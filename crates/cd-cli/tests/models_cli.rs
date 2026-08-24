@@ -8,10 +8,13 @@ use cd_core::capability_qualification::{
     qualification_store_path, save_qualification_store, CapabilityCheckResult, CapabilityKind,
     CapabilityStatus, QualificationKey, QualificationReport, QualificationStore,
 };
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{
     ProviderCapabilities, ProviderConfig, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
 };
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 fn configured_gateway() -> (AppConfig, ProviderProfile) {
     let profile = ProviderProfile {
@@ -46,7 +49,7 @@ fn configured_gateway() -> (AppConfig, ProviderProfile) {
 fn models_reports_persisted_verification_without_network_or_credentials() {
     let data = tempfile::tempdir().unwrap();
     let (cfg, profile) = configured_gateway();
-    save_config(&data.path().join("config.json"), &cfg).unwrap();
+    app_config::plant_app_config(&data.path().join("config.json"), &cfg);
 
     let key = QualificationKey::with_provider_kind(
         &profile.id,

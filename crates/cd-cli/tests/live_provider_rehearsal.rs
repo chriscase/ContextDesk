@@ -7,7 +7,7 @@
 //! normal JSON, and it emits decoded object-shaped function arguments.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::{json, Value};
 use std::io::Write;
@@ -17,6 +17,9 @@ use std::sync::Arc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use zip::write::SimpleFileOptions;
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 fn cli(data_dir: &Path) -> Command {
     let mut command =
@@ -187,7 +190,7 @@ async fn zip_to_two_grounded_traced_turns_survives_gpt_oss_gateway_variations() 
         },
         ..AppConfig::default()
     };
-    save_config(&data_dir.join("config.json"), &config).unwrap();
+    app_config::plant_app_config(&data_dir.join("config.json"), &config);
 
     let imported = cli(&data_dir)
         .args(["--json", "import", archive.to_str().unwrap()])

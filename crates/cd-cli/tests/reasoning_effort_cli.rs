@@ -4,6 +4,9 @@ use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "helpers/app_config.rs"]
+mod app_config;
+
 fn cli(data: &Path) -> Command {
     let mut cmd = Command::cargo_bin("contextdesk").expect("contextdesk binary");
     cmd.args(["--data-dir", data.to_str().unwrap()]);
@@ -29,13 +32,33 @@ fn write_config(data: &Path) {
         ..Default::default()
     };
     cfg.router.max_sources = 7;
-    cd_core::config::save_config(&config_path(data), &cfg).unwrap();
+    app_config::plant_app_config(&config_path(data), &cfg);
 }
 
 fn run(data: &Path, args: &[&str]) -> std::process::Output {
     cli(data).args(args).output().expect("spawn contextdesk")
 }
 
+#[test]
+fn effort_show_reads_planted_config_without_writing() {
+    let (_tmp, data) = isolated_data();
+    write_config(&data);
+    let before = fs::read(config_path(&data)).unwrap();
+    let show = run(&data, &["--format", "json", "config", "effort", "show"]);
+    assert!(
+        show.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let output = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        output.contains("contextdesk.reasoning_effort.v1"),
+        "{output}"
+    );
+    assert_eq!(before, fs::read(config_path(&data)).unwrap());
+}
+
+#[cfg(unix)]
 #[test]
 fn set_show_auto_preserve_unrelated_config() {
     let (_tmp, data) = isolated_data();

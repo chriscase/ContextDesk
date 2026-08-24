@@ -11,7 +11,7 @@
 //! (zero events, collapsed identities, silent failures) cannot pass.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::{json, Value};
 use std::io::Write;
@@ -21,6 +21,9 @@ use std::sync::{Arc, Mutex};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use zip::write::SimpleFileOptions;
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 /// Unique first-turn phrase so continuity can be proven in provider history
 /// without relying on second-turn prompt text alone.
@@ -57,31 +60,16 @@ fn jsonl(stdout: &[u8]) -> Vec<Value> {
 
 fn write_app_config(data_dir: &Path, cfg: &AppConfig) {
     std::fs::create_dir_all(data_dir).unwrap();
-    save_config(&data_dir.join("config.json"), cfg).expect("write AppConfig");
+    app_config::plant_app_config(&data_dir.join("config.json"), cfg);
 }
 
 fn init_timezone_only(data_dir: &Path, zone: &str) {
-    let out = cli(data_dir)
-        .args([
-            "--json",
-            "config",
-            "init",
-            "--non-interactive",
-            "--skip-provider",
-            "--default-timezone",
-            zone,
-            "--force",
-        ])
-        .output()
-        .expect("config init");
-    assert!(
-        out.status.success(),
-        "config init failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let env = parse_envelope(&out.stdout);
-    assert_eq!(env["ok"], true);
-    assert_eq!(env["data"]["default_timezone"], zone);
+    // Plant AppConfig instead of `config init --default-timezone`: production
+    // `save_config` is Unix-only. This lab proves import/explore/context/chat
+    // under an isolated data-dir, not durable config persistence.
+    let mut cfg = AppConfig::default();
+    cfg.default_timezone = Some(zone.to_string());
+    write_app_config(data_dir, &cfg);
 }
 
 // ---------------------------------------------------------------------------

@@ -32,6 +32,9 @@ use assert_cmd::Command;
 use serde_json::Value;
 use std::path::Path;
 
+#[path = "helpers/app_config.rs"]
+mod app_config;
+
 fn cli() -> Command {
     Command::cargo_bin("contextdesk").expect("contextdesk binary built by this workspace")
 }
@@ -119,6 +122,7 @@ fn profile_dir_is_a_true_alias_for_data_dir() {
 /// Two isolated profiles must be fully independent: creating and activating
 /// a provider in profile A must leave profile B's directory untouched — not
 /// merely "showing different values" but literally no file written there.
+#[cfg(unix)]
 #[test]
 fn two_isolated_profiles_cannot_read_or_modify_each_other() {
     let a = tempfile::tempdir().unwrap();
@@ -182,10 +186,65 @@ fn two_isolated_profiles_cannot_read_or_modify_each_other() {
     assert_eq!(app_config["providers"]["active_id"], profile_id);
 }
 
+/// Isolation does not require durable `save_config`. Planting A's AppConfig
+/// must leave B's data-dir unread and unmodified on every host.
+#[test]
+fn planted_isolated_profiles_cannot_read_or_modify_each_other() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let profile_id = unique_profile_id("planted-cross", a.path());
+    let mut profile = cd_core::providers::ProviderProfile::ollama_local();
+    profile.id = profile_id.clone();
+    profile.chat_model = "llama3".into();
+    let cfg = cd_core::config::AppConfig {
+        providers: cd_core::providers::ProviderConfig {
+            active_id: Some(profile.id.clone()),
+            profiles: vec![profile],
+        },
+        ..cd_core::config::AppConfig::default()
+    };
+    app_config::plant_app_config(&a.path().join("config.json"), &cfg);
+
+    assert!(
+        !b.path().join("config.json").exists(),
+        "profile B must not gain a config.json from profile A's planted bytes"
+    );
+    assert!(!b.path().join("cli.toml").exists());
+
+    let show_b = cli()
+        .args([
+            "--data-dir",
+            b.path().to_str().unwrap(),
+            "--json",
+            "config",
+            "show",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        show_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show_b.stderr)
+    );
+    let envelope = parse_envelope(&show_b.stdout);
+    assert_eq!(
+        envelope["data"]["default_provider_profile"]["source"],
+        "default"
+    );
+    assert!(envelope["data"]["default_provider_profile"]["value"].is_null());
+
+    let planted: Value =
+        serde_json::from_str(&std::fs::read_to_string(a.path().join("config.json")).unwrap())
+            .unwrap();
+    assert_eq!(planted["providers"]["active_id"], profile_id);
+    assert!(!b.path().join("config.json").exists());
+}
+
 /// `--data-dir` isolates the *desktop-shared* state; `--app-config` alone
 /// (no `--data-dir`) only redirects the `AppConfig` file and must not be
 /// reported as an isolated profile — these are two different knobs and the
 /// wizard's own report must not conflate them.
+#[cfg(unix)]
 #[test]
 fn app_config_override_alone_is_not_reported_as_isolated() {
     let home = tempfile::tempdir().unwrap();
@@ -210,6 +269,37 @@ fn app_config_override_alone_is_not_reported_as_isolated() {
         !envelope["data"]["isolated"].as_bool().unwrap(),
         "--app-config alone must not be reported as an isolated profile"
     );
+}
+
+#[cfg(not(unix))]
+#[test]
+fn app_config_override_without_data_dir_refuses_shared_directory_creation() {
+    let home = tempfile::tempdir().unwrap();
+    let app_config_path = home.path().join("nested").join("config.json");
+    std::fs::create_dir_all(app_config_path.parent().unwrap()).unwrap();
+
+    let output = cli()
+        .env("HOME", home.path())
+        .args([
+            "--app-config",
+            app_config_path.to_str().unwrap(),
+            "--json",
+            "config",
+            "init",
+            "--non-interactive",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let envelope = parse_envelope(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["kind"], "not_implemented");
+    let message = envelope["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains(cd_core::config::DURABLE_CONFIG_DIR_UNSUPPORTED),
+        "{message}"
+    );
+    assert!(!app_config_path.exists());
 }
 
 /// Configuration precedence (default < global < project < CLI) must stay
@@ -339,6 +429,7 @@ fn a_validation_failure_persists_nothing() {
 /// (`cd_core::config::save_config`, `crate::config::save_layer`), and this
 /// proves the new wizard code path actually reaches them rather than
 /// writing some other, non-atomic way.
+#[cfg(unix)]
 #[test]
 fn a_successful_init_leaves_no_tmp_files_behind() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -555,11 +646,44 @@ fn provider_kind_flag_matches_the_documented_slug() {
         ])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    #[cfg(unix)]
+    {
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelope = parse_envelope(&output.stdout);
+        assert!(envelope["ok"].as_bool().unwrap());
+        assert_eq!(
+            envelope["data"]["provider_profile_id"].as_str().unwrap(),
+            profile_id
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        assert_eq!(output.status.code(), Some(7));
+        let envelope = parse_envelope(&output.stdout);
+        assert_eq!(envelope["ok"], false);
+        assert_eq!(envelope["error"]["kind"], "not_implemented");
+        let message = envelope["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains(cd_core::config::DURABLE_CONFIG_SAVE_UNSUPPORTED),
+            "{message}"
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !combined.to_lowercase().contains("invalid value")
+                && !combined.to_lowercase().contains("unexpected value"),
+            "openai-compatible must parse; persistence is a separate refusal: {combined}"
+        );
+        assert!(!data_dir.path().join("config.json").exists());
+        assert!(!data_dir.path().join("cli.toml").exists());
+    }
 }
 
 /// The optional connectivity check must run only when explicitly requested,
@@ -567,6 +691,7 @@ fn provider_kind_flag_matches_the_documented_slug() {
 /// time), and must report a deterministic outcome against an always-closed
 /// loopback port — proving the wizard actually invokes the probe rather
 /// than only accepting the flag.
+#[cfg(unix)]
 #[test]
 fn check_connection_probes_and_reports_without_hanging() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -608,6 +733,7 @@ fn check_connection_probes_and_reports_without_hanging() {
 
 /// Without `--check-connection` (and outside a terminal, so the wizard
 /// cannot prompt for it either), no probe must run at all.
+#[cfg(unix)]
 #[test]
 fn connectivity_check_is_never_run_unless_requested() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -641,6 +767,7 @@ fn connectivity_check_is_never_run_unless_requested() {
 /// supposedly-throwaway `config init` silently reads and overwrites the
 /// same real OS keychain entry a prior non-isolated run (or the desktop
 /// app) already used for the same provider kind.
+#[cfg(unix)]
 #[test]
 fn isolated_default_profile_id_never_equals_the_shared_slug() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -684,6 +811,7 @@ fn isolated_default_profile_id_never_equals_the_shared_slug() {
 /// resolved for the profile, which would otherwise transmit a real, shared
 /// session credential from a process the user believed touched nothing but
 /// the given `--data-dir`.
+#[cfg(unix)]
 #[test]
 fn xai_grok_build_check_connection_is_refused_when_isolated() {
     let data_dir = tempfile::tempdir().unwrap();

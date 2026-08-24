@@ -1,11 +1,14 @@
 //! Public-process proofs for the top-level question shorthand.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::Value;
 use tempfile::TempDir;
 use wiremock::MockServer;
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 fn isolated_command(data: &TempDir) -> Command {
     let mut command = Command::cargo_bin("contextdesk").expect("contextdesk binary");
@@ -149,7 +152,7 @@ async fn blank_questions_close_each_output_contract_without_provider_calls() {
         },
         ..AppConfig::default()
     };
-    save_config(&app_config, &cfg).unwrap();
+    app_config::plant_app_config(&app_config, &cfg);
 
     let text = isolated_command(&data)
         .args(["--app-config", app_config.to_str().unwrap(), "   "])

@@ -21,7 +21,7 @@
 //!   auth.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -56,7 +56,12 @@ fn write_profile(data_dir: &Path, base_url: &str, chat_model: &str) {
         },
         ..AppConfig::default()
     };
-    save_config(&data_dir.join("config.json"), &config).expect("write synthetic profile");
+    std::fs::create_dir_all(data_dir).expect("create data dir");
+    std::fs::write(
+        data_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).expect("serialize synthetic profile"),
+    )
+    .expect("write synthetic profile");
 }
 
 fn jsonl(stdout: &[u8]) -> Vec<Value> {
@@ -107,6 +112,19 @@ fn synthetic_sessions_left_behind(data_dir: &Path) -> usize {
         .filter_map(Result::ok)
         .filter(|e| e.path().is_file())
         .count()
+}
+
+#[cfg(unix)]
+fn wait_for_saved_session(data_dir: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while synthetic_sessions_left_behind(data_dir) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "turn one never saved a session under {}",
+            data_dir.join("sessions").display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Block until the child's stdout has produced `n` complete lines, returning
@@ -653,16 +671,17 @@ async fn an_interrupt_during_the_second_turn_still_removes_the_already_saved_ses
         .spawn()
         .expect("spawn contextdesk doctor");
 
-    // Wait for the two fast local checks to print (see `wait_for_n_lines`
-    // — this removes process cold-start variance from the timing budget),
-    // then give turn one — a real, if local-mock, HTTP round trip plus a
-    // session save and second tool-host setup — a bounded window to finish
-    // and hand off to turn two. Turn two's own mock response is delayed
-    // 20s, so any reasonable margin here still lands SIGINT squarely inside
-    // turn two's wait, never inside turn one's.
+    // Wait for the two fast local checks, then for turn one to actually
+    // persist a session. A fixed 1800ms sleep after those two lines landed
+    // SIGINT in the inter-turn gap on hosted Ubuntu (no `ctrl_c` waiter
+    // armed yet), so the default disposition killed the process with
+    // `status.code() == None` instead of exit 130. The session file is the
+    // durable proof turn one finished; a short pause afterwards lets turn
+    // two start polling the process-wide cancel watcher.
     let stdout = child.stdout.take().expect("piped stdout");
     let (_observed, _stdout_drain) = wait_for_n_lines(stdout, 2);
-    tokio::time::sleep(Duration::from_millis(1800)).await;
+    wait_for_saved_session(data_dir.path());
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     let pid = child.id();
     let killed = std::process::Command::new("kill")

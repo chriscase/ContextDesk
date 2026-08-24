@@ -667,11 +667,7 @@ fn ensure_owner_only_app_directory(dir: &Path) -> CoreResult<()> {
     #[cfg(not(unix))]
     {
         let _ = dir;
-        Err(CoreError::Config(
-            "durable configuration directory creation is unavailable on this platform; \
-             handle-bound no-follow owner-checked traversal cannot be guaranteed with current dependencies"
-                .into(),
-        ))
+        Err(CoreError::Config(DURABLE_CONFIG_DIR_UNSUPPORTED.into()))
     }
 }
 
@@ -1810,6 +1806,36 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
     Ok(cfg)
 }
 
+/// Stable reason `save_config` returns on hosts that cannot prove a
+/// no-follow, owner-only, directory-relative replace.
+pub const DURABLE_CONFIG_SAVE_UNSUPPORTED: &str = "durable config save requires a no-follow owner-only temporary file and directory-relative replace, which this platform cannot guarantee with current dependencies";
+
+/// Stable reason `ensure_config_dir` returns on hosts that cannot prove
+/// handle-bound no-follow owner-checked directory creation.
+pub const DURABLE_CONFIG_DIR_UNSUPPORTED: &str = "durable configuration directory creation is unavailable on this platform; handle-bound no-follow owner-checked traversal cannot be guaranteed with current dependencies";
+
+/// Whether this build can persist `AppConfig` under the Unix durability
+/// contract (no-follow, owner-only, directory-relative replace).
+///
+/// Off Unix this is always false. Callers must fail closed rather than
+/// writing config through ordinary `create_dir_all` / `rename` APIs.
+#[must_use]
+pub const fn durable_config_persistence_supported() -> bool {
+    cfg!(unix)
+}
+
+/// True when `err` is the fail-closed platform-unsupported persistence
+/// reason from [`save_config`] or [`ensure_config_dir`].
+#[must_use]
+pub fn durable_config_persistence_unsupported(err: &CoreError) -> bool {
+    match err {
+        CoreError::Config(message) => {
+            message == DURABLE_CONFIG_SAVE_UNSUPPORTED || message == DURABLE_CONFIG_DIR_UNSUPPORTED
+        }
+        _ => false,
+    }
+}
+
 /// Handle-bound durable write of config.
 ///
 /// On Unix this creates a unique regular temporary file with create-new /
@@ -1826,7 +1852,9 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
 ///
 /// On platforms where that no-follow, owner-only, directory-relative replace
 /// cannot be guaranteed with current dependencies, this fails closed instead
-/// of claiming durability.
+/// of claiming durability. Tests that need a readable config file must plant
+/// fixture bytes themselves; they must not treat this function as a
+/// cross-platform writer.
 pub fn save_config(path: &Path, cfg: &AppConfig) -> CoreResult<()> {
     refuse_raw_secret_refs(cfg)?;
     #[cfg(unix)]
@@ -1838,9 +1866,7 @@ pub fn save_config(path: &Path, cfg: &AppConfig) -> CoreResult<()> {
     #[cfg(not(unix))]
     {
         let _ = path;
-        Err(CoreError::Config(
-            "durable config save requires a no-follow owner-only temporary file and directory-relative replace, which this platform cannot guarantee with current dependencies".into(),
-        ))
+        Err(CoreError::Config(DURABLE_CONFIG_SAVE_UNSUPPORTED.into()))
     }
 }
 
@@ -2153,7 +2179,8 @@ mod tests {
         {
             let err = save_config(&path, &cfg).expect_err("non-unix save is fail-closed");
             let msg = err.to_string();
-            assert!(msg.contains("directory-relative replace"), "{msg}");
+            assert!(durable_config_persistence_unsupported(&err), "{msg}");
+            assert!(msg.contains(DURABLE_CONFIG_SAVE_UNSUPPORTED), "{msg}");
         }
     }
 
@@ -2334,7 +2361,11 @@ mod tests {
         #[cfg(not(unix))]
         {
             let err = save_config(&path, &cfg).expect_err("non-unix save is fail-closed");
-            assert!(err.to_string().contains("directory-relative replace"));
+            assert!(durable_config_persistence_unsupported(&err), "{err}");
+            assert!(
+                !path.exists(),
+                "fail-closed save must not create the destination"
+            );
         }
     }
 
@@ -2492,7 +2523,11 @@ mod tests {
     fn ensure_config_dir_fails_closed_without_handle_bound_traversal() {
         let (home, branding) = branded_home(".acme-desk");
         let err = ensure_config_dir_in(home.path(), &branding).expect_err("fail closed");
-        assert!(err.to_string().contains("handle-bound"));
+        assert!(durable_config_persistence_unsupported(&err), "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!("config: {DURABLE_CONFIG_DIR_UNSUPPORTED}")
+        );
         assert!(!home.path().join(".acme-desk").exists());
     }
 
@@ -3370,10 +3405,28 @@ mod tests {
     #[cfg(not(unix))]
     fn save_config_fails_closed_without_handle_bound_durability() {
         let dir = store_tempdir();
-        let err = save_config(&dir.path().join("config.json"), &AppConfig::default())
-            .expect_err("fail closed");
-        assert!(err.to_string().contains("directory-relative replace"));
-        assert!(!dir.path().join("config.json").exists());
+        let path = dir.path().join("config.json");
+        let err = save_config(&path, &AppConfig::default()).expect_err("fail closed");
+        assert!(durable_config_persistence_unsupported(&err), "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!("config: {DURABLE_CONFIG_SAVE_UNSUPPORTED}")
+        );
+        assert!(!path.exists());
         assert!(!dir.path().join("config.json.tmp").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "fail-closed save must not leave temps or other files: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn durable_config_persistence_supported_matches_unix_cfg() {
+        assert_eq!(durable_config_persistence_supported(), cfg!(unix));
     }
 }
