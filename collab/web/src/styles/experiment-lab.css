@@ -1539,6 +1539,97 @@
   outline-offset: -2px;
 }
 
+.experiment-lab__evidence-picker {
+  min-width: 0;
+  margin: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+}
+
+.experiment-lab__evidence-picker > legend {
+  padding: 0 0.35rem;
+  font-weight: 700;
+}
+
+.experiment-lab__evidence-search,
+.experiment-lab__evidence-role {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.experiment-lab__evidence-search > span,
+.experiment-lab__evidence-role > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.experiment-lab__evidence-choices {
+  display: grid;
+  gap: 0.5rem;
+  max-height: 24rem;
+  margin-top: 0.7rem;
+  padding-right: 0.25rem;
+  overflow: auto;
+}
+
+.experiment-lab__evidence-choice {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--lab-surface) 94%, var(--accent) 6%);
+}
+
+.experiment-lab__evidence-choice > label:first-child {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: start;
+  cursor: pointer;
+}
+
+.experiment-lab__evidence-choice > label:first-child > input {
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-top: 0.15rem;
+}
+
+.experiment-lab__evidence-choice > label:first-child span {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.experiment-lab__evidence-choice small {
+  color: var(--muted);
+}
+
+.experiment-lab__evidence-choice code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.experiment-lab__evidence-choice > details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.experiment-lab__decision-unknowns {
+  margin-top: 0.6rem;
+  padding: 0.7rem;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--lab-surface) 92%, var(--accent) 8%);
+}
+
+.experiment-lab__decision-unknowns ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.25rem;
+}
+
 /* Deliberately no animation anywhere in the cockpit: motion here would only
    decorate, theme flips would repaint mid-transition, and a motionless surface
    respects prefers-reduced-motion by construction. */

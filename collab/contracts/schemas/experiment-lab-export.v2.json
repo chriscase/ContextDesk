@@ -268,7 +268,9 @@
                 "evidenceAliases": {
                   "type": "array",
                   "items": { "$ref": "#/$defs/evidenceAlias" }
-                }
+                },
+                "ownerState": { "enum": ["assigned", "unassigned"] },
+                "remainingUnknownCount": { "type": "integer", "minimum": 0 }
               }
             }
           ]

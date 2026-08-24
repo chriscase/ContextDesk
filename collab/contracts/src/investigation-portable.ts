@@ -479,6 +479,8 @@ const decisionShape: ObjectShape = {
   rationale: f.req(f.str),
   evidenceRefs: f.req(f.arr(f.str)),
   authorId: f.req(f.str),
+  ownerId: f.optNul(f.str),
+  remainingUnknowns: f.opt(f.arr(f.str)),
   createdAt: f.req(f.str),
   objectHash: f.req(f.str),
 };
@@ -754,6 +756,10 @@ export interface PortableDecisionV1 {
   rationale: string;
   evidenceRefs: string[];
   authorId: string;
+  /** Optional for V1 compatibility; new bundles write null for an unassigned owner. */
+  ownerId?: string | null;
+  /** Durable open questions recorded with this decision revision. */
+  remainingUnknowns?: string[];
   createdAt: string;
   objectHash: string;
 }
@@ -1574,6 +1580,26 @@ export function parsePortableInvestigation(raw: unknown): PortableInvestigationV
       throw new ContractViolation(`$.decisions[${i}].experimentId`, "dangling experiment reference");
     }
     requireActor(actors, row.authorId, `$.decisions[${i}].authorId`);
+    if (row.ownerId !== undefined && row.ownerId !== null) {
+      requireActor(actors, row.ownerId, `$.decisions[${i}].ownerId`);
+    }
+    const seenUnknowns = new Set<string>();
+    for (const [j, unknown] of (row.remainingUnknowns ?? []).entries()) {
+      const normalized = unknown.trim();
+      if (!normalized) {
+        throw new ContractViolation(
+          `$.decisions[${i}].remainingUnknowns[${j}]`,
+          "remaining unknown must not be empty",
+        );
+      }
+      if (seenUnknowns.has(normalized)) {
+        throw new ContractViolation(
+          `$.decisions[${i}].remainingUnknowns[${j}]`,
+          "remaining unknown must be unique",
+        );
+      }
+      seenUnknowns.add(normalized);
+    }
     for (const [j, ref] of row.evidenceRefs.entries()) {
       if (!evidence.has(ref)) {
         throw new ContractViolation(

@@ -35,6 +35,7 @@ interface ExperimentView {
     dimension: string;
     score: number;
     rationale: string;
+    evidenceRefs: string[];
     reviewerUsername: string;
   }[];
   decisions: {
@@ -43,7 +44,11 @@ interface ExperimentView {
     revision: number;
     text: string;
     rationale: string;
+    evidenceRefs: string[];
     authorUsername?: string;
+    ownerId?: string | null;
+    ownerUsername?: string | null;
+    remainingUnknowns?: string[];
   }[];
   gold: {
     goldId: string;
@@ -98,6 +103,16 @@ interface ExperimentView {
     gold: { status: string; version: number | null; acceptedDecisionId: string | null };
     notes: string[];
   };
+}
+
+interface EvidenceArtifactView {
+  id: string;
+  kind: string;
+  filename: string | null;
+  uri: string | null;
+  mediaType: string | null;
+  privacyClass: string;
+  verificationStatus: string | null;
 }
 
 interface ShareSafeExport {
@@ -399,6 +414,150 @@ function supportingArtifact(view: ExperimentView, evidenceRef: string): Supporti
     context: "Supporting excerpt, timestamp, and component were not captured. ContextDesk will not reconstruct them from an identifier.",
     technicalRef: evidenceRef,
   };
+}
+
+function evidenceRefsFor(view: ExperimentView, artifacts: EvidenceArtifactView[]): string[] {
+  const refs = new Set(artifacts.map((artifact) => artifact.id));
+  for (const anchor of view.agreement.sharedAnchors) refs.add(anchor.evidenceRef);
+  for (const row of view.agreement.candidateSpecific) {
+    for (const ref of row.evidenceRefs) refs.add(ref);
+  }
+  for (const row of view.agreement.roleConflicts) refs.add(row.evidenceRef);
+  for (const row of view.observations) {
+    for (const ref of row.evidenceRefs ?? []) refs.add(ref);
+  }
+  for (const row of view.decisions) {
+    for (const ref of row.evidenceRefs ?? []) refs.add(ref);
+  }
+  for (const ref of view.gold?.evidenceAnchors ?? []) refs.add(ref);
+  for (const trace of view.traces ?? []) {
+    for (const event of trace.events) {
+      for (const ref of event.evidenceRefs) refs.add(ref);
+    }
+  }
+  return [...refs].sort((left, right) => left.localeCompare(right));
+}
+
+function evidenceArtifactLabel(artifact: EvidenceArtifactView | undefined): string | null {
+  if (!artifact) return null;
+  const filename = artifact.filename?.trim();
+  if (filename) return filename;
+  const uri = artifact.uri?.trim();
+  if (uri) {
+    const withoutQuery = uri.split(/[?#]/, 1)[0] ?? uri;
+    const basename = withoutQuery.split(/[\\/]/).filter(Boolean).at(-1);
+    if (basename) return basename;
+  }
+  return `${artifact.kind.replaceAll("_", " ")} evidence`;
+}
+
+function EvidencePicker(props: {
+  view: ExperimentView;
+  artifacts: EvidenceArtifactView[];
+  legend: string;
+  roles?: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set());
+  const fieldsetRef = useRef<HTMLFieldSetElement>(null);
+  const artifactsById = new Map(props.artifacts.map((artifact) => [artifact.id, artifact]));
+  const choices = evidenceRefsFor(props.view, props.artifacts).map((ref) => {
+    const artifact = artifactsById.get(ref);
+    const support = supportingArtifact(props.view, ref);
+    return {
+      ref,
+      label: evidenceArtifactLabel(artifact) ?? support.label,
+      source: artifact
+        ? `${artifact.kind.replaceAll("_", " ")} · ${artifact.privacyClass.replaceAll("_", " ")}${artifact.verificationStatus ? ` · ${artifact.verificationStatus}` : ""}`
+        : support.source,
+      excerpt: support.excerpt,
+    };
+  });
+  const normalized = query.trim().toLowerCase();
+  const visible = normalized
+    ? choices.filter((choice) =>
+        selectedRefs.has(choice.ref) ||
+        `${choice.label} ${choice.source} ${choice.excerpt ?? ""} ${choice.ref}`
+          .toLowerCase()
+          .includes(normalized),
+      )
+    : choices;
+
+  useEffect(() => {
+    const form = fieldsetRef.current?.form;
+    if (!form) return undefined;
+    const reset = () => {
+      setSelectedRefs(new Set());
+      setQuery("");
+    };
+    form.addEventListener("reset", reset);
+    return () => form.removeEventListener("reset", reset);
+  }, []);
+
+  return (
+    <fieldset className="experiment-lab__evidence-picker" ref={fieldsetRef}>
+      <legend>{props.legend}</legend>
+      <label className="experiment-lab__evidence-search">
+        <span>Search recorded evidence</span>
+        <input
+          className="login__input"
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.currentTarget.value)}
+          placeholder="Filename, source, or excerpt"
+        />
+      </label>
+      {visible.length ? (
+        <div className="experiment-lab__evidence-choices">
+          {visible.map((choice) => (
+            <div className="experiment-lab__evidence-choice" key={choice.ref}>
+              <label>
+                <input
+                  type="checkbox"
+                  name="evidenceRefs"
+                  value={choice.ref}
+                  checked={selectedRefs.has(choice.ref)}
+                  onChange={(event) => {
+                    setSelectedRefs((current) => {
+                      const next = new Set(current);
+                      if (event.currentTarget.checked) next.add(choice.ref);
+                      else next.delete(choice.ref);
+                      return next;
+                    });
+                  }}
+                />
+                <span>
+                  <strong>{choice.label}</strong>
+                  <small>{choice.source}</small>
+                  {choice.excerpt ? <code>{truncateText(choice.excerpt, 240)}</code> : null}
+                </span>
+              </label>
+              {props.roles ? (
+                <label className="experiment-lab__evidence-role">
+                  <span>Expected role (optional)</span>
+                  <select className="login__input" name={`evidenceRole:${choice.ref}`} defaultValue="">
+                    <option value="">No role recorded</option>
+                    <option value="trigger">Trigger</option>
+                    <option value="cause">Cause</option>
+                    <option value="symptom">Symptom</option>
+                    <option value="observation">Observation</option>
+                    <option value="recovery">Recovery</option>
+                    <option value="disconfirmation">Disconfirmation</option>
+                  </select>
+                </label>
+              ) : null}
+              <details>
+                <summary>Technical details</summary>
+                <code>{choice.ref}</code>
+              </details>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="experiment-lab__empty">No recorded evidence matches this search.</p>
+      )}
+    </fieldset>
+  );
 }
 
 function buildHumanFindings(view: ExperimentView, rows: EvidenceCrossRow[]): HumanFinding[] {
@@ -1037,6 +1196,7 @@ export function ExperimentLab(props: {
   const [error, setError] = useState<string | null>(null);
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
   const [presence, setPresence] = useState<PresenceView | null>(null);
+  const [evidenceArtifacts, setEvidenceArtifacts] = useState<EvidenceArtifactView[]>([]);
   // Focus is URL-backed for reload/back/forward, but never filters evidence.
   const [focusedCandidateId, setFocusedCandidateId] = useState<string | null>(null);
   const [workspaceSection, setWorkspaceSection] = useState<CompareWorkspaceId>(() =>
@@ -1076,6 +1236,23 @@ export function ExperimentLab(props: {
     } catch {
       if (isCurrent()) setError("Experiment history could not be loaded");
     }
+  }, [props.caseId]);
+
+  useEffect(() => {
+    let mounted = true;
+    setEvidenceArtifacts([]);
+    void fetch(`/api/cases/${props.caseId}/evidence`)
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return (await response.json()) as { artifacts?: EvidenceArtifactView[] };
+      })
+      .then((body) => {
+        if (mounted && body) setEvidenceArtifacts(body.artifacts ?? []);
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
   }, [props.caseId]);
 
   useEffect(() => {
@@ -1463,10 +1640,7 @@ export function ExperimentLab(props: {
           dimension: String(data.get("dimension") ?? ""),
           score: Number(data.get("score")),
           rationale: String(data.get("rationale") ?? ""),
-          evidenceRefs: String(data.get("evidenceRefs") ?? "")
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean),
+          evidenceRefs: data.getAll("evidenceRefs").map(String),
         }),
       });
       if (!res.ok) {
@@ -1494,8 +1668,10 @@ export function ExperimentLab(props: {
         body: JSON.stringify({
           text: String(data.get("text") ?? ""),
           rationale: String(data.get("rationale") ?? ""),
-          evidenceRefs: String(data.get("evidenceRefs") ?? "")
-            .split(",")
+          evidenceRefs: data.getAll("evidenceRefs").map(String),
+          ownerAssignment: String(data.get("ownerAssignment") ?? "unassigned"),
+          remainingUnknowns: String(data.get("remainingUnknowns") ?? "")
+            .split(/\r?\n/)
             .map((item) => item.trim())
             .filter(Boolean),
           expectedRevision: latest ? latest.revision : null,
@@ -1562,6 +1738,11 @@ export function ExperimentLab(props: {
     if (!accepted) return;
     const form = event.currentTarget;
     const data = new FormData(form);
+    const evidenceAnchors = data.getAll("evidenceRefs").map(String);
+    if (!evidenceAnchors.length) {
+      setError("Select at least one recorded evidence item for the human benchmark");
+      return;
+    }
     const expectedGold = String(data.get("expectedGoldVersion") ?? "").trim();
     setError(null);
     try {
@@ -1572,19 +1753,11 @@ export function ExperimentLab(props: {
           decisionId: accepted.id,
           expectedRevision: accepted.revision,
           expectedGoldVersion: expectedGold ? Number(expectedGold) : current.gold?.version ?? 0,
-          evidenceAnchors: String(data.get("evidenceAnchors") ?? "")
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean),
-          expectedRelationships: String(data.get("expectedRelationships") ?? "")
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean)
-            .map((item) => {
-              const [evidenceRef, role] = item.split("=").map((part) => part.trim());
-              return { evidenceRef, role };
-            })
-            .filter((row) => row.evidenceRef && row.role),
+          evidenceAnchors,
+          expectedRelationships: evidenceAnchors.flatMap((evidenceRef) => {
+            const role = String(data.get(`evidenceRole:${evidenceRef}`) ?? "").trim();
+            return role ? [{ evidenceRef, role }] : [];
+          }),
           helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
             .split(",")
             .map((item) => item.trim())
@@ -2065,7 +2238,9 @@ export function ExperimentLab(props: {
                       Why: {latestDecision.rationale}
                     </p>
                     <p className="experiment-lab__scan-decision-author">
-                      Decided by {latestDecision.authorUsername ?? "identity unavailable in this view"}
+                      Recorded by {latestDecision.authorUsername ?? "identity unavailable in this view"}
+                      {" · owner "}{latestDecision.ownerUsername?.trim() || "Unassigned"}
+                      {" · remaining unknowns "}{(latestDecision.remainingUnknowns ?? []).length}
                     </p>
                   </div>
                 ) : (
@@ -3045,7 +3220,11 @@ export function ExperimentLab(props: {
                     required
                     aria-label="Helpfulness score from 0 to 3"
                   />
-                  <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
+                  <EvidencePicker
+                    view={current}
+                    artifacts={evidenceArtifacts}
+                    legend="Evidence supporting this helpfulness review (optional)"
+                  />
                   <textarea className="login__input" name="rationale" rows={2} required placeholder="Helpfulness rationale" />
                   <button className="login__submit" type="submit">
                     Record helpfulness
@@ -3136,7 +3315,27 @@ export function ExperimentLab(props: {
               <form className="composer" onSubmit={(event) => void proposeDecision(event)}>
                 <textarea className="login__input" name="text" rows={2} required placeholder="Proposed decision" />
                 <textarea className="login__input" name="rationale" rows={2} required placeholder="Decision rationale" />
-                <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
+                <label>
+                  <span>Decision owner</span>
+                  <select className="login__input" name="ownerAssignment" defaultValue="unassigned">
+                    <option value="unassigned">Unassigned</option>
+                    <option value="self">Assign to me ({participantName})</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Remaining unknowns or open questions</span>
+                  <textarea
+                    className="login__input"
+                    name="remainingUnknowns"
+                    rows={3}
+                    placeholder={"One open question per line\nWhat evidence would resolve it?"}
+                  />
+                </label>
+                <EvidencePicker
+                  view={current}
+                  artifacts={evidenceArtifacts}
+                  legend="Evidence supporting this decision (optional)"
+                />
                 <button className="login__submit" type="submit">
                   Propose decision
                 </button>
@@ -3155,6 +3354,27 @@ export function ExperimentLab(props: {
               <p className="experiment-lab__decision-author">
                 Recorded by {current.decisions.at(-1)?.authorUsername ?? "identity unavailable in this view"}
               </p>
+              <p className="experiment-lab__decision-author">
+                Decision owner: {current.decisions.at(-1)?.ownerUsername?.trim() || "Unassigned"}
+              </p>
+              {(current.decisions.at(-1)?.remainingUnknowns ?? []).length ? (
+                <div className="experiment-lab__decision-unknowns">
+                  <strong>Remaining unknowns</strong>
+                  <ul>
+                    {(current.decisions.at(-1)?.remainingUnknowns ?? []).map((unknown) => (
+                      <li key={unknown}>{unknown}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <p className="experiment-lab__decision-author">Remaining unknowns: none recorded</p>
+              )}
+              <details className="experiment-lab__technical-details">
+                <summary>Technical ownership details</summary>
+                <p>
+                  Owner identity: <code>{current.decisions.at(-1)?.ownerId ?? "unassigned"}</code>
+                </p>
+              </details>
             </div>
           ) : (
             <p className="experiment-lab__empty">
@@ -3168,7 +3388,9 @@ export function ExperimentLab(props: {
                 {current.decisions.map((row) => (
                   <li key={row.id}>
                     r{row.revision} · {row.status} — “{row.text}” · why: {row.rationale} · by{" "}
-                    {row.authorUsername ?? "identity unavailable in this view"}
+                    {row.authorUsername ?? "identity unavailable in this view"} · owner{" "}
+                    {row.ownerUsername?.trim() || "Unassigned"} · remaining unknowns{" "}
+                    {(row.remainingUnknowns ?? []).length}
                   </li>
                 ))}
               </ol>
@@ -3191,16 +3413,11 @@ export function ExperimentLab(props: {
             <details className="experiment-lab__tools">
               <summary>Version the human benchmark</summary>
               <form className="composer" onSubmit={(event) => void promoteGold(event)}>
-                <input
-                  className="login__input"
-                  name="evidenceAnchors"
-                  placeholder="gold evidence anchors, comma separated"
-                  required
-                />
-                <input
-                  className="login__input"
-                  name="expectedRelationships"
-                  placeholder="optional evidence=role pairs, comma separated"
+                <EvidencePicker
+                  view={current}
+                  artifacts={evidenceArtifacts}
+                  legend="Evidence anchors for this human benchmark"
+                  roles
                 />
                 <input
                   className="login__input"

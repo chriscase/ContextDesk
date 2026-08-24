@@ -235,6 +235,11 @@ export interface ExperimentDecisionV1 {
   packageId: string;
   authorId: string;
   authorUsername: string;
+  /** The person accountable for driving the decision to closure, when assigned. */
+  ownerId: string | null;
+  ownerUsername: string | null;
+  /** Open questions that remain recorded alongside this revision. */
+  remainingUnknowns: string[];
   createdAt: string;
 }
 
@@ -301,6 +306,10 @@ export interface ShareSafeExperimentDecisionV2 {
   revision: number;
   predecessorRevision: number | null;
   evidenceAliases: string[];
+  /** Identity-free ownership state; participant identity remains omitted. */
+  ownerState?: "assigned" | "unassigned";
+  /** Count only: the share-safe export deliberately omits the free text. */
+  remainingUnknownCount?: number;
 }
 
 export interface ShareSafeSnapshotProofV2 {
@@ -449,6 +458,9 @@ const decisionShape: ObjectShape = {
   packageId: f.req(f.str),
   authorId: f.req(f.str),
   authorUsername: f.req(f.str),
+  ownerId: f.optNul(f.str),
+  ownerUsername: f.optNul(f.str),
+  remainingUnknowns: f.opt(f.arr(f.str)),
   createdAt: f.req(f.str),
 };
 
@@ -525,6 +537,8 @@ const shareSafeDecisionShape: ObjectShape = {
   revision: f.req(f.u64),
   predecessorRevision: f.nul(f.u64),
   evidenceAliases: f.req(f.arr(f.str)),
+  ownerState: f.opt(f.en("assigned", "unassigned")),
+  remainingUnknownCount: f.opt(f.u64),
 };
 
 const shareSafeSnapshotProofShape: ObjectShape = {
@@ -626,13 +640,50 @@ export function parseHelpfulnessObservation(raw: unknown): HelpfulnessObservatio
 
 export function parseExperimentDecision(raw: unknown): ExperimentDecisionV1 {
   checkObject("$", decisionShape, raw);
-  const row = raw as ExperimentDecisionV1;
+  const stored = raw as ExperimentDecisionV1 & {
+    ownerId?: string | null;
+    ownerUsername?: string | null;
+    remainingUnknowns?: string[];
+  };
+  const row: ExperimentDecisionV1 = {
+    ...stored,
+    ownerId: stored.ownerId ?? null,
+    ownerUsername: stored.ownerUsername ?? null,
+    remainingUnknowns: [...(stored.remainingUnknowns ?? [])],
+  };
   if (!row.text.trim()) {
     throw new ContractViolation("$.text", "decision text must not be empty");
   }
   if (!row.rationale.trim()) {
     throw new ContractViolation("$.rationale", "rationale must not be empty");
   }
+  if ((row.ownerId === null) !== (row.ownerUsername === null)) {
+    throw new ContractViolation(
+      "$.ownerId",
+      "ownerId and ownerUsername must both be assigned or both be null",
+    );
+  }
+  if (row.ownerId !== null && (!row.ownerId.trim() || !row.ownerUsername?.trim())) {
+    throw new ContractViolation("$.ownerId", "assigned owner identity and name must not be empty");
+  }
+  const seenUnknowns = new Set<string>();
+  row.remainingUnknowns = row.remainingUnknowns.map((unknown, index) => {
+    const normalized = unknown.trim();
+    if (!normalized) {
+      throw new ContractViolation(
+        `$.remainingUnknowns[${index}]`,
+        "remaining unknown must not be empty",
+      );
+    }
+    if (seenUnknowns.has(normalized)) {
+      throw new ContractViolation(
+        `$.remainingUnknowns[${index}]`,
+        "remaining unknown must be unique",
+      );
+    }
+    seenUnknowns.add(normalized);
+    return normalized;
+  });
   return row;
 }
 

@@ -250,6 +250,14 @@ export async function registerExperimentRoutes(
     const evidenceRefs = Array.isArray(body.evidenceRefs)
       ? body.evidenceRefs.filter((item): item is string => typeof item === "string")
       : [];
+    const remainingUnknowns = Array.isArray(body.remainingUnknowns)
+      ? body.remainingUnknowns.filter((item): item is string => typeof item === "string")
+      : [];
+    const ownerAssignment = body.ownerAssignment ?? "unassigned";
+    if (ownerAssignment !== "self" && ownerAssignment !== "unassigned") {
+      void reply.code(400);
+      return { error: "ownerAssignment must be self or unassigned" };
+    }
     const expectedRevision =
       typeof body.expectedRevision === "number" ? body.expectedRevision : null;
     try {
@@ -257,7 +265,14 @@ export async function registerExperimentRoutes(
         params.id,
         params.eid,
         ctx.actor,
-        { text, rationale, evidenceRefs, expectedRevision },
+        {
+          text,
+          rationale,
+          evidenceRefs,
+          remainingUnknowns,
+          owner: ownerAssignment === "self" ? ctx.actor : null,
+          expectedRevision,
+        },
         request.ip,
         ctx.isAdmin,
       );

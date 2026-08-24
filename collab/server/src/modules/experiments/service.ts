@@ -681,6 +681,8 @@ export class ExperimentService {
       text: string;
       rationale: string;
       evidenceRefs: string[];
+      owner?: Actor | null;
+      remainingUnknowns?: string[];
       expectedRevision?: number | null;
     },
     origin: string,
@@ -707,6 +709,9 @@ export class ExperimentService {
       packageId: row.packageId,
       authorId: actor.id,
       authorUsername: actor.username,
+      ownerId: input.owner?.id ?? null,
+      ownerUsername: input.owner?.username ?? null,
+      remainingUnknowns: input.remainingUnknowns ?? [],
       createdAt: new Date().toISOString(),
     });
     await this.store.insertDecision(decision);

@@ -260,7 +260,11 @@ const cockpitView = {
       revision: 1,
       text: "Investigate the inventory timeout before checkout retries.",
       rationale: "Both lanes cite the checkout log; the timeout stays unproven.",
+      evidenceRefs: ["ev-demo-checkout-log"],
       authorUsername: "erin",
+      ownerId: "actor-synthetic-owner",
+      ownerUsername: "Synthetic Owner",
+      remainingUnknowns: ["Does the timeout reproduce after the synthetic cache is warmed?"],
     },
   ],
   gold: null,
@@ -353,6 +357,66 @@ describe("experiment lab", () => {
     expect(screen.getByText("Propose a new human decision").tagName).toBe("SUMMARY");
     expect(screen.getByText(/Latest decision r2 \(accepted\): Treat inventory timeout/)).toBeTruthy();
     expect(screen.getByText(/Recorded by identity unavailable in this view/)).toBeTruthy();
+    expect(screen.getByText("Decision owner: Unassigned")).toBeTruthy();
+    expect(screen.getByText("Remaining unknowns: none recorded")).toBeTruthy();
+    expect(
+      screen.getByRole("group", { name: "Evidence anchors for this human benchmark" }),
+    ).toBeTruthy();
+    expect(screen.queryByPlaceholderText(/gold evidence anchors, comma separated/i)).toBeNull();
+  });
+
+  it("builds a gold benchmark from recognizable evidence choices instead of raw ids", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/experiments") && !init?.method) {
+        return { ok: true, json: async () => ({ experiments: [goldView] }) };
+      }
+      if (url.endsWith("/evidence")) {
+        return {
+          ok: true,
+          json: async () => ({
+            artifacts: [
+              {
+                id: "ev-demo-checkout-log",
+                kind: "log",
+                filename: "synthetic-checkout-timeout.log",
+                uri: null,
+                mediaType: "text/plain",
+                privacyClass: "share_safe",
+                verificationStatus: "verified",
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    expect((await screen.findAllByText("synthetic-checkout-timeout.log")).length).toBeGreaterThan(0);
+    const benchmarkEvidence = screen.getByRole("group", {
+      name: "Evidence anchors for this human benchmark",
+    });
+    fireEvent.click(within(benchmarkEvidence).getAllByRole("checkbox")[0]!);
+    fireEvent.change(within(benchmarkEvidence).getAllByRole("combobox")[0]!, {
+      target: { value: "symptom" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/gold") && init?.method === "POST"),
+      ).toBe(true),
+    );
+    const goldCall = fetchMock.mock.calls.find(
+      ([url, init]) => String(url).endsWith("/gold") && init?.method === "POST",
+    )!;
+    const body = JSON.parse(String(goldCall[1]?.body)) as Record<string, unknown>;
+    expect(body.evidenceAnchors).toEqual(["ev-demo-checkout-log"]);
+    expect(body.expectedRelationships).toEqual([
+      { evidenceRef: "ev-demo-checkout-log", role: "symptom" },
+    ]);
   });
 
   it("keeps raw benchmark and decision identities out of primary summaries", async () => {
@@ -513,7 +577,10 @@ describe("experiment lab", () => {
     );
 
     await waitFor(() => expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy());
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/experiments")),
+    ).toHaveLength(2);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/evidence"))).toBe(true);
   });
 
   it("keeps only the share-safe export action in static read-only mode", async () => {
@@ -957,13 +1024,21 @@ describe("experiment lab", () => {
     expect(decidedCard?.textContent).toContain(
       "Why: Both lanes cite the checkout log; the timeout stays unproven.",
     );
-    expect(decidedCard?.textContent).toContain("Decided by erin");
+    expect(decidedCard?.textContent).toContain("Recorded by erin");
+    expect(decidedCard?.textContent).toContain("owner Synthetic Owner");
+    expect(decidedCard?.textContent).toContain("remaining unknowns 1");
     expect(decidedCard?.textContent).toContain("No gold benchmark recorded.");
 
     const decisionRegion = screen.getByRole("region", { name: "Accepted decision" });
     expect(
       within(decisionRegion).getByText(
         /Latest decision r1 \(proposed\): Investigate the inventory timeout/,
+      ),
+    ).toBeTruthy();
+    expect(within(decisionRegion).getByText("Decision owner: Synthetic Owner")).toBeTruthy();
+    expect(
+      within(decisionRegion).getByText(
+        "Does the timeout reproduce after the synthetic cache is warmed?",
       ),
     ).toBeTruthy();
     expect(
@@ -1108,7 +1183,7 @@ describe("experiment lab", () => {
     expect(screen.queryByRole("button", { name: "Annotate trace" })).toBeNull();
   });
 
-  it("keeps request routes and payload field names unchanged", async () => {
+  it("submits accessible evidence choices and honest decision ownership without raw ids", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/experiments") && !init?.method) {
@@ -1120,10 +1195,22 @@ describe("experiment lab", () => {
     render(<ExperimentLab caseId="c1" canWrite canLead />);
     await screen.findByRole("region", { name: "At a glance" });
     openCompareWorkspace("Signals");
+    expect(screen.queryByPlaceholderText(/evidence refs, comma separated/i)).toBeNull();
 
     fireEvent.change(screen.getByPlaceholderText("Helpfulness rationale"), {
       target: { value: "Cited the checkout log." },
     });
+    const helpfulnessEvidence = screen.getByRole("group", {
+      name: "Evidence supporting this helpfulness review (optional)",
+    });
+    expect(within(helpfulnessEvidence).getByRole("searchbox")).toBeTruthy();
+    fireEvent.click(within(helpfulnessEvidence).getAllByRole("checkbox")[0]!);
+    fireEvent.change(within(helpfulnessEvidence).getByRole("searchbox"), {
+      target: { value: "no other matching evidence" },
+    });
+    expect(
+      (within(helpfulnessEvidence).getAllByRole("checkbox")[0] as HTMLInputElement).checked,
+    ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Record helpfulness" }));
     await waitFor(() =>
       expect(
@@ -1145,7 +1232,7 @@ describe("experiment lab", () => {
     expect(helpfulnessBody.candidateId).toBe("cand-programmatic-agent");
     expect(helpfulnessBody.dimension).toBe("evidence_support");
     expect(helpfulnessBody.score).toBe(2);
-    expect(helpfulnessBody.evidenceRefs).toEqual([]);
+    expect(helpfulnessBody.evidenceRefs).toHaveLength(1);
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
 
     fireEvent.change(screen.getByPlaceholderText("Proposed decision"), {
@@ -1154,6 +1241,16 @@ describe("experiment lab", () => {
     fireEvent.change(screen.getByPlaceholderText("Decision rationale"), {
       target: { value: "The timeout stays unproven." },
     });
+    fireEvent.change(screen.getByRole("combobox", { name: "Decision owner" }), {
+      target: { value: "self" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Remaining unknowns or open questions" }), {
+      target: { value: "Does the synthetic timeout reproduce?\nWhich trace would disconfirm it?" },
+    });
+    const decisionEvidence = screen.getByRole("group", {
+      name: "Evidence supporting this decision (optional)",
+    });
+    fireEvent.click(within(decisionEvidence).getAllByRole("checkbox")[0]!);
     fireEvent.click(screen.getByRole("button", { name: "Propose decision" }));
     await waitFor(() =>
       expect(
@@ -1170,10 +1267,18 @@ describe("experiment lab", () => {
     expect(Object.keys(decisionBody).sort()).toEqual([
       "evidenceRefs",
       "expectedRevision",
+      "ownerAssignment",
       "rationale",
+      "remainingUnknowns",
       "text",
     ]);
     expect(decisionBody.expectedRevision).toBe(1);
+    expect(decisionBody.ownerAssignment).toBe("self");
+    expect(decisionBody.remainingUnknowns).toEqual([
+      "Does the synthetic timeout reproduce?",
+      "Which trace would disconfirm it?",
+    ]);
+    expect(decisionBody.evidenceRefs).toHaveLength(1);
     // A recorded proposal must never surface as an error (the reset after the
     // await used to throw on React's nulled currentTarget and paint one).
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
@@ -2168,7 +2273,7 @@ describe("focused Compare workspace", () => {
     expect(details.querySelector(".experiment-lab__artifact-full")?.textContent).toBe(longExcerpt);
 
     openCompareWorkspace("Evidence");
-    expect(screen.getByText("short checkout timeout line")).toBeTruthy();
+    expect(screen.getAllByText("short checkout timeout line").length).toBeGreaterThan(0);
     const shortExcerpt = [...document.querySelectorAll(".experiment-lab__artifact-excerpt")].find(
       (node) => node.textContent === "short checkout timeout line",
     );

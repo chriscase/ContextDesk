@@ -521,6 +521,12 @@
           "rationale": { "type": "string" },
           "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
           "authorId": { "type": "string", "minLength": 1 },
+          "ownerId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+          "remainingUnknowns": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
           "createdAt": { "$ref": "#/$defs/timestamp" },
           "objectHash": { "$ref": "#/$defs/objectHash" }
         }

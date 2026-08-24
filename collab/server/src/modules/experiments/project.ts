@@ -688,6 +688,9 @@ export function projectExperimentLabExport(view: ReviewExportSource): Experiment
             evidenceAliases: sortedAliases(
               accepted.evidenceRefs.map((ref) => aliases.evidence.for(ref)),
             ),
+            ownerState:
+              accepted.ownerId && accepted.ownerUsername ? "assigned" : "unassigned",
+            remainingUnknownCount: (accepted.remainingUnknowns ?? []).length,
           }
         : null,
       gold: view.gold
