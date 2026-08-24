@@ -7,11 +7,11 @@ import {
   PORTABLE_PROTOCOL_VERSION,
   PORTABLE_SCHEMA_ID,
   attachPortableIntegrity,
-  canonicalJson,
   canonicalizePortableInvestigation,
   computePortableObjectHashes,
   parsePortableInvestigation,
   portableBundleFingerprint,
+  portableDestinationUuid,
   portableSnapshotFingerprint,
   preflightPortableInvestigation,
   type PortableInvestigationUnsigned,
@@ -388,14 +388,11 @@ function remapKey(row: { namespace: string; sourceId: string; destinationId: str
 
 function remapCandidate(
   installationId: string,
-  namespace: string,
+  namespace: "investigation" | "contribution" | "evidence" | "actor",
   sourceId: string,
   attempt: number,
 ): string {
-  const input = attempt === 0
-    ? `${installationId}:${namespace}:${sourceId}`
-    : canonicalJson([installationId, namespace, sourceId, attempt]);
-  return `remap-${sha(input).slice(0, 24)}`;
+  return portableDestinationUuid(installationId, namespace, sourceId, attempt);
 }
 
 describe("portable investigation adversarial lab", () => {
@@ -952,7 +949,11 @@ describe("portable investigation adversarial lab", () => {
     const second = preflightPortableInvestigation(sealed, reversed);
     expect(first.idRemap.map(remapKey).sort()).toEqual(second.idRemap.map(remapKey).sort());
     const inv = first.idRemap.find((row) => row.namespace === "investigation");
-    expect(inv?.destinationId.startsWith("remap-")).toBe(true);
+    expect(inv?.destinationId).not.toBe(sealed.investigation.id);
+    expect(inv?.destinationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(inv?.destinationId.startsWith("remap-")).toBe(false);
     const contrib = first.idRemap.find((row) => row.namespace === "contribution");
     const evidence = first.idRemap.find((row) => row.namespace === "evidence");
     expect(contrib && evidence).toBeTruthy();

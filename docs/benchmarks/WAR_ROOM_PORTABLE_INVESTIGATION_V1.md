@@ -80,8 +80,11 @@ The report includes:
 - missing profile / omitted-content **warnings**
 - referential-integrity failures (missing destination users, raw-id collisions
   under `fail`)
-- deterministic ID remapping: `${sourceInstallationId}::${namespace}::${rawId}`
-  or `remap-<digest>` when the collision policy remaps
+- deterministic ID remapping: RFC 4122 UUID v5 values from
+  `portableDestinationUuid(sourceInstallationId, namespace, rawId, collisionCounter)`.
+  Dry-run/preflight never emits `sourceInstallationId::namespace::sourceId` or
+  `remap-*` as executable destination IDs. Mapping is collision-safe (occupied
+  destination UUIDs increment the counter; bounded exhaustion fails closed).
 - typed `reconstructionStatus`: `exact` | `metadata_only` | `blocked` (no longer
   unconditional `exactReconstruction: true`)
 - `semanticFingerprint` independent of `exportedAt` and inline payload layout
@@ -101,6 +104,15 @@ Parse or preflight refuses:
 - dangling references
 - illegal privacy claims (share-safe surfaces carrying private/owner-only
   evidence; tombstoned owner-only bodies left in place)
+- dishonest withholding metadata (evidence/attachments marked private, omitted,
+  or redacted while the referenced content object is present or carries
+  payloadBase64)
+- snapshot items whose privacyClass or contentHash do not match the exported
+  evidence record before same_snapshot / fingerprint derivation
+- crossed experiment/candidate/decision/gold graphs (experiment candidateIds
+  must be triage-job members; helpfulness/alignment candidateIds must belong
+  to that experiment; gold may reference only the accepted decision for the
+  same experiment)
 - missing required content (`inclusion: present` without payload) in the default
   V1 self-contained parse; archive parse may accept digest-committed detached bytes
 - self or cyclic snapshot lineage
@@ -119,6 +131,17 @@ digest, byte length, and content type; inline payload is transport, not identity
 `portableBundleFingerprint` remains the V1 transport/integrity hash and **does**
 change when export time or inline bytes change. SHA-256 here is integrity, not
 authenticity.
+
+## Residuals (persistence / apply / UI)
+
+This slice does **not** ship:
+
+- PostgreSQL persistence apply of remapped UUID rows
+- authorization routes or capability probes
+- War Room import/export UI
+- archive byte I/O on disk
+- Ed25519 key management, signing, or verification (metadata is recorded, not verified)
+- host catalog revalidation at apply time (`destinationCatalogMustRevalidate` remains true)
 
 ## What this does not prove
 

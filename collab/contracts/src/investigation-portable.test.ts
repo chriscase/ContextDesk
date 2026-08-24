@@ -23,6 +23,8 @@ import {
   portableSnapshotFingerprint,
   preflightPortableInvestigation,
   evaluatePortableReconstruction,
+  isRfc4122Uuid,
+  portableDestinationUuid,
   type PortableInvestigationUnsigned,
   type PortableInvestigationV1,
   type PreflightRequestV1,
@@ -202,13 +204,17 @@ describe("portable investigation contract", () => {
     parsed.contributions[0]!.id = "shared-raw";
     parsed.timeline[0]!.targetId = "shared-raw";
     parsed.discussions[0]!.messageIds = ["shared-raw"];
-    parsed.evidence[0]!.id = "shared-raw";
+    const shareEv = parsed.evidence.find((row) => row.inclusion === "present")!;
+    shareEv.id = "shared-raw";
     parsed.snapshots[0]!.evidence[0]!.evidenceId = "shared-raw";
     parsed.triageJobs[0]!.candidates[0]!.evidenceRefs = ["shared-raw"];
     parsed.helpfulnessObservations[0]!.evidenceRefs = ["shared-raw"];
     parsed.decisions[0]!.evidenceRefs = ["shared-raw"];
     parsed.gold[0]!.evidenceAnchors = ["shared-raw"];
     parsed.attachments[0]!.evidenceId = "shared-raw";
+    const rebound = parsed.evidence.find((row) => row.id === "shared-raw")!;
+    parsed.snapshots[0]!.evidence[0]!.privacyClass = rebound.privacyClass;
+    parsed.snapshots[0]!.evidence[0]!.contentHash = rebound.digest;
     parsed.snapshots[0]!.fingerprint = portableSnapshotFingerprint(parsed.snapshots[0]!);
     parsed.triageJobs[0]!.snapshotFingerprint = parsed.snapshots[0]!.fingerprint;
     parsed.experiments[0]!.snapshotFingerprint = parsed.snapshots[0]!.fingerprint;
@@ -219,8 +225,16 @@ describe("portable investigation contract", () => {
     expect(contrib).toBeTruthy();
     expect(evidence).toBeTruthy();
     expect(contrib?.destinationId).not.toBe(evidence?.destinationId);
-    expect(contrib?.destinationId).toContain("contribution");
-    expect(evidence?.destinationId).toContain("evidence");
+    expect(isRfc4122Uuid(contrib!.destinationId)).toBe(true);
+    expect(isRfc4122Uuid(evidence!.destinationId)).toBe(true);
+    expect(contrib?.destinationId).not.toContain("::");
+    expect(evidence?.destinationId).not.toMatch(/^remap-/);
+    expect(contrib?.destinationId).toBe(
+      portableDestinationUuid(sealed.sourceInstallationId, "contribution", "shared-raw", 0),
+    );
+    expect(evidence?.destinationId).toBe(
+      portableDestinationUuid(sealed.sourceInstallationId, "evidence", "shared-raw", 0),
+    );
   });
 
   it("warns on missing profiles and fail-closes missing mapped users", () => {

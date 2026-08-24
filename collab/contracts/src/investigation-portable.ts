@@ -121,6 +121,62 @@ export function sha256Text(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+
+/** RFC 4122 UUID (version 1-8, variant 10xx). Acceptable as a PostgreSQL UUID. */
+export const RFC4122_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+const RFC4122_DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+
+function uuidBytes(uuid: string): Buffer {
+  if (!RFC4122_UUID_RE.test(uuid)) {
+    throw new ContractViolation("$", `expected RFC 4122 UUID, got ${uuid}`);
+  }
+  return Buffer.from(uuid.replace(/-/g, ""), "hex");
+}
+
+function formatUuid(bytes: Buffer): string {
+  const hex = bytes.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function uuidV5(namespaceUuid: string, name: string): string {
+  const hash = createHash("sha1")
+    .update(uuidBytes(namespaceUuid))
+    .update(name, "utf8")
+    .digest();
+  const version = hash.at(6);
+  const variant = hash.at(8);
+  if (version === undefined || variant === undefined) {
+    throw new ContractViolation("$", "SHA-1 UUID materialization failed");
+  }
+  hash[6] = (version & 0x0f) | 0x50;
+  hash[8] = (variant & 0x3f) | 0x80;
+  return formatUuid(hash);
+}
+
+export const PORTABLE_REMAP_NAMESPACE_UUID = uuidV5(
+  RFC4122_DNS_NAMESPACE,
+  "cd-collab.investigation-portable.remap.v1",
+);
+
+export function isRfc4122Uuid(value: string): boolean {
+  return RFC4122_UUID_RE.test(value);
+}
+
+export function portableDestinationUuid(
+  sourceInstallationId: string,
+  namespace: PortableObjectKind,
+  sourceId: string,
+  collisionCounter: number,
+): string {
+  return uuidV5(
+    PORTABLE_REMAP_NAMESPACE_UUID,
+    `${sourceInstallationId}:${namespace}:${sourceId}:${collisionCounter}`,
+  );
+}
+
+
 function requireNonEmpty(path: string, value: string, detail = "must not be empty"): string {
   if (!value.trim()) {
     throw new ContractViolation(path, detail);
@@ -1267,6 +1323,14 @@ function validateContent(
     if (ev.byteLength !== content.byteLength) {
       throw new ContractViolation(`$.evidence[${i}].byteLength`, "content byteLength mismatch");
     }
+    if (ev.inclusion !== "present") {
+      if (content.inclusion === "present" || content.payloadBase64 !== null) {
+        throw new ContractViolation(
+          `$.evidence[${i}].inclusion`,
+          "dishonest withholding metadata: withheld evidence must not reference present payload bytes",
+        );
+      }
+    }
   }
 }
 
@@ -1559,8 +1623,27 @@ export function parsePortableInvestigation(
         throw new ContractViolation(`$.snapshots[${i}].evidence[${j}].ordinal`, "duplicate ordinal");
       }
       seenOrdinal.add(item.ordinal);
+      const exported = evidence.get(item.evidenceId);
+      if (!exported) {
+        throw new ContractViolation(
+          `$.snapshots[${i}].evidence[${j}].evidenceId`,
+          "dangling evidence reference",
+        );
+      }
+      if (item.privacyClass !== exported.privacyClass) {
+        throw new ContractViolation(
+          `$.snapshots[${i}].evidence[${j}].privacyClass`,
+          "snapshot privacyClass does not match exported evidence",
+        );
+      }
       if (item.contentHash !== null) {
         requireSha256(`$.snapshots[${i}].evidence[${j}].contentHash`, item.contentHash);
+        if (item.contentHash !== exported.digest) {
+          throw new ContractViolation(
+            `$.snapshots[${i}].evidence[${j}].contentHash`,
+            "snapshot contentHash does not match exported evidence",
+          );
+        }
         hashed += 1;
       }
       if (snap.visibility === "share_safe" && item.privacyClass !== "share_safe") {
@@ -1622,6 +1705,9 @@ export function parsePortableInvestigation(
       }
     }
   }
+  const triageCandidateIds = new Set(
+    bundle.triageJobs.flatMap((job) => job.candidates.map((row) => row.candidateId)),
+  );
 
   uniqueIds(
     "$.experiments.id",
@@ -1634,6 +1720,18 @@ export function parsePortableInvestigation(
     if (!bundle.snapshots.some((snap) => snap.fingerprint === exp.snapshotFingerprint)) {
       throw new ContractViolation(`$.experiments[${i}].snapshotFingerprint`, "dangling snapshot fingerprint");
     }
+    uniqueIds(
+      `$.experiments[${i}].candidateIds`,
+      exp.candidateIds,
+    );
+    for (const [j, candidateId] of exp.candidateIds.entries()) {
+      if (!triageCandidateIds.has(candidateId)) {
+        throw new ContractViolation(
+          `$.experiments[${i}].candidateIds[${j}]`,
+          "experiment candidate is not a member of any triage job",
+        );
+      }
+    }
   }
 
   uniqueIds(
@@ -1641,10 +1739,17 @@ export function parsePortableInvestigation(
     bundle.helpfulnessObservations.map((row) => row.id),
   );
   for (const [i, row] of bundle.helpfulnessObservations.entries()) {
-    if (!experiments.has(row.experimentId)) {
+    const experiment = experiments.get(row.experimentId);
+    if (!experiment) {
       throw new ContractViolation(
         `$.helpfulnessObservations[${i}].experimentId`,
         "dangling experiment reference",
+      );
+    }
+    if (!experiment.candidateIds.includes(row.candidateId)) {
+      throw new ContractViolation(
+        `$.helpfulnessObservations[${i}].candidateId`,
+        "candidate does not belong to that experiment",
       );
     }
     requireActor(actors, row.reviewerId, `$.helpfulnessObservations[${i}].reviewerId`);
@@ -1713,6 +1818,12 @@ export function parsePortableInvestigation(
         "dangling or non-accepted decision",
       );
     }
+    if (accepted.experimentId !== row.experimentId) {
+      throw new ContractViolation(
+        `$.gold[${i}].acceptedDecisionId`,
+        "gold accepted decision must belong to the same experiment",
+      );
+    }
     if (!row.notes.includes(GOLD_IS_HUMAN_BENCHMARK)) {
       throw new ContractViolation(`$.gold[${i}].notes`, "gold must declare the human-benchmark caveat");
     }
@@ -1729,8 +1840,16 @@ export function parsePortableInvestigation(
     bundle.alignments.map((row) => row.id),
   );
   for (const [i, row] of bundle.alignments.entries()) {
-    if (!bundle.gold.some((gold) => gold.goldId === row.goldId)) {
+    const gold = bundle.gold.find((item) => item.goldId === row.goldId);
+    if (!gold) {
       throw new ContractViolation(`$.alignments[${i}].goldId`, "dangling gold reference");
+    }
+    const goldExperiment = experiments.get(gold.experimentId);
+    if (!goldExperiment || !goldExperiment.candidateIds.includes(row.candidateId)) {
+      throw new ContractViolation(
+        `$.alignments[${i}].candidateId`,
+        "candidate does not belong to that experiment",
+      );
     }
     if (!row.notes.includes(GOLD_ALIGNMENT_NOT_CORRECTNESS)) {
       throw new ContractViolation(
@@ -1806,8 +1925,17 @@ export function parsePortableInvestigation(
     if (row.discussionId !== null && !discussions.has(row.discussionId)) {
       throw new ContractViolation(`$.attachments[${i}].discussionId`, "dangling discussion reference");
     }
-    if (!contents.has(row.digest)) {
+    const content = contents.get(row.digest);
+    if (!content) {
       throw new ContractViolation(`$.attachments[${i}].digest`, "dangling content digest");
+    }
+    if (row.inclusion !== "present") {
+      if (content.inclusion === "present" || content.payloadBase64 !== null) {
+        throw new ContractViolation(
+          `$.attachments[${i}].inclusion`,
+          "dishonest withholding metadata: withheld attachment must not reference present payload bytes",
+        );
+      }
     }
   }
 
@@ -1976,19 +2104,6 @@ const preflightRequestShape: ObjectShape = {
   ),
 };
 
-function deterministicRemap(
-  installationId: string,
-  namespace: PortableObjectKind,
-  sourceId: string,
-  attempt: number,
-): string {
-  const input = attempt === 0
-    ? `${installationId}:${namespace}:${sourceId}`
-    : canonicalJson([installationId, namespace, sourceId, attempt]);
-  const digest = sha256Text(input);
-  return `remap-${digest.slice(0, 24)}`;
-}
-
 const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
 
 function chooseDeterministicRemap(
@@ -1998,7 +2113,7 @@ function chooseDeterministicRemap(
   occupied: Set<string>,
 ): string {
   for (let attempt = 0; attempt < MAX_DETERMINISTIC_REMAP_ATTEMPTS; attempt += 1) {
-    const candidate = deterministicRemap(installationId, namespace, sourceId, attempt);
+    const candidate = portableDestinationUuid(installationId, namespace, sourceId, attempt);
     if (!occupied.has(candidate)) {
       occupied.add(candidate);
       return candidate;
@@ -2360,17 +2475,23 @@ export function preflightPortableInvestigation(
     for (const sourceId of ids) {
       if (seenRaw.has(sourceId)) continue;
       seenRaw.add(sourceId);
-      const namespaced = `${bundle.sourceInstallationId}::${kind}::${sourceId}`;
-      if (!occupied.has(sourceId) && !occupied.has(namespaced)) {
-        idRemap.push({ namespace: kind, sourceId, destinationId: namespaced });
-        occupied.add(namespaced);
+      const destinationId = portableDestinationUuid(
+        bundle.sourceInstallationId,
+        kind,
+        sourceId,
+        0,
+      );
+      const collides = occupied.has(destinationId) || occupied.has(sourceId);
+      if (!collides) {
+        idRemap.push({ namespace: kind, sourceId, destinationId });
+        occupied.add(destinationId);
         create += 1;
         continue;
       }
       if (request.collisionPolicy === "fail") {
         conflict += 1;
         blocked += 1;
-        idRemap.push({ namespace: kind, sourceId, destinationId: sourceId });
+        idRemap.push({ namespace: kind, sourceId, destinationId });
         referential.push({
           code: "id_collision",
           path: `${kind}:${sourceId}`,

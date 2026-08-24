@@ -18,8 +18,10 @@ persistence apply contract by itself:
   fingerprint (`portableBundleFingerprint` / `bundleFingerprint`).
 - Evidence bytes were easy to treat as semantically identifying if a later
   host hashed the whole envelope.
-- V1 deterministic remaps are namespaced strings (`inst-*::kind::id` /
-  `remap-<hex>`), not RFC 4122 UUIDs for PostgreSQL UUID columns.
+- Parent V1 deterministic remaps were namespaced strings (`inst-*::kind::id` /
+  `remap-<hex>`), which are not RFC 4122 UUIDs for PostgreSQL UUID columns.
+  This child maps **both** V1 preflight and archive remaps through
+  `portableDestinationUuid`.
 - Parent V1 preflight returned `exactReconstruction: true` unconditionally.
 
 ## Semantic vs transport identity
@@ -54,8 +56,9 @@ UUID v5 values. Destination ids are:
 - namespace-separated and distinct across installations
 - distinct from preserved source ids
 
-V1 remaps stay on `preflightPortableInvestigation` so existing adversarial
-string-remap rows remain true.
+V1 `preflightPortableInvestigation` now emits the same RFC 4122 UUID mapping
+as archive preflight. Adversarial collision/exhaustion rows occupy UUID
+candidates, not `remap-*` strings.
 
 ## Reconstruction status
 
@@ -93,10 +96,11 @@ source trust.
 
 ## Remaining server / archive / apply / UI work
 
-Not in this child:
+Not in this child (explicit residuals):
 
 - writing or reading archive bytes on disk
 - Ed25519 key management, signing, or verification
 - PostgreSQL persistence apply of remapped UUID rows
 - authorization routes or capability probes
 - War Room import/export UI
+- host catalog revalidation at apply time

@@ -11,6 +11,7 @@ import {
   attachPortableIntegrity,
   parsePortableInvestigation,
   portableSemanticFingerprint,
+  portableSnapshotFingerprint,
   type PortableInvestigationUnsigned,
   type PortableInvestigationV1,
   type PreflightRequestV1,
@@ -373,6 +374,23 @@ describe("portable investigation archive contract", () => {
     const evidence = mutated.evidence.find((row) => row.inclusion === "present")!;
     evidence.digest = present.digest;
     evidence.byteLength = present.byteLength;
+    for (const snap of mutated.snapshots) {
+      for (const item of snap.evidence) {
+        if (item.evidenceId === evidence.id) {
+          item.contentHash = evidence.digest;
+          item.privacyClass = evidence.privacyClass;
+        }
+      }
+      snap.fingerprint = portableSnapshotFingerprint(snap);
+    }
+    for (const job of mutated.triageJobs) {
+      const snap = mutated.snapshots.find((row) => row.id === job.snapshotId);
+      if (snap) job.snapshotFingerprint = snap.fingerprint;
+    }
+    for (const exp of mutated.experiments) {
+      const snap = mutated.snapshots[0];
+      if (snap) exp.snapshotFingerprint = snap.fingerprint;
+    }
     for (const att of mutated.attachments) {
       if (att.digest === first.investigation.evidence.find((row) => row.inclusion === "present")!.digest) {
         att.digest = present.digest;
