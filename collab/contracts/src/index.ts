@@ -569,3 +569,4 @@ export type {
 
 export * from "./investigation-portable.js";
 export * from "./investigation-portable-archive.js";
+export * from "./investigation-strategy-connector.js";
