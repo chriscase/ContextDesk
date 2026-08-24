@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import {
   PERMANENT_UNKNOWN_SOURCE_ID,
   PORTABLE_OBJECT_KINDS,
+  parseCorpusIntakeBatch,
   portableDestinationUuid,
   snapshotFairness,
   snapshotFingerprint,
@@ -591,15 +592,60 @@ export async function persistPortableArchive(input: {
     }
   }
 
+  const intakeBatchIds = new Map<string, string>();
+  for (const batch of bundle.intakeBatches ?? []) {
+    const id = portableDestinationUuid(
+      bundle.sourceInstallationId,
+      "evidence",
+      `intake-batch:${batch.id}`,
+      0,
+    );
+    const sourcePayload = parseCorpusIntakeBatch(JSON.parse(batch.payloadJson));
+    const createdBy = attribution(batch.createdBy);
+    const payload = {
+      ...sourcePayload,
+      id,
+      caseId: investigationId,
+      replayed: false,
+      createdBy: createdBy.id,
+      items: sourcePayload.items.map((item) => ({
+        ...item,
+        artifactId: remapOf(report, "evidence", item.artifactId),
+        sourceId: remapOf(report, "source", item.sourceId),
+      })),
+    };
+    await ports.cases.insertIntakeBatch({
+      id,
+      caseId: investigationId,
+      idempotencyKey: batch.idempotencyKey,
+      requestDigest: batch.requestDigest,
+      origin: batch.origin,
+      sourceLabel: batch.sourceLabel,
+      privacyClass: batch.privacyClass,
+      createdAt: batch.createdAt,
+      createdBy: createdBy.id,
+      payloadJson: JSON.stringify(payload),
+    });
+    intakeBatchIds.set(batch.id, id);
+  }
+
   for (const evidence of bundle.evidence) {
     const id = remapOf(report, "evidence", evidence.id);
     const uploader = attribution(evidence.createdBy);
+    let intakeBatchId: string | null = null;
+    if (evidence.intakeBatchId) {
+      const mapped = intakeBatchIds.get(evidence.intakeBatchId);
+      if (!mapped) throw new Error("portable evidence has a dangling corpus intake batch");
+      intakeBatchId = mapped;
+    }
     const row: ArtifactRow = {
       id,
       caseId: investigationId,
-      kind: bundle.attachments.some((item) => item.evidenceId === evidence.id)
-        ? "attachment"
-        : "log",
+      kind: evidence.artifactKind ?? (
+        bundle.attachments.some((item) => item.evidenceId === evidence.id)
+          ? "attachment"
+          : "log"
+      ),
       filename: evidence.title,
       uri: null,
       mediaType: evidence.contentType,
@@ -609,10 +655,16 @@ export async function persistPortableArchive(input: {
       verificationStatus: digestBytes.has(evidence.digest) ? "verified" : "unverified",
       refId: null,
       privacyClass: evidence.privacyClass,
-      summaryContributionId: null,
+      summaryContributionId: evidence.summaryContributionId
+        ? remapOf(report, "contribution", evidence.summaryContributionId)
+        : null,
       uploaderId: uploader.id,
       uploaderUsername: uploader.username,
-      sourceId: fallbackSourceId,
+      sourceId: evidence.sourceId
+        ? remapOf(report, "source", evidence.sourceId)
+        : fallbackSourceId,
+      relativePath: evidence.relativePath ?? evidence.title,
+      intakeBatchId,
     };
     await ports.cases.insertArtifact(row);
   }

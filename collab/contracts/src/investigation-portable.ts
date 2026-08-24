@@ -5,6 +5,12 @@
 import { createHash } from "node:crypto";
 import { CASE_SEVERITIES, CASE_STATUSES, PRIVACY_CLASSES } from "./case.js";
 import { CONTRIBUTION_KINDS, HYPOTHESIS_STATUSES } from "./contribution.js";
+import { ARTIFACT_KINDS, type ArtifactKind } from "./artifact.js";
+import {
+  CORPUS_INTAKE_ORIGINS,
+  parseCorpusIntakeBatch,
+  type CorpusIntakeOrigin,
+} from "./investigation-corpus-intake.js";
 import { GOLD_ALIGNMENT_NOT_CORRECTNESS, GOLD_ALIGNMENT_STATUSES, GOLD_IS_HUMAN_BENCHMARK } from "./gold.js";
 import {
   DECISION_STATUSES,
@@ -450,6 +456,11 @@ const contributionShape: ObjectShape = {
 const evidenceShape: ObjectShape = {
   id: f.req(f.str),
   title: f.req(f.str),
+  artifactKind: f.opt(f.en(...ARTIFACT_KINDS)),
+  sourceId: f.opt(f.str),
+  summaryContributionId: f.optNul(f.str),
+  relativePath: f.optNul(f.str),
+  intakeBatchId: f.optNul(f.str),
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
   digest: f.req(f.str),
   inclusion: f.req(f.en(...CONTENT_INCLUSIONS)),
@@ -458,6 +469,19 @@ const evidenceShape: ObjectShape = {
   createdBy: f.req(f.str),
   createdAt: f.req(f.str),
   objectHash: f.req(f.str),
+};
+
+const intakeBatchShape: ObjectShape = {
+  id: f.req(f.str),
+  caseId: f.req(f.str),
+  idempotencyKey: f.req(f.str),
+  requestDigest: f.req(f.str),
+  origin: f.req(f.en(...CORPUS_INTAKE_ORIGINS)),
+  sourceLabel: f.req(f.str),
+  privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
+  createdAt: f.req(f.str),
+  createdBy: f.req(f.str),
+  payloadJson: f.req(f.str),
 };
 
 const contentObjectShape: ObjectShape = {
@@ -659,6 +683,7 @@ const bundleShape: ObjectShape = {
   participants: f.req(f.arr(f.obj(participantShape))),
   contributions: f.req(f.arr(f.obj(contributionShape))),
   evidence: f.req(f.arr(f.obj(evidenceShape))),
+  intakeBatches: f.opt(f.arr(f.obj(intakeBatchShape))),
   contentObjects: f.req(f.arr(f.obj(contentObjectShape))),
   sources: f.req(f.arr(f.obj(sourceShape))),
   importedAiRuns: f.req(f.arr(f.obj(importedRunShape))),
@@ -733,6 +758,11 @@ export interface PortableContributionV1 {
 export interface PortableEvidenceV1 {
   id: string;
   title: string;
+  artifactKind?: ArtifactKind;
+  sourceId?: string;
+  summaryContributionId?: string | null;
+  relativePath?: string | null;
+  intakeBatchId?: string | null;
   privacyClass: (typeof PRIVACY_CLASSES)[number];
   digest: string;
   inclusion: ContentInclusion;
@@ -741,6 +771,19 @@ export interface PortableEvidenceV1 {
   createdBy: string;
   createdAt: string;
   objectHash: string;
+}
+
+export interface PortableIntakeBatchV1 {
+  id: string;
+  caseId: string;
+  idempotencyKey: string;
+  requestDigest: string;
+  origin: CorpusIntakeOrigin;
+  sourceLabel: string;
+  privacyClass: (typeof PRIVACY_CLASSES)[number];
+  createdAt: string;
+  createdBy: string;
+  payloadJson: string;
 }
 
 export interface PortableContentObjectV1 {
@@ -944,6 +987,7 @@ export interface PortableInvestigationV1 {
   participants: PortableParticipantV1[];
   contributions: PortableContributionV1[];
   evidence: PortableEvidenceV1[];
+  intakeBatches?: PortableIntakeBatchV1[];
   contentObjects: PortableContentObjectV1[];
   sources: PortableSourceV1[];
   importedAiRuns: PortableImportedAiRunV1[];
@@ -985,6 +1029,9 @@ function sortPortableBags(bundle: PortableInvestigationUnsigned): PortableInvest
     participants: sortBy(bundle.participants, (row) => row.sourceActorId),
     contributions: sortBy(bundle.contributions, (row) => `${row.id}:${row.revision}`),
     evidence: sortBy(bundle.evidence, (row) => row.id),
+    ...(bundle.intakeBatches
+      ? { intakeBatches: sortBy(bundle.intakeBatches, (row) => row.id) }
+      : {}),
     contentObjects: sortBy(bundle.contentObjects, (row) => row.digest),
     sources: sortBy(bundle.sources, (row) => row.id),
     importedAiRuns: sortBy(bundle.importedAiRuns, (row) => row.id),
@@ -1568,8 +1615,95 @@ export function parsePortableInvestigation(
   for (const [i, row] of bundle.evidence.entries()) {
     requireActor(actors, row.createdBy, `$.evidence[${i}].createdBy`);
     assertShareSafeTimestamp(`$.evidence[${i}].createdAt`, row.createdAt);
+    if (row.sourceId !== undefined && !sources.has(row.sourceId)) {
+      throw new ContractViolation(`$.evidence[${i}].sourceId`, "dangling source reference");
+    }
+    if (
+      row.summaryContributionId !== undefined &&
+      row.summaryContributionId !== null &&
+      !bundle.contributions.some((item) => item.id === row.summaryContributionId)
+    ) {
+      throw new ContractViolation(
+        `$.evidence[${i}].summaryContributionId`,
+        "dangling contribution reference",
+      );
+    }
   }
   validateContent(bundle, options);
+
+  const intakeBatches = bundle.intakeBatches ?? [];
+  uniqueIds("$.intakeBatches.id", intakeBatches.map((row) => row.id));
+  const intakeById = new Map(intakeBatches.map((row) => [row.id, row]));
+  const evidenceById = new Map(bundle.evidence.map((row) => [row.id, row]));
+  for (const [i, batch] of intakeBatches.entries()) {
+    requireActor(actors, batch.createdBy, `$.intakeBatches[${i}].createdBy`);
+    assertShareSafeTimestamp(`$.intakeBatches[${i}].createdAt`, batch.createdAt);
+    requireSha256(`$.intakeBatches[${i}].requestDigest`, batch.requestDigest);
+    if (batch.caseId !== bundle.investigation.id) {
+      throw new ContractViolation(`$.intakeBatches[${i}].caseId`, "wrong investigation reference");
+    }
+    let parsed;
+    try {
+      parsed = parseCorpusIntakeBatch(JSON.parse(batch.payloadJson));
+    } catch {
+      throw new ContractViolation(`$.intakeBatches[${i}].payloadJson`, "invalid corpus intake batch");
+    }
+    if (
+      parsed.id !== batch.id ||
+      parsed.caseId !== batch.caseId ||
+      parsed.idempotencyKey !== batch.idempotencyKey ||
+      parsed.requestDigest !== batch.requestDigest ||
+      parsed.origin !== batch.origin ||
+      parsed.sourceLabel !== batch.sourceLabel ||
+      parsed.privacyClass !== batch.privacyClass ||
+      parsed.createdAt !== batch.createdAt ||
+      parsed.createdBy !== batch.createdBy
+    ) {
+      throw new ContractViolation(
+        `$.intakeBatches[${i}].payloadJson`,
+        "corpus intake batch envelope does not match its payload",
+      );
+    }
+    for (const [j, item] of parsed.items.entries()) {
+      const evidence = evidenceById.get(item.artifactId);
+      if (!evidence || evidence.intakeBatchId !== batch.id) {
+        throw new ContractViolation(
+          `$.intakeBatches[${i}].payloadJson.items[${j}].artifactId`,
+          "dangling intake evidence reference",
+        );
+      }
+      if (
+        evidence.relativePath !== item.relativePath ||
+        evidence.digest !== item.digest ||
+        evidence.byteLength !== item.byteLength ||
+        evidence.contentType !== item.mediaType ||
+        evidence.privacyClass !== item.privacyClass ||
+        evidence.sourceId !== item.sourceId
+      ) {
+        throw new ContractViolation(
+          `$.intakeBatches[${i}].payloadJson.items[${j}]`,
+          "intake item does not match exported evidence",
+        );
+      }
+    }
+  }
+  for (const [i, row] of bundle.evidence.entries()) {
+    if (row.intakeBatchId === undefined || row.intakeBatchId === null) continue;
+    if (!intakeById.has(row.intakeBatchId)) {
+      throw new ContractViolation(`$.evidence[${i}].intakeBatchId`, "dangling intake batch reference");
+    }
+    if (
+      row.artifactKind === undefined ||
+      row.sourceId === undefined ||
+      row.relativePath === undefined ||
+      row.relativePath === null
+    ) {
+      throw new ContractViolation(
+        `$.evidence[${i}]`,
+        "intake evidence requires kind, source, and relative path",
+      );
+    }
+  }
 
   uniqueIds(
     "$.importedAiRuns.id",

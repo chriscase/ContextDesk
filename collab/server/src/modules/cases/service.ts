@@ -17,7 +17,11 @@ import {
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
-import type { EvidenceStage, EvidenceStore } from "../../evidence/store.js";
+import type {
+  EvidenceStage,
+  EvidenceStore,
+  EvidenceWriteBatch,
+} from "../../evidence/store.js";
 import type { AuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
 import {
@@ -1014,8 +1018,10 @@ export class CaseService {
     const batchId = randomUUID();
     const createdAt = new Date().toISOString();
     const stages: EvidenceStage[] = [];
+    let evidenceBatch: EvidenceWriteBatch | null = null;
     try {
-      return await this.store.withAtomic(async () => {
+      evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
+      const result = await this.store.withAtomic(async () => {
         await this.store.lockIntakeIdempotency(caseId, request.idempotencyKey);
         const replay = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
         if (replay) {
@@ -1025,15 +1031,20 @@ export class CaseService {
           return { ...parseCorpusIntakeBatch(JSON.parse(replay.payloadJson)), replayed: true };
         }
 
-        const stageByDigest = new Map<string, EvidenceStage>();
+        const metaByDigest = new Map<string, { hash: string; byteLength: number }>();
         const uniqueFiles = [...new Map(
           preview.classified.map((file) => [file.digest, file]),
         ).values()].sort((left, right) => left.digest.localeCompare(right.digest));
         for (const file of uniqueFiles) {
           await this.store.lockEvidenceDigest(file.digest);
-          const stage = await this.evidence.stage(file.bytes, { contentType: file.mediaType });
-          stageByDigest.set(file.digest, stage);
-          stages.push(stage);
+          if (evidenceBatch) {
+            const meta = await evidenceBatch.put(file.bytes, { contentType: file.mediaType });
+            metaByDigest.set(file.digest, meta);
+          } else {
+            const stage = await this.evidence.stage(file.bytes, { contentType: file.mediaType });
+            metaByDigest.set(file.digest, stage.meta);
+            stages.push(stage);
+          }
         }
         const items: CorpusIntakeBatchV1["items"] = preview.classified.map((file, index) => ({
           artifactId: randomUUID(),
@@ -1076,8 +1087,8 @@ export class CaseService {
         for (const [index, file] of preview.classified.entries()) {
           const item = items[index];
           if (!item) throw new Error("intake item materialization failed");
-          const stage = stageByDigest.get(file.digest);
-          if (!stage) throw new Error("evidence stage is missing");
+          const meta = metaByDigest.get(file.digest);
+          if (!meta) throw new Error("evidence stage is missing");
           const summary = await this.addContribution(
             caseId,
             actor,
@@ -1096,9 +1107,9 @@ export class CaseService {
             filename: file.relativePath,
             uri: null,
             mediaType: file.mediaType,
-            byteLength: stage.meta.byteLength,
-            contentHash: stage.meta.hash,
-            expectedHash: stage.meta.hash,
+            byteLength: meta.byteLength,
+            contentHash: meta.hash,
+            expectedHash: meta.hash,
             verificationStatus: "verified",
             refId: null,
             privacyClass: request.privacyClass,
@@ -1116,7 +1127,7 @@ export class CaseService {
             clientTime: null,
             payload: {
               artifactKind: file.artifactKind,
-              contentHash: stage.meta.hash,
+              contentHash: meta.hash,
               privacyClass: request.privacyClass,
               summaryId: summary.id,
               relativePath: file.relativePath,
@@ -1124,9 +1135,13 @@ export class CaseService {
             },
           });
         }
-        for (const stage of stages) {
-          await stage.commit();
-          if (!(await this.evidence.verify(stage.meta.hash))) {
+        if (evidenceBatch) {
+          await evidenceBatch.promote();
+        } else {
+          for (const stage of stages) await stage.commit();
+        }
+        for (const meta of metaByDigest.values()) {
+          if (!(await this.evidence.verify(meta.hash))) {
             throw new Error("hash verification failed after storage");
           }
         }
@@ -1146,8 +1161,14 @@ export class CaseService {
         });
         return batch;
       }, this.audit);
+      await evidenceBatch?.finalize();
+      return result;
     } catch (error) {
-      await Promise.allSettled(stages.map((stage) => stage.rollback()));
+      if (evidenceBatch) {
+        await evidenceBatch.rollback();
+      } else {
+        await Promise.allSettled(stages.map((stage) => stage.rollback()));
+      }
       throw error;
     } finally {
       for (const stage of stages) stage.release();

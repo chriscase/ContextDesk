@@ -10,6 +10,8 @@ Shipped: supported portable archive download, parse/integrity, host
 destination-catalog preflight, durable hashed confirmation intents, lead/admin
 apply, staged evidence with coordinated metadata rollback, actor-scoped replay,
 attribution-only historical people, and a War Room confirmation screen.
+Exact apply also preserves investigation-scoped intake batches, relative paths,
+source attribution, and included content-addressed evidence bytes.
 PostgreSQL uses transactional replica coordination plus a database-backed
 lease around filesystem evidence writes; it fails closed if that external byte
 coordination is absent. A confirmed committed intent resolves an interrupted

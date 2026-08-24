@@ -60,6 +60,6 @@ test.describe("portable investigation apply", () => {
     await page.reload();
     await expect(page).toHaveURL(new RegExp(`${href}$`));
     await expect(page.locator("h2.case-view__title").filter({ hasText: title })).toBeVisible();
-    await screenshot(page, "13-portable-apply-restored");
+    await screenshot(page, "14-portable-apply-restored");
   });
 });

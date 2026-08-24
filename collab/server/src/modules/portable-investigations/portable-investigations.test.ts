@@ -2,6 +2,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
   GOLD_IS_HUMAN_BENCHMARK,
   PORTABLE_APPLY_REQUEST_SCHEMA_ID,
   TRIAGE_JOB_REQUEST_SCHEMA_ID,
@@ -526,6 +528,91 @@ describe("portable investigation service", () => {
     );
     expect(archive.investigation.actors.every((actor) => actor.roleNote === "Historical attribution only"))
       .toBe(true);
+  });
+
+  it("round-trips corpus intake batches, paths, provenance, and evidence bytes", async () => {
+    const row = await fixture();
+    const bytes = new TextEncoder().encode(
+      "2042-03-04T11:30:00Z synthetic-router ERROR request timed out\n",
+    );
+    const seed = {
+      origin: "files" as const,
+      sourceLabel: "Synthetic router diagnostics",
+      privacyClass: "owner_only" as const,
+      idempotencyKey: "batch-synthetic-portable-1",
+      files: [{
+        relativePath: "router/timeout.log",
+        mediaType: "text/plain",
+        contentBase64: Buffer.from(bytes).toString("base64"),
+      }],
+      archiveBase64: null,
+    };
+    const preview = await row.cases.previewCorpusIntake(row.caseId, ACTOR, {
+      schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+      ...seed,
+    });
+    const committed = await row.cases.commitCorpusIntake(
+      row.caseId,
+      ACTOR,
+      {
+        schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+        ...seed,
+        previewToken: preview.previewToken,
+      },
+      "fixture",
+    );
+
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const exportedBatch = archive.investigation.intakeBatches?.[0];
+    const exportedEvidence = archive.investigation.evidence.find(
+      (item) => item.id === committed.items[0]?.artifactId,
+    );
+    expect(exportedBatch).toMatchObject({
+      id: committed.id,
+      origin: "files",
+      sourceLabel: "Synthetic router diagnostics",
+    });
+    expect(exportedEvidence).toMatchObject({
+      artifactKind: "log",
+      relativePath: "router/timeout.log",
+      intakeBatchId: committed.id,
+      digest: sha256Hex(bytes),
+    });
+
+    const identityMap = identityMapFor(archive);
+    const dryRun = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(dryRun.report.exactReconstruction).toBe(true);
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(dryRun.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const restoredArtifacts = await row.cases.listArtifacts(applied.investigationId, ACTOR, false);
+    const restoredEvidence = restoredArtifacts.find(
+      (item) => item.relativePath === "router/timeout.log",
+    );
+    expect(restoredEvidence?.contentHash).toBe(sha256Hex(bytes));
+    expect(restoredEvidence?.intakeBatchId).toBeTruthy();
+    const restoredBatch = await row.cases.getCorpusIntakeBatch(
+      applied.investigationId,
+      restoredEvidence?.intakeBatchId as string,
+    );
+    expect(restoredBatch).toMatchObject({
+      caseId: applied.investigationId,
+      sourceLabel: "Synthetic router diagnostics",
+      replayed: false,
+    });
+    expect(restoredBatch?.items[0]).toMatchObject({
+      artifactId: restoredEvidence?.id,
+      relativePath: "router/timeout.log",
+      digest: sha256Hex(bytes),
+    });
   });
 
   it("returns host-owned identity/collision/privacy facts and mints apply only for exact reconstruction", async () => {

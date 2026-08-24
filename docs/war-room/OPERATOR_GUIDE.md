@@ -270,6 +270,12 @@ included evidence supported by the current archive version. It also carries
 integrity data, privacy classifications, content inclusion state, historical
 attribution, and explicit reconstruction limitations.
 
+For investigation-scoped file, ZIP, and directory intake, an exact archive
+preserves the accepted batch record, relative paths, source attribution, and
+included evidence bytes. Restore remaps destination identities while keeping
+those relationships intact, so the reconstructed evidence can be inspected or
+processed again without pretending that historical users are local users.
+
 On another War Room, select the archive and run **Run dry-run check**. The
 preflight:
 

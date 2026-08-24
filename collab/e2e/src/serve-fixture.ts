@@ -116,6 +116,7 @@ async function main(): Promise<void> {
     jobs: jobStore,
     evidence: store,
     audit,
+    applyState,
   });
   const portable = new PortableInvestigationService({
     installationId: await loadPortableInstallationId(root),

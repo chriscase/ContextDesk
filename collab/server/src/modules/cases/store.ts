@@ -292,6 +292,7 @@ export class MemoryCaseStore implements CaseStore {
       revisions: [...this.revisions.entries()],
       artifacts: [...this.artifacts.entries()],
       snapshots: [...this.snapshots.entries()],
+      intakeBatches: [...this.intakeBatches.entries()],
     });
   }
 
@@ -302,17 +303,20 @@ export class MemoryCaseStore implements CaseStore {
       revisions: [string, RevisionRow[]][];
       artifacts: [string, ArtifactRow][];
       snapshots: [string, SnapshotRow][];
+      intakeBatches: [string, IntakeBatchRow][];
     };
     this.cases.clear();
     this.timeline.clear();
     this.revisions.clear();
     this.artifacts.clear();
     this.snapshots.clear();
+    this.intakeBatches.clear();
     for (const [id, value] of row.cases) this.cases.set(id, value);
     for (const [id, value] of row.timeline) this.timeline.set(id, value);
     for (const [id, value] of row.revisions) this.revisions.set(id, value);
     for (const [id, value] of row.artifacts) this.artifacts.set(id, value);
     for (const [id, value] of row.snapshots) this.snapshots.set(id, value);
+    for (const [id, value] of row.intakeBatches) this.intakeBatches.set(id, value);
   }
 
   async listCases(): Promise<CaseRow[]> {

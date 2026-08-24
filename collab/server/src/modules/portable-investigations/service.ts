@@ -550,6 +550,21 @@ export class PortableInvestigationService {
       latestContributions.map((row) => this.deps.cases.provenance(caseId, row.id)),
     );
     const contributions = contributionChains.flat();
+    const intakeBatchIds = [...new Set(
+      artifacts.flatMap((row) => row.intakeBatchId ? [row.intakeBatchId] : []),
+    )].sort();
+    const intakeBatches = await Promise.all(
+      intakeBatchIds.map(async (batchId) => {
+        const batch = await this.deps.cases.getCorpusIntakeBatch(caseId, batchId);
+        if (!batch) {
+          throw new PortableServerError(
+            "integrity_failure",
+            "investigation evidence has a dangling corpus intake batch",
+          );
+        }
+        return batch;
+      }),
+    );
     const historicalTimeline = timeline.filter((row) => row.kind !== "portable_archive_applied");
     const sourceIds = new Set<string>([
       ...contributions.map((row) => row.sourceId),
@@ -568,6 +583,7 @@ export class PortableInvestigationService {
       addActor(actors, { id: row.authorId, username: row.authorUsername });
     }
     for (const row of artifacts) addActor(actors, { id: row.uploaderId });
+    for (const row of intakeBatches) addActor(actors, { id: row.createdBy });
     for (const row of snapshots) addActor(actors, { id: row.createdBy });
     for (const row of jobs) addActor(actors, { id: row.requestedBy, username: row.requestedByUsername });
     for (const row of experiments) {
@@ -676,6 +692,11 @@ export class PortableInvestigationService {
       return {
         id: artifact.id,
         title: artifact.filename?.trim() || `${artifact.kind} evidence`,
+        artifactKind: artifact.kind,
+        sourceId: artifact.sourceId,
+        summaryContributionId: artifact.summaryContributionId,
+        relativePath: artifact.relativePath ?? artifact.filename,
+        intakeBatchId: artifact.intakeBatchId ?? null,
         privacyClass: artifact.privacyClass,
         digest,
         inclusion: content.inclusion,
@@ -923,6 +944,18 @@ export class PortableInvestigationService {
         objectHash: "",
       })),
       evidence,
+      intakeBatches: intakeBatches.map((row) => ({
+        id: row.id,
+        caseId: row.caseId,
+        idempotencyKey: row.idempotencyKey,
+        requestDigest: row.requestDigest,
+        origin: row.origin,
+        sourceLabel: row.sourceLabel,
+        privacyClass: row.privacyClass,
+        createdAt: row.createdAt,
+        createdBy: row.createdBy,
+        payloadJson: JSON.stringify(row),
+      })),
       contentObjects: contentRows(),
       sources: sources.map((row) => ({
         id: row.id,
