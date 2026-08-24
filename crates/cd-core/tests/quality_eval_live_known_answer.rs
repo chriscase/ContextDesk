@@ -1,9 +1,8 @@
 use cd_core::investigation_team_qualification::InvestigationTeamRole;
 use cd_core::quality_eval::live_known_answer::{
-    host_attempt_from_chat, host_diagnostic_for_grounding_sequence,
-    host_diagnostic_for_observed_attempts, host_diagnostic_for_observed_chat,
-    scripted_diagnostic_from_host_attempts, scripted_diagnostic_from_parsed_response,
-    HostAttemptClass, HostAttemptObservation, HOST_GROUNDING_REFUSAL_CATEGORY,
+    host_attempt_from_chat, host_diagnostic_for_observed_attempts,
+    host_diagnostic_for_observed_chat, scripted_diagnostic_from_host_attempts,
+    scripted_diagnostic_from_parsed_response, HostAttemptClass, HostAttemptObservation,
     MIXED_ATTEMPTS_CATEGORY, SERIAL_PARSED_ATTEMPT_CATEGORY,
 };
 use cd_core::quality_eval::{
@@ -122,14 +121,11 @@ fn prepares_all_fourteen_cases_in_manifest_order_with_opaque_ids() {
         .chain(&prepared[12..])
         .all(|case| !case.requires_host_diagnostic()));
     assert!(prepared[8].host_can_observe_diagnostic());
-    assert!(
-        prepared[9].host_can_observe_diagnostic(),
-        "qe10 can honestly observe a single-attempt grounding refusal"
-    );
+    assert!(!prepared[9].host_can_observe_diagnostic());
     assert!(!prepared[10].host_can_observe_diagnostic());
     assert!(!prepared[11].host_can_observe_diagnostic());
     assert!(!prepared[8].blocks_diagnostic_before_dispatch());
-    assert!(!prepared[9].blocks_diagnostic_before_dispatch());
+    assert!(prepared[9].blocks_diagnostic_before_dispatch());
     assert!(prepared[10].blocks_diagnostic_before_dispatch());
     assert!(prepared[11].blocks_diagnostic_before_dispatch());
     assert!(prepared[8].host_may_record_follow_up_attempt());
@@ -824,19 +820,9 @@ fn parsed_success_is_not_joined_when_its_category_is_not_allowed() {
         .answer
         .failed_ids()
         .contains(&"diagnostic_category"));
-    // `host_diagnostic_for_observed_chat` above is a hermetic unit call that
-    // can synthesize a raw_error *and* a parsed body in the same attempt.
-    // Production `dispatch_known_answer_chat` never returns that dual state
-    // (`Err` maps to empty content); the real host runner's grounding path
-    // (`host_diagnostic_for_grounding_sequence`) only ever reaches `Executed`
-    // through a genuinely single clean parsed attempt with zero claims, never
-    // by combining a transport error with a parsed body. qe10 no longer
-    // blocks pre-dispatch: it can honestly observe that single-attempt
-    // grounding-refusal shape even though this specific dual-state timeout
-    // envelope stays synthetic.
     assert!(
-        !qe10.blocks_diagnostic_before_dispatch(),
-        "qe10 can honestly observe a single-attempt grounding refusal"
+        qe10.blocks_diagnostic_before_dispatch(),
+        "production chat Err has no parsed body, so timeout cannot be scored on execute_target"
     );
 
     let mixed = host_diagnostic_for_observed_attempts(
@@ -860,129 +846,4 @@ fn parsed_success_is_not_joined_when_its_category_is_not_allowed() {
         .failed_ids()
         .contains(&"attempt_usefulness"));
     assert!(!qe09.blocks_diagnostic_before_dispatch());
-}
-
-#[test]
-fn qe10_single_clean_zero_claims_attempt_is_grounding_refusal_and_does_not_pass() {
-    let suite = suite();
-    let prepared = prepare_live_known_answer_suite(&suite).expect("prepare live suite");
-    let qe10 = prepared_index(&prepared, "qe10-grounding-vs-transport");
-
-    let zero_claims_response = LiveKnownAnswerResponse {
-        schema_id: LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID.into(),
-        scenario_id: qe10.prompt().scenario_id.clone(),
-        asserts_root_cause_established: false,
-        claims: Vec::new(),
-        conclusion: "Insufficient evidence in the supplied packet.".into(),
-        confidence: "low".into(),
-    };
-
-    let attempt = host_attempt_from_chat("host-1", false, None, Some(&zero_claims_response), false);
-    assert!(
-        attempt.class.succeeded(),
-        "the attempt transport-succeeded even though it asserted nothing"
-    );
-
-    let diagnostic = host_diagnostic_for_grounding_sequence(
-        qe10,
-        InvestigationTeamRole::Single,
-        &[attempt],
-        Some(true),
-    )
-    .expect("a clean zero-claims attempt is an honest grounding refusal");
-    assert_eq!(
-        diagnostic.reported_category,
-        HOST_GROUNDING_REFUSAL_CATEGORY
-    );
-    assert!(
-        diagnostic.attempts.iter().all(|row| !row.succeeded),
-        "an ungrounded refusal must not report a successful attempt row"
-    );
-    assert!(diagnostic
-        .attempts
-        .iter()
-        .all(|row| row.failure_class == "host_grounding"));
-
-    let score = score_response(qe10, &zero_claims_response, Some(diagnostic));
-    assert!(
-        !score.answer.failed_ids().contains(&"diagnostic_category"),
-        "{:?}",
-        score.answer.failed_ids()
-    );
-    assert!(!score
-        .answer
-        .failed_ids()
-        .contains(&"transport_versus_grounding"));
-    assert!(!score.answer.failed_ids().contains(&"attempt_usefulness"));
-    assert!(
-        !score.answer.passed,
-        "a fluent response without host grounding must not pass"
-    );
-}
-
-#[test]
-fn qe10_grounded_fluent_response_has_no_allowed_category_and_prior_transport_failure_blocks_refusal_too(
-) {
-    let suite = suite();
-    let prepared = prepare_live_known_answer_suite(&suite).expect("prepare live suite");
-    let qe10 = prepared_index(&prepared, "qe10-grounding-vs-transport");
-    let evidence = qe10
-        .prompt()
-        .evidence
-        .first()
-        .expect("qe10 fixture has at least one evidence row");
-    let grounded_response = LiveKnownAnswerResponse {
-        schema_id: LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID.into(),
-        scenario_id: qe10.prompt().scenario_id.clone(),
-        asserts_root_cause_established: true,
-        claims: vec![LiveAnswerClaim {
-            text: "genuinely grounded claim".into(),
-            citations: vec![LiveCitation {
-                evidence_id: evidence.evidence_id.clone(),
-                source_id: evidence.source_id.clone(),
-                time_anchor: evidence.time_anchor.clone(),
-            }],
-            role: Some("trigger".into()),
-        }],
-        conclusion: "grounded conclusion".into(),
-        confidence: "high".into(),
-    };
-    let grounded_attempt =
-        host_attempt_from_chat("host-1", false, None, Some(&grounded_response), false);
-    assert!(
-        host_diagnostic_for_grounding_sequence(
-            qe10,
-            InvestigationTeamRole::Single,
-            &[grounded_attempt],
-            Some(false),
-        )
-        .is_none(),
-        "qe10 has no allowed category for a genuinely grounded fluent answer"
-    );
-
-    // A prior real transport failure must never be papered over by a later
-    // clean zero-claims attempt reporting a grounding refusal: the scorer
-    // would flag that as transport mislabeled as grounding.
-    let zero_claims_response = LiveKnownAnswerResponse {
-        schema_id: LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID.into(),
-        scenario_id: qe10.prompt().scenario_id.clone(),
-        asserts_root_cause_established: false,
-        claims: Vec::new(),
-        conclusion: "Insufficient evidence in the supplied packet.".into(),
-        confidence: "low".into(),
-    };
-    let tainted_attempts = [
-        host_attempt_from_chat("host-1", false, Some("connection reset"), None, true),
-        host_attempt_from_chat("host-2", false, None, Some(&zero_claims_response), false),
-    ];
-    assert!(
-        host_diagnostic_for_grounding_sequence(
-            qe10,
-            InvestigationTeamRole::Single,
-            &tainted_attempts,
-            Some(true),
-        )
-        .is_none(),
-        "a lineage with an earlier real transport failure must never be reported as a clean grounding refusal"
-    );
 }

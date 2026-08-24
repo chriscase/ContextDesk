@@ -759,7 +759,8 @@ fn response_model_segments_are_route_shaped(segments: &[&str]) -> bool {
 
     // Reject only complete endpoint-like paths. Catalog namespaces and model
     // ids are allowed to contain words such as `api`, `chat`, or `responses`.
-    (version_prefix || first == "api") && has_endpoint
+    (version_prefix && has_endpoint)
+        || (first == "api" && has_endpoint)
         || (first == "chat"
             && normalized
                 .get(1)
