@@ -2007,8 +2007,7 @@ mod tests {
         let path = directory
             .path()
             .join("investigation-team-qualifications.json");
-        std::fs::write(&path, b"{malformed")
-            .expect("write malformed synthetic store");
+        std::fs::write(&path, b"{malformed").expect("write malformed synthetic store");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("secure malformed synthetic store");
 
@@ -2017,7 +2016,10 @@ mod tests {
         );
         assert!(state.store().is_err());
         assert!(state.reload_for_operation(&path).is_err());
-        assert_eq!(std::fs::read(&path).expect("preserved bytes"), b"{malformed");
+        assert_eq!(
+            std::fs::read(&path).expect("preserved bytes"),
+            b"{malformed"
+        );
 
         std::fs::remove_file(&path).expect("operator removes invalid synthetic store");
         let recovered = state

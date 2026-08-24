@@ -8,7 +8,11 @@ use cd_core::capability_qualification::{
 use cd_core::error::{CoreError, CoreResult};
 use cd_core::investigation_team_qualification::{InvestigationTeamRole, MemberBinding};
 use cd_core::openai_chat_contract::OpenAiChatRequestMode;
-use cd_core::provider_telemetry::{ModelIdentityStatus, ProviderTransportTelemetry};
+#[cfg(test)]
+use cd_core::provider_telemetry::CertifiedModelIdentity;
+use cd_core::provider_telemetry::{
+    ModelIdentityStatus, PresentResponseModelIdentity, ProviderTransportTelemetry,
+};
 use cd_core::quality_eval::live_known_answer::{
     host_attempt_from_chat, host_diagnostic_for_observed_attempts, HostAttemptObservation,
 };
@@ -32,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 #[cfg(unix)]
-use std::fs::File;
+use std::fs::{File, Metadata};
 #[cfg(unix)]
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
@@ -69,7 +73,35 @@ pub struct KnownAnswerSaveOutcome {
 #[cfg(unix)]
 #[derive(Debug)]
 struct KnownAnswerWriteLock {
-    _file: File,
+    file: File,
+    identity: Metadata,
+}
+
+#[cfg(unix)]
+impl KnownAnswerWriteLock {
+    fn revalidate(&self, directory: &LiveKnownAnswerOwnerDirectory, name: &str) -> CoreResult<()> {
+        let held = self.file.metadata()?;
+        validate_stable_open_metadata(&self.identity, &held, 0)
+            .map_err(|_| store_error("known-answer write lock retained inode changed"))?;
+        if held.nlink() != 1 {
+            return Err(store_error(
+                "known-answer write lock pathname is no longer uniquely bound",
+            ));
+        }
+        let named = directory
+            .open_owner_regular(name, 0, false)
+            .map_err(|_| store_error("known-answer write lock is unsafe to revalidate"))?
+            .ok_or_else(|| store_error("known-answer write lock pathname disappeared"))?;
+        let named_metadata = named.file.metadata()?;
+        validate_stable_open_metadata(&held, &named_metadata, 0)
+            .map_err(|_| store_error("known-answer write lock pathname identity changed"))?;
+        if named_metadata.nlink() != 1 {
+            return Err(store_error(
+                "known-answer write lock pathname is no longer uniquely bound",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(unix))]
@@ -359,6 +391,7 @@ impl InvestigationTeamKnownAnswerStore {
             path,
             expected_revision,
             |_| Ok(()),
+            |_| Ok(()),
             sync_parent_directory_after_replace,
         )
     }
@@ -373,15 +406,17 @@ impl InvestigationTeamKnownAnswerStore {
     }
 
     #[cfg(unix)]
-    fn save_with_seams<BeforeCas, SyncParent>(
+    fn save_with_seams<BeforeCas, BeforeReplace, SyncParent>(
         &self,
         path: &Path,
         expected_revision: &str,
         before_cas: BeforeCas,
+        before_replace: BeforeReplace,
         sync_parent: SyncParent,
     ) -> CoreResult<KnownAnswerSaveOutcome>
     where
         BeforeCas: FnOnce(&Path) -> CoreResult<()>,
+        BeforeReplace: FnOnce(&Path) -> CoreResult<()>,
         SyncParent: FnOnce(&LiveKnownAnswerOwnerDirectory) -> CoreResult<()>,
     {
         self.validate()?;
@@ -419,13 +454,45 @@ impl InvestigationTeamKnownAnswerStore {
             validate_stable_open_metadata(&after, &named.file.metadata()?, body.len() as u64)?;
             before_cas(path)?;
             directory.revalidate_path(parent)?;
-            let current = Self::load_from_directory(&directory, path, name, |_| {})?;
-            if current.revision()? != expected_revision {
+            lock.revalidate(&directory, &lock_name)?;
+            let current = read_validated_current_known_answer_store(&directory, name)?;
+            let current_revision = match current.as_ref() {
+                Some(row) => row.revision.clone(),
+                None => Self::default().revision()?,
+            };
+            if current_revision != expected_revision {
                 return Err(store_error(
                     "durable known-answer evidence changed; reload is required",
                 ));
             }
+            before_replace(path)?;
             directory.revalidate_path(parent)?;
+            lock.revalidate(&directory, &lock_name)?;
+            let destination = read_validated_current_known_answer_store(&directory, name)?;
+            match (&current, &destination) {
+                (None, None) => {}
+                (Some(expected), Some(actual)) => {
+                    validate_stable_open_metadata(
+                        &expected.metadata,
+                        &actual.metadata,
+                        expected.bytes.len() as u64,
+                    )
+                    .map_err(|_| {
+                        store_error("known-answer destination inode changed before replacement")
+                    })?;
+                    if actual.revision != expected.revision || actual.bytes != expected.bytes {
+                        return Err(store_error(
+                            "known-answer destination changed before replacement",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(store_error(
+                        "known-answer destination changed before replacement",
+                    ));
+                }
+            }
+            lock.revalidate(&directory, &lock_name)?;
             directory.rename_replace(&tmp_name, name)?;
             Ok(())
         })();
@@ -1127,10 +1194,15 @@ fn project_provider_telemetry(
         })
         .transpose()?;
     let (reported_model_id, model_identity_rejected) =
-        match (telemetry.model_identity_status, telemetry.response_model) {
+        match (telemetry.model_identity_status(), telemetry.response_model) {
             (ModelIdentityStatus::Absent, None) => (None, false),
-            (ModelIdentityStatus::Certified, Some(model)) => (Some(model), false),
-            (ModelIdentityStatus::Rejected, None) => (None, true),
+            (
+                ModelIdentityStatus::Certified,
+                Some(PresentResponseModelIdentity::Certified { value }),
+            ) => (Some(value.as_str().to_string()), false),
+            (ModelIdentityStatus::Rejected, Some(PresentResponseModelIdentity::Rejected)) => {
+                (None, true)
+            }
             _ => {
                 return Err(store_error(
                     "provider model identity telemetry is internally inconsistent",
@@ -1305,6 +1377,40 @@ fn validate_stable_open_metadata(
 }
 
 #[cfg(unix)]
+struct ValidatedCurrentKnownAnswerStore {
+    bytes: Vec<u8>,
+    metadata: Metadata,
+    revision: String,
+}
+
+#[cfg(unix)]
+fn read_validated_current_known_answer_store(
+    directory: &LiveKnownAnswerOwnerDirectory,
+    name: &str,
+) -> CoreResult<Option<ValidatedCurrentKnownAnswerStore>> {
+    let Some(mut opened) = directory
+        .open_owner_regular(
+            name,
+            MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_BYTES as u64,
+            false,
+        )
+        .map_err(|_| store_error("existing known-answer store path is unsafe to read"))?
+    else {
+        return Ok(None);
+    };
+    let before = opened.file.metadata()?;
+    let bytes = read_exact_open_file(&mut opened.file, opened.size)?;
+    let after = opened.file.metadata()?;
+    validate_stable_open_metadata(&before, &after, opened.size)?;
+    let revision = InvestigationTeamKnownAnswerStore::decode(&bytes)?.revision()?;
+    Ok(Some(ValidatedCurrentKnownAnswerStore {
+        bytes,
+        metadata: after,
+        revision,
+    }))
+}
+
+#[cfg(unix)]
 fn acquire_known_answer_write_lock(
     directory: &LiveKnownAnswerOwnerDirectory,
     name: &str,
@@ -1326,7 +1432,15 @@ fn acquire_known_answer_write_lock(
         .open_owner_regular(name, 0, false)?
         .ok_or_else(|| store_error("known-answer write lock disappeared"))?;
     validate_stable_open_metadata(&locked_metadata, &locked_named.file.metadata()?, 0)?;
-    Ok(KnownAnswerWriteLock { _file: file })
+    if locked_metadata.nlink() != 1 {
+        return Err(store_error(
+            "known-answer write lock pathname is not uniquely bound",
+        ));
+    }
+    Ok(KnownAnswerWriteLock {
+        file,
+        identity: locked_metadata,
+    })
 }
 
 #[cfg(unix)]
@@ -1615,8 +1729,10 @@ mod tests {
             };
             self.calls += 1;
             self.last = Some(ProviderTransportTelemetry {
-                response_model: Some("reported/model-b".into()),
-                model_identity_status: ModelIdentityStatus::Certified,
+                response_model: Some(PresentResponseModelIdentity::Certified {
+                    value: CertifiedModelIdentity::try_from("reported/model-b")
+                        .expect("certified model identity"),
+                }),
                 prompt_tokens: Some(100),
                 completion_tokens: Some(20),
                 reasoning_tokens: Some(5),
@@ -1890,8 +2006,10 @@ mod tests {
             self.scenario_ids.push(prompt.scenario_id.clone());
             self.calls += 1;
             self.last = Some(ProviderTransportTelemetry {
-                response_model: Some("reported/model-b".into()),
-                model_identity_status: ModelIdentityStatus::Certified,
+                response_model: Some(PresentResponseModelIdentity::Certified {
+                    value: CertifiedModelIdentity::try_from("reported/model-b")
+                        .expect("certified model identity"),
+                }),
                 prompt_tokens: Some(100),
                 completion_tokens: Some(20),
                 reasoning_tokens: Some(5),
@@ -2579,6 +2697,7 @@ mod tests {
                     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))?;
                     Ok(())
                 },
+                |_| Ok(()),
                 sync_parent_directory_after_replace,
             )
             .expect_err("parent replacement must fail before rename");
@@ -2641,6 +2760,7 @@ mod tests {
             .save_with_seams(
                 &path,
                 &empty_store_revision(),
+                |_| Ok(()),
                 |_| Ok(()),
                 |_| Err(store_error("injected directory sync failure")),
             )
@@ -2711,6 +2831,7 @@ mod tests {
                     std::fs::write(durable_path, &malformed)?;
                     Ok(())
                 },
+                |_| Ok(()),
                 sync_parent_directory_after_replace,
             )
             .expect_err("malformed current store must block replacement");
@@ -2727,11 +2848,82 @@ mod tests {
                     std::fs::write(durable_path, &changed_bytes)?;
                     Ok(())
                 },
+                |_| Ok(()),
                 sync_parent_directory_after_replace,
             )
             .expect_err("changed current store must fail CAS");
         assert!(error.to_string().contains("changed"));
         assert_eq!(std::fs::read(&path).expect("winner remains"), changed_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_swap_after_cas_fails_without_overwriting_the_winner() {
+        let dir = owner_tempdir();
+        let path = dir.path().join("known.json");
+        let mut original = InvestigationTeamKnownAnswerStore::default();
+        original
+            .publish_execution(captured_evidence())
+            .expect("publish original");
+        original
+            .save(&path, &empty_store_revision())
+            .expect("save original");
+        let expected_revision = original.revision().expect("original revision");
+        let next = InvestigationTeamKnownAnswerStore::default();
+        let winner_bytes = serde_json::to_vec_pretty(&next).expect("winner bytes");
+
+        let error = next
+            .save_with_seams(
+                &path,
+                &expected_revision,
+                |_| Ok(()),
+                |durable_path| {
+                    std::fs::write(durable_path, &winner_bytes)?;
+                    Ok(())
+                },
+                sync_parent_directory_after_replace,
+            )
+            .expect_err("destination swap after CAS must fail");
+        assert!(error.to_string().contains("destination"), "{error}");
+        assert_eq!(std::fs::read(&path).expect("winner remains"), winner_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_path_swap_after_cas_fails_before_destination_replacement() {
+        let dir = owner_tempdir();
+        let path = dir.path().join("known.json");
+        let original = InvestigationTeamKnownAnswerStore::default();
+        original
+            .save(&path, &empty_store_revision())
+            .expect("save original");
+        let original_bytes = std::fs::read(&path).expect("original bytes");
+        let expected_revision = original.revision().expect("original revision");
+        let mut next = original.clone();
+        next.publish_execution(captured_evidence())
+            .expect("publish next");
+        let lock_path = dir.path().join(".known.json.lock");
+        let displaced_lock = dir.path().join("displaced-known.lock");
+
+        let error = next
+            .save_with_seams(
+                &path,
+                &expected_revision,
+                |_| Ok(()),
+                |_| {
+                    std::fs::rename(&lock_path, &displaced_lock)?;
+                    let replacement = std::fs::File::create(&lock_path)?;
+                    replacement.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                    Ok(())
+                },
+                sync_parent_directory_after_replace,
+            )
+            .expect_err("lock pathname swap after CAS must fail");
+        assert!(error.to_string().contains("write lock"), "{error}");
+        assert_eq!(
+            std::fs::read(&path).expect("original remains"),
+            original_bytes
+        );
     }
 
     #[cfg(unix)]

@@ -172,6 +172,12 @@ function candidateRunSummary(candidates: CandidateRow[]): string {
     .join(" · ");
 }
 
+function candidateModelSummary(candidates: CandidateRow[]): string {
+  const labels = [...new Set(candidates.map((candidate) => candidate.modelLabel.trim()).filter(Boolean))];
+  if (labels.length <= 2) return labels.join(" + ");
+  return `${labels.slice(0, 2).join(" + ")} + ${labels.length - 2} more`;
+}
+
 // The alignment status alone ("partial", "unscored") reads like a verdict with a
 // hidden rationale; spell out what each status actually measures.
 const ALIGNMENT_STATUS_LABELS: Record<string, string> = {
@@ -1654,7 +1660,9 @@ export function ExperimentLab(props: {
                   aria-pressed={row.id === current?.id}
                   onClick={() => selectExperiment(row.id)}
                 >
-                  Comparison {index + 1} · {row.candidates.length} lane
+                  Comparison {index + 1}: {candidateModelSummary(row.candidates) || "Unlabeled models"}
+                  {" · "}
+                  {row.candidates.length} lane
                   {row.candidates.length === 1 ? "" : "s"}
                   {candidateRunSummary(row.candidates)
                     ? ` · ${candidateRunSummary(row.candidates)}`

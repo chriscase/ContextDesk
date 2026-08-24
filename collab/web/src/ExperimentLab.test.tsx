@@ -746,8 +746,16 @@ describe("experiment lab", () => {
     );
     render(<ExperimentLab caseId="c1" canWrite={false} canLead={false} readOnly />);
 
-    expect(await screen.findByRole("button", { name: /Comparison 1/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Comparison 2/ })).toBeTruthy();
+    expect(
+      await screen.findByRole("button", {
+        name: /Comparison 1: qwen-3\.6-27b \+ gpt-oss-120b \+ 1 more/,
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", {
+        name: /Comparison 2: programmatic-agent \+ chat-operator/,
+      }),
+    ).toBeTruthy();
     expect(screen.queryByRole("button", { name: /pkg-synth/ })).toBeNull();
     expect(screen.getByRole("heading", { name: "Experiment lab" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Historical triage artifacts" })).toBeTruthy();

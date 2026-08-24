@@ -8391,7 +8391,8 @@ fn clear_capability_qualification(
 #[tauri::command]
 fn get_investigation_team_qualification(
     state: State<'_, AppState>,
-) -> Result<Option<investigation_team_qualification_host::InvestigationTeamQualificationDto>, String> {
+) -> Result<Option<investigation_team_qualification_host::InvestigationTeamQualificationDto>, String>
+{
     let mut guard = state
         .investigation_team_qualification
         .lock()

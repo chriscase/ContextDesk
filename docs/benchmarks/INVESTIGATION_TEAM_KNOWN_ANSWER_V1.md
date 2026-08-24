@@ -178,8 +178,10 @@ retained parent descriptor; its configured pathname identity is revalidated
 before replacement. Size, exact EOF, and stable file-handle metadata are checked
 on the same descriptor. A SHA-256 revision of the fully validated durable
 mapping is compared immediately before replacement while a per-store writer
-lock is held, so malformed, stale, or concurrently changed evidence cannot be
-overwritten. The owner-only lock sidecar uses an OS file lock: the sidecar may
+lock is held. The destination bytes/inode and retained lock pathname are then
+revalidated again at publication, so cooperating ContextDesk writers serialize
+and stale, malformed, or swapped entries fail closed. The owner-only lock
+sidecar uses an OS file lock: the sidecar may
 persist across restart, but a crash releases its lock rather than leaving the
 feature falsely busy. Writes use a unique owner-only temporary file, validate
 its bytes and directory-relative entry identity against the same open handle,
@@ -187,6 +189,10 @@ fsync the file, and atomically replace the destination. Unix hosts then fsync
 the retained directory. If that post-commit directory sync fails, the save
 remains a committed success, live state is published to match disk, and a
 bounded durability warning is logged instead of reporting a false failure. On
+Unix this protects the application from races between cooperating writers and
+detects same-owner pathname tampering at each validation point; it is not a
+security boundary against a malicious process running as the same OS account
+inside the final filesystem syscall interval. On
 non-Unix hosts the entire persisted known-answer feature fails closed before
 provider resolution or calls until equivalent no-follow identity, owner-only
 capture retention, and atomic replace support exists. Clearing
