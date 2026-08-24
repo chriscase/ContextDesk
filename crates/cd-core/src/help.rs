@@ -43,6 +43,7 @@ const SECTION_DEFS: &[(&str, &str, u16)] = &[
     ("permissions", "Permissions & writes", 60),
     ("memory", "Memory", 70),
     ("log-analysis", "Log analysis", 80),
+    ("war-room", "War Room", 85),
     ("connectors", "Connectors", 90),
     ("backup", "Backup & export", 100),
     ("skills", "Skills & context packs", 110),
