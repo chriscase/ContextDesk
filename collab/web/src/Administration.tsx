@@ -16,6 +16,7 @@ import {
 } from "@cd-collab/contracts/admin";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { AdminPeoplePanel } from "./AdminPeoplePanel.js";
+import { ComponentHealthPanel } from "./ComponentHealthPanel.js";
 import { protectedApiFetch } from "./protected-api.js";
 
 type AdminTab = "roles" | "people";
@@ -385,6 +386,8 @@ export function Administration() {
       >
       {error ? <p ref={errorRef} tabIndex={-1} className="administration__message administration__message--error" role="alert">{error}</p> : null}
       {status ? <p ref={statusRef} tabIndex={-1} className="administration__message" role="status">{status}</p> : null}
+
+      <ComponentHealthPanel />
 
       <section className="administration__panel" aria-labelledby="role-mappings-title">
         <div className="administration__panel-heading">
