@@ -25,11 +25,14 @@
 //! desktop qualification genuinely share one implementation, not two that
 //! merely look alike.
 
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderCapabilities, ProviderConfig, ProviderKind, ProviderProfile};
 use cd_test_gateway::{Body, MockGateway, Response, Step};
 use serde_json::{json, Value};
 use std::path::Path;
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 fn cli(data_dir: &Path) -> assert_cmd::Command {
     let mut cmd = assert_cmd::Command::cargo_bin("contextdesk")
@@ -84,7 +87,7 @@ fn write_config(data_dir: &Path, profile: ProviderProfile) {
         },
         ..AppConfig::default()
     };
-    save_config(&data_dir.join("config.json"), &cfg).expect("write config");
+    app_config::plant_app_config(&data_dir.join("config.json"), &cfg);
 }
 
 /// Synthetic-only credential, matching the discipline in

@@ -200,11 +200,9 @@ fn config_migration_preserves_unrelated_fields_and_defaults_omit() {
         ..AppConfig::default()
     };
     cfg.router.max_tool_rounds = 7;
-    // Explicitly no reasoning_effort field written historically:
-    save_config(&path, &cfg).unwrap();
-    let raw = std::fs::read_to_string(&path).unwrap();
-    // Strip reasoning_effort if serializer emitted empty object.
-    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    // Historical files may omit `reasoning_effort`. Plant bytes — do not call
+    // production `save_config`, which is Unix-only.
+    let mut value = serde_json::to_value(&cfg).unwrap();
     value.as_object_mut().unwrap().remove("reasoning_effort");
     std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
@@ -215,18 +213,39 @@ fn config_migration_preserves_unrelated_fields_and_defaults_omit() {
     assert_eq!(loaded.router.max_tool_rounds, 7);
     assert_eq!(loaded.default_chat_model.as_deref(), Some("fixture-model"));
 
-    // Setting effort only rewrites that field.
     let mut next = loaded;
     next.reasoning_effort
         .apply_level(ReasoningEffortLevel::Medium);
-    save_config(&path, &next).unwrap();
-    let again = load_config(&path).unwrap();
-    assert_eq!(
-        again.reasoning_effort.level,
-        Some(ReasoningEffortLevel::Medium)
-    );
-    assert_eq!(again.theme, "slate");
-    assert_eq!(again.router.max_tool_rounds, 7);
+    #[cfg(unix)]
+    {
+        save_config(&path, &next).unwrap();
+        let again = load_config(&path).unwrap();
+        assert_eq!(
+            again.reasoning_effort.level,
+            Some(ReasoningEffortLevel::Medium)
+        );
+        assert_eq!(again.theme, "slate");
+        assert_eq!(again.router.max_tool_rounds, 7);
+    }
+    #[cfg(not(unix))]
+    {
+        let before = std::fs::read(&path).unwrap();
+        let err = save_config(&path, &next).expect_err("non-unix save is fail-closed");
+        assert!(
+            cd_core::config::durable_config_persistence_unsupported(&err),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains(cd_core::config::DURABLE_CONFIG_SAVE_UNSUPPORTED),
+            "{err}"
+        );
+        assert_eq!(before, std::fs::read(&path).unwrap());
+        let again = load_config(&path).unwrap();
+        assert!(again.reasoning_effort.is_omit());
+        assert_eq!(again.theme, "slate");
+        assert_eq!(again.router.max_tool_rounds, 7);
+    }
     let _ = std::fs::remove_file(&path);
 }
 

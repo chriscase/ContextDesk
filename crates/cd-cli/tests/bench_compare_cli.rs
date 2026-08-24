@@ -2,6 +2,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::json;
 
+#[path = "helpers/app_config.rs"]
+mod app_config;
+
 fn candidate(cancellation_id: &str) -> serde_json::Value {
     json!({
         "policy": {
@@ -296,7 +299,7 @@ fn write_app_config(
     data_dir: &std::path::Path,
     profiles: Vec<cd_core::providers::ProviderProfile>,
 ) -> std::path::PathBuf {
-    use cd_core::config::{save_config, AppConfig};
+    use cd_core::config::AppConfig;
     use cd_core::providers::ProviderConfig;
     let active_id = profiles.first().map(|profile| profile.id.clone());
     let cfg = AppConfig {
@@ -307,7 +310,7 @@ fn write_app_config(
         ..AppConfig::default()
     };
     let data_dir = data_dir.canonicalize().expect("canonical data dir");
-    save_config(&data_dir.join("config.json"), &cfg).expect("write app config");
+    app_config::plant_app_config(&data_dir.join("config.json"), &cfg);
     data_dir
 }
 

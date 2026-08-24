@@ -85,6 +85,24 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// return cleanly after Ctrl-C, before giving up and proceeding to cleanup
 /// regardless. Never blocks the command indefinitely on interruption.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+
+fn install_ctrlc_watcher(cancel: Arc<AtomicBool>) {
+    let _watcher = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    });
+}
+
+async fn wait_until_cancelled(cancel: &AtomicBool) {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// Distinctive token identifying this check's own synthetic content —
 /// never a real hostname, service name, or company term — so a provider's
 /// answer citing it is unambiguous proof the tool actually searched this
@@ -924,6 +942,7 @@ async fn execute_live_turns(
     let recorder = Arc::new(RecordingTurnTrace::new());
     let trace_sink: Arc<dyn TurnTraceSink> = recorder.clone();
     let cancel = Arc::new(AtomicBool::new(false));
+    install_ctrlc_watcher(cancel.clone());
 
     let mut host = match crate::adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets)
     {
@@ -960,7 +979,7 @@ async fn execute_live_turns(
 
     let raced = tokio::select! {
         result = tokio::time::timeout(timeout, turn_one.as_mut()) => result,
-        _ = tokio::signal::ctrl_c() => {
+        _ = wait_until_cancelled(&cancel) => {
             cancel.store(true, Ordering::SeqCst);
             eprintln!("doctor: interrupted — waiting for the in-flight check to stop...");
             // Best-effort: give the turn a bounded chance to notice the
@@ -1040,6 +1059,12 @@ async fn execute_live_turns(
         .map(|s| s.messages.len())
         .unwrap_or(0);
 
+    if cancel.load(Ordering::SeqCst) {
+        return LiveTurnOutcome::Interrupted {
+            session_id: Some(session_id),
+        };
+    }
+
     let question_two = continuity_question();
     let mut host_two =
         match crate::adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets) {
@@ -1087,7 +1112,7 @@ async fn execute_live_turns(
     ));
     let raced_two = tokio::select! {
         result = tokio::time::timeout(timeout, turn_two.as_mut()) => result,
-        _ = tokio::signal::ctrl_c() => {
+        _ = wait_until_cancelled(&cancel) => {
             cancel.store(true, Ordering::SeqCst);
             eprintln!("doctor: interrupted — waiting for the in-flight check to stop...");
             let _ = tokio::time::timeout(INTERRUPT_GRACE, turn_two.as_mut()).await;

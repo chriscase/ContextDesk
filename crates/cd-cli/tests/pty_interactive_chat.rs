@@ -19,7 +19,7 @@
 //! deterministic and network-free while still exercising the renderer
 //! exactly the way a real turn would.
 
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::Read;
@@ -27,6 +27,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 #[test]
 fn interactive_pty_chat_redraws_in_place_and_ends_clean() {
@@ -40,7 +43,7 @@ fn interactive_pty_chat_redraws_in_place_and_ends_clean() {
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -223,7 +226,7 @@ fn interactive_pty_chat_with_term_dumb_degrades_to_bounded_plain_output() {
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -448,7 +451,7 @@ async fn a_streamed_reply_is_never_concatenated_with_the_completion_line() {
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
 
     let pty_system = native_pty_system();
     let pair = pty_system
