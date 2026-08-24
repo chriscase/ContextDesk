@@ -20,6 +20,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("011_triage_worker_leases");
       expect(up.applied).toContain("012_case_situation");
       expect(up.applied).toContain("013_corpus_intake");
+      expect(up.applied).toContain("014_portable_apply_intents");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -73,6 +74,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
           '33333333-3333-4333-8333-333333333333'
         )
       `)).rejects.toThrow(/evidence_artifacts_intake_batch_fk/);
+      expect((await migrateDown(client)).rolledBack).toBe("014_portable_apply_intents");
       expect((await migrateDown(client)).rolledBack).toBe("013_corpus_intake");
       const intakeTable = await client.query<{ to_regclass: string | null }>(
         `SELECT to_regclass('public.evidence_intake_batches') AS to_regclass`,
@@ -122,6 +124,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("011_triage_worker_leases");
       expect(dry.pending).toContain("012_case_situation");
       expect(dry.pending).toContain("013_corpus_intake");
+      expect(dry.pending).toContain("014_portable_apply_intents");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

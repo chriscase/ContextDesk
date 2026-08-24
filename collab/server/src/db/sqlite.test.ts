@@ -63,6 +63,51 @@ describe("SQLite local runtime", () => {
     }
   });
 
+  it("persists portable confirmation and actor-scoped replay state across reopen", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-portable-"));
+    const path = join(root, "collab.sqlite");
+    const tokenHash = "11".repeat(32);
+    const transportHash = "22".repeat(32);
+    const investigationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    try {
+      const first = createSqliteRuntime(path);
+      await first.applyState.putIntent({
+        tokenHash,
+        actorId: "actor-synthetic-north",
+        installationId: "inst-synthetic-local",
+        transportHash,
+        semanticFingerprint: "33".repeat(32),
+        destinationCatalogDigest: "44".repeat(32),
+        identityMapDigest: "55".repeat(32),
+        materializedContentDigest: "66".repeat(32),
+        collisionPolicy: "remap_deterministic",
+        expiresAt: "2042-03-04T12:10:00.000Z",
+        appliedInvestigationId: null,
+      });
+      await first.applyState.markApplied(tokenHash, investigationId);
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      expect(await second.applyState.getIntent(tokenHash)).toMatchObject({
+        actorId: "actor-synthetic-north",
+        appliedInvestigationId: investigationId,
+      });
+      expect(await second.applyState.findApplied({
+        actorId: "actor-synthetic-north",
+        installationId: "inst-synthetic-local",
+        transportHash,
+      })).toMatchObject({ appliedInvestigationId: investigationId });
+      expect(await second.applyState.findApplied({
+        actorId: "actor-synthetic-west",
+        installationId: "inst-synthetic-local",
+        transportHash,
+      })).toBeNull();
+      second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rolls Situation state, timeline, audit, and persisted JSON back together", async () => {
     const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-atomic-"));
     const path = join(root, "collab.sqlite");

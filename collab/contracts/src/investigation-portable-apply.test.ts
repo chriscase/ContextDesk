@@ -84,6 +84,57 @@ describe("portable apply contract", () => {
     );
   });
 
+  it("rejects malformed supplied blob inventories instead of ignoring them", () => {
+    expect(() => parsePortableApplyRequest(validRequest({ suppliedBlobs: {} }))).toThrow(
+      /suppliedBlobs/,
+    );
+    expect(() =>
+      parsePortableApplyRequest(
+        validRequest({
+          suppliedBlobs: [
+            {
+              digest: "ab".repeat(32),
+              byteLength: 4,
+              contentType: "text/plain",
+              presence: "inline",
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/payloadBase64/);
+    expect(() =>
+      parsePortableApplyRequest(
+        validRequest({
+          suppliedBlobs: [
+            {
+              digest: "ab".repeat(32),
+              byteLength: 4,
+              contentType: "text/plain",
+              presence: "inline",
+              payloadBase64: "dGVzdA==",
+              planted: true,
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/unknown key/);
+    expect(() =>
+      parsePortableApplyRequest(
+        validRequest({
+          suppliedBlobs: [
+            {
+              digest: "ab".repeat(32),
+              byteLength: 4,
+              contentType: "text/plain",
+              presence: "detached",
+              payloadBase64: "dGVzdA==",
+            },
+          ],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
   it("never accepts destination membership, role, or capability grants", () => {
     expect(() =>
       parsePortableApplyResponse(validResponse({ destinationMembershipGranted: true })),

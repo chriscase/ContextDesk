@@ -24,6 +24,10 @@ import { MemoryCaseStore, type CaseStore } from "../modules/cases/index.js";
 import { MemoryRunStore, type RunStore } from "../modules/import/index.js";
 import { MemoryExperimentStore, type ExperimentStore } from "../modules/experiments/index.js";
 import { MemoryTriageJobStore, type TriageJobStore } from "../modules/triage-runs/index.js";
+import {
+  MemoryPortableApplyStateStore,
+  type PortableApplyStateStore,
+} from "../modules/portable-investigations/index.js";
 
 const SQLITE_SCHEMA_VERSION = "sqlite-current-v1";
 const TAG = "__cd_collab_state_type";
@@ -242,6 +246,8 @@ export interface SqliteRuntime {
   runs: RunStore;
   experiments: ExperimentStore;
   jobs: TriageJobStore;
+  applyState: PortableApplyStateStore;
+  runPortableTransaction: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
 export function createSqliteRuntime(
@@ -279,6 +285,58 @@ export function createSqliteRuntime(
       "restore",
     ]),
   );
+  const rawCatalog = new MemoryCatalogStore();
+  const catalog = persistentMemoryStore(
+    state,
+    "catalog",
+    rawCatalog,
+    new Set(["insert", "updateMeta", "setLifecycle", "restore"]),
+  );
+  const rawRuns = new MemoryRunStore();
+  const runs = persistentMemoryStore(
+    state,
+    "runs",
+    rawRuns,
+    new Set(["insert", "appendCorroboration", "restore"]),
+  );
+  const rawExperiments = new MemoryExperimentStore();
+  const experiments = persistentMemoryStore(
+    state,
+    "experiments",
+    rawExperiments,
+    new Set([
+      "insert",
+      "insertObservation",
+      "insertDecision",
+      "insertGold",
+      "insertTrace",
+      "insertAnnotation",
+      "restore",
+    ]),
+  );
+  const rawJobs = new MemoryTriageJobStore();
+  const jobs = persistentMemoryStore(
+    state,
+    "jobs",
+    rawJobs,
+    new Set(["insert", "claimQueued", "renewLease", "recoverStale", "update", "restore"]),
+  );
+  const rawApplyState = new MemoryPortableApplyStateStore();
+  const applyState = persistentMemoryStore(
+    state,
+    "portable_apply_state",
+    rawApplyState,
+    new Set(["putIntent", "markApplied", "restore"]),
+  );
+  const portableStores = [
+    { key: "audit", store: rawAudit },
+    { key: "cases", store: rawCases },
+    { key: "catalog", store: rawCatalog },
+    { key: "runs", store: rawRuns },
+    { key: "experiments", store: rawExperiments },
+    { key: "jobs", store: rawJobs },
+    { key: "portable_apply_state", store: rawApplyState },
+  ];
   return {
     state,
     databaseProbe: state,
@@ -290,38 +348,12 @@ export function createSqliteRuntime(
       new Set(["create", "touch", "revoke"]),
     ),
     roleStore: new SqliteGroupRoleStore(state, bootstrap),
-    catalog: persistentMemoryStore(
-      state,
-      "catalog",
-      new MemoryCatalogStore(),
-      new Set(["insert", "updateMeta", "setLifecycle", "restore"]),
-    ),
+    catalog,
     cases,
-    runs: persistentMemoryStore(
-      state,
-      "runs",
-      new MemoryRunStore(),
-      new Set(["insert", "appendCorroboration", "restore"]),
-    ),
-    experiments: persistentMemoryStore(
-      state,
-      "experiments",
-      new MemoryExperimentStore(),
-      new Set([
-        "insert",
-        "insertObservation",
-        "insertDecision",
-        "insertGold",
-        "insertTrace",
-        "insertAnnotation",
-        "restore",
-      ]),
-    ),
-    jobs: persistentMemoryStore(
-      state,
-      "jobs",
-      new MemoryTriageJobStore(),
-      new Set(["insert", "claimQueued", "renewLease", "recoverStale", "update", "restore"]),
-    ),
+    runs,
+    experiments,
+    jobs,
+    applyState,
+    runPortableTransaction: (operation) => state.transaction(portableStores, operation),
   };
 }

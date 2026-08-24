@@ -6,6 +6,10 @@ import { canonicalJson, sha256Text } from "./investigation-portable.js";
 import { COLLISION_POLICIES, IDENTITY_ACTIONS } from "./investigation-portable.js";
 import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import { assertNoCredentialLeakage } from "./investigation-portable.js";
+import {
+  BLOB_PRESENCES,
+  type ArchiveBlobInventoryEntryV1,
+} from "./investigation-portable-archive.js";
 
 export const PORTABLE_APPLY_REQUEST_SCHEMA_ID =
   "cd-collab.portable_investigation_apply_request.v1" as const;
@@ -24,7 +28,7 @@ export interface PortableApplyRequestV1 {
     destinationActorId: string | null;
   }[];
   archive: unknown;
-  suppliedBlobs?: unknown[];
+  suppliedBlobs?: ArchiveBlobInventoryEntryV1[];
 }
 
 export interface PortableApplyResponseV1 {
@@ -56,7 +60,17 @@ const requestShape: ObjectShape = {
     ),
   ),
   archive: f.req(f.obj({})),
-  suppliedBlobs: f.opt(f.arr(f.obj({}))),
+  suppliedBlobs: f.opt(
+    f.arr(
+      f.obj({
+        digest: f.req(f.str),
+        byteLength: f.req(f.u64),
+        contentType: f.nul(f.str),
+        presence: f.req(f.en(...BLOB_PRESENCES)),
+        payloadBase64: f.nul(f.str),
+      }),
+    ),
+  ),
 };
 
 const responseShape: ObjectShape = {
@@ -93,14 +107,7 @@ export function parsePortableApplyRequest(raw: unknown): PortableApplyRequestV1 
   const row = raw as Record<string, unknown>;
   const archive = row.archive;
   const suppliedBlobs = row.suppliedBlobs;
-  const withoutOpaque = { ...row };
-  delete withoutOpaque.archive;
-  delete withoutOpaque.suppliedBlobs;
-  checkObject("$", {
-    ...requestShape,
-    archive: f.opt(f.obj({})),
-    suppliedBlobs: f.opt(f.arr(f.obj({}))),
-  }, { ...withoutOpaque, archive: {}, ...(suppliedBlobs !== undefined ? { suppliedBlobs: [] } : {}) });
+  checkObject("$", requestShape, { ...row, archive: {} });
   if (!("archive" in row)) {
     throw new ContractViolation("$.archive", "missing required key");
   }
@@ -124,7 +131,9 @@ export function parsePortableApplyRequest(raw: unknown): PortableApplyRequestV1 
     collisionPolicy: row.collisionPolicy as PortableApplyRequestV1["collisionPolicy"],
     identityMap: row.identityMap as PortableApplyRequestV1["identityMap"],
     archive,
-    ...(Array.isArray(suppliedBlobs) ? { suppliedBlobs } : {}),
+    ...(Array.isArray(suppliedBlobs)
+      ? { suppliedBlobs: suppliedBlobs as ArchiveBlobInventoryEntryV1[] }
+      : {}),
   };
 }
 

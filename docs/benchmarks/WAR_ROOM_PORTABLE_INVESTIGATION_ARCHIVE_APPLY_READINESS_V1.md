@@ -6,10 +6,16 @@ archive projection in `collab/contracts/src/investigation-portable-archive.ts`
 and the fail-closed apply contract in
 `collab/contracts/src/investigation-portable-apply.ts`.
 
-Shipped: complete archive download, parse/integrity, host destination-catalog
-preflight, server-minted confirmation tokens, lead/admin apply, one atomic
-persist with rollback, attribution-only historical people, and a War Room
-confirmation screen. It does **not** ship Ed25519 signing or verification.
+Shipped: supported portable archive download, parse/integrity, host
+destination-catalog preflight, durable hashed confirmation intents, lead/admin
+apply, staged evidence with coordinated metadata rollback, actor-scoped replay,
+attribution-only historical people, and a War Room confirmation screen.
+PostgreSQL uses transactional replica coordination plus a database-backed
+lease around filesystem evidence writes; it fails closed if that external byte
+coordination is absent. A confirmed committed intent resolves an interrupted
+`COMMIT` response; an unverifiable outcome is reported as unknown, never as a
+clean rollback. Memory and SQLite are explicitly single-instance. It does
+**not** ship Ed25519 signing or verification.
 
 V1 portable parse/preflight remain in `investigation-portable.ts`. The package
 barrel (`collab/contracts/src/index.ts`) re-exports both modules.
@@ -109,7 +115,9 @@ Not claimed by this apply V1:
   content
 - interaction traces, experiment agreement, live discussion presence, and
   file-reference location verification
-- deleting content-addressed evidence bytes after a rolled-back metadata write
+- source membership, source identity ownership, audit references, discussions,
+  alignments, or opaque imported-run state; the server omits these on export and
+  blocks exact apply when an incoming archive represents them
 - treating a client-supplied destination catalog as authorization
   (`destinationCatalogMustRevalidate` remains true; apply recomputes the host
   catalog)

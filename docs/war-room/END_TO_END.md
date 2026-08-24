@@ -149,19 +149,19 @@ The Decide stage provides three different export jobs:
 1. **Triage brief** — a readable owner-only or share-safe handoff.
 2. **Selected-evidence prompt package** — only the evidence explicitly chosen
    for another analysis tool, plus an optional prompt scaffold.
-3. **Complete investigation archive** — the represented investigation record
+3. **Portable investigation archive** — the supported represented investigation record
    and included evidence for preservation or transfer.
 
 Exporting a selected-evidence package does not back up the investigation. Its
 manifest should contain only the selected eligible items.
 
-For the complete archive, choose **Download complete investigation archive**.
+For the portable archive, choose **Download portable investigation archive**.
 Then select that synthetic JSON archive and choose **Run dry-run check**. Read
 the archive readiness summary: objects, collisions, deterministic ID remaps,
 privacy, omitted content, warnings, and broken references. Historical people
 remain attribution only and receive no destination access.
 
-![Fully synthetic complete investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
+![Fully synthetic portable investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
 
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 
@@ -194,7 +194,7 @@ portable archives are never trusted.
 - evidence-based comparison and a human-owned decision;
 - durable discussion and activity using polling;
 - selected-evidence prompt packaging;
-- complete archive export, fail-closed dry-run preflight, and exact restore; and
+- portable archive export, fail-closed dry-run preflight, and supported-field exact restore; and
 - bounded administration and display identity in the synthetic fixture.
 
 ## What this walkthrough does not demonstrate

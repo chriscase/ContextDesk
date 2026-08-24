@@ -53,6 +53,8 @@ const PORTABLE_CAPABILITIES = {
     available: true,
     requiresExactReconstruction: true,
     typedConfirmation: "RESTORE",
+    coordination: "single_instance",
+    confirmationRestartDurable: true,
   },
 };
 
@@ -372,16 +374,17 @@ describe("export panel", () => {
 
     render(<ExportPanel caseId="case-safe" canWrite canLead />);
     const button = await screen.findByRole("button", {
-      name: "Download complete investigation archive",
+      name: "Download portable investigation archive",
     });
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(button);
 
-    expect(await screen.findByText(/Complete investigation archive downloaded/)).toBeTruthy();
+    expect(await screen.findByText(/Portable investigation archive downloaded/)).toBeTruthy();
     expect(downloadName).toBe("contextdesk-investigation-case-safe.json");
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive");
     expect(screen.getByText(/Unlike the selected-evidence package above/)).toBeTruthy();
+    expect(screen.getByText(/supported only by this single server instance/)).toBeTruthy();
     expect(screen.getByText(/Restore requires an exact reconstruction/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
   });
@@ -452,7 +455,7 @@ describe("export panel", () => {
     const input = await screen.findByLabelText("Portable investigation JSON");
     await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
     fireEvent.change(input, { target: { files: [jsonFile(SYNTHETIC_ARCHIVE)] } });
-    expect(await screen.findByText(/2 historical participants will remain attribution only/)).toBeTruthy();
+    expect(await screen.findByText(/2 historical people will remain attribution only/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Run dry-run check" }));
 
     expect(await screen.findByRole("region", { name: "Archive readiness summary" })).toBeTruthy();
@@ -545,7 +548,7 @@ describe("export panel", () => {
     expect(screen.queryByText(sensitiveText)).toBeNull();
 
     fireEvent.change(input, { target: { files: [jsonFile(SYNTHETIC_ARCHIVE)] } });
-    await screen.findByText(/2 historical participants/);
+    await screen.findByText(/2 historical people/);
     fireEvent.click(screen.getByRole("button", { name: "Run dry-run check" }));
     expect((await screen.findByRole("alert")).textContent).toContain(
       "archive request did not complete",
@@ -614,6 +617,7 @@ describe("export panel", () => {
       }
       if (url === "/api/portable-investigations/apply") {
         applyBodies.push(JSON.parse(String(init?.body)));
+        if (applyBodies.length === 1) throw new TypeError("synthetic interrupted restore response");
         return jsonResponse(true, {
           schemaId: "cd-collab.portable_investigation_apply_response.v1",
           status: "applied",
@@ -633,18 +637,23 @@ describe("export panel", () => {
     await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
     fireEvent.change(input, { target: { files: [jsonFile(SYNTHETIC_ARCHIVE)] } });
     fireEvent.click(await screen.findByRole("button", { name: "Run dry-run check" }));
-    expect(await screen.findByText(/exact reconstruction and can be restored/)).toBeTruthy();
+    expect(await screen.findByText(/can be reconstructed and the archive can be restored/)).toBeTruthy();
     expect(screen.getByText("Keep as historical attribution")).toBeTruthy();
     const restore = screen.getByRole("button", { name: "Restore investigation" }) as HTMLButtonElement;
     expect(restore.disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("Typed confirmation"), { target: { value: "RESTORE" } });
     expect(restore.disabled).toBe(false);
     fireEvent.click(restore);
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "outcome is not confirmed",
+    );
+    expect(restore.disabled).toBe(false);
+    fireEvent.click(restore);
     const link = await screen.findByRole("link", { name: "Open restored investigation" });
     expect(link.getAttribute("href")).toBe(
       "/investigations/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/situation",
     );
-    expect(applyBodies).toHaveLength(1);
+    expect(applyBodies).toHaveLength(2);
     expect((applyBodies[0] as { typedConfirmation: string }).typedConfirmation).toBe("RESTORE");
     expect((applyBodies[0] as { confirmationToken: string }).confirmationToken).toBe(
       "pit1.synthetic-token",
@@ -657,7 +666,7 @@ describe("export panel", () => {
     expect(await screen.findByText(/case lead or administrator must download or check/)).toBeTruthy();
     expect(
       (screen.getByRole("button", {
-        name: "Download complete investigation archive",
+        name: "Download portable investigation archive",
       }) as HTMLButtonElement).disabled,
     ).toBe(true);
     expect((screen.getByLabelText("Portable investigation JSON") as HTMLInputElement).disabled).toBe(

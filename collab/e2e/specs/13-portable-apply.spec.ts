@@ -38,16 +38,16 @@ test.describe("portable investigation apply", () => {
     const panel = exportPanel(page);
     const [download] = await Promise.all([
       page.waitForEvent("download"),
-      panel.getByRole("button", { name: "Download complete investigation archive" }).click(),
+      panel.getByRole("button", { name: "Download portable investigation archive" }).click(),
     ]);
     const folder = await mkdtemp(join(tmpdir(), "cd-portable-apply-"));
     const archivePath = join(folder, download.suggestedFilename());
     await download.saveAs(archivePath);
 
     await panel.locator("#portable-archive-file").setInputFiles(archivePath);
-    await expect(panel.getByText(/historical participant/)).toBeVisible();
+    await expect(panel.getByText(/historical (person|people)/)).toBeVisible();
     await panel.getByRole("button", { name: "Run dry-run check" }).click();
-    await expect(panel.getByText(/exact reconstruction and can be restored/)).toBeVisible();
+    await expect(panel.getByText(/can be reconstructed and the archive can be restored/)).toBeVisible();
     await panel.getByLabel("Typed confirmation").fill("RESTORE");
     await panel.getByRole("button", { name: "Restore investigation" }).click();
     const restored = panel.getByRole("link", { name: "Open restored investigation" });

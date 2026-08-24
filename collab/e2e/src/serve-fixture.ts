@@ -30,6 +30,7 @@ import { PresenceService } from "../../server/src/modules/presence/index.js";
 import {
   loadPortableInstallationId,
   memoryApplyBoundary,
+  MemoryPortableApplyStateStore,
   PortableInvestigationService,
 } from "../../server/src/modules/portable-investigations/index.js";
 import {
@@ -68,11 +69,13 @@ async function main(): Promise<void> {
   const runStore = new MemoryRunStore();
   const experimentStore = new MemoryExperimentStore();
   const jobStore = new MemoryTriageJobStore();
+  const applyState = new MemoryPortableApplyStateStore();
   const catalog = new CatalogService(catalogStore, audit);
   const domain = new CaseService(store, audit, caseStore, catalog);
   const imports = new ImportService({
     evidence: store,
     audit,
+    applyState,
     cases: domain,
     catalog,
     runs: runStore,
@@ -122,9 +125,10 @@ async function main(): Promise<void> {
     triageRuns,
     experiments,
     audit,
-    persist: applyBoundary.persist,
-    snapshot: applyBoundary.snapshot,
-    restore: applyBoundary.restore,
+    applyState,
+    withTransaction: applyBoundary.withTransaction,
+    applyCoordination: "single_instance",
+    confirmationRestartDurable: false,
   });
   const presence = new PresenceService();
   const exporter = new ExportService({

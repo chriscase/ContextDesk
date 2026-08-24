@@ -262,7 +262,7 @@ items remain out.
 This is not a complete investigation archive. It is intentionally narrower so
 an operator can control what another analysis tool receives.
 
-### Complete investigation archive
+### Portable investigation archive
 
 A case lead or administrator can download the portable JSON archive from
 Decide. It represents the durable Situation and the investigation objects and
@@ -285,18 +285,31 @@ The same archive and destination state produce the same remap plan. The dry
 run changes nothing. It does not create an investigation, user, membership,
 role, permission, or capability.
 
+Source memberships, audit references, discussions, alignments, and opaque
+imported-run details are not exported by the current server. If an incoming
+archive represents unsupported apply state, the dry run blocks exact apply.
+
 If the dry-run reports an **exact reconstruction**, a case lead or
 administrator can type **RESTORE** to apply it. The server recomputes parse,
 integrity, hashes, identity mapping, and the destination catalog and does not
 trust the client preflight report. Apply uses a short-lived confirmation token
 bound to the actor, archive transport hash, catalog digest, identity map, and
-collision policy. Failure rolls back the whole import. Reapplying the same
-archive does not duplicate records. Historical people remain attribution only.
+collision policy. Metadata and staged evidence bytes commit or roll back
+together. Replay is scoped to the applying actor. Historical people remain
+attribution only.
+
+PostgreSQL coordinates apply transactionally across replicas and takes a
+database-backed lease around filesystem evidence writes; apply fails closed if
+that lease is unavailable. An interrupted database commit whose outcome cannot
+be verified is reported as unconfirmed and should be retried for replay
+resolution. Memory and SQLite modes support only one server instance; the
+readiness screen reports that boundary and whether confirmation survives
+restart.
 
 Metadata-only, blocked, omitted, private, or redacted required content cannot
 be applied. Archive signature metadata is recorded, not verified.
 
-![Synthetic complete investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
+![Synthetic portable investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
 
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 

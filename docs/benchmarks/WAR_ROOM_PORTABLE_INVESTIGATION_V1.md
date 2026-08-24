@@ -1,7 +1,7 @@
 # War Room portable investigation contract v1
 
 Status: **contract only**. This document specifies a fail-closed JSON contract for
-exporting and reconstructing **one** complete investigation on another
+exporting and reconstructing **one** supported investigation record on another
 ContextDesk installation. It does **not** claim persistence, UI, storage,
 network transport, or import apply wiring. No live provider calls. No invented
 gold, cost, or usage.
@@ -45,6 +45,11 @@ The bundle covers:
 The bundle contains **no** credentials, tokens, gateway secrets, live endpoints,
 LDAP credentials, or destination capabilities. Destination permissions are not
 imported: they must be newly authorized and audited (`permissionCaveat`).
+
+The current server intentionally exports empty source-membership, discussion,
+alignment, and audit-reference collections and omits opaque imported-run state.
+An incoming archive that represents those unsupported fields is not eligible
+for exact apply.
 Imported history is immutable and never auto-merged by display name or email
 (`historyCaveat`).
 

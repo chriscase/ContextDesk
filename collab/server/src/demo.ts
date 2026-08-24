@@ -24,6 +24,7 @@ import { ExportService, testExportPrivacyConfig } from "./modules/export/index.j
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
 import {
   memoryApplyBoundary,
+  MemoryPortableApplyStateStore,
   PortableInvestigationService,
 } from "./modules/portable-investigations/index.js";
 import {
@@ -554,6 +555,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   const runStore = new MemoryRunStore();
   const experimentStore = new MemoryExperimentStore();
   const jobStore = new MemoryTriageJobStore();
+  const applyState = new MemoryPortableApplyStateStore();
   const catalog = new CatalogService(catalogStore, audit);
   const cases = new CaseService(evidence, audit, caseStore, catalog);
   const imports = new ImportService({
@@ -600,6 +602,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     jobs: jobStore,
     evidence,
     audit,
+    applyState,
   });
   const portable = new PortableInvestigationService({
     installationId: "inst-syntheticdemo",
@@ -609,9 +612,10 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     triageRuns,
     experiments,
     audit,
-    persist: applyBoundary.persist,
-    snapshot: applyBoundary.snapshot,
-    restore: applyBoundary.restore,
+    applyState,
+    withTransaction: applyBoundary.withTransaction,
+    applyCoordination: "single_instance",
+    confirmationRestartDurable: false,
   });
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(demoRoleMap));
   const staticDir =

@@ -28,6 +28,8 @@ interface PortableCapabilities {
     available: boolean;
     requiresExactReconstruction?: boolean;
     typedConfirmation?: string;
+    coordination?: "single_instance" | "postgres_transactional";
+    confirmationRestartDurable?: boolean;
   };
 }
 
@@ -90,6 +92,8 @@ interface PortablePreflightResult {
     confirmationToken: string | null;
     expiresAt: string | null;
     reason: string | null;
+    coordination: "single_instance" | "postgres_transactional";
+    confirmationRestartDurable: boolean;
   };
 }
 
@@ -109,6 +113,9 @@ const NETWORK_ERROR_MESSAGE =
 
 const PORTABLE_NETWORK_ERROR =
   "The archive request did not complete. Nothing was downloaded or changed; check your connection and try again.";
+
+const PORTABLE_APPLY_NETWORK_ERROR =
+  "The restore response was interrupted, so the outcome is not confirmed. Run the dry-run check again; an already committed restore returns an actor-scoped replay instead of creating another investigation.";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -166,9 +173,12 @@ function applyErrorMessage(status: number, code: string | null): string {
     return "This restore confirmation is no longer valid. Run the dry-run check again.";
   }
   if (code === "apply_refused") {
-    return "The restore was refused and nothing was kept.";
+    return "The restore was not committed. Staged evidence and metadata were rolled back.";
   }
-  return "This archive could not be restored. Nothing was kept.";
+  if (code === "apply_outcome_unknown") {
+    return PORTABLE_APPLY_NETWORK_ERROR;
+  }
+  return "This archive could not be restored. The server did not confirm a committed restore; run the dry-run check again before retrying.";
 }
 
 function readableAction(value: string): string {
@@ -363,7 +373,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
       anchor.click();
       URL.revokeObjectURL(url);
       setPortableMessage(
-        "Complete investigation archive downloaded. Store it according to its privacy classification.",
+        "Portable investigation archive downloaded. Store it according to its privacy classification.",
       );
     } catch {
       setPortableError(PORTABLE_NETWORK_ERROR);
@@ -396,7 +406,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
       }
       setPortableSelection({ archive, actorIds: actors.map((actor) => actor.sourceActorId) });
       setPortableMessage(
-        `Archive selected. ${actors.length} historical participant${actors.length === 1 ? "" : "s"} will remain attribution only.`,
+        `Archive selected. ${actors.length} historical ${actors.length === 1 ? "person" : "people"} will remain attribution only.`,
       );
     } catch {
       setPortableError("This file is not a valid portable investigation archive.");
@@ -502,7 +512,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           : "Restore complete. Historical people remain attribution only and received no destination access.",
       );
     } catch {
-      setPortableError(PORTABLE_NETWORK_ERROR);
+      setPortableError(PORTABLE_APPLY_NETWORK_ERROR);
     } finally {
       setPortablePending(null);
     }
@@ -685,14 +695,14 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         <div className="export__portable-heading">
           <div>
             <p className="export__eyebrow">Move or preserve an investigation</p>
-            <h4 id="portable-archive-heading">Complete investigation archive</h4>
+            <h4 id="portable-archive-heading">Portable investigation archive</h4>
           </div>
           <span className="export__badge">Lead access</span>
         </div>
         <p className="export__copy">
-          Download the complete portable record for safekeeping or transfer. Unlike the
-          selected-evidence package above, this archive represents the investigation record and
-          its included evidence.
+          Download the supported portable record for safekeeping or transfer. Unlike the
+          selected-evidence package above, this archive can include investigation fields and
+          evidence that the dry-run checker knows how to reconstruct exactly.
         </p>
         <div className="export__portable-grid">
           <article className="export__portable-card">
@@ -709,7 +719,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
             >
               {portablePending === "download"
                 ? "Preparing archive…"
-                : "Download complete investigation archive"}
+                : "Download portable investigation archive"}
             </button>
           </article>
           <article className="export__portable-card">
@@ -741,7 +751,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         </div>
         {!props.canLead ? (
           <p className="case-memory__note">
-            A case lead or administrator must download or check complete investigation archives.
+            A case lead or administrator must download or check portable investigation archives.
           </p>
         ) : portableStatus === "loading" ? (
           <p className="case-memory__note" role="status">
@@ -757,8 +767,17 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           produce the same plan. Source roles are never trusted. Historical identities do not
           become destination users, members, leads, administrators, or capability holders.
         </p>
+        {portableCapabilities?.apply.available ? (
+          <p className="export__portable-policy">
+            Restore coordination: {portableCapabilities.apply.coordination === "postgres_transactional"
+              ? "transactional across PostgreSQL-backed server replicas"
+              : "supported only by this single server instance"}. Confirmation survives a server
+            restart: {portableCapabilities.apply.confirmationRestartDurable ? "yes" : "no"}.
+          </p>
+        ) : null}
         <p className="export__portable-warning">
-          Restore requires an exact reconstruction, a case lead or administrator, and typing{" "}
+          Restore requires an exact reconstruction of every field represented by this archive
+          version, a case lead or administrator, and typing{" "}
           <strong>RESTORE</strong> after the dry-run check. Historical people stay attribution
           only. Archive signatures are recorded, not verified.
         </p>
@@ -834,7 +853,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
               </li>
               <li>
                 {preflight.report.exactReconstruction
-                  ? "This archive is an exact reconstruction and can be restored after typed confirmation."
+                  ? "Every field represented by this archive version can be reconstructed and the archive can be restored after typed confirmation."
                   : "This archive is not an exact reconstruction. Metadata-only, blocked, omitted, private, or redacted required content cannot be restored."}
               </li>
             </ul>
@@ -891,9 +910,9 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
               >
                 <h6 id="portable-confirm-heading">Confirm exact restore</h6>
                 <p>
-                  Type <strong>RESTORE</strong> to reconstruct this investigation. Failure rolls
-                  back the whole import. Historical identities do not become members, roles, or
-                  capability holders.
+                  Type <strong>RESTORE</strong> to reconstruct the supported investigation record.
+                  Metadata and staged evidence commit together or roll back together. Historical
+                  identities do not become members, roles, or capability holders.
                 </p>
                 <label className="export__typed">
                   Typed confirmation
@@ -927,8 +946,9 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
         ) : null}
         {portablePending === "apply" ? (
           <p className="case-memory__note" role="status">
-            Restoring investigation… This stays on one atomic import until it finishes or rolls
-            back.
+            Restoring investigation… Metadata and staged evidence stay within one coordinated
+            commit. If the response is interrupted, rerun the dry-run check to recover an
+            actor-scoped replay safely.
           </p>
         ) : null}
         {applyResult ? (

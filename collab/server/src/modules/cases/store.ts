@@ -121,6 +121,8 @@ export interface TimelineInsert {
   actor: Actor;
   targetId: string | null;
   clientTime: string | null;
+  /** Server-owned historical timestamp used only by verified portable restore. */
+  serverTime?: string;
   payload: unknown;
 }
 
@@ -378,7 +380,7 @@ export class MemoryCaseStore implements CaseStore {
       actorUsername: event.actor.username,
       targetId: event.targetId,
       clientTime: event.clientTime,
-      serverTime: new Date().toISOString(),
+      serverTime: event.serverTime ?? new Date().toISOString(),
       payload: JSON.stringify(event.payload),
     };
     list.push(row);
@@ -1184,7 +1186,7 @@ async function appendPgTimeline(
   const seqRaw = seqRes.rows[0]?.last_seq;
   if (seqRaw === undefined) throw new Error("case not found");
   const seq = Number(seqRaw);
-  const serverTime = new Date().toISOString();
+  const serverTime = event.serverTime ?? new Date().toISOString();
   const payload = JSON.stringify(event.payload);
   await db.query(
     `INSERT INTO timeline_events (

@@ -239,14 +239,8 @@ export async function registerPortableInvestigationRoutes(
           },
           ctx.actor,
           ctx.isAdmin,
+          request.ip,
         );
-        await deps.audit.append({
-          identity: ctx.actor.id,
-          action: "portable_archive_apply",
-          target: result.investigationId,
-          origin: request.ip,
-          outcome: "success",
-        });
         void reply.header("cache-control", "no-store");
         return result;
       } catch (error) {
@@ -281,6 +275,10 @@ function portableError(
   }
   if (error.code === "confirmation_invalid" || error.code === "actor_mismatch") {
     void reply.code(409);
+    return { error: error.code };
+  }
+  if (error.code === "apply_outcome_unknown") {
+    void reply.code(503);
     return { error: error.code };
   }
   if (
