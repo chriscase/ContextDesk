@@ -9,7 +9,9 @@ use cd_core::error::{CoreError, CoreResult};
 use cd_core::investigation_team_qualification::{InvestigationTeamRole, MemberBinding};
 use cd_core::openai_chat_contract::OpenAiChatRequestMode;
 use cd_core::provider_telemetry::ProviderTransportTelemetry;
-use cd_core::quality_eval::live_known_answer::host_diagnostic_for_observed_chat;
+use cd_core::quality_eval::live_known_answer::{
+    host_attempt_from_chat, host_diagnostic_for_observed_attempts, HostAttemptObservation,
+};
 #[cfg(unix)]
 use cd_core::quality_eval::LiveKnownAnswerOwnerDirectory;
 use cd_core::quality_eval::{
@@ -612,115 +614,22 @@ fn execute_target(
             ));
             continue;
         }
-        let prompt = serialize_live_known_answer_prompt(case)?;
-        let request = live_known_answer_request(&target.member.model_id, &prompt);
-        let message_content_bytes = request
-            .messages
-            .iter()
-            .map(|message| message.role.len() + message.content.len())
-            .sum::<usize>() as u64;
-        let started = Instant::now();
-        let response = match transport.chat_complete(&request, cancel) {
-            Ok(response) => response,
-            Err(error) => SyntheticChatResponse {
-                raw_error: Some(error.reason),
-                ..SyntheticChatResponse::default()
-            },
-        };
-        let provider_telemetry = project_provider_telemetry(
-            transport
-                .take_last_chat_provider_telemetry()
-                .unwrap_or_default(),
-        )?;
-        let latency_ms = started.elapsed().as_millis() as u64;
-        let provider_content_bytes = response.content.len() as u64;
-        if response.cancelled {
-            observations.push(failed_observation(
+        if !case.requires_host_diagnostic() {
+            let dispatched = dispatch_known_answer_chat(target, case, cancel, transport)?;
+            record_answer_only_observation(
+                case,
                 scenario_id,
-                LaneStatus::Cancelled,
-                "provider_attempt_cancelled",
-                latency_ms,
-                message_content_bytes,
-                provider_content_bytes,
-                provider_telemetry,
-            ));
-        } else if response.raw_error.is_some() {
-            observations.push(failed_observation(
-                scenario_id,
-                LaneStatus::Failed,
-                "provider_request_failed",
-                latency_ms,
-                message_content_bytes,
-                provider_content_bytes,
-                provider_telemetry,
-            ));
-        } else {
-            match parse_live_known_answer_response_classified(case, &response.content) {
-                Ok(parsed) => {
-                    captures.push(LiveKnownAnswerCanonicalScenarioInput {
-                        scenario_id: scenario_id.clone(),
-                        reported_model_id: provider_telemetry.reported_model_id.clone(),
-                        response: parsed.clone(),
-                        answer_score: None,
-                        host_score_failed: false,
-                    });
-                    let host_diagnostic = host_diagnostic_for_observed_chat(
-                        case,
-                        target.member.role,
-                        response.cancelled,
-                        response.raw_error.as_deref(),
-                        Some(&parsed),
-                    );
-                    if case.requires_host_diagnostic() && host_diagnostic.is_none() {
-                        observations.push(failed_observation(
-                            scenario_id,
-                            LaneStatus::Failed,
-                            "host_score_failed",
-                            latency_ms,
-                            message_content_bytes,
-                            provider_content_bytes,
-                            provider_telemetry,
-                        ));
-                        continue;
-                    }
-                    match score_live_known_answer_response(case, &parsed, host_diagnostic) {
-                        Ok(score) => observations.push(LiveKnownAnswerScenarioObservation {
-                            scenario_id,
-                            status: LaneStatus::Executed,
-                            answer: Some(score.answer),
-                            latency_ms,
-                            message_content_bytes,
-                            provider_content_bytes,
-                            reported_model_id: provider_telemetry.reported_model_id,
-                            input_tokens: provider_telemetry.input_tokens,
-                            output_tokens: provider_telemetry.output_tokens,
-                            reasoning_tokens: provider_telemetry.reasoning_tokens,
-                            cached_tokens: provider_telemetry.cached_tokens,
-                            cost_microusd: provider_telemetry.cost_microusd,
-                            failure_code: None,
-                        }),
-                        Err(_) => observations.push(failed_observation(
-                            scenario_id,
-                            LaneStatus::Failed,
-                            "host_score_failed",
-                            latency_ms,
-                            message_content_bytes,
-                            provider_content_bytes,
-                            provider_telemetry,
-                        )),
-                    }
-                }
-                Err(failure) => observations.push(failed_observation(
-                    scenario_id,
-                    LaneStatus::Failed,
-                    failure.as_code(),
-                    latency_ms,
-                    message_content_bytes,
-                    provider_content_bytes,
-                    provider_telemetry,
-                )),
-            }
+                dispatched,
+                &mut observations,
+                &mut captures,
+            );
+            continue;
         }
+        let (observation, capture) = execute_diagnostic_case(target, case, cancel, transport)?;
+        if let Some(capture) = capture {
+            captures.push(capture);
+        }
+        observations.push(observation);
     }
 
     let quality_unit = live_known_answer_quality_unit(
@@ -782,6 +691,290 @@ fn execute_target(
         validate_live_known_answer_run(&report)?;
     }
     Ok(LiveKnownAnswerExecutionEvidence { report, capture })
+}
+
+struct DispatchedChat {
+    response: SyntheticChatResponse,
+    telemetry: KnownAnswerProviderTelemetry,
+    latency_ms: u64,
+    message_content_bytes: u64,
+}
+
+fn dispatch_known_answer_chat(
+    target: &LiveQualificationTarget,
+    case: &cd_core::quality_eval::PreparedLiveKnownAnswerCase,
+    cancel: &AtomicBool,
+    transport: &mut dyn QualificationTransport,
+) -> CoreResult<DispatchedChat> {
+    let prompt = serialize_live_known_answer_prompt(case)?;
+    let request = live_known_answer_request(&target.member.model_id, &prompt);
+    let message_content_bytes = request
+        .messages
+        .iter()
+        .map(|message| message.role.len() + message.content.len())
+        .sum::<usize>() as u64;
+    let started = Instant::now();
+    let response = match transport.chat_complete(&request, cancel) {
+        Ok(response) => response,
+        Err(error) => SyntheticChatResponse {
+            raw_error: Some(error.reason),
+            ..SyntheticChatResponse::default()
+        },
+    };
+    let telemetry = project_provider_telemetry(
+        transport
+            .take_last_chat_provider_telemetry()
+            .unwrap_or_default(),
+    )?;
+    Ok(DispatchedChat {
+        response,
+        telemetry,
+        latency_ms: started.elapsed().as_millis() as u64,
+        message_content_bytes,
+    })
+}
+
+fn record_answer_only_observation(
+    case: &cd_core::quality_eval::PreparedLiveKnownAnswerCase,
+    scenario_id: String,
+    dispatched: DispatchedChat,
+    observations: &mut Vec<LiveKnownAnswerScenarioObservation>,
+    captures: &mut Vec<LiveKnownAnswerCanonicalScenarioInput>,
+) {
+    let provider_content_bytes = dispatched.response.content.len() as u64;
+    let DispatchedChat {
+        response,
+        telemetry,
+        latency_ms,
+        message_content_bytes,
+    } = dispatched;
+    if response.cancelled {
+        observations.push(failed_observation(
+            scenario_id,
+            LaneStatus::Cancelled,
+            "provider_attempt_cancelled",
+            latency_ms,
+            message_content_bytes,
+            provider_content_bytes,
+            telemetry,
+        ));
+        return;
+    }
+    if response.raw_error.is_some() {
+        observations.push(failed_observation(
+            scenario_id,
+            LaneStatus::Failed,
+            "provider_request_failed",
+            latency_ms,
+            message_content_bytes,
+            provider_content_bytes,
+            telemetry,
+        ));
+        return;
+    }
+    match parse_live_known_answer_response_classified(case, &response.content) {
+        Ok(parsed) => {
+            captures.push(LiveKnownAnswerCanonicalScenarioInput {
+                scenario_id: scenario_id.clone(),
+                reported_model_id: telemetry.reported_model_id.clone(),
+                response: parsed.clone(),
+                answer_score: None,
+                host_score_failed: false,
+            });
+            match score_live_known_answer_response(case, &parsed, None) {
+                Ok(score) => observations.push(LiveKnownAnswerScenarioObservation {
+                    scenario_id,
+                    status: LaneStatus::Executed,
+                    answer: Some(score.answer),
+                    latency_ms,
+                    message_content_bytes,
+                    provider_content_bytes,
+                    reported_model_id: telemetry.reported_model_id,
+                    input_tokens: telemetry.input_tokens,
+                    output_tokens: telemetry.output_tokens,
+                    reasoning_tokens: telemetry.reasoning_tokens,
+                    cached_tokens: telemetry.cached_tokens,
+                    cost_microusd: telemetry.cost_microusd,
+                    failure_code: None,
+                }),
+                Err(_) => observations.push(failed_observation(
+                    scenario_id,
+                    LaneStatus::Failed,
+                    "host_score_failed",
+                    latency_ms,
+                    message_content_bytes,
+                    provider_content_bytes,
+                    telemetry,
+                )),
+            }
+        }
+        Err(failure) => observations.push(failed_observation(
+            scenario_id,
+            LaneStatus::Failed,
+            failure.as_code(),
+            latency_ms,
+            message_content_bytes,
+            provider_content_bytes,
+            telemetry,
+        )),
+    }
+}
+
+fn execute_diagnostic_case(
+    target: &LiveQualificationTarget,
+    case: &cd_core::quality_eval::PreparedLiveKnownAnswerCase,
+    cancel: &AtomicBool,
+    transport: &mut dyn QualificationTransport,
+) -> CoreResult<(
+    LiveKnownAnswerScenarioObservation,
+    Option<LiveKnownAnswerCanonicalScenarioInput>,
+)> {
+    let scenario_id = case.prompt().scenario_id.clone();
+    let mut attempts: Vec<HostAttemptObservation> = Vec::new();
+    let mut last_parsed = None;
+    let mut last_parse_failure = None;
+    let mut last_dispatched;
+    let mut total_latency = 0;
+    let mut total_message_bytes = 0;
+    let mut total_provider_bytes = 0;
+
+    loop {
+        let dispatched = dispatch_known_answer_chat(target, case, cancel, transport)?;
+        total_latency += dispatched.latency_ms;
+        total_message_bytes += dispatched.message_content_bytes;
+        total_provider_bytes += dispatched.response.content.len() as u64;
+        let parsed = if dispatched.response.content.is_empty() {
+            None
+        } else {
+            match parse_live_known_answer_response_classified(case, &dispatched.response.content) {
+                Ok(parsed) => {
+                    last_parse_failure = None;
+                    Some(parsed)
+                }
+                Err(failure) => {
+                    last_parse_failure = Some(failure);
+                    None
+                }
+            }
+        };
+        attempts.push(host_attempt_from_chat(
+            format!("host-{}", attempts.len() + 1),
+            dispatched.response.cancelled,
+            dispatched.response.raw_error.as_deref(),
+            parsed.as_ref(),
+            dispatched.response.content.is_empty(),
+        ));
+        if let Some(parsed) = parsed {
+            last_parsed = Some(parsed);
+        }
+        let cancelled = dispatched.response.cancelled;
+        last_dispatched = dispatched;
+        if cancelled {
+            break;
+        }
+        let should_follow_up = case.host_may_record_follow_up_attempt()
+            && attempts.len() == 1
+            && !attempts[0].class.succeeded()
+            && !cancel.load(Ordering::SeqCst);
+        if !should_follow_up {
+            break;
+        }
+    }
+
+    let dispatched = last_dispatched;
+    let telemetry = dispatched.telemetry;
+    if dispatched.response.cancelled {
+        return Ok((
+            failed_observation(
+                scenario_id,
+                LaneStatus::Cancelled,
+                "provider_attempt_cancelled",
+                total_latency,
+                total_message_bytes,
+                total_provider_bytes,
+                telemetry,
+            ),
+            None,
+        ));
+    }
+
+    let host_diagnostic =
+        host_diagnostic_for_observed_attempts(case, target.member.role, &attempts);
+    if let Some(parsed) = last_parsed {
+        let capture = LiveKnownAnswerCanonicalScenarioInput {
+            scenario_id: scenario_id.clone(),
+            reported_model_id: telemetry.reported_model_id.clone(),
+            response: parsed.clone(),
+            answer_score: None,
+            host_score_failed: false,
+        };
+        if host_diagnostic.is_none() {
+            return Ok((
+                failed_observation(
+                    scenario_id,
+                    LaneStatus::Failed,
+                    "host_score_failed",
+                    total_latency,
+                    total_message_bytes,
+                    total_provider_bytes,
+                    telemetry,
+                ),
+                Some(capture),
+            ));
+        }
+        return match score_live_known_answer_response(case, &parsed, host_diagnostic) {
+            Ok(score) => Ok((
+                LiveKnownAnswerScenarioObservation {
+                    scenario_id,
+                    status: LaneStatus::Executed,
+                    answer: Some(score.answer),
+                    latency_ms: total_latency,
+                    message_content_bytes: total_message_bytes,
+                    provider_content_bytes: total_provider_bytes,
+                    reported_model_id: telemetry.reported_model_id,
+                    input_tokens: telemetry.input_tokens,
+                    output_tokens: telemetry.output_tokens,
+                    reasoning_tokens: telemetry.reasoning_tokens,
+                    cached_tokens: telemetry.cached_tokens,
+                    cost_microusd: telemetry.cost_microusd,
+                    failure_code: None,
+                },
+                Some(capture),
+            )),
+            Err(_) => Ok((
+                failed_observation(
+                    scenario_id,
+                    LaneStatus::Failed,
+                    "host_score_failed",
+                    total_latency,
+                    total_message_bytes,
+                    total_provider_bytes,
+                    telemetry,
+                ),
+                Some(capture),
+            )),
+        };
+    }
+
+    let code = if dispatched.response.raw_error.is_some() {
+        "provider_request_failed"
+    } else if let Some(failure) = last_parse_failure {
+        failure.as_code()
+    } else {
+        "provider_request_failed"
+    };
+    Ok((
+        failed_observation(
+            scenario_id,
+            LaneStatus::Failed,
+            code,
+            total_latency,
+            total_message_bytes,
+            total_provider_bytes,
+            telemetry,
+        ),
+        None,
+    ))
 }
 
 fn live_known_answer_request(model_id: &str, prompt: &str) -> SyntheticChatRequest {
@@ -1378,11 +1571,16 @@ mod tests {
         )
         .expect("report");
         let report = evidence.report;
-        assert_eq!(transport.calls, 10);
+        assert_eq!(transport.calls, 13);
         assert_eq!(report.status, LiveKnownAnswerRunStatus::Partial);
-        assert_eq!(report.metrics.failed_scenarios, 10);
-        assert_eq!(report.metrics.blocked_scenarios, 4);
-        assert!(report.telemetry[8..12].iter().all(|row| {
+        assert_eq!(report.metrics.failed_scenarios, 12);
+        assert_eq!(report.metrics.blocked_scenarios, 2);
+        assert!(report.telemetry[8..10].iter().all(|row| {
+            row.status == LaneStatus::Failed
+                && row.failure_code.as_deref() == Some("provider_request_failed")
+                && row.message_content_bytes > 0
+        }));
+        assert!(report.telemetry[10..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
                 && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.latency_ms == 0
@@ -1474,7 +1672,7 @@ mod tests {
         )
         .expect("evidence");
 
-        assert_eq!(transport.calls, 10);
+        assert_eq!(transport.calls, 12);
         assert_eq!(
             evidence.report.telemetry[0].failure_code.as_deref(),
             Some("provider_response_parse_failed")
@@ -1498,23 +1696,36 @@ mod tests {
             evidence.report.quality_run.quality_unit.subject.model_id,
             "model-a"
         );
-        assert_eq!(evidence.report.metrics.input_tokens, Some(1_000));
-        assert_eq!(evidence.report.metrics.output_tokens, Some(200));
-        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(50));
-        assert_eq!(evidence.report.metrics.cached_tokens, Some(70));
-        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_230));
+        assert_eq!(evidence.report.metrics.input_tokens, Some(1_200));
+        assert_eq!(evidence.report.metrics.output_tokens, Some(240));
+        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(60));
+        assert_eq!(evidence.report.metrics.cached_tokens, Some(84));
+        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_476));
 
         let capture = evidence.capture.as_ref().expect("capture");
-        assert_eq!(capture.scenarios.len(), 7);
+        assert_eq!(capture.scenarios.len(), 9);
         assert_eq!(capture.quality_unit.subject.model_id, "model-a");
         assert!(capture
             .scenarios
             .iter()
             .all(|row| row.reported_model_id.as_deref() == Some("reported/model-b")));
-        assert!(capture.scenarios.iter().all(|row| row
-            .answer_score_sha256
-            .as_deref()
-            .is_some_and(|hash| hash.len() == 64)));
+        assert!(capture.scenarios.iter().all(|row| {
+            if row.host_score_failed {
+                row.answer_score_sha256.is_none()
+            } else {
+                row.answer_score_sha256
+                    .as_deref()
+                    .is_some_and(|hash| hash.len() == 64)
+            }
+        }));
+        assert_eq!(
+            capture
+                .scenarios
+                .iter()
+                .filter(|row| row.host_score_failed)
+                .count(),
+            2
+        );
         let capture_json = render_live_known_answer_capture_json(capture).expect("capture json");
         assert!(!capture_json.contains("not json"));
         assert!(!capture_json.contains("sk-private"));
@@ -1536,13 +1747,109 @@ mod tests {
         assert!(!serialized.contains("https://gateway"));
     }
 
+    fn bounded_live_response(scenario_id: String) -> String {
+        serde_json::to_string(&cd_core::quality_eval::LiveKnownAnswerResponse {
+            schema_id: cd_core::quality_eval::LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID.into(),
+            scenario_id,
+            asserts_root_cause_established: false,
+            claims: Vec::new(),
+            conclusion: "Insufficient evidence in the supplied packet.".into(),
+            confidence: "low".into(),
+        })
+        .expect("response")
+    }
+
+    #[derive(Default)]
+    struct DiagnosticSeamTransport {
+        calls: usize,
+        qe09_calls: usize,
+        last: Option<ProviderTransportTelemetry>,
+        scenario_ids: Vec<String>,
+    }
+
+    impl QualificationTransport for DiagnosticSeamTransport {
+        fn chat_complete(
+            &mut self,
+            req: &SyntheticChatRequest,
+            _cancel: &AtomicBool,
+        ) -> Result<SyntheticChatResponse, TransportError> {
+            let prompt: cd_core::quality_eval::LiveKnownAnswerPrompt =
+                serde_json::from_str(&req.messages[1].content).expect("prompt");
+            self.scenario_ids.push(prompt.scenario_id.clone());
+            self.calls += 1;
+            self.last = Some(ProviderTransportTelemetry {
+                response_model: Some("reported/model-b".into()),
+                prompt_tokens: Some(100),
+                completion_tokens: Some(20),
+                reasoning_tokens: Some(5),
+                cached_tokens: Some(7),
+                cost: Some(0.000_123),
+                ..ProviderTransportTelemetry::default()
+            });
+            match prompt.scenario_id.as_str() {
+                "scenario-011" | "scenario-012" => {
+                    panic!("qe11/qe12 must stay pre-dispatch blocked")
+                }
+                "scenario-009" => {
+                    self.qe09_calls += 1;
+                    if self.qe09_calls == 1 {
+                        return Err(TransportError {
+                            reason: "connection reset".into(),
+                        });
+                    }
+                    Ok(SyntheticChatResponse {
+                        content: bounded_live_response(prompt.scenario_id),
+                        mode_transmitted: true,
+                        ..SyntheticChatResponse::default()
+                    })
+                }
+                "scenario-010" => Ok(SyntheticChatResponse {
+                    content: bounded_live_response(prompt.scenario_id),
+                    raw_error: Some("deadline exceeded".into()),
+                    mode_transmitted: true,
+                    ..SyntheticChatResponse::default()
+                }),
+                _ => Ok(SyntheticChatResponse {
+                    content: bounded_live_response(prompt.scenario_id),
+                    mode_transmitted: true,
+                    ..SyntheticChatResponse::default()
+                }),
+            }
+        }
+
+        fn take_last_chat_provider_telemetry(&mut self) -> Option<ProviderTransportTelemetry> {
+            self.last.take()
+        }
+
+        fn embed(
+            &mut self,
+            _model_id: &str,
+            _input: &str,
+            _cancel: &AtomicBool,
+        ) -> Result<cd_core::capability_qualification::SyntheticEmbeddingResponse, TransportError>
+        {
+            unreachable!()
+        }
+
+        fn rerank(
+            &mut self,
+            _model_id: &str,
+            _query: &str,
+            _documents: &[&str],
+            _cancel: &AtomicBool,
+        ) -> Result<cd_core::capability_qualification::SyntheticRerankResponse, TransportError>
+        {
+            unreachable!()
+        }
+    }
+
     #[test]
-    fn execute_target_keeps_unjoinable_diagnostics_blocked_not_category_failed() {
+    fn execute_target_fluent_qe09_qe10_are_host_gaps_not_category_failures() {
         let suite = load_embedded_open_v1_suite().expect("suite");
         let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
         let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
-        assert!(prepared[8].blocks_diagnostic_before_dispatch());
-        assert!(prepared[9].blocks_diagnostic_before_dispatch());
+        assert!(!prepared[8].blocks_diagnostic_before_dispatch());
+        assert!(!prepared[9].blocks_diagnostic_before_dispatch());
         let mut transport = AnsweringTransport::default();
         let evidence = execute_target(
             &target(),
@@ -1557,36 +1864,109 @@ mod tests {
         )
         .expect("evidence");
 
-        assert_eq!(transport.calls, 10);
+        assert_eq!(transport.calls, 12);
+        assert!(transport.scenario_ids.iter().any(|id| id == "scenario-009"));
+        assert!(transport.scenario_ids.iter().any(|id| id == "scenario-010"));
         assert!(
-            !transport.scenario_ids.iter().any(|id| {
-                matches!(
-                    id.as_str(),
-                    "scenario-009" | "scenario-010" | "scenario-011" | "scenario-012"
-                )
-            }),
-            "qe09–qe12 must not be dispatched: {:?}",
+            !transport
+                .scenario_ids
+                .iter()
+                .any(|id| { matches!(id.as_str(), "scenario-011" | "scenario-012") }),
+            "qe11/qe12 must not be dispatched: {:?}",
             transport.scenario_ids
         );
-        for (index, case) in evidence.report.quality_run.cases[8..12].iter().enumerate() {
+        for (index, case) in evidence.report.quality_run.cases[8..10].iter().enumerate() {
             let telemetry = &evidence.report.telemetry[index + 8];
-            assert_eq!(case.status, LaneStatus::Blocked, "{}", case.case_id);
             assert!(
                 case.answers.is_empty(),
                 "{} must not carry a diagnostic_category model failure",
                 case.case_id
             );
-            assert_eq!(telemetry.status, LaneStatus::Blocked);
-            assert_eq!(
-                telemetry.failure_code.as_deref(),
-                Some("host_diagnostic_pipeline_unavailable")
-            );
-            assert_eq!(telemetry.message_content_bytes, 0);
-            assert_eq!(telemetry.provider_content_bytes, 0);
-            assert_eq!(telemetry.latency_ms, 0);
+            assert_eq!(telemetry.status, LaneStatus::Failed);
+            assert_eq!(telemetry.failure_code.as_deref(), Some("host_score_failed"));
+            assert!(telemetry.message_content_bytes > 0);
         }
-        assert!(evidence.report.telemetry[0].message_content_bytes > 0);
-        assert!(evidence.report.telemetry[12].message_content_bytes > 0);
+        assert!(evidence.report.telemetry[10..12].iter().all(|row| {
+            row.status == LaneStatus::Blocked
+                && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
+                && row.message_content_bytes == 0
+        }));
+    }
+
+    #[test]
+    fn execute_target_joins_mixed_and_timeout_host_diagnostics() {
+        let suite = load_embedded_open_v1_suite().expect("suite");
+        let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
+        let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
+        let mut transport = DiagnosticSeamTransport::default();
+        let evidence = execute_target(
+            &target(),
+            &prepared,
+            &suite.manifest.suite_id,
+            &suite.digest,
+            &prompt_hash,
+            1_777_000_000,
+            "build-a",
+            &AtomicBool::new(false),
+            &mut transport,
+        )
+        .expect("evidence");
+
+        assert_eq!(transport.qe09_calls, 2);
+        assert!(
+            !transport
+                .scenario_ids
+                .iter()
+                .any(|id| { matches!(id.as_str(), "scenario-011" | "scenario-012") }),
+            "qe11/qe12 must stay blocked: {:?}",
+            transport.scenario_ids
+        );
+        assert_eq!(
+            evidence.report.telemetry[8].status,
+            LaneStatus::Executed,
+            "qe09 mixed attempts must reach the scorer"
+        );
+        assert_eq!(evidence.report.telemetry[9].status, LaneStatus::Executed);
+        assert_eq!(evidence.report.telemetry[10].status, LaneStatus::Blocked);
+        assert_eq!(evidence.report.telemetry[11].status, LaneStatus::Blocked);
+
+        let qe09 = evidence.report.quality_run.cases[8]
+            .answers
+            .first()
+            .expect("qe09 host-built score");
+        let qe09_failed = qe09.failed_ids();
+        assert!(qe09
+            .dimensions
+            .iter()
+            .any(|dimension| dimension.id == "diagnostic_envelope_present" && dimension.passed));
+        assert!(qe09
+            .dimensions
+            .iter()
+            .any(|dimension| dimension.id == "attempt_usefulness" && dimension.passed));
+        assert!(
+            !qe09_failed.contains(&"diagnostic_category"),
+            "qe09 must join mixed attempts, not compatible_success: {qe09_failed:?}"
+        );
+        assert!(!qe09_failed.contains(&"attempt_usefulness"));
+
+        let qe10 = evidence.report.quality_run.cases[9]
+            .answers
+            .first()
+            .expect("qe10 host-built score");
+        let qe10_failed = qe10.failed_ids();
+        assert!(qe10
+            .dimensions
+            .iter()
+            .any(|dimension| dimension.id == "transport_versus_grounding" && dimension.passed));
+        assert!(
+            !qe10_failed.contains(&"diagnostic_category"),
+            "qe10 must join timeout, not compatible_success: {qe10_failed:?}"
+        );
+        assert!(!qe10_failed.contains(&"transport_versus_grounding"));
+        assert!(qe10
+            .dimensions
+            .iter()
+            .all(|dimension| !dimension.reason.contains("host_grounding")));
     }
 
     fn captured_evidence() -> LiveKnownAnswerExecutionEvidence {

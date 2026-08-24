@@ -1,8 +1,9 @@
 use cd_core::investigation_team_qualification::InvestigationTeamRole;
 use cd_core::quality_eval::live_known_answer::{
+    host_attempt_from_chat, host_diagnostic_for_observed_attempts,
     host_diagnostic_for_observed_chat, scripted_diagnostic_from_host_attempts,
     scripted_diagnostic_from_parsed_response, HostAttemptClass, HostAttemptObservation,
-    SERIAL_PARSED_ATTEMPT_CATEGORY,
+    MIXED_ATTEMPTS_CATEGORY, SERIAL_PARSED_ATTEMPT_CATEGORY,
 };
 use cd_core::quality_eval::{
     live_known_answer_prompt_set_hash, load_suite, parse_live_known_answer_response,
@@ -119,14 +120,16 @@ fn prepares_all_fourteen_cases_in_manifest_order_with_opaque_ids() {
         .iter()
         .chain(&prepared[12..])
         .all(|case| !case.requires_host_diagnostic()));
-    assert!(!prepared[8].host_can_observe_diagnostic());
-    assert!(!prepared[9].host_can_observe_diagnostic());
+    assert!(prepared[8].host_can_observe_diagnostic());
+    assert!(prepared[9].host_can_observe_diagnostic());
     assert!(!prepared[10].host_can_observe_diagnostic());
     assert!(!prepared[11].host_can_observe_diagnostic());
-    assert!(prepared[8].blocks_diagnostic_before_dispatch());
-    assert!(prepared[9].blocks_diagnostic_before_dispatch());
+    assert!(!prepared[8].blocks_diagnostic_before_dispatch());
+    assert!(!prepared[9].blocks_diagnostic_before_dispatch());
     assert!(prepared[10].blocks_diagnostic_before_dispatch());
     assert!(prepared[11].blocks_diagnostic_before_dispatch());
+    assert!(prepared[8].host_may_record_follow_up_attempt());
+    assert!(!prepared[9].host_may_record_follow_up_attempt());
     assert!(!prepared[8].host_allows_reported_category(SERIAL_PARSED_ATTEMPT_CATEGORY));
     assert!(!prepared[9].host_allows_reported_category(SERIAL_PARSED_ATTEMPT_CATEGORY));
     assert!(prepared[8].host_allows_reported_category("mixed_attempts_accounted"));
@@ -803,9 +806,9 @@ fn parsed_success_is_not_joined_when_its_category_is_not_allowed() {
         InvestigationTeamRole::Single,
         false,
         Some("deadline exceeded"),
-        None,
+        Some(&response_10),
     )
-    .expect("timeout is an allowed qe10 category");
+    .expect("timeout is an allowed qe10 category even when a body also parsed");
     assert_eq!(timeout.reported_category, "timeout");
     assert_ne!(timeout.reported_category, "host_grounding_refusal");
     let timeout_score = score_response(qe10, &response_10, Some(timeout));
@@ -817,30 +820,27 @@ fn parsed_success_is_not_joined_when_its_category_is_not_allowed() {
         .answer
         .failed_ids()
         .contains(&"diagnostic_category"));
-    assert!(
-        qe10.blocks_diagnostic_before_dispatch(),
-        "timeout can be classified, but this runner cannot score it without a parsed error body"
-    );
+    assert!(!qe10.blocks_diagnostic_before_dispatch());
 
-    let mixed = scripted_diagnostic_from_host_attempts(
-        &[
-            HostAttemptObservation {
-                attempt_id: "host-transport".into(),
-                class: HostAttemptClass::Transport,
-                citeable_evidence: false,
-            },
-            HostAttemptObservation {
-                attempt_id: "host-success".into(),
-                class: HostAttemptClass::Success,
-                citeable_evidence: true,
-            },
-        ],
+    let mixed = host_diagnostic_for_observed_attempts(
+        qe09,
         InvestigationTeamRole::Single,
-    );
-    assert_eq!(mixed.reported_category, "mixed_attempts_accounted");
-    assert!(qe09.host_allows_reported_category(&mixed.reported_category));
-    assert!(
-        qe09.blocks_diagnostic_before_dispatch(),
-        "mixed attempts are allowed but this serial runner never records two attempts"
-    );
+        &[
+            host_attempt_from_chat("host-1", false, Some("connection reset"), None, true),
+            host_attempt_from_chat("host-2", false, None, Some(&response_09), false),
+        ],
+    )
+    .expect("mixed attempts are allow-listed for qe09");
+    assert_eq!(mixed.reported_category, MIXED_ATTEMPTS_CATEGORY);
+    let mixed_score = score_response(qe09, &response_09, Some(mixed.clone()));
+    assert!(mixed.attempts.iter().any(|row| !row.succeeded));
+    assert!(!mixed_score
+        .answer
+        .failed_ids()
+        .contains(&"diagnostic_category"));
+    assert!(!mixed_score
+        .answer
+        .failed_ids()
+        .contains(&"attempt_usefulness"));
+    assert!(!qe09.blocks_diagnostic_before_dispatch());
 }
