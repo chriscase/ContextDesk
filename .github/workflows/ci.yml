@@ -712,6 +712,14 @@ jobs:
         if: needs.ci-path-filter.outputs.surface == 'collab-only'
         run: |
           if [ -d collab ] || [ -d crates/cd-collab ]; then
+            # Dedicated validators: .github/workflows/collab.yml (unit/lint/build
+            # + war-room browser qualification) and collab-qualify.yml (hosted
+            # qualify). Without those files, refuse a green filtered Rust gate.
+            if [ -f .github/workflows/collab.yml ] && [ -f .github/workflows/collab-qualify.yml ]; then
+              echo "Collaboration source is present; dedicated collab validators cover this isolated surface (no Ubuntu Rust shards)."
+              git diff --check
+              exit 0
+            fi
             echo "::error::collaboration source is present but has no dedicated validator; refusing a green filtered gate"
             exit 1
           fi
