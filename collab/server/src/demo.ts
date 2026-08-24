@@ -21,6 +21,7 @@ import { CaseService } from "./modules/cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "./modules/experiments/index.js";
 import { ExportService, testExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
+import { PortableInvestigationService } from "./modules/portable-investigations/index.js";
 import {
   MemoryTriageJobStore,
   loadConfiguredTriageProfileCatalog,
@@ -452,6 +453,15 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       },
     }),
   });
+  const portable = new PortableInvestigationService({
+    installationId: "inst-syntheticdemo",
+    cases,
+    catalog,
+    imports,
+    triageRuns,
+    experiments,
+    audit,
+  });
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(demoRoleMap));
   const staticDir =
     options.staticDir === undefined
@@ -476,6 +486,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       presence,
       experiments,
       exporter,
+      portable,
       serveStatic: staticDir !== null,
       security: {
         auth: {

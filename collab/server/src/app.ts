@@ -31,6 +31,10 @@ import {
   type ExperimentService,
 } from "./modules/experiments/index.js";
 import { registerOverviewRoutes } from "./modules/overview/index.js";
+import {
+  registerPortableInvestigationRoutes,
+  type PortableInvestigationService,
+} from "./modules/portable-investigations/index.js";
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
@@ -52,6 +56,7 @@ export interface AppDeps {
   presence?: PresenceService;
   experiments?: ExperimentService;
   exporter?: ExportService;
+  portable?: PortableInvestigationService;
   serveStatic?: boolean;
 }
 
@@ -186,6 +191,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         roles: security.roles,
         audit: security.audit,
         exporter: deps.exporter,
+      });
+    }
+    if (deps.portable) {
+      await registerPortableInvestigationRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
+        portable: deps.portable,
       });
     }
   }

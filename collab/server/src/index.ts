@@ -35,6 +35,10 @@ import {
   type TriageJobStore,
 } from "./modules/triage-runs/index.js";
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
+import {
+  loadPortableInstallationId,
+  PortableInvestigationService,
+} from "./modules/portable-investigations/index.js";
 
 interface StorageRuntime {
   pool: Pool | null;
@@ -134,6 +138,18 @@ async function main(): Promise<void> {
     audit,
     privacy: loadExportPrivacyConfig(),
   });
+  const portable = new PortableInvestigationService({
+    installationId: await loadPortableInstallationId(
+      config.evidenceRoot,
+      process.env.COLLAB_INSTALLATION_ID,
+    ),
+    cases: domain,
+    catalog,
+    imports,
+    triageRuns,
+    experiments,
+    audit,
+  });
   const app = await buildApp({
     config,
     pool: storage.pool,
@@ -146,6 +162,7 @@ async function main(): Promise<void> {
     presence: storage.presence,
     experiments,
     exporter,
+    portable,
     security: {
       auth: {
         adapter,
