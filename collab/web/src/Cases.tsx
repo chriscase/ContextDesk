@@ -230,6 +230,7 @@ export function Cases(props: {
   const [discussionPresence, setDiscussionPresence] = useState<number | null>(null);
   const activeCaseRef = useRef<string | null>(null);
   const loadGeneration = useRef(0);
+  const casesRefreshGeneration = useRef(0);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const discussionToggleRef = useRef<HTMLButtonElement>(null);
   const previousStage = useRef<StageId | null>(null);
@@ -256,9 +257,20 @@ export function Cases(props: {
   }
 
   const refresh = useCallback(async () => {
+    const generation = ++casesRefreshGeneration.current;
     const res = await fetch("/api/cases");
-    if (!res.ok) return;
+    if (generation !== casesRefreshGeneration.current) return;
+    if (!res.ok) {
+      // Authorization loss must not leave previously cached case metadata on
+      // screen. Transient availability failures keep the last confirmed view.
+      if (res.status === 401 || res.status === 403) {
+        setCases([]);
+        setCasesLoaded(true);
+      }
+      return;
+    }
     const body = (await res.json()) as { cases?: CaseRow[] };
+    if (generation !== casesRefreshGeneration.current) return;
     setCases(body.cases ?? []);
     setCasesLoaded(true);
   }, []);
@@ -366,6 +378,10 @@ export function Cases(props: {
     }
     const created = (await res.json()) as CaseRow;
     setTitle("");
+    // Make the server-confirmed investigation available before changing the URL.
+    // A list refresh may still be in flight (or fail), but the focused workspace
+    // must never momentarily fall back to the inventory for a case we just created.
+    setCases((current) => [created, ...current.filter((row) => row.id !== created.id)]);
     openCase(created.id);
     await Promise.all([refresh(), refreshActivity()]);
   }
@@ -594,7 +610,7 @@ export function Cases(props: {
     </section>
   );
 
-  if (!current) {
+  if (!current && focusCaseId) {
     return (
       <div className="cases">
         {actionError ? (
@@ -602,17 +618,33 @@ export function Cases(props: {
             {actionError}
           </p>
         ) : null}
-        {focusCaseId && !casesLoaded ? (
+        {!casesLoaded ? (
           <p className="case-list__empty" role="status">
             Loading the investigation…
           </p>
-        ) : null}
-        {focusCaseId && casesLoaded ? (
-          <p className="case-list__empty" role="alert">
-            That investigation is not available to your account.{" "}
+        ) : (
+          <section
+            className="case-list__empty"
+            aria-labelledby="missing-investigation-title"
+            role="alert"
+          >
+            <h2 id="missing-investigation-title">Investigation unavailable</h2>
+            <p>That investigation is not available to your account.</p>
             <button type="button" className="crumbs__link" onClick={() => exitFocus("overview")}>
               Back to the overview
             </button>
+          </section>
+        )}
+      </div>
+    );
+  }
+
+  if (!current) {
+    return (
+      <div className="cases">
+        {actionError ? (
+          <p className="case-memory__error" role="alert">
+            {actionError}
           </p>
         ) : null}
         {view === "overview" ? (
