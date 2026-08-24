@@ -7,6 +7,9 @@ import {
   type KeyboardEvent,
 } from "react";
 import type { ContributionView } from "./TriageWorkspace.js";
+import type { WorkFocus } from "./app-location.js";
+import { protectedApiFetch } from "./protected-api.js";
+import { useRouteFocus } from "./route-focus.js";
 
 interface PresenceMemberView {
   identityId: string;
@@ -66,6 +69,7 @@ export function CaseDiscussion(props: {
   onPosted?: () => void;
   onPresence?: (count: number | null) => void;
   pollIntervalMs?: number;
+  routeFocus?: WorkFocus;
 }) {
   const [messages, setMessages] = useState<ContributionView[] | null>(null);
   const [threadError, setThreadError] = useState(false);
@@ -87,6 +91,7 @@ export function CaseDiscussion(props: {
   const presenceReq = useRef(0);
   const caseIdRef = useRef(props.caseId);
   const onPresenceRef = useRef(props.onPresence);
+  useRouteFocus(props.routeFocus, messages !== null);
 
   // Reset at the case boundary during render, before anything is committed,
   // so a prior case's thread can never be shown against the new case — even
@@ -114,7 +119,7 @@ export function CaseDiscussion(props: {
       const seq = ++threadReq.current;
       const fresh = () =>
         alive() && seq === threadReq.current && caseId === caseIdRef.current;
-      const response = await fetch(`/api/cases/${caseId}/contributions`).catch(() => null);
+      const response = await protectedApiFetch(`/api/cases/${caseId}/contributions`).catch(() => null);
       if (!fresh()) return;
       const body = response?.ok
         ? ((await response.json().catch(() => null)) as {
@@ -140,7 +145,7 @@ export function CaseDiscussion(props: {
       const seq = ++presenceReq.current;
       const fresh = () =>
         alive() && seq === presenceReq.current && caseId === caseIdRef.current;
-      const response = await fetch(`/api/cases/${caseId}/presence`).catch(() => null);
+      const response = await protectedApiFetch(`/api/cases/${caseId}/presence`).catch(() => null);
       if (!fresh()) return;
       const body = response?.ok
         ? ((await response.json().catch(() => null)) as {
@@ -242,7 +247,7 @@ export function CaseDiscussion(props: {
     setCloseBlocked(false);
     setConfirmingDiscard(false);
     try {
-      const response = await fetch(`/api/cases/${props.caseId}/contributions`, {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/contributions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ kind: "message", body, privacyClass }),
@@ -367,7 +372,13 @@ export function CaseDiscussion(props: {
             {messages.map((message) => {
               const when = messageWhen(message.createdAt);
               return (
-                <li key={message.id} className="discussion__message">
+                <li
+                  key={message.id}
+                  className="discussion__message"
+                  data-route-item={message.id}
+                  data-route-kind="comment"
+                  tabIndex={-1}
+                >
                   <p className="discussion__message-meta">
                     <strong className="discussion__author">
                       {message.authorUsername ?? "Author not recorded"}

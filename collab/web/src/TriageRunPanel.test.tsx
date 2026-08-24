@@ -184,7 +184,20 @@ describe("TriageRunPanel", () => {
       }),
     );
 
-    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    render(
+      <TriageRunPanel
+        caseId="case-1"
+        canLead
+        readOnly={false}
+        routeFocus={{
+          section: "triage-lane-runner",
+          item: "job-1:qwen-reviewer",
+          itemKind: "triage-candidate",
+          lane: null,
+          experiment: null,
+        }}
+      />,
+    );
     expect(await screen.findByText("Start a snapshot-bound comparison")).toBeTruthy();
     expect(screen.getAllByText("qwen-3.6-27b", { exact: false }).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("reviewer · settled")).toBeTruthy();
@@ -194,6 +207,10 @@ describe("TriageRunPanel", () => {
     expect(screen.getByText(/Agreement is not proof of correctness/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Use this setup again" })).toBeTruthy();
     expect(screen.queryByText(/schemaId/)).toBeNull();
+    const candidate = document.querySelector(
+      '[data-route-item="job-1:qwen-reviewer"][data-route-kind="triage-candidate"]',
+    ) as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(candidate));
   });
 
   it("adds an operator-picked lane by identifiers only and rejects DeepSeek", async () => {

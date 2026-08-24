@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { protectedApiFetch } from "./protected-api.js";
+import type { WorkFocus } from "./app-location.js";
+import { useRouteFocus } from "./route-focus.js";
 
 const ARTIFACT_KINDS = ["log", "email", "attachment", "file_server_ref"] as const;
 const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
@@ -122,6 +125,7 @@ export function CaseBoardPanel(props: {
   canWrite: boolean;
   canLead: boolean;
   readOnly: boolean;
+  routeFocus?: WorkFocus;
 }) {
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
@@ -132,6 +136,7 @@ export function CaseBoardPanel(props: {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadGeneration = useRef(0);
+  useRouteFocus(props.routeFocus, !loading);
 
   const load = useCallback(async (snapshotId?: string | null) => {
     const generation = ++loadGeneration.current;
@@ -141,9 +146,9 @@ export function CaseBoardPanel(props: {
     try {
       const suffix = snapshotId ? `?snapshotId=${encodeURIComponent(snapshotId)}` : "";
       const [evidenceResponse, snapshotsResponse, boardResponse] = await Promise.all([
-        fetch(`/api/cases/${props.caseId}/evidence`),
-        fetch(`/api/cases/${props.caseId}/snapshots`),
-        fetch(`/api/cases/${props.caseId}/board${suffix}`),
+        protectedApiFetch(`/api/cases/${props.caseId}/evidence`),
+        protectedApiFetch(`/api/cases/${props.caseId}/snapshots`),
+        protectedApiFetch(`/api/cases/${props.caseId}/board${suffix}`),
       ]);
       if (!evidenceResponse.ok) throw new Error(await errorText(evidenceResponse, "Evidence could not be loaded."));
       if (!snapshotsResponse.ok) throw new Error(await errorText(snapshotsResponse, "Snapshots could not be loaded."));
@@ -170,7 +175,7 @@ export function CaseBoardPanel(props: {
 
   async function freezeSnapshot() {
     setError(null);
-    const response = await fetch(`/api/cases/${props.caseId}/snapshots`, {
+    const response = await protectedApiFetch(`/api/cases/${props.caseId}/snapshots`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ evidenceIds: selectedEvidence }),
@@ -217,7 +222,7 @@ export function CaseBoardPanel(props: {
     setUploading(true);
     try {
       const contentBase64 = await readFileAsBase64(selectedFile);
-      const response = await fetch(`/api/cases/${props.caseId}/evidence`, {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/evidence`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -245,7 +250,7 @@ export function CaseBoardPanel(props: {
           return;
         }
         const evidenceIds = [...new Set([...selectedEvidence, artifactId])];
-        const snapshotResponse = await fetch(`/api/cases/${props.caseId}/snapshots`, {
+        const snapshotResponse = await protectedApiFetch(`/api/cases/${props.caseId}/snapshots`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ evidenceIds }),
@@ -300,7 +305,13 @@ export function CaseBoardPanel(props: {
               {artifacts.length === 0 ? <p className="case-memory__empty">No evidence has been registered yet.</p> : null}
               <ul className="case-memory__list">
                 {artifacts.map((artifact) => (
-                  <li key={artifact.id} className="case-memory__item">
+                  <li
+                    key={artifact.id}
+                    className="case-memory__item"
+                    data-route-item={artifact.id}
+                    data-route-kind="evidence"
+                    tabIndex={-1}
+                  >
                     {!props.readOnly && props.canLead ? (
                       <input
                         type="checkbox"
@@ -407,6 +418,8 @@ export function CaseBoardPanel(props: {
                     className={snapshot.id === selectedSnapshotId ? "case-memory__snapshot is-selected" : "case-memory__snapshot"}
                     type="button"
                     key={snapshot.id}
+                    data-route-item={snapshot.id}
+                    data-route-kind="snapshot"
                     aria-current={snapshot.id === selectedSnapshotId ? "page" : undefined}
                     onClick={() => {
                       setSelectedSnapshotId(snapshot.id);

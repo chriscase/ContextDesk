@@ -426,6 +426,7 @@ describe("war room overview", () => {
     expect(onActivityOpen).toHaveBeenCalledWith("c1", "situation", {
       section: "discussion",
       item: "message-8",
+      itemKind: "comment",
       lane: null,
       experiment: null,
     });
@@ -462,6 +463,53 @@ describe("war room overview", () => {
 });
 
 describe("focused investigation view", () => {
+  it("routes investigation-local activity to its exact typed record item", async () => {
+    const onDeepNavigate = vi.fn();
+    stubCaseFetch({
+      onRequest: (url) => {
+        if (url === "/api/cases/c1/timeline") {
+          return Promise.resolve({ ok: true, json: async () => ({ events: [{
+            seq: 12,
+            kind: "contribution_created",
+            actorUsername: "alice",
+            targetId: "note-12",
+            serverTime: "2026-08-24T12:00:00.000Z",
+            payload: "{}",
+          }] }) });
+        }
+        if (url === "/api/cases/c1/contributions") {
+          return Promise.resolve({ ok: true, json: async () => ({ contributions: [{
+            id: "note-12",
+            kind: "note",
+            body: "Synthetic queue observation",
+            privacyClass: "owner_only",
+            tombstoned: false,
+          }] }) });
+        }
+        return null;
+      },
+    });
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c1"
+        stage="situation"
+        onOpenCase={vi.fn()}
+        onStageChange={vi.fn()}
+        onDeepNavigate={onDeepNavigate}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /recorded an observation alice/ }));
+    expect(onDeepNavigate).toHaveBeenCalledWith("capture", {
+      section: "triage-capture",
+      item: "note-12",
+      itemKind: "contribution",
+      lane: null,
+      experiment: null,
+    });
+  });
+
   it("enters Focus on the Situation picture and returns to the inventory without losing filters", async () => {
     stubCaseFetch();
     render(<Cases roles={["case-lead"]} view="investigations" />);

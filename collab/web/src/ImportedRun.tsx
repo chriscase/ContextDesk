@@ -27,6 +27,9 @@ export function ImportedRun(props: {
         : "Unverified imported run";
   return (
     <article
+      data-route-item={run.id}
+      data-route-kind="imported-run"
+      tabIndex={-1}
       className={
         run.corroborationState === "contradicted"
           ? "imported-run imported-run--contradicted"

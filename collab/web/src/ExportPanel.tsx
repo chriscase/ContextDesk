@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { protectedApiFetch } from "./protected-api.js";
 
 interface InventoryItem {
   kind: "artifact" | "contribution";
@@ -50,7 +51,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   useEffect(() => {
     let stale = false;
     setInventoryStatus("loading");
-    void fetch(`/api/cases/${props.caseId}/export/inventory`)
+    void protectedApiFetch(`/api/cases/${props.caseId}/export/inventory`)
       .then(async (res) => {
         if (!res.ok) throw new Error(`inventory request failed (${res.status})`);
         return (await res.json()) as { items?: InventoryItem[] };
@@ -92,7 +93,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
     setError(null);
     setFindings([]);
     try {
-      const res = await fetch(path, {
+      const res = await protectedApiFetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),

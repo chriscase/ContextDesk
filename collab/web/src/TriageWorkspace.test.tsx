@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FormEvent } from "react";
 import {
@@ -173,6 +173,30 @@ describe("triage workspace capture paths", () => {
 });
 
 describe("triage workspace guidance and provenance", () => {
+  it("focuses the exact typed contribution from a shareable activity route", async () => {
+    const scrollIntoView = vi.fn();
+    const originalScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      render(<TriageWorkspace {...makeProps({
+        routeFocus: {
+          section: "triage-capture",
+          item: "n1",
+          itemKind: "contribution",
+          lane: null,
+          experiment: null,
+        },
+      })} />);
+      const item = screen.getByText("Queue depth spiked at 14:02").closest("li") as HTMLElement;
+      await waitFor(() => expect(document.activeElement).toBe(item));
+      expect(item.dataset.routeItem).toBe("n1");
+      expect(item.dataset.routeKind).toBe("contribution");
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScroll;
+    }
+  });
+
   it("renders a human-readable activity narrative and keeps raw audit identities closed", () => {
     render(<TriageWorkspace {...makeProps()} />);
     expect(screen.getByRole("heading", { name: "The investigation was opened" })).toBeTruthy();

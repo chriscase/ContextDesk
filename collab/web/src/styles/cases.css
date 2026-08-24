@@ -734,6 +734,12 @@
   margin-bottom: 1.1rem;
 }
 
+[data-route-item]:focus {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 0.35rem;
+}
+
 .situation__activity h4,
 .situation__next h4 {
   margin: 0 0 0.4rem;
@@ -746,6 +752,36 @@
   color: var(--muted);
   font-size: 0.88rem;
   line-height: 1.6;
+}
+
+.situation__recent {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.8rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.situation__activity-link {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  background: var(--panel);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.situation__activity-link strong,
+.situation__activity-link span {
+  display: block;
+}
+
+.situation__activity-link span {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .situation__links {

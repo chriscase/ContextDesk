@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { MouseEvent, ReactNode } from "react";
 import type { WorkFocus } from "./app-location.js";
+import { protectedApiFetch } from "./protected-api.js";
 
 interface CandidateRow {
   candidateId: string;
@@ -1232,7 +1233,7 @@ export function ExperimentLab(props: {
     const generation = ++refreshGeneration.current;
     const isCurrent = () => generation === refreshGeneration.current;
     try {
-      const res = await fetch(`/api/cases/${props.caseId}/experiments`);
+      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments`);
       if (!res.ok) {
         const message = await responseError(res, "Experiment history could not be loaded");
         if (isCurrent()) setError(message);
@@ -1253,7 +1254,7 @@ export function ExperimentLab(props: {
   useEffect(() => {
     let mounted = true;
     setEvidenceArtifacts([]);
-    void fetch(`/api/cases/${props.caseId}/evidence`)
+    void protectedApiFetch(`/api/cases/${props.caseId}/evidence`)
       .then(async (response) => {
         if (!response.ok) return null;
         return (await response.json()) as { artifacts?: EvidenceArtifactView[] };
@@ -1371,13 +1372,13 @@ export function ExperimentLab(props: {
     let mounted = true;
     const refreshPresence = async () => {
       if (!readOnly) {
-        await fetch(`/api/cases/${props.caseId}/presence`, {
+        await protectedApiFetch(`/api/cases/${props.caseId}/presence`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ surface: "experiment_lab" }),
         }).catch(() => undefined);
       }
-      const response = await fetch(`/api/cases/${props.caseId}/presence`).catch(() => null);
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/presence`).catch(() => null);
       if (!mounted || !response?.ok) return;
       const body = (await response.json().catch(() => null)) as PresenceView | null;
       if (mounted && body && Array.isArray(body.members)) setPresence(body);
@@ -1599,7 +1600,7 @@ export function ExperimentLab(props: {
       return;
     }
     try {
-      const res = await fetch(`/api/cases/${props.caseId}/experiments`, {
+      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -1628,7 +1629,7 @@ export function ExperimentLab(props: {
       return;
     }
     try {
-      const res = await fetch(`/api/cases/${props.caseId}/experiments`, {
+      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -1656,7 +1657,7 @@ export function ExperimentLab(props: {
     const data = new FormData(form);
     setError(null);
     try {
-      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/helpfulness`, {
+      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments/${current.id}/helpfulness`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -1686,7 +1687,7 @@ export function ExperimentLab(props: {
     const latest = current.decisions.at(-1);
     setError(null);
     try {
-      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/decisions`, {
+      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments/${current.id}/decisions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -1718,7 +1719,7 @@ export function ExperimentLab(props: {
     if (!latest) return;
     setError(null);
     try {
-      const res = await fetch(
+      const res = await protectedApiFetch(
         `/api/cases/${props.caseId}/experiments/${current.id}/decisions/${latest.id}/accept`,
         {
           method: "POST",
@@ -1741,7 +1742,7 @@ export function ExperimentLab(props: {
     setError(null);
     setExported(null);
     try {
-      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/export`, {
+      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments/${current.id}/export`, {
         method: "POST",
       });
       const body = (await res.json()) as ShareSafeExport & { error?: string };
@@ -1770,7 +1771,7 @@ export function ExperimentLab(props: {
     const expectedGold = String(data.get("expectedGoldVersion") ?? "").trim();
     setError(null);
     try {
-      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
+      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -1813,7 +1814,7 @@ export function ExperimentLab(props: {
       return;
     }
     try {
-      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/traces`, {
+      const res = await protectedApiFetch(`/api/cases/${props.caseId}/experiments/${current.id}/traces`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -1837,7 +1838,7 @@ export function ExperimentLab(props: {
     const candidateId = String(data.get("candidateId") ?? "");
     setError(null);
     try {
-      const res = await fetch(
+      const res = await protectedApiFetch(
         `/api/cases/${props.caseId}/experiments/${current.id}/traces/${candidateId}/annotations`,
         {
           method: "POST",

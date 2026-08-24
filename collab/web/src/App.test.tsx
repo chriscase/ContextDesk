@@ -165,6 +165,58 @@ describe("auth boundary", () => {
     expect(requested).not.toContain("/api/catalog/sources");
   });
 
+  it("invalidates the whole protected shell when a background GET loses authorization", async () => {
+    let denyActivity!: (value: Response) => void;
+    const activity = new Promise<Response>((resolve) => { denyActivity = resolve; });
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            cases: [{
+              id: "11111111-1111-4111-8111-111111111111",
+              title: "Protected fixture investigation",
+              status: "open",
+              severity: "high",
+            }],
+          }),
+        } as Response);
+      }
+      if (url === "/api/activity?limit=30") return activity;
+      return null;
+    });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Protected fixture investigation" })).toBeTruthy();
+
+    denyActivity({ ok: false, status: 401, json: async () => ({}) } as Response);
+
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(screen.queryByText("Protected fixture investigation")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Primary" })).toBeNull();
+    expect(window.location.pathname).toBe("/signin");
+  });
+
+  it("invalidates the whole protected shell when a mutation loses authorization", async () => {
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url, init) => {
+      if (url === "/api/cases" && (init?.method ?? "GET") === "POST") {
+        return Promise.resolve({ ok: false, status: 403, json: async () => ({}) } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Investigations" }));
+    fireEvent.change(screen.getByPlaceholderText("New investigation title"), {
+      target: { value: "Never retain this draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(screen.queryByDisplayValue("Never retain this draft")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(window.location.pathname).toBe("/signin");
+  });
+
   it("offers honest sample credentials on the sign-in screen in synthetic demo mode", async () => {
     (import.meta.env as Record<string, unknown>).VITE_CONTEXTDESK_SYNTHETIC_DEMO = "1";
     stubSignedOutFetch();
@@ -442,6 +494,7 @@ describe("pathname parsing", () => {
       focus: {
         section: "cross-exam-heading",
         item: "ev-synthetic-7",
+        itemKind: null,
         lane: "lane-a",
         experiment: "exp-a",
       },
@@ -449,6 +502,26 @@ describe("pathname parsing", () => {
     expect(pathFor(focused)).toBe(
       `/investigations/${uuid}/compare?section=cross-exam-heading&item=ev-synthetic-7&lane=lane-a&experiment=exp-a#cross-exam-heading`,
     );
+    const typedItem: WorkLocation = {
+      area: "investigations",
+      caseId: uuid,
+      stage: "analyze",
+      focus: {
+        section: "triage-evidence-board",
+        item: "evidence-7",
+        itemKind: "evidence",
+        lane: null,
+        experiment: null,
+      },
+    };
+    expect(pathFor(typedItem)).toBe(
+      `/investigations/${uuid}/analyze?section=triage-evidence-board&item=evidence-7&kind=evidence#triage-evidence-board`,
+    );
+    expect(parsePathname(
+      `/investigations/${uuid}/analyze`,
+      "?section=triage-evidence-board&item=evidence-7&kind=evidence",
+      "#triage-evidence-board",
+    )).toEqual(typedItem);
     const focusedWork = focused as WorkLocation;
     const preservePosition: WorkLocation = {
       ...focusedWork,
@@ -469,6 +542,77 @@ describe("pathname parsing", () => {
 });
 
 describe("pathname shell routing", () => {
+  it("restores an exact captured item and names the investigation stage in the document title", async () => {
+    const uuid = "77777777-7777-4777-8777-777777777777";
+    window.history.replaceState(null, "",
+      `/investigations/${uuid}/capture?section=triage-capture&item=note-7&kind=contribution#triage-capture`,
+    );
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            cases: [{ id: uuid, title: "Synthetic queue timeout", status: "open", severity: "high" }],
+          }),
+        } as Response);
+      }
+      if (url === `/api/cases/${uuid}/timeline`) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            events: [{
+              seq: 7,
+              kind: "contribution_created",
+              actorUsername: "dave",
+              targetId: "note-7",
+              serverTime: "2026-08-24T12:00:00.000Z",
+              payload: "{}",
+            }],
+          }),
+        } as Response);
+      }
+      if (url === `/api/cases/${uuid}/contributions`) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ contributions: [{
+            id: "note-7",
+            kind: "note",
+            body: "Synthetic worker queue paused.",
+            privacyClass: "owner_only",
+            tombstoned: false,
+          }] }),
+        } as Response);
+      }
+      if (url === `/api/cases/${uuid}/imports`) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ runs: [] }) } as Response);
+      }
+      return null;
+    });
+    const scrollIntoView = vi.fn();
+    const originalScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      render(<App />);
+      const target = await screen.findByText("Synthetic worker queue paused.");
+      const item = target.closest("[data-route-item]") as HTMLElement;
+      await waitFor(() => expect(document.activeElement).toBe(item));
+      expect(item.dataset.routeItem).toBe("note-7");
+      expect(item.dataset.routeKind).toBe("contribution");
+      await waitFor(() => {
+        expect(document.title).toBe("Synthetic queue timeout · Capture · ContextDesk War Room");
+      });
+      expect(window.location.pathname).toBe(`/investigations/${uuid}/capture`);
+      expect(window.location.search).toContain("kind=contribution");
+      fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+      await waitFor(() => expect(document.title).toBe("Sources · ContextDesk War Room"));
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScroll;
+    }
+  });
+
   it("restores a direct area pathname after a signed-in load", async () => {
     window.history.replaceState(null, "", "/sources");
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });

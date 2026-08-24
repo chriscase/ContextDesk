@@ -89,7 +89,21 @@ describe("CaseBoardPanel", () => {
       }),
     );
 
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(
+      <CaseBoardPanel
+        caseId="case-1"
+        canWrite={false}
+        canLead={false}
+        readOnly
+        routeFocus={{
+          section: "triage-evidence-board",
+          item: "artifact-1",
+          itemKind: "evidence",
+          lane: null,
+          experiment: null,
+        }}
+      />,
+    );
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
     expect(screen.getByText("checkout.log")).toBeTruthy();
     expect(screen.getByText("Snapshot lineage")).toBeTruthy();
@@ -100,6 +114,9 @@ describe("CaseBoardPanel", () => {
     expect(screen.getByText(/No open unknowns recorded/)).toBeTruthy();
     expect(screen.getByText(/agreement shared · confidence medium · 1 evidence ref/)).toBeTruthy();
     expect(screen.queryByText(/schemaId/)).toBeNull();
+    const evidence = screen.getByText("checkout.log").closest("li") as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(evidence));
+    expect(evidence.dataset.routeKind).toBe("evidence");
   });
 
   it("keeps the empty state useful and read-only", async () => {

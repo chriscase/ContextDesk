@@ -10,9 +10,22 @@ export const STAGE_IDS = [
 ] as const;
 export type StageId = (typeof STAGE_IDS)[number];
 
+export const ROUTE_ITEM_KINDS = [
+  "timeline",
+  "contribution",
+  "comment",
+  "evidence",
+  "snapshot",
+  "imported-run",
+  "triage-run",
+  "triage-candidate",
+] as const;
+export type RouteItemKind = (typeof ROUTE_ITEM_KINDS)[number];
+
 export type WorkFocus = {
   section: string;
   item: string | null;
+  itemKind?: RouteItemKind | null;
   lane: string | null;
   experiment: string | null;
   /** In-memory intent only; canonical URLs deliberately do not encode it. */
@@ -58,6 +71,7 @@ export const LEGACY_ANCHOR_STAGES: Record<string, StageId> = {
 
 const AREA_SET = new Set<string>(AREA_IDS);
 const STAGE_SET = new Set<string>(STAGE_IDS);
+const ROUTE_ITEM_KIND_SET = new Set<string>(ROUTE_ITEM_KINDS);
 const CASE_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -93,6 +107,8 @@ export function isWorkLocation(value: unknown): value is WorkLocation {
     if (
       typeof focus.section !== "string" ||
       (focus.item !== null && typeof focus.item !== "string") ||
+      (focus.itemKind !== undefined && focus.itemKind !== null &&
+        !ROUTE_ITEM_KIND_SET.has(String(focus.itemKind))) ||
       (focus.lane !== null && typeof focus.lane !== "string") ||
       (focus.experiment !== null && typeof focus.experiment !== "string") ||
       (focus.navigation !== undefined && focus.navigation !== "preserve")
@@ -140,6 +156,7 @@ export function sameLocation(a: ShellLocation, b: ShellLocation): boolean {
   return a.area === b.area && a.caseId === b.caseId && a.stage === b.stage &&
     (a.focus?.section ?? null) === (b.focus?.section ?? null) &&
     (a.focus?.item ?? null) === (b.focus?.item ?? null) &&
+    (a.focus?.itemKind ?? null) === (b.focus?.itemKind ?? null) &&
     (a.focus?.lane ?? null) === (b.focus?.lane ?? null) &&
     (a.focus?.experiment ?? null) === (b.focus?.experiment ?? null) &&
     (a.focus?.navigation ?? null) === (b.focus?.navigation ?? null);
@@ -198,6 +215,9 @@ function parseFocus(search: string, hash: string): WorkFocus | undefined {
   return {
     section,
     item: boundedFocusValue(params.get("item")),
+    itemKind: ROUTE_ITEM_KIND_SET.has(params.get("kind") ?? "")
+      ? params.get("kind") as RouteItemKind
+      : null,
     lane: boundedFocusValue(params.get("lane")),
     experiment: boundedFocusValue(params.get("experiment")),
   };
@@ -269,6 +289,7 @@ export function pathFor(location: ShellLocation): string {
     if (!location.focus) return base;
     const params = new URLSearchParams({ section: location.focus.section });
     if (location.focus.item) params.set("item", location.focus.item);
+    if (location.focus.itemKind) params.set("kind", location.focus.itemKind);
     if (location.focus.lane) params.set("lane", location.focus.lane);
     if (location.focus.experiment) params.set("experiment", location.focus.experiment);
     return `${base}?${params.toString()}#${encodeURIComponent(location.focus.section)}`;
@@ -290,7 +311,7 @@ export function parseHashStage(hash: string): StageId | null {
   return LEGACY_ANCHOR_STAGES[raw] ?? null;
 }
 
-export function titleFor(location: ShellLocation): string {
+export function titleFor(location: ShellLocation, investigationTitle?: string | null): string {
   if (isSignInLocation(location)) {
     return "Sign in · ContextDesk War Room";
   }
@@ -304,7 +325,8 @@ export function titleFor(location: ShellLocation): string {
     return "Help · ContextDesk War Room";
   }
   if (location.area === "investigations" && location.caseId) {
-    return "Investigation · ContextDesk War Room";
+    const stage = location.stage.slice(0, 1).toUpperCase() + location.stage.slice(1);
+    return `${investigationTitle || "Investigation"} · ${stage} · ContextDesk War Room`;
   }
   if (location.area === "investigations") {
     return "Investigations · ContextDesk War Room";

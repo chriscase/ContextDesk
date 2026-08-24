@@ -1,5 +1,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { ImportedRun } from "./ImportedRun.js";
+import type { WorkFocus } from "./app-location.js";
+import { useRouteFocus } from "./route-focus.js";
 
 export interface TimelineEvent {
   seq: number;
@@ -182,6 +184,7 @@ export function TriageWorkspace(props: {
   contributions: ContributionView[];
   runs: RunRow[];
   importError: string | null;
+  routeFocus?: WorkFocus;
   onAddNote: (event: FormEvent<HTMLFormElement>) => void;
   onImportRun: (event: FormEvent<HTMLFormElement>) => void;
   onCorroborate: (id: string, state: "corroborated" | "contradicted", linkId: string) => void;
@@ -196,6 +199,7 @@ export function TriageWorkspace(props: {
   ).length;
   const captureCount = humanEntries + props.runs.length;
   const nothingCaptured = captureCount === 0;
+  useRouteFocus(props.routeFocus, true);
 
   return (
     <>
@@ -524,7 +528,13 @@ export function TriageWorkspace(props: {
                     const payload = parsedTimelinePayload(event.payload);
                     const summary = payloadSummary(payload);
                     return (
-                      <li key={event.seq} className="timeline__item">
+                      <li
+                        key={event.seq}
+                        className="timeline__item"
+                        data-route-item={contribution?.id ?? String(event.seq)}
+                        data-route-kind={contribution ? "contribution" : "timeline"}
+                        tabIndex={-1}
+                      >
                         <h5 className="triage-record__event-title">{timelineTitle(event, contribution)}</h5>
                         <p className="timeline__meta">by {event.actorUsername} · {timelineTime(event)}</p>
                         {contribution?.body && !contribution.tombstoned ? (

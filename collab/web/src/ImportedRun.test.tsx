@@ -26,6 +26,9 @@ describe("imported run rendering", () => {
     expect(screen.getByText("Unverified imported run")).toBeTruthy();
     expect(screen.getByText(INJECT)).toBeTruthy();
     expect(document.querySelector("script")).toBeNull();
+    const item = screen.getByText("Unverified imported run").closest("article") as HTMLElement;
+    expect(item.dataset.routeItem).toBe("r1");
+    expect(item.dataset.routeKind).toBe("imported-run");
   });
 
   it("renders contradicted runs distinctly", () => {

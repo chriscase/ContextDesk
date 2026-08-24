@@ -20,6 +20,7 @@ import { Cases } from "./Cases.js";
 import { Catalog } from "./Catalog.js";
 import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
+import { AUTH_LOST_EVENT } from "./protected-api.js";
 
 interface SessionView {
   username: string;
@@ -182,6 +183,7 @@ export function App() {
   );
   const [navOpen, setNavOpen] = useState(false);
   const [startSignal, setStartSignal] = useState(0);
+  const [focusedCaseTitle, setFocusedCaseTitle] = useState<string | null>(null);
   const locationRef = useRef(location);
   locationRef.current = location;
   const restoreRef = useRef<WorkLocation | null>(
@@ -194,8 +196,22 @@ export function App() {
   sessionRef.current = session;
 
   useEffect(() => {
-    document.title = titleFor(location);
-  }, [location]);
+    document.title = titleFor(location, focusedCaseTitle);
+  }, [location, focusedCaseTitle]);
+
+  useEffect(() => {
+    const invalidate = () => {
+      const current = locationRef.current;
+      restoreRef.current = isWorkLocation(current) ? current : null;
+      setFocusedCaseTitle(null);
+      setSession(null);
+      setReady(true);
+      setLocation(SIGN_IN);
+      writeHistory(SIGN_IN, "replace");
+    };
+    window.addEventListener(AUTH_LOST_EVENT, invalidate);
+    return () => window.removeEventListener(AUTH_LOST_EVENT, invalidate);
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -477,6 +493,7 @@ export function App() {
           <>
             <section className="app__area" aria-label="Investigations" hidden={!inCasesArea}>
               <Cases
+                onFocusedCaseTitle={setFocusedCaseTitle}
                 roles={roles}
                 readOnly={staticReadOnly}
                 participant={{ username: session.username, roles }}

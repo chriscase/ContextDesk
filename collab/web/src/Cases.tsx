@@ -14,6 +14,7 @@ import {
   type TimelineEvent,
 } from "./TriageWorkspace.js";
 import type { WorkFocus } from "./app-location.js";
+import { protectedApiFetch } from "./protected-api.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
 
@@ -172,7 +173,13 @@ function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkF
   if (item.kind === "contribution_created" && item.details.kind === "message") {
     return {
       stage: "situation",
-      focus: { section: "discussion", item: item.targetId, lane: null, experiment: null },
+      focus: {
+        section: "discussion",
+        item: item.targetId,
+        itemKind: "comment",
+        lane: null,
+        experiment: null,
+      },
     };
   }
   if (
@@ -182,19 +189,39 @@ function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkF
   ) {
     return {
       stage: "capture",
-      focus: { section: "triage-capture", item: item.targetId, lane: null, experiment: null },
+      focus: {
+        section: "triage-capture",
+        item: item.targetId,
+        itemKind: item.kind === "external_run_imported" || item.kind === "run_corroboration"
+          ? "imported-run"
+          : "contribution",
+        lane: null,
+        experiment: null,
+      },
     };
   }
   if (item.kind.startsWith("triage_")) {
     return {
       stage: "analyze",
-      focus: { section: "triage-lane-runner", item: item.targetId, lane: null, experiment: null },
+      focus: {
+        section: "triage-lane-runner",
+        item: item.targetId,
+        itemKind: item.kind.startsWith("triage_candidate") ? "triage-candidate" : "triage-run",
+        lane: null,
+        experiment: null,
+      },
     };
   }
   if (item.kind.startsWith("evidence_") || item.kind === "snapshot_frozen") {
     return {
       stage: "analyze",
-      focus: { section: "triage-evidence-board", item: item.targetId, lane: null, experiment: null },
+      focus: {
+        section: "triage-evidence-board",
+        item: item.targetId,
+        itemKind: item.kind === "snapshot_frozen" ? "snapshot" : "evidence",
+        lane: null,
+        experiment: null,
+      },
     };
   }
   if (item.kind === "experiment_decision_accepted" || item.kind === "experiment_gold_promoted") {
@@ -210,8 +237,14 @@ function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkF
     };
   }
   return {
-    stage: "situation",
-    focus: { section: "stage-situation", item: item.targetId, lane: null, experiment: null },
+    stage: "capture",
+    focus: {
+      section: "triage-capture",
+      item: String(item.seq),
+      itemKind: "timeline",
+      lane: null,
+      experiment: null,
+    },
   };
 }
 
@@ -219,6 +252,82 @@ function activityTime(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.valueOf())) return "Time not recorded";
   return parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function investigationEventDestination(
+  event: TimelineEvent,
+  contribution: ContributionView | undefined,
+): { stage: StageId; focus: WorkFocus } {
+  if (contribution?.kind === "message") {
+    return {
+      stage: "situation",
+      focus: {
+        section: "discussion",
+        item: contribution.id,
+        itemKind: "comment",
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
+  if (contribution) {
+    return {
+      stage: "capture",
+      focus: {
+        section: "triage-capture",
+        item: contribution.id,
+        itemKind: "contribution",
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
+  if (event.kind === "external_run_imported" || event.kind === "run_corroboration") {
+    return {
+      stage: "capture",
+      focus: {
+        section: "triage-capture",
+        item: event.targetId ?? null,
+        itemKind: "imported-run",
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
+  if (event.kind.startsWith("triage_")) {
+    return {
+      stage: "analyze",
+      focus: {
+        section: "triage-lane-runner",
+        item: event.targetId ?? null,
+        itemKind: event.kind.startsWith("triage_candidate") ? "triage-candidate" : "triage-run",
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
+  if (event.kind.startsWith("evidence_") || event.kind === "snapshot_frozen") {
+    return {
+      stage: "analyze",
+      focus: {
+        section: "triage-evidence-board",
+        item: event.targetId ?? null,
+        itemKind: event.kind === "snapshot_frozen" ? "snapshot" : "evidence",
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
+  return {
+    stage: "capture",
+    focus: {
+      section: "triage-capture",
+      item: String(event.seq),
+      itemKind: "timeline",
+      lane: null,
+      experiment: null,
+    },
+  };
 }
 
 export function Cases(props: {
@@ -235,6 +344,7 @@ export function Cases(props: {
   onDeepNavigate?: (stage: StageId, focus: WorkFocus) => void;
   onActivityOpen?: (caseId: string, stage: StageId, focus: WorkFocus) => void;
   onExitFocus?: (target: "overview" | "investigations") => void;
+  onFocusedCaseTitle?: (title: string | null) => void;
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
@@ -297,7 +407,7 @@ export function Cases(props: {
 
   const refresh = useCallback(async () => {
     const generation = ++casesRefreshGeneration.current;
-    const res = await fetch("/api/cases");
+    const res = await protectedApiFetch("/api/cases");
     if (generation !== casesRefreshGeneration.current) return;
     if (!res.ok) {
       // Authorization loss must not leave previously cached case metadata on
@@ -315,7 +425,7 @@ export function Cases(props: {
   }, []);
 
   const refreshActivity = useCallback(async () => {
-    const res = await fetch("/api/activity?limit=30");
+    const res = await protectedApiFetch("/api/activity?limit=30");
     if (!res.ok) {
       setActivitiesLoaded(true);
       return;
@@ -326,7 +436,7 @@ export function Cases(props: {
   }, []);
 
   const refreshSources = useCallback(async () => {
-    const res = await fetch("/api/catalog/sources");
+    const res = await protectedApiFetch("/api/catalog/sources");
     if (!res.ok) return;
     const body = (await res.json()) as { sources?: SourceOption[] };
     setSources(body.sources ?? []);
@@ -336,19 +446,19 @@ export function Cases(props: {
     const generation = ++loadGeneration.current;
     const isCurrent = () => generation === loadGeneration.current && activeCaseRef.current === id;
     const requestInit = signal ? { signal } : undefined;
-    const res = await fetch(`/api/cases/${id}/timeline`, requestInit);
+    const res = await protectedApiFetch(`/api/cases/${id}/timeline`, requestInit);
     if (!res.ok || !isCurrent()) return;
     const body = (await res.json()) as { events?: TimelineEvent[] };
     if (!isCurrent()) return;
     setEvents(body.events ?? []);
-    const contributionResponse = await fetch(`/api/cases/${id}/contributions`, requestInit);
+    const contributionResponse = await protectedApiFetch(`/api/cases/${id}/contributions`, requestInit);
     if (contributionResponse.ok && isCurrent()) {
       const contributionBody = (await contributionResponse.json()) as {
         contributions?: ContributionView[];
       };
       setContributions(contributionBody.contributions ?? []);
     }
-    const imported = await fetch(`/api/cases/${id}/imports`, requestInit);
+    const imported = await protectedApiFetch(`/api/cases/${id}/imports`, requestInit);
     if (imported.ok && isCurrent()) {
       const list = (await imported.json()) as { runs?: RunRow[] };
       if (isCurrent()) setRuns(list.runs ?? []);
@@ -407,7 +517,7 @@ export function Cases(props: {
   async function createCase(event: FormEvent) {
     event.preventDefault();
     setActionError(null);
-    const res = await fetch("/api/cases", {
+    const res = await protectedApiFetch("/api/cases", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -438,7 +548,7 @@ export function Cases(props: {
   async function setStatus(status: string) {
     if (!focusCaseId) return;
     setActionError(null);
-    const response = await fetch(`/api/cases/${focusCaseId}/status`, {
+    const response = await protectedApiFetch(`/api/cases/${focusCaseId}/status`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ status }),
@@ -454,7 +564,7 @@ export function Cases(props: {
     event.preventDefault();
     if (!focusCaseId) return;
     setActionError(null);
-    const response = await fetch(`/api/cases/${focusCaseId}/situation`, {
+    const response = await protectedApiFetch(`/api/cases/${focusCaseId}/situation`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -483,7 +593,7 @@ export function Cases(props: {
     setImportError(null);
     const data = new FormData(form);
     try {
-      const response = await fetch(`/api/cases/${focusCaseId}/imports`, {
+      const response = await protectedApiFetch(`/api/cases/${focusCaseId}/imports`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -517,7 +627,7 @@ export function Cases(props: {
   ) {
     if (!focusCaseId) return;
     setActionError(null);
-    const response = await fetch(`/api/cases/${focusCaseId}/imports/${id}/corroborate`, {
+    const response = await protectedApiFetch(`/api/cases/${focusCaseId}/imports/${id}/corroborate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -541,7 +651,7 @@ export function Cases(props: {
     const body = String(data.get("body") ?? "");
     const kind = String(data.get("kind") ?? "note");
     const privacyClass = String(data.get("privacyClass") ?? "owner_only");
-    const response = await fetch(`/api/cases/${focusCaseId}/contributions`, {
+    const response = await protectedApiFetch(`/api/cases/${focusCaseId}/contributions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ kind, body, privacyClass }),
@@ -555,6 +665,9 @@ export function Cases(props: {
   }
 
   const current = cases.find((c) => c.id === focusCaseId);
+  useEffect(() => {
+    props.onFocusedCaseTitle?.(current?.title ?? null);
+  }, [current?.title, props.onFocusedCaseTitle]);
   const normalizedSearch = caseSearch.trim().toLocaleLowerCase();
   const visibleCases = cases.filter((c) => {
     if (statusFilter !== "all" && c.status !== statusFilter) return false;
@@ -1192,6 +1305,45 @@ export function Cases(props: {
               Counts restate what the case has recorded. They do not measure progress or
               completeness.
             </p>
+            {events.length ? (
+              <ol className="situation__recent">
+                {events.slice(-5).reverse().map((event) => {
+                  const contribution = event.targetId
+                    ? contributions.find((row) => row.id === event.targetId)
+                    : undefined;
+                  const destination = investigationEventDestination(event, contribution);
+                  return (
+                    <li key={event.seq}>
+                      <button
+                        type="button"
+                        className="situation__activity-link"
+                        onClick={() => {
+                          if (props.onDeepNavigate) {
+                            props.onDeepNavigate(destination.stage, destination.focus);
+                          } else {
+                            selectStage(destination.stage);
+                          }
+                        }}
+                      >
+                        <strong>{activityLabel({
+                          caseId: current.id,
+                          caseTitle: current.title,
+                          caseStatus: current.status,
+                          caseSeverity: current.severity,
+                          seq: event.seq,
+                          kind: event.kind,
+                          actorUsername: event.actorUsername,
+                          targetId: event.targetId ?? null,
+                          occurredAt: event.serverTime,
+                          details: contribution ? { kind: contribution.kind } : {},
+                        })}</strong>
+                        <span>{event.actorUsername} · {activityTime(event.serverTime)}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : null}
           </section>
           <section className="situation__next" aria-label="Work areas">
             <h4>Work areas</h4>
@@ -1227,6 +1379,7 @@ export function Cases(props: {
             contributions={contributions}
             runs={runs}
             importError={importError}
+            {...(props.focus ? { routeFocus: props.focus } : {})}
             onAddNote={(event) => void addNote(event)}
             onImportRun={(event) => void importRun(event)}
             onCorroborate={(id, state, linkId) => void corroborate(id, state, linkId)}
@@ -1246,10 +1399,21 @@ export function Cases(props: {
             lede="Curate the evidence the case may rely on, freeze a snapshot, then run ContextDesk model lanes against exactly that snapshot."
           >
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
-              <CaseBoardPanel caseId={current.id} canWrite={canWrite} canLead={canLead} readOnly={readOnly} />
+              <CaseBoardPanel
+                caseId={current.id}
+                canWrite={canWrite}
+                canLead={canLead}
+                readOnly={readOnly}
+                {...(props.focus ? { routeFocus: props.focus } : {})}
+              />
             </TriageAnchor>
             <TriageAnchor id="triage-lane-runner" label="AI lane runner">
-              <TriageRunPanel caseId={current.id} canLead={canLead} readOnly={readOnly} />
+              <TriageRunPanel
+                caseId={current.id}
+                canLead={canLead}
+                readOnly={readOnly}
+                {...(props.focus ? { routeFocus: props.focus } : {})}
+              />
             </TriageAnchor>
           </TriageStepSection>
         </section>
@@ -1378,6 +1542,7 @@ export function Cases(props: {
           onClose={closeDiscussion}
           onPosted={() => void loadTimeline(current.id)}
           onPresence={setDiscussionPresence}
+          {...(props.focus ? { routeFocus: props.focus } : {})}
         />
       ) : null}
       </div>

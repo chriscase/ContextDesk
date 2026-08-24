@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { EvidenceSnapshotCockpit } from "./EvidenceSnapshotCockpit.js";
+import { protectedApiFetch } from "./protected-api.js";
+import type { WorkFocus } from "./app-location.js";
+import { useRouteFocus } from "./route-focus.js";
 
 // Metadata fields beyond `id`/`fingerprint`/`evidence`/`createdBy` are already
 // part of the snapshot API response (cd-collab.snapshot.v1) but stay optional
@@ -203,6 +206,7 @@ export function TriageRunPanel(props: {
   caseId: string;
   canLead: boolean;
   readOnly: boolean;
+  routeFocus?: WorkFocus;
 }) {
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
@@ -241,18 +245,19 @@ export function TriageRunPanel(props: {
   const [benchImportExperimentId, setBenchImportExperimentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadRequestToken = useRef(0);
+  useRouteFocus(props.routeFocus, !loading);
 
   const load = useCallback(async () => {
     const requestToken = ++loadRequestToken.current;
     setError(null);
     try {
       const [snapshotResponse, evidenceResponse, jobsResponse, importsResponse, profilesResponse, capabilitiesResponse] = await Promise.all([
-        fetch(`/api/cases/${props.caseId}/snapshots`),
-        fetch(`/api/cases/${props.caseId}/evidence`),
-        fetch(`/api/cases/${props.caseId}/triage-runs`),
-        fetch(`/api/cases/${props.caseId}/imports`),
-        fetch("/api/triage-profiles"),
-        fetch("/api/triage-capabilities"),
+        protectedApiFetch(`/api/cases/${props.caseId}/snapshots`),
+        protectedApiFetch(`/api/cases/${props.caseId}/evidence`),
+        protectedApiFetch(`/api/cases/${props.caseId}/triage-runs`),
+        protectedApiFetch(`/api/cases/${props.caseId}/imports`),
+        protectedApiFetch("/api/triage-profiles"),
+        protectedApiFetch("/api/triage-capabilities"),
       ]);
       if (requestToken !== loadRequestToken.current) return;
       if (!snapshotResponse.ok) throw new Error(await errorText(snapshotResponse, "Snapshots could not be loaded."));
@@ -425,7 +430,7 @@ export function TriageRunPanel(props: {
       return;
     }
     try {
-      const response = await fetch(`/api/cases/${props.caseId}/triage-runs`, {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/triage-runs`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -456,7 +461,7 @@ export function TriageRunPanel(props: {
   }
 
   async function cancel(jobId: string) {
-    const response = await fetch(`/api/cases/${props.caseId}/triage-runs/${jobId}/cancel`, { method: "POST" });
+    const response = await protectedApiFetch(`/api/cases/${props.caseId}/triage-runs/${jobId}/cancel`, { method: "POST" });
     if (!response.ok) setError(await errorText(response, "Cancellation could not be requested."));
     await load();
   }
@@ -467,7 +472,7 @@ export function TriageRunPanel(props: {
     setHandoffExperimentId(null);
     setHandoffError(null);
     try {
-      const response = await fetch(
+      const response = await protectedApiFetch(
         `/api/cases/${props.caseId}/experiments/from-triage/${jobId}`,
         {
           method: "POST",
@@ -511,7 +516,7 @@ export function TriageRunPanel(props: {
       return;
     }
     try {
-      const response = await fetch(`/api/cases/${props.caseId}/experiments`, {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/experiments`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -941,7 +946,13 @@ export function TriageRunPanel(props: {
               {cockpit}
               <div className="triage-runs__history" aria-live="polite">
               {jobs.map((job) => (
-                <article className="triage-runs__job" key={job.id}>
+                <article
+                  className="triage-runs__job"
+                  key={job.id}
+                  data-route-item={job.id}
+                  data-route-kind="triage-run"
+                  tabIndex={-1}
+                >
                   <div className="triage-runs__job-header">
                     <div>
                       <h4>{job.request.strategyId}</h4>
@@ -968,7 +979,13 @@ export function TriageRunPanel(props: {
                   <p className="case-memory__note">Lanes settle independently; final same-snapshot proof waits for all lanes.</p>
                   <div className="triage-runs__results">
                     {job.candidates.map((candidate) => (
-                              <div className="triage-runs__candidate" key={candidate.candidateId}>
+                              <div
+                                className="triage-runs__candidate"
+                                key={candidate.candidateId}
+                                data-route-item={`${job.id}:${candidate.candidateId}`}
+                                data-route-kind="triage-candidate"
+                                tabIndex={-1}
+                              >
                                 <div className="triage-runs__candidate-heading">
                                   <strong>{candidate.model}</strong>
                                   <span>{candidate.role} · {candidateLifecycleText(candidate.status)}</span>
