@@ -162,6 +162,16 @@ function latencyLabel(value: CandidateRow["observedLatency"]): string {
     : "unknown";
 }
 
+function candidateRunSummary(candidates: CandidateRow[]): string {
+  const counts = new Map<string, number>();
+  for (const candidate of candidates) {
+    counts.set(candidate.runStatus, (counts.get(candidate.runStatus) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([status, count]) => `${count} ${status}`)
+    .join(" · ");
+}
+
 // The alignment status alone ("partial", "unscored") reads like a verdict with a
 // hidden rationale; spell out what each status actually measures.
 const ALIGNMENT_STATUS_LABELS: Record<string, string> = {
@@ -1115,13 +1125,7 @@ export function ExperimentLab(props: {
     : 0;
   // Scan-strip projections: every line restates a fact already present in the
   // response. Nothing here ranks, scores, or infers a winner.
-  const runStatusCounts = new Map<string, number>();
-  for (const row of current?.candidates ?? []) {
-    runStatusCounts.set(row.runStatus, (runStatusCounts.get(row.runStatus) ?? 0) + 1);
-  }
-  const runFactsSummary = [...runStatusCounts.entries()]
-    .map(([status, count]) => `${count} ${status}`)
-    .join(" · ");
+  const runFactsSummary = candidateRunSummary(current?.candidates ?? []);
   const goldConvergenceCount = (current?.comparison?.convergence ?? []).filter(
     (row) => row.inGold,
   ).length;
@@ -1642,7 +1646,7 @@ export function ExperimentLab(props: {
         <nav className="experiment-lab__experiments" aria-label="Historical triage artifacts">
           <p className="experiment-lab__eyebrow">Historical artifacts</p>
           <ul className="case-list__items">
-            {experiments.map((row) => (
+            {experiments.map((row, index) => (
               <li key={row.id}>
                 <button
                   type="button"
@@ -1650,7 +1654,11 @@ export function ExperimentLab(props: {
                   aria-pressed={row.id === current?.id}
                   onClick={() => selectExperiment(row.id)}
                 >
-                  {row.packageId}
+                  Comparison {index + 1} · {row.candidates.length} lane
+                  {row.candidates.length === 1 ? "" : "s"}
+                  {candidateRunSummary(row.candidates)
+                    ? ` · ${candidateRunSummary(row.candidates)}`
+                    : ""}
                 </button>
               </li>
             ))}
@@ -1659,10 +1667,13 @@ export function ExperimentLab(props: {
       ) : null}
       {current ? (
         <>
-          <p className="experiment-lab__identity">
-            package {current.packageId} · task {current.taskFingerprint.slice(0, 12)} · snapshot{" "}
-            {current.snapshotFingerprint.slice(0, 12)}
-          </p>
+          <details className="experiment-lab__identity">
+            <summary>Technical artifact identity</summary>
+            <p>
+              package {current.packageId} · task {current.taskFingerprint.slice(0, 12)} · snapshot{" "}
+              {current.snapshotFingerprint.slice(0, 12)}
+            </p>
+          </details>
           {showComparison ? (
             <>
           <section className="experiment-lab__scan" aria-labelledby="scan-heading">

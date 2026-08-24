@@ -619,10 +619,12 @@ describe("experiment lab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Export share-safe review" }));
     expect(await screen.findByRole("heading", { name: "Share-safe export ready" })).toBeTruthy();
 
-    const strategyButton = screen.getByRole("button", { name: "pkg-synth-strategy-paths-v1" });
+    expect(screen.queryByRole("button", { name: /pkg-synth/ })).toBeNull();
+    const strategyButton = screen.getByRole("button", { name: /Comparison 2/ });
     fireEvent.click(strategyButton);
     expect(screen.queryByRole("heading", { name: "Share-safe export ready" })).toBeNull();
     expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy();
+    expect(screen.getByText("Technical artifact identity").closest("details")?.hasAttribute("open")).toBe(false);
     expect(strategyButton.getAttribute("aria-current")).toBe("page");
   });
 
@@ -744,8 +746,9 @@ describe("experiment lab", () => {
     );
     render(<ExperimentLab caseId="c1" canWrite={false} canLead={false} readOnly />);
 
-    expect(await screen.findByRole("button", { name: "pkg-synth-three-model-checkout-v1" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "pkg-synth-strategy-paths-v1" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /Comparison 1/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Comparison 2/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /pkg-synth/ })).toBeNull();
     expect(screen.getByRole("heading", { name: "Experiment lab" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Historical triage artifacts" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Gold reference" })).toBeTruthy();
@@ -757,7 +760,7 @@ describe("experiment lab", () => {
     expect(screen.getAllByText(/Synthetic three-model comparison fixture|Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(screen.getByText(/Not live provider output/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "pkg-synth-strategy-paths-v1" }));
+    fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
     expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy();
     expect(screen.getAllByText("programmatic-agent").length).toBeGreaterThan(0);
     expect(screen.getAllByText("chat-operator").length).toBeGreaterThan(0);
@@ -766,7 +769,7 @@ describe("experiment lab", () => {
     expect(screen.getByText(/Textual similarity is not a winner/)).toBeTruthy();
     expect(screen.getByText(/Gold alignment is not a correctness verdict/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "pkg-synth-three-model-checkout-v1" }));
+    fireEvent.click(screen.getByRole("button", { name: /Comparison 1/ }));
     expect(screen.getByText(/package pkg-synth-three-model-checkout-v1/)).toBeTruthy();
     for (const model of ["qwen-3.6-27b", "gpt-oss-120b", "ministral-14b"]) {
       expect(screen.getAllByText(model).length).toBeGreaterThan(0);
@@ -1595,7 +1598,7 @@ describe("decision readiness cockpit", () => {
     fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
     expect(screen.getByText(/Inspecting chat-operator/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "pkg-synth-three-model-checkout-v1" }));
+    fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
     expect(screen.queryByText(/Inspecting chat-operator/)).toBeNull();
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "true",
