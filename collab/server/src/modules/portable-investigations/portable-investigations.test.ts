@@ -383,6 +383,14 @@ describe("portable investigation service", () => {
     const row = await fixture();
     const archive = parsePortableArchive(await row.portable.exportArchive(row.caseId, ACTOR, false));
     expect(archive.investigation.investigation.title).toBe("Synthetic queue stall");
+    expect(archive.investigation.investigation).toMatchObject({
+      problemStatement: "Synthetic workers stop draining a bounded queue.",
+      affectedParties: "Synthetic operations group",
+      impact: "Synthetic requests wait longer than expected.",
+      scope: "One fictional worker pool.",
+      openQuestions: ["Which synthetic signal precedes the stall?"],
+      situationVersion: 0,
+    });
     expect(archive.investigation.evidence.map((item) => item.id)).toContain(row.evidenceId);
     expect(archive.investigation.contentObjects.find((item) => item.digest === row.evidenceHash)?.payloadBase64)
       .toBe(Buffer.from(LOG_BYTES).toString("base64"));
@@ -434,8 +442,46 @@ describe("portable investigation service", () => {
       reason: PORTABLE_APPLY_UNAVAILABLE_REASON,
     });
     expect(response.report.applyAuthorized).toBe(false);
-    expect(response.unsupported).toContain("investigation_situation_fields");
+    expect(response.unsupported).not.toContain("investigation_situation_fields");
     expect(response.unsupported).toContain("imported_content_privacy_is_not_contract_bound");
+  });
+
+  it("fails closed when Situation changes during archive assembly", async () => {
+    const row = await fixture();
+    let caseReads = 0;
+    const mutatingCases = new Proxy(row.cases, {
+      get(target, property, receiver) {
+        if (property === "getCase") {
+          return async (...args: Parameters<CaseService["getCase"]>) => {
+            const found = await target.getCase(...args);
+            caseReads += 1;
+            return caseReads === 2 && found
+              ? {
+                  ...found,
+                  problemStatement: "A concurrent synthetic edit must invalidate the archive.",
+                  situationVersion: (found.situationVersion ?? 0) + 1,
+                }
+              : found;
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const portable = new PortableInvestigationService({
+      installationId: "inst-syntheticnorth",
+      cases: mutatingCases,
+      catalog: row.catalog,
+      imports: row.imports,
+      triageRuns: row.triageRuns,
+      experiments: row.experiments,
+      audit: row.audit,
+      now: () => "2042-03-04T12:00:00.000Z",
+    });
+
+    await expect(portable.exportArchive(row.caseId, ACTOR, false)).rejects.toMatchObject({
+      code: "integrity_failure",
+    } satisfies Partial<PortableServerError>);
   });
 
   it("reports a host-owned deterministic destination collision as blocked", async () => {

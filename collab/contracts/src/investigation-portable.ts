@@ -107,6 +107,9 @@ export type PortableObjectKind = (typeof PORTABLE_OBJECT_KINDS)[number];
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const INSTALLATION_ID = /^inst-[a-z0-9]{8,64}$/;
 const UNKNOWN_STATUS = "unknown" as const;
+const SITUATION_TEXT_LIMIT = 12_000;
+const SITUATION_QUESTION_LIMIT = 2_000;
+const SITUATION_QUESTION_COUNT_LIMIT = 50;
 
 const FORBIDDEN_KEY_RE =
   /^(?:api[_-]?key|authorization|credential|credentials|password|passwd|pwd|secret|token|access[_-]?key|private[_-]?key|endpoint|base[_-]?url|ldap|ldap[_-]?url|bind[_-]?dn|bind[_-]?password|gateway[_-]?url|gateway[_-]?host|gateway[_-]?secret)$/i;
@@ -361,6 +364,12 @@ const investigationShape: ObjectShape = {
   legalHold: f.req(f.bool),
   retentionClass: f.req(f.str),
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
+  problemStatement: f.req(f.str),
+  affectedParties: f.req(f.str),
+  impact: f.req(f.str),
+  scope: f.req(f.str),
+  openQuestions: f.req(f.arr(f.str)),
+  situationVersion: f.req(f.u64),
   createdAt: f.req(f.str),
   createdBy: f.req(f.str),
   objectHash: f.req(f.str),
@@ -638,6 +647,12 @@ export interface PortableInvestigationMetaV1 {
   legalHold: boolean;
   retentionClass: string;
   privacyClass: (typeof PRIVACY_CLASSES)[number];
+  problemStatement: string;
+  affectedParties: string;
+  impact: string;
+  scope: string;
+  openQuestions: string[];
+  situationVersion: number;
   createdAt: string;
   createdBy: string;
   objectHash: string;
@@ -1395,6 +1410,36 @@ export function parsePortableInvestigation(
   requireSafeIdentifier("$.investigation.id", bundle.investigation.id);
   requireNonEmpty("$.investigation.title", bundle.investigation.title);
   requireNonEmpty("$.investigation.retentionClass", bundle.investigation.retentionClass);
+  for (const field of ["problemStatement", "affectedParties", "impact", "scope"] as const) {
+    const value = bundle.investigation[field];
+    if (value.length > SITUATION_TEXT_LIMIT) {
+      throw new ContractViolation(`$.investigation.${field}`, "situation field is too long");
+    }
+    if (value !== value.trim()) {
+      throw new ContractViolation(
+        `$.investigation.${field}`,
+        "situation field must use its canonical trimmed form",
+      );
+    }
+  }
+  if (bundle.investigation.openQuestions.length > SITUATION_QUESTION_COUNT_LIMIT) {
+    throw new ContractViolation("$.investigation.openQuestions", "too many open questions");
+  }
+  for (const [i, question] of bundle.investigation.openQuestions.entries()) {
+    requireNonEmpty(`$.investigation.openQuestions[${i}]`, question);
+    if (question.length > SITUATION_QUESTION_LIMIT) {
+      throw new ContractViolation(
+        `$.investigation.openQuestions[${i}]`,
+        "open question is too long",
+      );
+    }
+    if (question !== question.trim()) {
+      throw new ContractViolation(
+        `$.investigation.openQuestions[${i}]`,
+        "open question must use its canonical trimmed form",
+      );
+    }
+  }
   assertShareSafeTimestamp("$.investigation.createdAt", bundle.investigation.createdAt);
 
   uniqueIds(

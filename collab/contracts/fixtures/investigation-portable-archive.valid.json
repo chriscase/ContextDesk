@@ -1,7 +1,7 @@
 {
   "schemaId": "cd-collab.investigation_portable_archive.v1",
   "exportedAt": "2026-08-23T12:00:00Z",
-  "semanticFingerprint": "6b2830863c0937e5ddb55a268611a5b8fca8c5c3d90867ecbe9decfcd317fb09",
+  "semanticFingerprint": "43e1d6b0dcf461e62b5bba1a6752a7f4188beb0ffdc5222a4f6e4e73cd5c0082",
   "permissionCaveat": "Imported membership and roles are historical snapshots only. Destination permissions must be newly authorized and audited.",
   "historyCaveat": "Imported history is immutable. Destination identity is never inferred from display name or email.",
   "blobInventory": [
@@ -36,9 +36,17 @@
       "legalHold": false,
       "retentionClass": "standard",
       "privacyClass": "share_safe",
+      "problemStatement": "Synthetic workers stop draining a bounded queue.",
+      "affectedParties": "Fictional operations group",
+      "impact": "Synthetic requests remain queued beyond the expected interval.",
+      "scope": "One fictional worker pool.",
+      "openQuestions": [
+        "Which synthetic signal precedes the stall?"
+      ],
+      "situationVersion": 3,
       "createdAt": "2026-08-23T12:00:00Z",
       "createdBy": "actor-alice",
-      "objectHash": "17d07fc15c72c317ed65158b4708310a2153985c28922b66b9785d15b33f10fa"
+      "objectHash": "23ca557fce9962403e97d9c0f4089324700ad95e05cf583f5861f7c1849db167"
     },
     "actors": [
       {
@@ -428,7 +436,7 @@
       {
         "kind": "investigation",
         "id": "inv-1",
-        "hash": "17d07fc15c72c317ed65158b4708310a2153985c28922b66b9785d15b33f10fa"
+        "hash": "23ca557fce9962403e97d9c0f4089324700ad95e05cf583f5861f7c1849db167"
       },
       {
         "kind": "snapshot",
@@ -456,7 +464,7 @@
         "hash": "ecada038eb8c236780c9cd980cff5b9c792421a9906b48fc48c2badf38aebe20"
       }
     ],
-    "bundleFingerprint": "11893e4c79418e697f9ca191b01a479825f3c284e898332d0712d668c5c2dfe6"
+    "bundleFingerprint": "0638ea7fe0d3cc045681e513a525003a67e51f2a38d06b25b440641f1cd6c4bb"
   },
-  "transportHash": "d2fa9e3b99e4a50826b0742bbc1e3f70cc538c1b0c33c04cf73a513d798e818a"
+  "transportHash": "a0ede9f1350e6cdc777d63fd471837b767fa4cc08fddb163b48f22200dbc5395"
 }

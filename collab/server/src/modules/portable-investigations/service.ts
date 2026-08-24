@@ -37,7 +37,6 @@ export const PORTABLE_APPLY_UNAVAILABLE_REASON =
   "atomic_apply_not_proven_for_memory_and_postgresql" as const;
 
 export const PORTABLE_CONTRACT_UNSUPPORTED = [
-  "investigation_situation_fields",
   "hypothesis_links",
   "file_reference_location_and_verification",
   "triage_candidate_summaries_and_runtime_details",
@@ -702,6 +701,12 @@ export class PortableInvestigationService {
         legalHold: caseRow.legalHold,
         retentionClass: caseRow.retentionClass,
         privacyClass,
+        problemStatement: caseRow.problemStatement ?? "",
+        affectedParties: caseRow.affectedParties ?? "",
+        impact: caseRow.impact ?? "",
+        scope: caseRow.scope ?? "",
+        openQuestions: [...(caseRow.openQuestions ?? [])],
+        situationVersion: caseRow.situationVersion ?? 0,
         createdAt: caseRow.createdAt,
         createdBy: caseRow.createdBy,
         objectHash: "",

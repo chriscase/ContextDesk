@@ -86,6 +86,14 @@ describe("portable investigation contract", () => {
     expect(parsed.permissionCaveat).toBe(PORTABLE_PERMISSION_CAVEAT);
     expect(parsed.historyCaveat).toBe(PORTABLE_HISTORY_CAVEAT);
     expect(parsed.investigation.id).toBe("inv-1");
+    expect(parsed.investigation).toMatchObject({
+      problemStatement: "Synthetic workers stop draining a bounded queue.",
+      affectedParties: "Fictional operations group",
+      impact: "Synthetic requests remain queued beyond the expected interval.",
+      scope: "One fictional worker pool.",
+      openQuestions: ["Which synthetic signal precedes the stall?"],
+      situationVersion: 3,
+    });
     expect(parsed.gold[0]?.notes).toContain(GOLD_IS_HUMAN_BENCHMARK);
     expect(parsed.alignments[0]?.notes).toContain(GOLD_ALIGNMENT_NOT_CORRECTNESS);
     expect(parsed.importedAiRuns[0]?.usageStatus).toBe("unknown");
@@ -114,6 +122,19 @@ describe("portable investigation contract", () => {
     const again = canonicalizePortableInvestigation(parsePortableInvestigation(canonical));
     expect(JSON.stringify(again)).toBe(JSON.stringify(canonical));
     expect(portableBundleFingerprint(unsignedOf(parsed))).toBe(parsed.bundleFingerprint);
+  });
+
+  it("preserves Situation through canonicalization and dry-run identity remapping", () => {
+    const parsed = parsePortableInvestigation(valid());
+    const canonical = canonicalizePortableInvestigation(parsed);
+    const report = preflightPortableInvestigation(canonical, dryRun(canonical));
+    expect(canonical.investigation.problemStatement).toBe(parsed.investigation.problemStatement);
+    expect(canonical.investigation.openQuestions).toEqual(parsed.investigation.openQuestions);
+    expect(canonical.investigation.situationVersion).toBe(3);
+    expect(canonical.investigation.objectHash).toBe(parsed.investigation.objectHash);
+    expect(canonical.bundleFingerprint).toBe(parsed.bundleFingerprint);
+    expect(report.idRemap.some((row) => row.namespace === "investigation")).toBe(true);
+    expect(report.semanticFingerprint).toBe(portableSemanticFingerprint(parsed));
   });
 
   it("keeps canonical fingerprints stable across reordered bags", () => {

@@ -66,6 +66,12 @@ function unsignedSynthetic(): PortableInvestigationUnsigned {
       legalHold: false,
       retentionClass: "standard",
       privacyClass: "share_safe",
+      problemStatement: "Synthetic workers stop draining a bounded queue.",
+      affectedParties: "Fictional operations group",
+      impact: "Synthetic requests remain queued beyond the expected interval.",
+      scope: "One fictional worker pool.",
+      openQuestions: ["Which synthetic signal precedes the stall?"],
+      situationVersion: 3,
       createdAt: TS,
       createdBy: "operator-north",
       objectHash: Z,
@@ -1142,5 +1148,65 @@ describe("portable investigation adversarial lab", () => {
     expect(() => parsePortableInvestigation({ ...after, bundleFingerprint: before.bundleFingerprint })).toThrow(
       /hash\/fingerprint mismatch/,
     );
+  });
+
+  it("binds every Situation field into investigation integrity and semantic fingerprints", () => {
+    const before = syntheticSeal();
+    const mutations: Array<[string, (row: PortableInvestigationV1) => void]> = [
+      ["problemStatement", (row) => { row.investigation.problemStatement = "Synthetic workers recover too slowly."; }],
+      ["affectedParties", (row) => { row.investigation.affectedParties = "Fictional service owners"; }],
+      ["impact", (row) => { row.investigation.impact = "Synthetic requests exceed a bounded target."; }],
+      ["scope", (row) => { row.investigation.scope = "Two fictional worker pools."; }],
+      ["openQuestions", (row) => { row.investigation.openQuestions.push("Did the retry begin first?"); }],
+      ["situationVersion", (row) => { row.investigation.situationVersion += 1; }],
+    ];
+
+    for (const [name, mutate] of mutations) {
+      const tampered = structuredClone(before);
+      mutate(tampered);
+      expect(() => parsePortableInvestigation(tampered), name).toThrow(/hash\/fingerprint mismatch/);
+      const after = reseal(tampered);
+      expect(() => parsePortableInvestigation(after), name).not.toThrow();
+      expect(after.investigation.objectHash, name).not.toBe(before.investigation.objectHash);
+      expect(after.bundleFingerprint, name).not.toBe(before.bundleFingerprint);
+      expect(portableBundleFingerprint(after), name).toBe(after.bundleFingerprint);
+    }
+  });
+
+  it("fails closed on missing, unknown, noncanonical, oversized, or invalid-version Situation data", () => {
+    const missing = structuredClone(syntheticSeal()) as unknown as {
+      investigation: Record<string, unknown>;
+    };
+    delete missing.investigation.problemStatement;
+    expect(() => parsePortableInvestigation(missing)).toThrow(/missing required key/);
+
+    const unknown = structuredClone(syntheticSeal()) as unknown as {
+      investigation: Record<string, unknown>;
+    };
+    unknown.investigation.situationNote = "Synthetic extra field";
+    expect(() => parsePortableInvestigation(unknown)).toThrow(/unknown key/);
+
+    const untrimmed = syntheticSeal();
+    untrimmed.investigation.problemStatement = " synthetic ";
+    expect(() => parsePortableInvestigation(reseal(untrimmed))).toThrow(/canonical trimmed form/);
+
+    const emptyQuestion = syntheticSeal();
+    emptyQuestion.investigation.openQuestions = ["   "];
+    expect(() => parsePortableInvestigation(reseal(emptyQuestion))).toThrow(/must not be empty/);
+
+    const tooMany = syntheticSeal();
+    tooMany.investigation.openQuestions = Array.from(
+      { length: 51 },
+      (_, index) => `Synthetic question ${index + 1}?`,
+    );
+    expect(() => parsePortableInvestigation(reseal(tooMany))).toThrow(/too many open questions/);
+
+    const tooLong = syntheticSeal();
+    tooLong.investigation.impact = "x".repeat(12_001);
+    expect(() => parsePortableInvestigation(reseal(tooLong))).toThrow(/situation field is too long/);
+
+    const fractional = syntheticSeal();
+    fractional.investigation.situationVersion = 1.5;
+    expect(() => parsePortableInvestigation(reseal(fractional))).toThrow(/unsigned safe integer/);
   });
 });

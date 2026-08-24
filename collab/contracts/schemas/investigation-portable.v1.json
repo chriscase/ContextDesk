@@ -117,6 +117,12 @@
         "legalHold",
         "retentionClass",
         "privacyClass",
+        "problemStatement",
+        "affectedParties",
+        "impact",
+        "scope",
+        "openQuestions",
+        "situationVersion",
         "createdAt",
         "createdBy",
         "objectHash"
@@ -129,6 +135,16 @@
         "legalHold": { "type": "boolean" },
         "retentionClass": { "type": "string", "minLength": 1 },
         "privacyClass": { "$ref": "#/$defs/privacy" },
+        "problemStatement": { "type": "string", "maxLength": 12000 },
+        "affectedParties": { "type": "string", "maxLength": 12000 },
+        "impact": { "type": "string", "maxLength": 12000 },
+        "scope": { "type": "string", "maxLength": 12000 },
+        "openQuestions": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "situationVersion": { "type": "integer", "minimum": 0 },
         "createdAt": { "$ref": "#/$defs/timestamp" },
         "createdBy": { "type": "string", "minLength": 1 },
         "objectHash": { "$ref": "#/$defs/objectHash" }
