@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,6 +28,8 @@ import {
   loadConfiguredTriageProfileCatalog,
   RustBridgeTriageExecutor,
   TriageRunService,
+  type TriageBatchRunExecutor,
+  type TriageProfileOption,
   type RustBridgeTriageExecutorOptions,
 } from "./modules/triage-runs/index.js";
 import { PresenceService } from "./modules/presence/index.js";
@@ -38,6 +41,7 @@ export const DEMO_PASSWORD = "demo";
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = join(here, "..", "..", "contracts", "fixtures");
 const demoRoleMap = "cn=demo-admins,ou=groups,dc=example,dc=test=admin";
+const demoTaskIdentity = "demo-checkout-v1";
 
 interface DemoApp {
   app: FastifyInstance;
@@ -49,6 +53,10 @@ interface DemoAppOptions {
   staticDir?: string | null;
   /** Explicit opt-in host bridge for a local, memory-backed live rehearsal. */
   gatewayRunner?: RustBridgeTriageExecutorOptions;
+  /** Deterministic test seam for the same gateway orchestration path. */
+  gatewayExecutor?: TriageBatchRunExecutor;
+  /** Safe profile metadata paired with a test gateway executor. */
+  triageProfiles?: TriageProfileOption[];
   /** Test seam for proving construction-failure cleanup; production uses buildApp. */
   appBuilder?: typeof buildApp;
   /** Test observer for the temporary root created before app construction. */
@@ -88,6 +96,45 @@ async function fixture(name: string): Promise<object> {
   return parsed;
 }
 
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function bindDemoExperimentEnvelope(
+  envelope: object,
+  snapshotFingerprint: string,
+  taskFingerprint: string,
+  evidenceIds: Readonly<Record<string, string>>,
+  candidateIds: Readonly<Record<string, string>>,
+): object {
+  const seedIds = { ...evidenceIds, ...candidateIds };
+  const retargetSeedIds = (value: unknown): unknown => {
+    if (typeof value === "string") return seedIds[value] ?? value;
+    if (Array.isArray(value)) return value.map(retargetSeedIds);
+    if (typeof value === "object" && value !== null) {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, row]) => [
+          key,
+          retargetSeedIds(row),
+        ]),
+      );
+    }
+    return value;
+  };
+  const clone = retargetSeedIds(structuredClone(envelope)) as Record<string, unknown>;
+  const binding = { snapshotFingerprint, taskFingerprint };
+  if (clone.schemaId !== "cd-collab.strategy_package.v1") {
+    return { ...clone, ...binding };
+  }
+  if (typeof clone.experiment !== "object" || clone.experiment === null || Array.isArray(clone.experiment)) {
+    throw new Error("synthetic demo strategy fixture must contain an experiment object");
+  }
+  return {
+    ...clone,
+    experiment: { ...(clone.experiment as Record<string, unknown>), ...binding },
+  };
+}
+
 async function okJson<T>(
   app: FastifyInstance,
   input: {
@@ -116,6 +163,8 @@ async function seedReviewedExperiment(
   cookie: string,
   caseId: string,
   envelope: object,
+  evidenceIds: Readonly<Record<string, string>>,
+  candidateIds: Readonly<Record<string, string>>,
   observations: {
     candidateId: string;
     dimension: string;
@@ -136,14 +185,21 @@ async function seedReviewedExperiment(
       method: "POST",
       url: `/api/cases/${caseId}/experiments/${imported.id}/helpfulness`,
       cookie,
-      payload: observation,
+      payload: {
+        ...observation,
+        candidateId: candidateIds[observation.candidateId] ?? observation.candidateId,
+        evidenceRefs: observation.evidenceRefs.map((id) => evidenceIds[id] ?? id),
+      },
     });
   }
   const proposed = await okJson<{ id: string; revision: number }>(app, {
     method: "POST",
     url: `/api/cases/${caseId}/experiments/${imported.id}/decisions`,
     cookie,
-    payload: decision,
+    payload: {
+      ...decision,
+      evidenceRefs: decision.evidenceRefs.map((id) => evidenceIds[id] ?? id),
+    },
   });
   const accepted = await okJson<{ id: string; revision: number }>(app, {
     method: "POST",
@@ -158,10 +214,13 @@ async function seedReviewedExperiment(
     payload: {
       decisionId: accepted.id,
       expectedRevision: accepted.revision,
-      evidenceAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+      evidenceAnchors: [
+        evidenceIds["ev-demo-checkout-log"],
+        evidenceIds["ev-demo-inventory-timeout"],
+      ],
       expectedRelationships: [
-        { evidenceRef: "ev-demo-checkout-log", role: "symptom" },
-        { evidenceRef: "ev-demo-inventory-timeout", role: "cause" },
+        { evidenceRef: evidenceIds["ev-demo-checkout-log"], role: "symptom" },
+        { evidenceRef: evidenceIds["ev-demo-inventory-timeout"], role: "cause" },
       ],
       helpfulnessDimensions: ["evidence_support", "actionability"],
       notes: ["Synthetic demo benchmark. Not live provider output."],
@@ -258,6 +317,32 @@ async function seed(app: FastifyInstance): Promise<string> {
       privacyClass: "share_safe",
     },
   });
+  const poolEvidence = await okJson<{ artifact: { id: string } }>(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/evidence`,
+    cookie,
+    payload: {
+      kind: "log",
+      filename: "connection-pool.log",
+      mediaType: "text/plain",
+      contentBase64: Buffer.from("connection pool active=40 idle=0 queued=17\n").toString("base64"),
+      summary: "Synthetic connection-pool pressure evidence.",
+      sourceId: source.id,
+      privacyClass: "share_safe",
+    },
+  });
+  const demoEvidenceIds = {
+    "ev-demo-checkout-log": checkoutEvidence.artifact.id,
+    "ev-demo-inventory-timeout": inventoryEvidence.artifact.id,
+    "ev-demo-pool-exhaustion": poolEvidence.artifact.id,
+  } as const;
+  const demoCandidateIds = {
+    "cand-qwen-3.6-27b": "qwen-reviewer",
+    "cand-gpt-oss-120b": "gpt-oss-contributor",
+    "cand-ministral-14b": "ministral-challenger",
+    "cand-programmatic-agent": "programmatic-agent",
+    "cand-chat-operator": "chat-operator",
+  } as const;
   for (const body of [
     "Inventory timeout is the leading cause to investigate.",
     "Checkout and inventory pool pressure should be investigated together.",
@@ -279,12 +364,16 @@ async function seed(app: FastifyInstance): Promise<string> {
       },
     });
   }
-  const demoSnapshot = await okJson<{ id: string }>(app, {
+  const demoSnapshot = await okJson<{ id: string; fingerprint: string }>(app, {
     method: "POST",
     url: `/api/cases/${created.id}/snapshots`,
     cookie,
     payload: {
-      evidenceIds: [checkoutEvidence.artifact.id, inventoryEvidence.artifact.id],
+      evidenceIds: [
+        checkoutEvidence.artifact.id,
+        inventoryEvidence.artifact.id,
+        poolEvidence.artifact.id,
+      ],
       visibility: "owner_only",
       protocolVersion: "synthetic-demo-v1",
     },
@@ -300,21 +389,50 @@ async function seed(app: FastifyInstance): Promise<string> {
       strategyId: "contextdesk.standard.synthetic-demo",
       question: "What caused the checkout timeout and what should we inspect next?",
       policyFingerprint: null,
-      taskFingerprint: "demo-checkout-v1",
+      taskFingerprint: demoTaskIdentity,
       candidates: [
-        { candidateId: "qwen-reviewer", role: "reviewer", provider: "synthetic", profileId: null, model: "qwen-3.6-27b", version: null },
-        { candidateId: "gpt-oss-contributor", role: "contributor", provider: "synthetic", profileId: null, model: "gpt-oss-120b", version: null },
-        { candidateId: "ministral-challenger", role: "challenger", provider: "synthetic", profileId: null, model: "ministral-3-14b-instruct-2512", version: null },
+        { candidateId: demoCandidateIds["cand-qwen-3.6-27b"], role: "reviewer", provider: "synthetic", profileId: null, model: "qwen-3.6-27b", version: null },
+        { candidateId: demoCandidateIds["cand-gpt-oss-120b"], role: "contributor", provider: "synthetic", profileId: null, model: "gpt-oss-120b", version: null },
+        { candidateId: demoCandidateIds["cand-ministral-14b"], role: "challenger", provider: "synthetic", profileId: null, model: "ministral-3-14b-instruct-2512", version: null },
+      ],
+    },
+  });
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/triage-runs`,
+    cookie,
+    payload: {
+      schemaId: "cd-collab.triage_job_request.v1",
+      snapshotId: demoSnapshot.id,
+      mode: "deterministic_mock",
+      strategyId: "contextdesk.strategy-paths.synthetic-demo",
+      question: "How do the fictional programmatic and chat investigation paths compare?",
+      policyFingerprint: null,
+      taskFingerprint: demoTaskIdentity,
+      candidates: [
+        { candidateId: demoCandidateIds["cand-programmatic-agent"], role: "contributor", provider: "synthetic", profileId: null, model: "programmatic-agent", version: null },
+        { candidateId: demoCandidateIds["cand-chat-operator"], role: "reviewer", provider: "synthetic", profileId: null, model: "chat-operator", version: null },
       ],
     },
   });
   await new Promise((resolve) => setTimeout(resolve, 40));
 
+  const experimentSnapshotFingerprint = `snap-${demoSnapshot.fingerprint}`;
+  const experimentTaskFingerprint = `task-${sha256(demoTaskIdentity)}`;
+
   const primaryExperimentId = await seedReviewedExperiment(
     app,
     cookie,
     created.id,
-    await fixture("experiment-package.valid.json"),
+    bindDemoExperimentEnvelope(
+      await fixture("experiment-package.valid.json"),
+      experimentSnapshotFingerprint,
+      experimentTaskFingerprint,
+      demoEvidenceIds,
+      demoCandidateIds,
+    ),
+    demoEvidenceIds,
+    demoCandidateIds,
     [
       {
         candidateId: "cand-qwen-3.6-27b",
@@ -348,26 +466,26 @@ async function seed(app: FastifyInstance): Promise<string> {
 
   const syntheticTraceTranscripts = [
     {
-      candidateId: "cand-qwen-3.6-27b",
+      candidateId: demoCandidateIds["cand-qwen-3.6-27b"],
       text:
         "Human: Determine why the fictional checkout request timed out.\n" +
-        "Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms while waiting for inventory-client; evidence ev-demo-checkout-log\n" +
-        "Tool: 2026-08-24T06:14:22Z inventory-client ERROR TimeoutError: inventory lookup exceeded 30000ms at InventoryClient.fetch (inventory-client.ts:118); evidence ev-demo-inventory-timeout\n" +
+        `Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms while waiting for inventory-client; evidence ${demoEvidenceIds["ev-demo-checkout-log"]}\n` +
+        `Tool: 2026-08-24T06:14:22Z inventory-client ERROR TimeoutError: inventory lookup exceeded 30000ms at InventoryClient.fetch (inventory-client.ts:118); evidence ${demoEvidenceIds["ev-demo-inventory-timeout"]}\n` +
         "Assistant: The checkout timeout is recorded by all lanes. This lane treats the inventory-client timeout as the leading cause, pending pool and network measurements.",
     },
     {
-      candidateId: "cand-gpt-oss-120b",
+      candidateId: demoCandidateIds["cand-gpt-oss-120b"],
       text:
         "Human: Compare the fictional checkout and connection-pool signals.\n" +
-        "Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms; evidence ev-demo-checkout-log\n" +
-        "Tool: 2026-08-24T06:14:21Z connection-pool WARN active=40 idle=0 queued=17; evidence ev-demo-pool-exhaustion\n" +
+        `Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms; evidence ${demoEvidenceIds["ev-demo-checkout-log"]}\n` +
+        `Tool: 2026-08-24T06:14:21Z connection-pool WARN active=40 idle=0 queued=17; evidence ${demoEvidenceIds["ev-demo-pool-exhaustion"]}\n` +
         "Assistant: Pool exhaustion is a plausible upstream contributor. Inspect pool wait duration and dependency latency before declaring a root cause.",
     },
     {
-      candidateId: "cand-ministral-14b",
+      candidateId: demoCandidateIds["cand-ministral-14b"],
       text:
         "Human: State only what the fictional checkout record establishes.\n" +
-        "Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms while awaiting a dependency; evidence ev-demo-checkout-log\n" +
+        `Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms while awaiting a dependency; evidence ${demoEvidenceIds["ev-demo-checkout-log"]}\n` +
         "Assistant: The timeout symptom is established. The record is not sufficient to choose between dependency latency, pool pressure, or another cause.",
     },
   ];
@@ -388,7 +506,15 @@ async function seed(app: FastifyInstance): Promise<string> {
     app,
     cookie,
     created.id,
-    await fixture("strategy-package.converge.json"),
+    bindDemoExperimentEnvelope(
+      await fixture("strategy-package.converge.json"),
+      experimentSnapshotFingerprint,
+      experimentTaskFingerprint,
+      demoEvidenceIds,
+      demoCandidateIds,
+    ),
+    demoEvidenceIds,
+    demoCandidateIds,
     [
       {
         candidateId: "cand-programmatic-agent",
@@ -438,10 +564,12 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     cases,
     audit,
     jobs: new MemoryTriageJobStore(),
-    ...(options.gatewayRunner
-      ? { gatewayExecutor: new RustBridgeTriageExecutor(options.gatewayRunner) }
-      : {}),
-    profiles: loadConfiguredTriageProfileCatalog(),
+    ...(options.gatewayExecutor
+      ? { gatewayExecutor: options.gatewayExecutor }
+      : options.gatewayRunner
+        ? { gatewayExecutor: new RustBridgeTriageExecutor(options.gatewayRunner) }
+        : {}),
+    profiles: options.triageProfiles ?? loadConfiguredTriageProfileCatalog(),
   });
   const presence = new PresenceService();
   const exporter = new ExportService({
