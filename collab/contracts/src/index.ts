@@ -484,3 +484,5 @@ export type {
   LiveQualificationStatus,
   LiveQualificationVerdict,
 } from "./live-qualification.js";
+
+export * from "./investigation-portable.js";
