@@ -92,7 +92,7 @@ fn live_transport_exposes_authoritative_model_usage_and_cost_once() {
         .take_last_chat_provider_telemetry()
         .expect("wire telemetry");
     assert_eq!(
-        telemetry.response_model.as_deref(),
+        telemetry.certified_response_model(),
         Some("reported/model-b")
     );
     assert_eq!(telemetry.prompt_tokens, Some(11));

@@ -160,6 +160,14 @@ impl ResponseModelIdentity {
         }
     }
 
+    fn into_status_and_value(self) -> (ModelIdentityStatus, Option<String>) {
+        match self {
+            Self::Absent => (ModelIdentityStatus::Absent, None),
+            Self::Certified { value } => (ModelIdentityStatus::Certified, Some(value.0)),
+            Self::Rejected => (ModelIdentityStatus::Rejected, None),
+        }
+    }
+
     fn from_status_and_value(status: ModelIdentityStatus, value: Option<String>) -> Self {
         match status {
             ModelIdentityStatus::Rejected => Self::Rejected,
@@ -1526,6 +1534,28 @@ mod tests {
             ModelIdentityStatus::Rejected
         );
         assert!(!serde_json::to_string(&non_string).unwrap().contains("7"));
+    }
+
+    #[test]
+    fn closed_model_identity_projects_status_without_rejected_bytes() {
+        assert_eq!(
+            ResponseModelIdentity::Absent.into_status_and_value(),
+            (ModelIdentityStatus::Absent, None)
+        );
+        assert_eq!(
+            ResponseModelIdentity::Certified {
+                value: certified("qwen-3.6-27b"),
+            }
+            .into_status_and_value(),
+            (
+                ModelIdentityStatus::Certified,
+                Some("qwen-3.6-27b".to_string())
+            )
+        );
+        assert_eq!(
+            ResponseModelIdentity::Rejected.into_status_and_value(),
+            (ModelIdentityStatus::Rejected, None)
+        );
     }
 
     #[test]

@@ -112,7 +112,10 @@ fn last_response_model_identity(
     for round in rounds.iter().rev() {
         match round.transport.response_model_identity() {
             ResponseModelIdentity::Certified { value } => {
-                return (Some(value), ModelIdentityStatus::Certified);
+                return (
+                    Some(value.as_str().to_owned()),
+                    ModelIdentityStatus::Certified,
+                );
             }
             ResponseModelIdentity::Rejected => return (None, ModelIdentityStatus::Rejected),
             ResponseModelIdentity::Absent => {}
@@ -243,7 +246,8 @@ pub fn aggregate_provider_telemetry_event(
 mod tests {
     use super::*;
     use cd_core::provider_telemetry::{
-        ModelIdentityStatus, ObservedRoute, ProviderTransportTelemetry,
+        CertifiedModelIdentity, ModelIdentityStatus, ObservedRoute, PresentResponseModelIdentity,
+        ProviderTransportTelemetry,
     };
     use cd_core::turn_trace::{TracedCall, TracedMessage, TracedOutcome};
 
@@ -297,8 +301,7 @@ mod tests {
         req: &str,
     ) -> ProviderTransportTelemetry {
         ProviderTransportTelemetry {
-            response_model: Some(model.into()),
-            model_identity_status: ModelIdentityStatus::Certified,
+            response_model: Some(certified_response_model(model)),
             provider_request_id: Some(req.into()),
             observed_route: ObservedRoute::Reported {
                 value: "anthropic".into(),
@@ -315,11 +318,17 @@ mod tests {
         }
     }
 
+    fn certified_response_model(model: &str) -> PresentResponseModelIdentity {
+        PresentResponseModelIdentity::Certified {
+            value: CertifiedModelIdentity::try_from(model)
+                .expect("synthetic provider model identity must certify"),
+        }
+    }
+
     #[test]
     fn configured_model_never_becomes_observed_route() {
         let transport = ProviderTransportTelemetry {
-            response_model: Some("anthropic/claude-sonnet-4".into()),
-            model_identity_status: ModelIdentityStatus::Certified,
+            response_model: Some(certified_response_model("anthropic/claude-sonnet-4")),
             ..Default::default()
         };
         let calls = vec![call_with_transport(0, transport, "stop", false)];
@@ -468,8 +477,7 @@ mod tests {
     #[test]
     fn later_rejected_identity_blocks_fallback_to_older_certified_value() {
         let rejected = ProviderTransportTelemetry {
-            response_model: None,
-            model_identity_status: ModelIdentityStatus::Rejected,
+            response_model: Some(PresentResponseModelIdentity::Rejected),
             ..Default::default()
         };
         let calls = vec![
@@ -521,8 +529,7 @@ mod tests {
             call_with_transport(
                 0,
                 ProviderTransportTelemetry {
-                    response_model: None,
-                    model_identity_status: ModelIdentityStatus::Rejected,
+                    response_model: Some(PresentResponseModelIdentity::Rejected),
                     ..Default::default()
                 },
                 "tool_calls",
@@ -707,11 +714,11 @@ mod tests {
             events: &events,
         });
         assert_eq!(
-            tel.rounds[0].transport.response_model.as_deref(),
+            tel.rounds[0].transport.certified_response_model(),
             Some("first")
         );
         assert_eq!(
-            tel.rounds[1].transport.response_model.as_deref(),
+            tel.rounds[1].transport.certified_response_model(),
             Some("second")
         );
         assert_eq!(tel.rounds[0].transport.cost, Some(0.01));
@@ -875,8 +882,7 @@ mod tests {
             ..Default::default()
         };
         let second = ProviderTransportTelemetry::default();
-        first.response_model = Some("deepseek/deepseek-v4-flash".into());
-        first.model_identity_status = ModelIdentityStatus::Certified;
+        first.response_model = Some(certified_response_model("deepseek/deepseek-v4-flash"));
         let calls = vec![
             call_with_transport(0, first, "tool_calls", false),
             call_with_transport(1, second, "stop", false),
