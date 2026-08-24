@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/overview.v1.json",
+  "title": "cd-collab Overview v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "generatedAt",
+    "viewer",
+    "statusCounts",
+    "severityCounts",
+    "openCases",
+    "recentActivity",
+    "queuedAndRunningJobs",
+    "recentTerminalJobs",
+    "presence",
+    "attention",
+    "notices"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.overview.v1" },
+    "generatedAt": { "type": "string", "minLength": 1 },
+    "viewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "roles"],
+      "properties": {
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "username", "displayName"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "username": { "type": "string", "minLength": 1 },
+            "displayName": { "type": "string", "minLength": 1 }
+          }
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["viewer", "contributor", "case-lead", "admin"]
+          }
+        }
+      }
+    },
+    "statusCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["open", "monitoring", "resolved", "archived"],
+      "properties": {
+        "open": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "monitoring": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "resolved": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "archived": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "severityCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["low", "medium", "high", "critical"],
+      "properties": {
+        "low": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "medium": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "high": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "critical": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "openCases": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "status", "severity", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["open", "monitoring"] },
+          "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "createdAt": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "recentActivity": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["caseId", "title", "kind", "actor", "serverTime", "seq"],
+        "properties": {
+          "caseId": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "actor": { "type": "string", "minLength": 1 },
+          "serverTime": { "type": "string", "minLength": 1 },
+          "seq": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        }
+      }
+    },
+    "queuedAndRunningJobs": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/runningJob" }
+    },
+    "recentTerminalJobs": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/terminalJob" }
+    },
+    "presence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "reason", "ttlSeconds", "members"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "reason": { "type": "string", "enum": ["ephemeral_live", "static_snapshot"] },
+        "ttlSeconds": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "members": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["caseId", "identityId", "username", "surface", "lastSeenAt"],
+            "properties": {
+              "caseId": { "type": "string", "minLength": 1 },
+              "identityId": { "type": "string", "minLength": 1 },
+              "username": { "type": "string", "minLength": 1 },
+              "surface": {
+                "type": "string",
+                "enum": ["case_board", "experiment_lab", "triage_runs"]
+              },
+              "lastSeenAt": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "reason": { "const": "static_snapshot" } },
+            "required": ["reason"]
+          },
+          "then": {
+            "properties": {
+              "available": { "const": false },
+              "members": { "type": "array", "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "reason": { "const": "ephemeral_live" } },
+            "required": ["reason"]
+          },
+          "then": {
+            "properties": {
+              "available": { "const": true }
+            }
+          }
+        }
+      ]
+    },
+    "attention": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "predicate",
+          "caseId",
+          "caseTitle",
+          "experimentId",
+          "decisionId",
+          "revision",
+          "authorUsername",
+          "createdAt"
+        ],
+        "properties": {
+          "predicate": {
+            "type": "string",
+            "enum": ["accept_eligible_proposal", "own_open_proposal"]
+          },
+          "caseId": { "type": "string", "minLength": 1 },
+          "caseTitle": { "type": "string", "minLength": 1 },
+          "experimentId": { "type": "string", "minLength": 1 },
+          "decisionId": { "type": "string", "minLength": 1 },
+          "revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "authorUsername": { "type": "string", "minLength": 1 },
+          "createdAt": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "notices": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "Recorded counts are not progress or completeness.",
+          "Overview is not the full investigation inventory.",
+          "Presence is ephemeral and is not evidence.",
+          "Agreement is not proof of correctness, and cost and usage may remain unknown.",
+          "No blocked or stale investigation state exists unless it is recorded.",
+          "Attention names only an accept-eligible proposed decision the current lead or admin did not author, or the current actor's own still-open proposal."
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "runningJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "caseId",
+        "caseTitle",
+        "status",
+        "strategyId",
+        "sameSnapshot",
+        "createdAt",
+        "updatedAt",
+        "startedAt",
+        "finishedAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "caseId": { "type": "string", "minLength": 1 },
+        "caseTitle": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["queued", "running"] },
+        "strategyId": { "type": "string", "minLength": 1 },
+        "strategyVersion": { "type": "string", "minLength": 1 },
+        "sameSnapshot": { "type": ["boolean", "null"] },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "startedAt": { "type": ["string", "null"] },
+        "finishedAt": { "type": ["string", "null"] }
+      }
+    },
+    "terminalJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "caseId",
+        "caseTitle",
+        "status",
+        "strategyId",
+        "sameSnapshot",
+        "createdAt",
+        "updatedAt",
+        "startedAt",
+        "finishedAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "caseId": { "type": "string", "minLength": 1 },
+        "caseTitle": { "type": "string", "minLength": 1 },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "partial", "failed", "timed_out", "cancelled"]
+        },
+        "strategyId": { "type": "string", "minLength": 1 },
+        "strategyVersion": { "type": "string", "minLength": 1 },
+        "sameSnapshot": { "type": ["boolean", "null"] },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "startedAt": { "type": ["string", "null"] },
+        "finishedAt": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

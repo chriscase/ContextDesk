@@ -46,4 +46,49 @@ describe("SQLite local runtime", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("does not serialize full store state for Overview reads or indexed visibility", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-overview-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const created = await cases.createCase(actor, { title: "Bounded Overview" }, "test");
+
+      const originalWrite = runtime.state.write.bind(runtime.state);
+      let writes = 0;
+      runtime.state.write = (key, value) => {
+        writes += 1;
+        originalWrite(key, value);
+      };
+
+      const scope = { actorId: actor.id, isAdmin: false };
+      const visibility = await runtime.cases.overviewVisibilityBoundary(scope);
+      expect(visibility?.caseTitle(created.id)).toBe("Bounded Overview");
+      await runtime.cases.overviewCounts(scope);
+      await runtime.cases.listOverviewOpenCases(scope, 12);
+      await runtime.cases.listOverviewActivity(scope, 20);
+      await runtime.jobs.listOverviewJobs({
+        ...scope,
+        statuses: ["queued", "running"],
+        limit: 20,
+        visibility,
+      });
+      await runtime.experiments.listOverviewProposed({
+        ...scope,
+        limit: 20,
+        visibility,
+      });
+      expect(writes).toBe(0);
+
+      await runtime.cases.updateCaseMeta({ id: created.id, status: "monitoring", legalHold: false });
+      expect(writes).toBe(1);
+      runtime.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

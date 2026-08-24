@@ -1,11 +1,28 @@
 import type { Pool } from "pg";
 import { parseTriageJob, type TriageJobV1 } from "@cd-collab/contracts";
+import {
+  overviewVisiblePredicate,
+  type OverviewScope,
+  type OverviewVisibilityBoundary,
+} from "../cases/index.js";
+
+export interface OverviewListedJob {
+  job: TriageJobV1;
+  caseTitle: string;
+}
+
+export interface OverviewJobQuery extends OverviewScope {
+  statuses: TriageJobV1["status"][];
+  limit: number;
+  visibility: OverviewVisibilityBoundary | null;
+}
 
 export interface TriageJobStore {
   insert(job: TriageJobV1): Promise<void>;
   get(id: string): Promise<TriageJobV1 | null>;
   listByCase(caseId: string): Promise<TriageJobV1[]>;
   listByStatuses(statuses: TriageJobV1["status"][]): Promise<TriageJobV1[]>;
+  listOverviewJobs(query: OverviewJobQuery): Promise<OverviewListedJob[]>;
   /** Atomically claims a queued job for one worker. */
   claimQueued(
     id: string,
@@ -63,6 +80,29 @@ export class MemoryTriageJobStore implements TriageJobStore {
       .filter((job) => allowed.has(job.status))
       .map((job) => cloneJob(job))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
+  async listOverviewJobs(query: OverviewJobQuery): Promise<OverviewListedJob[]> {
+    const cap = Math.max(0, Math.trunc(query.limit) || 0);
+    if (query.statuses.length === 0 || cap === 0) return [];
+    const allowed = new Set(query.statuses);
+    const titles = new Map<string, string | null>();
+    const listed: OverviewListedJob[] = [];
+    for (const job of this.jobs.values()) {
+      if (!allowed.has(job.status)) continue;
+      if (!titles.has(job.caseId)) {
+        titles.set(job.caseId, query.visibility?.caseTitle(job.caseId) ?? null);
+      }
+      const caseTitle = titles.get(job.caseId);
+      if (!caseTitle) continue;
+      listed.push({ job: cloneJob(job), caseTitle });
+    }
+    return listed
+      .sort((left, right) => {
+        const byUpdated = right.job.updatedAt.localeCompare(left.job.updatedAt);
+        return byUpdated !== 0 ? byUpdated : left.job.id.localeCompare(right.job.id);
+      })
+      .slice(0, cap);
   }
 
   async claimQueued(
@@ -209,6 +249,29 @@ export class PgTriageJobStore implements TriageJobStore {
       lease_owner?: unknown;
       lease_expires_at?: unknown;
     }));
+  }
+
+  async listOverviewJobs(query: OverviewJobQuery): Promise<OverviewListedJob[]> {
+    const cap = Math.max(0, Math.trunc(query.limit) || 0);
+    if (query.statuses.length === 0 || cap === 0) return [];
+    const result = await this.db.query(
+      `SELECT j.payload, j.lease_owner, j.lease_expires_at, c.title AS case_title
+       FROM triage_jobs j
+       INNER JOIN cases c ON c.id = j.case_id
+       WHERE j.status = ANY($3::text[])
+         AND ${overviewVisiblePredicate("j.case_id", "$1", "$2")}
+       ORDER BY j.updated_at DESC, j.id ASC
+       LIMIT $4`,
+      [query.isAdmin, query.actorId, query.statuses, cap],
+    );
+    return result.rows.map((row) => ({
+      job: PgTriageJobStore.withLease(row as {
+        payload?: unknown;
+        lease_owner?: unknown;
+        lease_expires_at?: unknown;
+      }),
+      caseTitle: String((row as { case_title?: unknown }).case_title ?? ""),
+    })).filter((row) => row.caseTitle.length > 0);
   }
 
   async claimQueued(

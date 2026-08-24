@@ -142,7 +142,12 @@ export class SqliteState {
   }
 }
 
-function persistentMemoryStore<T extends object>(state: SqliteState, key: string, store: T): T {
+function persistentMemoryStore<T extends object>(
+  state: SqliteState,
+  key: string,
+  store: T,
+  mutatingMethods: ReadonlySet<string>,
+): T {
   const saved = state.read(key);
   if (saved !== null) restoreStore(store, saved);
   for (const name of methodNames(store)) {
@@ -150,7 +155,7 @@ function persistentMemoryStore<T extends object>(state: SqliteState, key: string
     if (typeof original !== "function") continue;
     Reflect.set(store, name, async (...args: unknown[]) => {
       const result = await Reflect.apply(original, store, args);
-      state.write(key, storeState(store));
+      if (mutatingMethods.has(name)) state.write(key, storeState(store));
       return result;
     });
   }
@@ -221,13 +226,58 @@ export function createSqliteRuntime(
   return {
     state,
     databaseProbe: state,
-    audit: persistentMemoryStore(state, "audit", new MemoryAuditStore()),
-    sessions: persistentMemoryStore(state, "sessions", new MemorySessionStore()),
+    audit: persistentMemoryStore(state, "audit", new MemoryAuditStore(), new Set(["append"])),
+    sessions: persistentMemoryStore(
+      state,
+      "sessions",
+      new MemorySessionStore(),
+      new Set(["create", "touch", "revoke"]),
+    ),
     roleStore: new SqliteGroupRoleStore(state, bootstrap),
-    catalog: persistentMemoryStore(state, "catalog", new MemoryCatalogStore()),
-    cases: persistentMemoryStore(state, "cases", new MemoryCaseStore()),
-    runs: persistentMemoryStore(state, "runs", new MemoryRunStore()),
-    experiments: persistentMemoryStore(state, "experiments", new MemoryExperimentStore()),
-    jobs: persistentMemoryStore(state, "jobs", new MemoryTriageJobStore()),
+    catalog: persistentMemoryStore(
+      state,
+      "catalog",
+      new MemoryCatalogStore(),
+      new Set(["insert", "updateMeta", "setLifecycle"]),
+    ),
+    cases: persistentMemoryStore(
+      state,
+      "cases",
+      new MemoryCaseStore(),
+      new Set([
+        "insertCase",
+        "updateCaseMeta",
+        "addParticipant",
+        "appendTimeline",
+        "insertRevision",
+        "insertArtifact",
+        "insertSnapshot",
+      ]),
+    ),
+    runs: persistentMemoryStore(
+      state,
+      "runs",
+      new MemoryRunStore(),
+      new Set(["insert", "appendCorroboration"]),
+    ),
+    experiments: persistentMemoryStore(
+      state,
+      "experiments",
+      new MemoryExperimentStore(),
+      new Set([
+        "insert",
+        "insertObservation",
+        "insertDecision",
+        "insertGold",
+        "insertTrace",
+        "insertAnnotation",
+      ]),
+    ),
+    jobs: persistentMemoryStore(
+      state,
+      "jobs",
+      new MemoryTriageJobStore(),
+      new Set(["insert", "claimQueued", "renewLease", "recoverStale", "update"]),
+    ),
   };
 }
