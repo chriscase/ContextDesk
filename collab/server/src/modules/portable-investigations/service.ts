@@ -1197,6 +1197,9 @@ export class PortableInvestigationService {
         sourceId: row.sourceId,
         createdAt: row.createdAt,
         hypothesisStatus: row.hypothesisStatus,
+        hypothesisLinks: [...(row.hypothesisLinks ?? [])].sort((left, right) =>
+          `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`),
+        ),
         objectHash: "",
       })),
       evidence,

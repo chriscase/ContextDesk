@@ -2063,6 +2063,46 @@ describe("portable investigation apply", () => {
     expect(destUpdated?.locator.resourceId).not.toBe(hypothesis.id);
   });
 
+  it("preserves remapped hypothesis links after portable restore", async () => {
+    const row = await fixture();
+    const hypothesis = await row.cases.addContribution(
+      row.caseId,
+      ACTOR,
+      {
+        kind: "hypothesis",
+        body: "The synthetic stall is corroborated by the worker log.",
+        privacyClass: "share_safe",
+        hypothesisStatus: "supported",
+        hypothesisLinks: [{ kind: "artifact", id: row.evidenceId }],
+      },
+      "fixture",
+    );
+    expect(hypothesis.hypothesisLinks).toEqual([{ kind: "artifact", id: row.evidenceId }]);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const destHypotheses = (await row.cases.listContributions(applied.investigationId, ACTOR, false))
+      .filter((item) => item.kind === "hypothesis");
+    const destEvidence = await row.cases.listArtifacts(applied.investigationId, ACTOR, false);
+    expect(destHypotheses).toHaveLength(1);
+    expect(destHypotheses[0]?.hypothesisStatus).toBe("supported");
+    expect(destEvidence.some((item) => item.id === row.evidenceId)).toBe(false);
+    expect(destHypotheses[0]?.hypothesisLinks).toEqual([
+      { kind: "artifact", id: destEvidence.find((item) => item.contentHash === row.evidenceHash)?.id },
+    ]);
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({

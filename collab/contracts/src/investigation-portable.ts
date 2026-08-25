@@ -493,6 +493,10 @@ const contributionShape: ObjectShape = {
   sourceId: f.req(f.str),
   createdAt: f.req(f.str),
   hypothesisStatus: f.nul(f.en(...HYPOTHESIS_STATUSES)),
+  hypothesisLinks: f.opt(f.arr(f.obj({
+    kind: f.req(f.en("artifact", "contribution")),
+    id: f.req(f.str),
+  }))),
   objectHash: f.req(f.str),
 };
 
@@ -815,6 +819,7 @@ export interface PortableContributionV1 {
   sourceId: string;
   createdAt: string;
   hypothesisStatus: (typeof HYPOTHESIS_STATUSES)[number] | null;
+  hypothesisLinks?: { kind: "artifact" | "contribution"; id: string }[];
   objectHash: string;
 }
 
@@ -1731,6 +1736,24 @@ export function parsePortableInvestigation(
         `$.evidence[${i}].summaryContributionId`,
         "dangling contribution reference",
       );
+    }
+  }
+  const portableContributionIds = new Set(bundle.contributions.map((row) => row.id));
+  for (const [i, row] of bundle.contributions.entries()) {
+    const links = row.hypothesisLinks ?? [];
+    for (const [j, link] of links.entries()) {
+      if (link.kind === "artifact" && !evidence.has(link.id)) {
+        throw new ContractViolation(
+          `$.contributions[${i}].hypothesisLinks[${j}].id`,
+          "dangling evidence reference",
+        );
+      }
+      if (link.kind === "contribution" && !portableContributionIds.has(link.id)) {
+        throw new ContractViolation(
+          `$.contributions[${i}].hypothesisLinks[${j}].id`,
+          "dangling contribution reference",
+        );
+      }
     }
   }
   validateContent(bundle, options);

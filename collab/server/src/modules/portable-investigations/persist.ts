@@ -115,6 +115,30 @@ export function remapPortableTimelineTarget(
   return remapOf(report, namespace, targetId);
 }
 
+function remapHypothesisLinks(
+  report: ArchivePreflightReportV1,
+  links: readonly { kind: "artifact" | "contribution"; id: string }[] | undefined,
+  bundle: PortableArchiveV1["investigation"],
+): { kind: "artifact" | "contribution"; id: string }[] {
+  const contributionIds = new Set(bundle.contributions.map((row) => row.id));
+  const evidenceIds = new Set(bundle.evidence.map((row) => row.id));
+  return [...(links ?? [])]
+    .slice()
+    .sort((left, right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`))
+    .map((link) => {
+      if (link.kind === "artifact") {
+        if (!evidenceIds.has(link.id)) {
+          throw new Error("hypothesis artifact link is missing a portable evidence target");
+        }
+        return { kind: link.kind, id: remapOf(report, "evidence", link.id) };
+      }
+      if (!contributionIds.has(link.id)) {
+        throw new Error("hypothesis contribution link is missing a portable contribution target");
+      }
+      return { kind: link.kind, id: remapOf(report, "contribution", link.id) };
+    });
+}
+
 function isContributionHistoryKind(kind: string): boolean {
   return kind === "contribution_created"
     || kind === "contribution_revised"
@@ -881,7 +905,7 @@ export async function persistPortableArchive(input: {
       authorUsername: author.username,
       createdAt: contribution.createdAt,
       hypothesisStatus: contribution.hypothesisStatus,
-      hypothesisLinks: [],
+      hypothesisLinks: remapHypothesisLinks(report, contribution.hypothesisLinks, bundle),
       sourceId: remapOf(report, "source", contribution.sourceId),
     };
     await ports.cases.insertRevision(rev);
