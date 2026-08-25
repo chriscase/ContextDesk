@@ -211,6 +211,12 @@ def test_identity() -> None:
     print("== mutation: identity ==")
     versions = rc.read_package_versions(ROOT)
     check("repo package versions agree", len(versions.unique()) == 1, str(versions))
+    package_versions = versions.unique()
+    if len(package_versions) != 1:
+        return
+    package_version = next(iter(package_versions))
+    ga_tag = f"v{package_version}"
+    rc_tag = f"{ga_tag}-rc6"
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=ROOT,
@@ -220,12 +226,15 @@ def test_identity() -> None:
     ).stdout.strip()
     ident = rc.check_identity(
         repo_root=ROOT,
-        tag="v0.1.0",
+        tag=ga_tag,
         git_sha=sha,
-        git_describe="v0.1.0",
+        git_describe=ga_tag,
         channel="installed",
     )
-    check("v0.1.0 identity is GA", ident.kind == "ga" and ident.version == "0.1.0")
+    check(
+        f"{ga_tag} identity is GA",
+        ident.kind == "ga" and ident.version == package_version,
+    )
 
     try:
         rc.check_identity(
@@ -242,9 +251,9 @@ def test_identity() -> None:
     try:
         rc.check_identity(
             repo_root=ROOT,
-            tag="v0.1.0",
+            tag=ga_tag,
             git_sha="deadbeef",
-            git_describe="v0.1.0",
+            git_describe=ga_tag,
             channel="installed",
         )
         check("short SHA is rejected", False)
@@ -254,9 +263,9 @@ def test_identity() -> None:
     try:
         rc.check_identity(
             repo_root=ROOT,
-            tag="v0.1.0",
+            tag=ga_tag,
             git_sha=sha,
-            git_describe="v0.1.0",
+            git_describe=ga_tag,
             channel="dev",
         )
         check("non-installed channel is rejected", False)
@@ -265,16 +274,16 @@ def test_identity() -> None:
 
     rc_ident = rc.check_identity(
         repo_root=ROOT,
-        tag="v0.1.0-rc6",
+        tag=rc_tag,
         git_sha=sha,
-        git_describe="v0.1.0-rc6",
+        git_describe=rc_tag,
         channel="installed",
     )
     check(
-        "rc tag keeps package core 0.1.0",
+        f"rc tag keeps package core {package_version}",
         rc_ident.kind == "prerelease"
-        and rc_ident.package_version == "0.1.0"
-        and rc_ident.version == "0.1.0-rc6",
+        and rc_ident.package_version == package_version
+        and rc_ident.version == f"{package_version}-rc6",
     )
 
     try:
