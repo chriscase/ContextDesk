@@ -155,6 +155,26 @@ export function sha256Text(text: string): string {
 export const RFC4122_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+/** Imported comparison traces are `${experimentId}:${traceId}`; experiment-level events are a bare experiment id. */
+export function parsePortableExperimentTraceTarget(
+  targetId: string,
+): { experimentId: string; traceId: string } | null {
+  const separator = targetId.indexOf(":");
+  if (separator <= 0 || separator === targetId.length - 1) return null;
+  return {
+    experimentId: targetId.slice(0, separator),
+    traceId: targetId.slice(separator + 1),
+  };
+}
+
+export function formatPortableExperimentTraceTarget(experimentId: string, traceId: string): string {
+  const target = `${experimentId}:${traceId}`;
+  if (!RFC4122_UUID_RE.test(experimentId) || !parsePortableExperimentTraceTarget(target)) {
+    throw new ContractViolation("$", "malformed experiment trace target");
+  }
+  return target;
+}
+
 const RFC4122_DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 function uuidBytes(uuid: string): Buffer {
@@ -1453,6 +1473,10 @@ function portableTimelineTargetExists(
   targetId: string,
 ): boolean {
   if (namespaceIds[namespace].has(targetId)) return true;
+  if (namespace === "experiment") {
+    const parsed = parsePortableExperimentTraceTarget(targetId);
+    return Boolean(parsed && namespaceIds.experiment.has(parsed.experimentId));
+  }
   if (namespace !== "triage_job") return false;
   const attempt = parsePortableTriageAttemptTarget(targetId);
   if (!attempt) return false;

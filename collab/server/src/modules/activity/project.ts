@@ -11,6 +11,7 @@ import {
   safeActorLabel,
   safeInvestigationTitle,
   safeResourceLabel,
+  parsePortableExperimentTraceTarget,
   type InvestigationActivityItemV1,
   type InvestigationActivityKindV1,
   type InvestigationPrivacyVisibilityV1,
@@ -255,8 +256,28 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
       };
     }
     case "external_run_imported":
-    case "experiment_trace_imported":
       return { activityKind: "import_recorded", resourceKind: "evidence_context", resourceId: target, provenance: "ai_generated", summary: "imported analysis was recorded", humanFinding: false, revision: null, workstreamId: null };
+    case "experiment_trace_imported": {
+      const parsed = parsePortableExperimentTraceTarget(target);
+      const traceId = parsed?.traceId ?? str(payload, "traceId");
+      const experimentId = parsed?.experimentId ?? target;
+      const composed = traceId ? `${experimentId}:${traceId}` : null;
+      const resourceId = parsed
+        ? target
+        : composed && parsePortableExperimentTraceTarget(composed)
+          ? composed
+          : target;
+      return {
+        activityKind: "import_recorded",
+        resourceKind: "interaction_trace",
+        resourceId,
+        provenance: "ai_generated",
+        summary: "imported a comparison trace",
+        humanFinding: false,
+        revision: null,
+        workstreamId: null,
+      };
+    }
     case "corpus_intake_committed":
       return { activityKind: "import_recorded", resourceKind: "intake_batch", resourceId: target, provenance: "imported", summary: "committed a log intake batch", humanFinding: false, revision: null, workstreamId: null };
     case "export_recorded":

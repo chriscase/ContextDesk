@@ -23,6 +23,7 @@ import {
   buildStrategyComparison,
   boundExcerpt,
   extractPlainTranscript,
+  formatPortableExperimentTraceTarget,
   projectShareSafeTrace,
   sha256Hex,
   traceFingerprint,
@@ -1041,7 +1042,7 @@ export class ExperimentService {
     await this.deps.cases.appendDomainTimeline(row.caseId, {
       kind: "experiment_trace_imported",
       actor,
-      targetId: row.id,
+      targetId: formatPortableExperimentTraceTarget(row.id, safe.traceId),
       clientTime: null,
       payload: { traceId: safe.traceId, candidateId: safe.candidateId, sourceKind: safe.sourceKind },
     });

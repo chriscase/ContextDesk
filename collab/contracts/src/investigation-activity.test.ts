@@ -211,6 +211,7 @@ describe("human-readable presentation boundary", () => {
     expect(safeResourceLabel("intake_batch", null)).toBe("Intake batch");
     expect(safeResourceLabel("gold", null)).toBe("Outcome benchmark");
     expect(safeResourceLabel("helpfulness", null)).toBe("Comparison observation");
+    expect(safeResourceLabel("interaction_trace", null)).toBe("Imported comparison trace");
     expect(safeResourceLabel("workstream_attempt", CASE_A)).toBe("Workstream attempt");
     expect(safeResourceLabel("evidence_item", "ab".repeat(32))).toBe("Evidence item");
     expect(safeResourceLabel("evidence_item", "case_created")).toBe("Evidence item");
@@ -410,6 +411,7 @@ describe("routed locator focus against shipped War Room sections", () => {
       comparison_finding: { stage: "compare", section: "cross-exam-heading", itemKind: null },
       comparison_conflict: { stage: "compare", section: "cross-exam-heading", itemKind: null },
       helpfulness: { stage: "compare", section: "cross-exam-heading", itemKind: null },
+      interaction_trace: { stage: "compare", section: "candidate-comparison-heading", itemKind: null },
       discussion_message: { stage: "situation", section: "discussion", itemKind: "comment" },
       timeline_event: { stage: "capture", section: "triage-capture", itemKind: "timeline" },
       hypothesis: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
@@ -431,7 +433,9 @@ describe("routed locator focus against shipped War Room sections", () => {
             ? "12"
             : kind === "workstream_attempt"
               ? attempt
-              : kind === "discussion_message"
+              : kind === "interaction_trace"
+                ? `${job}:trace-synthetic-v1`
+                : kind === "discussion_message"
                 ? "message-synthetic-1"
                 : job;
       const locator = formatInvestigationResourceLocator({

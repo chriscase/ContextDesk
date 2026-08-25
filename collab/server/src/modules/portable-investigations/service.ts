@@ -14,6 +14,7 @@ import {
   destinationCatalogDigest,
   identityMapDigest,
   parsePortableArchive,
+  parsePortableExperimentTraceTarget,
   parsePortableTriageAttemptTarget,
   portableApplyDeepLink,
   portableSnapshotFingerprint,
@@ -310,6 +311,16 @@ function portableTimelineTarget(
     const observationId = typeof payload.observationId === "string" ? payload.observationId : row.targetId;
     if (observationId && namespaces.get(observationId)?.has("helpfulness")) {
       return { targetId: observationId, namespace: "helpfulness" };
+    }
+    return null;
+  }
+  if (row.kind === "experiment_trace_imported") {
+    const parsed = parsePortableExperimentTraceTarget(row.targetId);
+    const traceId = parsed?.traceId
+      ?? (typeof payload.traceId === "string" && payload.traceId.trim() ? payload.traceId : null);
+    const experimentId = parsed?.experimentId ?? row.targetId;
+    if (traceId && namespaces.get(experimentId)?.has("experiment")) {
+      return { targetId: `${experimentId}:${traceId}`, namespace: "experiment" };
     }
     return null;
   }
@@ -1035,6 +1046,17 @@ export class PortableInvestigationService {
           "unsupported_state",
           "experiment helpfulness timeline is missing a portable helpfulness target",
         );
+      }
+      if (row.kind === "experiment_trace_imported") {
+        const parsed = addressed?.targetId
+          ? parsePortableExperimentTraceTarget(addressed.targetId)
+          : null;
+        if (addressed?.namespace !== "experiment" || !parsed) {
+          throw new PortableServerError(
+            "unsupported_state",
+            "experiment trace timeline is missing a portable experiment+trace target",
+          );
+        }
       }
       if (/^triage_candidate_/.test(row.kind) && addressed?.namespace !== "triage_job") {
         throw new PortableServerError(

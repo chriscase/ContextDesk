@@ -80,15 +80,19 @@ contribution provenance also requires the durable kind (`message`, `note` /
 `corpus-intake` / `kind=intake-batch`, not Analyze evidence.
 Portable restore remaps investigation and resource ids, including intake-batch
 ids from `targetNamespace=intake_batch`, gold snapshot ids from
-`targetNamespace=gold` (`experiment_gold_promoted`), and helpfulness
+`targetNamespace=gold` (`experiment_gold_promoted`), helpfulness
 observation ids from `targetNamespace=helpfulness`
-(`experiment_helpfulness_recorded`); resolve is re-run
+(`experiment_helpfulness_recorded`), and `${experimentId}:${traceId}`
+composites from `targetNamespace=experiment` (`experiment_trace_imported`);
+resolve is re-run
 against the destination identities after apply and remains `not_found` for
 kind-confused or unauthorized locators. `experiment_gold_promoted` projects
 `gold` at the gold snapshot id and Decide `decision-heading`, not the
 experiment or accepted decision id. `experiment_helpfulness_recorded` projects
 `helpfulness` at the observation id and Compare `cross-exam-heading`, not the
-experiment id.
+experiment id. `experiment_trace_imported` projects `interaction_trace` at
+`${experimentId}:${traceId}` and Compare `candidate-comparison-heading`, not
+the experiment id or `evidence_context`.
 
 ## Privacy and authorization
 

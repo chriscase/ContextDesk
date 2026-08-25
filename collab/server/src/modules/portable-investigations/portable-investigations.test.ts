@@ -49,6 +49,7 @@ import {
   MemoryPortableApplyStateStore,
   persistPortableArchive,
   PortableCommitOutcomeUnknownError,
+  remapPortableTimelineTarget,
   withPgApplyTransaction,
   type MemoryApplyBoundary,
 } from "./persist.js";
@@ -883,6 +884,80 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable helpfulness target/);
   });
 
+  it("refuses apply when experiment trace timeline lacks a composite experiment+trace target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const missing = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "experiment_trace_imported");
+      if (!event) throw new Error("experiment trace timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(missing);
+    const dryRun = await row.portable.preflight(
+      missing,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: missing,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            missing.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/experiment\+trace target/);
+
+    const bareExperiment = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "experiment_trace_imported");
+      if (!event) throw new Error("experiment trace timeline is missing");
+      event.targetNamespace = "experiment";
+      event.targetId = investigation.experiments[0]!.id;
+    });
+    const bareMap = identityMapFor(bareExperiment);
+    const bareDry = await row.portable.preflight(
+      bareExperiment,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap: bareMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: bareExperiment,
+          report: bareDry.report,
+          identityMap: bareMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            bareExperiment.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/experiment\+trace target/);
+  });
+
   it("returns host-owned identity/collision/privacy facts and mints apply only for exact reconstruction", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1256,6 +1331,18 @@ describe("portable investigation routes", () => {
 });
 
 describe("portable investigation apply", () => {
+  it("remaps portable experiment trace targets by experiment id and preserves the trace suffix", () => {
+    const source = "11111111-1111-4111-8111-111111111111";
+    const dest = "22222222-2222-4222-8222-222222222222";
+    const report = {
+      idRemap: [{ namespace: "experiment", sourceId: source, destinationId: dest }],
+    } as Parameters<typeof remapPortableTimelineTarget>[0];
+    expect(remapPortableTimelineTarget(report, "experiment", `${source}:trace-chat-operator-v1`)).toBe(
+      `${dest}:trace-chat-operator-v1`,
+    );
+    expect(remapPortableTimelineTarget(report, "experiment", source)).toBe(dest);
+  });
+
   it("applies an exact reconstruction once, preserves attribution-only people, and replays", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1369,6 +1456,8 @@ describe("portable investigation apply", () => {
     const sourceDecision = sourcePage.items.find((item) => item.activityKind === "decision_proposed");
     const sourceGold = sourcePage.items.find((item) => item.summary === "recorded an accepted outcome benchmark");
     const sourceHelpfulness = sourcePage.items.find((item) => item.summary === "recorded a comparison observation");
+    const sourceTraces = sourcePage.items.filter((item) => item.summary === "imported a comparison trace");
+    const sourceTrace = sourceTraces[0];
     const sourceAttempt = sourcePage.items.find((item) => item.locator.kind === "workstream_attempt");
     const intakeBytes = new TextEncoder().encode(
       "2042-03-04T11:31:00Z synthetic-router ERROR request timed out\n",
@@ -1430,6 +1519,12 @@ describe("portable investigation apply", () => {
     expect(sourceHelpfulness?.locator.resourceId).toBeTruthy();
     expect(sourceHelpfulness?.locator.resourceId).not.toBe(row.caseId);
     expect(sourceHelpfulness?.humanFinding).toBe(false);
+    expect(sourceTraces.length).toBeGreaterThan(1);
+    expect(sourceTrace?.locator.kind).toBe("interaction_trace");
+    expect(sourceTrace?.locator.resourceId).toContain(":");
+    expect(sourceTrace?.locator.resourceId).not.toBe(row.caseId);
+    expect(sourceTrace?.humanFinding).toBe(false);
+    expect(new Set(sourceTraces.map((item) => item.locator.resourceId)).size).toBe(sourceTraces.length);
     expect(sourceAttempt?.locator.resourceId).toContain(":");
     await expect(
       activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceObservation!.locator)),
@@ -1440,6 +1535,9 @@ describe("portable investigation apply", () => {
     await expect(
       activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceHelpfulness!.locator)),
     ).resolves.toMatchObject({ authorized: true, resourceLabel: "Comparison observation" });
+    await expect(
+      activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceTrace!.locator)),
+    ).resolves.toMatchObject({ authorized: true, resourceLabel: "Imported comparison trace" });
     await expect(
       activity.resolve(
         ACTOR,
@@ -1498,6 +1596,21 @@ describe("portable investigation apply", () => {
       expect(decisionIds).not.toContain(event.targetId);
       expect(goldIds).not.toContain(event.targetId);
     }
+    const experimentIds = archive.investigation.experiments.map((experiment) => experiment.id);
+    const exportedTraces = archive.investigation.timeline.filter(
+      (event) => event.kind === "experiment_trace_imported",
+    );
+    expect(exportedTraces.length).toBeGreaterThan(1);
+    for (const event of exportedTraces) {
+      expect(event.targetNamespace).toBe("experiment");
+      expect(event.targetId).toMatch(/:/);
+      const experimentId = event.targetId?.slice(0, event.targetId.indexOf(":"));
+      expect(experimentIds).toContain(experimentId);
+      expect(event.targetId).not.toBe(experimentId);
+      expect(goldIds).not.toContain(event.targetId);
+      expect(helpfulnessIds).not.toContain(event.targetId);
+    }
+    expect(new Set(exportedTraces.map((event) => event.targetId)).size).toBe(exportedTraces.length);
     const exportedAttempts = archive.investigation.timeline.filter((event) =>
       event.kind.startsWith("triage_candidate_"),
     );
@@ -1550,6 +1663,8 @@ describe("portable investigation apply", () => {
     const destDecision = destPage.items.find((item) => item.activityKind === "decision_proposed");
     const destGold = destPage.items.find((item) => item.summary === "recorded an accepted outcome benchmark");
     const destHelpfulness = destPage.items.find((item) => item.summary === "recorded a comparison observation");
+    const destTraces = destPage.items.filter((item) => item.summary === "imported a comparison trace");
+    const destTrace = destTraces[0];
     const destAttempt = destPage.items.find((item) => item.locator.kind === "workstream_attempt");
     const destIntake = destPage.items.find((item) => item.locator.kind === "intake_batch");
     expect(destObservation?.locator.investigationId).toBe(applied.investigationId);
@@ -1584,6 +1699,17 @@ describe("portable investigation apply", () => {
     expect(destHelpfulness?.provenanceClass).toBe("historical_restored");
     expect(destHelpfulness?.resolvedRoute).toContain("section=cross-exam-heading");
     expect(destHelpfulness?.resolvedRoute).toContain(`item=${destHelpfulness?.locator.resourceId}`);
+    expect(destTraces.length).toBe(sourceTraces.length);
+    expect(destTrace?.locator.kind).toBe("interaction_trace");
+    expect(destTrace?.locator.resourceId).toBeTruthy();
+    expect(destTrace?.locator.resourceId).toContain(":");
+    expect(destTrace?.locator.resourceId).not.toBe(sourceTrace?.locator.resourceId);
+    expect(destTrace?.locator.resourceId).not.toBe(applied.investigationId);
+    expect(destTrace?.humanFinding).toBe(false);
+    expect(destTrace?.provenanceClass).toBe("historical_restored");
+    expect(destTrace?.resolvedRoute).toContain("section=candidate-comparison-heading");
+    expect(destTrace?.resolvedRoute).toContain(`item=${encodeURIComponent(destTrace?.locator.resourceId ?? "")}`);
+    expect(new Set(destTraces.map((item) => item.locator.resourceId)).size).toBe(destTraces.length);
     expect(destAttempt?.locator.resourceId).not.toBe(sourceAttempt?.locator.resourceId);
     expect(destAttempt?.locator.resourceId).toContain(":");
     expect(destAttempt?.locator.resourceId).not.toBe(applied.investigationId);
@@ -1623,6 +1749,15 @@ describe("portable investigation apply", () => {
     expect(destExperiments.map((experiment) => experiment.id)).not.toContain(destHelpfulness?.locator.resourceId);
     expect(destDecisionIds).not.toContain(destHelpfulness?.locator.resourceId);
     expect(destGoldIds).not.toContain(destHelpfulness?.locator.resourceId);
+    expect(destExperiments.map((experiment) => experiment.id)).toContain(
+      destTrace?.locator.resourceId.split(":")[0],
+    );
+    expect(destTrace?.locator.resourceId.split(":")[0]).not.toBe(sourceTrace?.locator.resourceId.split(":")[0]);
+    expect(
+      destTraces.map((item) => item.locator.resourceId.slice(item.locator.resourceId.indexOf(":") + 1)).sort(),
+    ).toEqual(
+      sourceTraces.map((item) => item.locator.resourceId.slice(item.locator.resourceId.indexOf(":") + 1)).sort(),
+    );
     const destJobs = await row.triageRuns.list(applied.investigationId, ACTOR, false);
     const destJobPrefix = destAttempt?.locator.resourceId.split(":")[0];
     expect(destJobs.map((job) => job.id)).toContain(destJobPrefix);
@@ -1631,7 +1766,7 @@ describe("portable investigation apply", () => {
     const destIntakeEvidence = destArtifacts.find((item) => item.relativePath === "router/locator.log");
     expect(destIntakeEvidence?.intakeBatchId).toBe(destIntake?.locator.resourceId);
 
-    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destGold, destHelpfulness, destAttempt, destIntake]) {
+    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destGold, destHelpfulness, destTrace, destAttempt, destIntake]) {
       await expect(
         activity.resolve(ACTOR, false, formatCompactInvestigationLocator(item!.locator)),
       ).resolves.toMatchObject({ authorized: true, locator: item!.locator });
@@ -1721,6 +1856,30 @@ describe("portable investigation apply", () => {
           investigationId: applied.investigationId,
           kind: "comparison_finding",
           resourceId: destHelpfulness!.locator.resourceId,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: applied.investigationId,
+          kind: "evidence_context",
+          resourceId: destTrace!.locator.resourceId,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: applied.investigationId,
+          kind: "interaction_trace",
+          resourceId: destExperiments[0]!.id,
         })),
       ),
     ).rejects.toMatchObject({ code: "not_found" });
@@ -2519,6 +2678,34 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
         resourceId: helpfulness!.locator.resourceId,
       }));
       await expect(activity.resolve(ACTOR, false, confusedHelpfulness)).rejects.toMatchObject({
+        code: "not_found",
+      });
+      const traces = page.items.filter((item) => item.locator.kind === "interaction_trace");
+      expect(traces.length).toBeGreaterThan(1);
+      expect(new Set(traces.map((item) => item.locator.resourceId)).size).toBe(traces.length);
+      for (const trace of traces) {
+        expect(trace.locator.resourceId).toContain(":");
+        expect(trace.locator.resourceId).not.toBe(investigationId);
+        expect(trace.humanFinding).toBe(false);
+        expect(trace.resolvedRoute).toContain("section=candidate-comparison-heading");
+        await expect(
+          activity.resolve(ACTOR, false, formatCompactInvestigationLocator(trace.locator)),
+        ).resolves.toMatchObject({ authorized: true, resourceLabel: "Imported comparison trace" });
+        await expect(
+          activity.resolve(
+            { id: "eve", username: "eve" },
+            false,
+            formatCompactInvestigationLocator(trace.locator),
+          ),
+        ).rejects.toMatchObject({ code: "not_found" });
+      }
+      const confusedTrace = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+        installationId: "inst-syntheticnorth",
+        investigationId,
+        kind: "evidence_context",
+        resourceId: traces[0]!.locator.resourceId,
+      }));
+      await expect(activity.resolve(ACTOR, false, confusedTrace)).rejects.toMatchObject({
         code: "not_found",
       });
     });

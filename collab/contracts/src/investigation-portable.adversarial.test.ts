@@ -686,6 +686,20 @@ describe("portable investigation adversarial lab", () => {
     unknownLane.timeline[0]!.targetNamespace = "triage_job";
     unknownLane.timeline[0]!.targetId = `${job.id}:missing-lane`;
     expect(() => parsePortableInvestigation(reseal(unknownLane))).toThrow(/dangling timeline target/);
+
+    const experiment = sealed.experiments[0]!;
+    const traceTarget = structuredClone(sealed);
+    traceTarget.timeline[0]!.targetNamespace = "experiment";
+    traceTarget.timeline[0]!.targetId = `${experiment.id}:trace-synthetic-alice`;
+    expect(() => parsePortableInvestigation(reseal(traceTarget))).not.toThrow();
+
+    const unknownExperiment = structuredClone(sealed);
+    unknownExperiment.timeline[0]!.targetNamespace = "experiment";
+    unknownExperiment.timeline[0]!.targetId =
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:trace-synthetic-alice";
+    expect(() => parsePortableInvestigation(reseal(unknownExperiment))).toThrow(
+      /dangling timeline target/,
+    );
   });
 
   it("rejects broken contribution, decision, and complete gold lineage failures", () => {

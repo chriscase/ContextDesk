@@ -6,6 +6,7 @@ import {
   PORTABLE_TERMINAL_TRIAGE_STATUSES,
   parseCorpusIntakeBatch,
   parsePortableTriageAttemptTarget,
+  parsePortableExperimentTraceTarget,
   portableDestinationUuid,
   snapshotFairness,
   snapshotFingerprint,
@@ -105,6 +106,12 @@ export function remapPortableTimelineTarget(
       return `${remapOf(report, "triage_job", attempt.jobId)}:${attempt.candidateId}`;
     }
   }
+  if (namespace === "experiment") {
+    const parsed = parsePortableExperimentTraceTarget(targetId);
+    if (parsed) {
+      return `${remapOf(report, "experiment", parsed.experimentId)}:${parsed.traceId}`;
+    }
+  }
   return remapOf(report, namespace, targetId);
 }
 
@@ -169,6 +176,13 @@ function importedTimelinePayload(
     const attempt = parsePortableTriageAttemptTarget(event.targetId);
     payload.jobId = remapOf(report, "triage_job", attempt?.jobId ?? event.targetId);
     if (attempt) payload.candidateId = attempt.candidateId;
+  }
+  if (event.targetNamespace === "experiment" && event.targetId) {
+    const parsed = parsePortableExperimentTraceTarget(event.targetId);
+    if (parsed) {
+      payload.traceId = parsed.traceId;
+      payload.experimentId = remapOf(report, "experiment", parsed.experimentId);
+    }
   }
   if (event.targetNamespace === "snapshot" && event.targetId) {
     payload.snapshotId = remapOf(report, "snapshot", event.targetId);
@@ -688,6 +702,12 @@ export async function persistPortableArchive(input: {
       && (event.targetNamespace !== "helpfulness" || !event.targetId)
     ) {
       throw new Error("experiment helpfulness timeline is missing a portable helpfulness target");
+    }
+    if (event.kind === "experiment_trace_imported") {
+      const parsed = event.targetId ? parsePortableExperimentTraceTarget(event.targetId) : null;
+      if (event.targetNamespace !== "experiment" || !parsed) {
+        throw new Error("experiment trace timeline is missing a portable experiment+trace target");
+      }
     }
   }
   const remapCandidateId = (candidateId: string): string => {
