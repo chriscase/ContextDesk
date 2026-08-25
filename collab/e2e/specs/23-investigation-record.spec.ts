@@ -52,7 +52,7 @@ test.describe("the investigation record graph", () => {
     await expect(
       page.locator(".catalog__item").filter({ hasText: label }).getByText("Stays internal"),
     ).toBeVisible();
-    await screenshot(page, "19-entities-registry");
+    await screenshot(page, "23-entities-registry");
   });
 
   test("a historical investigation keeps both clocks and never guesses a time zone", async ({
@@ -84,7 +84,7 @@ test.describe("the investigation record graph", () => {
     const recorded = page.getByTestId("recorded-at");
     await expect(recorded).not.toContainText("2024-11-04");
     await expect(recorded).not.toHaveText("Not recorded");
-    await screenshot(page, "19-occurred-at");
+    await screenshot(page, "23-occurred-at");
   });
 
   test("naming an entity makes an investigation findable by that entity later", async ({ page }) => {
@@ -132,7 +132,7 @@ test.describe("the investigation record graph", () => {
     expect(entityValue).toBeTruthy();
     await filter.selectOption(entityValue as string);
     await expect(page.getByRole("button", { name: title })).toBeVisible();
-    await screenshot(page, "19-entity-filter");
+    await screenshot(page, "23-entity-filter");
   });
 
   test("citing an earlier investigation deep-links to it without copying it", async ({ page }) => {
@@ -159,7 +159,7 @@ test.describe("the investigation record graph", () => {
     const openLink = citation.getByRole("link", { name: "Open the cited investigation" });
     // The locator is a real in-app address, so it survives being copied.
     await expect(openLink).toHaveAttribute("href", /^\/investigations\/[0-9a-f-]+\/situation\?/);
-    await screenshot(page, "19-cross-investigation-reference");
+    await screenshot(page, "23-cross-investigation-reference");
   });
 
   test("a case lead cannot resolve an investigation without recording why", async ({ page }) => {
@@ -192,7 +192,7 @@ test.describe("the investigation record graph", () => {
     await resolutionForm.getByRole("button", { name: "Resolve with this record" }).click();
 
     await expect(page.locator(".focus-head .status-pill")).toHaveText("resolved");
-    await screenshot(page, "19-human-only-resolution");
+    await screenshot(page, "23-human-only-resolution");
   });
 
   test("reopening withdraws the conclusion and a fresh one is required", async ({ page }) => {
@@ -228,6 +228,6 @@ test.describe("the investigation record graph", () => {
     await openEntities(page);
     await expect(page.getByRole("form", { name: "Add an entity" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /^Retire / })).toHaveCount(0);
-    await screenshot(page, "19-entities-viewer");
+    await screenshot(page, "23-entities-viewer");
   });
 });

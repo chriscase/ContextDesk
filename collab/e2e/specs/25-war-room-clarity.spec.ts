@@ -104,7 +104,7 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     // it on the evidence board, where the kind is the first thing read.
     expect(kinds["support/customer-email.txt"]).toBe("email");
     expect(kinds["support/shared-timeout.log"]).toBe("log");
-    await screenshot(page, "19-zip-intake-preview");
+    await screenshot(page, "25-zip-intake-preview");
 
     const [committed] = await Promise.all([
       page.waitForResponse(
@@ -175,7 +175,7 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     expect(imported.ok(), await imported.text()).toBeTruthy();
     // An imported chat stays marked unverified until a person reads it.
     await expect(page.getByText("Unverified imported run").first()).toBeVisible();
-    await screenshot(page, "19-email-and-chat-evidence");
+    await screenshot(page, "25-email-and-chat-evidence");
 
     // A large log is previewed bounded, with the whole trace one disclosure
     // away — and the preview gives way to it rather than repeating its opening
@@ -219,7 +219,7 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     await gotoStage(page, "Situation");
     await expect(page.getByText(/1 snapshot frozen/)).toBeVisible();
     await expect(page.getByText(/no snapshot frozen yet/)).toHaveCount(0);
-    await screenshot(page, "19-situation-after-freeze");
+    await screenshot(page, "25-situation-after-freeze");
   });
 
   test("questions recorded in Situation are still open questions in Compare", async ({ page }) => {
@@ -260,7 +260,7 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     for (const question of questions) await expect(unknowns).toContainText(question);
     await expect(unknowns).toContainText("recorded in Situation");
     await expect(unknowns).not.toContainText("No case-specific open questions have been recorded");
-    await screenshot(page, "19-open-questions-in-compare");
+    await screenshot(page, "25-open-questions-in-compare");
   });
 
   test("an investigation with no recorded analysis says so without model wording", async ({
@@ -293,7 +293,7 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     await expect(
       page.getByText(/Decisions are human calls|No human decision has been proposed yet/).first(),
     ).toBeVisible();
-    await screenshot(page, "19-human-only-work");
+    await screenshot(page, "25-human-only-work");
   });
 
   test("a multi-lane comparison tells its evidence apart and links to the exact lane", async ({
@@ -326,7 +326,7 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     await expect(table).toContainText("Demo inventory timeout");
     // Identifiers are addresses, not names, and stay out of the reading surface.
     expect(await table.innerText()).not.toMatch(/ev-demo-/);
-    await screenshot(page, "19-multi-lane-evidence");
+    await screenshot(page, "25-multi-lane-evidence");
 
     await openCompareWorkspace(page, "Review queue");
     const queueLink = page.getByRole("link", { name: "open run facts" }).first();
@@ -364,7 +364,7 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     await expect(paths).toContainText("Input or evidence considered");
     await expect(paths.locator("summary", { hasText: "Trace details" }).first()).toBeVisible();
     expect(await paths.innerText()).not.toMatch(/actor (assistant|tool|human)\b/);
-    await screenshot(page, "19-strategy-paths");
+    await screenshot(page, "25-strategy-paths");
   });
 
   test("the newest comparison is the decision basis and says so", async ({ page }) => {
@@ -387,7 +387,7 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     await expect(rows.first()).toContainText("Latest");
     await expect(rows.first()).toHaveAttribute("aria-current", "page");
     await expect(rows.nth(1)).toContainText("Earlier");
-    await screenshot(page, "19-decision-basis");
+    await screenshot(page, "25-decision-basis");
   });
 });
 
@@ -463,14 +463,14 @@ test.describe("War Room clarity: accessibility and narrow screens", () => {
     }));
     expect(metrics.overflowX).toBe("auto");
     expect(metrics.scrolls).toBe(true);
-    await screenshot(page, "19-responsive-375");
+    await screenshot(page, "25-responsive-375");
 
     await openCompareWorkspace(page, "Review queue");
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
-    await screenshot(page, "19-responsive-review-queue-375");
+    await screenshot(page, "25-responsive-review-queue-375");
 
     await page.setViewportSize({ width: 1280, height: 900 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1280);
-    await screenshot(page, "19-responsive-1280");
+    await screenshot(page, "25-responsive-1280");
   });
 });
