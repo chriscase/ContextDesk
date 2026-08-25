@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/investigation-resolution.v1.json",
+  "title": "cd-collab Investigation Resolution v1",
+  "description": "The record that authorises resolving an investigation. Human-only reasoning is first-class; an accepted experiment decision and an explicit reasoned exception are the other two bases. Insert-only and revision-guarded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "investigationId",
+    "revision",
+    "predecessorRevision",
+    "basis",
+    "provenance",
+    "status",
+    "rationale",
+    "unknowns",
+    "experimentDecisionId",
+    "exceptionReason",
+    "citedArtifactIds",
+    "citedContributionIds",
+    "occurredAt",
+    "occurredAtPrecision",
+    "occurredAtZone",
+    "recordedAt",
+    "recordedBy",
+    "recordedByUsername",
+    "supersededAt"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.investigation_resolution.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "investigationId": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "predecessorRevision": { "type": ["integer", "null"], "minimum": 1 },
+    "basis": {
+      "type": "string",
+      "enum": ["human_only", "experiment_decision", "reasoned_exception"]
+    },
+    "provenance": {
+      "type": "string",
+      "enum": ["human", "imported", "system", "ai_generated", "historical_restored"]
+    },
+    "status": { "type": "string", "enum": ["open", "monitoring", "resolved", "archived"] },
+    "rationale": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "unknowns": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "type": "string", "maxLength": 400 }
+    },
+    "experimentDecisionId": { "type": ["string", "null"] },
+    "exceptionReason": { "type": ["string", "null"], "maxLength": 600 },
+    "citedArtifactIds": { "type": "array", "items": { "type": "string" } },
+    "citedContributionIds": { "type": "array", "items": { "type": "string" } },
+    "occurredAt": { "type": ["string", "null"] },
+    "occurredAtPrecision": {
+      "type": "string",
+      "enum": ["year", "month", "day", "minute", "second", "unknown"]
+    },
+    "occurredAtZone": { "type": "string", "enum": ["explicit", "unspecified"] },
+    "recordedAt": { "type": "string", "minLength": 1 },
+    "recordedBy": { "type": "string", "minLength": 1 },
+    "recordedByUsername": { "type": "string", "minLength": 1 },
+    "supersededAt": { "type": ["string", "null"] }
+  }
+}

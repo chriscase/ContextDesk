@@ -1,0 +1,21 @@
+{
+  "schemaId": "cd-collab.investigation_reference.v1",
+  "id": "6d5c4b3a-2918-4f7e-be6d-5b4c3d2e1f0a",
+  "fromInvestigationId": "22222222-2222-4222-8222-222222222222",
+  "toInvestigationId": "33333333-3333-4333-8333-333333333333",
+  "resourceKind": "evidence_item",
+  "resourceId": "44444444-4444-4444-8444-444444444444",
+  "locator": "/investigations/33333333-3333-4333-8333-333333333333/analyze?section=triage-evidence-board&item=44444444-4444-4444-8444-444444444444&kind=evidence#triage-evidence-board",
+  "note": "Cited by an investigation this reader cannot open.",
+  "recordedTitle": "Synthetic restricted investigation",
+  "currentTitle": null,
+  "visibility": "restricted",
+  "state": "active",
+  "occurredAt": null,
+  "occurredAtPrecision": "unknown",
+  "recordedAt": "2024-02-11T09:26:00.000Z",
+  "recordedBy": "synthetic-operator",
+  "recordedByUsername": "synthetic-operator",
+  "withdrawnAt": null,
+  "occurredAtZone": "unspecified"
+}
