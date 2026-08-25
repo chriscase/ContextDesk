@@ -165,4 +165,108 @@ describe("first-run setup wizard", () => {
     render(<SetupWizard onUnavailable={onUnavailable} />);
     await waitFor(() => expect(onUnavailable).toHaveBeenCalledTimes(1));
   });
+
+  it("prepares a team LDAP draft with secret handles and never puts passwords in the draft", async () => {
+    const bindSecret = "Synthetic LDAP bind value";
+    const probeSecret = "fixture-alice-secret";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/status")) return response(200, claimed);
+      if (url.endsWith("/secrets")) {
+        const body = JSON.parse(String(init?.body)) as { purpose: string };
+        return response(200, {
+          purpose: body.purpose,
+          handle: `setup_secret:${body.purpose}:${"c".repeat(64)}`,
+        });
+      }
+      if (url.endsWith("/draft")) {
+        return response(200, {
+          schemaId: "cd-collab.setup_public_draft.v1",
+          deploymentLabel: "Synthetic team room",
+          status: { ...claimed, revision: 2, phase: "draft" },
+          summary: { storage: "postgres", authentication: "ldap", committed: false },
+          configurationPrepared: true,
+          installationComplete: false,
+        });
+      }
+      if (url.endsWith("/ldap-probe")) {
+        return response(200, {
+          schemaId: "cd-collab.ldap_probe_report.v1",
+          ready: true,
+          stages: [
+            { id: "transport", status: "passed", detail: "Encrypted directory transport is available." },
+            { id: "service_bind", status: "passed", detail: "Service bind succeeded." },
+            { id: "user_search", status: "skipped", detail: "No probe username was supplied." },
+            { id: "group_lookup", status: "passed", detail: "Group search base is reachable." },
+            { id: "role_map", status: "passed", detail: "A group-to-role map is present." },
+          ],
+          bindPasswordConfigured: true,
+          groupsFound: 0,
+          mappedRoles: true,
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SetupWizard />);
+    await screen.findByLabelText("Deployment label");
+    fireEvent.change(screen.getByLabelText("Owner token"), { target: { value: "A".repeat(43) } });
+    fireEvent.change(screen.getByLabelText("Deployment label"), { target: { value: "Synthetic team room" } });
+    fireEvent.change(screen.getByLabelText("Deployment pattern"), {
+      target: { value: "postgres_ldap" },
+    });
+    fireEvent.change(screen.getByLabelText("Data root"), {
+      target: { value: "/srv/contextdesk-synthetic" },
+    });
+    fireEvent.change(screen.getByLabelText("Evidence root"), {
+      target: { value: "/srv/contextdesk-synthetic/evidence" },
+    });
+    fireEvent.change(screen.getByLabelText("Application database URL"), {
+      target: { value: "postgres://app:synthetic@db.example.test/contextdesk" },
+    });
+    fireEvent.change(screen.getByLabelText("LDAP URL"), {
+      target: { value: "ldaps://directory.example.test:636" },
+    });
+    fireEvent.change(screen.getByLabelText("User search base"), {
+      target: { value: "ou=people,dc=example,dc=test" },
+    });
+    fireEvent.change(screen.getByLabelText("Group search base"), {
+      target: { value: "ou=groups,dc=example,dc=test" },
+    });
+    fireEvent.change(screen.getByLabelText("Bind DN"), {
+      target: { value: "cn=svc,ou=services,dc=example,dc=test" },
+    });
+    fireEvent.change(screen.getByLabelText("Bind password"), { target: { value: bindSecret } });
+    fireEvent.change(screen.getByLabelText("Administrator group"), {
+      target: { value: "cn=contributors,ou=groups,dc=example,dc=test" },
+    });
+    fireEvent.change(screen.getByLabelText("UPN suffix (optional)"), { target: { value: "example.test" } });
+    fireEvent.change(screen.getByLabelText("NetBIOS domain (optional)"), { target: { value: "EXAMPLE" } });
+    fireEvent.change(screen.getByLabelText("Probe username (optional)"), { target: { value: "alice" } });
+    fireEvent.change(screen.getByLabelText("Probe password (optional, never stored)"), {
+      target: { value: probeSecret },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Prepare configuration" }));
+    expect(await screen.findByText("Configuration prepared. Nothing has been installed or restarted.")).toBeTruthy();
+
+    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+    const draftPayload = String(calls.find(([url]) => url.endsWith("/draft"))?.[1].body);
+    expect(draftPayload).toContain("setup_secret:ldap_bind_password:");
+    expect(draftPayload).toContain("service_bind_search");
+    expect(draftPayload).toContain("upn");
+    expect(draftPayload).toContain("domain_backslash");
+    expect(draftPayload).not.toContain(bindSecret);
+    expect(draftPayload).not.toContain(probeSecret);
+    expect(draftPayload).not.toContain("postgres://app:synthetic");
+
+    fireEvent.click(screen.getByRole("button", { name: "Test directory" }));
+    expect(await screen.findByText(/Directory probe finished/)).toBeTruthy();
+    const probePayload = String(calls.find(([url]) => url.endsWith("/ldap-probe"))?.[1].body);
+    expect(probePayload).toContain(probeSecret);
+    expect(JSON.stringify(calls.find(([url]) => url.endsWith("/ldap-probe"))?.[1])).not.toContain(bindSecret);
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText("Probe password (optional, never stored)") as HTMLInputElement).value,
+      ).toBe("");
+    });
+  });
 });

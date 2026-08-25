@@ -13,6 +13,7 @@ order: 25
 related:
   - war-room-workflow
   - war-room-deployment
+  - war-room-ldap-directory
 ---
 
 # Update your War Room profile

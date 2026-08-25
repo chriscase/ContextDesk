@@ -41,6 +41,16 @@
 .setup-wizard button:disabled { cursor: not-allowed; opacity: 0.55; }
 .setup-wizard button.setup-wizard__secondary { background: transparent; color: var(--accent, #f7b928); }
 .setup-wizard__message { margin: 0; padding: 0.8rem 1rem; border-left: 3px solid var(--accent, #f7b928); background: rgb(247 185 40 / 7%); }
+.setup-wizard__probe-report {
+  margin: 0;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border, #2b303c);
+  border-radius: 0.65rem;
+  white-space: pre-wrap;
+  color: var(--muted, #a8afbf);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
 .setup-wizard__boundary { padding: 1rem 1.25rem; }
 .setup-wizard__boundary h2 { margin-top: 0; font-size: 1rem; }
 .setup-wizard__boundary > div { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }

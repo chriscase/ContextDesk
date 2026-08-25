@@ -4,6 +4,8 @@ import {
   ADMIN_PEOPLE_LIST_SCHEMA_ID,
   ADMIN_ROLE_MAPPING_LIST_SCHEMA_ID,
   ADMIN_ROLE_MAPPING_MAX_RESULTS,
+  DEFAULT_DIRECTORY_ATTRIBUTE_MAP,
+  LDAP_PUBLIC_CONFIG_SCHEMA_ID,
   type AppRole,
 } from "@cd-collab/contracts/admin";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -36,6 +38,33 @@ function rolesAndPeopleFetch(): typeof fetch {
         ok: true,
         status: 200,
         json: async () => ({ schemaId: ADMIN_PEOPLE_LIST_SCHEMA_ID, people: [], nextCursor: null }),
+      } as Response;
+    }
+    if (url === "/api/admin/ldap/config") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schemaId: LDAP_PUBLIC_CONFIG_SCHEMA_ID,
+          authMode: "local",
+          url: null,
+          starttls: false,
+          verifyTls: true,
+          caConfigured: false,
+          userResolutionModes: [],
+          userDnTemplate: null,
+          userSearchBase: null,
+          userSearchFilter: null,
+          groupSearchBase: null,
+          groupSearchFilter: null,
+          memberAttribute: null,
+          bindDn: null,
+          bindPasswordConfigured: false,
+          upnSuffix: null,
+          netbiosDomain: null,
+          attributeMap: DEFAULT_DIRECTORY_ATTRIBUTE_MAP,
+          timeoutMs: 8000,
+        }),
       } as Response;
     }
     return { ok: false, status: 404, json: async () => ({}) } as Response;
@@ -241,5 +270,28 @@ describe("Administration People tab", () => {
     window.dispatchEvent(new PopStateEvent("popstate"));
     expect(await screen.findByText("local:admins")).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Group role mappings" }).getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+describe("Administration Directory tab", () => {
+  it("switches to Directory on click, pushes /admin/ldap, and updates the document title", async () => {
+    vi.stubGlobal("fetch", rolesAndPeopleFetch());
+    render(<Administration />);
+    await screen.findByText("local:admins");
+    fireEvent.click(screen.getByRole("tab", { name: "Directory" }));
+    expect(await screen.findByText("Current directory configuration")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Directory" }).getAttribute("aria-selected")).toBe("true");
+    expect(window.location.pathname).toBe("/admin/ldap");
+    expect(document.title).toContain("Directory");
+    expect(document.getElementById("administration-roles-panel")?.hasAttribute("hidden")).toBe(true);
+  });
+
+  it("direct-loads and reloads on /admin/ldap with the Directory tab already selected", async () => {
+    window.history.pushState({}, "", "/admin/ldap");
+    vi.stubGlobal("fetch", rolesAndPeopleFetch());
+    render(<Administration />);
+    expect(await screen.findByText("Current directory configuration")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Directory" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.getElementById("administration-roles-panel")?.hasAttribute("hidden")).toBe(true);
   });
 });

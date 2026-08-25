@@ -10,10 +10,12 @@ import {
 import {
   ADMINISTRATION,
   HOME,
+  LDAP_ADMIN,
   PEOPLE,
   PROFILE,
   SIGN_IN,
   historyUrl,
+  isLdapAdminLocation,
   isPeopleLocation,
   isProfileLocation,
   isShellLocation,
@@ -762,9 +764,17 @@ export function App() {
               canAdmin ? (
                 <section className="app__area" aria-label="Administration">
                   <Administration
-                    tab={isPeopleLocation(work) ? "people" : "roles"}
+                    tab={
+                      isPeopleLocation(work)
+                        ? "people"
+                        : isLdapAdminLocation(work)
+                          ? "ldap"
+                          : "roles"
+                    }
                     onSelectTab={(tab) =>
-                      guardedNavigate(tab === "people" ? PEOPLE : ADMINISTRATION)
+                      guardedNavigate(
+                        tab === "people" ? PEOPLE : tab === "ldap" ? LDAP_ADMIN : ADMINISTRATION,
+                      )
                     }
                   />
                 </section>
