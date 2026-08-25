@@ -12,8 +12,3 @@ export type {
 } from "./service.js";
 export { registerInvestigationActivityRoutes } from "./routes.js";
 export type { InvestigationActivityRouteDeps } from "./routes.js";
-export {
-  INVESTIGATION_ACTIVITY_SOURCE_WINDOW,
-  projectTimelineSource,
-} from "./project.js";
-export type { ProjectedInvestigationActivity, TimelineActivitySource } from "./project.js";
