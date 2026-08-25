@@ -482,10 +482,13 @@ describe("experiment lab", () => {
       "Expected role for synthetic-checkout-timeout.log",
       "Expected role for synthetic-inventory-timeout.log",
     ]);
-    fireEvent.click(within(benchmarkEvidence).getAllByRole("checkbox")[0]!);
+    const selectedEvidence = within(benchmarkEvidence).getAllByRole("checkbox")[0]!;
+    fireEvent.click(selectedEvidence);
+    await waitFor(() => expect((selectedEvidence as HTMLInputElement).checked).toBe(true));
     fireEvent.change(roleSelectors[0]!, {
       target: { value: "symptom" },
     });
+    await waitFor(() => expect((roleSelectors[0] as HTMLSelectElement).value).toBe("symptom"));
     fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
 
     await waitFor(() =>
