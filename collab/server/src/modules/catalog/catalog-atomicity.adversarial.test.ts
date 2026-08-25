@@ -67,6 +67,35 @@ describe("catalog mutation atomicity", () => {
     expect(await catalog.findByIdentity(ALICE.id)).toBeNull();
     expect(await humanSourceFor(catalog, ALICE.id)).toBeNull();
   });
+
+  it("does not leave a human source when the first evidence registration fails", async () => {
+    const store = new InjectedFailureStore();
+    store.failTimelineKind = "evidence_registered";
+    const { cases, catalog, audit } = await harness(store);
+    const created = await cases.createCase(ALICE, { title: "Synthetic catalog evidence atomic fixture" }, "test");
+    expect(await humanSourceFor(catalog, ALICE.id)).toBeNull();
+    await expect(
+      cases.addEvidence(
+        created.id,
+        ALICE,
+        {
+          kind: "log",
+          filename: "mailer.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("2026-08-25T00:00:00Z synthetic mailer timeout\n"),
+          summary: "Synthetic mailer timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      ),
+    ).rejects.toThrow(/injected timeline failure:evidence_registered/);
+    expect(await cases.listArtifacts(created.id, ALICE, true)).toEqual([]);
+    expect(await cases.listContributions(created.id, ALICE, true)).toEqual([]);
+    expect((await cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
+    expect(await audit.list({ action: "evidence_register" })).toEqual([]);
+    expect(await audit.list({ action: "catalog_create" })).toEqual([]);
+    expect(await catalog.findByIdentity(ALICE.id)).toBeNull();
+  });
 });
 
 describe.skipIf(!adminUrl())("postgres catalog mutation atomicity", () => {
@@ -113,6 +142,61 @@ describe.skipIf(!adminUrl())("postgres catalog mutation atomicity", () => {
         expect(await audit.list({ action: "catalog_create" })).toEqual([]);
         expect(await catalog.findByIdentity(ALICE.id)).toBeNull();
         expect(await humanSourceFor(catalog, ALICE.id)).toBeNull();
+      } finally {
+        await pool.end();
+      }
+    });
+  });
+
+  it("rolls back a PostgreSQL human source when first evidence registration fails", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 4 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-catalog-evidence-atomic-"));
+      dirs.push(root);
+      class InjectedPgCaseStore extends PgCaseStore {
+        failTimelineKind: string | null = null;
+        override async appendTimeline(
+          caseId: string,
+          event: Parameters<PgCaseStore["appendTimeline"]>[1],
+        ): Promise<Awaited<ReturnType<PgCaseStore["appendTimeline"]>>> {
+          if (this.failTimelineKind && event.kind === this.failTimelineKind) {
+            throw new Error(`injected timeline failure:${event.kind}`);
+          }
+          return super.appendTimeline(caseId, event);
+        }
+      }
+      const caseStore = new InjectedPgCaseStore(pool);
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, caseStore, catalog);
+      try {
+        const created = await cases.createCase(ALICE, { title: "PG catalog evidence atomic fixture" }, "test");
+        expect(await humanSourceFor(catalog, ALICE.id)).toBeNull();
+        caseStore.failTimelineKind = "evidence_registered";
+        await expect(
+          cases.addEvidence(
+            created.id,
+            ALICE,
+            {
+              kind: "log",
+              filename: "mailer.log",
+              mediaType: "text/plain",
+              bytes: new TextEncoder().encode("2026-08-25T00:00:00Z synthetic mailer timeout\n"),
+              summary: "Synthetic mailer timeout.",
+              privacyClass: "share_safe",
+            },
+            "test",
+          ),
+        ).rejects.toThrow(/injected timeline failure:evidence_registered/);
+        expect(await cases.listArtifacts(created.id, ALICE, true)).toEqual([]);
+        expect((await cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(
+          false,
+        );
+        expect(await audit.list({ action: "evidence_register" })).toEqual([]);
+        expect(await audit.list({ action: "catalog_create" })).toEqual([]);
+        expect(await catalog.findByIdentity(ALICE.id)).toBeNull();
       } finally {
         await pool.end();
       }

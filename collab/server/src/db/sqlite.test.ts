@@ -632,4 +632,55 @@ describe("SQLite local runtime", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("rolls a first-use human source back across SQLite reopen after evidence timeline failure", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-catalog-evidence-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "evidence_registered") {
+          throw new Error("injected timeline failure:evidence_registered");
+        }
+        return originalAppend(caseId, event);
+      };
+      const created = await cases.createCase(actor, { title: "SQLite catalog evidence rollback" }, "test");
+      expect((await catalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      await expect(
+        cases.addEvidence(
+          created.id,
+          actor,
+          {
+            kind: "log",
+            filename: "mailer.log",
+            mediaType: "text/plain",
+            bytes: new TextEncoder().encode("2026-08-25T00:00:00Z synthetic mailer timeout\n"),
+            summary: "Synthetic mailer timeout.",
+            privacyClass: "share_safe",
+          },
+          "test",
+        ),
+      ).rejects.toThrow(/injected timeline failure:evidence_registered/);
+      expect(await cases.listArtifacts(created.id, actor, true)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
+      expect(await runtime.audit.list({ action: "evidence_register" })).toEqual([]);
+      expect(await runtime.audit.list({ action: "catalog_create" })).toEqual([]);
+      expect((await catalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      const reopenedCatalog = new CatalogService(reopened.catalog, reopened.audit);
+      expect((await reopenedCatalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
+      expect(await reopened.audit.list({ action: "catalog_create" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

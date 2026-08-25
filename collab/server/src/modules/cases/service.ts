@@ -1122,7 +1122,6 @@ export class CaseService {
     await this.requireCase(caseId);
     const privacy = defaultPrivacy(input.privacyClass);
     if (input.filename !== undefined) assertFilenameAllowed(input.filename);
-    const sourceId = await this.resolveSourceId(actor, input.sourceId);
     const id = randomUUID();
     const uri: string | null = input.uri ?? null;
     let mediaType = input.mediaType ?? null;
@@ -1150,7 +1149,7 @@ export class CaseService {
           verificationStatus: ref.verificationStatus,
           refId: ref.id,
           privacyClass: privacy,
-          sourceId,
+          sourceId: input.sourceId,
           summary: input.summary,
         });
       } catch (error) {
@@ -1171,7 +1170,8 @@ export class CaseService {
     let evidenceBatch: EvidenceWriteBatch | null = null;
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
-      const result = await this.store.withAtomic(async () => {
+      const result = await this.withAtomic(async () => {
+        const sourceId = await this.resolveSourceId(actor, input.sourceId);
         let meta: { hash: string; byteLength: number };
         if (evidenceBatch) {
           meta = await evidenceBatch.put(input.bytes!, { contentType: mediaType ?? undefined });
@@ -1238,7 +1238,7 @@ export class CaseService {
           throw new Error("hash verification failed after storage");
         }
         return { artifact: this.toArtifact(row), summary };
-      }, this.audit);
+      });
       await evidenceBatch?.finalize();
       return result;
     } catch (error) {
@@ -1329,14 +1329,13 @@ export class CaseService {
     if (request.previewToken !== requestDigest || preview.report.previewToken !== requestDigest) {
       throw new CorpusIntakeConflictError("preview token does not match commit input");
     }
-    const sourceId = await this.resolveSourceId(actor);
     const batchId = randomUUID();
     const createdAt = new Date().toISOString();
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
-      const result = await this.store.withAtomic(async () => {
+      const result = await this.withAtomic(async () => {
         await this.store.lockIntakeIdempotency(caseId, request.idempotencyKey);
         const replay = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
         if (replay) {
@@ -1345,6 +1344,7 @@ export class CaseService {
           }
           return { ...parseCorpusIntakeBatch(JSON.parse(replay.payloadJson)), replayed: true };
         }
+        const sourceId = await this.resolveSourceId(actor);
 
         const metaByDigest = new Map<string, { hash: string; byteLength: number }>();
         const uniqueFiles = [...new Map(
@@ -1485,7 +1485,7 @@ export class CaseService {
           outcome: "success",
         });
         return batch;
-      }, this.audit);
+      });
       await evidenceBatch?.finalize();
       return result;
     } catch (error) {
@@ -1596,16 +1596,17 @@ export class CaseService {
       verificationStatus: string | null;
       refId: string | null;
       privacyClass: PrivacyClass;
-      sourceId: string;
+      sourceId: string | undefined;
       summary: string;
     },
   ): Promise<{ artifact: ArtifactV1; summary: ContributionV1 }> {
-    return this.store.withAtomic(async () => {
+    return this.withAtomic(async () => {
+      const sourceId = await this.resolveSourceId(actor, input.sourceId);
       const summaryInput: ContributionWriteInput = {
         kind: "upload",
         body: input.summary,
         privacyClass: input.privacyClass,
-        sourceId: input.sourceId,
+        sourceId,
       };
       if (clientTime !== null) summaryInput.clientTime = clientTime;
       const summary = await this.persistContribution(caseId, actor, summaryInput, origin);
@@ -1625,7 +1626,7 @@ export class CaseService {
         summaryContributionId: summary.id,
         uploaderId: actor.id,
         uploaderUsername: actor.username,
-        sourceId: input.sourceId,
+        sourceId,
       };
       await this.store.insertArtifact(row);
       await this.store.appendTimeline(caseId, {
@@ -1648,7 +1649,7 @@ export class CaseService {
         outcome: "success",
       });
       return { artifact: this.toArtifact(row), summary };
-    }, this.audit);
+    });
   }
 
   private async replayContributionWrite(
