@@ -310,7 +310,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     expect((await screen.findAllByText("qwen-3.6-27b")).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(screen.getByRole("columnheader", { name: "Gold" })).toBeTruthy();
@@ -336,7 +336,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     expect(await screen.findByText(/Gold reference v1/)).toBeTruthy();
     expect(
       screen.getByText(/accepted decision “Treat inventory timeout as the benchmark cause\.” \(r2\)/),
@@ -422,7 +422,7 @@ describe("experiment lab", () => {
       return { ok: true, json: async () => ({}) };
     });
     vi.stubGlobal("fetch", fetchMock);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     expect((await screen.findAllByText("synthetic-checkout-timeout.log")).length).toBeGreaterThan(0);
     const benchmarkEvidence = screen.getByRole("group", {
@@ -478,7 +478,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite={false} canLead={false} readOnly />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite={false} canLead={false} readOnly />);
 
     const gold = await screen.findByRole("region", { name: "Gold reference" });
     const goldSummary = gold.querySelector(".experiment-lab__gold-summary");
@@ -557,7 +557,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     expect(await screen.findByRole("heading", { name: "At a glance" })).toBeTruthy();
     openCompareWorkspace("Evidence");
     expect(screen.getAllByText(/Shared supporting evidence/).length).toBeGreaterThan(0);
@@ -578,14 +578,14 @@ describe("experiment lab", () => {
       return { ok: true, json: async () => ({ experiments: [view] }) };
     });
     vi.stubGlobal("fetch", fetchMock);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     await screen.findAllByText("qwen-3.6-27b");
     fireEvent.change(screen.getByPlaceholderText(/Paste share-safe experiment/), {
       target: { value: JSON.stringify({ schemaId: "cd-collab.experiment_summary.v1" }) },
     });
     fireEvent.click(screen.getByRole("button", { name: "Import experiment" }));
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/cases/c1/experiments",
+      "/api/cases/00000000-0000-4000-8000-000000000001/experiments",
       expect.objectContaining({ method: "POST" }),
     );
   });
@@ -603,7 +603,7 @@ describe("experiment lab", () => {
       return { ok: false, json: async () => ({}) };
     });
     vi.stubGlobal("fetch", fetchMock);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     expect(await screen.findByText(/package pkg-synth-three-model-checkout-v1/)).toBeTruthy();
     window.dispatchEvent(
@@ -639,7 +639,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead readOnly />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead readOnly />);
     expect(await screen.findByText(/Static read-only mode/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Export share-safe review" })).toBeTruthy();
     for (const name of [
@@ -670,7 +670,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     await screen.findAllByText("qwen-3.6-27b");
     fireEvent.click(screen.getByRole("button", { name: "Export share-safe review" }));
     expect(await screen.findByText("Imported fingerprint is not export-compatible")).toBeTruthy();
@@ -711,7 +711,7 @@ describe("experiment lab", () => {
       return { ok: false, json: async () => ({}) };
     });
     vi.stubGlobal("fetch", fetchMock);
-    render(<ExperimentLab caseId="c1" canWrite={false} canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite={false} canLead />);
 
     expect(await screen.findByRole("table", { name: /Candidate comparison/ })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Experiment lab" })).toBeTruthy();
@@ -752,7 +752,7 @@ describe("experiment lab", () => {
     expect(screen.getByText(/"privacyClass": "share_safe"/)).toBeTruthy();
     expect(exportedPayload.textContent).not.toMatch(/dave|reviewerUsername|promotedByUsername/);
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/cases/c1/experiments/exp-1/export",
+      "/api/cases/00000000-0000-4000-8000-000000000001/experiments/exp-1/export",
       expect.objectContaining({ method: "POST" }),
     );
   });
@@ -781,7 +781,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite={false} canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite={false} canLead />);
 
     expect(await screen.findByRole("table", { name: /Candidate comparison/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Export share-safe review" }));
@@ -825,7 +825,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Accept decision" }));
     const alert = await screen.findByRole("alert");
@@ -877,7 +877,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite={false} canLead={false} readOnly />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite={false} canLead={false} readOnly />);
 
     await screen.findByRole("heading", { name: "At a glance" });
     const summary = screen.getByLabelText("Experiment summary");
@@ -923,7 +923,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite={false} canLead={false} readOnly />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite={false} canLead={false} readOnly />);
 
     expect(
       await screen.findByRole("button", {
@@ -977,7 +977,7 @@ describe("experiment lab", () => {
             ok: true,
             json: async () => ({
               schemaId: "cd-collab.presence.v1",
-              caseId: "c1",
+              caseId: "00000000-0000-4000-8000-000000000001",
               ttlSeconds: 30,
               members: [],
             }),
@@ -986,7 +986,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     expect(await screen.findByRole("button", { name: "Import experiment" })).toBeTruthy();
     expect(screen.getByText("Import bench-compare / recorded artifact").tagName).toBe("SUMMARY");
     fireEvent.click(screen.getByText("Import bench-compare / recorded artifact"));
@@ -1006,7 +1006,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const scan = await screen.findByRole("region", { name: "At a glance" });
     expect(within(scan).getByRole("heading", { name: "Investigative findings" })).toBeTruthy();
@@ -1046,7 +1046,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const scan = await screen.findByRole("region", { name: "At a glance" });
     const decidedCard = within(scan)
@@ -1095,7 +1095,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     expect(await screen.findByRole("table", { name: /Candidate comparison/ })).toBeTruthy();
     const matrixRegion = screen.getByRole("region", { name: "Candidate comparison" });
@@ -1127,7 +1127,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("region", { name: "At a glance" });
     const text = document.body.textContent ?? "";
@@ -1152,7 +1152,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    render(<ExperimentLab caseId="c1" canWrite={false} canLead={false} readOnly />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite={false} canLead={false} readOnly />);
 
     const scan = await screen.findByRole("region", { name: "At a glance" });
     const unknownCard = within(scan)
@@ -1180,7 +1180,7 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    const contributor = render(<ExperimentLab caseId="c1" canWrite canLead={false} />);
+    const contributor = render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead={false} />);
     await screen.findByRole("region", { name: "At a glance" });
     expect(screen.getByRole("button", { name: "Import experiment" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Propose decision" })).toBeTruthy();
@@ -1204,13 +1204,13 @@ describe("experiment lab", () => {
         return { ok: false, json: async () => ({}) };
       }),
     );
-    const lead = render(<ExperimentLab caseId="c1" canWrite canLead />);
+    const lead = render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     expect(await screen.findByRole("button", { name: "Accept decision" })).toBeTruthy();
     expect(screen.getByText("Accept the proposed decision").tagName).toBe("SUMMARY");
     expect(screen.getByRole("button", { name: "Export share-safe review" })).toBeTruthy();
     lead.unmount();
 
-    render(<ExperimentLab caseId="c1" canWrite canLead readOnly />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead readOnly />);
     expect(await screen.findByText(/Static read-only mode/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Export share-safe review" })).toBeTruthy();
     expect(screen.queryAllByRole("textbox").length).toBe(0);
@@ -1228,7 +1228,7 @@ describe("experiment lab", () => {
       return { ok: true, json: async () => ({}) };
     });
     vi.stubGlobal("fetch", fetchMock);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     await screen.findByRole("region", { name: "At a glance" });
     openCompareWorkspace("Signals");
     expect(screen.queryByPlaceholderText(/evidence refs, comma separated/i)).toBeNull();
@@ -1256,7 +1256,7 @@ describe("experiment lab", () => {
     const helpfulnessCall = fetchMock.mock.calls.find(([url]) =>
       String(url).endsWith("/helpfulness"),
     )!;
-    expect(String(helpfulnessCall[0])).toBe("/api/cases/c1/experiments/exp-cockpit/helpfulness");
+    expect(String(helpfulnessCall[0])).toBe("/api/cases/00000000-0000-4000-8000-000000000001/experiments/exp-cockpit/helpfulness");
     const helpfulnessBody = JSON.parse(String(helpfulnessCall[1]?.body)) as Record<string, unknown>;
     expect(Object.keys(helpfulnessBody).sort()).toEqual([
       "candidateId",
@@ -1298,7 +1298,7 @@ describe("experiment lab", () => {
     const decisionCall = fetchMock.mock.calls.find(
       ([url, init]) => String(url).endsWith("/decisions") && init?.method === "POST",
     )!;
-    expect(String(decisionCall[0])).toBe("/api/cases/c1/experiments/exp-cockpit/decisions");
+    expect(String(decisionCall[0])).toBe("/api/cases/00000000-0000-4000-8000-000000000001/experiments/exp-cockpit/decisions");
     const decisionBody = JSON.parse(String(decisionCall[1]?.body)) as Record<string, unknown>;
     expect(Object.keys(decisionBody).sort()).toEqual([
       "evidenceRefs",
@@ -1325,7 +1325,7 @@ describe("experiment lab", () => {
     );
     const acceptCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/accept"))!;
     expect(String(acceptCall[0])).toBe(
-      "/api/cases/c1/experiments/exp-cockpit/decisions/dec-cockpit/accept",
+      "/api/cases/00000000-0000-4000-8000-000000000001/experiments/exp-cockpit/decisions/dec-cockpit/accept",
     );
     expect(JSON.parse(String(acceptCall[1]?.body))).toEqual({ expectedRevision: 1 });
   });
@@ -1337,7 +1337,7 @@ describe("experiment lab", () => {
       packageId: "pkg-synth-cockpit-v2",
     };
     stubExperiments([cockpitView, second]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const firstPicker = await screen.findByRole("group", {
       name: "Evidence supporting this decision (optional)",
@@ -1501,7 +1501,7 @@ describe("decision readiness cockpit", () => {
       } : trace),
     };
     stubExperiments([artifactView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const scan = await screen.findByRole("region", { name: "At a glance" });
     expect(within(scan).getByText(/worker-pool WARN queue depth=48/)).toBeTruthy();
@@ -1517,6 +1517,52 @@ describe("decision readiness cockpit", () => {
     const technical = within(scan).getAllByText("Technical details")[0]?.closest("details") as HTMLDetailsElement;
     expect(technical.open).toBe(false);
     expect(technical.textContent).toContain("ev-demo-inventory-timeout");
+  });
+
+  it("joins recorded evidence metadata and bytes into a readable, bounded artifact view", async () => {
+    const content = "2026-08-24T06:14:22Z inventory-client ERROR TimeoutError: inventory lookup exceeded 30000ms\n  at InventoryClient.fetch (inventory-client.ts:118)";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [cockpitView] }) };
+      }
+      if (url.endsWith("/evidence")) {
+        return {
+          ok: true,
+          json: async () => ({
+            artifacts: [{
+              id: "ev-demo-inventory-timeout",
+              kind: "log",
+              filename: "synthetic-inventory-timeout.log",
+              uri: null,
+              mediaType: "text/plain",
+              privacyClass: "share_safe",
+              verificationStatus: "verified",
+            }],
+          }),
+        };
+      }
+      if (url.endsWith("/evidence/ev-demo-inventory-timeout/bytes")) {
+        return { ok: true, json: async () => ({ contentBase64: btoa(content) }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    }));
+
+    render(
+      <ExperimentLab
+        caseId="00000000-0000-4000-8000-000000000001"
+        canWrite
+        canLead
+      />,
+    );
+
+    const scan = await screen.findByRole("region", { name: "At a glance" });
+    expect(await within(scan).findByText("synthetic-inventory-timeout.log")).toBeTruthy();
+    expect(within(scan).getByText(/inventory lookup exceeded 30000ms/)).toBeTruthy();
+    const inspect = within(scan).getAllByRole("link", { name: "Inspect supporting artifact" })[0]!;
+    expect(inspect.getAttribute("href")).toContain("kind=evidence");
+    expect(within(scan).getAllByRole("button", { name: /Copy synthetic-inventory-timeout\.log text/ }).length)
+      .toBeGreaterThan(0);
   });
 
   it("keeps large logs and stack traces bounded until the operator expands them", async () => {
@@ -1541,7 +1587,7 @@ describe("decision readiness cockpit", () => {
       } : trace),
     };
     stubExperiments([artifactView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const controls = await screen.findAllByText(/Expand complete log or stack trace · 12 lines/);
     expect(controls.length).toBeGreaterThan(0);
@@ -1558,7 +1604,7 @@ describe("decision readiness cockpit", () => {
 
   it("keeps internal artifact, evidence, and lane identities inside closed technical disclosures", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const scan = await screen.findByRole("region", { name: "At a glance" });
     expect(within(scan).getAllByText(/Supporting evidence needs inspection/).length).toBeGreaterThan(0);
@@ -1594,7 +1640,7 @@ describe("decision readiness cockpit", () => {
 
   it("states honestly when a supporting excerpt was not captured and gives an action", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     const scan = await screen.findByRole("region", { name: "At a glance" });
     expect(within(scan).getAllByText(/Supporting excerpt not captured/).length).toBeGreaterThan(0);
     expect(within(scan).getByText(/inspect surrounding log or stack-trace context/)).toBeTruthy();
@@ -1602,7 +1648,7 @@ describe("decision readiness cockpit", () => {
 
   it("explains the eight readiness facets with factual states and section links", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const readiness = await screen.findByRole("region", { name: "Decision readiness" });
     for (const facet of [
@@ -1643,12 +1689,12 @@ describe("decision readiness cockpit", () => {
       within(readiness)
         .getAllByRole("link", { name: "Open cross-examination" })[0]
         ?.getAttribute("href"),
-    ).toMatch(/^\/investigations\/c1\/compare\?section=cross-exam-heading/);
+    ).toMatch(/^\/investigations\/00000000-0000-4000-8000-000000000001\/compare\?section=cross-exam-heading/);
   });
 
   it("ties each facet to its recorded review-queue volume without ranking", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const readiness = await screen.findByRole("region", { name: "Decision readiness" });
     const facetCard = (name: string) =>
@@ -1664,7 +1710,7 @@ describe("decision readiness cockpit", () => {
 
   it("derives a deterministic human review queue in fixed category order", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("heading", { name: "At a glance" });
     openCompareWorkspace("Review queue");
@@ -1717,14 +1763,14 @@ describe("decision readiness cockpit", () => {
     );
     const links = within(queue).getAllByRole("link");
     expect(links.length).toBe(expectedOrder.length);
-    expect(links[0]?.getAttribute("href")).toContain("/investigations/c1/compare?section=cross-exam-heading&item=");
-    expect(links.at(-1)?.getAttribute("href")).toContain("/investigations/c1/decide?section=decision-heading");
+    expect(links[0]?.getAttribute("href")).toContain("/investigations/00000000-0000-4000-8000-000000000001/compare?section=cross-exam-heading&item=");
+    expect(links.at(-1)?.getAttribute("href")).toContain("/investigations/00000000-0000-4000-8000-000000000001/decide?section=decision-heading");
     expect(links.every((link) => link.getAttribute("href") !== "/investigations")).toBe(true);
   });
 
   it("shows an honest empty queue that never certifies correctness", async () => {
     stubExperiments([readyView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("region", { name: "Decision readiness" });
     expect(within(screen.getByRole("region", { name: "Decision readiness" })).getByText("accepted r1")).toBeTruthy();
@@ -1742,7 +1788,7 @@ describe("decision readiness cockpit", () => {
 
   it("cross-examines shared, conflicting, and single-lane evidence without a benchmark", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("heading", { name: "At a glance" });
     openCompareWorkspace("Evidence");
@@ -1766,7 +1812,7 @@ describe("decision readiness cockpit", () => {
 
   it("cross-examines missing and extra anchors against the recorded benchmark", async () => {
     stubExperiments([benchmarkCrossView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("heading", { name: "At a glance" });
     openCompareWorkspace("Evidence");
@@ -1795,7 +1841,7 @@ describe("decision readiness cockpit", () => {
 
   it("keeps unknown trace coverage explicit in the cross-examination footer", async () => {
     stubExperiments([benchmarkCrossView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("heading", { name: "At a glance" });
     openCompareWorkspace("Evidence");
@@ -1814,7 +1860,7 @@ describe("decision readiness cockpit", () => {
     cleanup();
     vi.unstubAllGlobals();
     stubExperiments([missingTraceView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     await screen.findByRole("heading", { name: "At a glance" });
     openCompareWorkspace("Evidence");
     const rerendered = await screen.findByRole("table", { name: /Evidence cross-examination/ });
@@ -1825,7 +1871,7 @@ describe("decision readiness cockpit", () => {
 
   it("keeps exactly one candidate matrix and one separately named cross-examination table", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     expect(await screen.findByRole("table", { name: /Candidate comparison/ })).toBeTruthy();
     const matrixTables = document.querySelectorAll("table.experiment-lab__matrix");
@@ -1862,7 +1908,7 @@ describe("decision readiness cockpit", () => {
 
   it("inspects one lane in place while keeping the aggregate decision basis unchanged", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("region", { name: "Decision readiness" });
     const allLanes = screen.getByRole("button", { name: "All lanes" });
@@ -1921,7 +1967,7 @@ describe("decision readiness cockpit", () => {
 
   it("clears focus when the operator switches historical artifacts", async () => {
     stubExperiments([cockpitView, seededThreeModelView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("region", { name: "Decision readiness" });
     fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
@@ -1938,7 +1984,7 @@ describe("decision readiness cockpit", () => {
     stubExperiments([cockpitView]);
     render(
       <ExperimentLab
-        caseId="c1"
+        caseId="00000000-0000-4000-8000-000000000001"
         canWrite
         canLead
         readOnly
@@ -1966,7 +2012,7 @@ describe("decision readiness cockpit", () => {
 describe("focused surfaces", () => {
   it("renders the complete lab when no surface prop is given (backwards compatible)", async () => {
     stubExperiments([goldView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     expect(await screen.findByRole("heading", { name: "Experiment lab" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "At a glance" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Accepted decision" })).toBeTruthy();
@@ -1976,7 +2022,7 @@ describe("focused surfaces", () => {
 
   it("comparison surface shows review material without decision or export controls", async () => {
     stubExperiments([goldView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead surface="comparison" />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead surface="comparison" />);
     expect(await screen.findByRole("heading", { name: "Experiment lab" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "At a glance" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Strategy comparison" })).toBeNull();
@@ -1990,7 +2036,7 @@ describe("focused surfaces", () => {
 
   it("decision surface shows the journal and export without the comparison material", async () => {
     stubExperiments([goldView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead surface="decision" />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead surface="decision" />);
     expect(await screen.findByRole("heading", { name: "Decision journal" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Accepted decision" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Export review" })).toBeTruthy();
@@ -2011,7 +2057,7 @@ describe("focused Compare workspace", () => {
     const [focus, setFocus] = useState<WorkFocus | undefined>(props.initial);
     return (
       <ExperimentLab
-        caseId="c1"
+        caseId="00000000-0000-4000-8000-000000000001"
         canWrite
         canLead
         {...(focus ? { routeFocus: focus } : {})}
@@ -2023,7 +2069,7 @@ describe("focused Compare workspace", () => {
           window.history.pushState(
             nextFocus,
             "",
-            `/investigations/c1/compare?${params.toString()}#${encodeURIComponent(nextFocus.section)}`,
+            `/investigations/00000000-0000-4000-8000-000000000001/compare?${params.toString()}#${encodeURIComponent(nextFocus.section)}`,
           );
           setFocus(nextFocus);
         }}
@@ -2041,7 +2087,7 @@ describe("focused Compare workspace", () => {
       window.history.pushState(
         nextFocus,
         "",
-        `/investigations/c1/compare?${params.toString()}#${encodeURIComponent(nextFocus.section)}`,
+        `/investigations/00000000-0000-4000-8000-000000000001/compare?${params.toString()}#${encodeURIComponent(nextFocus.section)}`,
       );
       setFocus(nextFocus);
     };
@@ -2052,7 +2098,7 @@ describe("focused Compare workspace", () => {
         <section aria-label="Compare stage">
           <ExperimentLab
             key={`compare-${routeGeneration}`}
-            caseId="c1"
+            caseId="00000000-0000-4000-8000-000000000001"
             surface="comparison"
             canWrite
             canLead
@@ -2063,7 +2109,7 @@ describe("focused Compare workspace", () => {
         <section aria-label="Decide stage" hidden>
           <ExperimentLab
             key={`decide-${routeGeneration}`}
-            caseId="c1"
+            caseId="00000000-0000-4000-8000-000000000001"
             surface="decision"
             canWrite
             canLead
@@ -2077,7 +2123,7 @@ describe("focused Compare workspace", () => {
 
   it("renders one major subsection at a time and a useful default summary", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     expect(await screen.findByRole("heading", { name: "At a glance" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Decision readiness" })).toBeTruthy();
@@ -2092,7 +2138,7 @@ describe("focused Compare workspace", () => {
 
   it("makes every subsection keyboard reachable and URL-backed", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     await screen.findByRole("navigation", { name: "Compare workspace" });
 
     const expected = [
@@ -2119,7 +2165,7 @@ describe("focused Compare workspace", () => {
     stubExperiments([cockpitView]);
     render(
       <ExperimentLab
-        caseId="c1"
+        caseId="00000000-0000-4000-8000-000000000001"
         canWrite
         canLead
         routeFocus={{
@@ -2143,11 +2189,48 @@ describe("focused Compare workspace", () => {
     expect(screen.getByText(/highlights matching cards, table columns, and review references in place/)).toBeTruthy();
   });
 
+  it("never focuses a same-id route target inside a hidden stage", async () => {
+    const hiddenStage = document.createElement("section");
+    hiddenStage.hidden = true;
+    const hiddenDuplicate = document.createElement("button");
+    hiddenDuplicate.dataset.routeItem = "ev-demo-inventory-timeout";
+    hiddenDuplicate.dataset.routeKind = "evidence";
+    hiddenStage.append(hiddenDuplicate);
+    document.body.prepend(hiddenStage);
+    try {
+      stubExperiments([cockpitView]);
+      render(
+        <ExperimentLab
+          caseId="00000000-0000-4000-8000-000000000001"
+          canWrite
+          canLead
+          routeFocus={{
+            section: "cross-exam-heading",
+            item: "ev-demo-inventory-timeout",
+            itemKind: "evidence",
+            lane: null,
+            experiment: "exp-cockpit",
+          }}
+        />,
+      );
+
+      await screen.findByRole("region", { name: "Shared and different evidence" });
+      const visibleTarget = [...document.querySelectorAll<HTMLElement>(
+        "[data-route-item='ev-demo-inventory-timeout'][data-route-kind='evidence']",
+      )].find((element) => !element.closest("[hidden]"));
+      expect(visibleTarget).toBeTruthy();
+      await waitFor(() => expect(document.activeElement).toBe(visibleTarget));
+      expect(document.activeElement).not.toBe(hiddenDuplicate);
+    } finally {
+      hiddenStage.remove();
+    }
+  });
+
   it("fails unknown section ids to the useful summary instead of a blank screen", async () => {
     stubExperiments([cockpitView]);
     render(
       <ExperimentLab
-        caseId="c1"
+        caseId="00000000-0000-4000-8000-000000000001"
         canWrite
         canLead
         routeFocus={{
@@ -2174,7 +2257,7 @@ describe("focused Compare workspace", () => {
 
     rerender(
       <ExperimentLab
-        caseId="c1"
+        caseId="00000000-0000-4000-8000-000000000001"
         canWrite
         canLead
         routeFocus={{
@@ -2189,7 +2272,7 @@ describe("focused Compare workspace", () => {
 
     rerender(
       <ExperimentLab
-        caseId="c1"
+        caseId="00000000-0000-4000-8000-000000000001"
         canWrite
         canLead
         routeFocus={{
@@ -2247,7 +2330,7 @@ describe("focused Compare workspace", () => {
     try {
       render(
         <ExperimentLab
-          caseId="c1"
+          caseId="00000000-0000-4000-8000-000000000001"
           canWrite
           canLead
           routeFocus={{
@@ -2273,7 +2356,7 @@ describe("focused Compare workspace", () => {
     const originalScroll = HTMLElement.prototype.scrollIntoView;
     HTMLElement.prototype.scrollIntoView = scrollIntoView;
     try {
-      render(<ExperimentLab caseId="c1" canWrite canLead />);
+      render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
       await screen.findByRole("region", { name: "Decision readiness" });
       openCompareWorkspace("Review queue");
@@ -2355,7 +2438,7 @@ describe("focused Compare workspace", () => {
 
   it("lands evidence and strategy review links on the relevant subsection", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     await screen.findByRole("heading", { name: "At a glance" });
 
     const inspect = screen.getAllByRole("link", { name: "Inspect supporting artifact" })[0]!;
@@ -2390,7 +2473,7 @@ describe("focused Compare workspace", () => {
     const onDeepNavigate = vi.fn();
     render(
       <ExperimentLab
-        caseId="c1"
+        caseId="00000000-0000-4000-8000-000000000001"
         canWrite
         canLead
         surface="comparison"
@@ -2403,7 +2486,7 @@ describe("focused Compare workspace", () => {
 
     const decisionLink = screen.getByRole("link", { name: "open decision" });
     expect(decisionLink.getAttribute("href")).toMatch(
-      /^\/investigations\/c1\/decide\?section=decision-heading/,
+      /^\/investigations\/00000000-0000-4000-8000-000000000001\/decide\?section=decision-heading/,
     );
     decisionLink.addEventListener("click", (event) => event.preventDefault(), { once: true });
     fireEvent.click(decisionLink, { metaKey: true });
@@ -2440,7 +2523,7 @@ describe("focused Compare workspace", () => {
       } : trace),
     };
     stubExperiments([artifactView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const expand = await screen.findByText(/Expand complete log or stack trace · 12 lines/);
     const details = expand.closest("details") as HTMLDetailsElement;
@@ -2461,7 +2544,7 @@ describe("focused Compare workspace", () => {
 
   it("keeps finding headings semantic and the workspace contained for narrow viewports", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     const scan = await screen.findByRole("region", { name: "At a glance" });
     const finding = within(scan).getByRole("heading", {
       name: "Models assign different meaning to the same evidence",
@@ -2476,7 +2559,7 @@ describe("focused Compare workspace", () => {
 
   it("preserves modifier-click so a subsection href can open without in-app navigation", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     await screen.findByRole("heading", { name: "At a glance" });
     const evidence = within(compareWorkspaceNav()).getByRole("link", { name: "Evidence" });
     fireEvent.click(evidence, { metaKey: true });

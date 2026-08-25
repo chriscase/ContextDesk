@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { MouseEvent, ReactNode } from "react";
-import type { WorkFocus } from "./app-location.js";
+import { pathFor, type RouteItemKind, type WorkFocus } from "./app-location.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
 import { protectedApiFetch } from "./protected-api.js";
+import { matchingRouteItem, visibleSectionTarget } from "./route-focus.js";
 
 interface CandidateRow {
   candidateId: string;
@@ -289,6 +290,7 @@ function stageForSection(section: string): "compare" | "decide" {
 function navigationKey(focus: WorkFocus): string {
   return [
     focus.section,
+    focus.itemKind ?? "",
     focus.item ?? "",
     focus.experiment ?? "",
     focus.navigation ?? "focus",
@@ -353,7 +355,44 @@ interface HumanFinding {
   candidateIds: string[];
 }
 
-function supportingArtifact(view: ExperimentView, evidenceRef: string): SupportingArtifact {
+interface LoadedEvidenceExcerpt {
+  text: string;
+  truncated: boolean;
+}
+
+function artifactSource(artifact: EvidenceArtifactView): string {
+  return [
+    artifact.kind.replaceAll("_", " "),
+    artifact.verificationStatus?.replaceAll("_", " ") ?? "verification unknown",
+    artifact.privacyClass.replaceAll("_", " "),
+  ].join(" · ");
+}
+
+function supportingArtifact(
+  view: ExperimentView,
+  evidenceRef: string,
+  artifacts: EvidenceArtifactView[] = [],
+  excerpts: Record<string, LoadedEvidenceExcerpt> = {},
+): SupportingArtifact {
+  const artifact = artifacts.find((row) => row.id === evidenceRef);
+  const loaded = excerpts[evidenceRef];
+  const traceEvent = (view.traces ?? []).flatMap((trace) =>
+    trace.events.map((event) => ({ trace, event })),
+  ).find(({ event }) => event.evidenceRefs.includes(evidenceRef) && Boolean(event.excerpt?.trim()));
+  if (artifact) {
+    const label = evidenceArtifactLabel(artifact) ?? "Recorded evidence";
+    return {
+      label,
+      source: artifactSource(artifact),
+      excerpt: loaded?.text ?? traceEvent?.event.excerpt ?? null,
+      context: loaded
+        ? `Text loaded from the recorded evidence artifact${loaded.truncated ? "; the displayed content is a bounded excerpt" : ""}.`
+        : traceEvent
+          ? `The recorded lane captured this excerpt from ${label}; inspect the evidence board for the complete artifact.`
+          : `The evidence record is available as ${label}, but no readable excerpt was loaded.`,
+      technicalRef: evidenceRef,
+    };
+  }
   for (const trace of view.traces ?? []) {
     const event = trace.events.find((row) =>
       row.evidenceRefs.includes(evidenceRef) && Boolean(row.excerpt?.trim()),
@@ -407,6 +446,22 @@ function evidenceArtifactLabel(artifact: EvidenceArtifactView | undefined): stri
   return `${artifact.kind.replaceAll("_", " ")} evidence`;
 }
 
+const MAX_EVIDENCE_EXCERPT_BYTES = 64 * 1024;
+
+function decodeEvidenceExcerpt(contentBase64: string): LoadedEvidenceExcerpt | null {
+  try {
+    const bytes = Uint8Array.from(atob(contentBase64), (character) => character.charCodeAt(0));
+    if (bytes.subarray(0, 1024).includes(0)) return null;
+    const bounded = bytes.subarray(0, MAX_EVIDENCE_EXCERPT_BYTES);
+    return {
+      text: new TextDecoder().decode(bounded),
+      truncated: bytes.length > bounded.length,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function EvidencePicker(props: {
   view: ExperimentView;
   artifacts: EvidenceArtifactView[];
@@ -419,7 +474,7 @@ function EvidencePicker(props: {
   const artifactsById = new Map(props.artifacts.map((artifact) => [artifact.id, artifact]));
   const choices = evidenceRefsFor(props.view).map((ref) => {
     const artifact = artifactsById.get(ref);
-    const support = supportingArtifact(props.view, ref);
+    const support = supportingArtifact(props.view, ref, props.artifacts);
     return {
       ref,
       label: evidenceArtifactLabel(artifact) ?? support.label,
@@ -527,7 +582,12 @@ function EvidencePicker(props: {
   );
 }
 
-function buildHumanFindings(view: ExperimentView, rows: EvidenceCrossRow[]): HumanFinding[] {
+function buildHumanFindings(
+  view: ExperimentView,
+  rows: EvidenceCrossRow[],
+  artifacts: EvidenceArtifactView[] = [],
+  excerpts: Record<string, LoadedEvidenceExcerpt> = {},
+): HumanFinding[] {
   const label = (candidateId: string): string =>
     view.candidates.find((row) => row.candidateId === candidateId)?.modelLabel ?? "recorded lane";
   return rows
@@ -557,7 +617,7 @@ function buildHumanFindings(view: ExperimentView, rows: EvidenceCrossRow[]): Hum
       return {
         id: row.evidenceRef,
         headline,
-        artifact: supportingArtifact(view, row.evidenceRef),
+        artifact: supportingArtifact(view, row.evidenceRef, artifacts, excerpts),
         claims,
         why,
         nextStep: row.conflict
@@ -1164,6 +1224,8 @@ export function ExperimentLab(props: {
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
   const [presence, setPresence] = useState<PresenceView | null>(null);
   const [evidenceArtifacts, setEvidenceArtifacts] = useState<EvidenceArtifactView[]>([]);
+  const [evidenceExcerpts, setEvidenceExcerpts] = useState<Record<string, LoadedEvidenceExcerpt>>({});
+  const requestedEvidenceExcerpts = useRef(new Set<string>());
   // Focus is URL-backed for reload/back/forward, but never filters evidence.
   const [focusedCandidateId, setFocusedCandidateId] = useState<string | null>(null);
   const [workspaceSection, setWorkspaceSection] = useState<CompareWorkspaceId>(() =>
@@ -1211,6 +1273,8 @@ export function ExperimentLab(props: {
   useEffect(() => {
     let mounted = true;
     setEvidenceArtifacts([]);
+    setEvidenceExcerpts({});
+    requestedEvidenceExcerpts.current = new Set<string>();
     void protectedApiFetch(`/api/cases/${props.caseId}/evidence`)
       .then(async (response) => {
         if (!response.ok) return null;
@@ -1293,22 +1357,19 @@ export function ExperimentLab(props: {
         }
       }
     }
-  }, [props.routeFocus?.section, props.routeFocus?.item, props.routeFocus?.experiment, props.routeFocus?.navigation, surfaceStage]);
+  }, [props.routeFocus?.section, props.routeFocus?.itemKind, props.routeFocus?.item, props.routeFocus?.experiment, props.routeFocus?.navigation, surfaceStage]);
 
   useEffect(() => {
     // Section and item navigation moves keyboard focus to the rendered destination.
     // Lane-only focus never updates navigationTarget, so it cannot move the viewport.
     if (!navigationTarget) return undefined;
     const timer = window.setTimeout(() => {
-      const exactItem = navigationTarget.item
-        ? [...document.querySelectorAll<HTMLElement>("[data-route-item]")]
-            .find((element) => element.dataset.routeItem === navigationTarget.item)
-        : null;
-      const requestedSection = document.getElementById(navigationTarget.section);
+      const exactItem = matchingRouteItem(navigationTarget);
+      const requestedSection = visibleSectionTarget(navigationTarget.section);
       const workspace = COMPARE_WORKSPACE.find(
         (item) => item.id === compareWorkspaceFor(navigationTarget.section),
       );
-      const workspaceHeading = workspace ? document.getElementById(workspace.section) : null;
+      const workspaceHeading = workspace ? visibleSectionTarget(workspace.section) : null;
       const destination = exactItem ?? requestedSection ?? workspaceHeading;
       if (destination) {
         destination.focus({ preventScroll: true });
@@ -1349,20 +1410,59 @@ export function ExperimentLab(props: {
   }, [props.caseId, props.participant?.username, readOnly]);
 
   const current = experiments.find((row) => row.id === active) ?? experiments[0] ?? null;
-  const routeFor = (section: string, item: string | null = null, lane: string | null = null): WorkFocus => ({
+
+  useEffect(() => {
+    if (!current) return undefined;
+    const artifactIds = new Set(evidenceArtifacts.map((artifact) => artifact.id));
+    const pending = evidenceRefsFor(current).filter(
+      (evidenceId) => artifactIds.has(evidenceId) && !requestedEvidenceExcerpts.current.has(evidenceId),
+    );
+    if (!pending.length) return undefined;
+    let mounted = true;
+    for (const evidenceId of pending) requestedEvidenceExcerpts.current.add(evidenceId);
+    void Promise.all(pending.map(async (evidenceId) => {
+      try {
+        const response = await protectedApiFetch(
+          `/api/cases/${props.caseId}/evidence/${evidenceId}/bytes`,
+        );
+        if (!response.ok) return null;
+        const body = (await response.json()) as { contentBase64?: string };
+        const excerpt = body.contentBase64 ? decodeEvidenceExcerpt(body.contentBase64) : null;
+        return excerpt ? [evidenceId, excerpt] as const : null;
+      } catch {
+        return null;
+      }
+    })).then((entries) => {
+      if (!mounted) return;
+      const loaded = entries.filter((entry): entry is readonly [string, LoadedEvidenceExcerpt] => entry !== null);
+      if (loaded.length) {
+        setEvidenceExcerpts((previous) => ({ ...previous, ...Object.fromEntries(loaded) }));
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [current, evidenceArtifacts, props.caseId]);
+
+  const evidenceRouteItems = new Set(current ? evidenceRefsFor(current) : []);
+  const routeFor = (
+    section: string,
+    item: string | null = null,
+    lane: string | null = null,
+    itemKind: RouteItemKind | null = item && evidenceRouteItems.has(item) ? "evidence" : null,
+  ): WorkFocus => ({
     section,
     item,
+    itemKind,
     lane,
     experiment: current?.id ?? null,
   });
-  const hrefFor = (focus: WorkFocus): string => {
-    const params = new URLSearchParams({ section: focus.section });
-    if (focus.item) params.set("item", focus.item);
-    if (focus.lane) params.set("lane", focus.lane);
-    if (focus.experiment) params.set("experiment", focus.experiment);
-    const stage = stageForSection(focus.section);
-    return `/investigations/${props.caseId}/${stage}?${params.toString()}#${encodeURIComponent(focus.section)}`;
-  };
+  const hrefFor = (focus: WorkFocus): string => pathFor({
+    area: "investigations",
+    caseId: props.caseId,
+    stage: stageForSection(focus.section),
+    focus,
+  });
   const applyFocus = (focus: WorkFocus, navigateDestination: boolean) => {
     setWorkspaceSection(compareWorkspaceFor(focus.section));
     setWorkspaceItem(focus.item);
@@ -1478,7 +1578,9 @@ export function ExperimentLab(props: {
   }
   // Cockpit projections — pure restatements of the current view (see builders).
   const crossRows = current ? buildEvidenceCrossRows(current) : [];
-  const humanFindings = current ? buildHumanFindings(current, crossRows) : [];
+  const humanFindings = current
+    ? buildHumanFindings(current, crossRows, evidenceArtifacts, evidenceExcerpts)
+    : [];
   const visibleQueueText = (text: string): string => crossRows.reduce(
     (readable, row) => readable.split(row.evidenceRef).join("the recorded evidence"),
     text,
@@ -2145,7 +2247,11 @@ export function ExperimentLab(props: {
                           <strong>{finding.artifact.label}</strong> · {finding.artifact.source}
                         </p>
                         {finding.artifact.excerpt ? (
-                          <ArtifactExcerpt text={finding.artifact.excerpt} />
+                          <ArtifactExcerpt
+                            text={finding.artifact.excerpt}
+                            label={finding.artifact.label}
+                            copyable
+                          />
                         ) : (
                           <p className="experiment-lab__artifact-missing" role="note">
                             Supporting excerpt not captured. {finding.artifact.context}
@@ -2503,7 +2609,12 @@ export function ExperimentLab(props: {
                           ? humanFindings.find((row) => row.id === item.evidenceRef)
                           : null;
                         const artifact = item.evidenceRef
-                          ? finding?.artifact ?? supportingArtifact(current, item.evidenceRef)
+                          ? finding?.artifact ?? supportingArtifact(
+                            current,
+                            item.evidenceRef,
+                            evidenceArtifacts,
+                            evidenceExcerpts,
+                          )
                           : null;
                         const primary = finding?.headline ?? (item.evidenceRef
                           ? item.text.split(item.evidenceRef).join("this recorded evidence")
@@ -2517,6 +2628,7 @@ export function ExperimentLab(props: {
                                 : "experiment-lab__queue-item"
                             }
                             data-route-item={item.evidenceRef ?? item.id}
+                            data-route-kind={item.evidenceRef ? "evidence" : undefined}
                             tabIndex={-1}
                           >
                             <h6 className="experiment-lab__queue-text">{primary}</h6>
@@ -2526,7 +2638,7 @@ export function ExperimentLab(props: {
                                   <strong>{artifact.label}</strong> · {artifact.source}
                                 </p>
                                 {artifact.excerpt ? (
-                                  <ArtifactExcerpt text={artifact.excerpt} />
+                                  <ArtifactExcerpt text={artifact.excerpt} label={artifact.label} copyable />
                                 ) : (
                                   <p className="experiment-lab__artifact-missing" role="note">
                                     Supporting excerpt not captured. {artifact.context}
@@ -2812,12 +2924,18 @@ export function ExperimentLab(props: {
                     </thead>
                     <tbody>
                       {crossRows.map((row) => {
-                        const artifact = supportingArtifact(current, row.evidenceRef);
+                        const artifact = supportingArtifact(
+                          current,
+                          row.evidenceRef,
+                          evidenceArtifacts,
+                          evidenceExcerpts,
+                        );
                         const finding = humanFindings.find((item) => item.id === row.evidenceRef);
                         return (
                         <tr
                           key={row.evidenceRef}
                           data-route-item={row.evidenceRef}
+                          data-route-kind="evidence"
                           tabIndex={-1}
                           className={workspaceItem === row.evidenceRef ? "experiment-lab__route-target" : undefined}
                         >
@@ -2825,7 +2943,7 @@ export function ExperimentLab(props: {
                             <strong>{finding?.headline ?? artifact.label}</strong>
                             <span className="experiment-lab__crossexam-source">{artifact.source}</span>
                             {artifact.excerpt ? (
-                              <ArtifactExcerpt text={artifact.excerpt} />
+                              <ArtifactExcerpt text={artifact.excerpt} label={artifact.label} copyable />
                             ) : (
                               <span className="experiment-lab__artifact-missing">
                                 Supporting excerpt not captured. Inspect or attach the source artifact.
