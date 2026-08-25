@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseExperimentDecision,
+  type InteractionTraceV1,
+} from "@cd-collab/contracts";
+import {
   MemoryExperimentStore,
   PgExperimentStore,
   type ExperimentRow,
 } from "./store.js";
-import type { InteractionTraceV1 } from "@cd-collab/contracts";
 
 const AGREEMENT = {
   sharedAnchors: [],
@@ -178,5 +181,36 @@ describe("experiment snapshot proof persistence boundary", () => {
       fairnessClass: "unknown",
       lineageClass: "unknown",
     });
+  });
+});
+
+describe("experiment decision revision uniqueness", () => {
+  it("refuses a forked first revision even when decision ids differ", async () => {
+    const store = new MemoryExperimentStore();
+    const first = parseExperimentDecision({
+      schemaId: "cd-collab.experiment_decision.v1",
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      experimentId: experimentRow().id,
+      status: "proposed",
+      revision: 1,
+      predecessorRevision: null,
+      text: "Inspect the synthetic timeout path before changing capacity.",
+      rationale: "Concurrent first proposals must not fork revision history.",
+      evidenceRefs: [],
+      packageId: experimentRow().packageId,
+      authorId: "alice",
+      authorUsername: "alice",
+      createdAt: "2026-08-24T12:00:00.000Z",
+    });
+    const second = parseExperimentDecision({
+      ...first,
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      text: "A concurrent first proposal must not create a second head.",
+    });
+    await store.insertDecision(first);
+    await expect(store.insertDecision(second)).rejects.toThrow(/decision revision already exists/);
+    const listed = await store.listDecisions(experimentRow().id);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.id).toBe(first.id);
   });
 });

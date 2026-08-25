@@ -396,7 +396,7 @@ export class MemoryExperimentStore implements ExperimentStore {
 
   async insertDecision(row: NormalizedExperimentDecisionV1): Promise<void> {
     const list = this.decisions.get(row.experimentId) ?? [];
-    if (list.some((d) => d.revision === row.revision && d.id === row.id)) {
+    if (list.some((d) => d.revision === row.revision)) {
       throw new Error("decision revision already exists");
     }
     list.push({ ...row, evidenceRefs: [...row.evidenceRefs] });

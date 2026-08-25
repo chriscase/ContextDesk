@@ -86,6 +86,19 @@ export class ExperimentNotFoundError extends Error {
   }
 }
 
+function isDecisionRevisionConflict(error: unknown): boolean {
+  if (
+    error
+    && typeof error === "object"
+    && "code" in error
+    && (error as { code: unknown }).code === "23505"
+  ) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /decision revision already exists|duplicate key.*experiment_decisions/i.test(message);
+}
+
 export interface ExperimentView {
   id: string;
   caseId: string;
@@ -721,7 +734,14 @@ export class ExperimentService {
           : input.remainingUnknowns,
       createdAt: new Date().toISOString(),
     });
-    await this.store.insertDecision(decision);
+    try {
+      await this.store.insertDecision(decision);
+    } catch (error) {
+      if (isDecisionRevisionConflict(error)) {
+        throw new ExperimentConflictError("revision_conflict", "decision revision already exists");
+      }
+      throw error;
+    }
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_decision_proposed",
       actor,
@@ -770,7 +790,14 @@ export class ExperimentService {
       createdAt: new Date().toISOString(),
       packageId: row.packageId,
     });
-    await this.store.insertDecision(accepted);
+    try {
+      await this.store.insertDecision(accepted);
+    } catch (error) {
+      if (isDecisionRevisionConflict(error)) {
+        throw new ExperimentConflictError("revision_conflict", "decision revision already exists");
+      }
+      throw error;
+    }
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_decision_accepted",
       actor,
