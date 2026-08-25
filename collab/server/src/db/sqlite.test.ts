@@ -193,7 +193,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("persists contribution, intake batch, and evidence mutations across reopen", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-mutators-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-mutators-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     try {
@@ -244,7 +244,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("rolls held evidence, timeline, and audit back on SQLite reopen after withAtomic failure", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-evidence-atomic-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-evidence-atomic-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     try {
