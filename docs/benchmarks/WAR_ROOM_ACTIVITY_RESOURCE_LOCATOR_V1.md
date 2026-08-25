@@ -91,7 +91,9 @@ refuses dropped snapshot targets), and imported-run ids from
 `targetNamespace=imported_ai_run` (`external_run_imported`; persist refuses
 dropped imported-run targets), and contribution ids from
 `targetNamespace=contribution` (`contribution_*` / `hypothesis_status`; persist
-refuses dropped contribution targets);
+refuses dropped contribution targets), and evidence ids from
+`targetNamespace=evidence` (`evidence_*`; persist refuses dropped evidence
+targets);
 resolve is re-run
 against the destination identities after apply and remains `not_found` for
 kind-confused or unauthorized locators. `experiment_gold_promoted` projects

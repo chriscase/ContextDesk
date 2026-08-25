@@ -1091,6 +1091,12 @@ export class PortableInvestigationService {
           "contribution timeline is missing a portable contribution target",
         );
       }
+      if (/^evidence_/.test(row.kind) && addressed?.namespace !== "evidence") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "evidence timeline is missing a portable evidence target",
+        );
+      }
       if (row.kind === "corpus_intake_committed" && addressed?.namespace !== "intake_batch") {
         throw new PortableServerError(
           "unsupported_state",

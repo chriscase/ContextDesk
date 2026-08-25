@@ -1075,6 +1075,45 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable contribution target/);
   });
 
+  it("refuses apply when evidence timeline lacks an evidence target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "evidence_registered");
+      if (!event) throw new Error("evidence timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable evidence target/);
+  });
+
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1967,6 +2006,8 @@ describe("portable investigation apply", () => {
     expect(destObservation?.locator.resourceId).not.toBe(applied.investigationId);
     expect(destDiscussion?.locator.resourceId).not.toBe(applied.investigationId);
     expect(destEvidence?.locator.resourceId).not.toBe(sourceEvidence?.locator.resourceId);
+    expect(destEvidence?.locator.kind).toBe("evidence_item");
+    expect(destEvidence?.locator.resourceId).not.toBe(applied.investigationId);
     expect(destFrozen?.locator.resourceId).not.toBe(sourceFrozen?.locator.resourceId);
     expect(destFrozen?.locator.kind).toBe("evidence_context");
     expect(destFrozen?.locator.resourceId).not.toBe(applied.investigationId);
@@ -1978,6 +2019,13 @@ describe("portable investigation apply", () => {
     expect(destContributionEvents.some((event) => event.targetId === destObservation?.locator.resourceId)).toBe(true);
     expect(destContributionEvents.some((event) => event.targetId === destDiscussion?.locator.resourceId)).toBe(true);
     for (const event of destContributionEvents) {
+      expect(event.targetId).toBeTruthy();
+      expect(event.targetId).not.toBe(applied.investigationId);
+    }
+    const destEvidenceEvents = destFrozenTimeline.filter((event) => /^evidence_/.test(event.kind));
+    expect(destEvidenceEvents.length).toBeGreaterThan(0);
+    expect(destEvidenceEvents.some((event) => event.targetId === destEvidence?.locator.resourceId)).toBe(true);
+    for (const event of destEvidenceEvents) {
       expect(event.targetId).toBeTruthy();
       expect(event.targetId).not.toBe(applied.investigationId);
     }
