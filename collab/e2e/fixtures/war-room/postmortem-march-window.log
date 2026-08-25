@@ -1,0 +1,7 @@
+# Synthetic fixture gathered weeks after the fact for a postmortem. It covers
+# the historical window only; nothing here was collected while the incident was
+# live, which is exactly what the backfill journey has to keep visible.
+2026-03-14T02:10:00-07:00 INFO  retro.collect  window=start source=archived-mailer-host
+2026-03-14T02:15:09-07:00 ERROR retro.collect  matched original failure id=syn-mailer-118
+2026-03-14T02:44:00-07:00 INFO  retro.collect  last failure in window id=syn-mailer-131
+2026-03-14T03:02:00-07:00 INFO  retro.collect  window=end recovered=true

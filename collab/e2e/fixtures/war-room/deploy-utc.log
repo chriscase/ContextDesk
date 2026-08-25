@@ -1,0 +1,6 @@
+# Synthetic fixture. The deploy pipeline logs with an explicit offset, so these
+# lines are unambiguous. Comparing them against mailer-offsetless.log is only
+# possible once a human asserts the mailer host's timezone.
+2026-03-14T09:11:58+00:00 INFO deploy.pipeline release=syn-2026.03.14-a stage=start
+2026-03-14T09:12:31+00:00 INFO deploy.pipeline release=syn-2026.03.14-a stage=smtp-config-rollout
+2026-03-14T09:14:02+00:00 INFO deploy.pipeline release=syn-2026.03.14-a stage=complete

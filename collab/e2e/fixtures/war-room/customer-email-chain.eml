@@ -1,0 +1,34 @@
+Synthetic forwarded correspondence. Every address is on example.test and every
+person named here is invented for this fixture.
+
+---------- Forwarded message ----------
+From: Support Triage <support-triage@example.test>
+To: Incident Desk <incident-desk@example.test>
+Subject: Fwd: Re: Re: order confirmations not arriving
+Date: Sat, 14 Mar 2026 11:02:00 +0000
+
+Forwarding the chain below. The reporter is on the account team's side; I have
+not reproduced anything myself.
+
+> From: Account Team <account-team@example.test>
+> Date: Sat, 14 Mar 2026 10:41:00 +0000
+> Subject: Re: Re: order confirmations not arriving
+>
+> Escalating. From what the customer describes this sounds like the same
+> mailer problem we had in January, but I have not checked the logs.
+>
+> > From: R. Okonkwo <r.okonkwo@example.test>
+> > Date: Sat, 14 Mar 2026 09:58:00 +0000
+> > Subject: Re: order confirmations not arriving
+> >
+> > To answer your question: yes, the orders themselves went through. We can
+> > see them in our dashboard. It is only the confirmation email that never
+> > shows up. First one I noticed was a little after 2am our time, and I am on
+> > the west coast if that matters.
+> >
+> > > From: Support Triage <support-triage@example.test>
+> > > Date: Sat, 14 Mar 2026 09:30:00 +0000
+> > > Subject: order confirmations not arriving
+> > >
+> > > Thanks for the report. Can you confirm whether the orders themselves are
+> > > completing, and roughly when you first noticed the missing confirmations?
