@@ -232,7 +232,7 @@ describe("InvestigationTeamReadinessPanel", () => {
 
     fireEvent.click(screen.getByTestId("investigation-team-copy-redacted-json"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(aggregate.redacted_json));
-    expect(screen.getByText("Copied redacted JSON.")).toBeTruthy();
+    expect(await screen.findByText("Copied redacted JSON.")).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("investigation-team-copy-redacted-markdown"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(aggregate.redacted_markdown));

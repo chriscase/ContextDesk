@@ -357,6 +357,7 @@ describe("first-run setup HTTP boundary", () => {
       ldapSessions: createSyntheticLdapFactory(cfg, exampleSyntheticDirectory()),
     });
     await claim(app);
+    const deploymentPaths = syntheticDeploymentPaths("ldap-probe");
     const values = {
       database_url: "postgres://app:synthetic@db.example.test/contextdesk",
       migrate_database_url: "postgres://migrator:synthetic@db.example.test/contextdesk",
@@ -382,8 +383,8 @@ describe("first-run setup HTTP boundary", () => {
       basedOnRevision: 1,
       draftRevision: 2,
       deploymentProfile: "postgres_ldap",
-      dataRoot: "/srv/contextdesk-synthetic",
-      evidenceRoot: "/srv/contextdesk-synthetic/evidence",
+      dataRoot: deploymentPaths.dataRoot,
+      evidenceRoot: deploymentPaths.evidenceRoot,
       storage: {
         kind: "postgres",
         sqlitePath: null,
