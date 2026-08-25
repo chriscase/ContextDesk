@@ -42,6 +42,22 @@ Provider-free checks and measured runs are different evidence classes. The UI
 labels them **Wiring check** and **Measured**, and a newer wiring check never
 displaces the latest measured run on startup.
 
+## Share-safe artifacts
+
+The readiness panel exposes the host-owned redacted JSON and Markdown for the
+current measured report and for each known-answer quality report. A user can
+either copy an artifact or download it directly from the expanded artifact
+panel. Downloads use deterministic names such as
+`investigation-team-qualification.json` and
+`investigation-team-quality-1.md`; the downloaded bytes are the same redacted
+bytes shown in the panel.
+
+These downloads are presentation artifacts, not a second evidence store. They
+contain no provider URL, credential, case text, evaluator truth, private
+canonical response, or raw transport error. The browser/desktop renderer
+creates the file only after the user explicitly selects Download; the trusted
+host remains the source of the report and its durable history.
+
 ## Provider boundary
 
 The provider sees only an opaque evidence id and neutral evidence text, plus a
@@ -78,6 +94,9 @@ or investigator.
     retained separately, and does not replace the latest measured report.
 13. Inject a timeout or cancellation and confirm the speed axis reads
     **Needs attention**, with the corresponding metric retained.
+14. Expand the redacted JSON and Markdown artifacts and download both. Confirm
+    the filenames, contents, and absence of provider credentials, endpoint
+    URLs, case text, evaluator truth, and raw transport diagnostics.
 
 This is a bounded qualification measurement, not a guarantee that a later
 investigation will execute successfully or that a model is universally best.

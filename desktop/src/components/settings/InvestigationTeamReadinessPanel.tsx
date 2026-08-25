@@ -120,13 +120,20 @@ function RedactedArtifact({
   text,
   testId,
   copyTestId,
+  downloadFilename,
+  downloadTestId,
 }: {
   label: string;
   text: string;
   testId?: string;
   copyTestId?: string;
+  downloadFilename: string;
+  downloadTestId?: string;
 }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const [downloadState, setDownloadState] = useState<
+    "idle" | "downloaded" | "error"
+  >("idle");
 
   const copy = async () => {
     setCopyState("idle");
@@ -136,6 +143,26 @@ function RedactedArtifact({
       setCopyState("copied");
     } catch {
       setCopyState("error");
+    }
+  };
+
+  const download = () => {
+    setDownloadState("idle");
+    try {
+      const url = URL.createObjectURL(
+        new Blob([text], { type: "text/plain;charset=utf-8" }),
+      );
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = downloadFilename;
+      link.rel = "noopener";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setDownloadState("downloaded");
+    } catch {
+      setDownloadState("error");
     }
   };
 
@@ -151,11 +178,26 @@ function RedactedArtifact({
         >
           Copy {label}
         </button>
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          data-testid={downloadTestId}
+          onClick={download}
+        >
+          Download {label}
+        </button>
         {copyState !== "idle" ? (
           <span role="status" aria-live="polite">
             {copyState === "copied"
               ? `Copied ${label}.`
               : `Couldn’t copy ${label}. Select the redacted text and copy it manually.`}
+          </span>
+        ) : null}
+        {downloadState !== "idle" ? (
+          <span role="status" aria-live="polite">
+            {downloadState === "downloaded"
+              ? `Downloaded ${label}.`
+              : `Couldn’t download ${label}.`}
           </span>
         ) : null}
       </div>
@@ -1055,12 +1097,16 @@ export function InvestigationTeamReadinessPanel() {
               text={qualification.redacted_json}
               testId="investigation-team-redacted-json"
               copyTestId="investigation-team-copy-redacted-json"
+              downloadFilename="investigation-team-qualification.json"
+              downloadTestId="investigation-team-download-redacted-json"
             />
             <RedactedArtifact
               label="redacted Markdown"
               text={qualification.redacted_markdown}
               testId="investigation-team-redacted-markdown"
               copyTestId="investigation-team-copy-redacted-markdown"
+              downloadFilename="investigation-team-qualification.md"
+              downloadTestId="investigation-team-download-redacted-markdown"
             />
           </div>
           {failures.length > 0 ? (
@@ -1428,11 +1474,15 @@ export function InvestigationTeamReadinessPanel() {
                     label="redacted quality JSON"
                     text={report.redacted_json}
                     copyTestId={`investigation-team-copy-known-answer-json-${index}`}
+                    downloadFilename={`investigation-team-quality-${index + 1}.json`}
+                    downloadTestId={`investigation-team-download-known-answer-json-${index}`}
                   />
                   <RedactedArtifact
                     label="redacted quality Markdown"
                     text={report.redacted_markdown}
                     copyTestId={`investigation-team-copy-known-answer-markdown-${index}`}
+                    downloadFilename={`investigation-team-quality-${index + 1}.md`}
+                    downloadTestId={`investigation-team-download-known-answer-markdown-${index}`}
                   />
                 </div>
               </details>
