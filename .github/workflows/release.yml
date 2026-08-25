@@ -46,6 +46,11 @@ jobs:
           ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
           fetch-depth: 0
 
+      - name: Use release-contract Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Resolve and verify identity
         id: identity
         env:
@@ -119,6 +124,11 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.git_sha }}
           fetch-depth: 0
+
+      - name: Use release-contract Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Resolve exact remote tag
         env:
