@@ -1082,6 +1082,12 @@ export class PortableInvestigationService {
           "imported-run timeline is missing a portable imported-run target",
         );
       }
+      if (row.kind === "run_corroboration" && addressed?.namespace !== "imported_ai_run") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "corroboration timeline is missing a portable imported-run target",
+        );
+      }
       if (
         (/^contribution_/.test(row.kind) || row.kind === "hypothesis_status")
         && addressed?.namespace !== "contribution"

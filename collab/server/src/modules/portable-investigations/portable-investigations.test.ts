@@ -1191,6 +1191,56 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/workstream job timeline/);
   });
 
+  it("refuses apply when corroboration timeline lacks an imported-run target", async () => {
+    const row = await fixture();
+    const timeline = await row.cases.listTimeline(row.caseId);
+    const imported = timeline.find((event) => event.kind === "external_run_imported");
+    if (!imported?.targetId) throw new Error("imported-run timeline is missing");
+    await row.imports.corroborate(
+      row.caseId,
+      imported.targetId,
+      ACTOR,
+      { state: "corroborated", links: [{ kind: "artifact", id: row.evidenceId }] },
+      "fixture",
+      false,
+    );
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "run_corroboration");
+      if (!event) throw new Error("corroboration timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/corroboration timeline/);
+  });
+
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
