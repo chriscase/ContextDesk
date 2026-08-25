@@ -1,6 +1,6 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   doctorExitCode,
@@ -10,7 +10,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { parseEnvFile } from "./env-file.js";
 import { nodeOperatorFs, type OperatorFs } from "./fs.js";
-import { runDoctor } from "./doctor.js";
+import { probeWritableDirectory, runDoctor } from "./doctor.js";
 import { initConfig, renderConfigFile } from "./config-init.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -18,6 +18,7 @@ const collabRoot = join(here, "../../../..");
 const catalogValid = join(collabRoot, "contracts/fixtures/profile-catalog.valid.json");
 const catalogUnknown = join(collabRoot, "contracts/fixtures/profile-catalog.unknown-field.json");
 const liveCatalogValid = join(collabRoot, "contracts/fixtures/live-qualification-catalog.valid.json");
+const fixtureRoot = resolve(collabRoot, ".operator-doctor-fixture");
 
 function memoryFs(
   entries: Record<string, "file" | "dir" | "ro-dir">,
@@ -45,11 +46,11 @@ function memoryFs(
 
 function built(root: string): Record<string, "file" | "dir" | "ro-dir"> {
   return {
-    [`${root}/contracts/dist/index.js`]: "file",
-    [`${root}/server/dist/index.js`]: "file",
-    [`${root}/web/dist/index.html`]: "file",
-    [`${root}/web/dist`]: "dir",
-    [`${root}/.data/evidence`]: "dir",
+    [resolve(root, "contracts/dist/index.js")]: "file",
+    [resolve(root, "server/dist/index.js")]: "file",
+    [resolve(root, "web/dist/index.html")]: "file",
+    [resolve(root, "web/dist")]: "dir",
+    [resolve(root, ".data/evidence")]: "dir",
   };
 }
 
@@ -62,7 +63,7 @@ function statusOf(
 
 describe("operator doctor", () => {
   it("accepts a local demo configuration", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const report = runDoctor({
       env: {
         COLLAB_AUTH_MODE: "local",
@@ -85,7 +86,7 @@ describe("operator doctor", () => {
   });
 
   it("accepts a postgres deployment configuration with placeholders", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const env = parseEnvFile(renderConfigFile("postgres"));
     const report = runDoctor({
       env,
@@ -102,7 +103,7 @@ describe("operator doctor", () => {
   });
 
   it("accepts encrypted LDAP transport without contacting a directory", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const env = parseEnvFile(renderConfigFile("ldap"));
     const report = runDoctor({
       env,
@@ -117,7 +118,7 @@ describe("operator doctor", () => {
   });
 
   it("rejects plaintext LDAP", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const report = runDoctor({
       env: {
         COLLAB_AUTH_MODE: "ldap",
@@ -138,7 +139,7 @@ describe("operator doctor", () => {
   });
 
   it("warns when the host bridge and live profiles are missing on a deployment", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const report = runDoctor({
       env: parseEnvFile(renderConfigFile("postgres")),
       collabRoot: root,
@@ -152,7 +153,7 @@ describe("operator doctor", () => {
   });
 
   it("errors when a configured host bridge path is missing", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const report = runDoctor({
       env: {
         COLLAB_AUTH_MODE: "local",
@@ -169,9 +170,9 @@ describe("operator doctor", () => {
   });
 
   it("errors on an unwritable evidence path", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const files = built(root);
-    files[`${root}/.data/evidence`] = "ro-dir";
+    files[resolve(root, ".data/evidence")] = "ro-dir";
     const report = runDoctor({
       env: {
         COLLAB_AUTH_MODE: "local",
@@ -187,9 +188,9 @@ describe("operator doctor", () => {
   });
 
   it("errors on a malformed profile catalog", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const files = built(root);
-    files[`${root}/catalog.json`] = "file";
+    files[resolve(root, "catalog.json")] = "file";
     const report = runDoctor({
       env: {
         COLLAB_AUTH_MODE: "local",
@@ -200,7 +201,7 @@ describe("operator doctor", () => {
       cwd: root,
       nodeVersion: "22.5.0",
       fs: memoryFs(files, {
-        [`${root}/catalog.json`]: JSON.stringify({ prompt: "leak" }),
+        [resolve(root, "catalog.json")]: JSON.stringify({ prompt: "leak" }),
       }),
     });
     expect(statusOf(report, "profile_catalog")).toBe("error");
@@ -208,9 +209,9 @@ describe("operator doctor", () => {
   });
 
   it("accepts a valid profile catalog without contacting providers", async () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const files = built(root);
-    files[`${root}/catalog.json`] = "file";
+    files[resolve(root, "catalog.json")] = "file";
     const body = await readFile(catalogValid, "utf8");
     const report = runDoctor({
       env: {
@@ -221,15 +222,15 @@ describe("operator doctor", () => {
       collabRoot: root,
       cwd: root,
       nodeVersion: "22.5.0",
-      fs: memoryFs(files, { [`${root}/catalog.json`]: body }),
+      fs: memoryFs(files, { [resolve(root, "catalog.json")]: body }),
     });
     expect(statusOf(report, "profile_catalog")).toBe("ok");
   });
 
   it("accepts the share-safe live qualification catalog without contacting providers", async () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const files = built(root);
-    files[`${root}/live-catalog.json`] = "file";
+    files[resolve(root, "live-catalog.json")] = "file";
     const body = await readFile(liveCatalogValid, "utf8");
     const report = runDoctor({
       env: {
@@ -241,15 +242,15 @@ describe("operator doctor", () => {
       collabRoot: root,
       cwd: root,
       nodeVersion: "22.5.0",
-      fs: memoryFs(files, { [`${root}/live-catalog.json`]: body }),
+      fs: memoryFs(files, { [resolve(root, "live-catalog.json")]: body }),
     });
     expect(statusOf(report, "profile_catalog")).toBe("ok");
   });
 
   it("rejects unknown-field catalogs", async () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const files = built(root);
-    files[`${root}/catalog.json`] = "file";
+    files[resolve(root, "catalog.json")] = "file";
     const body = await readFile(catalogUnknown, "utf8");
     const report = runDoctor({
       env: {
@@ -260,14 +261,14 @@ describe("operator doctor", () => {
       collabRoot: root,
       cwd: root,
       nodeVersion: "22.5.0",
-      fs: memoryFs(files, { [`${root}/catalog.json`]: body }),
+      fs: memoryFs(files, { [resolve(root, "catalog.json")]: body }),
     });
     expect(statusOf(report, "profile_catalog")).toBe("error");
     expect(JSON.stringify(report)).not.toContain("gateway.example.test");
   });
 
   it("keeps secrets and credential URLs out of JSON and human output", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const secret = "supersecret-doctor-token";
     const report = runDoctor({
       env: {
@@ -293,7 +294,7 @@ describe("operator doctor", () => {
   });
 
   it("errors on an old Node runtime and an invalid port", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const report = runDoctor({
       env: {
         COLLAB_AUTH_MODE: "local",
@@ -311,13 +312,13 @@ describe("operator doctor", () => {
   });
 
   it("errors when compiled artifacts are missing", () => {
-    const root = "/fixture-collab";
+    const root = fixtureRoot;
     const report = runDoctor({
       env: { COLLAB_AUTH_MODE: "local", COLLAB_EVIDENCE_ROOT: ".data/evidence" },
       collabRoot: root,
       cwd: root,
       nodeVersion: "22.5.0",
-      fs: memoryFs({ [`${root}/.data/evidence`]: "dir" }),
+      fs: memoryFs({ [resolve(root, ".data/evidence")]: "dir" }),
     });
     expect(statusOf(report, "built_artifacts")).toBe("error");
   });
@@ -337,8 +338,11 @@ describe("operator config:init", () => {
       expect(body).toContain("COLLAB_AUTH_MODE=local");
       expect(body).toContain("does not contact PostgreSQL");
       expect(body).not.toMatch(/connected to/i);
-      expect((await stat(result.outputPath)).mode & 0o777).toBe(0o600);
+      if (process.platform !== "win32") {
+        expect((await stat(result.outputPath)).mode & 0o777).toBe(0o600);
+      }
       expect(result.createdDirectories.length).toBe(1);
+      expect(await readdir(result.createdDirectories[0] ?? "")).toEqual([]);
       const probe = join(result.createdDirectories[0] ?? "", ".keep");
       await writeFile(probe, "ok");
     } finally {
@@ -410,9 +414,40 @@ describe("operator config:init", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "fails closed before writing config when the evidence directory is not writable",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "cd-collab-init-"));
+      const evidence = join(dir, ".data", "evidence");
+      await mkdir(evidence, { recursive: true });
+      await chmod(evidence, 0o500);
+      try {
+        await expect(initConfig({
+          collabRoot,
+          cwd: dir,
+          output: ".env.local",
+          profile: "demo",
+          nonInteractive: true,
+        })).rejects.toThrow(/evidence root is not writable/);
+        await expect(stat(join(dir, ".env.local"))).rejects.toThrow();
+      } finally {
+        await chmod(evidence, 0o700);
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("env file parser", () => {
+  it("accepts a UTF-8 BOM, CRLF, and a Windows path without rewriting it", () => {
+    expect(parseEnvFile("\ufeffCOLLAB_AUTH_MODE=local\r\nCOLLAB_EVIDENCE_ROOT=C:\\ContextDesk\\evidence\r\n"))
+      .toEqual({
+        COLLAB_AUTH_MODE: "local",
+        COLLAB_EVIDENCE_ROOT: "C:\\ContextDesk\\evidence",
+      });
+  });
+
   it("does not include secret line text in malformed errors", () => {
     const secret = "leak-me-now";
     expect(() => parseEnvFile(`COLLAB_LDAP_BIND_PASSWORD${secret}`)).toThrow(/line 1 is malformed/);
@@ -442,7 +477,27 @@ describe("doctor compile-first scripts", () => {
 });
 
 describe("real filesystem evidence probe", () => {
-  it("detects an unwritable evidence directory", async () => {
+  it("proves a real directory is writable without leaving a probe behind", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cd-collab-ev-"));
+    try {
+      expect(probeWritableDirectory(dir)).toBe(true);
+      expect(await readdir(dir)).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the probe target does not exist", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cd-collab-ev-"));
+    try {
+      expect(probeWritableDirectory(join(dir, "missing"))).toBe(false);
+      expect(await readdir(dir)).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("detects an unwritable evidence directory", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cd-collab-ev-"));
     const evidence = join(dir, "evidence");
     await mkdir(evidence);

@@ -20,6 +20,27 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  collab-windows-source-acceptance:
+    name: collab Windows source acceptance (demo:check)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: collab
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.19.0"
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - run: npm ci
+      # Match the documented Windows source-acceptance gate exactly. This
+      # covers native path separators, process launching, filesystem checks,
+      # the contracts/server/web unit suites, and the provider-free static
+      # demo build. Browser and service-backed qualification stay in their
+      # dedicated lanes.
+      - run: npm run demo:check
+
   collab:
     name: collab (typecheck, lint, test, migrate dry-run)
     runs-on: ubuntu-latest

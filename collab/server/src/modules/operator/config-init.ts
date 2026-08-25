@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { chmod, mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const CONFIG_INIT_PROFILES = ["demo", "postgres", "ldap"] as const;
@@ -161,6 +162,40 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+async function assertWritableDirectory(path: string): Promise<void> {
+  const probe = join(
+    path,
+    `.contextdesk-write-${process.pid}-${randomBytes(6).toString("hex")}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let created = false;
+  let usable = true;
+  try {
+    handle = await open(probe, "wx", 0o600);
+    created = true;
+    await handle.writeFile("contextdesk operator write probe\n", "utf8");
+    await handle.sync();
+  } catch {
+    usable = false;
+  } finally {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch {
+        usable = false;
+      }
+    }
+    if (created) {
+      try {
+        await unlink(probe);
+      } catch {
+        usable = false;
+      }
+    }
+  }
+  if (!usable) throw new Error("evidence root is not writable");
+}
+
 export async function initConfig(input: ConfigInitInput): Promise<ConfigInitResult> {
   const profile = input.profile ?? "demo";
   if (!isProfile(profile)) {
@@ -182,14 +217,16 @@ export async function initConfig(input: ConfigInitInput): Promise<ConfigInitResu
     if (!confirmed) throw new Error("config:init cancelled");
   }
   const body = renderConfigFile(profile);
-  await mkdir(dirname(outputPath), { recursive: true });
-  await writeFile(outputPath, body, { encoding: "utf8", flag: "w", mode: 0o600 });
-  // writeFile's mode only applies on creation; forced overwrites must also
-  // tighten an existing environment file.
-  await chmod(outputPath, 0o600);
   const evidence = evidenceRootFrom(body);
   const evidencePath = isAbsolute(evidence) ? evidence : resolve(cwd, evidence);
+  await mkdir(dirname(outputPath), { recursive: true });
   await mkdir(evidencePath, { recursive: true });
+  await assertWritableDirectory(evidencePath);
+  await writeFile(outputPath, body, { encoding: "utf8", flag: "w", mode: 0o600 });
+  // writeFile's mode only applies on creation; forced overwrites must also
+  // tighten an existing environment file. Windows ACLs do not expose POSIX
+  // mode semantics, so the successful exclusive write is the qualification.
+  if (process.platform !== "win32") await chmod(outputPath, 0o600);
   return {
     outputPath,
     profile,
