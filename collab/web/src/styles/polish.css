@@ -1,0 +1,489 @@
+/*
+ * War Room visual polish layer.
+ *
+ * Loaded after every base stylesheet, this file carries the shared visual
+ * language introduced for the shell: the brand lockup, the stage stepper, the
+ * Capture → Analyze → Compare → Decide flow figure, illustrated empty states,
+ * and hierarchy/spacing refinements. Everything derives from the theme tokens
+ * in tokens.css, so all six skins — plus forced colors, reduced motion, 200%
+ * text, and phone widths — are handled here rather than per component.
+ */
+
+/* ————— Brand lockup ————— */
+
+.topbar {
+  gap: 0.4rem 1.1rem;
+  padding: 0.5rem 1.1rem;
+  background: color-mix(in srgb, var(--surface) 62%, var(--bg));
+  /* Wide layouts keep one row; under heavy text zoom the nav and actions wrap
+     below the brand instead of clipping past the viewport edge. */
+  flex-wrap: wrap;
+}
+
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.brand-mark {
+  flex: 0 0 auto;
+  color: var(--accent);
+  display: block;
+}
+
+.topbar__title {
+  line-height: 1;
+}
+
+.topbar__title-product {
+  display: block;
+  margin-bottom: 0.16rem;
+  color: var(--muted);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.topbar__title-app {
+  display: block;
+  font-size: 1.06rem;
+  font-weight: 700;
+  letter-spacing: 0.005em;
+}
+
+/* Pre-auth gates share the lockup so sign-in already looks like the product. */
+.shell__brand {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.9rem;
+  color: var(--accent);
+}
+
+.shell--gate .shell__title {
+  font-size: 1.9rem;
+  letter-spacing: -0.01em;
+}
+
+/* ————— Primary navigation ————— */
+
+.topbar__nav-link {
+  position: relative;
+  font-weight: 550;
+}
+
+.topbar__nav-link[aria-current] {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+.topbar__start {
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.topbar__start:hover {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .topbar__nav-link,
+  .topbar__start {
+    transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  }
+}
+
+/* The collapsed phone menu reads as one panel, not floating rows. */
+@media (max-width: 840px) {
+  .topbar__spread[data-open="true"] {
+    padding-bottom: 0.5rem;
+  }
+
+  .topbar__nav-link {
+    padding: 0.55rem 0.7rem;
+  }
+
+  .topbar__nav-link[aria-current] {
+    box-shadow: inset 3px 0 0 0 var(--accent);
+  }
+}
+
+/* ————— Investigation stage stepper ————— */
+
+.stage-nav ul {
+  gap: 0.1rem;
+  padding: 0.5rem 0 0.55rem;
+  align-items: center;
+}
+
+.stage-nav li {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+/* The connector draws the Capture → Decide spine into the navigation itself. */
+.stage-nav li + li::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 1.1rem;
+  height: 2px;
+  margin: 0 0.2rem;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--border) 85%, var(--fg));
+}
+
+.stage-nav__link {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0.7rem 0.35rem 0.45rem;
+  border-radius: 0.6rem;
+  min-width: 0;
+}
+
+.stage-nav__badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  color: inherit;
+}
+
+.stage-nav__text {
+  display: grid;
+  gap: 0.05rem;
+  min-width: 0;
+}
+
+.stage-nav__link:hover .stage-nav__badge {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.stage-nav__link[aria-current] .stage-nav__badge {
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .stage-nav__link,
+  .stage-nav__badge {
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+}
+
+/* Narrow rooms: the stepper becomes a wrapping grid of whole-stage targets.
+   Connectors disappear rather than implying a broken line. */
+@media (max-width: 700px) {
+  .stage-nav ul {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(8.6rem, 1fr));
+    gap: 0.35rem;
+  }
+
+  .stage-nav li + li::before {
+    display: none;
+  }
+
+  .stage-nav li {
+    display: block;
+  }
+
+  .stage-nav__link {
+    width: 100%;
+  }
+}
+
+/* ————— Capture → Decide flow figure ————— */
+
+.stage-flow {
+  margin: 0;
+}
+
+.stage-flow__steps {
+  display: flex;
+  align-items: stretch;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage-flow__step {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.stage-flow__arrow {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--accent);
+}
+
+.stage-flow__card {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--surface);
+}
+
+/* Decide is the human call; its card says so before its text does. */
+.stage-flow__card--human {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.stage-flow__badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.stage-flow__text {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.stage-flow__name {
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+.stage-flow__kicker {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.stage-flow__caption {
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* The flow reads top-to-bottom on narrow screens; arrows turn to match. */
+@media (max-width: 700px) {
+  .stage-flow__steps {
+    flex-direction: column;
+  }
+
+  .stage-flow__step {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .stage-flow__arrow {
+    align-self: center;
+    transform: rotate(90deg);
+  }
+}
+
+/* ————— Overview onboarding hero ————— */
+
+.overview-hero {
+  display: grid;
+  gap: 1rem;
+  margin: 0 0 1.25rem;
+  padding: 1.5rem 1.4rem 1.4rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+}
+
+.overview-hero__eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.overview-hero__title {
+  margin: 0.15rem 0 0.4rem;
+  font-size: 1.3rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.overview-hero__copy {
+  margin: 0;
+  max-width: 46rem;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+/* ————— Illustrated empty states ————— */
+
+.empty-state {
+  display: grid;
+  justify-items: center;
+  gap: 0.7rem;
+  padding: 1.5rem 1rem 1.7rem;
+  text-align: center;
+}
+
+.empty-state__body {
+  display: grid;
+  gap: 0.3rem;
+  max-width: 30rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.empty-state__body p {
+  margin: 0;
+}
+
+.empty-art {
+  color: color-mix(in srgb, var(--muted) 80%, transparent);
+}
+
+.empty-art__faint {
+  opacity: 0.45;
+}
+
+.empty-art__accent {
+  stroke: var(--accent);
+}
+
+.empty-art__accent-dot {
+  fill: var(--accent);
+}
+
+/* Inventory empties keep the old paragraph's rhythm above the create form. */
+.case-list__empty-state {
+  margin: 0 0 1rem;
+}
+
+/* ————— Hierarchy, spacing, and card polish ————— */
+
+.app__area-title {
+  font-size: 1.45rem;
+  letter-spacing: -0.01em;
+}
+
+.focus-head .case-view__title {
+  font-size: 1.55rem;
+  letter-spacing: -0.01em;
+}
+
+.overview__count {
+  border-radius: 0.7rem;
+}
+
+.overview__count dt::before {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-right: 0.4em;
+  border-radius: 50%;
+  background: var(--muted);
+  vertical-align: 0.08em;
+}
+
+.overview__count[data-status="open"] dt::before {
+  background: var(--accent);
+}
+
+.overview__count[data-status="monitoring"] dt::before {
+  background: var(--warning);
+}
+
+.overview__count[data-status="resolved"] dt::before {
+  background: var(--success);
+}
+
+.overview__count dd {
+  font-size: 1.45rem;
+}
+
+.overview__activity,
+.overview__attention {
+  border-radius: var(--radius-panel);
+}
+
+.case-card {
+  border-radius: var(--radius-card);
+  padding: 0.8rem 0.95rem;
+}
+
+.case-card__open {
+  font-size: 1.02rem;
+}
+
+.case-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.case-card:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .case-card {
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .case-card:hover {
+    box-shadow: 0 2px 10px rgb(0 0 0 / 0.14);
+  }
+}
+
+/* ————— Forced colors ————— */
+
+/* High Contrast strips backgrounds and box shadows, so the states above fall
+   back to shapes: current pages underline, connectors and accents take the
+   system text color, and every SVG inherits it via currentColor. */
+@media (forced-colors: active) {
+  .topbar__nav-link[aria-current],
+  .stage-nav__link[aria-current],
+  .account__profile[aria-current="page"] {
+    text-decoration: underline;
+    text-underline-offset: 0.25em;
+  }
+
+  .stage-nav li + li::before {
+    background: CanvasText;
+  }
+
+  .brand-mark,
+  .stage-flow__arrow,
+  .empty-art {
+    color: CanvasText;
+  }
+
+  .empty-art__accent {
+    stroke: CanvasText;
+  }
+
+  .brand-mark__point,
+  .empty-art__accent-dot {
+    fill: CanvasText;
+  }
+}
