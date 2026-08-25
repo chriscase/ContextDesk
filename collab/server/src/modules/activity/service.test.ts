@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   formatCompactInvestigationLocator,
   formatInvestigationActivityCursor,
+  formatInvestigationResourceLocator,
   investigationActivityFilterFingerprint,
   parseInvestigationActivityPage,
 } from "@cd-collab/contracts";
@@ -379,5 +380,72 @@ describe("investigation activity projection", () => {
     await expect(
       activity.resolve(EVE, false, formatCompactInvestigationLocator(comment!.locator)),
     ).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("reauthorizes locators by resource kind and hides kind-confused existence", async () => {
+    const { cases, activity } = await harness();
+    const created = await cases.createCase(ALICE, { title: "Synthetic kind isolation" }, "test");
+    const note = await cases.addContribution(created.id, ALICE, {
+      kind: "note",
+      body: "Synthetic queue-depth observation.",
+    }, "test");
+    const comment = await cases.addContribution(created.id, ALICE, {
+      kind: "message",
+      body: "Synthetic discussion comment.",
+      privacyClass: "share_safe",
+    }, "test");
+    const uploaded = await cases.addEvidence(created.id, ALICE, {
+      kind: "log",
+      filename: "mailer.log",
+      mediaType: "text/plain",
+      bytes: new TextEncoder().encode("synthetic mailer timeout\n"),
+      summary: "Synthetic mailer timeout.",
+      privacyClass: "owner_only",
+    }, "test");
+    const snapshot = await cases.createSnapshot(
+      created.id,
+      ALICE,
+      { evidenceIds: [uploaded.artifact.id], visibility: "owner_only" },
+      "test",
+    );
+    const page = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const observation = page.items.find((item) => item.activityKind === "observation_recorded");
+    const discussion = page.items.find((item) => item.activityKind === "comment_added");
+    const evidence = page.items.find((item) => item.activityKind === "evidence_added");
+    const frozen = page.items.find((item) => item.activityKind === "evidence_frozen");
+    expect(observation?.locator.kind).toBe("observation");
+    expect(observation?.locator.resourceId).toBe(note.id);
+    expect(discussion?.locator.kind).toBe("discussion_message");
+    expect(discussion?.locator.resourceId).toBe(comment.id);
+    expect(evidence?.locator.kind).toBe("evidence_item");
+    expect(evidence?.locator.resourceId).toBe(uploaded.artifact.id);
+    expect(frozen?.locator.kind).toBe("evidence_context");
+    expect(frozen?.locator.resourceId).toBe(snapshot.id);
+
+    const confused = [
+      { kind: "evidence_item" as const, resourceId: note.id },
+      { kind: "discussion_message" as const, resourceId: note.id },
+      { kind: "observation" as const, resourceId: comment.id },
+      { kind: "discussion_message" as const, resourceId: uploaded.artifact.id },
+      { kind: "evidence_item" as const, resourceId: snapshot.id },
+    ].map((row) => formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+      installationId: INSTALLATION,
+      investigationId: created.id,
+      kind: row.kind,
+      resourceId: row.resourceId,
+    })));
+    for (const locator of confused) {
+      await expect(activity.resolve(ALICE, false, locator)).rejects.toMatchObject({ code: "not_found" });
+      await expect(activity.resolve(EVE, false, locator)).rejects.toMatchObject({ code: "not_found" });
+    }
+
+    await expect(activity.resolve(ALICE, false, formatCompactInvestigationLocator(observation!.locator)))
+      .resolves.toMatchObject({ authorized: true, resourceLabel: "Observation" });
+    await expect(activity.resolve(ALICE, false, formatCompactInvestigationLocator(discussion!.locator)))
+      .resolves.toMatchObject({ authorized: true, resourceLabel: "Discussion message" });
+    await expect(activity.resolve(ALICE, false, formatCompactInvestigationLocator(evidence!.locator)))
+      .resolves.toMatchObject({ authorized: true, resourceLabel: "Evidence item" });
+    await expect(activity.resolve(ALICE, false, formatCompactInvestigationLocator(frozen!.locator)))
+      .resolves.toMatchObject({ authorized: true, resourceLabel: "Evidence context" });
   });
 });

@@ -66,8 +66,13 @@ filenames do not appear in locators or URLs. Opaque ids remain for machine
 consumers and Technical details views.
 
 Resolution reauthorizes at request time. Cross-investigation substitution,
-dangling resources, wrong revisions, and unauthorized private evidence all
-fail closed as `not_found` so existence is not leaked.
+dangling resources, **kind-confused locators** (for example a note id presented
+as `evidence_item` or a snapshot id presented as `evidence_item`), wrong
+revisions, and unauthorized private evidence all fail closed as `not_found` so
+existence is not leaked. Timeline fallback matches the same projected
+`locator.kind` + `resourceId` (+ revision when supplied) as the activity feed;
+contribution provenance also requires the durable kind (`message`, `note` /
+`handoff`, `hypothesis`, `action`) rather than any row with that id.
 
 ## Privacy and authorization
 

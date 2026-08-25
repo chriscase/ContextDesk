@@ -30,7 +30,7 @@ import {
   type InvestigationResourceResolveV1,
   type InvestigationStageV1,
 } from "@cd-collab/contracts";
-import type { Actor, CaseService } from "../cases/index.js";
+import type { Actor, CaseService, CaseTimelineRow } from "../cases/index.js";
 import {
   INVESTIGATION_ACTIVITY_SOURCE_WINDOW,
   projectTimelineSource,
@@ -287,11 +287,10 @@ export class InvestigationActivityService {
     const caseId = locator.investigationId;
     switch (locator.kind) {
       case "investigation":
-        return { label: resourceLabelForKind("investigation") };
+        return locator.resourceId === caseId ? { label: resourceLabelForKind("investigation") } : null;
       case "investigation_stage":
         return { label: resourceLabelForKind("investigation_stage") };
-      case "evidence_item":
-      case "evidence_context": {
+      case "evidence_item": {
         const artifact = await this.deps.cases.getArtifact(caseId, locator.resourceId);
         if (artifact) {
           return {
@@ -301,6 +300,9 @@ export class InvestigationActivityService {
             ),
           };
         }
+        return this.authorizeViaTimeline(caseId, locator);
+      }
+      case "evidence_context": {
         const snapshots = await this.deps.cases.listSnapshots(caseId, actor, isAdmin);
         if (snapshots.some((row) => row.id === locator.resourceId)) {
           return { label: resourceLabelForKind(locator.kind) };
@@ -318,6 +320,7 @@ export class InvestigationActivityService {
           }
           const latest = chain[chain.length - 1];
           if (!latest || latest.caseId !== caseId) return null;
+          if (!contributionKindMatchesLocator(latest.kind, locator.kind)) return null;
           return { label: resourceLabelForKind(locator.kind) };
         } catch {
           return this.authorizeViaTimeline(caseId, locator);
@@ -340,22 +343,9 @@ export class InvestigationActivityService {
     locator: InvestigationResourceLocatorV1,
   ): Promise<{ label: string } | null> {
     const events = await this.deps.cases.listTimeline(caseId);
-    const match = events.find((event) => {
-      if (event.targetId === locator.resourceId) {
-        if (locator.revision === undefined) return true;
-        try {
-          return (JSON.parse(event.payload) as { revision?: unknown }).revision === locator.revision;
-        } catch {
-          return false;
-        }
-      }
-      if (locator.kind === "timeline_event" && String(event.seq) === locator.resourceId) return true;
-      if (locator.kind === "investigation" && locator.resourceId === caseId) return true;
-      if (locator.kind === "portable_archive_event" && event.kind === "portable_archive_applied") {
-        return event.targetId === locator.resourceId || locator.resourceId === caseId;
-      }
-      return false;
-    });
+    const match = events.some((event) =>
+      projectedLocatorMatches(this.deps.installationId, caseId, event, locator),
+    );
     if (!match) return null;
     return {
       label: resourceLabelForKind(
@@ -365,4 +355,41 @@ export class InvestigationActivityService {
       ),
     };
   }
+}
+
+function contributionKindMatchesLocator(
+  contributionKind: string,
+  locatorKind: InvestigationResourceLocatorV1["kind"],
+): boolean {
+  switch (locatorKind) {
+    case "discussion_message":
+      return contributionKind === "message";
+    case "hypothesis":
+      return contributionKind === "hypothesis";
+    case "action":
+      return contributionKind === "action";
+    case "observation":
+      return contributionKind === "note" || contributionKind === "handoff";
+    default:
+      return false;
+  }
+}
+
+function projectedLocatorMatches(
+  installationId: string,
+  caseId: string,
+  event: CaseTimelineRow,
+  locator: InvestigationResourceLocatorV1,
+): boolean {
+  const projected = projectTimelineSource({
+    installationId,
+    source: { caseId, title: "Investigation", event },
+  });
+  if (!projected) return false;
+  if (projected.item.locator.kind !== locator.kind) return false;
+  if (projected.item.locator.resourceId !== locator.resourceId) return false;
+  if (locator.revision !== undefined && projected.item.locator.revision !== locator.revision) {
+    return false;
+  }
+  return true;
 }
