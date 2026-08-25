@@ -470,6 +470,237 @@ describe("war room overview", () => {
   });
 });
 
+describe("operational overview", () => {
+  const CASE_A = "11111111-1111-4111-8111-111111111111";
+  const CASE_B = "22222222-2222-4222-8222-222222222222";
+
+  function activity(overrides: Record<string, unknown>) {
+    return {
+      activityId: "a".repeat(64),
+      occurredAt: "2026-08-24T12:00:00.000Z",
+      actorLabel: "dave",
+      investigationId: CASE_A,
+      investigationTitle: "Checkout latency spike",
+      summary: "updated the investigation",
+      resolvedRoute: `/investigations/${CASE_A}/analyze`,
+      provenanceClass: "human",
+      humanFinding: true,
+      privacyVisibility: "member",
+      secondaryContext: { label: "Stage", value: "Analyze" },
+      ...overrides,
+    };
+  }
+
+  function stubActivities(items: unknown[]) {
+    return stubCaseFetch({
+      cases: [
+        { id: CASE_A, title: "Checkout latency spike", status: "open", severity: "medium" },
+        { id: CASE_B, title: "Index rebuild stall", status: "open", severity: "low" },
+      ],
+      onRequest: (url) => {
+        if (url === "/api/investigation-activity?limit=30") {
+          return Promise.resolve({ ok: true, json: async () => ({ items }) });
+        }
+        return null;
+      },
+    });
+  }
+
+  it("names the stage, provenance, and any restriction on every feed row", async () => {
+    stubActivities([
+      activity({
+        activityId: "1".repeat(64),
+        summary: "recorded an observation",
+        privacyVisibility: "owner_only",
+      }),
+      activity({
+        activityId: "2".repeat(64),
+        summary: "imported analysis was recorded",
+        provenanceClass: "ai_generated",
+        humanFinding: false,
+        secondaryContext: { label: "Stage", value: "Capture" },
+      }),
+    ]);
+    render(<Cases roles={["case-lead"]} />);
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+
+    expect(within(panel).getByText("Stage: Analyze")).toBeTruthy();
+    expect(within(panel).getByText("Stage: Capture")).toBeTruthy();
+    // A human row says so rather than leaving the reader to infer it.
+    expect(within(panel).getByText("human-authored")).toBeTruthy();
+    expect(within(panel).getByText("AI-assisted · not a human finding")).toBeTruthy();
+    expect(within(panel).getByText("restricted to its owner")).toBeTruthy();
+  });
+
+  it("collects stalled, disagreeing, and unread work with a direct path to each", async () => {
+    stubActivities([
+      activity({
+        activityId: "3".repeat(64),
+        activityKind: "workstream_failed",
+        summary: "failed a workstream",
+        provenanceClass: "system",
+        humanFinding: false,
+        resolvedRoute: `/investigations/${CASE_A}/analyze?section=workstreams`,
+      }),
+      activity({
+        activityId: "4".repeat(64),
+        activityKind: "comparison_disagreement",
+        investigationId: CASE_B,
+        investigationTitle: "Index rebuild stall",
+        summary: "recorded a comparison disagreement",
+        humanFinding: false,
+      }),
+      activity({
+        activityId: "5".repeat(64),
+        activityKind: "import_recorded",
+        summary: "imported analysis was recorded",
+        provenanceClass: "ai_generated",
+        humanFinding: false,
+      }),
+    ]);
+    const onActivityOpen = vi.fn();
+    render(<Cases roles={["case-lead"]} onActivityOpen={onActivityOpen} />);
+    const threads = await screen.findByRole("complementary", { name: "Open threads" });
+
+    expect(within(threads).getByRole("heading", { name: /Analysis that stopped short/ })).toBeTruthy();
+    expect(within(threads).getByRole("heading", { name: /Lanes that disagreed/ })).toBeTruthy();
+    expect(
+      within(threads).getByRole("heading", { name: /Imported or AI output not yet read/ }),
+    ).toBeTruthy();
+    // The bound on what was examined is stated, never implied to be everything.
+    expect(within(threads).getByText(/most recent recorded events/)).toBeTruthy();
+
+    fireEvent.click(within(threads).getAllByRole("link")[0]!);
+    expect(onActivityOpen).toHaveBeenCalledTimes(1);
+    expect(onActivityOpen.mock.calls[0]?.[0]).toBe(CASE_A);
+  });
+
+  it("lists an investigation whose latest recorded decision is still a proposal", async () => {
+    stubActivities([
+      // Newest first: case A was accepted after being proposed; case B was not.
+      activity({ activityId: "6".repeat(64), activityKind: "decision_accepted", summary: "accepted a decision" }),
+      activity({
+        activityId: "7".repeat(64),
+        activityKind: "decision_proposed",
+        investigationId: CASE_B,
+        investigationTitle: "Index rebuild stall",
+        summary: "proposed a decision",
+      }),
+      activity({ activityId: "8".repeat(64), activityKind: "decision_proposed", summary: "proposed a decision" }),
+    ]);
+    render(<Cases roles={["case-lead"]} />);
+    const threads = await screen.findByRole("complementary", { name: "Open threads" });
+    const pending = within(threads).getByRole("region", { name: /Waiting on a human decision/ });
+
+    expect(within(pending).getByText("Index rebuild stall")).toBeTruthy();
+    expect(within(pending).queryByText("Checkout latency spike")).toBeNull();
+    expect(within(pending).getByText(/Only a person accepts a decision/)).toBeTruthy();
+  });
+
+  it("says plainly when recent activity records nothing open", async () => {
+    stubActivities([activity({ activityKind: "observation_recorded" })]);
+    render(<Cases roles={["case-lead"]} />);
+    const threads = await screen.findByRole("complementary", { name: "Open threads" });
+    expect(
+      within(threads).getByText(/Nothing in recent activity is recorded as stopped, disagreeing/),
+    ).toBeTruthy();
+  });
+
+  it("re-reads the projection when a run recorded elsewhere reports a change", async () => {
+    let items: unknown[] = [activity({ activityKind: "observation_recorded" })];
+    stubCaseFetch({
+      cases: [{ id: CASE_A, title: "Checkout latency spike", status: "open", severity: "medium" }],
+      onRequest: (url) => {
+        if (url === "/api/investigation-activity?limit=30") {
+          return Promise.resolve({ ok: true, json: async () => ({ items }) });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["case-lead"]} />);
+    await screen.findByRole("heading", { name: "Latest activity" });
+
+    // A workstream finished in Analyze; that work never passed through here.
+    items = [
+      activity({
+        activityId: "b".repeat(64),
+        activityKind: "workstream_failed",
+        summary: "failed a workstream",
+        provenanceClass: "system",
+        humanFinding: false,
+      }),
+      ...items,
+    ];
+    fireEvent(window, new Event("contextdesk:triage-run-changed"));
+
+    const threads = await screen.findByRole("complementary", { name: "Open threads" });
+    await waitFor(() =>
+      expect(within(threads).queryByRole("heading", { name: /Analysis that stopped short/ })).toBeTruthy(),
+    );
+  });
+
+  it("re-reads the projection when the operator returns to the overview", async () => {
+    let items: unknown[] = [];
+    let activityRequests = 0;
+    stubCaseFetch({
+      cases: [{ id: CASE_A, title: "Checkout latency spike", status: "open", severity: "medium" }],
+      onRequest: (url) => {
+        if (url === "/api/investigation-activity?limit=30") {
+          activityRequests += 1;
+          return Promise.resolve({ ok: true, json: async () => ({ items }) });
+        }
+        return null;
+      },
+    });
+    const view = render(<Cases roles={["case-lead"]} view="overview" />);
+    await screen.findByRole("heading", { name: "Latest activity" });
+    const initialRequests = activityRequests;
+
+    // The operator works inside an investigation, where the feed is not shown.
+    view.rerender(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId={CASE_A}
+        onOpenCase={vi.fn()}
+        onStageChange={vi.fn()}
+      />,
+    );
+    items = [activity({ activityId: "c".repeat(64), summary: "recorded an observation" })];
+
+    view.rerender(<Cases roles={["case-lead"]} view="overview" />);
+    await waitFor(() => expect(activityRequests).toBeGreaterThan(initialRequests));
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+    await waitFor(() =>
+      expect(within(panel).queryByText(/recorded an observation/)).toBeTruthy(),
+    );
+  });
+
+  it("says nothing about stage or restriction when the projection omits them", async () => {
+    stubActivities([
+      {
+        activityId: "9".repeat(64),
+        occurredAt: "2026-08-24T12:00:00.000Z",
+        actorLabel: "dave",
+        investigationId: CASE_A,
+        investigationTitle: "Checkout latency spike",
+        summary: "recorded an observation",
+        resolvedRoute: `/investigations/${CASE_A}/capture`,
+        provenanceClass: "human",
+        humanFinding: true,
+      },
+    ]);
+    render(<Cases roles={["case-lead"]} />);
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+    expect(within(panel).queryByText(/^Stage:/)).toBeNull();
+    expect(within(panel).queryByText(/restricted to its owner/)).toBeNull();
+    expect(within(panel).getByText("human-authored")).toBeTruthy();
+  });
+});
+
 describe("situation briefing", () => {
   /** Records a returning engineer must be able to read without leaving Situation. */
   function briefingFetch() {
