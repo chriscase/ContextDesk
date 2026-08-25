@@ -82,8 +82,10 @@ Portable restore remaps investigation and resource ids, including intake-batch
 ids from `targetNamespace=intake_batch`, gold snapshot ids from
 `targetNamespace=gold` (`experiment_gold_promoted`), helpfulness
 observation ids from `targetNamespace=helpfulness`
-(`experiment_helpfulness_recorded`), and `${experimentId}:${traceId}`
-composites from `targetNamespace=experiment` (`experiment_trace_imported`);
+(`experiment_helpfulness_recorded`), `${experimentId}:${traceId}`
+composites from `targetNamespace=experiment` (`experiment_trace_imported`),
+and `${jobId}:${candidateId}` composites from `targetNamespace=triage_job`
+(`triage_candidate_*`; persist refuses dropped or bare-job targets);
 resolve is re-run
 against the destination identities after apply and remains `not_found` for
 kind-confused or unauthorized locators. `experiment_gold_promoted` projects

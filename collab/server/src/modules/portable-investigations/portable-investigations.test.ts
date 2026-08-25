@@ -884,6 +884,80 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable decision target/);
   });
 
+  it("refuses apply when workstream attempt timeline lacks a composite job+candidate target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const missing = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind.startsWith("triage_candidate_"));
+      if (!event) throw new Error("workstream attempt timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(missing);
+    const dryRun = await row.portable.preflight(
+      missing,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: missing,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            missing.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable job target/);
+
+    const bareJob = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind.startsWith("triage_candidate_"));
+      if (!event) throw new Error("workstream attempt timeline is missing");
+      event.targetNamespace = "triage_job";
+      event.targetId = investigation.triageJobs[0]!.id;
+    });
+    const bareMap = identityMapFor(bareJob);
+    const bareDry = await row.portable.preflight(
+      bareJob,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap: bareMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: bareJob,
+          report: bareDry.report,
+          identityMap: bareMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            bareJob.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable job target/);
+  });
+
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1870,6 +1944,17 @@ describe("portable investigation apply", () => {
     const destJobPrefix = destAttempt?.locator.resourceId.split(":")[0];
     expect(destJobs.map((job) => job.id)).toContain(destJobPrefix);
     expect(destJobs.map((job) => job.id)).not.toContain(sourceAttempt?.locator.resourceId.split(":")[0]);
+    const destAttemptTimeline = await row.cases.listTimeline(applied.investigationId);
+    const destAttemptEvents = destAttemptTimeline.filter((event) =>
+      event.kind.startsWith("triage_candidate_"),
+    );
+    expect(destAttemptEvents.length).toBeGreaterThan(0);
+    for (const event of destAttemptEvents) {
+      expect(event.targetId).toMatch(/:/);
+      expect(destJobs.map((job) => job.id)).toContain(event.targetId?.split(":")[0]);
+      expect(event.targetId).not.toBe(applied.investigationId);
+      expect(destJobs.map((job) => job.id)).not.toContain(event.targetId);
+    }
     const destArtifacts = await row.cases.listArtifacts(applied.investigationId, ACTOR, false);
     const destIntakeEvidence = destArtifacts.find((item) => item.relativePath === "router/locator.log");
     expect(destIntakeEvidence?.intakeBatchId).toBe(destIntake?.locator.resourceId);

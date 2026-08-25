@@ -718,6 +718,12 @@ export async function persistPortableArchive(input: {
         throw new Error("experiment trace timeline is missing a portable experiment+trace target");
       }
     }
+    if (/^triage_candidate_/.test(event.kind)) {
+      const parsed = event.targetId ? parsePortableTriageAttemptTarget(event.targetId) : null;
+      if (event.targetNamespace !== "triage_job" || !parsed) {
+        throw new Error("workstream attempt timeline is missing a portable job target");
+      }
+    }
   }
   const remapCandidateId = (candidateId: string): string => {
     const imported = bundle.importedAiRuns.find((run) => candidateId === `chat-${run.id}`);
