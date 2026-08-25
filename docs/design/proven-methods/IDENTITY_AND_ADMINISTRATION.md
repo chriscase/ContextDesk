@@ -37,6 +37,7 @@ forward-compatible provenance value; no OIDC adapter exists yet).
 | Memory + PostgreSQL profile/grant stores with CAS, login-time sync, fail-closed identity collision | Shipped | [`store.ts`](../../../collab/server/src/modules/people/store.ts), [`store.contract-tests.ts`](../../../collab/server/src/modules/people/store.contract-tests.ts) run against both backends by [`store.test.ts`](../../../collab/server/src/modules/people/store.test.ts) and [`pg-store.test.ts`](../../../collab/server/src/modules/people/pg-store.test.ts) | None known |
 | Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | CSRF header check covers only People/self-profile mutation routes, not the pre-existing `authz`/`cases`/etc. mutation routes |
 | Domain-wide session authorization and suspension fail-closed | Shipped | [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`authorization.adversarial.test.ts`](../../../collab/server/src/modules/authz/authorization.adversarial.test.ts), War Room domain/admin `routes.ts` files | CSRF retrofit of older mutation routes remains residual (named, not a silent gap) |
+| Restart recovery re-authorization for queued triage jobs | **Local integration** | [`recovery-authorization.ts`](../../../collab/server/src/modules/authz/recovery-authorization.ts) injected into [`TriageRunService.recoverPending`](../../../collab/server/src/modules/triage-runs/service.ts); adversarial proof in [`recovery.adversarial.test.ts`](../../../collab/server/src/modules/triage-runs/recovery.adversarial.test.ts) | Foreground `create()` still uses the submitting session's current flags. Expired running leases stay `worker_lease_expired` and are not re-executed. Demo/qualification hosts that never call `recoverPending` do not inject the seam; a missing seam fails closed. |
 | Self-service profile API (GET/PATCH own profile, directory-owned fields read-only) | Shipped | [`self-routes.ts`](../../../collab/server/src/modules/people/self-routes.ts), [`self-routes.test.ts`](../../../collab/server/src/modules/people/self-routes.test.ts) | None known for the API |
 | Self-service profile UI (`/profile`, account-menu destination) | Shipped | [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx), [`SelfProfilePanel.test.tsx`](../../../collab/web/src/SelfProfilePanel.test.tsx), [`App.test.tsx`](../../../collab/web/src/App.test.tsx), Help article `my-profile` | Live LDAP attribute values still follow §16 (the UI cannot invent directory writes) |
 | Admin People console (`/admin/people` first-class shell location; `/administration` remains the roles alias) | Shipped | [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), [`AdminPeoplePanel.test.tsx`](../../../collab/web/src/AdminPeoplePanel.test.tsx), [`Administration.test.tsx`](../../../collab/web/src/Administration.test.tsx), [`app-location.ts`](../../../collab/web/src/app-location.ts) | Detail view is inline-expand, not its own URL per person |
@@ -135,7 +136,14 @@ mapping function. See [`directory-mapping.ts`](../../../collab/contracts/src/dir
   disabled, or historical profiles fail closed as unauthenticated (`401`)
   on an existing cookie; a fresh login for those accounts is
   `403 access_denied` with no cookie. Membership bypass (`isAdmin`) stays
-  the `admin` *role*, not `admin:users`.
+  the `admin` *role*, not `admin:users`. Restart recovery of a queued
+  triage job uses the same derivation through `authorizeRecoveryRequester`
+  (no cookie, no cached roles) and then re-checks current case access,
+  `run:strategies`, and `evidence:private:read` before claiming a worker
+  lease, reading evidence bytes, or calling a provider. Stale admin or
+  private authority from queue time is never inherited. A snapshot that
+  still contains `owner_only` evidence fails closed when private-read is
+  no longer granted, rather than materializing those bytes.
 - **Invariant:** An admin mutation route decides authorization *before*
   looking up the target id, so a forbidden caller receives an identical 403
   for a real id and a nonexistent one (no enumeration signal).
@@ -221,6 +229,7 @@ inspection view calls the inspection function.
 | Stale CAS on a profile mutation | `revision` mismatch on the guarded `UPDATE` | `409` + `stale_revision` | Client re-fetches current revision and retries | No partial write occurred |
 | Retried admin mutation (same idempotency key) | `IdempotencyCache` hit | Identical response to the original attempt, not a fresh `stale_revision` | N/A - already succeeded | Exactly one underlying mutation and one audit entry |
 | Profile store unavailable during login | `touchOnLogin` or follow-up `getById` throws, caught in `auth/routes.ts` | Login is refused (`403 access_denied`); any cookie created before the failure is revoked | Retry after the store recovers | No durable session is left for an account whose profile cannot be confirmed usable |
+| Queued triage job recovered after restart | `recoverPending` re-resolves the requester through `authorizeRecoveryRequester` before `claimQueued` | Unauthorized work becomes a terminal `failed` job with an explicit `stoppedReason` (`requester_suspended`, `requester_disabled`, `requester_historical`, `requester_not_member`, `requester_run_revoked`, `requester_private_read_revoked`, `recovery_authorization_unavailable`, …) | Active authorized requesters resume with only their current capabilities | No provider call and no `owner_only` byte read on refusal; expired running leases remain `worker_lease_expired` |
 | Admin grants a capability to an `imported_historical` id | Provenance check in `admin-routes.ts` | `403 forbidden`, audited `denied` | N/A - structurally refused | No grant row is ever created for that id |
 
 ## 9. Observability
@@ -303,6 +312,7 @@ recovery, and states that historical attribution is never rewritten.
 | Contract/unit | round-trip parse, capability resolution, directory mapping | dangerous Unicode, duplicate custom-attribute keys, oversized pages, unknown capability, identity-collision table | `capability.test.ts`, `user-profile.test.ts`, `directory-mapping.test.ts`, `admin-people.test.ts` (58 tests) |
 | Server/store | create/update/list, CAS success | stale revision, suspended-write refusal, collision refusal, not_found | `store.test.ts` + `store.contract-tests.ts` run against **both** Memory and Postgres (`pg-store.test.ts`), plus `grants.test.ts`/`pg-grants.test.ts`, `capabilities.test.ts` |
 | Server/routes | search, effective, status, grant/revoke, preview; domain-wide capability gates | missing CSRF header, idempotent retry after CAS staleness, enumeration-safe 403, historical-stub grant refusal, self-suspend fail-closed (`401`), suspended/historical login refusal, local-grant write then revoke, owner_only bytes require `evidence:private:read` | `admin-routes.test.ts`, `self-routes.test.ts`, `authorization.adversarial.test.ts` (full `buildApp` + real login flow) |
+| Server/restart recovery | active authorized queued job resumes with current admin/private flags | suspension/disable/historical after queue, membership loss, `run:strategies` revoke, `evidence:private:read` revoke on `owner_only` snapshots, profile/grant store throw, missing seam, zero provider/byte reads on refusal, restart idempotency | `recovery-authorization.test.ts`, `recovery.adversarial.test.ts`, membership-loss case in `triage-runs.test.ts` |
 | Database constraints | migration up/down in order | case-insensitive duplicate username, directory-subject-required check, JSONB custom-attribute round-trip | `pg-store.test.ts`, `migrate.test.ts` (updated for the new migration), `grants.test.ts` least-privilege pin |
 | Web/UI | list/search, manage/expand, suspend/grant/revoke confirm flow, preview; self-service `/profile` load/edit/LDAP-readonly/409 draft recovery | imported_historical never offered an action, tab switch preserves hidden-panel state, direct-load and browser-back on `/admin/people` and `/profile` | `AdminPeoplePanel.test.tsx`, `Administration.test.tsx`, `SelfProfilePanel.test.tsx`, `App.test.tsx`, `HelpCenter.test.tsx` |
 
@@ -332,6 +342,7 @@ counts.
 | LDAP claim mapping engine | Shipped | Pure, tested, admin-previewable against synthetic sample claims | **Not** wired to any live directory bind - see §16 |
 | Self-service profile UI | Shipped | Real, tested React page at `/profile` for any authenticated user | Does not write to LDAP/OIDC; live directory attribute sync remains unwired (§16) |
 | Directory-removal auto-disable | Not shipped | `disabled` status and manual admin path exist | No automatic detection of a person's removal from the directory |
+| Restart recovery re-authorization | **Local integration** | Queued triage jobs re-resolve current profile/roles/grants/case access/`run:strategies`/`evidence:private:read` before lease claim | Not a claim that in-flight expired leases are replayed, or that hosts other than `cd-collab` `index.ts` inject the seam |
 
 ## 15. Reimplementation notes
 

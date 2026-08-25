@@ -19,6 +19,7 @@ import {
   MutableGroupRoleMap,
   parseGroupRoleMap,
   PgGroupRoleStore,
+  bindRecoveryAuthorization,
   type GroupRoleStore,
 } from "./modules/authz/index.js";
 import { CatalogService, PgCatalogStore, type CatalogStore } from "./modules/catalog/index.js";
@@ -167,6 +168,12 @@ async function main(): Promise<void> {
     cases: domain,
     audit,
     jobs: storage.jobs,
+    recoveryAuthorization: bindRecoveryAuthorization({
+      lookupGroups: (identity) => adapter.lookupGroups(identity),
+      roles,
+      profiles: storage.profiles,
+      grants: storage.grants,
+    }),
     ...(process.env.COLLAB_TRIAGE_WORKER_ID?.trim()
       ? { workerId: process.env.COLLAB_TRIAGE_WORKER_ID.trim() }
       : {}),
