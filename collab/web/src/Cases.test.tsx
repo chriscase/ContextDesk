@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CaseDiscussion } from "./CaseDiscussion.js";
-import { Cases } from "./Cases.js";
+import { Cases, activityLabel } from "./Cases.js";
 
 afterEach(() => {
   cleanup();
@@ -1035,7 +1035,9 @@ describe("focused investigation view", () => {
         onDeepNavigate={onDeepNavigate}
       />,
     );
-    fireEvent.click(await screen.findByRole("button", { name: /recorded an observation alice/ }));
+    // The row names the kind the person recorded — a note — and the deep link
+    // resolves to that same note.
+    fireEvent.click(await screen.findByRole("button", { name: /recorded a note alice/ }));
     expect(onDeepNavigate).toHaveBeenCalledWith("capture", {
       section: "triage-capture",
       item: "note-12",
@@ -2467,5 +2469,41 @@ describe("workstreams in the Analyze stage", () => {
       );
       expect(document.activeElement).toBe(record);
     });
+  });
+});
+
+describe("recorded contribution kinds", () => {
+  function legacy(kind: string, details: Record<string, unknown>) {
+    return {
+      caseId: "11111111-1111-4111-8111-111111111111",
+      caseTitle: "Checkout latency spike",
+      caseStatus: "open",
+      caseSeverity: "sev2",
+      seq: 1,
+      kind,
+      actorUsername: "alice",
+      targetId: "note-12",
+      details,
+    } as Parameters<typeof activityLabel>[0];
+  }
+
+  // The case record renders a note as "A human note was recorded". The feed
+  // called the same target an observation, so following the link showed a
+  // record of a different kind than the row that led there.
+  it("calls a recorded note a note", () => {
+    expect(activityLabel(legacy("contribution_created", { kind: "note" }))).toBe("recorded a note");
+  });
+
+  it("never restates a note as an observation or promotes it to a finding", () => {
+    const label = activityLabel(legacy("contribution_created", { kind: "note" }));
+    expect(label).not.toMatch(/observation/i);
+    expect(label).not.toMatch(/finding/i);
+  });
+
+  it("leaves the other recorded kinds saying what they are", () => {
+    expect(activityLabel(legacy("contribution_created", { kind: "message" }))).toBe("added a discussion comment");
+    expect(activityLabel(legacy("contribution_created", { kind: "hypothesis" }))).toBe("proposed a working hypothesis");
+    expect(activityLabel(legacy("contribution_created", { kind: "action" }))).toBe("recorded a next action");
+    expect(activityLabel(legacy("contribution_created", { kind: "upload" }))).toBe("recorded an evidence upload");
   });
 });

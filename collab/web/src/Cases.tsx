@@ -340,7 +340,15 @@ function decisionsAwaitingAcceptance(items: readonly ActivityItem[]): ActivityIt
   return [...latest.values()].filter((item) => DECISION_PENDING_KINDS.has(item.activityKind ?? ""));
 }
 
-function activityLabel(item: ActivityItem | LegacyActivityItem): string {
+/**
+ * How one recorded action reads in the case record and the activity feed.
+ *
+ * Exported so the wording can be pinned directly: these strings are the only
+ * place a reader learns what kind of record they are looking at, and a
+ * mismatch with the server's own summary sends them to a record that does not
+ * match the row they followed.
+ */
+export function activityLabel(item: ActivityItem | LegacyActivityItem): string {
   if ("summary" in item) return item.summary;
   const contributionKind = typeof item.details.kind === "string" ? item.details.kind : null;
   const labels: Record<string, string> = {
@@ -374,7 +382,9 @@ function activityLabel(item: ActivityItem | LegacyActivityItem): string {
   };
   if (item.kind === "contribution_created") {
     if (contributionKind === "message") return "added a discussion comment";
-    if (contributionKind === "note") return "recorded an observation";
+    // Same wording as the investigation record and the server projection:
+    // a note stays a note wherever it is shown.
+    if (contributionKind === "note") return "recorded a note";
     if (contributionKind === "hypothesis") return "proposed a working hypothesis";
     if (contributionKind === "action") return "recorded a next action";
     if (contributionKind === "upload") return "recorded an evidence upload";

@@ -164,7 +164,13 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
         return { activityKind: "comment_added", resourceKind: "discussion_message", resourceId: target, provenance: "human", summary: event.kind === "contribution_revised" ? "revised a discussion comment" : "added a discussion comment", humanFinding: true, revision, workstreamId: null };
       }
       if (contribution === "note") {
-        return { activityKind: "observation_recorded", resourceKind: "observation", resourceId: target, provenance: "human", summary: "recorded an observation", humanFinding: true, revision, workstreamId: null };
+        // The person chose "note". The investigation record says "A human note
+        // was recorded", so the feed says the same thing: restating someone's
+        // note as an "observation" reads as a different, stronger kind of
+        // record than the one they actually made. The activity/resource enums
+        // stay as they are — `observation` is the category a note belongs to,
+        // and the recorded kind is carried by what the row says.
+        return { activityKind: "observation_recorded", resourceKind: "observation", resourceId: target, provenance: "human", summary: event.kind === "contribution_revised" ? "revised a note" : "recorded a note", humanFinding: true, revision, workstreamId: null };
       }
       if (contribution === "hypothesis") {
         return { activityKind: event.kind === "contribution_revised" ? "hypothesis_updated" : "hypothesis_recorded", resourceKind: "hypothesis", resourceId: target, provenance: "human", summary: event.kind === "contribution_revised" ? "revised a working hypothesis" : "proposed a working hypothesis", humanFinding: true, revision, workstreamId: null };
