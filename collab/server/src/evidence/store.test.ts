@@ -116,6 +116,15 @@ describe("FilesystemEvidenceStore", () => {
       await store.abandonFileServerReference(created.id);
       expect(await store.getFileServerReference(created.id)).toBeNull();
       await expect(store.abandonFileServerReference("../secret")).rejects.toThrow(/invalid file-server reference id/);
+      const restored = await store.putFileServerReference({
+        uri: "https://files.example.test/incident/core.bin",
+        expectedHash: sha256Hex(new TextEncoder().encode("remote-synthetic")),
+      });
+      const snapshot = { ...restored, verificationStatus: "unreachable" as const };
+      await store.restoreFileServerReference(snapshot);
+      expect(await store.getFileServerReference(restored.id)).toEqual(snapshot);
+      await expect(store.restoreFileServerReference({ ...snapshot, id: "../secret" }))
+        .rejects.toThrow(/invalid file-server reference id/);
     });
   });
 

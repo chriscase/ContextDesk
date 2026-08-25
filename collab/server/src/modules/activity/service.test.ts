@@ -100,6 +100,30 @@ describe("investigation activity projection", () => {
     expect(JSON.stringify(page)).not.toContain("pkg-should-not-leak");
   });
 
+  it("does not mark failed, canceled, timed-out, or partial workstreams as human findings", async () => {
+    const { cases, activity } = await harness();
+    const created = await cases.createCase(ALICE, { title: "Synthetic workstream terminals" }, "test");
+    const jobId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    for (const status of ["failed", "cancelled", "timed_out", "partial"] as const) {
+      await cases.appendDomainTimeline(created.id, {
+        kind: "triage_job_finished",
+        actor: ALICE,
+        targetId: jobId,
+        clientTime: null,
+        payload: { status, jobId },
+      });
+    }
+    const page = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const finished = page.items.filter((item) =>
+      item.activityKind === "workstream_failed"
+      || item.activityKind === "workstream_canceled"
+      || item.activityKind === "workstream_partially_completed"
+    );
+    expect(finished.length).toBeGreaterThanOrEqual(4);
+    expect(finished.every((item) => item.humanFinding === false)).toBe(true);
+    expect(JSON.stringify(finished)).not.toMatch(/humanFinding":true/);
+  });
+
   it("keeps a restored decision historical after its actor is mapped to a current identity", async () => {
     const { cases, activity } = await harness();
     const created = await cases.createCase(ALICE, { title: "Restored synthetic decision" }, "test");

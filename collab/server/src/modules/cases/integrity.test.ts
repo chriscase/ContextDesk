@@ -218,6 +218,145 @@ describe("case write integrity", () => {
     }, boom);
   });
 
+  it("restores the file-server reference when recheck timeline or audit fails", async () => {
+    const boom = new InjectedFailureStore();
+    boom.failTimelineKind = "evidence_recheck";
+    await withService(async ({ service, evidence, audit, store }) => {
+      const created = await service.createCase(actor, { title: "Recheck atomic fixture" }, "test");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "file_server_ref",
+          uri: "https://files.example.test/incident/core.bin",
+          expectedHash: sha256Hex(new TextEncoder().encode("remote-synthetic")),
+          summary: "Synthetic core dump stays on the file server.",
+        },
+        "test",
+      );
+      const row = await store.getArtifact(uploaded.artifact.id);
+      const refId = row?.refId;
+      expect(refId).toBeTruthy();
+      const before = await evidence.getFileServerReference(refId!);
+      expect(before?.verificationStatus).toBe("unverified");
+      await expect(service.recheckReference(created.id, uploaded.artifact.id, actor, "test"))
+        .rejects.toThrow(/injected timeline failure:evidence_recheck/);
+      expect(await evidence.getFileServerReference(refId!)).toEqual(before);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "evidence_recheck")).toBe(
+        false,
+      );
+      expect(await audit.list({ action: "evidence_recheck" })).toEqual([]);
+    }, boom);
+  });
+
+  it("keeps concurrent notes and refuses a forked revision without leaking across cases", async () => {
+    const bob = { id: "bob", username: "bob" };
+    const eve = { id: "eve", username: "eve" };
+    await withService(async ({ service }) => {
+      const created = await service.createCase(actor, { title: "Concurrent notes fixture" }, "test");
+      const other = await service.createCase(eve, { title: "Private synthetic investigation" }, "test");
+      await service.addParticipant(created.id, actor, { identityId: bob.id, username: bob.username }, "test");
+      const notes = await Promise.all([
+        service.addContribution(created.id, actor, { kind: "note", body: "Alice saw the synthetic timeout." }, "test"),
+        service.addContribution(created.id, bob, { kind: "note", body: "Bob saw the synthetic queue depth." }, "test"),
+        service.addContribution(
+          created.id,
+          actor,
+          { kind: "message", body: "Please inspect the synthetic worker trace." },
+          "test",
+        ),
+      ]);
+      expect(new Set(notes.map((row) => row.id)).size).toBe(3);
+      const listed = await service.listContributions(created.id, actor, false);
+      expect(listed.map((row) => row.body).sort()).toEqual([
+        "Alice saw the synthetic timeout.",
+        "Bob saw the synthetic queue depth.",
+        "Please inspect the synthetic worker trace.",
+      ]);
+      const timeline = await service.listTimeline(created.id);
+      expect(timeline.filter((event) => event.kind === "contribution_created")).toHaveLength(3);
+      expect((await service.listContributions(other.id, eve, false)).map((row) => row.body)).toEqual([]);
+      expect((await service.listTimeline(other.id)).some((event) => event.kind === "contribution_created")).toBe(
+        false,
+      );
+
+      const target = notes[0]!;
+      const revisions = await Promise.allSettled([
+        service.reviseContribution(created.id, target.id, actor, "Alice revised the timeout note.", "test", 1),
+        service.reviseContribution(created.id, target.id, bob, "Bob raced the same note revision.", "test", 1),
+      ]);
+      const fulfilled = revisions.filter((row) => row.status === "fulfilled");
+      const conflicts = revisions.filter(
+        (row) => row.status === "rejected" && row.reason instanceof ContributionConflictError,
+      );
+      expect(fulfilled).toHaveLength(1);
+      expect(conflicts).toHaveLength(1);
+      const chain = await service.provenance(created.id, target.id);
+      expect(chain).toHaveLength(2);
+      expect(chain[1]?.revision).toBe(2);
+      expect(
+        (await service.listTimeline(created.id)).filter((event) => event.kind === "contribution_revised"),
+      ).toHaveLength(1);
+    });
+  });
+
+  it("keeps a frozen snapshot immutable after later evidence intake", async () => {
+    await withService(async ({ service }) => {
+      const created = await service.createCase(actor, { title: "Frozen snapshot intake fixture" }, "test");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "mailer.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("2026-08-25T00:00:00Z synthetic timeout\n"),
+          summary: "Synthetic mailer timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const frozen = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [uploaded.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      const frozenEvidence = frozen.evidence.map((item) => ({ ...item }));
+      const later = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "worker.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("2026-08-25T00:01:00Z synthetic worker stall\n"),
+          summary: "Synthetic worker stall.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const listed = await service.listSnapshots(created.id, actor, false);
+      const reloaded = listed.find((row) => row.id === frozen.id);
+      expect(reloaded?.status).toBe("frozen");
+      expect(reloaded?.fingerprint).toBe(frozen.fingerprint);
+      expect(reloaded?.evidence).toEqual(frozenEvidence);
+      expect(reloaded?.evidence.some((item) => item.evidenceId === later.artifact.id)).toBe(false);
+      const next = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [uploaded.artifact.id, later.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      expect(next.id).not.toBe(frozen.id);
+      expect(next.parentSnapshotId).toBe(frozen.id);
+      expect(next.fingerprint).not.toBe(frozen.fingerprint);
+      expect((await service.listTimeline(created.id)).filter((event) => event.kind === "snapshot_frozen")).toHaveLength(
+        2,
+      );
+    });
+  });
+
   it("rolls back promoted corpus blobs when the post-promote timeline write fails", async () => {
     const boom = new InjectedFailureStore();
     boom.failTimelineKind = "corpus_intake_committed";

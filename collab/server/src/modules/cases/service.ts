@@ -1533,25 +1533,34 @@ export class CaseService {
       throw new Error("file-server reference not found");
     }
     const snapshot = { ...row };
-    const checked = await this.evidence.verifyFileServerReference(row.refId);
-    await this.store.appendTimeline(caseId, {
-      kind: "evidence_recheck",
-      actor,
-      targetId: artifactId,
-      clientTime: null,
-      payload: {
-        verificationStatus: checked.verificationStatus,
-        originalVerificationStatus: snapshot.verificationStatus,
-      },
-    });
-    await this.audit.append({
-      identity: actor.id,
-      action: "evidence_recheck",
-      target: artifactId,
-      origin,
-      outcome: checked.verificationStatus === "verified" ? "success" : "failure",
-    });
-    return { artifact: this.toArtifact(snapshot), status: checked.verificationStatus };
+    const previous = await this.evidence.getFileServerReference(row.refId);
+    if (!previous) throw new Error("file-server reference not found");
+    try {
+      const checked = await this.evidence.verifyFileServerReference(row.refId);
+      await this.store.withAtomic(async () => {
+        await this.store.appendTimeline(caseId, {
+          kind: "evidence_recheck",
+          actor,
+          targetId: artifactId,
+          clientTime: null,
+          payload: {
+            verificationStatus: checked.verificationStatus,
+            originalVerificationStatus: snapshot.verificationStatus,
+          },
+        });
+        await this.audit.append({
+          identity: actor.id,
+          action: "evidence_recheck",
+          target: artifactId,
+          origin,
+          outcome: checked.verificationStatus === "verified" ? "success" : "failure",
+        });
+      }, this.audit);
+      return { artifact: this.toArtifact(snapshot), status: checked.verificationStatus };
+    } catch (error) {
+      await this.evidence.restoreFileServerReference(previous);
+      throw error;
+    }
   }
 
   async isMemberOf(caseId: string, identityId: string): Promise<boolean> {
