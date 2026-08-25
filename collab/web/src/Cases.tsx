@@ -22,6 +22,7 @@ import { focusArrivalCopy } from "./route-focus-copy.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { InvestigationRecordPanel } from "./InvestigationRecord.js";
 import { ResolutionForm } from "./ResolutionForm.js";
+import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
 import { loadEntities, type EntityRow } from "./Entities.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
@@ -1184,13 +1185,16 @@ export function Cases(props: {
       && (row.severity === "critical" || row.severity === "high"),
     )
     .slice(0, 5);
-  const overviewActivities = activities.slice(0, 10);
+  // Grouped before the window is taken, so ten repeats of one imported
+  // analysis cannot fill all ten slots and push the rest of the story out.
+  const groupedActivities = groupRepeatedActivity(activities);
+  const overviewActivities = groupedActivities.slice(0, 10);
   // Both panels below read the same committed activity window the feed reads.
   // Restored history records work that already happened somewhere else. It
   // belongs in the feed, where its provenance is stated, but it is not open
   // work: a successful exact restore must not raise an alert for every event
   // it replayed.
-  const openWorkActivities = activities.filter(
+  const openWorkActivities = groupedActivities.filter(
     (item) => item.provenanceClass !== "historical_restored",
   );
   const attentionGroups = ATTENTION_GROUPS.map((group) => ({
@@ -1524,6 +1528,12 @@ export function Cases(props: {
                             <span className="activity-feed__case">{item.investigationTitle}</span>
                             <span className="activity-feed__meta">
                               <time dateTime={item.occurredAt}>{activityTime(item.occurredAt)}</time>
+                              {/* A repeat is stated, never silently dropped:
+                                  the row opens the newest of them and says how
+                                  many times the same record was written. */}
+                              {repeatLabel(item) ? (
+                                <span className="activity-feed__repeat">{repeatLabel(item)}</span>
+                              ) : null}
                               {/* The committed projection names the stage this
                                   event belongs to; showing it saves opening the
                                   investigation to find out where work happened. */}
@@ -1564,9 +1574,14 @@ export function Cases(props: {
                     })}
                   </ol>
                 )}
-                {activities.length > overviewActivities.length ? (
+                {groupedActivities.length > overviewActivities.length ? (
                   <p className="activity-feed__limit">
-                    Showing the 10 most recent of {activities.length} recorded events.
+                    Showing the {overviewActivities.length} most recent of{" "}
+                    {groupedActivities.length} recorded activities
+                    {groupedActivities.length === activities.length
+                      ? ""
+                      : ` (${activities.length} events, repeats grouped)`}
+                    .
                   </p>
                 ) : null}
               </section>

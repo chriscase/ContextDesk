@@ -154,10 +154,18 @@
 }
 
 .activity-feed__stage,
+.activity-feed__repeat,
 .activity-feed__restricted {
   padding: 0.05rem 0.4rem;
   border: 1px solid var(--border);
   border-radius: 0.35rem;
+}
+
+/* A grouped row says how many times the same record was written. It reads as
+   a count, not as an alert: repetition is a fact about the record, not a
+   problem with it. */
+.activity-feed__repeat {
+  border-style: dashed;
 }
 
 .activity-feed__restricted {

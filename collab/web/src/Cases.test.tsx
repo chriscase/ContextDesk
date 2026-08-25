@@ -465,7 +465,9 @@ describe("war room overview", () => {
     });
 
     render(<Cases roles={["case-lead"]} />);
-    await screen.findByText("Showing the 10 most recent of 12 recorded events.");
+    // Twelve distinct records: each opens a different comment, so grouping
+    // leaves all twelve and the line counts activities, not raw events.
+    await screen.findByText("Showing the 10 most recent of 12 recorded activities.");
     expect(document.querySelectorAll(".activity-feed__item")).toHaveLength(10);
   });
 });
@@ -713,6 +715,73 @@ describe("operational overview", () => {
     await waitFor(() =>
       expect(within(panel).queryByText(/recorded an observation/)).toBeTruthy(),
     );
+  });
+
+  it("shows one imported analysis once, saying how many times it was recorded", async () => {
+    // Importing one analysis and then comparing it wrote several entries that
+    // said the same thing about the same record. Ten of them filled every slot
+    // of Latest activity and pushed the operational story out.
+    const importedRoute = `/investigations/${CASE_A}/analyze?item=run-1`;
+    const repeated = (id: string, occurredAt: string) => activity({
+      activityId: id.repeat(64).slice(0, 64),
+      summary: "imported analysis was recorded",
+      activityKind: "import_recorded",
+      resolvedRoute: importedRoute,
+      provenanceClass: "ai_generated",
+      humanFinding: false,
+      occurredAt,
+    });
+    stubActivities([
+      repeated("1", "2026-08-24T12:02:00.000Z"),
+      repeated("2", "2026-08-24T12:01:00.000Z"),
+      repeated("3", "2026-08-24T12:00:00.000Z"),
+      activity({
+        activityId: "4".repeat(64),
+        summary: "froze an evidence snapshot",
+        activityKind: "evidence_frozen",
+        occurredAt: "2026-08-24T11:59:00.000Z",
+      }),
+    ]);
+    render(<Cases roles={["case-lead"]} view="overview" />);
+
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+    await waitFor(() =>
+      expect(within(panel).getAllByText(/imported analysis was recorded/)).toHaveLength(1),
+    );
+    // Collapsed, never silently: the row states the repeat.
+    expect(within(panel).getByText("recorded 3 times")).toBeTruthy();
+    // And the work it was crowding out is still on the page.
+    expect(within(panel).getByText(/froze an evidence snapshot/)).toBeTruthy();
+  });
+
+  it("does not fold two people's identical work into one row", async () => {
+    const importedRoute = `/investigations/${CASE_A}/analyze?item=run-1`;
+    stubActivities([
+      activity({
+        activityId: "1".repeat(64),
+        actorLabel: "dave",
+        summary: "imported analysis was recorded",
+        activityKind: "import_recorded",
+        resolvedRoute: importedRoute,
+      }),
+      activity({
+        activityId: "2".repeat(64),
+        actorLabel: "erin",
+        summary: "imported analysis was recorded",
+        activityKind: "import_recorded",
+        resolvedRoute: importedRoute,
+        occurredAt: "2026-08-24T11:00:00.000Z",
+      }),
+    ]);
+    render(<Cases roles={["case-lead"]} view="overview" />);
+
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+    await waitFor(() =>
+      expect(within(panel).getAllByText(/imported analysis was recorded/)).toHaveLength(2),
+    );
+    expect(within(panel).queryByText(/recorded 2 times/)).toBeNull();
   });
 
   it("says nothing about stage or restriction when the projection omits them", async () => {
