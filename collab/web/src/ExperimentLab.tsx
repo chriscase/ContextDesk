@@ -2192,6 +2192,15 @@ export function ExperimentLab(props: {
       {showComparison && canWrite ? (
         <details className="experiment-lab__tools">
           <summary>Add or import analysis</summary>
+          {/* An analysis pasted into Capture does not appear in this list, and
+              the options below do not accept one. Saying so here is the
+              difference between a boundary and a page that looks broken. */}
+          <p className="experiment-lab__section-note">
+            These bring in an already-recorded comparison. An analysis pasted into Capture is not
+            one of them: it becomes comparable from Analyze, through &ldquo;Review in Experiment
+            Lab&rdquo; on a workstream that has run, which is what binds it to that run&rsquo;s
+            frozen evidence. Nothing here will invent that evidence for it.
+          </p>
           <details className="experiment-lab__tools">
             <summary>Import another experiment package</summary>
             <form className="composer" onSubmit={(event) => void importPackage(event)}>

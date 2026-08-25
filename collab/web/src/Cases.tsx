@@ -2350,6 +2350,7 @@ export function Cases(props: {
             <TriageAnchor id={WORKSTREAMS_SECTION} label="Workstreams">
               <Workstreams
                 caseId={current.id}
+                importedRunCount={runs.length}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
                 {...(props.onDeepNavigate
                   ? {

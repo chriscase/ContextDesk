@@ -166,6 +166,15 @@ function CopyWorkstreamLink(props: { href: string }) {
 
 export function Workstreams(props: {
   caseId: string;
+  /**
+   * How many analyses were pasted in from elsewhere.
+   *
+   * A pasted chat is recorded work, but it is not a workstream: it has no
+   * frozen evidence behind it and nothing re-ran it. Saying only "no workstream
+   * has run" to someone who just imported one reads as the import having been
+   * lost, so the count is stated here and the boundary is named.
+   */
+  importedRunCount?: number;
   routeFocus?: WorkFocus;
   onDeepNavigate?: (focus: WorkFocus) => void;
 }) {
@@ -683,6 +692,16 @@ export function Workstreams(props: {
         <p className="workstreams__empty">
           No workstream has run on this investigation yet. Freeze the evidence a workstream should
           see, then start one below.
+          {props.importedRunCount ? (
+            <>
+              {" "}
+              {props.importedRunCount === 1
+                ? "One analysis was imported from elsewhere and is recorded in Capture"
+                : `${props.importedRunCount} analyses were imported from elsewhere and are recorded in Capture`}
+              . Imported analysis is not a workstream: nothing here ran it, and it has no frozen
+              evidence behind it. It can be compared against a workstream once one has run.
+            </>
+          ) : null}
         </p>
       ) : null}
       {groups.map((group) => {

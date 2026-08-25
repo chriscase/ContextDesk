@@ -135,8 +135,10 @@ test.describe("complete war-room operator journey", () => {
     expect(sharedPosted.ok(), await sharedPosted.text()).toBeTruthy();
     await expect(page.getByText("shared-timeout.log", { exact: true })).toBeVisible();
     await expect(page.getByText("share_safe", { exact: true }).first()).toBeVisible();
+    // Present in the page behind its disclosure; a closed <details> keeps it
+    // out of the accessibility tree, so it is addressed by attribute here.
     await expect(
-      page.getByRole("button", { name: "Copy content hash for shared-timeout.log" }),
+      page.locator('button[aria-label="Copy content hash for shared-timeout.log"]'),
     ).toBeAttached();
 
     await page.locator("#case-evidence-file").setInputFiles({
@@ -184,7 +186,13 @@ test.describe("complete war-room operator journey", () => {
     await expect(page.getByRole("heading", { name: "Snapshot lineage" })).toBeVisible();
     await expect(page.getByText(/1 items ·/)).toBeVisible();
     await expect(page.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
-    await expect(page.locator(".case-memory__snapshot small")).toHaveText(shortFp);
+    // The picker tells snapshots apart by number, size, and who froze them.
+    // Twelve characters of a digest never did that job and no longer appear.
+    await expect(page.locator(".case-memory__snapshot small")).toHaveCount(0);
+    await expect(page.getByText(shortFp)).toHaveCount(0);
+    // The exact fingerprint is still reachable: it is shown in full where a
+    // snapshot is inspected.
+    await expect(page.locator(".case-memory__snapshot").first()).toContainText("S0");
 
     const snapshotsRes = await page.request.get(`/api/cases/${caseId}/snapshots`);
     expect(snapshotsRes.ok(), await snapshotsRes.text()).toBeTruthy();
@@ -202,7 +210,9 @@ test.describe("complete war-room operator journey", () => {
     // The run row states the same-snapshot proof in words. The exact
     // fingerprint stays available, in full, behind the row's identifiers
     // disclosure rather than truncated into the heading.
-    const identifiers = page.locator("details.technical-id").first();
+    // Scoped to the run row: evidence cards carry their own identifier
+    // disclosures on this same stage, so `.first()` would open the wrong one.
+    const identifiers = page.locator("details.technical-id.triage-runs__identifiers").first();
     await expect(identifiers).toBeVisible();
     await identifiers.locator("summary").click();
     await expect(identifiers.getByText(frozenBody.fingerprint, { exact: true })).toBeVisible();
@@ -310,7 +320,9 @@ test.describe("complete war-room operator journey", () => {
     await expect(page.getByText(`Signed in as ${dave.username}`)).toBeVisible();
     await openCase(page, title);
     await expectFocusedStage(page, "analyze");
-    await expect(page.locator(".case-memory__snapshot small")).toHaveText(shortFp);
+    // Survives the reload without the truncated digest coming back.
+    await expect(page.locator(".case-memory__snapshot").first()).toContainText("S0");
+    await expect(page.getByText(shortFp)).toHaveCount(0);
     await expect(page.getByText("Same frozen snapshot").first()).toBeVisible();
     await expect(completedLanes).toHaveCount(3);
 
