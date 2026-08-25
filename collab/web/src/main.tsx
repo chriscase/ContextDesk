@@ -11,6 +11,7 @@ import "./styles/catalog.css";
 import "./styles/export.css";
 import "./styles/experiment-lab.css";
 import "./styles/administration.css";
+import "./styles/admin-people.css";
 
 const root = document.getElementById("root");
 if (!root) {

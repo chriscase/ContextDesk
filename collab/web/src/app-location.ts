@@ -253,7 +253,10 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/help") {
     return { area: "help", caseId: null, stage: "situation" };
   }
-  if (path === "/administration") {
+  if (path === "/administration" || path === "/admin/people") {
+    // /admin/people is a focused sub-view the Administration component
+    // itself renders (a People tab); it shares the same area gate (an
+    // admin role) as /administration and does not need its own AreaId.
     return { area: "administration", caseId: null, stage: "situation" };
   }
   const investigation = /^\/investigations\/([^/]+)(?:\/([^/]+))?$/.exec(path);

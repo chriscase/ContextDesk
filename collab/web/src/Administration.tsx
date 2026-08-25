@@ -15,7 +15,19 @@ import {
   type AppRole,
 } from "@cd-collab/contracts/admin";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { AdminPeoplePanel } from "./AdminPeoplePanel.js";
 import { protectedApiFetch } from "./protected-api.js";
+
+type AdminTab = "roles" | "people";
+
+const ADMIN_TAB_PATHS: Record<AdminTab, string> = {
+  roles: "/administration",
+  people: "/admin/people",
+};
+
+function adminTabFromPathname(pathname: string): AdminTab {
+  return pathname === "/admin/people" ? "people" : "roles";
+}
 
 const ROLE_LABELS: Record<AppRole, string> = {
   viewer: "Viewer",
@@ -130,8 +142,33 @@ export function Administration() {
   const [pending, setPending] = useState<PendingChange | null>(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [activeTab, setActiveTab] = useState<AdminTab>(() =>
+    adminTabFromPathname(window.location.pathname),
+  );
 
   useEffect(() => headingRef.current?.focus(), []);
+
+  useEffect(() => {
+    document.title =
+      activeTab === "people"
+        ? "People · Administration · ContextDesk War Room"
+        : "Administration · ContextDesk War Room";
+  }, [activeTab]);
+
+  useEffect(() => {
+    function onPopState() {
+      setActiveTab(adminTabFromPathname(window.location.pathname));
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  function selectTab(tab: AdminTab) {
+    setActiveTab(tab);
+    if (window.location.pathname !== ADMIN_TAB_PATHS[tab]) {
+      window.history.pushState(null, "", ADMIN_TAB_PATHS[tab]);
+    }
+  }
 
   const refreshMappings = useCallback(async () => {
     setLoadingMappings(true);
@@ -308,6 +345,44 @@ export function Administration() {
         </p>
       </header>
 
+      <div className="admin-people-tabs" role="tablist" aria-label="Administration sections">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "roles"}
+          aria-controls="administration-roles-panel"
+          id="administration-tab-roles"
+          onClick={() => selectTab("roles")}
+        >
+          Group role mappings
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "people"}
+          aria-controls="administration-people-panel"
+          id="administration-tab-people"
+          onClick={() => selectTab("people")}
+        >
+          People
+        </button>
+      </div>
+
+      <div
+        id="administration-people-panel"
+        role="tabpanel"
+        aria-labelledby="administration-tab-people"
+        hidden={activeTab !== "people"}
+      >
+        {activeTab === "people" ? <AdminPeoplePanel /> : null}
+      </div>
+
+      <div
+        id="administration-roles-panel"
+        role="tabpanel"
+        aria-labelledby="administration-tab-roles"
+        hidden={activeTab !== "roles"}
+      >
       {error ? <p ref={errorRef} tabIndex={-1} className="administration__message administration__message--error" role="alert">{error}</p> : null}
       {status ? <p ref={statusRef} tabIndex={-1} className="administration__message" role="status">{status}</p> : null}
 
@@ -457,6 +532,7 @@ export function Administration() {
           Permissions come only from the persistent mappings shown above.
         </p>
       </aside>
+      </div>
 
       {pending ? <Confirmation change={pending} onCancel={closeConfirmation} onConfirm={() => void applyChange(pending)} /> : null}
     </section>

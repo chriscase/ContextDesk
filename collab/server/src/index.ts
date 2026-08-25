@@ -36,6 +36,12 @@ import {
 } from "./modules/triage-runs/index.js";
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 import {
+  PgLocalGrantStore,
+  PgUserProfileStore,
+  type LocalGrantStore,
+  type UserProfileStore,
+} from "./modules/people/index.js";
+import {
   loadPortableInstallationId,
   memoryApplyBoundary,
   PgPortableApplyStateStore,
@@ -56,6 +62,8 @@ interface StorageRuntime {
   experiments: ExperimentStore;
   jobs: TriageJobStore;
   applyState: PortableApplyStateStore;
+  profiles: UserProfileStore;
+  grants: LocalGrantStore;
   runPortableTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
   presence: PresenceService;
 }
@@ -76,6 +84,8 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       experiments: runtime.experiments,
       jobs: runtime.jobs,
       applyState: runtime.applyState,
+      profiles: runtime.profiles,
+      grants: runtime.grants,
       runPortableTransaction: runtime.runPortableTransaction,
       presence: new PresenceService(),
     };
@@ -95,6 +105,8 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     experiments: new PgExperimentStore(pool),
     jobs: new PgTriageJobStore(pool),
     applyState: new PgPortableApplyStateStore(pool),
+    profiles: new PgUserProfileStore(pool),
+    grants: new PgLocalGrantStore(pool),
     presence: new PresenceService(new PgPresenceBackend(pool)),
   };
 }
@@ -228,6 +240,8 @@ async function main(): Promise<void> {
     exporter,
     portable,
     installationId,
+    profiles: storage.profiles,
+    grants: storage.grants,
     security: {
       auth: {
         adapter,

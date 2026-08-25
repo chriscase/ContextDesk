@@ -631,3 +631,7 @@ export * from "./investigation-portable-archive.js";
 export * from "./investigation-portable-apply.js";
 export * from "./investigation-strategy-connector.js";
 export * from "./investigation-activity.js";
+export * from "./capability.js";
+export * from "./user-profile.js";
+export * from "./directory-mapping.js";
+export * from "./admin-people.js";

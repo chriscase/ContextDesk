@@ -24,6 +24,8 @@ const LOCAL_DIRECTORY_SCAN_LIMIT = 1_000;
  * No module outside `auth` may call this with a password — login routes live here.
  */
 export interface AuthAdapter {
+  /** Which profile provenance a successful authenticate() through this adapter represents. */
+  readonly provenance: "local" | "ldap";
   authenticate(username: string, password: string): Promise<AuthSuccess | null>;
   /**
    * Live directory groups for an already-authenticated identity.
@@ -44,6 +46,8 @@ export interface AuthAdapter {
 }
 
 export class MapAuthAdapter implements AuthAdapter {
+  readonly provenance = "local" as const;
+
   constructor(
     private readonly users: ReadonlyMap<
       string,
