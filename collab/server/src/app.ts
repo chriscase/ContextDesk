@@ -38,6 +38,7 @@ import {
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerCorpusIntakeRoutes } from "./modules/corpus-intake/index.js";
+import { registerLogTimeRoutes, type LogTimeService } from "./modules/log-time/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
 import { registerTriageRunRoutes, type TriageRunService } from "./modules/triage-runs/index.js";
@@ -85,6 +86,7 @@ export interface AppDeps {
   imports?: ImportService;
   triageRuns?: TriageRunService;
   presence?: PresenceService;
+  logTime?: LogTimeService;
   experiments?: ExperimentService;
   exporter?: ExportService;
   portable?: PortableInvestigationService;
@@ -258,6 +260,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
           sessionAuth,
           audit: security.audit,
           resolutions: deps.resolutions,
+        });
+      }
+      if (deps.logTime) {
+        await registerLogTimeRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          logTime: deps.logTime,
+          cases: deps.domain,
         });
       }
     }

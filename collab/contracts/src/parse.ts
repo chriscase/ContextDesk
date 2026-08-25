@@ -20,6 +20,7 @@ export type FieldType =
   | { kind: "nstr" }
   | { kind: "bool" }
   | { kind: "u64" }
+  | { kind: "i64" }
   | { kind: "enum"; values: readonly string[] }
   | { kind: "array"; of: FieldType }
   | { kind: "object"; shape: ObjectShape };
@@ -61,6 +62,13 @@ export function checkValue(path: string, type: FieldType, v: unknown): void {
           `expected unsigned safe integer, got ${describe(v)}`,
         );
       return;
+    case "i64":
+      if (typeof v !== "number" || !Number.isSafeInteger(v))
+        throw new ContractViolation(
+          path,
+          `expected signed safe integer, got ${describe(v)}`,
+        );
+      return;
     case "enum":
       if (typeof v !== "string" || !type.values.includes(v))
         throw new ContractViolation(
@@ -88,11 +96,14 @@ export function checkObject(
   if (!isPlainObject(v))
     throw new ContractViolation(path, `expected object, got ${describe(v)}`);
   for (const key of Object.keys(v)) {
-    if (!(key in shape))
+    // `key in shape` would walk Object.prototype, so an unknown key named
+    // `__proto__`, `toString`, or `constructor` would pass as recognized.
+    // Only the shape's own keys count as declared fields.
+    if (!Object.prototype.hasOwnProperty.call(shape, key))
       throw new ContractViolation(`${path}.${key}`, "unknown key (contract drift)");
   }
   for (const [key, spec] of Object.entries(shape)) {
-    const present = key in v;
+    const present = Object.prototype.hasOwnProperty.call(v, key);
     const value = v[key];
     const fieldPath = `${path}.${key}`;
     if (!present) {
@@ -122,6 +133,8 @@ export const f = {
   nstr: { kind: "nstr" } as FieldType,
   bool: { kind: "bool" } as FieldType,
   u64: { kind: "u64" } as FieldType,
+  /** Signed safe integer; for values such as a UTC offset in seconds. */
+  i64: { kind: "i64" } as FieldType,
   en: (...values: string[]): FieldType => ({ kind: "enum", values }),
   arr: (of: FieldType): FieldType => ({ kind: "array", of }),
   obj: (shape: ObjectShape): FieldType => ({ kind: "object", shape }),

@@ -33,6 +33,12 @@ export default defineConfig({
   use: {
     baseURL,
     browserName: "chromium",
+    // Environments that pre-provision a Chromium build (containers, CI images)
+    // can point at it instead of the version Playwright would download. Unset
+    // by default, so a normal checkout keeps using the pinned browser.
+    ...(process.env.COLLAB_E2E_CHROMIUM?.trim()
+      ? { launchOptions: { executablePath: process.env.COLLAB_E2E_CHROMIUM.trim() } }
+      : {}),
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",

@@ -3,12 +3,30 @@ import { adminUrl, withDisposableDb } from "../test/disposable-db.js";
 import { latestMigrationVersion, listMigrations, migrateDown, migrateUp } from "./migrate.js";
 
 describe("migration versions", () => {
-  it("pins the canonical PostgreSQL head at the investigation record graph", () => {
+  // Two slices landed a migration on the same integration train. They are
+  // numbered consecutively rather than sharing a prefix: the investigation
+  // record graph first, then the case-bound log corpus, which is the order
+  // they are applied in and the order their rollbacks unwind.
+  it("pins the canonical PostgreSQL head at the case-bound log corpus", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
     expect(versions).toContain("017_investigation_record");
-    expect(latestMigrationVersion()).toBe("017_investigation_record");
+    expect(versions).toContain("018_log_time");
+    expect(latestMigrationVersion()).toBe("018_log_time");
+  });
+
+  it("keeps every migration version unique and consecutively ordered from the record graph", () => {
+    const versions = listMigrations().map((file) => file.version);
+    expect(new Set(versions).size).toBe(versions.length);
+    // localeCompare ordering is what the runner applies, so assert on it
+    // directly rather than on the filenames' numeric prefixes.
+    expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
+    expect(versions.slice(-3)).toEqual([
+      "016_contribution_write_intents",
+      "017_investigation_record",
+      "018_log_time",
+    ]);
   });
 });
 
@@ -34,6 +52,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("015_user_profiles");
       expect(up.applied).toContain("016_contribution_write_intents");
       expect(up.applied).toContain("017_investigation_record");
+      expect(up.applied).toContain("018_log_time");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -87,6 +106,19 @@ describe.skipIf(!adminUrl())("migrations", () => {
           '33333333-3333-4333-8333-333333333333'
         )
       `)).rejects.toThrow(/evidence_artifacts_intake_batch_fk/);
+      // 018 unwinds first: it is the head, and its tables reference cases but
+      // nothing in the record graph, so it rolls back independently.
+      expect((await migrateDown(client)).rolledBack).toBe("018_log_time");
+      const logTimeTables = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename IN ('log_corpora', 'log_time_declarations',
+                             'log_time_operations', 'log_time_dependents')`,
+      );
+      expect(logTimeTables.rows).toHaveLength(0);
+      const logTimeTrigger = await client.query<{ proname: string }>(
+        `SELECT proname FROM pg_proc WHERE proname = 'log_time_dependents_immutable'`,
+      );
+      expect(logTimeTrigger.rows).toHaveLength(0);
       // Rolling back 017 removes the relationship tables and the occurred-at
       // columns and leaves case, evidence, and timeline content untouched.
       expect((await migrateDown(client)).rolledBack).toBe("017_investigation_record");
@@ -162,6 +194,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("015_user_profiles");
       expect(dry.pending).toContain("016_contribution_write_intents");
       expect(dry.pending).toContain("017_investigation_record");
+      expect(dry.pending).toContain("018_log_time");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,
