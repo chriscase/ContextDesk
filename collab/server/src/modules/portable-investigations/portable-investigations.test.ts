@@ -845,6 +845,45 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable gold target/);
   });
 
+  it("refuses apply when experiment decision timeline lacks a decision target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind.startsWith("experiment_decision_"));
+      if (!event) throw new Error("experiment decision timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable decision target/);
+  });
+
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1551,6 +1590,7 @@ describe("portable investigation apply", () => {
     expect(sourceFrozen?.locator.resourceId).toBeTruthy();
     expect(sourceDecision?.locator.kind).toBe("decision_revision");
     expect(sourceDecision?.locator.resourceId).toBeTruthy();
+    expect(sourceDecision?.locator.resourceId).not.toBe(row.caseId);
     expect(sourceGold?.locator.kind).toBe("gold");
     expect(sourceGold?.locator.resourceId).toBeTruthy();
     expect(sourceGold?.locator.resourceId).not.toBe(row.caseId);
@@ -1792,6 +1832,16 @@ describe("portable investigation apply", () => {
     );
     expect(destDecisionIds).toContain(destDecision?.locator.resourceId);
     expect(destExperiments.map((experiment) => experiment.id)).not.toContain(destDecision?.locator.resourceId);
+    const destDecisionTimeline = await row.cases.listTimeline(applied.investigationId);
+    const destDecisionEvents = destDecisionTimeline.filter((event) =>
+      event.kind.startsWith("experiment_decision_"),
+    );
+    expect(destDecisionEvents.length).toBeGreaterThan(0);
+    for (const event of destDecisionEvents) {
+      expect(destDecisionIds).toContain(event.targetId);
+      expect(event.targetId).not.toBe(applied.investigationId);
+      expect(destExperiments.map((experiment) => experiment.id)).not.toContain(event.targetId);
+    }
     const destGoldIds = destExperiments.flatMap((experiment) =>
       experiment.golds.map((gold) => gold.goldId),
     );

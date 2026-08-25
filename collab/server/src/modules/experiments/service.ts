@@ -808,7 +808,7 @@ export class ExperimentService {
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_decision_proposed",
       actor,
-      targetId: experimentId,
+      targetId: decision.id,
       clientTime: null,
       payload: { decisionId: decision.id, revision: decision.revision, packageId: row.packageId },
     });
@@ -866,7 +866,7 @@ export class ExperimentService {
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_decision_accepted",
       actor,
-      targetId: experimentId,
+      targetId: accepted.id,
       clientTime: null,
       payload: {
         decisionId: accepted.id,

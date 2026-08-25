@@ -694,6 +694,12 @@ export async function persistPortableArchive(input: {
     if (event.kind === "corpus_intake_committed" && (event.targetNamespace !== "intake_batch" || !event.targetId)) {
       throw new Error("corpus intake timeline is missing a portable intake-batch target");
     }
+    if (
+      /^experiment_decision_/.test(event.kind)
+      && (event.targetNamespace !== "decision" || !event.targetId)
+    ) {
+      throw new Error("experiment decision timeline is missing a portable decision target");
+    }
     if (event.kind === "experiment_gold_promoted" && (event.targetNamespace !== "gold" || !event.targetId)) {
       throw new Error("experiment gold timeline is missing a portable gold target");
     }

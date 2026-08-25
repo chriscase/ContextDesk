@@ -294,7 +294,7 @@ function portableTimelineTarget(
   if (row.targetId === null) return null;
   const payload = timelinePayload(row);
   if (/^experiment_decision_/.test(row.kind)) {
-    const decisionId = typeof payload.decisionId === "string" ? payload.decisionId : null;
+    const decisionId = typeof payload.decisionId === "string" ? payload.decisionId : row.targetId;
     if (decisionId && namespaces.get(decisionId)?.has("decision")) {
       return { targetId: decisionId, namespace: "decision" };
     }
