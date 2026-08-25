@@ -3,6 +3,14 @@ import { buildApp } from "./app.js";
 import { createSqliteRuntime } from "./db/sqlite.js";
 import { loadRuntimeConfig } from "./config.js";
 import { FilesystemEvidenceStore } from "./evidence/store.js";
+import {
+  LogTimeService,
+  MemoryLogTimeStore,
+  PgLogTimeStore,
+  ProcessLogTimeBridge,
+  createLogTimeCasePort,
+  logTimeBridgeOptions,
+} from "./modules/log-time/index.js";
 import { PgAuditStore, type AuditStore } from "./modules/audit/index.js";
 import {
   LdapAuthAdapter,
@@ -163,6 +171,26 @@ async function main(): Promise<void> {
     audit,
     experiments: storage.experiments,
   });
+  // Log-time review needs the shipped host pipeline. With no host binary or
+  // no corpus root configured, the routes stay unregistered rather than
+  // offering a review surface that cannot answer.
+  const logTimeBridge = logTimeBridgeOptions();
+  const logTime = logTimeBridge
+    ? new LogTimeService({
+        store:
+          storage.pool === null
+            ? new MemoryLogTimeStore()
+            : new PgLogTimeStore(storage.pool),
+        bridge: new ProcessLogTimeBridge(logTimeBridge),
+        cases: createLogTimeCasePort({
+          cases: storage.cases,
+          domain,
+          evidence: store,
+          jobs: storage.jobs,
+        }),
+        audit,
+      })
+    : null;
   const bridge = triageBridgeOptions();
   const triageRuns = new TriageRunService({
     cases: domain,
@@ -238,6 +266,7 @@ async function main(): Promise<void> {
     pool: storage.pool,
     ...(storage.databaseProbe ? { databaseProbe: storage.databaseProbe } : {}),
     store,
+    ...(logTime ? { logTime } : {}),
     domain,
     catalog,
     imports,

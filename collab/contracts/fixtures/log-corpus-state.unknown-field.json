@@ -1,0 +1,12 @@
+{
+  "schemaId": "cd-collab.log_corpus_state.v1",
+  "caseId": "case-synthetic-0001",
+  "corpusId": "corpus-synthetic-0001",
+  "corpusRevision": 0,
+  "builtAt": null,
+  "privacyClass": "owner_only",
+  "sources": [],
+  "reviewOutstanding": false,
+  "undoableRevision": null,
+  "inferredTimezone": "America/Chicago"
+}

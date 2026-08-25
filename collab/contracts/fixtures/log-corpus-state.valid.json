@@ -1,0 +1,36 @@
+{
+  "schemaId": "cd-collab.log_corpus_state.v1",
+  "caseId": "case-synthetic-0001",
+  "corpusId": "corpus-synthetic-0001",
+  "corpusRevision": 3,
+  "builtAt": "2024-03-09T18:00:00Z",
+  "privacyClass": "owner_only",
+  "sources": [
+    {
+      "source": "gateway/edge.log",
+      "unresolvedLocalRecords": 0,
+      "resolvedLocalRecords": 42,
+      "explicitWallClockRecords": 8,
+      "otherOrderOnlyRecords": 1,
+      "declaration": {
+        "source": "gateway/edge.log",
+        "ianaTimezone": "America/Chicago",
+        "basis": "user_declared",
+        "declaredAt": 1710007200,
+        "appliedRevision": 3,
+        "declarationFingerprint": "3f2a1b6c4d5e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708",
+        "declaredBy": "analyst-synthetic-01"
+      }
+    },
+    {
+      "source": "worker/batch.log",
+      "unresolvedLocalRecords": 17,
+      "resolvedLocalRecords": 0,
+      "explicitWallClockRecords": 0,
+      "otherOrderOnlyRecords": 4,
+      "declaration": null
+    }
+  ],
+  "reviewOutstanding": true,
+  "undoableRevision": 2
+}

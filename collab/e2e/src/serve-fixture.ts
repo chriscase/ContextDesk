@@ -28,6 +28,12 @@ import { ImportService, MemoryRunStore } from "../../server/src/modules/import/i
 import { ExperimentService, MemoryExperimentStore } from "../../server/src/modules/experiments/index.js";
 import { PresenceService } from "../../server/src/modules/presence/index.js";
 import {
+  LogTimeService,
+  MemoryLogTimeStore,
+  ProcessLogTimeBridge,
+  createLogTimeCasePort,
+} from "../../server/src/modules/log-time/index.js";
+import {
   MemoryLocalGrantStore,
   MemoryUserProfileStore,
 } from "../../server/src/modules/people/index.js";
@@ -137,6 +143,28 @@ async function main(): Promise<void> {
     applyCoordination: "single_instance",
     confirmationRestartDurable: false,
   });
+  // Log-time review runs against the real `contextdesk` host binary when one
+  // is configured, so the browser suite exercises the shipped pipeline rather
+  // than a stand-in. Without it the routes stay unregistered and the spec
+  // skips, which is honest: there is nothing to review without the pipeline.
+  const logTimeBin = process.env.COLLAB_E2E_LOG_TIME_BIN?.trim();
+  const logTime = logTimeBin
+    ? new LogTimeService({
+        store: new MemoryLogTimeStore(),
+        bridge: new ProcessLogTimeBridge({
+          command: logTimeBin,
+          cacheRoot: join(root, "log-corpora"),
+          timeoutMs: 60_000,
+        }),
+        cases: createLogTimeCasePort({
+          cases: caseStore,
+          domain,
+          evidence: store,
+          jobs: jobStore,
+        }),
+        audit,
+      })
+    : null;
   const presence = new PresenceService();
   const exporter = new ExportService({
     cases: domain,
@@ -181,6 +209,7 @@ async function main(): Promise<void> {
     imports,
     triageRuns,
     presence,
+    ...(logTime ? { logTime } : {}),
     experiments,
     exporter,
     portable,
