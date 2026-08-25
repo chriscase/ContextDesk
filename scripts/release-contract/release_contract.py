@@ -997,6 +997,10 @@ def assemble(
     if reuse_errs:
         die("; ".join(reuse_errs))
     require_complete_matrices(assets)
+    # A staged signature is always a security claim, even when an RC does not
+    # require updater metadata.  Never let unsigned-release policy turn an
+    # orphan, stale, or invalid sidecar into an unchecked release asset.
+    verify_signature_sidecars(assets, allow_test_sig=allow_test_sig)
 
     signed = False
     latest_path = directory / "latest.json"
@@ -1434,6 +1438,7 @@ def validate_promote_payload(
         # drop generated metadata from matrix completeness by re-running assemble checks
         raw = collect_assets(directory, skip_generated=True)
         require_complete_matrices(raw)
+        verify_signature_sidecars(raw, allow_test_sig=allow_test_sig)
         reuse_errs = detect_foreign_reuse(
             names=[a.name for a in assets],
             urls=[],
