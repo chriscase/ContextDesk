@@ -87,6 +87,15 @@ describe.skipIf(!adminUrl())("migrations", () => {
           '33333333-3333-4333-8333-333333333333'
         )
       `)).rejects.toThrow(/evidence_artifacts_intake_batch_fk/);
+      const logTimeTables = await client.query<{ to_regclass: string | null }>(
+        `SELECT to_regclass('public.log_corpora') AS to_regclass`,
+      );
+      expect(logTimeTables.rows[0]?.to_regclass).not.toBeNull();
+      expect((await migrateDown(client)).rolledBack).toBe("017_log_time");
+      const rolledBackLogTime = await client.query<{ to_regclass: string | null }>(
+        `SELECT to_regclass('public.log_corpora') AS to_regclass`,
+      );
+      expect(rolledBackLogTime.rows[0]?.to_regclass).toBeNull();
       expect((await migrateDown(client)).rolledBack).toBe("016_contribution_write_intents");
       expect((await migrateDown(client)).rolledBack).toBe("015_user_profiles");
       expect((await migrateDown(client)).rolledBack).toBe("014_portable_apply_intents");
