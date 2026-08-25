@@ -1427,6 +1427,10 @@ describe("experiment lab", () => {
     stubExperiments([cockpitView, second]);
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
+    // Both comparisons must have landed before touching the picker: the picker
+    // clears its selection whenever the active comparison changes, so a click
+    // placed while the lab is still settling would be reset by that same rule.
+    await screen.findByRole("button", { name: /Comparison 2/ });
     const firstPicker = await screen.findByRole("group", {
       name: "Evidence supporting this decision (optional)",
     });
