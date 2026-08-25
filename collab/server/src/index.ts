@@ -192,11 +192,12 @@ async function main(): Promise<void> {
             : {}),
         })
       : null;
+  const installationId = await loadPortableInstallationId(
+    config.evidenceRoot,
+    process.env.COLLAB_INSTALLATION_ID,
+  );
   const portable = new PortableInvestigationService({
-    installationId: await loadPortableInstallationId(
-      config.evidenceRoot,
-      process.env.COLLAB_INSTALLATION_ID,
-    ),
+    installationId,
     cases: domain,
     catalog,
     imports,
@@ -226,6 +227,7 @@ async function main(): Promise<void> {
     experiments,
     exporter,
     portable,
+    installationId,
     security: {
       auth: {
         adapter,
