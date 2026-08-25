@@ -368,7 +368,7 @@ describe("triage brief and prompt-package export", () => {
             await app.inject({
               method: "POST",
               url: `/api/cases/${fx.caseId}/export/brief`,
-              headers: { cookie: fx.alice },
+              headers: { cookie: fx.dave },
               payload: { variant: "owner_only" },
             })
           ).body,
@@ -380,7 +380,7 @@ describe("triage brief and prompt-package export", () => {
             await app.inject({
               method: "POST",
               url: `/api/cases/${fx.caseId}/export/brief`,
-              headers: { cookie: fx.alice },
+              headers: { cookie: fx.dave },
               payload: { variant: "owner_only" },
             })
           ).body,
@@ -478,7 +478,7 @@ describe("triage brief and prompt-package export", () => {
             await app.inject({
               method: "POST",
               url: `/api/cases/${fx.caseId}/export/package`,
-              headers: { cookie: fx.alice },
+              headers: { cookie: fx.dave },
               payload: { variant: "owner_only", selection, promptScaffold: "Summarize the evidence." },
             })
           ).body,
@@ -490,7 +490,7 @@ describe("triage brief and prompt-package export", () => {
             await app.inject({
               method: "POST",
               url: `/api/cases/${fx.caseId}/export/package`,
-              headers: { cookie: fx.alice },
+              headers: { cookie: fx.dave },
               payload: { variant: "owner_only", selection, promptScaffold: "Summarize the evidence." },
             })
           ).body,
@@ -567,7 +567,7 @@ describe("triage brief and prompt-package export", () => {
             await app.inject({
               method: "POST",
               url: `/api/cases/${fx.caseId}/export/package`,
-              headers: { cookie: fx.alice },
+              headers: { cookie: fx.dave },
               payload: { variant: "owner_only", selection, promptScaffold: "Summarize the evidence." },
             })
           ).body,
@@ -583,7 +583,7 @@ describe("triage brief and prompt-package export", () => {
               await app.inject({
                 method: "POST",
                 url: `/api/cases/${fx.caseId}/export/brief`,
-                headers: { cookie: fx.alice },
+                headers: { cookie: fx.dave },
                 payload: { variant: "owner_only" },
               })
             ).body,
@@ -625,7 +625,7 @@ describe("triage brief and prompt-package export", () => {
       ).toBe(true);
 
       const audits = await audit.list();
-      expect(audits.some((a) => a.action === "export_brief" && a.identity?.includes("alice"))).toBe(
+      expect(audits.some((a) => a.action === "export_brief" && a.identity?.includes("dave"))).toBe(
         true,
       );
       expect(audits.some((a) => a.action === "export_brief" && a.target?.includes(fx.caseId))).toBe(

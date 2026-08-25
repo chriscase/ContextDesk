@@ -78,12 +78,12 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Sessions come from the workspace server; a directory group must map to a workspace role before the workspace opens.",
         keywords: ["login", "password", "roles", "permissions", "viewer", "contributor", "case-lead", "admin", "ldap", "fixture", "demo"],
         what:
-          "Signing in sends your username and password to the workspace server, which checks them against its configured identity source and maps your directory groups to one of four roles: viewer, contributor, case-lead, or admin. Viewers can read everything visible to their account. Contributors can also add notes, upload evidence, and import external runs. Case leads can additionally freeze snapshots, launch AI lanes, accept decisions, manage sources, change case status, and make share-safe exports. Admin also unlocks the Administration page for persistent group-to-role mapping.",
+          "Signing in sends your username and password to the workspace server, which checks them against its configured identity source and maps your directory groups to one of four roles: viewer, contributor, case-lead, or admin. Each role is a default bundle of capabilities; a local grant can add a capability without changing the role. Viewers can read investigations they can access. Contributors can also add notes, upload evidence, and import external runs. Case leads can additionally freeze snapshots, launch AI lanes, accept decisions, manage sources, change case status, and create exports. The Administration page is visible only with the admin:users capability (the admin role includes it; a local grant can add it to another role). Suspended, disabled, and historical/imported identities cannot sign in, and an existing session for those accounts is treated as signed out.",
         when:
           "Use this when sign-in fails, or when a button you expected is missing — most missing controls are role-gated, and the page usually says which role is required.",
         steps: [
           "Enter your username and password and select Sign in.",
-          "If sign-in fails, read the message: wrong credentials, a missing role mapping, or rate limiting each say so explicitly.",
+          "If sign-in fails, read the message: wrong credentials, a missing role mapping, a suspended or historical identity, or rate limiting each say so explicitly.",
           "If your credentials are accepted but no role is mapped, an administrator has to grant a role before the workspace opens.",
           "Check your roles any time from the account menu in the top bar. Open My profile from that menu to see your current display name, directory ownership, and local contact details.",
         ],
@@ -112,7 +112,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Creation records who opened the case and when. Situation edits and status changes are recorded. Contributors, case leads, and admins can edit Situation on a case they can access; only a case lead can change status.",
         limits:
-          "Creating requires the contributor or case-lead role. Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses.",
+          "Creating requires the investigation:write capability (the contributor, case-lead, and admin roles include it; a local grant can add it to a viewer). Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses.",
         actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
       },
     ],
@@ -480,7 +480,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Cases record participants; workspace-wide permissions come from directory-mapped roles. This build has no separate team entity.",
         keywords: ["participants", "team", "members", "people", "who", "case membership"],
         what:
-          "Each investigation records its participants, shown on the case card and the Situation page. Permissions do not come from case membership: they come from your workspace role (viewer, contributor, case-lead, admin), which the server derives from your directory groups at sign-in.",
+          "Each investigation records its participants, shown on the case card and the Situation page. Case membership decides which investigations you can open; it does not grant capabilities. Workspace permissions come from your mapped role plus any local capability grants, resolved on every request from the current profile status.",
         when:
           "Check the Situation page when you need to know who is recorded on a case, and the account menu for your own roles.",
         steps: [
@@ -598,11 +598,11 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Administrators can discover directory references and manage persistent group-to-role mappings; deployment setup remains operator work.",
         keywords: ["admin", "directory", "group", "role", "grant", "revoke", "ldap", "setup", "configuration", "wizard", "operator", "doctor", "static", "read-only", "sample data"],
         what:
-          "The Administration page is visible only to the workspace admin role. It lists the persistent mappings that grant ContextDesk roles and provides bounded searches for identities and groups in the configured directory. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin.",
+          "The Administration page is visible only with the admin:users capability, not merely because a person holds the admin role title. It lists the persistent mappings that grant ContextDesk roles and provides bounded searches for identities and groups in the configured directory. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin, or from a local capability grant.",
         when:
           "Use this when a directory group needs workspace access, a group's role changes, or a stale mapping must be revoked. Use operator tooling instead for first deployment, gateways, database settings, directory connection settings, backups, and health checks.",
         steps: [
-          "Open Administration from the primary navigation. Non-admin users cannot see the destination, and a direct route does not request protected administration data.",
+          "Open Administration from the primary navigation. Accounts without admin:users cannot see the destination, and a direct route does not request protected administration data.",
           "Search for a group or identity. Results are capped at twenty; refine the term rather than assuming the result is the full directory.",
           "Select or enter the exact group reference, choose one workspace role, and grant it. Existing-role changes, revocation, and every administrator grant require an explicit confirmation.",
           "Refresh Current group permissions to verify the destination state. The server also refreshes its live authorization map from persistent storage on each API request.",
@@ -646,7 +646,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Successful saves update the current profile row only. The server audits the attempt. Past authored records are not rewritten.",
         limits:
-          "This page never contacts LDAP and never implies that it can. Suspended accounts can read the profile but cannot save. A static read-only snapshot cannot edit. Host provider profiles used by AI lanes are a different kind of profile — see lane help.",
+          "This page never contacts LDAP and never implies that it can. A suspended, disabled, or historical account cannot stay signed in, so My profile is not available in that state. A static read-only snapshot cannot edit. Host provider profiles used by AI lanes are a different kind of profile — see lane help.",
         actions: [{ label: "Go to My profile", go: { area: "profile" } }],
       },
     ],

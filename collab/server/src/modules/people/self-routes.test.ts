@@ -177,8 +177,8 @@ describe("self profile routes", () => {
           contactOther: "should be refused",
         },
       });
-      expect(patch.statusCode).toBe(403);
-      expect((patch.json() as { error: string }).error).toBe("suspended");
+      expect(patch.statusCode).toBe(401);
+      expect((patch.json() as { error: string }).error).toBe("unauthenticated");
     });
   });
 

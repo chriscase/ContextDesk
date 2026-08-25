@@ -11,24 +11,23 @@ import {
   parseAdminPeopleRevokeRequest,
   parseAdminPeopleStatusRequest,
   type AdminPeopleErrorCode,
-  type AppRole,
   type AuthErrorV1,
-  type LocalCapabilityGrantV1,
-  type UserProfileV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
-import { type MutableGroupRoleMap } from "../authz/index.js";
-import { canUse, effectiveCapabilityRows } from "./capabilities.js";
+import {
+  authorizeSession,
+  type AuthorizedSession,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
+import { effectiveCapabilityRows } from "./capabilities.js";
 import { hasCsrfHeader } from "./csrf.js";
 import type { LocalGrantStore } from "./grants.js";
 import { IdempotencyCache } from "./idempotency.js";
 import type { UserProfileStore } from "./store.js";
 
 export interface AdminPeopleRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
@@ -42,45 +41,23 @@ function peopleError(error: AdminPeopleErrorCode) {
   return { schemaId: ADMIN_PEOPLE_ERROR_SCHEMA_ID, error };
 }
 
-interface Authorized {
-  identityId: string;
-  roles: AppRole[];
-}
-
 /**
  * Session -> profile -> capability, in that order. Authorization is always
  * decided before a target user is ever looked up, so a caller lacking
  * admin:users gets an identical 403 whether the target id exists or not -
- * no enumeration signal leaks through the error path.
+ * no enumeration signal leaks through the error path. Inactive or historical
+ * callers fail closed as unauthenticated.
  */
 async function authorize(
   request: FastifyRequest,
   deps: AdminPeopleRouteDeps,
   capability: "admin:users" | "admin:system_config",
-): Promise<Authorized | "unauthenticated" | "forbidden" | "unavailable"> {
-  const session = await resolveActiveSession(request, deps.auth);
-  if (!session) return "unauthenticated";
-  let groups = session.groups;
-  if (groups.length === 0) {
-    try {
-      groups = await deps.auth.adapter.lookupGroups(session.identity);
-    } catch {
-      return "unavailable";
-    }
-  }
-  const roles = deps.roles.resolve(groups);
-  let callerProfile: UserProfileV1 | null;
-  let callerGrants: LocalCapabilityGrantV1[];
-  try {
-    callerProfile = await deps.profiles.getById(session.identity.id);
-    callerGrants = callerProfile ? await deps.grants.list(session.identity.id) : [];
-  } catch {
-    return "unavailable";
-  }
-  if (!callerProfile || !canUse(callerProfile, roles, callerGrants, capability)) {
-    return "forbidden";
-  }
-  return { identityId: session.identity.id, roles };
+): Promise<AuthorizedSession | "unauthenticated" | "forbidden" | "unavailable"> {
+  const resolved = await authorizeSession(request, deps.sessionAuth);
+  if (resolved.kind === "unavailable") return "unavailable";
+  if (resolved.kind !== "ok") return "unauthenticated";
+  if (!resolved.ctx.has(capability)) return "forbidden";
+  return resolved.ctx;
 }
 
 async function recordAudit(
@@ -147,7 +124,7 @@ export async function registerAdminPeopleRoutes(
         nextCursor: page.nextCursor,
       });
       await recordAudit(deps.audit, {
-        identity: authorized.identityId,
+        identity: authorized.identity.id,
         action: "people_search",
         target: query.term.length > 0 ? "filtered" : "all",
         origin: request.ip,
@@ -156,7 +133,7 @@ export async function registerAdminPeopleRoutes(
       return response;
     } catch {
       await recordAudit(deps.audit, {
-        identity: authorized.identityId,
+        identity: authorized.identity.id,
         action: "people_search",
         target: "error",
         origin: request.ip,
@@ -189,7 +166,7 @@ export async function registerAdminPeopleRoutes(
     }
     let groups: string[] = [];
     try {
-      groups = await deps.auth.adapter.lookupGroups({
+      groups = await deps.sessionAuth.auth.adapter.lookupGroups({
         id: target.id,
         username: target.username,
         displayName: target.displayName,
@@ -197,10 +174,10 @@ export async function registerAdminPeopleRoutes(
     } catch {
       groups = [];
     }
-    const roles = deps.roles.resolve(groups);
+    const roles = deps.sessionAuth.roles.resolve(groups);
     const grants = await deps.grants.list(id);
     await recordAudit(deps.audit, {
-      identity: authorized.identityId,
+      identity: authorized.identity.id,
       action: "people_effective_read",
       target: id,
       origin: request.ip,
@@ -246,8 +223,11 @@ export async function registerAdminPeopleRoutes(
       async () => {
         const result = await deps.profiles.setStatus(id, body.status, body.expectedRevision);
         if (result.outcome === "ok") {
+          if (body.status === "suspended" || body.status === "disabled") {
+            await deps.sessionAuth.auth.sessions.revokeAllForIdentity(id);
+          }
           await recordAudit(deps.audit, {
-            identity: authorized.identityId,
+            identity: authorized.identity.id,
             action: "people_status_update",
             target: `${id}=${body.status}`,
             origin: request.ip,
@@ -256,7 +236,7 @@ export async function registerAdminPeopleRoutes(
           return { status: 200, body: { schemaId: result.profile.schemaId, profile: result.profile } };
         }
         await recordAudit(deps.audit, {
-          identity: authorized.identityId,
+          identity: authorized.identity.id,
           action: "people_status_update",
           target: `${id}=${body.status}`,
           origin: request.ip,
@@ -301,7 +281,7 @@ export async function registerAdminPeopleRoutes(
         const target = await deps.profiles.getById(id);
         if (!target) {
           await recordAudit(deps.audit, {
-            identity: authorized.identityId,
+            identity: authorized.identity.id,
             action: "people_grant",
             target: `${id}:${body.capability}`,
             origin: request.ip,
@@ -313,7 +293,7 @@ export async function registerAdminPeopleRoutes(
         // must never hold a capability, no matter who asks.
         if (target.provenance === "imported_historical") {
           await recordAudit(deps.audit, {
-            identity: authorized.identityId,
+            identity: authorized.identity.id,
             action: "people_grant",
             target: `${id}:${body.capability}`,
             origin: request.ip,
@@ -321,9 +301,9 @@ export async function registerAdminPeopleRoutes(
           });
           return { status: 403, body: peopleError("forbidden") };
         }
-        await deps.grants.grant(id, body.capability, authorized.identityId);
+        await deps.grants.grant(id, body.capability, authorized.identity.id);
         await recordAudit(deps.audit, {
-          identity: authorized.identityId,
+          identity: authorized.identity.id,
           action: "people_grant",
           target: `${id}:${body.capability}`,
           origin: request.ip,
@@ -366,7 +346,7 @@ export async function registerAdminPeopleRoutes(
       async () => {
         await deps.grants.revoke(id, body.capability);
         await recordAudit(deps.audit, {
-          identity: authorized.identityId,
+          identity: authorized.identity.id,
           action: "people_revoke",
           target: `${id}:${body.capability}`,
           origin: request.ip,
@@ -401,7 +381,7 @@ export async function registerAdminPeopleRoutes(
     try {
       const preview = computeDirectoryMappingPreview(body);
       await recordAudit(deps.audit, {
-        identity: authorized.identityId,
+        identity: authorized.identity.id,
         action: "directory_mapping_preview",
         target: "sample",
         origin: request.ip,
@@ -410,7 +390,7 @@ export async function registerAdminPeopleRoutes(
       return preview;
     } catch {
       await recordAudit(deps.audit, {
-        identity: authorized.identityId,
+        identity: authorized.identity.id,
         action: "directory_mapping_preview",
         target: "sample",
         origin: request.ip,

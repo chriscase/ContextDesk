@@ -426,6 +426,7 @@ function investigationEventDestination(
 
 export function Cases(props: {
   roles?: string[];
+  capabilities?: readonly string[];
   readOnly?: boolean;
   participant?: { username: string; roles: string[] };
   view?: "overview" | "investigations";
@@ -442,8 +443,16 @@ export function Cases(props: {
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
-  const canLead = !readOnly && (roles.includes("case-lead") || roles.includes("admin"));
-  const canWrite = !readOnly && (canLead || roles.includes("contributor"));
+  const capabilitySet = props.capabilities ? new Set(props.capabilities) : null;
+  const canLead = !readOnly && (capabilitySet
+    ? capabilitySet.has("run:strategies") ||
+      capabilitySet.has("decision:accept") ||
+      capabilitySet.has("export:create") ||
+      capabilitySet.has("portable:restore")
+    : roles.includes("case-lead") || roles.includes("admin"));
+  const canWrite = !readOnly && (capabilitySet
+    ? capabilitySet.has("investigation:write")
+    : canLead || roles.includes("contributor"));
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [casesLoaded, setCasesLoaded] = useState(false);
   const [activities, setActivities] = useState<ActivityItem[]>([]);

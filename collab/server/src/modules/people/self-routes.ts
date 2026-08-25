@@ -9,12 +9,15 @@ import {
 } from "@cd-collab/contracts";
 import type { FastifyInstance } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
+import {
+  authorizeSession,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 import { hasCsrfHeader } from "./csrf.js";
 import type { UserProfileStore } from "./store.js";
 
 export interface SelfProfileRouteDeps {
-  auth: ActiveSessionDeps;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   profiles: UserProfileStore;
 }
@@ -32,12 +35,16 @@ export async function registerSelfProfileRoutes(
   deps: SelfProfileRouteDeps,
 ): Promise<void> {
   app.get("/api/profile/me", async (request, reply) => {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) {
+    const resolved = await authorizeSession(request, deps.sessionAuth);
+    if (resolved.kind === "unavailable") {
+      void reply.code(503);
+      return profileError("unavailable");
+    }
+    if (resolved.kind !== "ok") {
       void reply.code(401);
       return authError("unauthenticated");
     }
-    const profile = await deps.profiles.getById(session.identity.id);
+    const profile = await deps.profiles.getById(resolved.ctx.identity.id);
     if (!profile) {
       // Login always touches the profile store first (see auth/routes.ts
       // wiring), so a missing profile behind a valid session is an
@@ -49,8 +56,12 @@ export async function registerSelfProfileRoutes(
   });
 
   app.patch("/api/profile/me", async (request, reply) => {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) {
+    const resolved = await authorizeSession(request, deps.sessionAuth);
+    if (resolved.kind === "unavailable") {
+      void reply.code(503);
+      return profileError("unavailable");
+    }
+    if (resolved.kind !== "ok") {
       void reply.code(401);
       return authError("unauthenticated");
     }
@@ -65,7 +76,7 @@ export async function registerSelfProfileRoutes(
       void reply.code(400);
       return profileError("invalid_request");
     }
-    const current = await deps.profiles.getById(session.identity.id);
+    const current = await deps.profiles.getById(resolved.ctx.identity.id);
     if (!current) {
       void reply.code(503);
       return profileError("unavailable");
@@ -74,7 +85,7 @@ export async function registerSelfProfileRoutes(
       assertProfileUpdateAllowed(current, update);
     } catch (error) {
       await recordAudit(deps.audit, {
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "profile_self_update",
         target: error instanceof ContractViolation ? error.path : "field_not_editable",
         origin: request.ip,
@@ -84,7 +95,7 @@ export async function registerSelfProfileRoutes(
       return profileError("field_not_editable");
     }
     const result = await deps.profiles.updateFields(
-      session.identity.id,
+      resolved.ctx.identity.id,
       {
         ...(update.displayName !== undefined ? { displayName: update.displayName } : {}),
         ...(update.roleTitle !== undefined ? { roleTitle: update.roleTitle } : {}),
@@ -98,18 +109,18 @@ export async function registerSelfProfileRoutes(
     );
     if (result.outcome === "ok") {
       await recordAudit(deps.audit, {
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "profile_self_update",
-        target: session.identity.id,
+        target: resolved.ctx.identity.id,
         origin: request.ip,
         outcome: "success",
       });
       return result.profile;
     }
     await recordAudit(deps.audit, {
-      identity: session.identity.id,
+      identity: resolved.ctx.identity.id,
       action: "profile_self_update",
-      target: session.identity.id,
+      target: resolved.ctx.identity.id,
       origin: request.ip,
       outcome: "failure",
     });

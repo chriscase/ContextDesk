@@ -4,7 +4,7 @@
   "title": "cd-collab SessionResponse v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaId", "identity", "roles"],
+  "required": ["schemaId", "identity", "roles", "capabilities"],
   "properties": {
     "schemaId": { "type": "string", "const": "cd-collab.session.v1" },
     "identity": {
@@ -22,6 +22,24 @@
       "items": {
         "type": "string",
         "enum": ["viewer", "contributor", "case-lead", "admin"]
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "investigation:read",
+          "investigation:write",
+          "evidence:private:read",
+          "run:strategies",
+          "decision:accept",
+          "export:create",
+          "portable:restore",
+          "admin:users",
+          "admin:system_config",
+          "audit:view"
+        ]
       }
     }
   }

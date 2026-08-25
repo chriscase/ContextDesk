@@ -33,9 +33,10 @@ forward-compatible provenance value; no OIDC adapter exists yet).
 | Capability | Status | Evidence | Residual |
 | --- | --- | --- | --- |
 | Canonical profile contract (mutable display profile split from immutable attribution identity) | Shipped | [`user-profile.ts`](../../../collab/contracts/src/user-profile.ts), [`user-profile.test.ts`](../../../collab/contracts/src/user-profile.test.ts) | Real Unicode confusable-skeleton/homoglyph detection is not attempted — only C0/DEL/zero-width/bidi-control/BOM code points are blocked |
-| Capability model (10 fine-grained capabilities, role-default matrix, additive local grants) | Shipped | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts) | None known |
+| Capability model (10 fine-grained capabilities, role-default matrix, additive local grants) | Shipped | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts) | None known |
 | Memory + PostgreSQL profile/grant stores with CAS, login-time sync, fail-closed identity collision | Shipped | [`store.ts`](../../../collab/server/src/modules/people/store.ts), [`store.contract-tests.ts`](../../../collab/server/src/modules/people/store.contract-tests.ts) run against both backends by [`store.test.ts`](../../../collab/server/src/modules/people/store.test.ts) and [`pg-store.test.ts`](../../../collab/server/src/modules/people/pg-store.test.ts) | None known |
-| Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | CSRF header check covers only these new routes, not the pre-existing `authz`/`cases`/etc. mutation routes |
+| Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | CSRF header check covers only People/self-profile mutation routes, not the pre-existing `authz`/`cases`/etc. mutation routes |
+| Domain-wide session authorization and suspension fail-closed | Shipped | [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`authorization.adversarial.test.ts`](../../../collab/server/src/modules/authz/authorization.adversarial.test.ts), War Room domain/admin `routes.ts` files | CSRF retrofit of older mutation routes remains residual (named, not a silent gap) |
 | Self-service profile API (GET/PATCH own profile, directory-owned fields read-only) | Shipped | [`self-routes.ts`](../../../collab/server/src/modules/people/self-routes.ts), [`self-routes.test.ts`](../../../collab/server/src/modules/people/self-routes.test.ts) | None known for the API |
 | Self-service profile UI (`/profile`, account-menu destination) | Shipped | [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx), [`SelfProfilePanel.test.tsx`](../../../collab/web/src/SelfProfilePanel.test.tsx), [`App.test.tsx`](../../../collab/web/src/App.test.tsx), Help article `my-profile` | Live LDAP attribute values still follow §16 (the UI cannot invent directory writes) |
 | Admin People console (`/admin/people` tab inside Administration) | Shipped | [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), [`AdminPeoplePanel.test.tsx`](../../../collab/web/src/AdminPeoplePanel.test.tsx), [`Administration.test.tsx`](../../../collab/web/src/Administration.test.tsx) | Detail view is inline-expand, not its own URL per person |
@@ -127,8 +128,14 @@ mapping function. See [`directory-mapping.ts`](../../../collab/contracts/src/dir
 
 - **Invariant:** `usableCapabilities` returns `[]` whenever `status !==
   "active"` or `provenance === "imported_historical"`, regardless of role
-  rank or local grant. Every capability-gated route derives authorization
-  through this one function.
+  rank or local grant. War Room domain and admin routes derive the live
+  capability set through one function, `authorizeSession`, which reloads
+  groups, roles, profile status, and local grants on every request and
+  never caches capabilities on the session record. Missing, suspended,
+  disabled, or historical profiles fail closed as unauthenticated (`401`)
+  on an existing cookie; a fresh login for those accounts is
+  `403 access_denied` with no cookie. Membership bypass (`isAdmin`) stays
+  the `admin` *role*, not `admin:users`.
 - **Invariant:** An admin mutation route decides authorization *before*
   looking up the target id, so a forbidden caller receives an identical 403
   for a real id and a nonexistent one (no enumeration signal).
@@ -179,8 +186,10 @@ role/grant combination confer" for admin inspection - it does **not** take
 account status as an input, so an admin can see what reactivating a
 suspended account would restore. `usableCapabilities(profile, roles,
 grants)` is the enforcement gate: it calls the same role-matrix resolution
-and then zeroes the result for a non-active or historical profile. Route
-code must call the enforcement function; only the People admin UI's
+and then zeroes the result for a non-active or historical profile.
+`authorizeSession` is the only session path War Room routes use for that
+gate: route handlers call `ctx.has("…")` on that result instead of
+re-deriving `canPerform(roles, …)` booleans. Only the People admin UI's
 inspection view calls the inspection function.
 
 ### 6.3 Self-service update
@@ -211,7 +220,7 @@ inspection view calls the inspection function.
 | Directory identity collision at login | `resolveDirectoryIdentityCollision` returns `collision` | Login still succeeds; no profile-visible change | Audited as `profile_sync`/`collision`; needs manual admin investigation (no automatic resolution ships) | The two conflicting profiles are left exactly as they were |
 | Stale CAS on a profile mutation | `revision` mismatch on the guarded `UPDATE` | `409` + `stale_revision` | Client re-fetches current revision and retries | No partial write occurred |
 | Retried admin mutation (same idempotency key) | `IdempotencyCache` hit | Identical response to the original attempt, not a fresh `stale_revision` | N/A - already succeeded | Exactly one underlying mutation and one audit entry |
-| Profile store unavailable during login | `touchOnLogin` throws, caught in `auth/routes.ts` | Login still succeeds | Profile is stale until next successful login | Session and audit outcome unaffected |
+| Profile store unavailable during login | `touchOnLogin` or follow-up `getById` throws, caught in `auth/routes.ts` | Login is refused (`403 access_denied`); any cookie created before the failure is revoked | Retry after the store recovers | No durable session is left for an account whose profile cannot be confirmed usable |
 | Admin grants a capability to an `imported_historical` id | Provenance check in `admin-routes.ts` | `403 forbidden`, audited `denied` | N/A - structurally refused | No grant row is ever created for that id |
 
 ## 9. Observability
@@ -266,8 +275,10 @@ claim beyond what the admin themselves typed into a preview request.
 
 The People tab lives inside the existing `Administration` component
 (`/admin/people`, reachable by a second tab alongside "Group role
-mappings"), gated by the same admin-role check App.tsx already applies to
-the whole Administration area. It supports search/filter, an inline
+mappings"). The Administration chrome and direct `/administration` route
+are gated by `admin:users`, not by the raw `admin` role: a viewer with
+that local grant sees the destination; a case-lead without it does not.
+It supports search/filter, an inline
 "Manage" expand showing effective roles and a full capability table with
 source (role vs. local grant), a confirm-before-destructive-action dialog
 for suspend/reactivate/grant/revoke, and a synthetic-sample directory-
@@ -289,7 +300,7 @@ recovery, and states that historical attribution is never rewritten.
 | --- | --- | --- | --- |
 | Contract/unit | round-trip parse, capability resolution, directory mapping | dangerous Unicode, duplicate custom-attribute keys, oversized pages, unknown capability, identity-collision table | `capability.test.ts`, `user-profile.test.ts`, `directory-mapping.test.ts`, `admin-people.test.ts` (58 tests) |
 | Server/store | create/update/list, CAS success | stale revision, suspended-write refusal, collision refusal, not_found | `store.test.ts` + `store.contract-tests.ts` run against **both** Memory and Postgres (`pg-store.test.ts`), plus `grants.test.ts`/`pg-grants.test.ts`, `capabilities.test.ts` |
-| Server/routes | search, effective, status, grant/revoke, preview | missing CSRF header, idempotent retry after CAS staleness, enumeration-safe 403, historical-stub grant refusal, self-suspend zeroing admin access | `admin-routes.test.ts`, `self-routes.test.ts` (13 tests, full `buildApp` + real login flow) |
+| Server/routes | search, effective, status, grant/revoke, preview; domain-wide capability gates | missing CSRF header, idempotent retry after CAS staleness, enumeration-safe 403, historical-stub grant refusal, self-suspend fail-closed (`401`), suspended/historical login refusal, local-grant write then revoke, owner_only bytes require `evidence:private:read` | `admin-routes.test.ts`, `self-routes.test.ts`, `authorization.adversarial.test.ts` (full `buildApp` + real login flow) |
 | Database constraints | migration up/down in order | case-insensitive duplicate username, directory-subject-required check, JSONB custom-attribute round-trip | `pg-store.test.ts`, `migrate.test.ts` (updated for the new migration), `grants.test.ts` least-privilege pin |
 | Web/UI | list/search, manage/expand, suspend/grant/revoke confirm flow, preview; self-service `/profile` load/edit/LDAP-readonly/409 draft recovery | imported_historical never offered an action, tab switch preserves hidden-panel state, direct-load and browser-back on `/admin/people` and `/profile` | `AdminPeoplePanel.test.tsx`, `Administration.test.tsx`, `SelfProfilePanel.test.tsx`, `App.test.tsx`, `HelpCenter.test.tsx` |
 
@@ -374,12 +385,13 @@ counts.
   `resolveActiveSession`'s existing `catch { groups = [] }` fallback, which
   already conflates those two cases for group resolution. Closing this
   gap needs a stronger not-found signal from the LDAP adapter.
-- **CSRF coverage is scoped to this chapter's new routes.** The
+- **CSRF coverage is scoped to People and self-profile mutation routes.** The
   pre-existing `authz` group-role-map routes and other older mutation
   routes do not carry the new header check. Retrofitting them is
-  straightforward (the same `hasCsrfHeader` guard) but out of scope for a
-  foundation PR that was asked to avoid unrelated edits to already-shipped
-  routes.
+  straightforward (the same `hasCsrfHeader` guard) but remains named
+  residual work. Domain routes now honor the 10-capability model and
+  profile status through `authorizeSession`; that does not silently add
+  CSRF to those older routes.
 
 ## Acceptance checklist
 
@@ -398,8 +410,11 @@ commissioned to satisfy:
 3. **Authorization.** Shipped - versioned 10-capability model covering
    every named area (investigation read/write, private evidence, run
    strategies, accept decisions, exports, portable restore, user
-   administration, system configuration, audit viewing), enforced only on
-   server routes via `usableCapabilities`. §4, §5, §6.2.
+   administration, system configuration, audit viewing), enforced on War
+   Room domain and admin routes via `authorizeSession` →
+   `usableCapabilities`. Local grants are honored without a role change.
+   Suspend/disable/historical fail closed for fresh login and existing
+   sessions. §4, §5, §6.2.
 4. **Admin operations.** Shipped - list/search, effective roles/
    capabilities with source, activate/suspend, assign/revoke local grants,
    directory-mapping preview; admin-capability-gated, CSRF-guarded,

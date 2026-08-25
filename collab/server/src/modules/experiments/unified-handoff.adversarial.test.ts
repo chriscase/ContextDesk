@@ -233,6 +233,7 @@ async function createJob(
     },
     "test",
     true,
+    true,
   );
   const terminal = await waitForTerminal(runs, caseId, job.id);
   expect(terminal).not.toBeNull();

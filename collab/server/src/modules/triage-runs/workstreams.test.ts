@@ -38,12 +38,16 @@ async function fixture() {
       privacyClass: "share_safe",
     },
     "test",
+    true,
+    true,
   );
   const snapshot = await cases.createSnapshot(
     created.id,
     lead,
     { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
     "test",
+    true,
+    true,
   );
   await runs.create(
     created.id,
@@ -68,6 +72,8 @@ async function fixture() {
       ],
     },
     "test",
+    true,
+    true,
   );
   // The deterministic executor settles lanes on the next tick.
   await new Promise((resolve) => setTimeout(resolve, 40));

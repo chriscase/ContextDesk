@@ -20,6 +20,8 @@ export interface SessionStore {
   getByToken(token: string): Promise<SessionRecord | null>;
   touch(id: string): Promise<void>;
   revoke(id: string): Promise<void>;
+  /** Revoke every unexpired session for this identity (suspend/disable). */
+  revokeAllForIdentity(identityId: string): Promise<number>;
 }
 
 export interface SessionPolicy {
@@ -83,6 +85,18 @@ export class MemorySessionStore implements SessionStore {
         return;
       }
     }
+  }
+
+  async revokeAllForIdentity(identityId: string): Promise<number> {
+    let count = 0;
+    const now = new Date();
+    for (const row of this.byHash.values()) {
+      if (row.identity.id === identityId && !row.revokedAt) {
+        row.revokedAt = now;
+        count += 1;
+      }
+    }
+    return count;
   }
 }
 
@@ -169,6 +183,15 @@ export class PgSessionStore implements SessionStore {
     await this.pool.query(`UPDATE sessions SET revoked_at = now() WHERE id = $1`, [
       id,
     ]);
+  }
+
+  async revokeAllForIdentity(identityId: string): Promise<number> {
+    const result = await this.pool.query(
+      `UPDATE sessions SET revoked_at = now()
+       WHERE identity_id = $1 AND revoked_at IS NULL`,
+      [identityId],
+    );
+    return result.rowCount ?? 0;
   }
 }
 

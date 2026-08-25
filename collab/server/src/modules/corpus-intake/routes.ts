@@ -1,9 +1,12 @@
-import { AUTH_ERROR_SCHEMA_ID, ContractViolation, type AuthErrorV1 } from "@cd-collab/contracts";
+import { ContractViolation } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { ActiveSessionDeps } from "../auth/index.js";
-import { resolveActiveSession } from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
-import { CorpusIntakeConflictError, type Actor, type CaseService } from "../cases/index.js";
+import {
+  capabilityForbidden,
+  requireSessionCapability,
+  type AuthorizedSession,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
+import { CorpusIntakeConflictError, type CaseService } from "../cases/index.js";
 import type { AuditStore } from "../audit/index.js";
 import { ZipError } from "./zip.js";
 
@@ -25,13 +28,8 @@ function publicIntakeError(err: unknown): string {
   return "invalid";
 }
 
-function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
-  return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
-}
-
 export interface CorpusIntakeRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   domain: Pick<
     CaseService,
@@ -47,29 +45,19 @@ export async function registerCorpusIntakeRoutes(
   app: FastifyInstance,
   deps: CorpusIntakeRouteDeps,
 ): Promise<void> {
-  const sessionOf = async (request: FastifyRequest) => {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) return null;
-    const roles = deps.roles.resolve(session.groups);
-    return {
-      actor: {
-        id: session.identity.id,
-        username: session.identity.username,
-      } satisfies Actor,
-      isAdmin: canPerform(roles, "admin"),
-      canRead: canPerform(roles, "read"),
-      canWrite: canPerform(roles, "mutate"),
-    };
-  };
+  const sessionOf = async (
+    request: FastifyRequest,
+    reply: { code: (status: number) => unknown },
+  ) => requireSessionCapability(request, reply, deps.sessionAuth);
 
   const requireAccess = async (
-    ctx: { actor: Actor; isAdmin: boolean; canRead: boolean },
+    ctx: AuthorizedSession,
     caseId: string,
     reply: { code: (status: number) => unknown },
     deniedAction?: "corpus_intake_preview" | "corpus_intake_commit",
     deniedOrigin?: string,
   ): Promise<boolean> => {
-    if (!ctx.canRead) {
+    if (!ctx.has("investigation:read")) {
       if (deniedAction) {
         await deps.audit.append({
           identity: ctx.actor.id,
@@ -103,12 +91,10 @@ export async function registerCorpusIntakeRoutes(
     { bodyLimit: 12 * 1024 * 1024 },
     async (request, reply) => {
       const id = (request.params as { id: string }).id;
-      const ctx = await sessionOf(request);
-      if (!ctx) {
-        void reply.code(401);
-        return authError("unauthenticated");
-      }
-      if (!ctx.canWrite) {
+      const loaded = await sessionOf(request, reply);
+      if ("denied" in loaded) return loaded.denied;
+      const ctx = loaded.ctx;
+      if (!ctx.has("investigation:write")) {
         await deps.audit.append({
           identity: ctx.actor.id,
           action: "corpus_intake_preview",
@@ -116,8 +102,7 @@ export async function registerCorpusIntakeRoutes(
           origin: request.ip,
           outcome: "denied",
         });
-        void reply.code(403);
-        return authError("forbidden");
+        return capabilityForbidden(reply);
       }
       if (!(await requireAccess(ctx, id, reply, "corpus_intake_preview", request.ip))) {
         return { error: "not_found" };
@@ -136,12 +121,10 @@ export async function registerCorpusIntakeRoutes(
     { bodyLimit: 12 * 1024 * 1024 },
     async (request, reply) => {
       const id = (request.params as { id: string }).id;
-      const ctx = await sessionOf(request);
-      if (!ctx) {
-        void reply.code(401);
-        return authError("unauthenticated");
-      }
-      if (!ctx.canWrite) {
+      const loaded = await sessionOf(request, reply);
+      if ("denied" in loaded) return loaded.denied;
+      const ctx = loaded.ctx;
+      if (!ctx.has("investigation:write")) {
         await deps.audit.append({
           identity: ctx.actor.id,
           action: "corpus_intake_commit",
@@ -149,8 +132,7 @@ export async function registerCorpusIntakeRoutes(
           origin: request.ip,
           outcome: "denied",
         });
-        void reply.code(403);
-        return authError("forbidden");
+        return capabilityForbidden(reply);
       }
       if (!(await requireAccess(ctx, id, reply, "corpus_intake_commit", request.ip))) {
         return { error: "not_found" };
@@ -165,11 +147,9 @@ export async function registerCorpusIntakeRoutes(
   );
 
   app.get("/api/cases/:id/corpus-intake/:batchId", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const params = request.params as { id: string; batchId: string };
     if (!(await requireAccess(ctx, params.id, reply))) {
       return { error: "not_found" };

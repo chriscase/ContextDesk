@@ -2,33 +2,29 @@ import {
   ADMIN_ROLE_MAPPING_ERROR_SCHEMA_ID,
   ADMIN_ROLE_MAPPING_LIST_SCHEMA_ID,
   ADMIN_ROLE_MAPPING_MAX_RESULTS,
-  AUTH_ERROR_SCHEMA_ID,
   parseAdminRoleMappingList,
   parseAdminRoleMappingRevokeRequest,
   parseAdminRoleMappingUpdateRequest,
-  type AuthErrorV1,
   type AppRole,
   type AdminRoleMappingErrorCode,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import {
-  resolveActiveSession,
-  type ActiveSessionDeps,
-} from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "./roles.js";
+  authorizeSession,
+  capabilityForbidden,
+  sessionAuthFailure,
+  type SessionAuthorizationDeps,
+} from "./session-authorization.js";
+import type { MutableGroupRoleMap } from "./roles.js";
 import type { GroupRoleStore } from "./store.js";
-
-function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
-  return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
-}
 
 function roleMappingError(error: AdminRoleMappingErrorCode) {
   return { schemaId: ADMIN_ROLE_MAPPING_ERROR_SCHEMA_ID, error };
 }
 
 export interface AuthzRouteDeps {
-  auth: ActiveSessionDeps;
+  sessionAuth: SessionAuthorizationDeps;
   roles: MutableGroupRoleMap;
   roleStore: GroupRoleStore;
   audit: AuditStore;
@@ -43,21 +39,17 @@ export async function registerAuthzRoutes(
   });
 
   app.get("/api/authz/group-role-map", async (request, reply) => {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!canPerform(deps.roles.resolve(session.groups), "admin")) {
+    const resolved = await authorizeSession(request, deps.sessionAuth);
+    if (resolved.kind !== "ok") return sessionAuthFailure(reply, resolved);
+    if (!resolved.ctx.has("admin:system_config")) {
       await recordAuditBestEffort(deps.audit, {
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "role_mapping_read",
         target: "current",
         origin: request.ip,
         outcome: "denied",
       });
-      void reply.code(403);
-      return authError("forbidden");
+      return capabilityForbidden(reply);
     }
 
     try {
@@ -75,7 +67,7 @@ export async function registerAuthzRoutes(
       };
       parseAdminRoleMappingList(response);
       await deps.audit.append({
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "role_mapping_read",
         target: "current",
         origin: request.ip,
@@ -84,7 +76,7 @@ export async function registerAuthzRoutes(
       return response;
     } catch {
       await recordAuditBestEffort(deps.audit, {
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "role_mapping_read",
         target: "current",
         origin: request.ip,
@@ -96,22 +88,17 @@ export async function registerAuthzRoutes(
   });
 
   app.put("/api/authz/group-role-map", async (request, reply) => {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    const roles = deps.roles.resolve(session.groups);
-    if (!canPerform(roles, "admin")) {
+    const resolved = await authorizeSession(request, deps.sessionAuth);
+    if (resolved.kind !== "ok") return sessionAuthFailure(reply, resolved);
+    if (!resolved.ctx.has("admin:system_config")) {
       await deps.audit.append({
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "role_mapping_update",
         target: "forbidden",
         origin: request.ip,
         outcome: "denied",
       });
-      void reply.code(403);
-      return authError("forbidden");
+      return capabilityForbidden(reply);
     }
     let update: { group: string; role: AppRole };
     try {
@@ -122,10 +109,10 @@ export async function registerAuthzRoutes(
     }
     const { group, role } = update;
     try {
-      await deps.roleStore.set(group, role, session.identity.id);
+      await deps.roleStore.set(group, role, resolved.ctx.identity.id);
     } catch {
       const audit = await recordAudit(deps.audit, {
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "role_mapping_update",
         target: `${group}=${role}`,
         origin: request.ip,
@@ -136,7 +123,7 @@ export async function registerAuthzRoutes(
     }
     deps.roles.set(group, role);
     const audit = await recordAudit(deps.audit, {
-      identity: session.identity.id,
+      identity: resolved.ctx.identity.id,
       action: "role_mapping_update",
       target: `${group}=${role}`,
       origin: request.ip,
@@ -146,22 +133,17 @@ export async function registerAuthzRoutes(
   });
 
   app.delete("/api/authz/group-role-map", async (request, reply) => {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    const roles = deps.roles.resolve(session.groups);
-    if (!canPerform(roles, "admin")) {
+    const resolved = await authorizeSession(request, deps.sessionAuth);
+    if (resolved.kind !== "ok") return sessionAuthFailure(reply, resolved);
+    if (!resolved.ctx.has("admin:system_config")) {
       await deps.audit.append({
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "role_mapping_revoke",
         target: "forbidden",
         origin: request.ip,
         outcome: "denied",
       });
-      void reply.code(403);
-      return authError("forbidden");
+      return capabilityForbidden(reply);
     }
     let group: string;
     try {
@@ -175,7 +157,7 @@ export async function registerAuthzRoutes(
       deleted = await deps.roleStore.delete(group);
     } catch {
       const audit = await recordAudit(deps.audit, {
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "role_mapping_revoke",
         target: group,
         origin: request.ip,
@@ -186,7 +168,7 @@ export async function registerAuthzRoutes(
     }
     if (!deleted) {
       const audit = await recordAudit(deps.audit, {
-        identity: session.identity.id,
+        identity: resolved.ctx.identity.id,
         action: "role_mapping_revoke",
         target: group,
         origin: request.ip,
@@ -197,7 +179,7 @@ export async function registerAuthzRoutes(
     }
     deps.roles.delete(group);
     const audit = await recordAudit(deps.audit, {
-      identity: session.identity.id,
+      identity: resolved.ctx.identity.id,
       action: "role_mapping_revoke",
       target: group,
       origin: request.ip,
@@ -234,28 +216,23 @@ async function authorizeMutation(
   request: FastifyRequest,
   reply: { code: (n: number) => unknown },
   deps: AuthzRouteDeps,
-  action: "mutate",
+  _action: "mutate",
   target: string,
 ) {
-  const session = await resolveActiveSession(request, deps.auth);
-  if (!session) {
-    void reply.code(401);
-    return authError("unauthenticated");
-  }
-  const roles = deps.roles.resolve(session.groups);
-  if (!canPerform(roles, action)) {
+  const resolved = await authorizeSession(request, deps.sessionAuth);
+  if (resolved.kind !== "ok") return sessionAuthFailure(reply, resolved);
+  if (!resolved.ctx.has("investigation:write")) {
     await deps.audit.append({
-      identity: session.identity.id,
+      identity: resolved.ctx.identity.id,
       action: "mutation",
       target,
       origin: request.ip,
       outcome: "denied",
     });
-    void reply.code(403);
-    return authError("forbidden");
+    return capabilityForbidden(reply);
   }
   await deps.audit.append({
-    identity: session.identity.id,
+    identity: resolved.ctx.identity.id,
     action: "mutation",
     target,
     origin: request.ip,

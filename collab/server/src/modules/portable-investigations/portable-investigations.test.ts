@@ -271,6 +271,7 @@ async function fixture(): Promise<Fixture> {
     },
     "fixture",
     false,
+    true,
   );
   const job = await waitForCompleted(triageRuns, caseRow.id, queued.id);
   const experiment = await experiments.importTriageJob(
@@ -499,7 +500,7 @@ describe("portable installation identity", () => {
 describe("portable investigation service", () => {
   it("exports a parseable supported archive and omits unsupported destination state", async () => {
     const row = await fixture();
-    const archive = parsePortableArchive(await row.portable.exportArchive(row.caseId, ACTOR, false));
+    const archive = parsePortableArchive(await row.portable.exportArchive(row.caseId, ACTOR, false, true));
     expect(archive.investigation.investigation.title).toBe("Synthetic queue stall");
     expect(archive.investigation.investigation).toMatchObject({
       problemStatement: "Synthetic workers stop draining a bounded queue.",
@@ -562,7 +563,7 @@ describe("portable investigation service", () => {
       "fixture",
     );
 
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const exportedBatch = archive.investigation.intakeBatches?.[0];
     const exportedEvidence = archive.investigation.evidence.find(
       (item) => item.id === committed.items[0]?.artifactId,
@@ -617,7 +618,7 @@ describe("portable investigation service", () => {
 
   it("returns host-owned identity/collision/privacy facts and mints apply only for exact reconstruction", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const response = await row.portable.preflight(
       archive,
       {
@@ -652,7 +653,7 @@ describe("portable investigation service", () => {
 
   it("blocks exact apply when an incoming archive represents unsupported source membership", async () => {
     const row = await fixture();
-    const original = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const { bundleFingerprint: _bundle, objectHashes: _hashes, ...unsigned } = structuredClone(
       original.investigation,
     );
@@ -712,14 +713,14 @@ describe("portable investigation service", () => {
       now: () => "2042-03-04T12:00:00.000Z",
     });
 
-    await expect(portable.exportArchive(row.caseId, ACTOR, false)).rejects.toMatchObject({
+    await expect(portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
       code: "integrity_failure",
     } satisfies Partial<PortableServerError>);
   });
 
   it("reports a host-owned deterministic destination collision as blocked", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const collisionId = portableDestinationUuid(
       archive.investigation.sourceInstallationId,
       "investigation",
@@ -787,7 +788,7 @@ describe("portable investigation service", () => {
     const row = await fixture();
     const path = join(row.root, "blobs", row.evidenceHash.slice(0, 2), row.evidenceHash);
     await rm(path);
-    await expect(row.portable.exportArchive(row.caseId, ACTOR, false)).rejects.toMatchObject({
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
       code: "integrity_failure",
     } satisfies Partial<PortableServerError>);
   });
@@ -795,7 +796,7 @@ describe("portable investigation service", () => {
   it("rejects a tampered archive without reflecting planted content", async () => {
     const row = await fixture();
     const archive = JSON.parse(
-      JSON.stringify(await row.portable.exportArchive(row.caseId, ACTOR, false)),
+      JSON.stringify(await row.portable.exportArchive(row.caseId, ACTOR, false, true)),
     ) as PortableArchiveV1;
     archive.investigation.investigation.title = "PLANTED-ARCHIVE-CONTENT";
     await expect(
@@ -845,7 +846,7 @@ describe("portable investigation routes", () => {
     const app = await appFor(row);
     try {
       const lead = await login(app, "operator-north", "fixture-operator-secret");
-      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
       const identityMap = identityMapFor(archive);
       const response = await app.inject({
         method: "POST",
@@ -942,7 +943,7 @@ describe("portable investigation routes", () => {
     try {
       const lead = await login(app, "operator-north", "fixture-operator-secret");
       const archive = JSON.parse(
-        JSON.stringify(await row.portable.exportArchive(row.caseId, ACTOR, false)),
+        JSON.stringify(await row.portable.exportArchive(row.caseId, ACTOR, false, true)),
       ) as PortableArchiveV1;
       archive.investigation.investigation.title = "PLANTED-ARCHIVE-CONTENT";
       const response = await app.inject({
@@ -990,7 +991,7 @@ describe("portable investigation routes", () => {
 describe("portable investigation apply", () => {
   it("applies an exact reconstruction once, preserves attribution-only people, and replays", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1045,7 +1046,7 @@ describe("portable investigation apply", () => {
 
   it("materializes detached supplied bytes and round-trips supported archive fields honestly", async () => {
     const row = await fixture();
-    const original = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const detached = detachedArchiveFor(original, row.evidenceHash);
     const blob = join(row.root, "blobs", row.evidenceHash.slice(0, 2), row.evidenceHash);
     const meta = `${blob}.meta.json`;
@@ -1075,7 +1076,7 @@ describe("portable investigation apply", () => {
     expect(await row.store.verify(row.evidenceHash)).toBe(true);
     expect(await row.store.get(row.evidenceHash)).toEqual(LOG_BYTES);
 
-    const restored = await row.portable.exportArchive(applied.investigationId, ACTOR, false);
+    const restored = await row.portable.exportArchive(applied.investigationId, ACTOR, false, true);
     expect(restored.investigation.investigation).toMatchObject({
       title: original.investigation.investigation.title,
       problemStatement: original.investigation.investigation.problemStatement,
@@ -1113,7 +1114,7 @@ describe("portable investigation apply", () => {
 
   it("rolls back promoted evidence bytes when a later promotion boundary fails", async () => {
     const row = await fixture();
-    const original = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const detached = detachedArchiveFor(original, row.evidenceHash);
     const blob = join(row.root, "blobs", row.evidenceHash.slice(0, 2), row.evidenceHash);
     await rm(blob, { force: true });
@@ -1165,7 +1166,7 @@ describe("portable investigation apply", () => {
 
   it("rejects duplicate, unrequested, and non-canonical supplied blobs", async () => {
     const row = await fixture();
-    const original = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const detached = detachedArchiveFor(original, row.evidenceHash);
     const identityMap = identityMapFor(detached.archive);
     const preflight = (suppliedBlobs: typeof detached.suppliedBlobs) =>
@@ -1203,7 +1204,7 @@ describe("portable investigation apply", () => {
 
   it("replays after service restart and scopes same-archive replay to the applying actor", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1286,7 +1287,7 @@ describe("portable investigation apply", () => {
 
   it("refuses metadata-only, unresolved identities, tamper, stale catalogs, and substituted maps before mutation", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const before = (await row.cases.listCases(ACTOR, true)).length;
 
@@ -1377,7 +1378,7 @@ describe("portable investigation apply", () => {
       const lead = await login(app, "operator-north", "fixture-operator-secret");
       const otherLead = await login(app, "reviewer-west", "fixture-reviewer-secret");
       const viewer = await login(app, "viewer-west", "fixture-viewer-secret");
-      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
       const identityMap = identityMapFor(archive);
       const preview = await app.inject({
         method: "POST",
@@ -1417,7 +1418,7 @@ describe("portable investigation apply", () => {
 
   it("rolls back memory stores when a later write fails and isolates snapshots", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1506,7 +1507,7 @@ describe("portable investigation apply", () => {
 
   it("applies concurrently as one write plus an idempotent replay", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1548,7 +1549,7 @@ describe("portable investigation apply", () => {
 describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", () => {
   it("rolls back a partial PostgreSQL apply", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,

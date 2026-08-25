@@ -6,3 +6,5 @@ export {
   PgAuditStore,
 } from "./store.js";
 export type { AuditOutcome, AuditRecord, AuditStore, StoredAudit } from "./store.js";
+export { registerAdminAuditRoutes } from "./routes.js";
+export type { AdminAuditRouteDeps } from "./routes.js";

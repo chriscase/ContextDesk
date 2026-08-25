@@ -1,7 +1,7 @@
 import {
   buildEffectiveCapabilityRows,
-  hasCapability,
-  resolveCapabilities,
+  canUse as canUseFromRolesAndGrants,
+  usableCapabilities as usableFromRolesAndGrants,
   type AppRole,
   type Capability,
   type EffectiveCapabilityV1,
@@ -34,9 +34,8 @@ export function usableCapabilities(
   roles: readonly AppRole[],
   grants: readonly LocalCapabilityGrantV1[],
 ): Capability[] {
-  if (profile.status !== "active") return [];
-  if (profile.provenance === "imported_historical") return [];
-  return resolveCapabilities(
+  return usableFromRolesAndGrants(
+    profile,
     roles,
     grants.map((grant) => grant.capability),
   );
@@ -48,5 +47,10 @@ export function canUse(
   grants: readonly LocalCapabilityGrantV1[],
   capability: Capability,
 ): boolean {
-  return hasCapability(usableCapabilities(profile, roles, grants), capability);
+  return canUseFromRolesAndGrants(
+    profile,
+    roles,
+    grants.map((grant) => grant.capability),
+    capability,
+  );
 }

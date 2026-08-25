@@ -1,7 +1,8 @@
-import { AUTH_ERROR_SCHEMA_ID, type AuthErrorV1 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import {
+  requireSessionCapability,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 import type { CaseService } from "../cases/index.js";
 import {
   InvestigationActivityError,
@@ -11,10 +12,6 @@ import {
   type InvestigationActivityListInput,
 } from "./service.js";
 
-function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
-  return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
-}
-
 function asQuery(query: unknown): Record<string, unknown> {
   return typeof query === "object" && query !== null && !Array.isArray(query)
     ? (query as Record<string, unknown>)
@@ -22,8 +19,7 @@ function asQuery(query: unknown): Record<string, unknown> {
 }
 
 export interface InvestigationActivityRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   domain: CaseService;
   installationId: string;
 }
@@ -37,21 +33,14 @@ export async function registerInvestigationActivityRoutes(
     installationId: deps.installationId,
   });
 
-  async function sessionOf(request: FastifyRequest) {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) return null;
-    const roles = deps.roles.resolve(session.groups);
-    return {
-      actor: { id: session.identity.id, username: session.identity.username },
-      isAdmin: canPerform(roles, "admin"),
-      canRead: canPerform(roles, "read"),
-    };
+  async function sessionOf(request: FastifyRequest, reply: { code: (status: number) => unknown }) {
+    return requireSessionCapability(request, reply, deps.sessionAuth, "investigation:read");
   }
 
   function replyActivityError(
     reply: { code: (status: number) => unknown },
     error: unknown,
-  ): AuthErrorV1 | ReturnType<typeof investigationActivityErrorBody> {
+  ): ReturnType<typeof investigationActivityErrorBody> {
     if (error instanceof InvestigationActivityError) {
       void reply.code(error.code === "not_found" ? 404 : 400);
       return error.toJSON();
@@ -82,15 +71,9 @@ export async function registerInvestigationActivityRoutes(
   }
 
   app.get("/api/investigation-activity", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     try {
       return await activity.listPage(listInput(ctx, asQuery(request.query)));
     } catch (error) {
@@ -99,15 +82,9 @@ export async function registerInvestigationActivityRoutes(
   });
 
   app.get("/api/cases/:id/investigation-activity", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const caseId = (request.params as { id: string }).id;
     const query = asQuery(request.query);
     try {
@@ -122,15 +99,9 @@ export async function registerInvestigationActivityRoutes(
   });
 
   app.get("/api/investigation-resources/resolve", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const locator = asQuery(request.query).locator;
     if (typeof locator !== "string" || locator.length < 1) {
       void reply.code(400);

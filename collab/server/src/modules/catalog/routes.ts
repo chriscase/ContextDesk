@@ -5,8 +5,10 @@ import {
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import {
+  requireSessionCapability,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 import { projectSourceForCaller } from "./project.js";
 import type { CatalogService } from "./service.js";
 
@@ -25,8 +27,7 @@ function str(v: unknown): string | undefined {
 }
 
 export interface CatalogRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   catalog: CatalogService;
 }
@@ -35,30 +36,20 @@ export async function registerCatalogRoutes(
   app: FastifyInstance,
   deps: CatalogRouteDeps,
 ): Promise<void> {
-  async function sessionOf(request: FastifyRequest) {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) return null;
-    const roles = deps.roles.resolve(session.groups);
-    return {
-      actor: { id: session.identity.id, username: session.identity.username },
-      canRead: canPerform(roles, "read"),
-      canLead: canPerform(roles, "lead"),
-      canSeeDirectoryIdentities: canPerform(roles, "admin"),
-    };
+  async function sessionOf(request: FastifyRequest, reply: { code: (status: number) => unknown }) {
+    return requireSessionCapability(request, reply, deps.sessionAuth);
   }
 
   app.get("/api/catalog/sources", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
       void reply.code(403);
       return authError("forbidden");
     }
     const sources = (await deps.catalog.list()).map((source) =>
-      projectSourceForCaller(source, ctx.canSeeDirectoryIdentities),
+      projectSourceForCaller(source, ctx.has("admin:users")),
     );
     return {
       schemaId: SOURCE_LIST_SCHEMA_ID,
@@ -67,12 +58,10 @@ export async function registerCatalogRoutes(
   });
 
   app.post("/api/catalog/sources", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
       await deps.audit.append({
         identity: ctx.actor.id,
         action: "catalog_create",
@@ -109,12 +98,10 @@ export async function registerCatalogRoutes(
   });
 
   app.post("/api/catalog/sources/:id", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -136,12 +123,10 @@ export async function registerCatalogRoutes(
   });
 
   app.post("/api/catalog/sources/:id/retire", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
       void reply.code(403);
       return authError("forbidden");
     }

@@ -171,7 +171,7 @@ describe("snapshot-bound triage runs", () => {
   it("runs a deterministic candidate and projects a share-safe lifecycle record", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {
-      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false, true);
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(parseTriageJob(completed).snapshotFingerprint).toBe(fx.snapshot.fingerprint);
       expect(completed.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
@@ -199,7 +199,7 @@ describe("snapshot-bound triage runs", () => {
       ]) {
         const req = request(fx.snapshot.id);
         req.candidates[0] = { ...req.candidates[0]!, ...overlay };
-        await expect(fx.service.create(fx.caseId, actor, req, "test", false)).rejects.toThrow(
+        await expect(fx.service.create(fx.caseId, actor, req, "test", false, true)).rejects.toThrow(
           /DeepSeek lanes are not permitted/,
         );
       }
@@ -217,7 +217,7 @@ describe("snapshot-bound triage runs", () => {
     };
     const fx = await fixture(executor);
     try {
-      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false, true);
       await new Promise((resolve) => setTimeout(resolve, 0));
       const requested = await fx.service.cancel(fx.caseId, created.id, actor, "test", false);
       expect(requested.cancelRequestedAt).not.toBeNull();
@@ -294,6 +294,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
       await fx.service.cancel(fx.caseId, created.id, actor, "test", false);
@@ -346,6 +347,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       const partial = await waitFor(fx.service, fx.caseId, created.id, "partial");
       expect(partial.candidates.map((candidate) => candidate.status)).toEqual([
@@ -400,6 +402,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(calls).toBe(1);
@@ -454,6 +457,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       let runningJob: Awaited<ReturnType<TriageRunService["get"]>> = null;
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -515,6 +519,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(observed?.request.candidates.map((candidate) => candidate.profileId)).toEqual([
@@ -536,6 +541,7 @@ describe("snapshot-bound triage runs", () => {
           },
           "test",
           false,
+          true,
         ),
       ).rejects.toThrow("unknown gateway profile for candidate lane-unknown");
     } finally {
@@ -578,6 +584,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(completed.request.concurrency).toBe(3);
@@ -597,6 +604,7 @@ describe("snapshot-bound triage runs", () => {
           },
           "test",
           false,
+          true,
         ),
       ).rejects.toThrow("gateway concurrency must be between 1 and 4");
     } finally {
@@ -627,6 +635,7 @@ describe("snapshot-bound triage runs", () => {
           },
           "test",
           false,
+          true,
         ),
       ).rejects.toThrow("gateway comparisons require at least 2 candidate lanes");
     } finally {
@@ -637,13 +646,14 @@ describe("snapshot-bound triage runs", () => {
   it("persists same-case rerun lineage and rejects a cross-case parent", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {
-      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false, true);
       const child = await fx.service.create(
         fx.caseId,
         actor,
         { ...request(fx.snapshot.id), parentJobId: parent.id },
         "test",
         false,
+        true,
       );
       expect(child.parentJobId).toBe(parent.id);
       expect(child.request.parentJobId).toBe(parent.id);
@@ -663,6 +673,7 @@ describe("snapshot-bound triage runs", () => {
           { ...request(otherSnapshot.id), parentJobId: parent.id },
           "test",
           false,
+          true,
         ),
       ).rejects.toThrow("parent triage job not found for case");
     } finally {
@@ -673,7 +684,7 @@ describe("snapshot-bound triage runs", () => {
   it("parses and projects legacy jobs without rerun lineage", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {
-      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false, true);
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       const legacy = JSON.parse(JSON.stringify(completed)) as Record<string, unknown>;
       delete legacy.parentJobId;
@@ -711,7 +722,7 @@ describe("snapshot-bound triage runs", () => {
         "test",
       );
       expect(snapshot.fairnessClass).toBe("unknown");
-      const created = await fx.service.create(fx.caseId, actor, request(snapshot.id), "test", false);
+      const created = await fx.service.create(fx.caseId, actor, request(snapshot.id), "test", false, true);
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(completed.sameSnapshot).not.toBe(true);
       expect(completed.sameSnapshot).toBeNull();
