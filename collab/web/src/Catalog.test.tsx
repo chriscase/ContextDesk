@@ -164,7 +164,10 @@ describe("source & provenance library", () => {
         description: "On-call alert stream",
       }),
     );
-    expect(postCall![1]?.headers).toEqual({ "content-type": "application/json" });
+    expect(postCall![1]?.headers).toEqual({
+      "content-type": "application/json",
+      "x-cd-collab-csrf": "1",
+    });
     expect(listener).toHaveBeenCalledTimes(1);
     dispose();
   });
@@ -266,7 +269,10 @@ describe("source & provenance library", () => {
     expect(await screen.findByRole("region", { name: "Retired sources (1)" })).toBeTruthy();
     const retireCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/retire"));
     expect(String(retireCall![0])).toBe("/api/catalog/sources/1/retire");
-    expect(retireCall![1]).toEqual({ method: "POST" });
+    expect(retireCall![1]).toEqual({
+      method: "POST",
+      headers: { "x-cd-collab-csrf": "1" },
+    });
     expect(listener).toHaveBeenCalledTimes(1);
     dispose();
   });

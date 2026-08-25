@@ -46,12 +46,14 @@ export const ADMIN_DIRECTORY_MAPPING_PREVIEW_RESPONSE_SCHEMA_ID =
   "cd-collab.admin_directory_mapping_preview_response.v1" as const;
 
 /**
- * Shared with the server's CSRF guard (people/csrf.ts) and the People admin
- * client so both sides read the header name/value from one place instead of
- * duplicating a literal string. See people/csrf.ts for the full rationale.
+ * Compatibility aliases for the canonical browser-mutation CSRF header
+ * (`collab/contracts/src/csrf.ts`). People admin/self clients historically
+ * imported these names; the header itself is now system-wide.
  */
-export const ADMIN_PEOPLE_CSRF_HEADER = "x-cd-collab-csrf" as const;
-export const ADMIN_PEOPLE_CSRF_HEADER_VALUE = "1" as const;
+export {
+  COLLAB_CSRF_HEADER as ADMIN_PEOPLE_CSRF_HEADER,
+  COLLAB_CSRF_HEADER_VALUE as ADMIN_PEOPLE_CSRF_HEADER_VALUE,
+} from "./csrf.js";
 
 export const ADMIN_PEOPLE_MAX_PAGE_SIZE = 50;
 export const ADMIN_PEOPLE_SEARCH_MAX_LENGTH = 64;

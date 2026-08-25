@@ -13,7 +13,11 @@ import type { Pool } from "pg";
 import type { Config } from "./config.js";
 import { latestMigrationVersion } from "./db/migrate.js";
 import type { EvidenceStore } from "./evidence/store.js";
-import { registerAuthRoutes, type AuthRouteDeps } from "./modules/auth/index.js";
+import {
+  registerAuthRoutes,
+  registerBrowserMutationCsrfGuard,
+  type AuthRouteDeps,
+} from "./modules/auth/index.js";
 import { registerAuthzRoutes } from "./modules/authz/index.js";
 import {
   MemoryGroupRoleStore,
@@ -84,6 +88,7 @@ export interface AppDeps {
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
+  registerBrowserMutationCsrfGuard(app);
   const requiredMigrationVersion = latestMigrationVersion();
 
   app.get("/health", async (): Promise<HealthResponseV1> => {

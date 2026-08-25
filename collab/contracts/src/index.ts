@@ -70,6 +70,20 @@ export type {
 } from "./auth.js";
 
 export {
+  BROWSER_MUTATION_METHODS,
+  COLLAB_CSRF_HEADER,
+  COLLAB_CSRF_HEADER_VALUE,
+  CSRF_ERROR_SCHEMA_ID,
+  apiPathname,
+  isBrowserMutationMethod,
+  isCollabApiPath,
+  isCsrfExemptApiPath,
+  parseCsrfError,
+  requiresBrowserMutationCsrf,
+} from "./csrf.js";
+export type { BrowserMutationMethod, CsrfErrorCode, CsrfErrorV1 } from "./csrf.js";
+
+export {
   ADMIN_DIRECTORY_ERROR_SCHEMA_ID,
   ADMIN_DIRECTORY_GROUPS_SCHEMA_ID,
   ADMIN_DIRECTORY_IDENTITIES_SCHEMA_ID,

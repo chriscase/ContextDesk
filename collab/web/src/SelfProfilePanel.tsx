@@ -1,6 +1,4 @@
 import {
-  ADMIN_PEOPLE_CSRF_HEADER,
-  ADMIN_PEOPLE_CSRF_HEADER_VALUE,
   LOCAL_ONLY_FIELDS,
   PROFILE_CONTACT_EMAIL_MAX,
   PROFILE_CONTACT_OTHER_MAX,
@@ -24,7 +22,7 @@ import {
   type UserProfileV1,
 } from "@cd-collab/contracts/admin";
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { AUTH_LOST_EVENT } from "./protected-api.js";
+import { AUTH_LOST_EVENT, withBrowserMutationCsrf } from "./protected-api.js";
 
 const AVATAR_VALUE_MAX = 2048;
 
@@ -75,13 +73,6 @@ interface Draft {
 interface FieldError {
   field: string;
   message: string;
-}
-
-function csrfHeaders(): Record<string, string> {
-  return {
-    "content-type": "application/json",
-    [ADMIN_PEOPLE_CSRF_HEADER]: ADMIN_PEOPLE_CSRF_HEADER_VALUE,
-  };
 }
 
 async function profileFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -447,11 +438,11 @@ export function SelfProfilePanel(props: {
     setFormError("");
     setNotice("");
     try {
-      const response = await profileFetch("/api/profile/me", {
+      const response = await profileFetch("/api/profile/me", withBrowserMutationCsrf({
         method: "PATCH",
-        headers: csrfHeaders(),
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(update),
-      });
+      }));
       if (response.ok) {
         const profile = parseUserProfile(await response.json());
         setSaved(profile);
