@@ -29,6 +29,7 @@ afterEach(async () => {
 
 class InjectedFailureStore extends MemoryCaseStore {
   failTimelineKind: string | null = null;
+  failListSnapshots = false;
   override async appendTimeline(
     caseId: string,
     event: Parameters<MemoryCaseStore["appendTimeline"]>[1],
@@ -37,6 +38,13 @@ class InjectedFailureStore extends MemoryCaseStore {
       throw new Error(`injected timeline failure:${event.kind}`);
     }
     return super.appendTimeline(caseId, event);
+  }
+
+  override async listSnapshotsByCase(
+    caseId: string,
+  ): Promise<Awaited<ReturnType<MemoryCaseStore["listSnapshotsByCase"]>>> {
+    if (this.failListSnapshots) throw new Error("injected snapshot list failure");
+    return super.listSnapshotsByCase(caseId);
   }
 }
 
@@ -244,11 +252,106 @@ describe("triage mutation atomicity", () => {
     store.failTimelineKind = "triage_job_finished";
     const { cases, service, jobs, audit, caseId, snapshot } = await harness(store);
     const created = await service.create(caseId, ALICE, request(snapshot.id), "test", false, true);
-    const settled = await waitUntilSettled(jobs, created.id);
-    expect(settled.status).not.toBe("completed");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const latest = await jobs.get(created.id);
+    expect(latest?.status).not.toBe("completed");
     const timeline = await cases.listTimeline(caseId);
     expect(timeline.some((event) => event.kind === "triage_job_finished")).toBe(false);
     expect((await audit.list({ action: "triage_job_finish" })).length).toBe(0);
+  });
+
+  it("rolls back a claim when started timeline projection fails", async () => {
+    const store = new InjectedFailureStore();
+    store.failTimelineKind = "triage_job_started";
+    const executor = new CountingTriageExecutor();
+    const { cases, service, jobs, audit, caseId, snapshot } = await harness(
+      store,
+      new MemoryAuditStore(),
+      executor,
+    );
+    const created = await service.create(caseId, ALICE, request(snapshot.id), "test", false, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const job = await jobs.get(created.id);
+    expect(job?.status).toBe("queued");
+    expect(job?.stoppedReason).toBeNull();
+    const timeline = await cases.listTimeline(caseId);
+    expect(timeline.some((event) => event.kind === "triage_job_started")).toBe(false);
+    expect(timeline.some((event) => event.kind === "triage_job_finished")).toBe(false);
+    expect((await audit.list({ action: "triage_job_finish" })).length).toBe(0);
+    expect(executor.calls).toBe(0);
+  });
+
+  it("records a failed finish when a running job hits a runner error", async () => {
+    const store = new InjectedFailureStore();
+    const { cases, service, jobs, audit, caseId, snapshot } = await harness(store);
+    const created = await service.create(caseId, ALICE, request(snapshot.id), "test", false, true);
+    store.failListSnapshots = true;
+    const settled = await waitUntilSettled(jobs, created.id);
+    expect(settled.status).toBe("failed");
+    expect(settled.stoppedReason).toBe("runner_error");
+    const timeline = await cases.listTimeline(caseId);
+    expect(timeline.some((event) => event.kind === "triage_job_started")).toBe(true);
+    expect(timeline.some((event) => event.kind === "triage_job_finished")).toBe(true);
+    expect((await audit.list({ action: "triage_job_finish" })).length).toBe(1);
+  });
+
+  it("projects stale-lease recovery as a failed finish, not a human finding", async () => {
+    const { cases, service, jobs, audit, caseId, snapshot } = await harness();
+    const spec = request(snapshot.id);
+    const job = {
+      schemaId: "cd-collab.triage_job.v1" as const,
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      caseId,
+      snapshotId: snapshot.id,
+      snapshotFingerprint: snapshot.fingerprint,
+      requestFingerprint: "b".repeat(64),
+      cancellationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      request: spec,
+      status: "queued" as const,
+      candidates: [{
+        ...spec.candidates[0]!,
+        status: "queued" as const,
+        benchmarkRunId: null,
+        outputHash: null,
+        summary: null,
+        evidenceRefs: [],
+        unknowns: [],
+        usageStatus: "unknown" as const,
+        costStatus: "unknown" as const,
+        errorCode: null,
+        startedAt: null,
+        finishedAt: null,
+        privacyClass: "owner_only" as const,
+      }],
+      sameSnapshot: null,
+      agreementNotice: "Agreement is not proof of correctness." as const,
+      requestedBy: ALICE.id,
+      requestedByUsername: ALICE.username,
+      createdAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+      startedAt: null,
+      finishedAt: null,
+      cancelRequestedAt: null,
+      stoppedReason: null,
+    };
+    await jobs.insert(job);
+    const claimed = await jobs.claimQueued(
+      job.id,
+      "2026-08-25T00:00:01.000Z",
+      "worker-stale",
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    await jobs.update({
+      ...claimed!,
+      leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
+    });
+    await service.recoverPending();
+    const recovered = await jobs.get(job.id);
+    expect(recovered?.status).toBe("failed");
+    expect(recovered?.stoppedReason).toBe("worker_lease_expired");
+    const timeline = await cases.listTimeline(caseId);
+    expect(timeline.some((event) => event.kind === "triage_job_finished")).toBe(true);
+    expect((await audit.list({ action: "triage_job_recovered" })).length).toBe(1);
   });
 });
 
@@ -380,6 +483,69 @@ describe.skipIf(!adminUrl())("postgres triage mutation atomicity", () => {
       } finally {
         executor.release();
         await new Promise((resolve) => setTimeout(resolve, 50));
+        await pool.end();
+      }
+    });
+  });
+
+  it("rolls back a PostgreSQL claim when started timeline projection fails", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 4 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-triage-started-atomic-"));
+      dirs.push(root);
+      class InjectedPgCaseStore extends PgCaseStore {
+        failTimelineKind: string | null = null;
+        override async appendTimeline(
+          caseId: string,
+          event: Parameters<PgCaseStore["appendTimeline"]>[1],
+        ): Promise<Awaited<ReturnType<PgCaseStore["appendTimeline"]>>> {
+          if (this.failTimelineKind && event.kind === this.failTimelineKind) {
+            throw new Error(`injected timeline failure:${event.kind}`);
+          }
+          return super.appendTimeline(caseId, event);
+        }
+      }
+      const caseStore = new InjectedPgCaseStore(pool);
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, caseStore, catalog);
+      const jobs = new PgTriageJobStore(pool);
+      const executor = new CountingTriageExecutor();
+      const service = new TriageRunService({ cases, audit, jobs, executor });
+      try {
+        const created = await cases.createCase(ALICE, { title: "PG triage started atomicity" }, "test");
+        const artifact = await cases.addEvidence(
+          created.id,
+          ALICE,
+          {
+            kind: "log",
+            filename: "checkout.log",
+            mediaType: "text/plain",
+            bytes: new TextEncoder().encode("checkout timeout"),
+            summary: "Synthetic checkout timeout.",
+            privacyClass: "share_safe",
+          },
+          "test",
+        );
+        const snapshot = await cases.createSnapshot(
+          created.id,
+          ALICE,
+          { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+          "test",
+        );
+        caseStore.failTimelineKind = "triage_job_started";
+        const job = await service.create(created.id, ALICE, request(snapshot.id), "test", false, true);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        const latest = await jobs.get(job.id);
+        expect(latest?.status).toBe("queued");
+        expect(latest?.stoppedReason).toBeNull();
+        const timeline = await cases.listTimeline(created.id);
+        expect(timeline.some((event) => event.kind === "triage_job_started")).toBe(false);
+        expect(timeline.some((event) => event.kind === "triage_job_finished")).toBe(false);
+        expect(executor.calls).toBe(0);
+      } finally {
         await pool.end();
       }
     });

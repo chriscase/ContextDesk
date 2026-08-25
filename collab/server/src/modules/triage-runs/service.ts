@@ -327,6 +327,72 @@ export class TriageRunService {
     });
   }
 
+  private async persistJobFinished(
+    job: Pick<TriageJobV1, "id" | "caseId" | "requestedBy" | "requestedByUsername" | "requestFingerprint">,
+    status: TriageJobStatus,
+    audit: { action: string; target: string; outcome: "success" | "failure" },
+  ): Promise<void> {
+    await this.deps.cases.appendDomainTimeline(job.caseId, {
+      kind: "triage_job_finished",
+      actor: { id: job.requestedBy, username: job.requestedByUsername },
+      targetId: job.id,
+      clientTime: null,
+      payload: { status, requestFingerprint: job.requestFingerprint },
+    });
+    await this.deps.audit.append({
+      identity: job.requestedBy,
+      action: audit.action,
+      target: audit.target,
+      origin: "triage-runner",
+      outcome: audit.outcome,
+    });
+  }
+
+  private async failOwnedRunningJob(jobId: string): Promise<void> {
+    const failed = await this.deps.jobs.get(jobId);
+    if (
+      !failed
+      || isTerminal(failed.status)
+      || !triageWorkerHoldsLiveLease(failed, this.workerId, Date.now())
+    ) return;
+    const finishedAt = now();
+    const next: TriageJobV1 = {
+      ...failed,
+      status: "failed",
+      candidates: failed.candidates.map((candidate) =>
+        candidate.status === "queued" || candidate.status === "running"
+          ? {
+              ...candidate,
+              status: "failed",
+              benchmarkRunId: candidate.benchmarkRunId,
+              outputHash: null,
+              summary: null,
+              evidenceRefs: [],
+              unknowns: ["runner preparation"],
+              errorCode: "runner_error",
+              finishedAt,
+            }
+          : candidate,
+      ),
+      finishedAt,
+      updatedAt: finishedAt,
+      stoppedReason: "runner_error",
+      leaseExpiresAt: null,
+    };
+    try {
+      await this.withJobAtomic(async () => {
+        await this.deps.jobs.update(next);
+        await this.persistJobFinished(failed, "failed", {
+          action: "triage_job_finish",
+          target: `${failed.id}:failed`,
+          outcome: "failure",
+        });
+      });
+    } catch {
+      // Leave the job running so stale-lease recovery can record the terminal state.
+    }
+  }
+
   /** Safe profile metadata only; no endpoint, credential, or secret is returned. */
   listProfiles(): TriageProfileOption[] {
     return (this.deps.profiles ?? []).map((profile) => ({ ...profile }));
@@ -392,8 +458,7 @@ export class TriageRunService {
       });
     }
     for (const job of staleRunning) {
-      const actor = { id: job.requestedBy, username: job.requestedByUsername };
-        const finishedAt = now();
+      const finishedAt = now();
         const recoveredCandidates = job.candidates.map((candidate) =>
           candidate.status === "queued" || candidate.status === "running"
             ? {
@@ -419,11 +484,9 @@ export class TriageRunService {
       };
       const recoveredOk = await this.withJobAtomic(async () => {
         if (!(await this.deps.jobs.recoverStale(recovered, finishedAt))) return false;
-        await this.deps.audit.append({
-          identity: actor.id,
+        await this.persistJobFinished(job, recovered.status, {
           action: "triage_job_recovered",
           target: `${job.id}:worker_lease_expired`,
-          origin: "triage-runner",
           outcome: "success",
         });
         return true;
@@ -534,11 +597,9 @@ export class TriageRunService {
           stoppedReason: reason,
           leaseExpiresAt: null,
         });
-        await this.deps.audit.append({
-          identity: job.requestedBy,
+        await this.persistJobFinished(job, "failed", {
           action: "triage_job_recovered",
           target: `${job.id}:${reason}`,
-          origin: "triage-runner",
           outcome: "failure",
         });
       });
@@ -745,17 +806,32 @@ export class TriageRunService {
     try {
       const startedAt = now();
       const leaseExpiresAt = new Date(Date.now() + this.workerLeaseMs).toISOString();
-      const job = await this.deps.jobs.claimQueued(
-        jobId,
-        startedAt,
-        this.workerId,
-        leaseExpiresAt,
-      );
-      if (!job) return;
-      if (!isAdmin && !(await this.deps.cases.isMemberOf(job.caseId, job.requestedBy))) {
-        await this.refuseUnauthorizedPendingJob(job);
+      const claimed = await this.withJobAtomic(async () => {
+        const queued = await this.deps.jobs.claimQueued(
+          jobId,
+          startedAt,
+          this.workerId,
+          leaseExpiresAt,
+        );
+        if (!queued) return null;
+        if (!isAdmin && !(await this.deps.cases.isMemberOf(queued.caseId, queued.requestedBy))) {
+          return { job: queued, started: false as const };
+        }
+        await this.deps.cases.appendDomainTimeline(queued.caseId, {
+          kind: "triage_job_started",
+          actor: { id: queued.requestedBy, username: queued.requestedByUsername },
+          targetId: queued.id,
+          clientTime: null,
+          payload: { snapshotId: queued.snapshotId, requestFingerprint: queued.requestFingerprint },
+        });
+        return { job: queued, started: true as const };
+      });
+      if (!claimed) return;
+      if (!claimed.started) {
+        await this.refuseUnauthorizedPendingJob(claimed.job);
         return;
       }
+      const job = claimed.job;
       let currentJob = job;
       leaseTimer = setInterval(() => {
         const nextLeaseExpiresAt = new Date(Date.now() + this.workerLeaseMs).toISOString();
@@ -773,13 +849,6 @@ export class TriageRunService {
             controller.abort();
           });
       }, WORKER_HEARTBEAT_MS);
-      await this.deps.cases.appendDomainTimeline(job.caseId, {
-        kind: "triage_job_started",
-        actor: { id: job.requestedBy, username: job.requestedByUsername },
-        targetId: job.id,
-        clientTime: null,
-        payload: { snapshotId: job.snapshotId, requestFingerprint: job.requestFingerprint },
-      });
       const afterStart = await this.deps.jobs.get(jobId);
       if (!afterStart) {
         return;
@@ -1043,51 +1112,16 @@ export class TriageRunService {
         };
         await this.withJobAtomic(async () => {
           await this.deps.jobs.update(finishedJob);
-          await this.deps.cases.appendDomainTimeline(finishedJob.caseId, {
-            kind: "triage_job_finished",
-            actor: { id: job.requestedBy, username: job.requestedByUsername },
-            targetId: finishedJob.id,
-            clientTime: null,
-            payload: { status: finalStatus, requestFingerprint: finishedJob.requestFingerprint },
-          });
-          await this.deps.audit.append({
-            identity: finishedJob.requestedBy,
+          await this.persistJobFinished(finishedJob, finalStatus, {
             action: "triage_job_finish",
             target: `${job.id}:${finalStatus}`,
-            origin: "triage-runner",
             outcome: "success",
           });
         });
         currentJob = finishedJob;
       }
     } catch {
-      const failed = await this.deps.jobs.get(jobId);
-      if (failed && !isTerminal(failed.status)) {
-        const finishedAt = now();
-        await this.deps.jobs.update({
-          ...failed,
-          status: "failed",
-          candidates: failed.candidates.map((candidate) =>
-            candidate.status === "queued" || candidate.status === "running"
-              ? {
-                  ...candidate,
-                  status: "failed",
-                  benchmarkRunId: candidate.benchmarkRunId,
-                  outputHash: null,
-                  summary: null,
-                  evidenceRefs: [],
-                  unknowns: ["runner preparation"],
-                  errorCode: "runner_error",
-                  finishedAt,
-                }
-              : candidate,
-          ),
-          finishedAt,
-          updatedAt: finishedAt,
-          stoppedReason: "runner_error",
-          leaseExpiresAt: null,
-        });
-      }
+      await this.failOwnedRunningJob(jobId);
     } finally {
       if (leaseTimer) clearInterval(leaseTimer);
       this.controllers.delete(jobId);
