@@ -168,6 +168,19 @@ export interface OverviewScope {
   isAdmin: boolean;
 }
 
+export interface ActivityPageCursor {
+  serverTime: string;
+  caseId: string;
+  seq: number;
+}
+
+export interface ActivityPageQuery {
+  caseId?: string;
+  scope?: OverviewScope;
+  limit: number;
+  after?: ActivityPageCursor;
+}
+
 /**
  * Process-local visibility boundary used by memory-backed Overview stores.
  * PostgreSQL stores correlate visibility inside SQL and therefore return null.
@@ -216,6 +229,27 @@ export function isOverviewVisibleCase(
   return scope.isAdmin || row.participants.some((participant) => participant.identityId === scope.actorId);
 }
 
+export function compareActivityDesc(
+  left: { serverTime: string; caseId: string; seq: number },
+  right: { serverTime: string; caseId: string; seq: number },
+): number {
+  const byTime = right.serverTime.localeCompare(left.serverTime);
+  if (byTime !== 0) return byTime;
+  const byCase = left.caseId.localeCompare(right.caseId);
+  return byCase !== 0 ? byCase : right.seq - left.seq;
+}
+
+export function activityComesAfter(
+  event: { serverTime: string; caseId: string; seq: number },
+  cursor: ActivityPageCursor,
+): boolean {
+  if (event.serverTime < cursor.serverTime) return true;
+  if (event.serverTime > cursor.serverTime) return false;
+  if (event.caseId > cursor.caseId) return true;
+  if (event.caseId < cursor.caseId) return false;
+  return event.seq < cursor.seq;
+}
+
 function emptyOverviewCounts(): OverviewCounts {
   return {
     status: { open: 0, monitoring: 0, resolved: 0, archived: 0 },
@@ -248,6 +282,7 @@ export interface CaseStore {
   ): Promise<void>;
   listTimeline(caseId: string): Promise<TimelineRow[]>;
   listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]>;
+  listActivityPage(query: ActivityPageQuery): Promise<CaseTimelineRow[]>;
   overviewVisibilityBoundary(scope: OverviewScope): Promise<OverviewVisibilityBoundary | null>;
   overviewCounts(scope: OverviewScope): Promise<OverviewCounts>;
   listOverviewOpenCases(scope: OverviewScope, limit: number): Promise<OverviewOpenCaseRow[]>;
@@ -409,17 +444,29 @@ export class MemoryCaseStore implements CaseStore {
   }
 
   async listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]> {
-    return caseIds
-      .flatMap((caseId) =>
-        (this.timeline.get(caseId) ?? []).map((row) => ({ ...row, caseId })),
-      )
-      .sort((left, right) => {
-        const byTime = right.serverTime.localeCompare(left.serverTime);
-        if (byTime !== 0) return byTime;
-        const byCase = left.caseId.localeCompare(right.caseId);
-        return byCase !== 0 ? byCase : right.seq - left.seq;
-      })
-      .slice(0, limit);
+    return this.listActivityPage({ caseIds, limit });
+  }
+
+  async listActivityPage(query: ActivityPageQuery & { caseIds?: string[] }): Promise<CaseTimelineRow[]> {
+    const cap = Math.max(0, Math.trunc(query.limit) || 0);
+    if (cap === 0) return [];
+    const rows: CaseTimelineRow[] = [];
+    const sourceIds = query.caseId
+      ? [query.caseId]
+      : query.caseIds
+        ? query.caseIds
+        : [...this.cases.keys()];
+    for (const caseId of sourceIds) {
+      const caseRow = this.cases.get(caseId);
+      if (!caseRow) continue;
+      if (query.scope && !isOverviewVisibleCase(caseRow, query.scope)) continue;
+      for (const event of this.timeline.get(caseId) ?? []) {
+        const row = { ...event, caseId };
+        if (query.after && !activityComesAfter(row, query.after)) continue;
+        rows.push(row);
+      }
+    }
+    return rows.sort(compareActivityDesc).slice(0, cap);
   }
 
   async overviewVisibilityBoundary(scope: OverviewScope): Promise<OverviewVisibilityBoundary> {
@@ -767,15 +814,47 @@ export class PgCaseStore implements CaseStore {
   }
 
   async listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]> {
-    if (caseIds.length === 0) return [];
+    return this.listActivityPage({ caseIds, limit });
+  }
+
+  async listActivityPage(query: ActivityPageQuery & { caseIds?: string[] }): Promise<CaseTimelineRow[]> {
+    const cap = Math.max(0, Math.trunc(query.limit) || 0);
+    if (cap === 0) return [];
+    const params: unknown[] = [];
+    const where: string[] = [];
+    if (query.caseId) {
+      params.push(query.caseId);
+      where.push(`e.case_id = $${params.length}::uuid`);
+    } else if (query.caseIds) {
+      if (query.caseIds.length === 0) return [];
+      params.push(query.caseIds);
+      where.push(`e.case_id = ANY($${params.length}::uuid[])`);
+    } else if (query.scope) {
+      params.push(query.scope.isAdmin, query.scope.actorId);
+      where.push(overviewVisiblePredicate("e.case_id", `$${params.length - 1}`, `$${params.length}`));
+    } else {
+      throw new Error("activity page requires a case, case list, or overview scope");
+    }
+    if (query.after) {
+      params.push(query.after.serverTime, query.after.caseId, query.after.seq);
+      const t = `$${params.length - 2}`;
+      const c = `$${params.length - 1}`;
+      const s = `$${params.length}`;
+      where.push(`(
+        e.server_time < ${t}::timestamptz
+        OR (e.server_time = ${t}::timestamptz AND e.case_id > ${c}::uuid)
+        OR (e.server_time = ${t}::timestamptz AND e.case_id = ${c}::uuid AND e.seq < ${s}::int)
+      )`);
+    }
+    params.push(cap);
     const result = await this.db.query(
-      `SELECT case_id, seq, kind, actor_id, actor_username, target_id,
-              client_time, server_time, payload
-       FROM timeline_events
-       WHERE case_id = ANY($1::uuid[])
-       ORDER BY server_time DESC, case_id ASC, seq DESC
-       LIMIT $2`,
-      [caseIds, limit],
+      `SELECT e.case_id, e.seq, e.kind, e.actor_id, e.actor_username, e.target_id,
+              e.client_time, e.server_time, e.payload
+       FROM timeline_events e
+       WHERE ${where.join(" AND ")}
+       ORDER BY e.server_time DESC, e.case_id ASC, e.seq DESC
+       LIMIT $${params.length}`,
+      params,
     );
     return result.rows.map((row) => ({
       ...asTimeline(row as Record<string, unknown>),

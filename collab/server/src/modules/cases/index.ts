@@ -11,6 +11,7 @@ export {
 } from "./service.js";
 export type {
   Actor,
+  ArtifactRow,
   CaseStore,
   CaseTimelineRow,
   OverviewActivityRow,
@@ -18,9 +19,11 @@ export type {
   OverviewOpenCaseRow,
   OverviewScope,
   OverviewVisibilityBoundary,
+  RevisionRow,
   TimelineRow,
 } from "./service.js";
-export { overviewVisiblePredicate, isOverviewVisibleCase } from "./store.js";
+export type { ActivityPageCursor, ActivityPageQuery } from "./store.js";
+export { activityComesAfter, compareActivityDesc, overviewVisiblePredicate, isOverviewVisibleCase } from "./store.js";
 export { deriveCaseBoard } from "./board.js";
 export type { AcceptedDecisionBoardInput, CaseBoardInput } from "./board.js";
 export { registerCaseRoutes } from "./routes.js";
