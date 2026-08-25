@@ -2748,17 +2748,16 @@ export function preflightPortableInvestigation(
     for (const sourceId of ids) {
       if (seenRaw.has(sourceId)) continue;
       seenRaw.add(sourceId);
-      const destinationId = portableDestinationUuid(
-        bundle.sourceInstallationId,
-        kind,
-        sourceId,
-        0,
-      );
+      const destinationId =
+        portableIdMintingMode(kind) === "content_addressed"
+          ? sourceId
+          : portableDestinationUuid(bundle.sourceInstallationId, kind, sourceId, 0);
       if (!portableMintsDestinationId(kind)) {
         // Content is addressed by digest and timeline events are sequenced by
-        // the destination, so neither namespace keys a destination row and
-        // neither can collide. The remap entry stays a stable UUID for shape
-        // parity, but this namespace never consults the occupied set.
+        // the destination, so neither namespace can collide. A content remap
+        // must preserve the digest because that digest is the destination
+        // identity referenced by evidence and timeline events. Timeline rows
+        // retain a stable non-persisted projection for report shape parity.
         idRemap.push({ namespace: kind, sourceId, destinationId });
         create += 1;
         continue;

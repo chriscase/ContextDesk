@@ -556,6 +556,13 @@ describe("portable investigation adversarial lab", () => {
     danglingTimeline.timeline[0]!.targetId = "ghost-note";
     expect(() => parsePortableInvestigation(reseal(danglingTimeline))).toThrow(/dangling/);
 
+    const danglingContentTimeline = syntheticSeal();
+    danglingContentTimeline.timeline[0]!.targetNamespace = "content";
+    danglingContentTimeline.timeline[0]!.targetId = "ab".repeat(32);
+    expect(() => parsePortableInvestigation(reseal(danglingContentTimeline))).toThrow(
+      /dangling timeline target/,
+    );
+
     const danglingAudit = syntheticSeal();
     danglingAudit.auditRefs[0]!.actorId = "ghost-operator";
     expect(() => parsePortableInvestigation(reseal(danglingAudit))).toThrow(/dangling actor/);

@@ -184,6 +184,11 @@ describe("portable restore collision scope", () => {
     expect(report.reconstructionStatus).toBe("exact");
     expect(portableIdMintingMode("content")).toBe("content_addressed");
     expect(portableMintsDestinationId("content")).toBe(false);
+    expect(
+      report.idRemap
+        .filter((row) => row.namespace === "content")
+        .map((row) => [row.sourceId, row.destinationId]),
+    ).toEqual(bundle.contentObjects.map((row) => [row.digest, row.digest]).sort());
   });
 
   it("fails a real minted collision under the fail policy and names the namespace", () => {

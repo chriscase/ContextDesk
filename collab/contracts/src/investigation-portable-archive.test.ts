@@ -176,7 +176,7 @@ describe("portable investigation archive contract", () => {
     expect(restored.reconstructionStatus).toBe("metadata_only");
   });
 
-  it("emits RFC 4122 UUID destination ids that are stable, namespaced, and collision-aware", () => {
+  it("emits stable, namespaced, and collision-aware destination identities", () => {
     const investigation = valid();
     const archive = sealPortableArchive({ investigation });
     const first = preflightPortableArchive(archive, archiveDryRun(investigation));
@@ -191,6 +191,11 @@ describe("portable investigation archive contract", () => {
     );
     expect(first.idRemap.length).toBeGreaterThan(10);
     for (const row of first.idRemap) {
+      if (row.namespace === "content") {
+        expect(row.destinationId).toBe(row.sourceId);
+        expect(row.destinationId).toMatch(/^[a-f0-9]{64}$/);
+        continue;
+      }
       expect(isRfc4122Uuid(row.destinationId)).toBe(true);
       expect(row.destinationId).toMatch(RFC4122_UUID_RE);
       expect(row.sourceId).not.toBe(row.destinationId);
