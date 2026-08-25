@@ -120,6 +120,50 @@ function decodeEvidence(contentBase64: string): ExcerptState {
   }
 }
 
+/**
+ * Shares the exact address of the workstream a reader has open. The address is
+ * the canonical route, not a token: opening it still reauthorizes, so a link
+ * shared with someone who may not read this investigation grants them nothing.
+ */
+function CopyWorkstreamLink(props: { href: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "unavailable">("idle");
+  const timer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  async function copy() {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    try {
+      await navigator.clipboard.writeText(new URL(props.href, window.location.origin).href);
+      setState("copied");
+    } catch {
+      // A blocked clipboard is reported rather than faked as a success.
+      setState("unavailable");
+    }
+    timer.current = window.setTimeout(() => setState("idle"), 4000);
+  }
+
+  return (
+    <p className="workstreams__share">
+      <button type="button" className="workstreams__share-button" onClick={() => void copy()}>
+        Copy link to this workstream
+      </button>
+      <span role="status">
+        {state === "copied"
+          ? "Copied. Opening it reauthorizes — it is not an access grant."
+          : state === "unavailable"
+            ? "This browser blocked the clipboard — copy the address bar instead."
+            : ""}
+      </span>
+    </p>
+  );
+}
+
 export function Workstreams(props: {
   caseId: string;
   routeFocus?: WorkFocus;
@@ -315,9 +359,12 @@ export function Workstreams(props: {
   if (focused) {
     return (
       <section className="workstreams workstreams--focused" aria-labelledby="workstream-detail-title">
-        <nav className="workstreams__crumbs" aria-label="Workstream">
-          {routeLink(null, "All workstreams", "workstreams__back")}
-        </nav>
+        <div className="workstreams__crumbs-row">
+          <nav className="workstreams__crumbs" aria-label="Workstream">
+            {routeLink(null, "All workstreams", "workstreams__back")}
+          </nav>
+          <CopyWorkstreamLink href={hrefFor(focusFor(focused.key))} />
+        </div>
         <article
           className="workstreams__detail"
           data-route-item={focused.key}

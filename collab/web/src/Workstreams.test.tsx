@@ -230,6 +230,49 @@ describe("focused workstream", () => {
     ).toBeTruthy();
   });
 
+  it("shares the exact address of the workstream on screen", async () => {
+    stubApi();
+    const writeText = vi.fn(async (_text: string) => undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    render(<Workstreams caseId={CASE_ID} routeFocus={focus("run-1:reviewer-lane")} />);
+    await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy link to this workstream" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = new URL(String(writeText.mock.calls.at(0)?.at(0)));
+    expect(copied.pathname).toBe(`/investigations/${CASE_ID}/analyze`);
+    expect(copied.searchParams.get("section")).toBe("workstreams");
+    expect(copied.searchParams.get("item")).toBe("run-1:reviewer-lane");
+    expect(copied.searchParams.get("kind")).toBe("workstream");
+    // A shared address is not an access grant, and the copy says so.
+    await screen.findByText(/Opening it reauthorizes — it is not an access grant/);
+  });
+
+  it("reports a blocked clipboard instead of claiming a successful copy", async () => {
+    stubApi();
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      clipboard: {
+        writeText: vi.fn(async () => {
+          throw new Error("blocked");
+        }),
+      },
+    });
+    render(<Workstreams caseId={CASE_ID} routeFocus={focus("run-1:reviewer-lane")} />);
+    await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy link to this workstream" }));
+    await screen.findByText(/This browser blocked the clipboard/);
+    expect(screen.queryByText(/^Copied\./)).toBeNull();
+  });
+
+  it("offers no workstream address to copy while the list is showing", async () => {
+    stubApi();
+    render(<Workstreams caseId={CASE_ID} />);
+    await screen.findByRole("heading", { name: "Workstreams" });
+    expect(screen.queryByRole("button", { name: "Copy link to this workstream" })).toBeNull();
+  });
+
   it("shows purpose, owner, inputs, findings, unknowns, and ordered history", async () => {
     stubApi();
     render(<Workstreams caseId={CASE_ID} routeFocus={focus("run-1:reviewer-lane")} />);
