@@ -275,6 +275,10 @@ function compareOverviewOpenCases(left: OverviewOpenCaseRow, right: OverviewOpen
   return byCreated !== 0 ? byCreated : left.id.localeCompare(right.id);
 }
 
+function addReferencedHash(into: Set<string>, value: string | null | undefined): void {
+  if (value && /^[0-9a-f]{64}$/.test(value)) into.add(value);
+}
+
 export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
@@ -302,6 +306,7 @@ export interface CaseStore {
   insertRevision(rev: RevisionRow): Promise<void>;
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
   listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
+  listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   insertArtifact(row: ArtifactRow): Promise<void>;
   withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T>;
   lockIntakeIdempotency(caseId: string, key: string): Promise<void>;
@@ -608,6 +613,21 @@ export class MemoryCaseStore implements CaseStore {
       .filter((row) => row.caseId === caseId)
       .map((row) => ({ ...row }))
       .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
+    const hashes = new Set<string>();
+    for (const row of this.artifacts.values()) {
+      addReferencedHash(hashes, row.contentHash);
+      addReferencedHash(hashes, row.expectedHash);
+    }
+    for (const snapshot of this.snapshots.values()) {
+      for (const item of snapshot.evidence) {
+        addReferencedHash(hashes, item.contentHash);
+        addReferencedHash(hashes, item.expectedHash);
+      }
+    }
+    return hashes;
   }
 
   async insertArtifact(row: ArtifactRow): Promise<void> {
@@ -1064,6 +1084,26 @@ export class PgCaseStore implements CaseStore {
       [caseId],
     );
     return result.rows.map((row) => asArtifact(row as Record<string, unknown>));
+  }
+
+  async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
+    const result = await this.db.query<{ hash: string | null }>(
+      `SELECT hash FROM (
+         SELECT content_hash AS hash FROM evidence_artifacts
+         UNION
+         SELECT expected_hash FROM evidence_artifacts
+         UNION
+         SELECT item->>'contentHash'
+         FROM snapshots, LATERAL jsonb_array_elements(evidence) AS item
+         UNION
+         SELECT item->>'expectedHash'
+         FROM snapshots, LATERAL jsonb_array_elements(evidence) AS item
+       ) hashes
+       WHERE hash ~ '^[0-9a-f]{64}$'`,
+    );
+    const hashes = new Set<string>();
+    for (const row of result.rows) addReferencedHash(hashes, row.hash);
+    return hashes;
   }
 
   async insertArtifact(row: ArtifactRow): Promise<void> {

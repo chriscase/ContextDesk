@@ -12,7 +12,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
-import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
+import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import { MapAuthAdapter } from "../auth/index.js";
 import {
@@ -648,6 +648,55 @@ describe("external-run import", () => {
       expect(await cases.listContributions(created.id, actor, false)).toEqual([]);
       expect(await imports.listRuns(created.id, actor, false)).toEqual([]);
       expect(await evidence.head(sha256Hex(new TextEncoder().encode(outputText)))).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps imported run bytes when recovering unreferenced promote residue", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-import-pending-write-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const caseStore = new MemoryCaseStore();
+    const runs = new MemoryRunStore();
+    evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
+    evidence.addReferencedContentHashSource(() => runs.listReferencedContentHashes());
+    const cases = new CaseService(evidence, audit, caseStore, catalog);
+    const imports = new ImportService({
+      evidence,
+      audit,
+      cases,
+      catalog,
+      runs,
+    });
+    try {
+      const created = await cases.createCase(actor, { title: "Import hash recovery fixture" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const outputText = "synthetic imported mailer timeout transcript";
+      const imported = await imports.importRun(
+        created.id,
+        actor,
+        {
+          outputText,
+          sourceId: source.id,
+          operatorId: "uid=operator,ou=people,dc=example,dc=test",
+          operatorUsername: "operator",
+        },
+        "test",
+        false,
+      );
+      const crashedBytes = new TextEncoder().encode("2026-08-25T00:01:00Z synthetic import crash residue\n");
+      const batch = await evidence.beginWriteBatch();
+      const crashedMeta = await batch.put(crashedBytes, { contentType: "text/plain" });
+      await batch.promote();
+      await abandonWriteBatchForCrashTest(batch);
+      const recovered = await evidence.recoverUnreferencedWrites();
+      expect(recovered.reclaimed).toEqual([crashedMeta.hash]);
+      expect(await evidence.head(crashedMeta.hash)).toBeNull();
+      expect(await evidence.verify(imported.outputHash)).toBe(true);
+      expect(await runs.listReferencedContentHashes()).toEqual(new Set([imported.outputHash]));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -593,11 +593,11 @@ export async function withPgApplyTransaction<T>(
           return result as T;
         }
       } catch {
-        await batch.finalize();
+        await batch.finalize({ retainPendingJournal: true });
         throw new PortableCommitOutcomeUnknownError();
       }
     } else if (commitAttempted) {
-      await batch.finalize();
+      await batch.finalize({ retainPendingJournal: true });
       throw new PortableCommitOutcomeUnknownError();
     }
     if (began) {

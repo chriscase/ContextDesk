@@ -596,6 +596,9 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   const applyState = new MemoryPortableApplyStateStore();
   const catalog = new CatalogService(catalogStore, audit);
   const cases = new CaseService(evidence, audit, caseStore, catalog);
+  evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
+  evidence.addReferencedContentHashSource(() => runStore.listReferencedContentHashes());
+  await evidence.recoverUnreferencedWrites();
   const imports = new ImportService({
     evidence,
     audit,

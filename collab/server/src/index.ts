@@ -143,6 +143,9 @@ async function main(): Promise<void> {
       : {}),
   });
   await store.ping();
+  store.addReferencedContentHashSource(() => storage.cases.listReferencedContentHashes());
+  store.addReferencedContentHashSource(() => storage.runs.listReferencedContentHashes());
+  await store.recoverUnreferencedWrites();
   const log = createAuthLog();
   const adapter = config.authMode === "local"
     ? loadLocalAuthAdapter()

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FilesystemEvidenceStore, sha256Hex } from "../evidence/store.js";
+import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../evidence/store.js";
 import { CatalogService } from "../modules/catalog/index.js";
 import { CaseService } from "../modules/cases/index.js";
 import { createSqliteRuntime } from "./sqlite.js";
@@ -282,6 +282,55 @@ describe("SQLite local runtime", () => {
       expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
       expect(await reopened.audit.list({ action: "evidence_register" })).toEqual([]);
       reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reclaims unreferenced CAS bytes after a promote crash across SQLite reopen", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-pending-write-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    const evidenceRoot = join(root, "evidence");
+    try {
+      const first = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: evidenceRoot });
+      evidence.addReferencedContentHashSource(() => first.cases.listReferencedContentHashes());
+      const catalog = new CatalogService(first.catalog, first.audit);
+      const cases = new CaseService(evidence, first.audit, first.cases, catalog);
+      const created = await cases.createCase(actor, { title: "SQLite promote crash fixture" }, "test");
+      const keptBytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic sqlite kept stall\n");
+      const kept = await cases.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "kept-sqlite.log",
+          mediaType: "text/plain",
+          bytes: keptBytes,
+          summary: "Synthetic SQLite kept stall.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const crashedBytes = new TextEncoder().encode("2026-08-25T00:01:00Z synthetic sqlite crash residue\n");
+      const batch = await evidence.beginWriteBatch();
+      const crashedMeta = await batch.put(crashedBytes, { contentType: "text/plain" });
+      await batch.promote();
+      await abandonWriteBatchForCrashTest(batch);
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      const recoveredStore = new FilesystemEvidenceStore({ rootDir: evidenceRoot });
+      recoveredStore.addReferencedContentHashSource(() => second.cases.listReferencedContentHashes());
+      const recovered = await recoveredStore.recoverUnreferencedWrites();
+      expect(recovered.reclaimed).toEqual([crashedMeta.hash]);
+      expect(await recoveredStore.head(crashedMeta.hash)).toBeNull();
+      expect(await recoveredStore.verify(kept.artifact.contentHash ?? "")).toBe(true);
+      expect(await second.cases.listArtifactsByCase(created.id)).toHaveLength(1);
+      expect((await second.cases.listTimeline(created.id)).filter((event) => event.kind === "evidence_registered"))
+        .toHaveLength(1);
+      second.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

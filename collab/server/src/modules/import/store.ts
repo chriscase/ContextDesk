@@ -47,6 +47,7 @@ export interface RunStore {
   insert(row: FrozenRunRow): Promise<void>;
   get(id: string): Promise<FrozenRunRow | null>;
   listByCase(caseId: string): Promise<FrozenRunRow[]>;
+  listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   listCorroborations(runId: string): Promise<CorroborationRow[]>;
   appendCorroboration(row: Omit<CorroborationRow, "seq" | "createdAt">): Promise<CorroborationRow>;
 }
@@ -89,6 +90,15 @@ export class MemoryRunStore implements RunStore {
     return [...this.runs.values()]
       .filter((row) => row.caseId === caseId)
       .map((row) => ({ ...row, claimedTraces: [...row.claimedTraces] }));
+  }
+
+  async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
+    const hashes = new Set<string>();
+    for (const row of this.runs.values()) {
+      if (/^[0-9a-f]{64}$/.test(row.outputHash)) hashes.add(row.outputHash);
+      if (row.promptHash && /^[0-9a-f]{64}$/.test(row.promptHash)) hashes.add(row.promptHash);
+    }
+    return hashes;
   }
 
   async listCorroborations(runId: string): Promise<CorroborationRow[]> {
@@ -176,6 +186,22 @@ export class PgRunStore implements RunStore {
       [caseId],
     );
     return result.rows.map((row) => asRun(row as Record<string, unknown>));
+  }
+
+  async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
+    const result = await this.db.query<{ hash: string | null }>(
+      `SELECT hash FROM (
+         SELECT output_hash AS hash FROM imported_runs
+         UNION
+         SELECT prompt_hash FROM imported_runs
+       ) hashes
+       WHERE hash ~ '^[0-9a-f]{64}$'`,
+    );
+    return new Set(
+      result.rows
+        .map((row) => row.hash)
+        .filter((hash): hash is string => Boolean(hash && /^[0-9a-f]{64}$/.test(hash))),
+    );
   }
 
   async listCorroborations(runId: string): Promise<CorroborationRow[]> {

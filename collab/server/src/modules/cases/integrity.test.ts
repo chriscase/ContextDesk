@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CORPUS_INTAKE_COMMIT_SCHEMA_ID } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
-import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
+import {
+  FilesystemEvidenceStore,
+  abandonWriteBatchForCrashTest,
+  sha256Hex,
+} from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { corpusIntakeRequestDigest } from "../corpus-intake/index.js";
@@ -753,6 +757,44 @@ describe("case write integrity", () => {
       expect(tombstoneReplay.revision).toBe(tombstoned.revision);
       expect(tombstoneReplay.tombstoned).toBe(true);
       expect((await service.provenance(created.id, note.id)).filter((row) => row.tombstoned)).toHaveLength(1);
+    });
+  });
+
+  it("reclaims promoted evidence bytes after a crash before commit and keeps referenced digests", async () => {
+    await withService(async ({ service, evidence, store }) => {
+      evidence.addReferencedContentHashSource(() => store.listReferencedContentHashes());
+      const created = await service.createCase(actor, { title: "Promote crash recovery fixture" }, "test");
+      const keptBytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic kept worker stall\n");
+      const kept = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "kept-worker.log",
+          mediaType: "text/plain",
+          bytes: keptBytes,
+          summary: "Synthetic kept worker stall.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const crashedBytes = new TextEncoder().encode("2026-08-25T00:01:00Z synthetic crashed corpus\n");
+      const batch = await evidence.beginWriteBatch();
+      const crashedMeta = await batch.put(crashedBytes, { contentType: "text/plain" });
+      await batch.promote();
+      expect(await evidence.verify(crashedMeta.hash)).toBe(true);
+      await abandonWriteBatchForCrashTest(batch);
+      expect(await store.listArtifactsByCase(created.id)).toHaveLength(1);
+      const recovered = await evidence.recoverUnreferencedWrites();
+      expect(recovered.reclaimed).toEqual([crashedMeta.hash]);
+      expect(await evidence.head(crashedMeta.hash)).toBeNull();
+      expect(await evidence.verify(kept.artifact.contentHash ?? "")).toBe(true);
+      expect((await service.listArtifacts(created.id, actor, false)).map((row) => row.id)).toEqual([
+        kept.artifact.id,
+      ]);
+      expect(
+        (await service.listTimeline(created.id)).filter((event) => event.kind === "evidence_registered"),
+      ).toHaveLength(1);
     });
   });
 });
