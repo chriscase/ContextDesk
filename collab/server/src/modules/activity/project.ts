@@ -186,7 +186,7 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
       }
       return { activityKind: "investigation_updated", resourceKind: "observation", resourceId: target, provenance: "human", summary: "updated the investigation record", humanFinding: false, revision, workstreamId: null };
     case "hypothesis_status":
-      return { activityKind: status === "superseded" ? "decision_superseded" : "hypothesis_updated", resourceKind: "hypothesis", resourceId: target, provenance: "human", summary: status === "superseded" ? "superseded a working hypothesis" : "updated a working hypothesis", humanFinding: true, revision, workstreamId: null };
+      return { activityKind: "hypothesis_updated", resourceKind: "hypothesis", resourceId: target, provenance: "human", summary: status === "superseded" ? "superseded a working hypothesis" : "updated a working hypothesis", humanFinding: true, revision, workstreamId: null };
     case "triage_job_created":
       return { activityKind: rerun ? "workstream_rerun" : "workstream_launched", resourceKind: rerun ? "workstream_rerun" : "workstream", resourceId: target, provenance: "system", summary: rerun ? "reran a workstream" : "launched a workstream", humanFinding: false, revision: null, workstreamId: jobId };
     case "triage_job_started":
