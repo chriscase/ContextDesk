@@ -742,6 +742,12 @@ export async function persistPortableArchive(input: {
     if (/^evidence_/.test(event.kind) && (event.targetNamespace !== "evidence" || !event.targetId)) {
       throw new Error("evidence timeline is missing a portable evidence target");
     }
+    if (/^triage_job_/.test(event.kind)) {
+      const parsed = event.targetId ? parsePortableTriageAttemptTarget(event.targetId) : null;
+      if (event.targetNamespace !== "triage_job" || !event.targetId || parsed) {
+        throw new Error("workstream job timeline is missing a portable job target");
+      }
+    }
   }
   const remapCandidateId = (candidateId: string): string => {
     const imported = bundle.importedAiRuns.find((run) => candidateId === `chat-${run.id}`);

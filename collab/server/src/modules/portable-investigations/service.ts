@@ -1097,6 +1097,15 @@ export class PortableInvestigationService {
           "evidence timeline is missing a portable evidence target",
         );
       }
+      if (/^triage_job_/.test(row.kind)) {
+        const parsed = addressed?.targetId ? parsePortableTriageAttemptTarget(addressed.targetId) : null;
+        if (addressed?.namespace !== "triage_job" || parsed) {
+          throw new PortableServerError(
+            "unsupported_state",
+            "workstream job timeline is missing a portable job target",
+          );
+        }
+      }
       if (row.kind === "corpus_intake_committed" && addressed?.namespace !== "intake_batch") {
         throw new PortableServerError(
           "unsupported_state",

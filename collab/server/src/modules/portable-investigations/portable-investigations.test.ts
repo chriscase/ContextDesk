@@ -1114,6 +1114,83 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable evidence target/);
   });
 
+  it("refuses apply when workstream job timeline lacks a job target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const missing = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind.startsWith("triage_job_"));
+      if (!event) throw new Error("workstream job timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(missing);
+    const dryRun = await row.portable.preflight(
+      missing,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: missing,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            missing.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/workstream job timeline/);
+
+    const job = archive.investigation.triageJobs[0];
+    const candidateId = job?.candidates[0]?.candidateId;
+    if (!job || !candidateId) throw new Error("portable triage job is missing");
+    const collapsed = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind.startsWith("triage_job_"));
+      if (!event) throw new Error("workstream job timeline is missing");
+      event.targetNamespace = "triage_job";
+      event.targetId = `${job.id}:${candidateId}`;
+    });
+    const collapsedMap = identityMapFor(collapsed);
+    const collapsedDry = await row.portable.preflight(
+      collapsed,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap: collapsedMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: collapsed,
+          report: collapsedDry.report,
+          identityMap: collapsedMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            collapsed.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/workstream job timeline/);
+  });
+
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -2158,6 +2235,13 @@ describe("portable investigation apply", () => {
       expect(destJobs.map((job) => job.id)).toContain(event.targetId?.split(":")[0]);
       expect(event.targetId).not.toBe(applied.investigationId);
       expect(destJobs.map((job) => job.id)).not.toContain(event.targetId);
+    }
+    const destJobEvents = destAttemptTimeline.filter((event) => event.kind.startsWith("triage_job_"));
+    expect(destJobEvents.length).toBeGreaterThan(0);
+    for (const event of destJobEvents) {
+      expect(destJobs.map((job) => job.id)).toContain(event.targetId);
+      expect(event.targetId).not.toMatch(/:/);
+      expect(event.targetId).not.toBe(applied.investigationId);
     }
     const destArtifacts = await row.cases.listArtifacts(applied.investigationId, ACTOR, false);
     const destIntakeEvidence = destArtifacts.find((item) => item.relativePath === "router/locator.log");

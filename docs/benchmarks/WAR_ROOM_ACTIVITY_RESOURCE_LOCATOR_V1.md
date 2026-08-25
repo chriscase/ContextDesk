@@ -93,7 +93,8 @@ dropped imported-run targets), and contribution ids from
 `targetNamespace=contribution` (`contribution_*` / `hypothesis_status`; persist
 refuses dropped contribution targets), and evidence ids from
 `targetNamespace=evidence` (`evidence_*`; persist refuses dropped evidence
-targets);
+targets), and job-level workstream ids from `targetNamespace=triage_job`
+(`triage_job_*`; persist refuses dropped or attempt-composite job targets);
 resolve is re-run
 against the destination identities after apply and remains `not_found` for
 kind-confused or unauthorized locators. `experiment_gold_promoted` projects
