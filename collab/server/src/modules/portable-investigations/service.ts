@@ -1070,6 +1070,12 @@ export class PortableInvestigationService {
           "workstream attempt timeline is missing a portable job target",
         );
       }
+      if (row.kind === "snapshot_frozen" && addressed?.namespace !== "snapshot") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "snapshot timeline is missing a portable snapshot target",
+        );
+      }
       if (row.kind === "corpus_intake_committed" && addressed?.namespace !== "intake_batch") {
         throw new PortableServerError(
           "unsupported_state",

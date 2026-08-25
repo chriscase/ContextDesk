@@ -724,6 +724,9 @@ export async function persistPortableArchive(input: {
         throw new Error("workstream attempt timeline is missing a portable job target");
       }
     }
+    if (event.kind === "snapshot_frozen" && (event.targetNamespace !== "snapshot" || !event.targetId)) {
+      throw new Error("snapshot timeline is missing a portable snapshot target");
+    }
   }
   const remapCandidateId = (candidateId: string): string => {
     const imported = bundle.importedAiRuns.find((run) => candidateId === `chat-${run.id}`);

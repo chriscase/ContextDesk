@@ -958,6 +958,45 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable job target/);
   });
 
+  it("refuses apply when snapshot timeline lacks a snapshot target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "snapshot_frozen");
+      if (!event) throw new Error("snapshot timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable snapshot target/);
+  });
+
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1843,6 +1882,15 @@ describe("portable investigation apply", () => {
     expect(destDiscussion?.locator.resourceId).not.toBe(sourceDiscussion?.locator.resourceId);
     expect(destEvidence?.locator.resourceId).not.toBe(sourceEvidence?.locator.resourceId);
     expect(destFrozen?.locator.resourceId).not.toBe(sourceFrozen?.locator.resourceId);
+    expect(destFrozen?.locator.kind).toBe("evidence_context");
+    expect(destFrozen?.locator.resourceId).not.toBe(applied.investigationId);
+    const destFrozenTimeline = await row.cases.listTimeline(applied.investigationId);
+    const destFrozenEvents = destFrozenTimeline.filter((event) => event.kind === "snapshot_frozen");
+    expect(destFrozenEvents.length).toBeGreaterThan(0);
+    for (const event of destFrozenEvents) {
+      expect(event.targetId).toBe(destFrozen?.locator.resourceId);
+      expect(event.targetId).not.toBe(applied.investigationId);
+    }
     expect(destDecision?.locator.kind).toBe("decision_revision");
     expect(destDecision?.locator.resourceId).not.toBe(sourceDecision?.locator.resourceId);
     expect(destGold?.locator.kind).toBe("gold");
