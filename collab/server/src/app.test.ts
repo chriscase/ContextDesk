@@ -5,6 +5,7 @@ import { parseHealthResponse, parseReadyResponse } from "@cd-collab/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { testConfig } from "./config.js";
+import { latestMigrationVersion } from "./db/migrate.js";
 import { FilesystemEvidenceStore } from "./evidence/store.js";
 
 describe("health and readiness", () => {
@@ -57,10 +58,14 @@ describe("health and readiness", () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-ready-ok-"));
     dirs.push(root);
     const store = new FilesystemEvidenceStore({ rootDir: root });
+    const queries: Array<{ text: string; values: unknown[] | undefined }> = [];
     const app = await buildApp({
       config: testConfig({ evidenceRoot: root }),
       pool: {
-        query: async () => ({ rows: [{ "?column?": 1 }], rowCount: 1 }),
+        query: async (text: string, values?: unknown[]) => {
+          queries.push({ text, values });
+          return { rows: [{ "?column?": 1 }], rowCount: 1 };
+        },
       },
       store,
     });
@@ -70,10 +75,16 @@ describe("health and readiness", () => {
     expect(body.status).toBe("ready");
     expect(body.database).toBe("up");
     expect(body.evidenceStore).toBe("up");
+    expect(queries).toEqual([
+      {
+        text: "SELECT 1 FROM schema_migrations WHERE version = $1",
+        values: [latestMigrationVersion()],
+      },
+    ]);
     await app.close();
   });
 
-  it("reports not_ready when migration 013 is not applied", async () => {
+  it("reports not_ready when the latest migration is not applied", async () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-ready-migration-"));
     dirs.push(root);
     const store = new FilesystemEvidenceStore({ rootDir: root });

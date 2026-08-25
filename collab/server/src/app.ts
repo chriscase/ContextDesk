@@ -11,6 +11,7 @@ import {
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import type { Config } from "./config.js";
+import { latestMigrationVersion } from "./db/migrate.js";
 import type { EvidenceStore } from "./evidence/store.js";
 import { registerAuthRoutes, type AuthRouteDeps } from "./modules/auth/index.js";
 import { registerAuthzRoutes } from "./modules/authz/index.js";
@@ -68,6 +69,7 @@ export interface AppDeps {
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
+  const requiredMigrationVersion = latestMigrationVersion();
 
   app.get("/health", async (): Promise<HealthResponseV1> => {
     return {
@@ -83,7 +85,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (deps.pool) {
       try {
         const migrated = await deps.pool.query(
-          "SELECT 1 FROM schema_migrations WHERE version = '013_corpus_intake'",
+          "SELECT 1 FROM schema_migrations WHERE version = $1",
+          [requiredMigrationVersion],
         );
         if (migrated.rowCount !== 1) throw new Error("required migration is not applied");
         database = "up";
