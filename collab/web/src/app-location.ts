@@ -66,10 +66,51 @@ export const PROFILE: WorkLocation = {
   stage: "situation",
 };
 
+export const ADMINISTRATION: WorkLocation = {
+  area: "administration",
+  caseId: null,
+  stage: "situation",
+};
+
+/** Canonical People tab. `/administration` remains the roles alias. */
+export const PEOPLE_SECTION = "people";
+export const PEOPLE: WorkLocation = {
+  area: "administration",
+  caseId: null,
+  stage: "situation",
+  focus: {
+    section: PEOPLE_SECTION,
+    item: null,
+    itemKind: null,
+    lane: null,
+    experiment: null,
+  },
+};
+
 export const SIGN_IN: SignInLocation = { kind: "sign-in" };
+
+export const DISCUSSION_SECTION = "discussion";
+export const DISCUSSION_SECTION_LEGACY = "case-discussion";
+export const DISCUSSION_ELEMENT_ID = "case-discussion";
+
+export function isDiscussionSection(section: string): boolean {
+  return section === DISCUSSION_SECTION || section === DISCUSSION_SECTION_LEGACY;
+}
+
+export function canonicalRouteSection(section: string): string {
+  return section === DISCUSSION_SECTION_LEGACY ? DISCUSSION_SECTION : section;
+}
 
 export function isProfileLocation(value: unknown): value is WorkLocation {
   return isWorkLocation(value) && value.area === "profile";
+}
+
+export function isPeopleLocation(value: unknown): value is WorkLocation {
+  return (
+    isWorkLocation(value)
+    && value.area === "administration"
+    && value.focus?.section === PEOPLE_SECTION
+  );
 }
 
 /**
@@ -231,7 +272,9 @@ function boundedFocusValue(value: string | null): string | null {
 function parseFocus(search: string, hash: string): WorkFocus | undefined {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const hashSection = boundedFocusValue(hash.replace(/^#/, ""));
-  const section = boundedFocusValue(params.get("section")) ?? hashSection;
+  const section = canonicalRouteSection(
+    boundedFocusValue(params.get("section")) ?? hashSection ?? "",
+  );
   if (!section) return undefined;
   return {
     section,
@@ -267,11 +310,11 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/profile") {
     return { ...PROFILE };
   }
-  if (path === "/administration" || path === "/admin/people") {
-    // /admin/people is a focused sub-view the Administration component
-    // itself renders (a People tab); it shares the same area gate (an
-    // admin role) as /administration and does not need its own AreaId.
-    return { area: "administration", caseId: null, stage: "situation" };
+  if (path === "/admin/people") {
+    return { ...PEOPLE };
+  }
+  if (path === "/administration") {
+    return { ...ADMINISTRATION };
   }
   const investigation = /^\/investigations\/([^/]+)(?:\/([^/]+))?$/.exec(path);
   if (investigation) {
@@ -308,7 +351,7 @@ export function areaPathFor(location: WorkLocation): string {
     return "/profile";
   }
   if (location.area === "administration") {
-    return "/administration";
+    return isPeopleLocation(location) ? "/admin/people" : "/administration";
   }
   return "/investigations";
 }
@@ -364,7 +407,9 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
     return "My profile · ContextDesk War Room";
   }
   if (location.area === "administration") {
-    return "Administration · ContextDesk War Room";
+    return isPeopleLocation(location)
+      ? "People · Administration · ContextDesk War Room"
+      : "Administration · ContextDesk War Room";
   }
   if (location.area === "investigations" && location.caseId) {
     const stage = location.stage.slice(0, 1).toUpperCase() + location.stage.slice(1);

@@ -134,10 +134,15 @@ export function Workstreams(props: {
   const loaded = workstreams !== null;
   const focusedKey = props.routeFocus?.section === WORKSTREAMS_SECTION
     ? props.routeFocus.lane
-      ?? (props.routeFocus.itemKind === "workstream" ? props.routeFocus.item : null)
+      ?? (props.routeFocus.itemKind === "workstream" || props.routeFocus.itemKind === "triage-run"
+        ? props.routeFocus.item
+        : null)
     : null;
-  const focused = focusedKey
-    ? workstreams?.find((row) => row.key === focusedKey) ?? null
+  const focused = focusedKey && workstreams
+    ? workstreams.find((row) => row.key === focusedKey)
+      ?? (!focusedKey.includes(":")
+        ? workstreams.find((row) => row.key.startsWith(`${focusedKey}:`)) ?? null
+        : null)
     : null;
 
   useRouteFocus(props.routeFocus, loaded);

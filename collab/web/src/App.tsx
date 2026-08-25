@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ADMINISTRATION,
   HOME,
+  PEOPLE,
   PROFILE,
   SIGN_IN,
   historyUrl,
+  isPeopleLocation,
   isProfileLocation,
   isShellLocation,
   isSignInLocation,
@@ -361,8 +364,18 @@ export function App() {
       restoreRef.current = null;
       setLocation(next);
       writeHistory(next, "replace");
+      return;
     }
-  }, [ready, session]);
+    if (!isWorkLocation(current)) return;
+    // Direct and restored locators may still carry a legacy alias
+    // (`case-discussion`). Rewrite to the copyable canonical URL without
+    // changing the in-memory destination.
+    const canonical = historyUrl(current, window.location.pathname);
+    const live = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (canonical !== live) {
+      writeHistory(current, "replace");
+    }
+  }, [ready, session, location]);
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
@@ -713,7 +726,12 @@ export function App() {
             {work.area === "administration" ? (
               canAdmin ? (
                 <section className="app__area" aria-label="Administration">
-                  <Administration />
+                  <Administration
+                    tab={isPeopleLocation(work) ? "people" : "roles"}
+                    onSelectTab={(tab) =>
+                      guardedNavigate(tab === "people" ? PEOPLE : ADMINISTRATION)
+                    }
+                  />
                 </section>
               ) : (
                 <section className="not-found" aria-labelledby="administration-denied-title">

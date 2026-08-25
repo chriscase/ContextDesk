@@ -47,7 +47,11 @@ scoped reads use the full timeline for that case.
 Compact form: `cdl.v1/{installationId}/{investigationId}/{kind}/{resourceId}[;rev=N]`.
 
 JSON locators also carry a **derived** pathname
-`/investigations/{uuid}/{stage}?...#section`. Parsers reject:
+`/investigations/{uuid}/{stage}?...#section` from `routedInvestigationFocus`.
+Discussion comments use `section=discussion` (legacy `case-discussion` still
+parses). Job-level workstream events open the Analyze run record
+(`triage-lane-runner`, `kind=triage-run`). Lane attempts open the workstream
+record (`workstreams`, `kind=workstream`, with `lane`). Parsers reject:
 
 - unknown kinds and version ≠ 1
 - malformed installation, investigation, or resource ids

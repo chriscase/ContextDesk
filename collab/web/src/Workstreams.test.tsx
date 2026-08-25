@@ -358,6 +358,26 @@ describe("focused workstream", () => {
     expect(screen.getByRole("link", { name: "Back to all workstreams" })).toBeTruthy();
   });
 
+  it("opens an existing workstream when a job-level locator names the run, not a missing card", async () => {
+    stubApi();
+    render(
+      <Workstreams
+        caseId={CASE_ID}
+        routeFocus={{
+          section: "workstreams",
+          item: "run-1",
+          itemKind: "workstream",
+          lane: null,
+          experiment: null,
+        }}
+      />,
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("returns to the list through a real route, not history state", async () => {
     stubApi();
     const onDeepNavigate = vi.fn();
