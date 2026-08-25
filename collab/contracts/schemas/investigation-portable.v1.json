@@ -545,6 +545,7 @@
           "taskFingerprint": { "$ref": "#/$defs/fingerprint" },
           "candidateIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
           "createdAt": { "$ref": "#/$defs/timestamp" },
+          "importerId": { "type": "string", "minLength": 1 },
           "objectHash": { "$ref": "#/$defs/objectHash" }
         }
       }

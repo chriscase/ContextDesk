@@ -674,6 +674,7 @@ const experimentShape: ObjectShape = {
   taskFingerprint: f.req(f.str),
   candidateIds: f.req(f.arr(f.str)),
   createdAt: f.req(f.str),
+  importerId: f.opt(f.str),
   objectHash: f.req(f.str),
 };
 
@@ -1015,6 +1016,7 @@ export interface PortableExperimentV1 {
   taskFingerprint: string;
   candidateIds: string[];
   createdAt: string;
+  importerId?: string;
   objectHash: string;
 }
 
@@ -2099,6 +2101,9 @@ export function parsePortableInvestigation(
           "experiment candidate is not backed by a triage job or imported AI run",
         );
       }
+    }
+    if (exp.importerId) {
+      requireActor(actors, exp.importerId, `$.experiments[${i}].importerId`);
     }
   }
 

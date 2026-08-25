@@ -485,6 +485,7 @@ function applySupportReasons(
       ...(row.importerId ? [row.importerId] : []),
       ...(row.operatorId ? [row.operatorId] : []),
     ]),
+    ...bundle.experiments.flatMap((row) => (row.importerId ? [row.importerId] : [])),
     ...bundle.triageJobs.map((row) => row.requestedBy),
     ...bundle.helpfulnessObservations.map((row) => row.reviewerId),
     ...bundle.decisions.flatMap((row) => [row.authorId, ...(row.ownerId ? [row.ownerId] : [])]),
@@ -716,6 +717,7 @@ export class PortableInvestigationService {
     for (const row of snapshots) addActor(actors, { id: row.createdBy });
     for (const row of jobs) addActor(actors, { id: row.requestedBy, username: row.requestedByUsername });
     for (const row of experiments) {
+      addActor(actors, { id: row.importerId, username: row.importerUsername });
       for (const observation of row.observations) {
         addActor(actors, { id: observation.reviewerId, username: observation.reviewerUsername });
       }
@@ -957,6 +959,7 @@ export class PortableInvestigationService {
         taskFingerprint: portableFingerprint(experiment.taskFingerprint, "task"),
         candidateIds: experiment.candidates.map((candidate) => candidate.candidateId),
         createdAt: experiment.createdAt,
+        importerId: experiment.importerId,
         objectHash: "",
       };
     });

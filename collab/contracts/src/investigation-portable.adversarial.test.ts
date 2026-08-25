@@ -653,6 +653,12 @@ describe("portable investigation adversarial lab", () => {
       /dangling actor/,
     );
 
+    const danglingExperimentImporter = syntheticSeal();
+    danglingExperimentImporter.experiments[0]!.importerId = "ghost-importer";
+    expect(() => parsePortableInvestigation(reseal(danglingExperimentImporter))).toThrow(
+      /dangling actor/,
+    );
+
     const danglingIntake = syntheticSeal();
     danglingIntake.timeline[0]!.targetNamespace = "intake_batch";
     danglingIntake.timeline[0]!.targetId = "ghost-batch";

@@ -1208,6 +1208,9 @@ export async function persistPortableArchive(input: {
 
   for (const experiment of bundle.experiments) {
     const id = remapOf(report, "experiment", experiment.id);
+    const importer = experiment.importerId
+      ? attribution(experiment.importerId)
+      : { id: actor.id, username: actor.username };
     const experimentRow: ExperimentRow = {
       id,
       caseId: investigationId,
@@ -1237,8 +1240,8 @@ export async function persistPortableArchive(input: {
       })),
       agreement: { sharedAnchors: [], candidateSpecific: [], roleConflicts: [], notes: [] },
       createdAt: experiment.createdAt,
-      importerId: actor.id,
-      importerUsername: actor.username,
+      importerId: importer.id,
+      importerUsername: importer.username,
     };
     await ports.experiments.insert(experimentRow);
   }

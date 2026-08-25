@@ -149,6 +149,7 @@ export interface ExperimentView {
   snapshotFingerprint: string;
   snapshotProof: ExperimentSnapshotProof;
   createdAt: string;
+  importerId: string;
   importerUsername: string;
   candidates: ReturnType<typeof projectCandidateMatrix>;
   agreement: ExperimentAgreementV1;
@@ -1296,6 +1297,7 @@ export class ExperimentService {
       snapshotFingerprint: row.snapshotFingerprint,
       snapshotProof: { ...row.snapshotProof },
       createdAt: row.createdAt,
+      importerId: row.importerId,
       importerUsername: row.importerUsername,
       candidates: projectCandidateMatrix(candidates, Boolean(gold)),
       agreement: row.agreement,

@@ -40,7 +40,7 @@ import {
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService, MemoryCatalogStore } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
-import { ExperimentService, MemoryExperimentStore } from "../experiments/index.js";
+import { ExperimentService, MemoryExperimentStore, PgExperimentStore } from "../experiments/index.js";
 import { ImportService, MemoryRunStore, PgRunStore } from "../import/index.js";
 import { MemoryTriageJobStore, TriageRunService } from "../triage-runs/index.js";
 import { loadPortableInstallationId } from "./installation.js";
@@ -61,6 +61,10 @@ import {
 } from "./service.js";
 
 const ACTOR = { id: "actor-north", username: "operator-north" };
+const HISTORICAL_EXPERIMENT_IMPORTER = {
+  id: "actor-historical-experiment-importer",
+  username: "experiment-importer",
+};
 const LOG_BYTES = new TextEncoder().encode(
   "2042-03-04T10:00:00Z queue-worker WARN synthetic backlog exceeded 40 items\n",
 );
@@ -493,6 +497,51 @@ function detachedArchiveFor(
       },
     ],
   };
+}
+
+async function importExperimentAsHistorical(row: Fixture) {
+  await row.cases.addParticipant(
+    row.caseId,
+    ACTOR,
+    {
+      identityId: HISTORICAL_EXPERIMENT_IMPORTER.id,
+      username: HISTORICAL_EXPERIMENT_IMPORTER.username,
+    },
+    "fixture",
+  );
+  const job = (await row.triageRuns.list(row.caseId, ACTOR, true))[0];
+  if (!job) throw new Error("fixture triage job is missing");
+  const firstRun = (await row.imports.listRuns(row.caseId, ACTOR, true))[0];
+  if (!firstRun) throw new Error("fixture imported run is missing");
+  const snapshot = (await row.cases.listSnapshots(row.caseId, ACTOR, true))[0];
+  if (!snapshot) throw new Error("fixture snapshot is missing");
+  const extraRun = await row.imports.importRun(
+    row.caseId,
+    ACTOR,
+    {
+      outputText: "A second synthetic stall remains historically imported.",
+      promptText: "Inspect the second synthetic queue evidence.",
+      sourceId: firstRun.sourceId,
+      operatorId: ACTOR.id,
+      operatorUsername: ACTOR.username,
+      promptCompleteness: "exact",
+      outputCompleteness: "exact",
+      snapshotBinding: snapshot.fingerprint,
+      privacyClass: "owner_only",
+    },
+    "fixture",
+    false,
+  );
+  const source = await row.experiments.importTriageJob(
+    row.caseId,
+    HISTORICAL_EXPERIMENT_IMPORTER,
+    job,
+    extraRun,
+    "fixture",
+    false,
+  );
+  expect(source.importerUsername).toBe(HISTORICAL_EXPERIMENT_IMPORTER.username);
+  return source;
 }
 
 function applyInput(
@@ -2320,6 +2369,34 @@ describe("portable investigation apply", () => {
     expect(dest?.operatorUsername).toMatch(/^historical-/);
   });
 
+  it("preserves remapped experiment importer after portable restore", async () => {
+    const row = await fixture();
+    const source = await importExperimentAsHistorical(row);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const portable = archive.investigation.experiments.find((item) => item.id === source.id);
+    expect(portable?.importerId).toBe(HISTORICAL_EXPERIMENT_IMPORTER.id);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(preview.apply.confirmationToken).toEqual(expect.any(String));
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const dest = (await row.experiments.list(applied.investigationId, ACTOR, true))
+      .find((item) => item.packageId === source.packageId);
+    expect(dest?.importerId).not.toBe(ACTOR.id);
+    expect(dest?.importerId).not.toBe(HISTORICAL_EXPERIMENT_IMPORTER.id);
+    expect(dest?.importerUsername).not.toBe(ACTOR.username);
+    expect(dest?.importerUsername).toMatch(/^historical-/);
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({
@@ -3936,6 +4013,45 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
       expect(dest?.operatorId).not.toBe(ACTOR.id);
       expect(dest?.operatorId).not.toBe(source.operatorId);
       expect(dest?.operatorUsername).toMatch(/^historical-/);
+    });
+  });
+
+  it("preserves remapped experiment importer after PostgreSQL apply", async () => {
+    const row = await fixture();
+    const source = await importExperimentAsHistorical(row);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const pgRoot = await mkdtemp(join(tmpdir(), "cd-portable-pg-experiment-importer-"));
+      roots.push(pgRoot);
+      const pgEvidence = new FilesystemEvidenceStore({
+        rootDir: pgRoot,
+        acquireWriteLease: async () => () => undefined,
+      });
+      const investigationId = await withPgApplyTransaction(client, pgEvidence, async (ports) =>
+        persistPortableArchive({
+          archive,
+          report: preview.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: archiveContentBytes(archive),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      );
+      const dest = (await new PgExperimentStore(client).listByCase(investigationId))
+        .find((item) => item.packageId === source.packageId);
+      expect(dest?.importerId).not.toBe(ACTOR.id);
+      expect(dest?.importerId).not.toBe(HISTORICAL_EXPERIMENT_IMPORTER.id);
+      expect(dest?.importerUsername).toMatch(/^historical-/);
     });
   });
 });
