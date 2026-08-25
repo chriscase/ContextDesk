@@ -392,12 +392,12 @@ export function routedInvestigationFocus(
         lane: null,
       };
     case "evidence_context":
-      // Frozen snapshots only. Imported analysis uses imported_ai_run.
+      // Frozen snapshots. Imported analysis uses imported_ai_run.
       return {
         stage: "analyze",
         section: "triage-evidence-board",
         item: resourceId,
-        itemKind: null,
+        itemKind: "snapshot",
         lane: null,
       };
     case "imported_ai_run":

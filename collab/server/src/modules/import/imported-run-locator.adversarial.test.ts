@@ -147,6 +147,8 @@ async function assertImportedRunLocators(
   expect(frozen?.locator.kind).toBe("evidence_context");
   expect(frozen?.locator.resourceId).toBe(seeded.snapshotId);
   expect(frozen?.locator.resourceId).not.toBe(seeded.runId);
+  expect(frozen?.resolvedRoute).toContain("section=triage-evidence-board");
+  expect(frozen?.resolvedRoute).toContain("kind=snapshot");
   await expect(
     activity.resolve(ALICE, false, formatCompactInvestigationLocator(imported!.locator)),
   ).resolves.toMatchObject({

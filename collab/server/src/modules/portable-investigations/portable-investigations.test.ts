@@ -1946,6 +1946,9 @@ describe("portable investigation apply", () => {
     expect(sourceDiscussion?.locator.resourceId).toBeTruthy();
     expect(sourceEvidence?.locator.resourceId).toBe(row.evidenceId);
     expect(sourceFrozen?.locator.resourceId).toBeTruthy();
+    expect(sourceFrozen?.locator.kind).toBe("evidence_context");
+    expect(sourceFrozen?.resolvedRoute).toContain("section=triage-evidence-board");
+    expect(sourceFrozen?.resolvedRoute).toContain("kind=snapshot");
     expect(sourceImported?.locator.kind).toBe("imported_ai_run");
     expect(sourceImported?.locator.resourceId).toBeTruthy();
     expect(sourceImported?.locator.resourceId).not.toBe(row.caseId);
@@ -2157,6 +2160,8 @@ describe("portable investigation apply", () => {
     expect(destFrozen?.locator.resourceId).not.toBe(sourceFrozen?.locator.resourceId);
     expect(destFrozen?.locator.kind).toBe("evidence_context");
     expect(destFrozen?.locator.resourceId).not.toBe(applied.investigationId);
+    expect(destFrozen?.resolvedRoute).toContain("section=triage-evidence-board");
+    expect(destFrozen?.resolvedRoute).toContain("kind=snapshot");
     const destFrozenTimeline = await row.cases.listTimeline(applied.investigationId);
     const destContributionEvents = destFrozenTimeline.filter((event) =>
       /^contribution_|^hypothesis_/.test(event.kind),
@@ -3331,6 +3336,8 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
       expect(imported?.resolvedRoute).toContain("section=triage-capture");
       expect(imported?.resolvedRoute).toContain("kind=imported-run");
       expect(frozen?.locator.kind).toBe("evidence_context");
+      expect(frozen?.resolvedRoute).toContain("section=triage-evidence-board");
+      expect(frozen?.resolvedRoute).toContain("kind=snapshot");
       await expect(
         activity.resolve(ACTOR, false, formatCompactInvestigationLocator(imported!.locator)),
       ).resolves.toMatchObject({ authorized: true, resourceLabel: "Imported analysis" });

@@ -445,6 +445,7 @@ describe("investigation activity projection", () => {
     expect(evidence?.locator.resourceId).toBe(uploaded.artifact.id);
     expect(frozen?.locator.kind).toBe("evidence_context");
     expect(frozen?.locator.resourceId).toBe(snapshot.id);
+    expect(frozen?.resolvedRoute).toContain("kind=snapshot");
 
     const intakeBytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic intake timeout\n");
     const intakeSeed = {

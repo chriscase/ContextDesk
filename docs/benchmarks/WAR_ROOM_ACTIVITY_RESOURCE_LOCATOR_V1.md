@@ -87,7 +87,8 @@ composites from `targetNamespace=experiment` (`experiment_trace_imported`),
 and `${jobId}:${candidateId}` composites from `targetNamespace=triage_job`
 (`triage_candidate_*`; persist refuses dropped or bare-job targets), and
 snapshot ids from `targetNamespace=snapshot` (`snapshot_frozen`; persist
-refuses dropped snapshot targets), and imported-run ids from
+refuses dropped snapshot targets) and Analyze `triage-evidence-board` /
+`kind=snapshot`, and imported-run ids from
 `targetNamespace=imported_ai_run` (`external_run_imported`; persist refuses
 dropped imported-run targets), and contribution ids from
 `targetNamespace=contribution` (`contribution_*` / `hypothesis_status`; persist
@@ -109,7 +110,9 @@ the experiment id or `evidence_context`. `experiment_imported` projects
 `experiment` at the experiment id and Compare `candidate-comparison-heading`,
 not `comparison_finding`. `external_run_imported` and `run_corroboration`
 project `imported_ai_run` at the imported-run id and Capture `triage-capture`
-/ `kind=imported-run`, not snapshot `evidence_context`. Live `experiment_decision_*` writes address the
+/ `kind=imported-run`, not snapshot `evidence_context`. `snapshot_frozen`
+projects `evidence_context` at the snapshot id and Analyze
+`triage-evidence-board` / `kind=snapshot`. Live `experiment_decision_*` writes address the
 decision id (`targetId` = decision id) so activity is not payload-dependent;
 portable persist refuses archives that drop `targetNamespace=decision`.
 

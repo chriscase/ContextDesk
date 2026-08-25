@@ -405,7 +405,7 @@ describe("routed locator focus against shipped War Room sections", () => {
       investigation_stage: { stage: "analyze", section: null, itemKind: null },
       evidence_item: { stage: "analyze", section: "triage-evidence-board", itemKind: "evidence" },
       intake_batch: { stage: "capture", section: "corpus-intake", itemKind: "intake-batch" },
-      evidence_context: { stage: "analyze", section: "triage-evidence-board", itemKind: null },
+      evidence_context: { stage: "analyze", section: "triage-evidence-board", itemKind: "snapshot" },
       imported_ai_run: { stage: "capture", section: "triage-capture", itemKind: "imported-run" },
       workstream: { stage: "analyze", section: "triage-lane-runner", itemKind: "triage-run" },
       workstream_attempt: { stage: "analyze", section: "workstreams", itemKind: "workstream", hasLane: true },
