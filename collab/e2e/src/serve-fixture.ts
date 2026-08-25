@@ -49,6 +49,24 @@ const here = dirname(fileURLToPath(import.meta.url));
 const webDistEnv = process.env.COLLAB_E2E_STATIC_DIR?.trim();
 const webDist = webDistEnv ? webDistEnv : join(here, "..", "..", "web", "dist");
 const bridgeFixture = join(here, "..", "fixtures", "triage-bridge-runner.mjs");
+const degradedBridgeFixture = join(here, "..", "fixtures", "triage-bridge-degraded-runner.mjs");
+
+/**
+ * Bridge selection for browser qualification.
+ *
+ * `1` runs the clean-lane fixture. `degraded` runs the mixed completed/partial/
+ * failed fixture the War Room scenario catalog needs, so the shell can be
+ * qualified against a run that did not go well. Anything else stays on the
+ * provider-free synthetic executor.
+ */
+type BridgeMode = "off" | "clean" | "degraded";
+
+function bridgeModeFrom(raw: string | undefined): BridgeMode {
+  const value = raw?.trim().toLowerCase();
+  if (value === "1" || value === "clean") return "clean";
+  if (value === "degraded") return "degraded";
+  return "off";
+}
 
 function parsePort(raw: string | undefined): number {
   const port = Number.parseInt(raw ?? "8788", 10);
@@ -86,20 +104,20 @@ async function main(): Promise<void> {
     catalog,
     runs: runStore,
   });
-  const bridgeMode = process.env.COLLAB_E2E_BRIDGE === "1";
+  const bridgeMode = bridgeModeFrom(process.env.COLLAB_E2E_BRIDGE);
   const triageRuns = new TriageRunService({
     cases: domain,
     audit,
     jobs: jobStore,
-    ...(bridgeMode
+    ...(bridgeMode !== "off"
       ? {
           gatewayExecutor: new RustBridgeTriageExecutor({
-            command: bridgeFixture,
+            command: bridgeMode === "degraded" ? degradedBridgeFixture : bridgeFixture,
             timeoutMs: 30_000,
           }),
         }
       : { executor: new DeterministicMockTriageExecutor() }),
-    ...(bridgeMode
+    ...(bridgeMode !== "off"
       ? {
           profiles: [
             { id: "profile:fixture-qwen", label: "Fixture Qwen", provider: "openai-compatible" },
@@ -214,7 +232,7 @@ async function main(): Promise<void> {
 
   const address = await app.listen({ host: "127.0.0.1", port });
   process.stdout.write(
-    `cd-collab fixture server listening ${address} (MapAuthAdapter test-only; LDAP unused; /ready expects Postgres; bridge=${bridgeMode ? "fixture" : "synthetic"})\n`,
+    `cd-collab fixture server listening ${address} (MapAuthAdapter test-only; LDAP unused; /ready expects Postgres; bridge=${bridgeMode === "off" ? "synthetic" : bridgeMode})\n`,
   );
 }
 

@@ -115,8 +115,8 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
       mimeType: "text/plain",
       buffer: fixtureBytes("evidence", "shared-timeout.log"),
     });
-    await page.getByLabel("Summary").fill("Uploaded through the war-room form");
-    await page.getByLabel("Artifact kind").selectOption("log");
+    await page.locator(".case-memory__upload-form").getByLabel("Summary").fill("Uploaded through the war-room form");
+    await page.locator(".case-memory__upload-form").getByLabel("Artifact kind").selectOption("log");
     await page.locator(".case-memory__upload-form").getByLabel("Privacy class").selectOption("share_safe");
     const [posted] = await Promise.all([
       page.waitForResponse(

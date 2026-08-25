@@ -2044,6 +2044,7 @@ export function ExperimentLab(props: {
                 rows={6}
                 value={payload}
                 onChange={(event) => setPayload(event.target.value)}
+                aria-label="Share-safe experiment, strategy package, or summary JSON"
                 placeholder="Paste share-safe experiment, strategy package, or summary JSON"
                 required
               />
@@ -2064,6 +2065,7 @@ export function ExperimentLab(props: {
                 rows={6}
                 value={benchPayload}
                 onChange={(event) => setBenchPayload(event.target.value)}
+                aria-label="Recorded multi-strategy comparison"
                 placeholder="Paste a recorded multi-strategy comparison"
                 required
               />
@@ -3285,6 +3287,7 @@ export function ExperimentLab(props: {
                   className="login__input"
                   name="trace"
                   rows={4}
+                  aria-label="Interaction trace or plain transcript JSON"
                   placeholder="Paste interaction trace or plain transcript JSON"
                   required
                 />
@@ -3311,7 +3314,7 @@ export function ExperimentLab(props: {
                   ))}
                 </select>
                 <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
-                <textarea className="login__input" name="text" rows={2} required placeholder="Human annotation" />
+                <textarea className="login__input" name="text" rows={2} required aria-label="Human annotation" placeholder="Human annotation" />
                 <button className="login__submit" type="submit">
                   Annotate trace
                 </button>
@@ -3375,7 +3378,7 @@ export function ExperimentLab(props: {
                     artifacts={evidenceArtifacts}
                     legend="Evidence supporting this helpfulness review (optional)"
                   />
-                  <textarea className="login__input" name="rationale" rows={2} required placeholder="Helpfulness rationale" />
+                  <textarea className="login__input" name="rationale" rows={2} required aria-label="Helpfulness rationale" placeholder="Helpfulness rationale" />
                   <button className="login__submit" type="submit">
                     Record helpfulness
                   </button>
@@ -3465,8 +3468,8 @@ export function ExperimentLab(props: {
             <details className="experiment-lab__tools">
               <summary>Propose a new human decision</summary>
               <form className="composer" onSubmit={(event) => void proposeDecision(event)}>
-                <textarea className="login__input" name="text" rows={2} required placeholder="Proposed decision" />
-                <textarea className="login__input" name="rationale" rows={2} required placeholder="Decision rationale" />
+                <textarea className="login__input" name="text" rows={2} required aria-label="Proposed decision" placeholder="Proposed decision" />
+                <textarea className="login__input" name="rationale" rows={2} required aria-label="Decision rationale" placeholder="Decision rationale" />
                 <label>
                   <span>Decision owner</span>
                   <select className="login__input" name="ownerAssignment" defaultValue="unassigned">
