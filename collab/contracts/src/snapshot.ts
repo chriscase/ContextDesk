@@ -138,6 +138,19 @@ export function snapshotFairness(evidence: readonly SnapshotEvidenceV1[]): Snaps
     : "unknown";
 }
 
+/**
+ * Canonical SHA-256 digest for snapshot identity comparison.
+ * Accepts a bare hex digest or a `snap-` prefixed fingerprint.
+ * Unverifiable values return null and must never be treated as a match.
+ */
+export function snapshotFingerprintDigest(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return null;
+  const digest = normalized.startsWith("snap-") ? normalized.slice("snap-".length) : normalized;
+  return SHA256_HEX.test(digest) ? digest : null;
+}
+
 export function parseSnapshot(raw: unknown): SnapshotV1 {
   checkObject("$", snapshotShape, raw);
   const row = raw as SnapshotV1;

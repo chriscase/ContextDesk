@@ -88,6 +88,34 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
           /insert-only|permission denied/,
         );
         await app.query(
+          `INSERT INTO contributions (
+             id, case_id, kind, privacy_class, created_by, created_by_username
+           ) VALUES ($1, $2, 'note', 'owner_only', $3, 'alice')`,
+          [
+            "66666666-6666-4666-8666-666666666666",
+            "11111111-1111-1111-1111-111111111111",
+            "uid=alice,ou=people,dc=example,dc=test",
+          ],
+        );
+        await app.query(
+          `INSERT INTO contribution_write_intents (
+             case_id, actor_id, idempotency_key, request_digest, contribution_id, created_at
+           ) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)`,
+          [
+            "11111111-1111-1111-1111-111111111111",
+            "uid=alice,ou=people,dc=example,dc=test",
+            "contrib-syn-grant",
+            "a".repeat(64),
+            "66666666-6666-4666-8666-666666666666",
+          ],
+        );
+        await expect(
+          app.query(`UPDATE contribution_write_intents SET request_digest = $1`, ["b".repeat(64)]),
+        ).rejects.toThrow(/insert-only|permission denied/);
+        await expect(app.query(`DELETE FROM contribution_write_intents`)).rejects.toThrow(
+          /insert-only|permission denied/,
+        );
+        await app.query(
           `INSERT INTO portable_apply_intents (
              token_hash, actor_id, installation_id, transport_hash, semantic_fingerprint,
              destination_catalog_digest, identity_map_digest, materialized_content_digest,

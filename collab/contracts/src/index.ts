@@ -210,6 +210,7 @@ export {
   CONTRIBUTION_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
   PROVENANCE_SCHEMA_ID,
+  isContributionIdempotencyKey,
   parseContributionList,
   parseContribution,
   parseProvenance,
@@ -263,6 +264,8 @@ export {
   parseSnapshotList,
   snapshotFairness,
   snapshotFingerprint,
+  snapshotFingerprintDigest,
+  snapshotItemContentHash,
 } from "./snapshot.js";
 export type {
   SnapshotEvidenceV1,

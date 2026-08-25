@@ -3,6 +3,7 @@ export const MODULE_ID = "cases" as const;
 
 export {
   CaseService,
+  ContributionConflictError,
   CorpusIntakeConflictError,
   LegalHoldError,
   MemoryCaseStore,
@@ -23,7 +24,7 @@ export type {
   TimelineRow,
 } from "./service.js";
 export type { ActivityPageCursor, ActivityPageQuery } from "./store.js";
-export { activityComesAfter, compareActivityDesc, overviewVisiblePredicate, isOverviewVisibleCase } from "./store.js";
+export { activityComesAfter, compareActivityDesc, overviewVisiblePredicate, isOverviewVisibleCase, activeCaseQueryable } from "./store.js";
 export { deriveCaseBoard } from "./board.js";
 export type { AcceptedDecisionBoardInput, CaseBoardInput } from "./board.js";
 export { registerCaseRoutes } from "./routes.js";

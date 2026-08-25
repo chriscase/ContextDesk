@@ -114,6 +114,15 @@ export interface IntakeBatchRow {
   payloadJson: string;
 }
 
+export interface ContributionWriteIntent {
+  caseId: string;
+  actorId: string;
+  idempotencyKey: string;
+  requestDigest: string;
+  contributionId: string;
+  createdAt: string;
+}
+
 export type SnapshotRow = SnapshotV1;
 
 export interface TimelineInsert {
@@ -300,6 +309,13 @@ export interface CaseStore {
   getIntakeBatchByIdempotency(caseId: string, key: string): Promise<IntakeBatchRow | null>;
   getIntakeBatch(caseId: string, batchId: string): Promise<IntakeBatchRow | null>;
   insertIntakeBatch(row: IntakeBatchRow): Promise<void>;
+  lockContributionIdempotency(caseId: string, actorId: string, key: string): Promise<void>;
+  getContributionIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ContributionWriteIntent | null>;
+  insertContributionIdempotency(row: ContributionWriteIntent): Promise<void>;
   listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]>;
   getSnapshot(snapshotId: string): Promise<SnapshotRow | null>;
   insertSnapshot(row: SnapshotRow): Promise<void>;
@@ -314,6 +330,7 @@ export class MemoryCaseStore implements CaseStore {
   private readonly artifacts = new Map<string, ArtifactRow>();
   private readonly snapshots = new Map<string, SnapshotRow>();
   private readonly intakeBatches = new Map<string, IntakeBatchRow>();
+  private readonly contributionIntents = new Map<string, ContributionWriteIntent>();
   private readonly atomicBoundary: AtomicBoundary;
 
   constructor(boundary: AtomicBoundary = async (operation) => operation()) {
@@ -328,6 +345,7 @@ export class MemoryCaseStore implements CaseStore {
       artifacts: [...this.artifacts.entries()],
       snapshots: [...this.snapshots.entries()],
       intakeBatches: [...this.intakeBatches.entries()],
+      contributionIntents: [...this.contributionIntents.entries()],
     });
   }
 
@@ -339,6 +357,7 @@ export class MemoryCaseStore implements CaseStore {
       artifacts: [string, ArtifactRow][];
       snapshots: [string, SnapshotRow][];
       intakeBatches: [string, IntakeBatchRow][];
+      contributionIntents?: [string, ContributionWriteIntent][];
     };
     this.cases.clear();
     this.timeline.clear();
@@ -346,12 +365,14 @@ export class MemoryCaseStore implements CaseStore {
     this.artifacts.clear();
     this.snapshots.clear();
     this.intakeBatches.clear();
+    this.contributionIntents.clear();
     for (const [id, value] of row.cases) this.cases.set(id, value);
     for (const [id, value] of row.timeline) this.timeline.set(id, value);
     for (const [id, value] of row.revisions) this.revisions.set(id, value);
     for (const [id, value] of row.artifacts) this.artifacts.set(id, value);
     for (const [id, value] of row.snapshots) this.snapshots.set(id, value);
     for (const [id, value] of row.intakeBatches) this.intakeBatches.set(id, value);
+    for (const [id, value] of row.contributionIntents ?? []) this.contributionIntents.set(id, value);
   }
 
   async listCases(): Promise<CaseRow[]> {
@@ -551,7 +572,10 @@ export class MemoryCaseStore implements CaseStore {
   async listLatestRevisions(caseId: string): Promise<RevisionRow[]> {
     const latest: RevisionRow[] = [];
     for (const chain of this.revisions.values()) {
-      const row = chain[chain.length - 1];
+      const row = chain.reduce<RevisionRow | undefined>(
+        (best, item) => (!best || item.revision >= best.revision ? item : best),
+        undefined,
+      );
       if (row && row.caseId === caseId) {
         latest.push({
           ...row,
@@ -564,6 +588,9 @@ export class MemoryCaseStore implements CaseStore {
 
   async insertRevision(rev: RevisionRow): Promise<void> {
     const chain = this.revisions.get(rev.contributionId) ?? [];
+    if (chain.some((row) => row.revision === rev.revision)) {
+      throw new Error("contribution revision conflict");
+    }
     chain.push({
       ...rev,
       hypothesisLinks: [...rev.hypothesisLinks],
@@ -603,6 +630,7 @@ export class MemoryCaseStore implements CaseStore {
         [...this.timeline.entries()].map(([key, events]) => [key, events.map((row) => ({ ...row }))]),
       );
       const batches = new Map(this.intakeBatches);
+      const intents = new Map(this.contributionIntents);
       const auditSnapshot = audit instanceof MemoryAuditStore ? audit.capture() : null;
       try {
         return await operation();
@@ -615,6 +643,8 @@ export class MemoryCaseStore implements CaseStore {
         for (const [key, value] of timeline) this.timeline.set(key, value);
         this.intakeBatches.clear();
         for (const [key, value] of batches) this.intakeBatches.set(key, value);
+        this.contributionIntents.clear();
+        for (const [key, value] of intents) this.contributionIntents.set(key, value);
         if (audit instanceof MemoryAuditStore && auditSnapshot) audit.restore(auditSnapshot);
         throw error;
       }
@@ -646,6 +676,26 @@ export class MemoryCaseStore implements CaseStore {
     this.intakeBatches.set(row.id, { ...row });
   }
 
+  async lockContributionIdempotency(_caseId: string, _actorId: string, _key: string): Promise<void> {
+    // Memory transactions are serialized by atomicBoundary.
+  }
+
+  async getContributionIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ContributionWriteIntent | null> {
+    return this.contributionIntents.get(contributionIntentKey(caseId, actorId, key)) ?? null;
+  }
+
+  async insertContributionIdempotency(row: ContributionWriteIntent): Promise<void> {
+    const key = contributionIntentKey(row.caseId, row.actorId, row.idempotencyKey);
+    if (this.contributionIntents.has(key)) {
+      throw new Error("contribution idempotency key already exists");
+    }
+    this.contributionIntents.set(key, { ...row });
+  }
+
   async listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]> {
     return [...this.snapshots.values()]
       .filter((row) => row.caseId === caseId)
@@ -674,6 +724,10 @@ export class MemoryCaseStore implements CaseStore {
 }
 
 const pgCaseTx = new AsyncLocalStorage<Queryable>();
+
+export function activeCaseQueryable(): Queryable | undefined {
+  return pgCaseTx.getStore();
+}
 
 export class PgCaseStore implements CaseStore {
   private readonly pool: Queryable;
@@ -1122,6 +1176,44 @@ export class PgCaseStore implements CaseStore {
     );
   }
 
+  async lockContributionIdempotency(caseId: string, actorId: string, key: string): Promise<void> {
+    await this.db.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`contrib:${caseId}:${actorId}:${key}`],
+    );
+  }
+
+  async getContributionIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ContributionWriteIntent | null> {
+    const result = await this.db.query(
+      `SELECT case_id, actor_id, idempotency_key, request_digest, contribution_id, created_at
+       FROM contribution_write_intents
+       WHERE case_id = $1 AND actor_id = $2 AND idempotency_key = $3`,
+      [caseId, actorId, key],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asContributionWriteIntent(row) : null;
+  }
+
+  async insertContributionIdempotency(row: ContributionWriteIntent): Promise<void> {
+    await this.db.query(
+      `INSERT INTO contribution_write_intents (
+         case_id, actor_id, idempotency_key, request_digest, contribution_id, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        row.caseId,
+        row.actorId,
+        row.idempotencyKey,
+        row.requestDigest,
+        row.contributionId,
+        row.createdAt,
+      ],
+    );
+  }
+
   async listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]> {
     const result = await this.db.query(
       `SELECT id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
@@ -1198,6 +1290,21 @@ function cloneCase(row: CaseRow): CaseRow {
 function asIso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   return String(value);
+}
+
+function contributionIntentKey(caseId: string, actorId: string, key: string): string {
+  return `${caseId}\0${actorId}\0${key}`;
+}
+
+function asContributionWriteIntent(row: Record<string, unknown>): ContributionWriteIntent {
+  return {
+    caseId: String(row.case_id),
+    actorId: String(row.actor_id),
+    idempotencyKey: String(row.idempotency_key),
+    requestDigest: String(row.request_digest),
+    contributionId: String(row.contribution_id),
+    createdAt: asIso(row.created_at),
+  };
 }
 
 function asCase(row: Record<string, unknown>): CaseRow {

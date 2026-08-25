@@ -174,8 +174,23 @@ export class MemoryTriageJobStore implements TriageJobStore {
     const existing = this.jobs.get(job.id);
     if (!existing) throw new Error("triage job not found");
     if (existing.caseId !== job.caseId) throw new Error("triage job case cannot change");
+    if (!leaseAllowsTriageUpdate(existing, job, Date.now())) {
+      throw new Error("triage job not found");
+    }
     this.jobs.set(job.id, cloneJob(job));
   }
+}
+
+function leaseAllowsTriageUpdate(
+  existing: TriageJobV1,
+  next: TriageJobV1,
+  nowMs: number,
+): boolean {
+  if ((existing.workerId ?? null) !== (next.workerId ?? null)) return false;
+  if (existing.status === "queued") return true;
+  if (existing.status !== "running") return false;
+  if (!existing.leaseExpiresAt) return false;
+  return Date.parse(existing.leaseExpiresAt) > nowMs;
 }
 
 export type Queryable = Pick<Pool, "query">;
@@ -303,7 +318,7 @@ export class PgTriageJobStore implements TriageJobStore {
              ),
              '{updatedAt}', to_jsonb($2::text), true
            ),
-           updated_at = $2,
+           updated_at = $2::timestamptz,
            lease_owner = $3,
            lease_expires_at = $4::timestamptz
        WHERE id = $1 AND status = 'queued'
@@ -344,15 +359,15 @@ export class PgTriageJobStore implements TriageJobStore {
     return result.rowCount === 1;
   }
 
-  async recoverStale(job: TriageJobV1, _now: string): Promise<boolean> {
+  async recoverStale(job: TriageJobV1, now: string): Promise<boolean> {
     const result = await this.db.query(
       `UPDATE triage_jobs
-       SET status = $2, payload = $3::jsonb, updated_at = $4,
+       SET status = $2, payload = $3::jsonb, updated_at = $4::timestamptz,
            lease_owner = $6, lease_expires_at = NULL
        WHERE id = $1 AND case_id = $5 AND status = 'running'
-         AND (lease_expires_at IS NULL OR lease_expires_at <= $4::timestamptz)
+         AND (lease_expires_at IS NULL OR lease_expires_at <= $7::timestamptz)
          AND lease_owner IS NOT DISTINCT FROM $6`,
-      [job.id, job.status, JSON.stringify(job), job.updatedAt, job.caseId, job.workerId ?? null],
+      [job.id, job.status, JSON.stringify(job), job.updatedAt, job.caseId, job.workerId ?? null, now],
     );
     return result.rowCount === 1;
   }
@@ -360,10 +375,18 @@ export class PgTriageJobStore implements TriageJobStore {
   async update(job: TriageJobV1): Promise<void> {
     const result = await this.db.query(
       `UPDATE triage_jobs
-       SET status = $2, payload = $3::jsonb, updated_at = $4,
+       SET status = $2, payload = $3::jsonb, updated_at = $4::timestamptz,
            lease_owner = $6, lease_expires_at = $7::timestamptz
        WHERE id = $1 AND case_id = $5
-         AND lease_owner IS NOT DISTINCT FROM $6`,
+         AND lease_owner IS NOT DISTINCT FROM $6
+         AND (
+           status = 'queued'
+           OR (
+             status = 'running'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at > now()
+           )
+         )`,
       [job.id, job.status, JSON.stringify(job), job.updatedAt, job.caseId, job.workerId ?? null, job.leaseExpiresAt ?? null],
     );
     if (result.rowCount !== 1) throw new Error("triage job not found");

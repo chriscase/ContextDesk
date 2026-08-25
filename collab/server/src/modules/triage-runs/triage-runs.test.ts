@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,10 +10,12 @@ import {
   type TriageJobV1,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
+import { migrateUp } from "../../db/migrate.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
-import { MemoryAuditStore } from "../audit/index.js";
-import { CatalogService } from "../catalog/index.js";
-import { CaseService, MemoryCaseStore } from "../cases/index.js";
+import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
+import { MemoryAuditStore, PgAuditStore } from "../audit/index.js";
+import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
+import { CatalogService, PgCatalogStore } from "../catalog/index.js";
 import {
   DeterministicMockTriageExecutor,
   TriageRunService,
@@ -22,7 +25,7 @@ import {
   type TriageExecutionContext,
   type TriageRunExecutor,
 } from "./index.js";
-import { MemoryTriageJobStore } from "./store.js";
+import { MemoryTriageJobStore, PgTriageJobStore } from "./store.js";
 
 const actor = { id: "lead", username: "lead" };
 
@@ -144,6 +147,11 @@ describe("snapshot-bound triage runs", () => {
       leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
     });
     expect(await store.listStaleRunning(new Date().toISOString())).toHaveLength(1);
+    await expect(store.update({
+      ...expired,
+      status: "completed",
+      updatedAt: new Date().toISOString(),
+    })).rejects.toThrow("triage job not found");
     const recovery = {
       ...(await store.get(job.id))!,
       status: "failed" as const,
@@ -152,6 +160,12 @@ describe("snapshot-bound triage runs", () => {
     };
     expect(await store.recoverStale(recovery, new Date().toISOString())).toBe(true);
     expect(await store.recoverStale(recovery, new Date().toISOString())).toBe(false);
+    await expect(store.update({
+      ...expired,
+      status: "completed",
+      updatedAt: new Date().toISOString(),
+    })).rejects.toThrow("triage job not found");
+    expect((await store.get(job.id))?.status).toBe("failed");
   });
 
   it("runs a deterministic candidate and projects a share-safe lifecycle record", async () => {
@@ -164,6 +178,7 @@ describe("snapshot-bound triage runs", () => {
       expect(completed.candidates[0]?.status).toBe("completed");
       expect(completed.candidates[0]?.evidenceRefs).toEqual([fx.snapshot.evidence[0]?.evidenceId]);
       expect(completed.candidates[0]?.usageStatus).toBe("unknown");
+      expect(completed.sameSnapshot).toBe(true);
 
       const shareSafe = parseTriageJobShareSafe(projectTriageJobShareSafe(completed));
       expect(shareSafe.candidates[0]?.evidenceCount).toBe(1);
@@ -673,6 +688,141 @@ describe("snapshot-bound triage runs", () => {
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }
+  });
+
+  it("never records sameSnapshot=true for unverifiable or unhashed snapshot identity", async () => {
+    const fx = await fixture(new DeterministicMockTriageExecutor());
+    try {
+      const unhashed = await fx.cases.addEvidence(
+        fx.caseId,
+        actor,
+        {
+          kind: "file_server_ref",
+          uri: "s3://example.invalid/unhashed.log",
+          summary: "Reference has no recorded content or expected hash.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const snapshot = await fx.cases.createSnapshot(
+        fx.caseId,
+        actor,
+        { evidenceIds: [unhashed.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      expect(snapshot.fairnessClass).toBe("unknown");
+      const created = await fx.service.create(fx.caseId, actor, request(snapshot.id), "test", false);
+      const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
+      expect(completed.sameSnapshot).not.toBe(true);
+      expect(completed.sameSnapshot).toBeNull();
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(!adminUrl())("pg-backed triage lease integrity", () => {
+  it("refuses an expired or recovered worker from updating the job", async () => {
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const root = await mkdtemp(join(tmpdir(), "contextdesk-pg-triage-lease-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(client);
+      const catalog = new CatalogService(new PgCatalogStore(client), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(client), catalog);
+      const jobs = new PgTriageJobStore(client);
+      const pgActor = { id: "alice", username: "alice" };
+      try {
+        const created = await cases.createCase(pgActor, { title: "PG lease fixture" }, "test");
+        const artifact = await cases.addEvidence(
+          created.id,
+          pgActor,
+          {
+            kind: "log",
+            filename: "checkout.log",
+            mediaType: "text/plain",
+            bytes: new TextEncoder().encode("checkout timeout"),
+            summary: "Synthetic checkout timeout.",
+            privacyClass: "share_safe",
+          },
+          "test",
+        );
+        const snapshot = await cases.createSnapshot(
+          created.id,
+          pgActor,
+          { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+          "test",
+        );
+        const spec = request(snapshot.id);
+        const job: TriageJobV1 = {
+          schemaId: "cd-collab.triage_job.v1",
+          id: randomUUID(),
+          caseId: created.id,
+          snapshotId: snapshot.id,
+          snapshotFingerprint: snapshot.fingerprint,
+          requestFingerprint: "a".repeat(64),
+          cancellationId: randomUUID(),
+          request: spec,
+          status: "queued",
+          candidates: [
+            {
+              ...spec.candidates[0]!,
+              status: "queued",
+              benchmarkRunId: null,
+              outputHash: null,
+              summary: null,
+              evidenceRefs: [],
+              unknowns: [],
+              usageStatus: "unknown",
+              costStatus: "unknown",
+              errorCode: null,
+              startedAt: null,
+              finishedAt: null,
+              privacyClass: "owner_only",
+            },
+          ],
+          sameSnapshot: null,
+          agreementNotice: "Agreement is not proof of correctness.",
+          requestedBy: pgActor.id,
+          requestedByUsername: pgActor.username,
+          createdAt: "2026-08-20T00:00:00.000Z",
+          updatedAt: "2026-08-20T00:00:00.000Z",
+          startedAt: null,
+          finishedAt: null,
+          cancelRequestedAt: null,
+          stoppedReason: null,
+        };
+        await jobs.insert(job);
+        const liveUntil = new Date(Date.now() + 60_000).toISOString();
+        const claimed = await jobs.claimQueued(job.id, new Date().toISOString(), "worker-a", liveUntil);
+        expect(claimed?.workerId).toBe("worker-a");
+        const live = (await jobs.get(job.id))!;
+        await jobs.update({
+          ...live,
+          leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
+        });
+        await expect(jobs.update({
+          ...live,
+          status: "completed",
+          updatedAt: new Date().toISOString(),
+        })).rejects.toThrow("triage job not found");
+        const recovery = {
+          ...(await jobs.get(job.id))!,
+          status: "failed" as const,
+          stoppedReason: "worker_lease_expired",
+          leaseExpiresAt: null,
+        };
+        expect(await jobs.recoverStale(recovery, new Date().toISOString())).toBe(true);
+        await expect(jobs.update({
+          ...live,
+          status: "completed",
+          updatedAt: new Date().toISOString(),
+        })).rejects.toThrow("triage job not found");
+        expect((await jobs.get(job.id))?.status).toBe("failed");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 
