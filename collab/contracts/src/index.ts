@@ -296,6 +296,36 @@ export type {
 } from "./triage-job.js";
 
 export {
+  WORKSTREAM_AGREEMENT_NOTICE,
+  WORKSTREAM_LIFECYCLES,
+  WORKSTREAM_LIST_SCHEMA_ID,
+  WORKSTREAM_OPERATOR_KINDS,
+  WORKSTREAM_VIEW_SCHEMA_ID,
+  operatorKindFor,
+  parseWorkstreamList,
+  parseWorkstreamView,
+  projectWorkstreams,
+  readableUnknown,
+  strategyLabelFor,
+  workstreamKey,
+} from "./workstream.js";
+export type {
+  WorkstreamActivityEntryV1,
+  WorkstreamEvidenceCitationV1,
+  WorkstreamEvidenceInput,
+  WorkstreamInputsV1,
+  WorkstreamLifecycle,
+  WorkstreamListV1,
+  WorkstreamOperatorKind,
+  WorkstreamProjectionInput,
+  WorkstreamRerunV1,
+  WorkstreamSnapshotInput,
+  WorkstreamTechnicalV1,
+  WorkstreamTimelineInput,
+  WorkstreamViewV1,
+} from "./workstream.js";
+
+export {
   PERMANENT_UNKNOWN_SOURCE_ID,
   SOURCE_KINDS,
   SOURCE_LIFECYCLES,

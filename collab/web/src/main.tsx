@@ -6,6 +6,7 @@ import "./styles/shell.css";
 import "./styles/login.css";
 import "./styles/cases.css";
 import "./styles/triage-workspace.css";
+import "./styles/workstreams.css";
 import "./styles/catalog.css";
 import "./styles/export.css";
 import "./styles/experiment-lab.css";

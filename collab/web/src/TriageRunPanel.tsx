@@ -493,6 +493,9 @@ export function TriageRunPanel(props: {
       if (!response.ok) setError(await errorText(response, "Triage run could not be started."));
       else setParentJobId(null);
       await load();
+      // Workstreams presents the same runs as readable investigative work;
+      // tell it the recorded set changed instead of making it poll blindly.
+      window.dispatchEvent(new Event("contextdesk:triage-run-changed"));
     } catch (cause) {
       setError(cause instanceof Error ? boundedError(cause.message, "Triage run could not be started.") : "Triage run could not be started.");
     } finally {
@@ -504,6 +507,7 @@ export function TriageRunPanel(props: {
     const response = await protectedApiFetch(`/api/cases/${props.caseId}/triage-runs/${jobId}/cancel`, { method: "POST" });
     if (!response.ok) setError(await errorText(response, "Cancellation could not be requested."));
     await load();
+    window.dispatchEvent(new Event("contextdesk:triage-run-changed"));
   }
 
   async function reviewInExperimentLab(jobId: string) {

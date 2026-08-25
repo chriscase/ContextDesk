@@ -176,6 +176,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         roles: security.roles,
         audit: security.audit,
         runs: deps.triageRuns,
+        ...(deps.domain ? { cases: deps.domain } : {}),
       });
     }
     if (deps.domain && deps.presence) {

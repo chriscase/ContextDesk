@@ -249,6 +249,39 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
+        id: "read-workstreams",
+        title: "Read a workstream",
+        summary:
+          "Each recorded workstream has its own address: purpose, owner, frozen inputs, findings, cited evidence, unknowns, and a timestamped history.",
+        keywords: [
+          "workstream",
+          "workstreams",
+          "lane",
+          "share",
+          "link",
+          "deep link",
+          "history",
+          "evidence",
+          "unknowns",
+          "technical details",
+        ],
+        what:
+          "A workstream is one line of investigation against a frozen set of evidence — not a model button. Its record states the exact question it was asked, whether it was AI-assisted, human, programmatic, imported, or host-run, who requested it, which frozen evidence set it saw and whether the host proved that binding, what it reported, which evidence it cited, what it left unknown, and what happened in what order. Run, lane, snapshot, request, and task identifiers, fingerprints, and hashes sit under Technical details.",
+        when:
+          "Open a workstream when you need to judge one attempt on its own terms, or when you want to hand another engineer a link to exactly that record.",
+        steps: [
+          "On the Analyze stage, find the workstream under the strategy and question it belongs to.",
+          "Select it — the evidence board and run launcher step aside so the workstream is the page.",
+          "Read the cited evidence in place; expand a long log or stack trace for the complete text, and copy it if you need it elsewhere.",
+          "Copy the address from the browser to share that exact workstream; reload, Back, and Forward all return to it.",
+        ],
+        recorded:
+          "The record restates what the run already stored: timestamps, the authenticated requester, per-lane status, cited evidence with its registered summary and integrity state, recorded unknowns, and rerun lineage. Identifiers are collapsed for reading, never dropped — machine exports carry them unchanged.",
+        limits:
+          "An empty unknown list means nothing was recorded as unknown, not that nothing is unknown. AI-assisted output is analysis, never a human finding, and agreement between workstreams is not proof of correctness. A citation that no longer resolves is marked unresolved rather than reconstructed, and an address naming a workstream this investigation does not have fails closed.",
+        actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
+      },
+      {
         id: "run-lanes",
         title: "Run AI lanes against a snapshot",
         summary:

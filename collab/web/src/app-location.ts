@@ -26,6 +26,7 @@ export const ROUTE_ITEM_KINDS = [
   "triage-run",
   "triage-candidate",
   "intake-batch",
+  "workstream",
 ] as const;
 export type RouteItemKind = (typeof ROUTE_ITEM_KINDS)[number];
 
@@ -70,6 +71,7 @@ export const LEGACY_ANCHOR_STAGES: Record<string, StageId> = {
   "triage-analyze": "analyze",
   "triage-evidence-board": "analyze",
   "triage-lane-runner": "analyze",
+  workstreams: "analyze",
   "triage-compare": "compare",
   "triage-comparison-lab": "compare",
   "triage-decide": "decide",

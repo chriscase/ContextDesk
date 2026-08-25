@@ -1,0 +1,20 @@
+2026-08-15T00:00:00Z checkout-service INFO synthetic order syn-4412 accepted
+2026-08-15T00:00:01Z checkout-service WARN synthetic request syn-4412 waited 2000ms on inventory-client
+2026-08-15T00:00:02Z checkout-service WARN synthetic request syn-4412 waited 4000ms on inventory-client
+2026-08-15T00:00:03Z checkout-service WARN synthetic request syn-4412 waited 6000ms on inventory-client
+2026-08-15T00:00:04Z checkout-service WARN synthetic request syn-4412 waited 8000ms on inventory-client
+2026-08-15T00:00:05Z checkout-service WARN synthetic request syn-4412 waited 10000ms on inventory-client
+2026-08-15T00:00:06Z checkout-service WARN synthetic request syn-4412 waited 12000ms on inventory-client
+2026-08-15T00:00:07Z checkout-service WARN synthetic request syn-4412 waited 14000ms on inventory-client
+2026-08-15T00:00:08Z checkout-service WARN synthetic request syn-4412 waited 16000ms on inventory-client
+2026-08-15T00:00:09Z checkout-service WARN synthetic request syn-4412 waited 18000ms on inventory-client
+2026-08-15T00:00:10Z checkout-service WARN synthetic request syn-4412 waited 20000ms on inventory-client
+2026-08-15T00:00:11Z checkout-service WARN synthetic request syn-4412 waited 22000ms on inventory-client
+2026-08-15T00:00:12Z checkout-service WARN synthetic request syn-4412 waited 24000ms on inventory-client
+2026-08-15T00:00:13Z checkout-service WARN synthetic request syn-4412 waited 26000ms on inventory-client
+2026-08-15T00:00:14Z checkout-service WARN synthetic request syn-4412 waited 28000ms on inventory-client
+2026-08-15T00:00:15Z inventory-client ERROR TimeoutError: synthetic inventory lookup exceeded 30000ms
+    at InventoryClient.fetch (fixtures/inventory-client.ts:118:15)
+    at CheckoutSession.reserve (fixtures/checkout-session.ts:64:22)
+    at async CheckoutHandler.submit (fixtures/checkout-handler.ts:31:5)
+2026-08-15T00:00:15Z checkout-service ERROR synthetic order syn-4412 abandoned after timeout

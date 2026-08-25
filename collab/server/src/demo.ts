@@ -233,6 +233,41 @@ async function seedReviewedExperiment(
   return imported.id;
 }
 
+/**
+ * Synthetic evidence bodies for the demo investigation.
+ *
+ * These are fabricated for the fixture: fictional service names, fictional
+ * order identifiers, and a fictional stack trace. They are deliberately
+ * multi-line so the shipped demo shows the surrounding context and failing
+ * frames an engineer actually reads, not a one-line summary.
+ */
+const DEMO_CHECKOUT_LOG = [
+  "2026-08-24T06:14:18Z checkout-service INFO synthetic order syn-4412 accepted",
+  "2026-08-24T06:14:19Z checkout-service INFO reserving synthetic inventory for syn-4412",
+  "2026-08-24T06:14:20Z checkout-service WARN synthetic request syn-4412 waited 10000ms on inventory-client",
+  "2026-08-24T06:14:21Z checkout-service WARN synthetic request syn-4412 waited 20000ms on inventory-client",
+  "2026-08-24T06:14:22Z checkout-service WARN synthetic request syn-4412 exceeded 30000ms while waiting for inventory-client",
+  "2026-08-24T06:14:22Z checkout-service ERROR synthetic order syn-4412 abandoned after timeout",
+  "2026-08-24T06:14:23Z checkout-service INFO synthetic order syn-4413 accepted",
+].join("\n") + "\n";
+
+const DEMO_INVENTORY_LOG = [
+  "2026-08-24T06:14:20Z inventory-client INFO synthetic lookup started for syn-4412",
+  "2026-08-24T06:14:22Z inventory-client ERROR TimeoutError: synthetic inventory lookup exceeded 30000ms",
+  "    at InventoryClient.fetch (fixtures/inventory-client.ts:118:15)",
+  "    at CheckoutSession.reserve (fixtures/checkout-session.ts:64:22)",
+  "    at async CheckoutHandler.submit (fixtures/checkout-handler.ts:31:5)",
+  "2026-08-24T06:14:22Z inventory-client WARN synthetic client pool had no free connection for 30000ms",
+].join("\n") + "\n";
+
+const DEMO_POOL_LOG = [
+  "2026-08-24T06:14:15Z connection-pool INFO active=22 idle=18 queued=0",
+  "2026-08-24T06:14:18Z connection-pool WARN active=36 idle=4 queued=3",
+  "2026-08-24T06:14:21Z connection-pool WARN active=40 idle=0 queued=17",
+  "2026-08-24T06:14:22Z connection-pool ERROR synthetic pool saturated; no connection released for 30000ms",
+  "2026-08-24T06:14:26Z connection-pool INFO active=31 idle=9 queued=0",
+].join("\n") + "\n";
+
 async function seed(app: FastifyInstance): Promise<string> {
   const login = await app.inject({
     method: "POST",
@@ -301,8 +336,8 @@ async function seed(app: FastifyInstance): Promise<string> {
       kind: "log",
       filename: "checkout.log",
       mediaType: "text/plain",
-      contentBase64: Buffer.from("checkout request timed out while waiting for inventory service\n").toString("base64"),
-      summary: "Synthetic checkout timeout evidence.",
+      contentBase64: Buffer.from(DEMO_CHECKOUT_LOG).toString("base64"),
+      summary: "Synthetic checkout log: order syn-4412 waits on the inventory call, then times out.",
       sourceId: source.id,
       privacyClass: "share_safe",
     },
@@ -315,8 +350,8 @@ async function seed(app: FastifyInstance): Promise<string> {
       kind: "log",
       filename: "inventory-timeout.log",
       mediaType: "text/plain",
-      contentBase64: Buffer.from("inventory client timeout after pool exhaustion\n").toString("base64"),
-      summary: "Synthetic inventory timeout evidence.",
+      contentBase64: Buffer.from(DEMO_INVENTORY_LOG).toString("base64"),
+      summary: "Synthetic inventory-client trace: the failing frames for the timed-out lookup.",
       sourceId: source.id,
       privacyClass: "share_safe",
     },
@@ -329,8 +364,8 @@ async function seed(app: FastifyInstance): Promise<string> {
       kind: "log",
       filename: "connection-pool.log",
       mediaType: "text/plain",
-      contentBase64: Buffer.from("connection pool active=40 idle=0 queued=17\n").toString("base64"),
-      summary: "Synthetic connection-pool pressure evidence.",
+      contentBase64: Buffer.from(DEMO_POOL_LOG).toString("base64"),
+      summary: "Synthetic connection-pool counters across the timeout window.",
       sourceId: source.id,
       privacyClass: "share_safe",
     },
