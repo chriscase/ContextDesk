@@ -19,6 +19,7 @@ import {
   type PortableInvestigationV1,
   type PreflightRequestV1,
 } from "./investigation-portable.js";
+import { INTERACTION_TRACE_SCHEMA_ID, TRACE_UNKNOWN_STAYS_UNKNOWN } from "./trace.js";
 
 const Z = "0".repeat(64);
 const TS = "2026-08-24T15:00:00Z";
@@ -417,6 +418,46 @@ function reseal(bundle: PortableInvestigationV1): PortableInvestigationV1 {
   return attachPortableIntegrity(rest);
 }
 
+function syntheticTrace(
+  candidateId: string,
+  overlay: { traceId?: string; evidenceRefs?: string[] } = {},
+) {
+  return {
+    schemaId: INTERACTION_TRACE_SCHEMA_ID,
+    traceId: overlay.traceId ?? `trace-${candidateId}`,
+    candidateId,
+    sourceKind: "programmatic" as const,
+    completeness: "partial" as const,
+    privacyClass: "share_safe" as const,
+    rawHash: null,
+    events: [
+      {
+        eventId: `evt-${candidateId}-question`,
+        sequence: 1,
+        kind: "question" as const,
+        actor: "human" as const,
+        role: null,
+        parentEventId: null,
+        evidenceRefs: overlay.evidenceRefs ?? [],
+        observedAt: { status: "unknown" as const },
+        excerpt: "What should the fictional operator inspect next?",
+        excerptHash: null,
+        unknowns: ["timestamp"],
+      },
+    ],
+    efficiency: {
+      turnCount: { status: "unknown" as const },
+      evidenceAcquisitionSteps: { status: "unknown" as const },
+      latency: { status: "unknown" as const },
+      cost: { status: "unknown" as const },
+      providerCalls: { status: "unknown" as const },
+    },
+    unknowns: ["tools"],
+    notes: [TRACE_UNKNOWN_STAYS_UNKNOWN],
+    createdAt: TS,
+  };
+}
+
 function dryRun(
   bundle: PortableInvestigationV1,
   overlay: Partial<PreflightRequestV1> = {},
@@ -705,6 +746,47 @@ describe("portable investigation adversarial lab", () => {
     };
     expect(() => parsePortableInvestigation(reseal(danglingAgreementEvidence))).toThrow(
       /dangling evidence/,
+    );
+
+    const matchingExperimentTrace = syntheticSeal();
+    matchingExperimentTrace.experiments[0]!.traces = [
+      syntheticTrace(matchingExperimentTrace.experiments[0]!.candidateIds[0]!, {
+        evidenceRefs: ["ev-public-1"],
+      }),
+    ];
+    matchingExperimentTrace.timeline.push({
+      seq: 2,
+      kind: "experiment_trace_imported",
+      actorId: "operator-north",
+      targetId: `${matchingExperimentTrace.experiments[0]!.id}:trace-${matchingExperimentTrace.experiments[0]!.candidateIds[0]!}`,
+      targetNamespace: "experiment",
+      serverTime: TS,
+      objectHash: Z,
+    });
+    expect(() => parsePortableInvestigation(reseal(matchingExperimentTrace))).not.toThrow();
+
+    const danglingTraceCandidate = syntheticSeal();
+    danglingTraceCandidate.experiments[0]!.traces = [syntheticTrace("ghost-candidate")];
+    expect(() => parsePortableInvestigation(reseal(danglingTraceCandidate))).toThrow(
+      /dangling experiment candidate/,
+    );
+
+    const danglingTraceEvidence = syntheticSeal();
+    danglingTraceEvidence.experiments[0]!.traces = [
+      syntheticTrace(danglingTraceEvidence.experiments[0]!.candidateIds[0]!, {
+        evidenceRefs: ["ghost-evidence"],
+      }),
+    ];
+    expect(() => parsePortableInvestigation(reseal(danglingTraceEvidence))).toThrow(
+      /dangling evidence/,
+    );
+
+    const missingTraceTimeline = syntheticSeal();
+    missingTraceTimeline.experiments[0]!.traces = [
+      syntheticTrace(missingTraceTimeline.experiments[0]!.candidateIds[0]!),
+    ];
+    expect(() => parsePortableInvestigation(reseal(missingTraceTimeline))).toThrow(
+      /experiment traces must match experiment_trace_imported timeline targets/,
     );
 
     const danglingIntake = syntheticSeal();

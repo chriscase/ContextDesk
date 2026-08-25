@@ -5,15 +5,18 @@ import {
   PORTABLE_OBJECT_KINDS,
   PORTABLE_TERMINAL_TRIAGE_STATUSES,
   parseCorpusIntakeBatch,
+  parseInteractionTrace,
   parsePortableTriageAttemptTarget,
   parsePortableExperimentTraceTarget,
   portableDestinationUuid,
   snapshotFairness,
   snapshotFingerprint,
+  traceFingerprint,
   type ArchivePreflightReportV1,
   type GoldReferenceV1,
   type HelpfulnessObservationV1,
   type IdentityMapEntryV1,
+  type InteractionTraceV1,
   type NormalizedExperimentDecisionV1,
   type PortableArchiveV1,
   type PortableObjectKind,
@@ -874,6 +877,42 @@ export async function persistPortableArchive(input: {
       ? `chat-${remapOf(report, "imported_ai_run", imported.id)}`
       : candidateId;
   };
+  const remapExperimentTrace = (trace: InteractionTraceV1): InteractionTraceV1 =>
+    parseInteractionTrace({
+      schemaId: trace.schemaId,
+      traceId: trace.traceId,
+      candidateId: remapCandidateId(trace.candidateId),
+      sourceKind: trace.sourceKind,
+      completeness: trace.completeness,
+      privacyClass: trace.privacyClass,
+      rawHash: trace.rawHash,
+      events: trace.events.map((event) => ({
+        eventId: event.eventId,
+        sequence: event.sequence,
+        kind: event.kind,
+        actor: event.actor,
+        role: event.role,
+        parentEventId: event.parentEventId,
+        evidenceRefs: event.evidenceRefs.map((id) => remapOf(report, "evidence", id)),
+        observedAt:
+          event.observedAt.status === "observed"
+            ? { status: "observed" as const, timestamp: event.observedAt.timestamp }
+            : { status: "unknown" as const },
+        excerpt: event.excerpt,
+        excerptHash: event.excerptHash,
+        unknowns: [...event.unknowns],
+      })),
+      efficiency: {
+        turnCount: { ...trace.efficiency.turnCount },
+        evidenceAcquisitionSteps: { ...trace.efficiency.evidenceAcquisitionSteps },
+        latency: { ...trace.efficiency.latency },
+        cost: { ...trace.efficiency.cost },
+        providerCalls: { ...trace.efficiency.providerCalls },
+      },
+      unknowns: [...trace.unknowns],
+      notes: [...trace.notes],
+      createdAt: trace.createdAt,
+    });
   const remapAgreement = (
     agreement: NonNullable<(typeof bundle.experiments)[number]["agreement"]>,
   ) => ({
@@ -1287,6 +1326,10 @@ export async function persistPortableArchive(input: {
       importerUsername: importer.username,
     };
     await ports.experiments.insert(experimentRow);
+    for (const trace of experiment.traces ?? []) {
+      const remapped = remapExperimentTrace(trace);
+      await ports.experiments.insertTrace(id, remapped, traceFingerprint(remapped));
+    }
   }
 
   for (const observation of bundle.helpfulnessObservations) {

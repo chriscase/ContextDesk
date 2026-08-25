@@ -30,6 +30,11 @@ import { assertShareSafeFingerprint, assertShareSafeTimestamp } from "./privacy.
 import { SNAPSHOT_FAIRNESS_CLASSES } from "./snapshot.js";
 import { SOURCE_KINDS, SOURCE_LIFECYCLES } from "./source.js";
 import { TRIAGE_JOB_MODES } from "./triage-job.js";
+import {
+  interactionTraceShape,
+  parseInteractionTrace,
+  type InteractionTraceV1,
+} from "./trace.js";
 
 export const PORTABLE_SCHEMA_ID = "cd-collab.investigation_portable.v1" as const;
 export const PORTABLE_PREFLIGHT_SCHEMA_ID =
@@ -457,6 +462,14 @@ function uniqueIds(path: string, ids: string[]): void {
   }
 }
 
+function rethrowContractAt(path: string, error: unknown): never {
+  if (error instanceof ContractViolation) {
+    const suffix = error.path.startsWith("$") ? error.path.slice(1) : `.${error.path}`;
+    throw new ContractViolation(`${path}${suffix}`, error.detail);
+  }
+  throw error;
+}
+
 function sortBy<T>(rows: readonly T[], key: (row: T) => string): T[] {
   return [...rows].sort((a, b) => compareCodeUnits(key(a), key(b)));
 }
@@ -744,6 +757,7 @@ const experimentShape: ObjectShape = {
   candidates: f.opt(f.arr(f.obj(experimentCandidateShape))),
   agreement: f.opt(f.obj(experimentAgreementShape)),
   snapshotProof: f.opt(f.obj(experimentSnapshotProofShape)),
+  traces: f.opt(f.arr(f.obj(interactionTraceShape))),
   objectHash: f.req(f.str),
 };
 
@@ -1093,6 +1107,7 @@ export interface PortableExperimentV1 {
     fairnessClass: (typeof SNAPSHOT_FAIRNESS_CLASSES)[number];
     lineageClass: (typeof SNAPSHOT_LINEAGE_CLASSES)[number];
   };
+  traces?: InteractionTraceV1[];
   objectHash: string;
 }
 
@@ -1260,7 +1275,12 @@ function sortPortableBags(bundle: PortableInvestigationUnsigned): PortableInvest
       ...job,
       candidates: sortBy(job.candidates, (item) => item.candidateId),
     })),
-    experiments: sortBy(bundle.experiments, (row) => row.id),
+    experiments: sortBy(bundle.experiments, (row) => row.id).map((experiment) => ({
+      ...experiment,
+      ...(experiment.traces
+        ? { traces: sortBy(experiment.traces, (item) => item.traceId) }
+        : {}),
+    })),
     helpfulnessObservations: sortBy(bundle.helpfulnessObservations, (row) => row.id),
     decisions: sortBy(bundle.decisions, (row) => `${row.id}:${row.revision}`),
     gold: sortBy(bundle.gold, (row) => `${row.goldId}:${row.version}`),
@@ -2267,6 +2287,57 @@ export function parsePortableInvestigation(
     }
     if (exp.importerId) {
       requireActor(actors, exp.importerId, `$.experiments[${i}].importerId`);
+    }
+    if (exp.traces) {
+      const candidateSet = new Set(exp.candidateIds);
+      const evidenceIds = new Set(bundle.evidence.map((row) => row.id));
+      uniqueIds(
+        `$.experiments[${i}].traces.traceId`,
+        exp.traces.map((row) => row.traceId),
+      );
+      uniqueIds(
+        `$.experiments[${i}].traces.candidateId`,
+        exp.traces.map((row) => row.candidateId),
+      );
+      for (const [j, rawTrace] of exp.traces.entries()) {
+        const path = `$.experiments[${i}].traces[${j}]`;
+        try {
+          parseInteractionTrace(rawTrace);
+        } catch (error) {
+          rethrowContractAt(path, error);
+        }
+        if (!candidateSet.has(rawTrace.candidateId)) {
+          throw new ContractViolation(`${path}.candidateId`, "dangling experiment candidate");
+        }
+        for (const [k, event] of rawTrace.events.entries()) {
+          uniqueIds(`${path}.events[${k}].evidenceRefs`, event.evidenceRefs);
+          for (const [n, evidenceId] of event.evidenceRefs.entries()) {
+            if (!evidenceIds.has(evidenceId)) {
+              throw new ContractViolation(
+                `${path}.events[${k}].evidenceRefs[${n}]`,
+                "dangling evidence reference",
+              );
+            }
+          }
+        }
+      }
+      const expectedTargets = exp.traces
+        .map((row) => `${exp.id}:${row.traceId}`)
+        .sort();
+      const actualTargets = bundle.timeline
+        .filter((row) => row.kind === "experiment_trace_imported")
+        .map((row) => row.targetId)
+        .filter((targetId): targetId is string => {
+          const parsed = targetId ? parsePortableExperimentTraceTarget(targetId) : null;
+          return Boolean(parsed && parsed.experimentId === exp.id);
+        })
+        .sort();
+      if (canonicalJson(expectedTargets) !== canonicalJson(actualTargets)) {
+        throw new ContractViolation(
+          `$.experiments[${i}].traces`,
+          "experiment traces must match experiment_trace_imported timeline targets",
+        );
+      }
     }
   }
 

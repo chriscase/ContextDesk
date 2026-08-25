@@ -55,6 +55,93 @@
       "anyOf": [{ "type": "string", "minLength": 2 }, { "type": "null" }]
     },
     "objectHash": { "$ref": "#/$defs/sha256" },
+    "interactionTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "traceId",
+        "candidateId",
+        "sourceKind",
+        "completeness",
+        "privacyClass",
+        "rawHash",
+        "events",
+        "efficiency",
+        "unknowns",
+        "notes",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaId": { "type": "string", "const": "cd-collab.interaction_trace.v1" },
+        "traceId": { "type": "string", "minLength": 1 },
+        "candidateId": { "type": "string", "minLength": 1 },
+        "sourceKind": { "type": "string", "enum": ["programmatic", "plain_text"] },
+        "completeness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+        "privacyClass": { "type": "string", "const": "share_safe" },
+        "rawHash": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "eventId",
+              "sequence",
+              "kind",
+              "actor",
+              "role",
+              "parentEventId",
+              "evidenceRefs",
+              "observedAt",
+              "excerpt",
+              "excerptHash",
+              "unknowns"
+            ],
+            "properties": {
+              "eventId": { "type": "string", "minLength": 1 },
+              "sequence": { "type": "integer", "minimum": 1 },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "question",
+                  "assistant_response",
+                  "tool_call",
+                  "tool_result",
+                  "evidence_anchor",
+                  "hypothesis",
+                  "recommendation",
+                  "human_annotation"
+                ]
+              },
+              "actor": {
+                "type": "string",
+                "enum": ["human", "assistant", "tool", "importer", "unknown"]
+              },
+              "role": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "parentEventId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "evidenceRefs": { "type": "array", "items": { "type": "string" } },
+              "observedAt": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["status"],
+                "properties": {
+                  "status": { "type": "string", "enum": ["unknown", "observed"] },
+                  "timestamp": { "type": "string" }
+                }
+              },
+              "excerpt": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "excerptHash": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "unknowns": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "efficiency": { "type": "object" },
+        "unknowns": { "type": "array", "items": { "type": "string" } },
+        "notes": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "minLength": 1 }
+      }
+    },
     "hashEntry": {
       "type": "object",
       "additionalProperties": false,
@@ -658,6 +745,10 @@
               "fairnessClass": { "type": "string", "enum": ["same_snapshot", "unknown"] },
               "lineageClass": { "type": "string", "enum": ["root", "derived", "unknown"] }
             }
+          },
+          "traces": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/interactionTrace" }
           },
           "objectHash": { "$ref": "#/$defs/objectHash" }
         }

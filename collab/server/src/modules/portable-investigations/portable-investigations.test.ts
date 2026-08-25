@@ -406,6 +406,34 @@ function identityMapFor(archive: PortableArchiveV1) {
   );
 }
 
+function expectRestoredExperimentTraces(input: {
+  sourceTraces: { traceId: string; candidateId: string; events: { evidenceRefs: string[] }[] }[];
+  destTraces: { traceId: string; candidateId: string; events: { evidenceRefs: string[] }[] }[];
+  destCandidateIds: string[];
+  destEvidenceIds: Set<string>;
+}) {
+  expect(input.sourceTraces.length).toBeGreaterThan(0);
+  expect(input.destTraces).toHaveLength(input.sourceTraces.length);
+  expect(input.destTraces.map((item) => item.traceId).sort()).toEqual(
+    input.sourceTraces.map((item) => item.traceId).sort(),
+  );
+  const destCandidateIds = new Set(input.destCandidateIds);
+  for (const trace of input.destTraces) {
+    expect(destCandidateIds.has(trace.candidateId)).toBe(true);
+    for (const event of trace.events) {
+      for (const ref of event.evidenceRefs) {
+        expect(input.destEvidenceIds.has(ref)).toBe(true);
+      }
+    }
+  }
+  const sourceChat = input.sourceTraces.find((item) => item.candidateId.startsWith("chat-"));
+  const destChat = input.destTraces.find((item) => item.candidateId.startsWith("chat-"));
+  if (!sourceChat) return;
+  expect(destChat?.traceId).toBe(sourceChat.traceId);
+  expect(destChat?.candidateId).not.toBe(sourceChat.candidateId);
+  expect(destChat?.candidateId.startsWith("chat-")).toBe(true);
+}
+
 function resealArchive(
   archive: PortableArchiveV1,
   mutate: (investigation: PortableInvestigationUnsigned) => void,
@@ -2449,6 +2477,43 @@ describe("portable investigation apply", () => {
     }
   });
 
+  it("preserves experiment traces after portable restore", async () => {
+    const row = await fixture();
+    const source = (await row.experiments.list(row.caseId, ACTOR, true))[0];
+    if (!source) throw new Error("fixture experiment is missing");
+    expect(source.traces.length).toBeGreaterThan(0);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const portable = archive.investigation.experiments.find((item) => item.id === source.id);
+    expect(portable?.traces?.map((item) => item.traceId).sort()).toEqual(
+      source.traces.map((item) => item.traceId).sort(),
+    );
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(preview.apply.confirmationToken).toEqual(expect.any(String));
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const dest = (await row.experiments.list(applied.investigationId, ACTOR, true))
+      .find((item) => item.packageId === source.packageId);
+    const destEvidenceIds = new Set(
+      (await row.cases.listArtifacts(applied.investigationId, ACTOR, true)).map((item) => item.id),
+    );
+    expectRestoredExperimentTraces({
+      sourceTraces: source.traces,
+      destTraces: dest?.traces ?? [],
+      destCandidateIds: dest?.candidates.map((item) => item.candidateId) ?? [],
+      destEvidenceIds,
+    });
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({
@@ -4149,6 +4214,54 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
       );
       expect(dest?.snapshotProof).toEqual(source.snapshotProof);
       expect(dest?.agreement.notes).toEqual(source.agreement.notes);
+    });
+  });
+
+  it("preserves experiment traces after PostgreSQL apply", async () => {
+    const row = await fixture();
+    const source = (await row.experiments.list(row.caseId, ACTOR, true))[0];
+    if (!source) throw new Error("fixture experiment is missing");
+    expect(source.traces.length).toBeGreaterThan(0);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const pgRoot = await mkdtemp(join(tmpdir(), "cd-portable-pg-experiment-traces-"));
+      roots.push(pgRoot);
+      const pgEvidence = new FilesystemEvidenceStore({
+        rootDir: pgRoot,
+        acquireWriteLease: async () => () => undefined,
+      });
+      const investigationId = await withPgApplyTransaction(client, pgEvidence, async (ports) =>
+        persistPortableArchive({
+          archive,
+          report: preview.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: archiveContentBytes(archive),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      );
+      const store = new PgExperimentStore(client);
+      const dest = (await store.listByCase(investigationId))
+        .find((item) => item.packageId === source.packageId);
+      if (!dest) throw new Error("destination experiment is missing");
+      const destTraces = await store.listTraces(dest.id);
+      const destEvidence = await new PgCaseStore(client).listArtifactsByCase(investigationId);
+      expectRestoredExperimentTraces({
+        sourceTraces: source.traces,
+        destTraces,
+        destCandidateIds: dest.candidates.map((item) => item.candidateId),
+        destEvidenceIds: new Set(destEvidence.map((item) => item.id)),
+      });
     });
   });
 });

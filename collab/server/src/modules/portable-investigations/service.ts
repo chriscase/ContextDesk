@@ -997,6 +997,41 @@ export class PortableInvestigationService {
           notes: [...experiment.agreement.notes],
         },
         snapshotProof: { ...experiment.snapshotProof },
+        traces: experiment.traces.map((trace) => ({
+          schemaId: trace.schemaId,
+          traceId: trace.traceId,
+          candidateId: trace.candidateId,
+          sourceKind: trace.sourceKind,
+          completeness: trace.completeness,
+          privacyClass: "share_safe" as const,
+          rawHash: trace.rawHash,
+          events: trace.events.map((event) => ({
+            eventId: event.eventId,
+            sequence: event.sequence,
+            kind: event.kind,
+            actor: event.actor,
+            role: event.role,
+            parentEventId: event.parentEventId,
+            evidenceRefs: [...event.evidenceRefs],
+            observedAt:
+              event.observedAt.status === "observed"
+                ? { status: "observed" as const, timestamp: event.observedAt.timestamp }
+                : { status: "unknown" as const },
+            excerpt: event.excerpt,
+            excerptHash: event.excerptHash,
+            unknowns: [...event.unknowns],
+          })),
+          efficiency: {
+            turnCount: { ...trace.efficiency.turnCount },
+            evidenceAcquisitionSteps: { ...trace.efficiency.evidenceAcquisitionSteps },
+            latency: { ...trace.efficiency.latency },
+            cost: { ...trace.efficiency.cost },
+            providerCalls: { ...trace.efficiency.providerCalls },
+          },
+          unknowns: [...trace.unknowns],
+          notes: [...trace.notes],
+          createdAt: trace.createdAt,
+        })),
         objectHash: "",
       };
     });
