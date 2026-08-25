@@ -838,6 +838,20 @@ describe("situation briefing", () => {
     ).toBeTruthy();
   });
 
+  it("marks a briefing entry whose record is not broadly readable", async () => {
+    briefingFetch();
+    renderSituation();
+    const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
+    const hypotheses = within(briefing).getByRole("region", { name: /Working hypotheses/ });
+    // The fixture records this hypothesis as owner_only.
+    expect(within(hypotheses).getByText("restricted to its owner")).toBeTruthy();
+    // Imported output states the visibility its importer described.
+    const imported = within(briefing).getByRole("region", {
+      name: /Imported analysis awaiting a human read/,
+    });
+    expect(within(imported).getByText(/evidence visibility importer_described/)).toBeTruthy();
+  });
+
   it("keeps a removed contribution out of the working record", async () => {
     briefingFetch();
     renderSituation();
