@@ -323,17 +323,18 @@ function requireSha256(path: string, value: string): void {
   }
 }
 
-function requirePresentContentDigest(
+function requireContentDigest(
   contents: readonly { digest: string; inclusion: string }[],
   digest: string,
   path: string,
+  requirePresent: boolean,
 ): void {
   requireSha256(path, digest);
   const content = contents.find((item) => item.digest === digest);
   if (!content) {
     throw new ContractViolation(path, "dangling content digest");
   }
-  if (content.inclusion !== "present") {
+  if (requirePresent && content.inclusion !== "present") {
     throw new ContractViolation(path, "missing required content");
   }
 }
@@ -1884,10 +1885,11 @@ export function parsePortableInvestigation(
       );
     }
     if (row.outputDigest !== null) {
-      requirePresentContentDigest(
+      requireContentDigest(
         bundle.contentObjects,
         row.outputDigest,
         `$.importedAiRuns[${i}].outputDigest`,
+        row.outputCompleteness === "exact",
       );
     }
     if (row.outputCompleteness === "exact" && !row.outputDigest) {
@@ -1897,10 +1899,11 @@ export function parsePortableInvestigation(
       );
     }
     if (row.promptDigest) {
-      requirePresentContentDigest(
+      requireContentDigest(
         bundle.contentObjects,
         row.promptDigest,
         `$.importedAiRuns[${i}].promptDigest`,
+        row.promptCompleteness === "exact",
       );
     }
     if (row.promptCompleteness === "exact" && !row.promptDigest) {

@@ -628,6 +628,7 @@ describe("portable investigation adversarial lab", () => {
     const withheldImportedPrompt = syntheticSeal();
     const withheld = withheldImportedPrompt.contentObjects.find((row) => row.inclusion === "private");
     withheldImportedPrompt.importedAiRuns[0]!.promptDigest = withheld?.digest;
+    withheldImportedPrompt.importedAiRuns[0]!.promptCompleteness = "exact";
     expect(() => parsePortableInvestigation(reseal(withheldImportedPrompt))).toThrow(
       /missing required content/,
     );
