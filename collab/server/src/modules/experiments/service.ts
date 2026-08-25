@@ -392,6 +392,19 @@ export class ExperimentService {
     this.store = deps.experiments ?? new MemoryExperimentStore();
   }
 
+  private async withExperimentAtomic<T>(operation: () => Promise<T>): Promise<T> {
+    const memory = this.store instanceof MemoryExperimentStore ? this.store : null;
+    return this.deps.cases.withAtomic(async () => {
+      const snapshot = memory?.capture();
+      try {
+        return await operation();
+      } catch (error) {
+        if (memory && snapshot !== undefined) memory.restore(snapshot);
+        throw error;
+      }
+    });
+  }
+
   async importEnvelope(
     caseId: string,
     actor: Actor,
@@ -413,6 +426,7 @@ export class ExperimentService {
       parsed.kind === "strategy"
         ? parsed.package.traces.map((trace) => prepareTraceForStorage(trace))
         : [];
+    return this.withExperimentAtomic(async () => {
     const existing = await this.store.findByPackage(caseId, envelope.packageId);
     if (existing) {
       await this.deps.audit.append({
@@ -483,6 +497,7 @@ export class ExperimentService {
       }
     }
     return this.toView(row);
+    });
   }
 
   async list(caseId: string, actor: Actor, isAdmin: boolean): Promise<ExperimentView[]> {
@@ -666,6 +681,7 @@ export class ExperimentService {
       reviewerUsername: actor.username,
       createdAt: new Date().toISOString(),
     });
+    return this.withExperimentAtomic(async () => {
     await this.store.insertObservation(observation);
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_helpfulness_recorded",
@@ -686,6 +702,7 @@ export class ExperimentService {
       outcome: "success",
     });
     return observation;
+    });
   }
 
   async proposeDecision(
@@ -704,6 +721,7 @@ export class ExperimentService {
     isAdmin: boolean,
   ): Promise<NormalizedExperimentDecisionV1> {
     const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    return this.withExperimentAtomic(async () => {
     const history = await this.store.listDecisions(experimentId);
     const latest = history.at(-1) ?? null;
     if (latest?.status === "accepted") {
@@ -757,6 +775,7 @@ export class ExperimentService {
       outcome: "success",
     });
     return decision;
+    });
   }
 
   async acceptDecision(
@@ -768,6 +787,7 @@ export class ExperimentService {
     isAdmin: boolean,
   ): Promise<NormalizedExperimentDecisionV1> {
     const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    return this.withExperimentAtomic(async () => {
     const history = await this.store.listDecisions(experimentId);
     const latest = history.at(-1) ?? null;
     if (!latest) throw new Error("no proposed decision");
@@ -818,6 +838,7 @@ export class ExperimentService {
       outcome: "success",
     });
     return accepted;
+    });
   }
 
   async exportShareSafe(
@@ -840,6 +861,7 @@ export class ExperimentService {
     isAdmin: boolean,
   ): Promise<InteractionTraceV1> {
     const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    return this.withExperimentAtomic(async () => {
     if (
       raw &&
       typeof raw === "object" &&
@@ -866,6 +888,7 @@ export class ExperimentService {
       return this.attachParsedTrace(row, actor, trace, origin);
     }
     throw new Error("expected interaction trace or plain transcript");
+    });
   }
 
   async annotateTrace(
@@ -886,6 +909,7 @@ export class ExperimentService {
     if (!current) throw new Error("import a trace before annotating");
     const nextSeq = (current.events.at(-1)?.sequence ?? 0) + 1;
     const annotationId = randomUUID();
+    return this.withExperimentAtomic(async () => {
     await this.store.insertAnnotation({
       id: annotationId,
       experimentId: row.id,
@@ -918,6 +942,7 @@ export class ExperimentService {
     const trace = view.traces.find((item) => item.candidateId === input.candidateId);
     if (!trace) throw new Error("trace not found after annotation");
     return trace;
+    });
   }
 
   private async attachParsedTrace(
@@ -1001,6 +1026,7 @@ export class ExperimentService {
       }
     }
 
+    return this.withExperimentAtomic(async () => {
     const golds = await this.store.listGolds(experimentId);
     const fingerprint = goldPromotionFingerprint({
       acceptedDecisionId: accepted.id,
@@ -1097,6 +1123,7 @@ export class ExperimentService {
       outcome: "success",
     });
     return gold;
+    });
   }
 
   private assertExpectedRevision(
