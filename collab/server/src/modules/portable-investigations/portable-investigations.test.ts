@@ -41,7 +41,7 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService, MemoryCatalogStore } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "../experiments/index.js";
-import { ImportService, MemoryRunStore } from "../import/index.js";
+import { ImportService, MemoryRunStore, PgRunStore } from "../import/index.js";
 import { MemoryTriageJobStore, TriageRunService } from "../triage-runs/index.js";
 import { loadPortableInstallationId } from "./installation.js";
 import {
@@ -414,6 +414,58 @@ function resealArchive(
     investigation: attachPortableIntegrity(unsigned as PortableInvestigationUnsigned),
     exportedAt: archive.exportedAt,
   });
+}
+
+function injectCorroborationEvent(
+  archive: PortableArchiveV1,
+  target: { targetId: string | null; targetNamespace: string | null },
+): PortableArchiveV1 {
+  return resealArchive(archive, (investigation) => {
+    const imported = investigation.timeline.find((row) => row.kind === "external_run_imported");
+    if (!imported) throw new Error("imported-run timeline is missing");
+    investigation.timeline.push({
+      seq: Math.max(...investigation.timeline.map((row) => row.seq)) + 1,
+      kind: "run_corroboration",
+      actorId: imported.actorId,
+      targetId: target.targetId,
+      targetNamespace: target.targetNamespace,
+      serverTime: imported.serverTime,
+      objectHash: "",
+    });
+  });
+}
+
+function archiveContentBytes(archive: PortableArchiveV1) {
+  return new Map(
+    archive.investigation.contentObjects
+      .filter((item) => item.payloadBase64 !== null)
+      .map((item) => [
+        item.digest,
+        new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+      ]),
+  );
+}
+
+async function persistFixtureArchive(row: Fixture, archive: PortableArchiveV1) {
+  const identityMap = identityMapFor(archive);
+  const dryRun = await row.portable.preflight(
+    archive,
+    { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+    ACTOR,
+    false,
+  );
+  return row.applyBoundary.withTransaction((ports) =>
+    persistPortableArchive({
+      archive,
+      report: dryRun.report,
+      identityMap,
+      actor: ACTOR,
+      destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+      contentBytes: archiveContentBytes(archive),
+      ports,
+      now: "2042-03-04T12:00:00.000Z",
+    }),
+  );
 }
 
 function detachedArchiveFor(
@@ -1191,7 +1243,19 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/workstream job timeline/);
   });
 
-  it("refuses apply when corroboration timeline lacks an imported-run target", async () => {
+  it("refuses apply when corroboration timeline is present even without an imported-run target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = injectCorroborationEvent(archive, {
+      targetId: null,
+      targetNamespace: null,
+    });
+    await expect(persistFixtureArchive(row, incomplete)).rejects.toThrow(
+      /imported-run corroboration is not exact-applyable/,
+    );
+  });
+
+  it("refuses to export imported-run corroboration as exact-applyable", async () => {
     const row = await fixture();
     const timeline = await row.cases.listTimeline(row.caseId);
     const imported = timeline.find((event) => event.kind === "external_run_imported");
@@ -1204,41 +1268,42 @@ describe("portable investigation service", () => {
       "fixture",
       false,
     );
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
-    const incomplete = resealArchive(archive, (investigation) => {
-      const event = investigation.timeline.find((row) => row.kind === "run_corroboration");
-      if (!event) throw new Error("corroboration timeline is missing");
-      event.targetId = null;
-      event.targetNamespace = null;
+    const sourceRuns = await row.imports.listRuns(row.caseId, ACTOR, false);
+    expect(sourceRuns.map((run) => run.corroborationState)).toEqual(["corroborated"]);
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
+      code: "unsupported_state",
+      message: expect.stringMatching(/imported-run corroboration is not exact-applyable/),
     });
-    const identityMap = identityMapFor(incomplete);
+  });
+
+  it("refuses dry-run and apply of remapped imported-run corroboration timeline", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const imported = archive.investigation.timeline.find((event) => event.kind === "external_run_imported");
+    if (!imported?.targetId) throw new Error("imported-run timeline is missing");
+    const injected = injectCorroborationEvent(archive, {
+      targetId: imported.targetId,
+      targetNamespace: "imported_ai_run",
+    });
+    const identityMap = identityMapFor(injected);
     const dryRun = await row.portable.preflight(
-      incomplete,
+      injected,
       { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
       ACTOR,
       false,
     );
-    await expect(
-      row.applyBoundary.withTransaction((ports) =>
-        persistPortableArchive({
-          archive: incomplete,
-          report: dryRun.report,
-          identityMap,
-          actor: ACTOR,
-          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
-          contentBytes: new Map(
-            incomplete.investigation.contentObjects
-              .filter((item) => item.payloadBase64 !== null)
-              .map((item) => [
-                item.digest,
-                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
-              ]),
-          ),
-          ports,
-          now: "2042-03-04T12:00:00.000Z",
-        }),
-      ),
-    ).rejects.toThrow(/corroboration timeline/);
+    expect(dryRun.report.exactReconstruction).toBe(false);
+    expect(dryRun.report.reconstructionStatus).toBe("blocked");
+    expect(dryRun.report.reconstructionReasons).toContainEqual(
+      expect.objectContaining({
+        path: "$.investigation.timeline",
+        detail: expect.stringMatching(/imported-run corroboration is not exact-applyable/),
+      }),
+    );
+    expect(dryRun.apply.confirmationToken).toBeNull();
+    await expect(persistFixtureArchive(row, injected)).rejects.toThrow(
+      /imported-run corroboration is not exact-applyable/,
+    );
   });
 
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
@@ -1426,6 +1491,7 @@ describe("portable investigation service", () => {
     expect(response.report.applyAuthorized).toBe(false);
     expect(response.unsupported).not.toContain("investigation_situation_fields");
     expect(response.unsupported).toContain("imported_content_privacy_is_not_contract_bound");
+    expect(response.unsupported).toContain("imported_run_corroboration");
   });
 
   it("blocks exact apply when an incoming archive represents unsupported source membership", async () => {
@@ -2202,6 +2268,11 @@ describe("portable investigation apply", () => {
       expect(event.targetId).not.toBe(applied.investigationId);
       expect(event.targetId).not.toBe(destFrozen?.locator.resourceId);
     }
+    expect(destFrozenTimeline.some((event) => event.kind === "run_corroboration")).toBe(false);
+    expect(destPage.items.some((item) => item.summary === "reviewed imported analysis")).toBe(false);
+    const destRuns = await row.imports.listRuns(applied.investigationId, ACTOR, false);
+    expect(destRuns.length).toBeGreaterThan(0);
+    expect(destRuns.every((run) => run.corroborationState === "unverified")).toBe(true);
     expect(destDecision?.locator.kind).toBe("decision_revision");
     expect(destDecision?.locator.resourceId).not.toBe(sourceDecision?.locator.resourceId);
     expect(destGold?.locator.kind).toBe("gold");
@@ -3366,6 +3437,56 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
       await expect(activity.resolve(ACTOR, false, confusedImportedSnapshot)).rejects.toMatchObject({
         code: "not_found",
       });
+      expect(page.items.some((item) => item.summary === "reviewed imported analysis")).toBe(false);
+      expect((await pgCases.listTimeline(investigationId)).some((event) => event.kind === "run_corroboration"))
+        .toBe(false);
+      const destRuns = await new PgRunStore(client).listByCase(investigationId);
+      expect(destRuns.length).toBeGreaterThan(0);
+      for (const run of destRuns) {
+        expect(await new PgRunStore(client).listCorroborations(run.id)).toEqual([]);
+      }
+    });
+  });
+
+  it("refuses PostgreSQL apply of imported-run corroboration timeline", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const imported = archive.investigation.timeline.find((event) => event.kind === "external_run_imported");
+    if (!imported?.targetId) throw new Error("imported-run timeline is missing");
+    const injected = injectCorroborationEvent(archive, {
+      targetId: imported.targetId,
+      targetNamespace: "imported_ai_run",
+    });
+    const identityMap = identityMapFor(injected);
+    const preview = await row.portable.preflight(
+      injected,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const pgRoot = await mkdtemp(join(tmpdir(), "cd-portable-pg-corroboration-"));
+      roots.push(pgRoot);
+      const pgEvidence = new FilesystemEvidenceStore({
+        rootDir: pgRoot,
+        acquireWriteLease: async () => () => undefined,
+      });
+      await expect(
+        withPgApplyTransaction(client, pgEvidence, async (ports) =>
+          persistPortableArchive({
+            archive: injected,
+            report: preview.report,
+            identityMap,
+            actor: ACTOR,
+            destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+            contentBytes: archiveContentBytes(injected),
+            ports,
+            now: "2042-03-04T12:00:00.000Z",
+          }),
+        ),
+      ).rejects.toThrow(/imported-run corroboration is not exact-applyable/);
+      expect(await new PgCaseStore(client).listCases()).toEqual([]);
     });
   });
 });

@@ -733,11 +733,8 @@ export async function persistPortableArchive(input: {
     ) {
       throw new Error("imported-run timeline is missing a portable imported-run target");
     }
-    if (
-      event.kind === "run_corroboration"
-      && (event.targetNamespace !== "imported_ai_run" || !event.targetId)
-    ) {
-      throw new Error("corroboration timeline is missing a portable imported-run target");
+    if (event.kind === "run_corroboration") {
+      throw new Error("imported-run corroboration is not exact-applyable");
     }
     if (
       (/^contribution_/.test(event.kind) || event.kind === "hypothesis_status")

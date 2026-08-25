@@ -62,6 +62,7 @@ export const PORTABLE_CONTRACT_UNSUPPORTED = [
   "experiment_agreement_and_interaction_traces",
   "source_membership_and_source_identity_ownership",
   "imported_prompt_and_opaque_run_details",
+  "imported_run_corroboration",
   "imported_content_privacy_is_not_contract_bound",
   "discussion_containers_presence_and_live_chat_state",
   "derived_alignment_details_and_interaction_traces",
@@ -616,6 +617,12 @@ function applySupportReasons(
   if (bundle.discussions.length > 0) {
     block("$.investigation.discussions", "discussion containers are unsupported");
   }
+  if (bundle.timeline.some((row) => row.kind === "run_corroboration")) {
+    block(
+      "$.investigation.timeline",
+      "imported-run corroboration is not exact-applyable",
+    );
+  }
   if (bundle.timeline.some((row, index) => row.seq !== index + 1)) {
     block("$.investigation.timeline", "timeline sequence must be contiguous from one");
   }
@@ -792,6 +799,12 @@ export class PortableInvestigationService {
     }
 
     for (const run of importedRuns) {
+      if (run.corroborationState !== "unverified") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "imported-run corroboration is not exact-applyable",
+        );
+      }
       const output = new TextEncoder().encode(run.outputText);
       addContent(run.outputHash, output, "text/plain", output.byteLength);
       if ((run.promptHash === null) !== (run.promptText === null)) {
@@ -1082,10 +1095,10 @@ export class PortableInvestigationService {
           "imported-run timeline is missing a portable imported-run target",
         );
       }
-      if (row.kind === "run_corroboration" && addressed?.namespace !== "imported_ai_run") {
+      if (row.kind === "run_corroboration") {
         throw new PortableServerError(
           "unsupported_state",
-          "corroboration timeline is missing a portable imported-run target",
+          "imported-run corroboration is not exact-applyable",
         );
       }
       if (
