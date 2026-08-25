@@ -242,6 +242,33 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(writeText).toHaveBeenCalledTimes(3);
   });
 
+  it("downloads redacted qualification JSON without exposing private host data", async () => {
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:qualification");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    host.qualification.mockResolvedValue(report());
+
+    try {
+      render(<InvestigationTeamReadinessPanel />);
+      await screen.findByTestId("investigation-team-readiness");
+      fireEvent.click(screen.getByTestId("investigation-team-download-redacted-json"));
+
+      await waitFor(() =>
+        expect(screen.getByText("Downloaded redacted JSON.")).toBeTruthy(),
+      );
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      expect(createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob);
+      expect(click).toHaveBeenCalledTimes(1);
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:qualification");
+    } finally {
+      click.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps clipboard denial visible and leaves the redacted artifact inspectable", async () => {
     const writeText = vi.fn(async () => {
       throw new Error("clipboard denied");
