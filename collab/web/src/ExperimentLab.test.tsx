@@ -2411,8 +2411,12 @@ describe("focused Compare workspace", () => {
     );
 
     expect(await screen.findByRole("region", { name: "Shared and different evidence" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "programmatic-agent" }).getAttribute("aria-pressed")).toBe(
-      "true",
+    // Routed lane focus is projected from props a tick after the subsection
+    // renders, so this settles rather than being true on the first paint.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "programmatic-agent" }).getAttribute("aria-pressed"),
+      ).toBe("true"),
     );
 
     fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));

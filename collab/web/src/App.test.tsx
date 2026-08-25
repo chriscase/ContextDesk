@@ -406,7 +406,9 @@ describe("authenticated application shell", () => {
     vi.stubGlobal("fetch", stub);
     render(<App />);
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
-    expect(window.location.pathname).toBe("/signin");
+    // The sign-in form renders before the shell has finished rewriting the
+    // address it is holding for after sign-in, so wait for the redirect.
+    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
     fireEvent.change(screen.getByLabelText("Username"), { target: { value: "owner" } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secret" } });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));

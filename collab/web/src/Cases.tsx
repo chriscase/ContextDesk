@@ -87,6 +87,14 @@ interface ActivityItem {
   resolvedRoute: string;
   provenanceClass: "human" | "imported" | "system" | "ai_generated" | "historical_restored";
   humanFinding: boolean;
+  /**
+   * Also published by the committed activity projection. Older payloads and
+   * embedded consumers may omit them, so every reader treats them as optional
+   * and says nothing rather than guessing.
+   */
+  activityKind?: string;
+  privacyVisibility?: string;
+  secondaryContext?: { label: string; value: string };
 }
 
 interface LegacyActivityItem {
@@ -226,6 +234,94 @@ function evidenceSignals(events: readonly TimelineEvent[]): {
     else if (event.kind === "corpus_intake_committed") intakeBatches += 1;
   }
   return { registered, snapshots, intakeBatches };
+}
+
+/**
+ * Provenance shown on every feed row, not only the non-human ones. A reader
+ * scanning the room should never have to infer that an unlabeled row was
+ * written by a person. Model and imported output are always named as analysis.
+ */
+function activityProvenance(item: ActivityItem): { className: string; label: string } {
+  if (item.provenanceClass === "ai_generated") {
+    return { className: "triage-chip triage-chip--model", label: "AI-assisted \u00b7 not a human finding" };
+  }
+  if (item.provenanceClass === "imported") {
+    return { className: "triage-chip triage-chip--imported", label: "imported \u00b7 not a human finding" };
+  }
+  if (item.provenanceClass === "historical_restored") {
+    return { className: "triage-chip triage-chip--imported", label: "restored history \u00b7 attribution only" };
+  }
+  if (item.provenanceClass === "system") {
+    return { className: "triage-chip", label: "recorded by the system" };
+  }
+  return { className: "triage-chip triage-chip--human", label: "human-authored" };
+}
+
+/**
+ * Names a restricted item so a reader knows the record behind this row is not
+ * broadly readable. Nothing about the restricted content itself is shown.
+ */
+function activityRestriction(item: ActivityItem): string | null {
+  if (item.privacyVisibility === "owner_only") return "restricted to its owner";
+  if (item.privacyVisibility === "redacted") return "redacted";
+  if (item.privacyVisibility === "omitted") return "content omitted";
+  return null;
+}
+
+/**
+ * Recorded events that name work nobody has carried further. These are read
+ * from the same committed activity projection the feed uses \u2014 a filter over
+ * recorded events, never a second source of truth and never a judgment that
+ * the work is wrong.
+ */
+const ATTENTION_GROUPS: readonly {
+  id: string;
+  title: string;
+  kinds: readonly string[];
+  meaning: string;
+}[] = [
+  {
+    id: "stalled",
+    title: "Analysis that stopped short",
+    kinds: ["workstream_failed", "workstream_partially_completed", "workstream_canceled"],
+    meaning:
+      "A workstream was recorded as failed, partial, or canceled. Its own record says what it did reach.",
+  },
+  {
+    id: "disagreed",
+    title: "Lanes that disagreed",
+    kinds: ["comparison_disagreement"],
+    meaning:
+      "A recorded comparison contradicted itself across lanes. Disagreement is for a person to adjudicate.",
+  },
+  {
+    id: "unread",
+    title: "Imported or AI output not yet read",
+    kinds: ["import_recorded"],
+    meaning:
+      "Output pasted or generated elsewhere. It stays unverified until a person corroborates it.",
+  },
+];
+
+const DECISION_PENDING_KINDS = new Set(["decision_proposed", "decision_revised"]);
+const DECISION_SETTLED_KINDS = new Set(["decision_accepted", "decision_superseded"]);
+
+/**
+ * Investigations whose most recent recorded decision event is still a
+ * proposal. Read strictly from the loaded window of activity, so callers must
+ * state that bound rather than implying the whole history was examined.
+ */
+function decisionsAwaitingAcceptance(items: readonly ActivityItem[]): ActivityItem[] {
+  const latest = new Map<string, ActivityItem>();
+  // Items arrive newest-first, so the first decision event seen for an
+  // investigation is the most recent one recorded in this window.
+  for (const item of items) {
+    const kind = item.activityKind ?? "";
+    if (!DECISION_PENDING_KINDS.has(kind) && !DECISION_SETTLED_KINDS.has(kind)) continue;
+    if (latest.has(item.investigationId)) continue;
+    latest.set(item.investigationId, item);
+  }
+  return [...latest.values()].filter((item) => DECISION_PENDING_KINDS.has(item.activityKind ?? ""));
 }
 
 function activityLabel(item: ActivityItem | LegacyActivityItem): string {
@@ -681,12 +777,25 @@ export function Cases(props: {
 
   useEffect(() => {
     void refresh();
-    void refreshActivity();
     void refreshSources();
     const refreshCatalog = () => void refreshSources();
     window.addEventListener("contextdesk:source-catalog-changed", refreshCatalog);
     return () => window.removeEventListener("contextdesk:source-catalog-changed", refreshCatalog);
-  }, [refresh, refreshActivity, refreshSources]);
+  }, [refresh, refreshSources]);
+
+  // Work recorded elsewhere in the room — a workstream that finished, failed,
+  // or was canceled in Analyze — never passed through this component, so the
+  // operating picture could show a room state that had already moved on.
+  // Re-read the committed projection whenever the overview is put on screen,
+  // and whenever a run reports that it changed.
+  const showingOverview = view === "overview" && !focusCaseId;
+  useEffect(() => {
+    if (!showingOverview) return undefined;
+    void refreshActivity();
+    const onRunChanged = () => void refreshActivity();
+    window.addEventListener("contextdesk:triage-run-changed", onRunChanged);
+    return () => window.removeEventListener("contextdesk:triage-run-changed", onRunChanged);
+  }, [showingOverview, refreshActivity]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -941,6 +1050,14 @@ export function Cases(props: {
     )
     .slice(0, 5);
   const overviewActivities = activities.slice(0, 10);
+  // Both panels below read the same committed activity window the feed reads.
+  const attentionGroups = ATTENTION_GROUPS.map((group) => ({
+    ...group,
+    items: activities.filter((item) => group.kinds.includes(item.activityKind ?? "")),
+  })).filter((group) => group.items.length > 0);
+  const pendingDecisions = decisionsAwaitingAcceptance(activities);
+  const attentionCount =
+    attentionGroups.reduce((total, group) => total + group.items.length, 0) + pendingDecisions.length;
 
   const createForm = canWrite ? (
     <form className="case-form" aria-label="Start a new investigation" onSubmit={(e) => void createCase(e)}>
@@ -1204,14 +1321,27 @@ export function Cases(props: {
                             <span className="activity-feed__case">{item.investigationTitle}</span>
                             <span className="activity-feed__meta">
                               <time dateTime={item.occurredAt}>{activityTime(item.occurredAt)}</time>
+                              {/* The committed projection names the stage this
+                                  event belongs to; showing it saves opening the
+                                  investigation to find out where work happened. */}
+                              {item.secondaryContext ? (
+                                <span className="activity-feed__stage">
+                                  {item.secondaryContext.label}: {item.secondaryContext.value}
+                                </span>
+                              ) : null}
                               {investigation ? (
                                 <span className={`status-pill status-pill--${investigation.status}`}>
                                   {investigation.status}
                                 </span>
                               ) : null}
-                              {item.provenanceClass !== "human" ? (
-                                <span>{item.provenanceClass.replaceAll("_", " ")} · not a human finding</span>
+                              {activityRestriction(item) ? (
+                                <span className="activity-feed__restricted">
+                                  {activityRestriction(item)}
+                                </span>
                               ) : null}
+                            </span>
+                            <span className={activityProvenance(item).className}>
+                              {activityProvenance(item).label}
                             </span>
                           </a>
                           <div className="activity-feed__share">
@@ -1237,10 +1367,125 @@ export function Cases(props: {
                   </p>
                 ) : null}
               </section>
+              <aside className="overview__attention" aria-labelledby="overview-open-title">
+                <header className="overview__section-head">
+                  <div>
+                    <p className="overview__eyebrow">Nothing has carried this further</p>
+                    <h3 id="overview-open-title">Open threads</h3>
+                    <p>
+                      Recorded work that stopped, disagreed, or is still waiting on a person. Read
+                      from the {activities.length} most recent recorded events, so older open work
+                      may not appear here.
+                    </p>
+                  </div>
+                </header>
+                {!activitiesLoaded ? (
+                  <p className="overview__empty" role="status">Loading recent activity…</p>
+                ) : attentionCount === 0 ? (
+                  <p className="overview__empty">
+                    Nothing in recent activity is recorded as stopped, disagreeing, unread, or
+                    waiting on a decision.
+                  </p>
+                ) : (
+                  <div className="overview__threads">
+                    {pendingDecisions.length ? (
+                      <section
+                        className="overview__thread-group"
+                        aria-labelledby="overview-thread-decisions"
+                      >
+                        <h4 id="overview-thread-decisions">
+                          Waiting on a human decision
+                          <span className="overview__thread-count">{pendingDecisions.length}</span>
+                        </h4>
+                        <p className="overview__thread-meaning">
+                          The most recent decision recorded for these investigations is a proposal.
+                          Only a person accepts a decision.
+                        </p>
+                        <ul className="overview__thread-list">
+                          {pendingDecisions.map((item) => (
+                            <li key={item.activityId}>
+                              <a
+                                href={item.resolvedRoute}
+                                onClick={(event) => {
+                                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                  event.preventDefault();
+                                  const destination = activityDestination(item);
+                                  if (props.onActivityOpen) {
+                                    props.onActivityOpen(
+                                      item.investigationId,
+                                      destination.stage,
+                                      destination.focus,
+                                    );
+                                  } else {
+                                    setLocalNav({ caseId: item.investigationId, stage: destination.stage });
+                                  }
+                                }}
+                              >
+                                <strong>{item.investigationTitle}</strong>
+                                <span>
+                                  {item.actorLabel} {activityLabel(item)} ·{" "}
+                                  {activityTime(item.occurredAt)}
+                                </span>
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    ) : null}
+                    {attentionGroups.map((group) => (
+                      <section
+                        key={group.id}
+                        className="overview__thread-group"
+                        aria-labelledby={`overview-thread-${group.id}`}
+                      >
+                        <h4 id={`overview-thread-${group.id}`}>
+                          {group.title}
+                          <span className="overview__thread-count">{group.items.length}</span>
+                        </h4>
+                        <p className="overview__thread-meaning">{group.meaning}</p>
+                        <ul className="overview__thread-list">
+                          {group.items.slice(0, 4).map((item) => (
+                            <li key={item.activityId}>
+                              <a
+                                href={item.resolvedRoute}
+                                onClick={(event) => {
+                                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                  event.preventDefault();
+                                  const destination = activityDestination(item);
+                                  if (props.onActivityOpen) {
+                                    props.onActivityOpen(
+                                      item.investigationId,
+                                      destination.stage,
+                                      destination.focus,
+                                    );
+                                  } else {
+                                    setLocalNav({ caseId: item.investigationId, stage: destination.stage });
+                                  }
+                                }}
+                              >
+                                <strong>{item.investigationTitle}</strong>
+                                <span>
+                                  {item.actorLabel} {activityLabel(item)} ·{" "}
+                                  {activityTime(item.occurredAt)}
+                                </span>
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                        {group.items.length > 4 ? (
+                          <p className="overview__thread-more">
+                            {group.items.length - 4} more in recent activity.
+                          </p>
+                        ) : null}
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </aside>
               <aside className="overview__attention" aria-labelledby="overview-attention-title">
                 <header className="overview__section-head">
                   <div>
-                    <p className="overview__eyebrow">Needs attention</p>
+                    <p className="overview__eyebrow">Recorded severity</p>
                     <h3 id="overview-attention-title">High-impact investigations</h3>
                     <p>Open or monitored work recorded as high or critical severity.</p>
                   </div>
