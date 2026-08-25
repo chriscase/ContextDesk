@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID } from "@cd-collab/contracts/admin";
@@ -860,7 +860,11 @@ describe("pathname shell routing", () => {
     HTMLElement.prototype.scrollIntoView = scrollIntoView;
     try {
       render(<App />);
-      const target = await screen.findByText("Synthetic worker queue paused.");
+      // Situation also restates recorded observations, so scope the assertion
+      // to the stage this address actually opens.
+      await waitFor(() => expect(document.getElementById("stage-capture")).not.toBeNull());
+      const capture = document.getElementById("stage-capture") as HTMLElement;
+      const target = await within(capture).findByText("Synthetic worker queue paused.");
       const item = target.closest("[data-route-item]") as HTMLElement;
       await waitFor(() => expect(document.activeElement).toBe(item));
       expect(item.dataset.routeItem).toBe("note-7");
