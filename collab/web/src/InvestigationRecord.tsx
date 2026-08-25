@@ -137,6 +137,12 @@ export function InvestigationRecordPanel(props: {
   createdAt: string | null;
   investigations: readonly { id: string; title: string }[];
   onOccurrenceSaved: () => void | Promise<void>;
+  /**
+   * Fired after involvement changes. The investigation list filters by entity
+   * from a server-built index, so that index has to be re-read here — without
+   * it, filtering by an entity just linked returns nothing.
+   */
+  onInvolvementChanged?: () => void | Promise<void>;
   onOpenInvestigation?: (caseId: string) => void;
 }) {
   const [entities, setEntities] = useState<EntityRow[]>([]);
@@ -236,6 +242,7 @@ export function InvestigationRecordPanel(props: {
     }
     setEntityDraft({ entityId: "", relationship: "affected", note: "", occurredAt: "" });
     await refresh();
+    await props.onInvolvementChanged?.();
   }
 
   async function release(involvementId: string) {
@@ -249,6 +256,7 @@ export function InvestigationRecordPanel(props: {
       return;
     }
     await refresh();
+    await props.onInvolvementChanged?.();
   }
 
   async function addReference(event: FormEvent) {

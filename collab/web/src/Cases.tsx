@@ -2169,6 +2169,7 @@ export function Cases(props: {
             onOccurrenceSaved={async () => {
               await Promise.all([refresh(), refreshActivity()]);
             }}
+            onInvolvementChanged={refreshRecordIndex}
             onOpenInvestigation={(id) => openCase(id)}
           />
           <section className="situation__activity" aria-label="Recorded activity">
