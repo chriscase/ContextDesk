@@ -408,6 +408,7 @@ export type {
 export {
   BRIEF_SCHEMA_ID,
   IMPORTED_RESPONSE_PRESENTATION,
+  SHARE_SAFE_ENTITY_HANDLE_PREFIX,
   parseBrief,
 } from "./brief.js";
 export type {
@@ -417,8 +418,11 @@ export type {
   BriefHeaderV1,
   BriefHypothesisV1,
   BriefImportedRunV1,
+  BriefInvolvementV1,
   BriefLinkV1,
   BriefMemorySummaryV1,
+  BriefReferenceV1,
+  BriefResolutionV1,
   BriefTimelineEventV1,
   BriefV1,
 } from "./brief.js";
@@ -675,6 +679,10 @@ export * from "./investigation-portable-archive.js";
 export * from "./investigation-portable-apply.js";
 export * from "./investigation-strategy-connector.js";
 export * from "./investigation-activity.js";
+export * from "./temporal.js";
+export * from "./investigation-entity.js";
+export * from "./investigation-reference.js";
+export * from "./investigation-resolution.js";
 export * from "./capability.js";
 export * from "./user-profile.js";
 export * from "./directory-mapping.js";

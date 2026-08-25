@@ -61,6 +61,9 @@ import {
   type UserProfileStore,
 } from "./modules/people/index.js";
 import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js";
+import { registerEntityRoutes, type EntityService } from "./modules/entities/index.js";
+import { registerReferenceRoutes, type ReferenceService } from "./modules/references/index.js";
+import { registerResolutionRoutes, type ResolutionService } from "./modules/resolutions/index.js";
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
@@ -86,6 +89,12 @@ export interface AppDeps {
   exporter?: ExportService;
   portable?: PortableInvestigationService;
   setup?: SetupService;
+  /** Reusable investigation entities and their per-investigation involvement. */
+  entities?: EntityService;
+  /** Authorized cross-investigation references. */
+  references?: ReferenceService;
+  /** Resolution records behind conclusive status transitions. */
+  resolutions?: ResolutionService;
   /** Canonical user profile store. Also wires login-time profile sync onto security.auth. */
   profiles?: UserProfileStore;
   grants?: LocalGrantStore;
@@ -225,6 +234,32 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         audit: security.audit,
         domain: deps.domain,
       });
+      if (deps.entities) {
+        const domain = deps.domain;
+        await registerEntityRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          entities: deps.entities,
+          // Filtering by entity must never widen what a reader can see, so the
+          // index is built from the investigations they could already list.
+          visibleInvestigationIds: async (actor, isAdmin) =>
+            (await domain.listCases(actor, isAdmin)).map((row) => row.id),
+        });
+      }
+      if (deps.references) {
+        await registerReferenceRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          references: deps.references,
+        });
+      }
+      if (deps.resolutions) {
+        await registerResolutionRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          resolutions: deps.resolutions,
+        });
+      }
     }
     if (deps.catalog) {
       await registerCatalogRoutes(app, {

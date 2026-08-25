@@ -39,6 +39,47 @@ export function briefMarkdown(brief: BriefV1): string {
     lines.push(`- ${brief.memory.agreementNotice}`);
   }
   lines.push("");
+  lines.push("## Involved entities");
+  const involvement = brief.involvement ?? [];
+  if (involvement.length === 0) lines.push("- (none recorded)");
+  for (const row of involvement) {
+    const when = row.occurredAt === null
+      ? "when not recorded"
+      : `${row.occurredAt}${row.occurredAtZone === "unspecified" ? " (time zone not recorded)" : ""}`;
+    const disclosure = row.labelDisclosed ? "" : " · label withheld";
+    lines.push(`- ${row.entityRef} · ${row.kind} · ${row.relationship} · ${row.state} · ${when}${disclosure}`);
+  }
+
+  lines.push("");
+  lines.push("## Referenced investigations");
+  const references = brief.references ?? [];
+  if (references.length === 0) lines.push("- (none recorded)");
+  for (const row of references) {
+    const title = row.citedTitle ?? "title withheld";
+    const note = row.note === "" ? "" : ` — ${row.note}`;
+    lines.push(`- ${title} · ${row.resourceKind} · ${row.state} · ${row.locator}${note}`);
+  }
+
+  lines.push("");
+  lines.push("## Resolution");
+  if (!brief.resolution) {
+    lines.push("- (not resolved)");
+  } else {
+    const resolution = brief.resolution;
+    lines.push(`- basis: ${resolution.basis}`);
+    lines.push(`- provenance: ${resolution.provenance}`);
+    lines.push(`- revision: ${resolution.revision}`);
+    lines.push(`- recorded by: ${resolution.actorLabel}`);
+    lines.push(`- open unknowns: ${resolution.unknownCount}`);
+    lines.push(
+      resolution.rationaleIncluded
+        ? `- rationale: ${resolution.rationale ?? ""}`
+        : "- rationale: withheld from a share-safe export",
+    );
+    for (const unknown of resolution.unknowns ?? []) lines.push(`  - unknown: ${unknown}`);
+  }
+
+  lines.push("");
   lines.push("## Hypotheses");
   if (brief.hypotheses.length === 0) lines.push("- (none)");
   for (const h of brief.hypotheses) {

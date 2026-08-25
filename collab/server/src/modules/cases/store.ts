@@ -14,6 +14,8 @@ import {
   type OverviewOpenStatus,
   type OverviewSeverityCountsV1,
   type OverviewStatusCountsV1,
+  type OccurredAtPrecision,
+  type OccurredAtZone,
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
@@ -52,6 +54,14 @@ export interface CaseRow {
   scope?: string;
   openQuestions?: string[];
   situationVersion?: number;
+  /**
+   * When the investigated work actually happened, as recorded. Literal text,
+   * so an unknown time zone is never guessed into UTC. `createdAt` keeps
+   * saying when the row was written and is never rewritten by a backfill.
+   */
+  occurredAt?: string | null;
+  occurredAtPrecision?: OccurredAtPrecision;
+  occurredAtZone?: OccurredAtZone;
   severity: CaseSeverity;
   status: CaseStatus;
   legalHold: boolean;
@@ -280,6 +290,14 @@ export interface CaseStore {
   getCase(id: string): Promise<CaseRow | null>;
   insertCase(row: CaseRow): Promise<void>;
   updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void>;
+  updateOccurredAt(
+    id: string,
+    occurrence: {
+      occurredAt: string | null;
+      occurredAtPrecision: OccurredAtPrecision;
+      occurredAtZone: OccurredAtZone;
+    },
+  ): Promise<void>;
   updateSituationAtomic(
     input: AtomicSituationUpdate,
     audit: AuditStore,
@@ -394,6 +412,21 @@ export class MemoryCaseStore implements CaseStore {
     if (!existing) throw new Error("case not found");
     existing.status = row.status;
     existing.legalHold = row.legalHold;
+  }
+
+  async updateOccurredAt(
+    id: string,
+    occurrence: {
+      occurredAt: string | null;
+      occurredAtPrecision: OccurredAtPrecision;
+      occurredAtZone: OccurredAtZone;
+    },
+  ): Promise<void> {
+    const existing = this.cases.get(id);
+    if (!existing) throw new Error("case not found");
+    existing.occurredAt = occurrence.occurredAt;
+    existing.occurredAtPrecision = occurrence.occurredAtPrecision;
+    existing.occurredAtZone = occurrence.occurredAtZone;
   }
 
   async updateSituationAtomic(
@@ -745,10 +778,11 @@ export class PgCaseStore implements CaseStore {
     await this.db.query(
       `INSERT INTO cases (
          id, title, problem_statement, affected_parties, impact, situation_scope, open_questions,
-         situation_version,
+         situation_version, occurred_at, occurred_at_precision, occurred_at_zone,
          severity, status, legal_hold, retention_class,
          created_at, created_by, created_by_username, last_seq
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, 0)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15,
+                 $16, $17, $18, 0)`,
       [
         row.id,
         row.title,
@@ -758,6 +792,9 @@ export class PgCaseStore implements CaseStore {
         row.scope ?? "",
         JSON.stringify(row.openQuestions ?? []),
         row.situationVersion ?? 0,
+        row.occurredAt ?? null,
+        row.occurredAtPrecision ?? "unknown",
+        row.occurredAtZone ?? "unspecified",
         row.severity,
         row.status,
         row.legalHold,
@@ -776,6 +813,23 @@ export class PgCaseStore implements CaseStore {
     const result = await this.db.query(
       `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
       [row.id, row.status, row.legalHold],
+    );
+    if (result.rowCount === 0) throw new Error("case not found");
+  }
+
+  async updateOccurredAt(
+    id: string,
+    occurrence: {
+      occurredAt: string | null;
+      occurredAtPrecision: OccurredAtPrecision;
+      occurredAtZone: OccurredAtZone;
+    },
+  ): Promise<void> {
+    const result = await this.db.query(
+      `UPDATE cases
+       SET occurred_at = $2, occurred_at_precision = $3, occurred_at_zone = $4
+       WHERE id = $1`,
+      [id, occurrence.occurredAt, occurrence.occurredAtPrecision, occurrence.occurredAtZone],
     );
     if (result.rowCount === 0) throw new Error("case not found");
   }
@@ -1251,7 +1305,9 @@ export class PgCaseStore implements CaseStore {
 
 const CASE_SELECT = `
   SELECT c.id, c.title, c.problem_statement, c.affected_parties, c.impact, c.situation_scope,
-         c.open_questions, c.situation_version, c.severity, c.status, c.legal_hold,
+         c.open_questions, c.situation_version,
+         c.occurred_at, c.occurred_at_precision, c.occurred_at_zone,
+         c.severity, c.status, c.legal_hold,
          c.retention_class,
          c.created_at, c.created_by, c.created_by_username,
          COALESCE(
@@ -1273,6 +1329,9 @@ function cloneCase(row: CaseRow): CaseRow {
     scope: row.scope ?? "",
     openQuestions: caseOpenQuestions(row.openQuestions, "case.openQuestions"),
     situationVersion: caseSituationVersion(row.situationVersion),
+    occurredAt: row.occurredAt ?? null,
+    occurredAtPrecision: row.occurredAtPrecision ?? "unknown",
+    occurredAtZone: row.occurredAtZone ?? "unspecified",
     participants: row.participants.map((p) => ({ ...p })),
   };
 }
@@ -1320,6 +1379,10 @@ function asCase(row: Record<string, unknown>): CaseRow {
       : String(row.situation_scope),
     openQuestions: caseOpenQuestions(row.open_questions, "cases.open_questions"),
     situationVersion: caseSituationVersion(row.situation_version),
+    occurredAt:
+      row.occurred_at === null || row.occurred_at === undefined ? null : String(row.occurred_at),
+    occurredAtPrecision: (row.occurred_at_precision as OccurredAtPrecision | undefined) ?? "unknown",
+    occurredAtZone: (row.occurred_at_zone as OccurredAtZone | undefined) ?? "unspecified",
     severity: row.severity as CaseSeverity,
     status: row.status as CaseStatus,
     legalHold: Boolean(row.legal_hold),

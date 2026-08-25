@@ -3,11 +3,12 @@ import { adminUrl, withDisposableDb } from "../test/disposable-db.js";
 import { latestMigrationVersion, listMigrations, migrateDown, migrateUp } from "./migrate.js";
 
 describe("migration versions", () => {
-  it("pins the canonical PostgreSQL head after user profiles", () => {
+  it("pins the canonical PostgreSQL head at the investigation record graph", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
-    expect(latestMigrationVersion()).toBe("016_contribution_write_intents");
+    expect(versions).toContain("017_investigation_record");
+    expect(latestMigrationVersion()).toBe("017_investigation_record");
   });
 });
 
@@ -32,6 +33,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("014_portable_apply_intents");
       expect(up.applied).toContain("015_user_profiles");
       expect(up.applied).toContain("016_contribution_write_intents");
+      expect(up.applied).toContain("017_investigation_record");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -85,6 +87,25 @@ describe.skipIf(!adminUrl())("migrations", () => {
           '33333333-3333-4333-8333-333333333333'
         )
       `)).rejects.toThrow(/evidence_artifacts_intake_batch_fk/);
+      // Rolling back 017 removes the relationship tables and the occurred-at
+      // columns and leaves case, evidence, and timeline content untouched.
+      expect((await migrateDown(client)).rolledBack).toBe("017_investigation_record");
+      const recordTables = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename IN ('investigation_entities', 'investigation_involvements',
+                             'investigation_references', 'investigation_resolutions')`,
+      );
+      expect(recordTables.rows).toHaveLength(0);
+      const occurredColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cases'
+           AND column_name LIKE 'occurred_at%'`,
+      );
+      expect(occurredColumns.rows).toHaveLength(0);
+      const survivingCases = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM cases`,
+      );
+      expect(Number(survivingCases.rows[0]?.count)).toBeGreaterThan(0);
       expect((await migrateDown(client)).rolledBack).toBe("016_contribution_write_intents");
       expect((await migrateDown(client)).rolledBack).toBe("015_user_profiles");
       expect((await migrateDown(client)).rolledBack).toBe("014_portable_apply_intents");
@@ -140,6 +161,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("014_portable_apply_intents");
       expect(dry.pending).toContain("015_user_profiles");
       expect(dry.pending).toContain("016_contribution_write_intents");
+      expect(dry.pending).toContain("017_investigation_record");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

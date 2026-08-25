@@ -4,23 +4,107 @@
   "title": "cd-collab Case v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaId", "id", "title", "severity", "status", "legalHold", "retentionClass", "participants", "createdAt", "createdBy"],
+  "required": [
+    "schemaId",
+    "id",
+    "title",
+    "severity",
+    "status",
+    "legalHold",
+    "retentionClass",
+    "participants",
+    "createdAt",
+    "createdBy"
+  ],
   "properties": {
-    "schemaId": { "type": "string", "const": "cd-collab.case.v1" },
-    "id": { "type": "string" },
-    "title": { "type": "string" },
-    "problemStatement": { "type": "string" },
-    "affectedParties": { "type": "string" },
-    "impact": { "type": "string" },
-    "scope": { "type": "string" },
-    "openQuestions": { "type": "array", "items": { "type": "string" } },
-    "situationVersion": { "type": "integer", "minimum": 0 },
-    "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
-    "status": { "type": "string", "enum": ["open", "monitoring", "resolved", "archived"] },
-    "legalHold": { "type": "boolean" },
-    "retentionClass": { "type": "string" },
-    "participants": { "type": "array" },
-    "createdAt": { "type": "string" },
-    "createdBy": { "type": "string" }
+    "schemaId": {
+      "type": "string",
+      "const": "cd-collab.case.v1"
+    },
+    "id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "problemStatement": {
+      "type": "string"
+    },
+    "affectedParties": {
+      "type": "string"
+    },
+    "impact": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "openQuestions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "situationVersion": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "open",
+        "monitoring",
+        "resolved",
+        "archived"
+      ]
+    },
+    "legalHold": {
+      "type": "boolean"
+    },
+    "retentionClass": {
+      "type": "string"
+    },
+    "participants": {
+      "type": "array"
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "createdBy": {
+      "type": "string"
+    },
+    "occurredAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occurredAtPrecision": {
+      "type": "string",
+      "enum": [
+        "year",
+        "month",
+        "day",
+        "minute",
+        "second",
+        "unknown"
+      ]
+    },
+    "occurredAtZone": {
+      "type": "string",
+      "enum": [
+        "explicit",
+        "unspecified"
+      ]
+    }
   }
 }
