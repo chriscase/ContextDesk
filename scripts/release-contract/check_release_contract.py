@@ -342,6 +342,8 @@ def test_partial_matrix() -> None:
         tdp = Path(td)
         rc.populate_complete_matrix(tdp, identity=identity, signed=True)
         (tdp / f"ContextDesk_{identity.package_version}_x64_en-US.msi").unlink()
+        (tdp / f"ContextDesk_{identity.package_version}_x64-setup.exe").unlink()
+        (tdp / f"ContextDesk_{identity.package_version}_x64-setup.exe.sig").unlink()
         try:
             _assemble_ok(tdp, identity, signed=True)
             check("missing Windows installer fails", False)
