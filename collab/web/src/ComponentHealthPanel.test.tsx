@@ -26,7 +26,7 @@ function fixture() {
         version: "0.0.1-fixture",
         commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         protocol: { name: "cd", version: "v1" },
-        storageMigration: { state: "current" as const, current: "015_user_profiles", target: "015_user_profiles" },
+        storageMigration: { state: "current" as const, current: "016_contribution_write_intents", target: "016_contribution_write_intents" },
         compatibility: { status: "compatible" as const, scope: "component_health_contract" as const, detail: "Fixture contract check." },
         update: { state: "available" as const, targetVersion: "0.0.2-fixture" },
       },
@@ -79,7 +79,7 @@ describe("ComponentHealthPanel", () => {
 
     expect(await screen.findByText("Synthetic fixture data — this is not live desktop, CLI, or host telemetry.")).toBeTruthy();
     expect(screen.getByText("0.0.1-fixture")).toBeTruthy();
-    expect(screen.getByText("015_user_profiles → 015_user_profiles")).toBeTruthy();
+    expect(screen.getByText("016_contribution_write_intents → 016_contribution_write_intents")).toBeTruthy();
     expect(screen.getByText("available")).toBeTruthy();
     expect(screen.getAllByText("not_evaluated").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);

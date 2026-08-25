@@ -168,6 +168,123 @@ describe("snapshot-bound triage runs", () => {
     expect((await store.get(job.id))?.status).toBe("failed");
   });
 
+  it("fails closed on cancel after lease expiry and refuses requester-less recovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "contextdesk-triage-lease-membership-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const audit = new MemoryAuditStore();
+    const caseStore = new MemoryCaseStore();
+    const cases = new CaseService(evidence, audit, caseStore, new CatalogService());
+    const jobs = new MemoryTriageJobStore();
+    const service = new TriageRunService({
+      cases,
+      audit,
+      jobs,
+      workerId: "worker-a",
+    });
+    try {
+      const created = await cases.createCase(actor, { title: "Lease membership fixture" }, "test");
+      const artifact = await cases.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "checkout.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("checkout timeout"),
+          summary: "Synthetic checkout timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const snapshot = await cases.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      const spec = request(snapshot.id);
+      const queued: TriageJobV1 = {
+        schemaId: "cd-collab.triage_job.v1",
+        id: "job-recover-membership",
+        caseId: created.id,
+        snapshotId: snapshot.id,
+        snapshotFingerprint: snapshot.fingerprint,
+        requestFingerprint: "d".repeat(64),
+        cancellationId: "cancel-recover",
+        request: spec,
+        status: "queued",
+        candidates: [
+          {
+            ...spec.candidates[0]!,
+            status: "queued",
+            benchmarkRunId: null,
+            outputHash: null,
+            summary: null,
+            evidenceRefs: [],
+            unknowns: [],
+            usageStatus: "unknown",
+            costStatus: "unknown",
+            errorCode: null,
+            startedAt: null,
+            finishedAt: null,
+            privacyClass: "owner_only",
+          },
+        ],
+        sameSnapshot: null,
+        agreementNotice: "Agreement is not proof of correctness.",
+        requestedBy: actor.id,
+        requestedByUsername: actor.username,
+        createdAt: "2026-08-20T00:00:00.000Z",
+        updatedAt: "2026-08-20T00:00:00.000Z",
+        startedAt: null,
+        finishedAt: null,
+        cancelRequestedAt: null,
+        stoppedReason: null,
+      };
+      await jobs.insert(queued);
+      const liveUntil = new Date(Date.now() + 60_000).toISOString();
+      const claimed = await jobs.claimQueued(queued.id, new Date().toISOString(), "worker-a", liveUntil);
+      expect(claimed?.status).toBe("running");
+      await jobs.update({
+        ...claimed!,
+        leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
+      });
+      await expect(service.cancel(created.id, queued.id, actor, "test", false)).rejects.toMatchObject({
+        name: "TriageRunConflictError",
+        message: "worker lease expired",
+      });
+      await expect(jobs.update({
+        ...((await jobs.get(queued.id))!),
+        status: "completed",
+        updatedAt: new Date().toISOString(),
+      })).rejects.toThrow("triage job not found");
+      expect((await jobs.get(queued.id))?.status).toBe("running");
+
+      await jobs.insert({
+        ...queued,
+        id: "job-recover-queued",
+        cancellationId: "cancel-queued-recover",
+        status: "queued",
+        workerId: null,
+        leaseExpiresAt: null,
+      });
+      const captured = caseStore.capture() as { cases: [string, { id: string; participants: unknown[] }][] };
+      for (const [, row] of captured.cases) {
+        if (row.id === created.id) row.participants = [];
+      }
+      caseStore.restore(captured);
+      await service.recoverPending();
+      expect((await jobs.get(queued.id))?.status).toBe("failed");
+      expect((await jobs.get(queued.id))?.stoppedReason).toBe("worker_lease_expired");
+      expect((await jobs.get("job-recover-queued"))?.status).toBe("failed");
+      expect((await jobs.get("job-recover-queued"))?.stoppedReason).toBe("requester_not_member");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect((await jobs.get("job-recover-queued"))?.status).toBe("failed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("runs a deterministic candidate and projects a share-safe lifecycle record", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {

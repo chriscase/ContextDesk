@@ -70,7 +70,11 @@ describe("component health route", () => {
       expect(response.statusCode).toBe(200);
       const body = parseComponentHealthResponse(JSON.parse(response.body));
       expect(body.dataMode).toBe("synthetic_fixture");
-      expect(body.components[0]?.storageMigration.state).toBe("current");
+      expect(body.components[0]?.storageMigration).toEqual({
+        state: "current",
+        current: "016_contribution_write_intents",
+        target: "016_contribution_write_intents",
+      });
       expect(body.components[2]?.reportStatus).toBe("not_reported");
       expect(response.body).not.toMatch(/password|secret|email|directory|customer/i);
     } finally {

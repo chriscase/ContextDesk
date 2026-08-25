@@ -59,7 +59,9 @@ export function syntheticComponentHealth(): ComponentHealthProjectorInputV1 {
         version: "0.0.1-fixture",
         commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         protocol: { name: "cd", version: "v1" },
-        storageMigration: { state: "current", current: "015_user_profiles", target: "015_user_profiles" },
+        // Authoritative collab storage head is 016_contribution_write_intents.
+        // 015_user_profiles remains in lineage as the profile/grants schema only.
+        storageMigration: { state: "current", current: "016_contribution_write_intents", target: "016_contribution_write_intents" },
         compatibility: {
           status: "compatible",
           scope: "component_health_contract",

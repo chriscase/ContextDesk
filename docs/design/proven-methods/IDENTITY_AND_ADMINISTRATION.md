@@ -305,7 +305,7 @@ counts.
   [`directory-mapping.ts`](../../../collab/contracts/src/directory-mapping.ts),
   [`admin-people.ts`](../../../collab/contracts/src/admin-people.ts)
 - Server: [`collab/server/src/modules/people/`](../../../collab/server/src/modules/people/)
-- Migration: [`015_user_profiles.up.sql`](../../../collab/server/src/db/migrations/015_user_profiles.up.sql) / [`.down.sql`](../../../collab/server/src/db/migrations/015_user_profiles.down.sql)
+- Migration: [`015_user_profiles.up.sql`](../../../collab/server/src/db/migrations/015_user_profiles.up.sql) / [`.down.sql`](../../../collab/server/src/db/migrations/015_user_profiles.down.sql). This is the profile/grants schema only. It is **not** the collab storage head. The next additive migration is [`016_contribution_write_intents.up.sql`](../../../collab/server/src/db/migrations/016_contribution_write_intents.up.sql) (insert-only contribution write intents). Synthetic component-health fixtures must report that head, not `015_user_profiles`.
 - Web: [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), the People tab in [`Administration.tsx`](../../../collab/web/src/Administration.tsx), [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx) at `/profile`
 - Deployment/config: [`collab/deploy/README.md`](../../../collab/deploy/README.md)
 - No tracked issue number exists for this chapter at authoring time; residuals below are literal, not linked.
@@ -335,7 +335,10 @@ counts.
   that the derivation is the same function everywhere.
 - Migration/rollback: `015_user_profiles` is additive-only (two new
   tables, no changes to existing tables) and its `.down.sql` drops both
-  cleanly; rolling back loses no data outside those two tables. Grants
+  cleanly; rolling back loses no data outside those two tables. It does
+  not remain the storage head: `016_contribution_write_intents` follows
+  it and is the current collab schema version reported by `/ready` and
+  the synthetic component-health fixture. Grants
   cascade-delete with their owning profile row; profiles themselves are
   never hard-deleted by any code path in this chapter (status is the
   lifecycle mechanism), which is why the migration revokes `DELETE` on

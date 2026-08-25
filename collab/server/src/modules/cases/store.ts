@@ -622,29 +622,12 @@ export class MemoryCaseStore implements CaseStore {
 
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
     return this.atomicBoundary(async () => {
-      const artifacts = new Map(this.artifacts);
-      const revisions = new Map(
-        [...this.revisions.entries()].map(([key, chain]) => [key, chain.map((row) => ({ ...row }))]),
-      );
-      const timeline = new Map(
-        [...this.timeline.entries()].map(([key, events]) => [key, events.map((row) => ({ ...row }))]),
-      );
-      const batches = new Map(this.intakeBatches);
-      const intents = new Map(this.contributionIntents);
+      const snapshot = this.capture();
       const auditSnapshot = audit instanceof MemoryAuditStore ? audit.capture() : null;
       try {
         return await operation();
       } catch (error) {
-        this.artifacts.clear();
-        for (const [key, value] of artifacts) this.artifacts.set(key, value);
-        this.revisions.clear();
-        for (const [key, value] of revisions) this.revisions.set(key, value);
-        this.timeline.clear();
-        for (const [key, value] of timeline) this.timeline.set(key, value);
-        this.intakeBatches.clear();
-        for (const [key, value] of batches) this.intakeBatches.set(key, value);
-        this.contributionIntents.clear();
-        for (const [key, value] of intents) this.contributionIntents.set(key, value);
+        this.restore(snapshot);
         if (audit instanceof MemoryAuditStore && auditSnapshot) audit.restore(auditSnapshot);
         throw error;
       }

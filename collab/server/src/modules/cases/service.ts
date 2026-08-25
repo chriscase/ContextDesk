@@ -18,10 +18,11 @@ import {
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
-import type {
-  EvidenceStage,
-  EvidenceStore,
-  EvidenceWriteBatch,
+import {
+  sha256Hex,
+  type EvidenceStage,
+  type EvidenceStore,
+  type EvidenceWriteBatch,
 } from "../../evidence/store.js";
 import type { AuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
@@ -170,6 +171,14 @@ function contributionWriteDigest(input: {
       }),
     )
     .digest("hex");
+}
+
+function sameHypothesisLinks(
+  left: { kind: string; id: string }[],
+  right: { kind: string; id: string }[],
+): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => item.kind === right[index]?.kind && item.id === right[index]?.id);
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -659,68 +668,84 @@ export class CaseService {
     if (new Set(evidenceIds).size !== evidenceIds.length) {
       throw new Error("snapshot evidence ids must be unique");
     }
-    const artifacts = await this.store.listArtifactsByCase(caseId);
-    const byId = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
-    const selected = evidenceIds.map((id, ordinal) => {
-      const artifact = byId.get(id);
-      if (!artifact) throw new Error("evidence not found");
-      return {
-        evidenceId: artifact.id,
-        ordinal,
-        contentHash: artifact.contentHash,
-        expectedHash: artifact.expectedHash,
-        verificationStatus: artifact.verificationStatus,
-        privacyClass: artifact.privacyClass,
-      };
-    });
-    const existing = await this.store.listSnapshotsByCase(caseId);
-    const parentSnapshotId = existing.at(-1)?.id ?? null;
-    const visibility = input.visibility ?? "owner_only";
-    if (visibility === "share_safe" && selected.some((item) => item.privacyClass !== "share_safe")) {
-      throw new Error("share-safe snapshot cannot include owner-only evidence");
-    }
     const protocolVersion = input.protocolVersion ?? "cd-collab.snapshot.v1";
-    const fingerprint = snapshotFingerprint({
-      parentSnapshotId,
-      evidence: selected,
-      visibility,
-      protocolVersion,
-    });
-    const row: SnapshotRow = {
-      schemaId: "cd-collab.snapshot.v1",
-      id: randomUUID(),
-      caseId,
-      fingerprint,
-      parentSnapshotId,
-      evidence: selected,
-      visibility,
-      protocolVersion,
-      fairnessClass: snapshotFairness(selected),
-      status: "frozen",
-      createdAt: new Date().toISOString(),
-      createdBy: actor.id,
-    };
-    await this.store.insertSnapshot(row);
-    await this.store.appendTimeline(caseId, {
-      kind: "snapshot_frozen",
-      actor,
-      targetId: row.id,
-      clientTime,
-      payload: {
+    return this.store.withAtomic(async () => {
+      await this.requireCase(caseId);
+      const artifacts = await this.store.listArtifactsByCase(caseId);
+      const byId = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
+      const selected = evidenceIds.map((id, ordinal) => {
+        const artifact = byId.get(id);
+        if (!artifact) throw new Error("evidence not found");
+        return {
+          evidenceId: artifact.id,
+          ordinal,
+          contentHash: artifact.contentHash,
+          expectedHash: artifact.expectedHash,
+          verificationStatus: artifact.verificationStatus,
+          privacyClass: artifact.privacyClass,
+        };
+      });
+      const existing = await this.store.listSnapshotsByCase(caseId);
+      const parentSnapshotId = existing.at(-1)?.id ?? null;
+      const visibility = input.visibility ?? "owner_only";
+      if (visibility === "share_safe" && selected.some((item) => item.privacyClass !== "share_safe")) {
+        throw new Error("share-safe snapshot cannot include owner-only evidence");
+      }
+      const fingerprint = snapshotFingerprint({
+        parentSnapshotId,
+        evidence: selected,
+        visibility,
+        protocolVersion,
+      });
+      const replay = existing.find((row) => row.fingerprint === fingerprint);
+      if (replay) return replay;
+      const row: SnapshotRow = {
+        schemaId: "cd-collab.snapshot.v1",
+        id: randomUUID(),
+        caseId,
         fingerprint,
         parentSnapshotId,
-        evidenceCount: selected.length,
+        evidence: selected,
         visibility,
-      },
-    });
-    await this.audit.append({
-      identity: actor.id,
-      action: "snapshot_freeze",
-      target: row.id,
-      origin,
-      outcome: "success",
-    });
-    return row;
+        protocolVersion,
+        fairnessClass: snapshotFairness(selected),
+        status: "frozen",
+        createdAt: new Date().toISOString(),
+        createdBy: actor.id,
+      };
+      try {
+        await this.store.insertSnapshot(row);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/snapshot fingerprint already exists/i.test(message)) {
+          const found = (await this.store.listSnapshotsByCase(caseId)).find(
+            (item) => item.fingerprint === fingerprint,
+          );
+          if (found) return found;
+        }
+        throw error;
+      }
+      await this.store.appendTimeline(caseId, {
+        kind: "snapshot_frozen",
+        actor,
+        targetId: row.id,
+        clientTime,
+        payload: {
+          fingerprint,
+          parentSnapshotId,
+          evidenceCount: selected.length,
+          visibility,
+        },
+      });
+      await this.audit.append({
+        identity: actor.id,
+        action: "snapshot_freeze",
+        target: row.id,
+        origin,
+        outcome: "success",
+      });
+      return row;
+    }, this.audit);
   }
 
   async getCaseBoard(
@@ -948,36 +973,47 @@ export class CaseService {
     actor: Actor,
     origin: string,
   ): Promise<ContributionV1> {
-    const row = await this.requireCase(caseId);
-    assertCanTombstone(row.legalHold);
-    const latest = await this.requireLatest(caseId, contributionId);
-    const next: RevisionRow = {
-      ...latest,
-      revision: latest.revision + 1,
-      predecessorRevision: latest.revision,
-      body: "",
-      contentHash: hashContributionContent(latest.kind, ""),
-      authorId: actor.id,
-      authorUsername: actor.username,
-      createdAt: new Date().toISOString(),
-      tombstone: true,
-    };
-    await this.store.insertRevision(next);
-    await this.store.appendTimeline(caseId, {
-      kind: "contribution_tombstoned",
-      actor,
-      targetId: contributionId,
-      clientTime: null,
-      payload: { revision: next.revision },
-    });
-    await this.audit.append({
-      identity: actor.id,
-      action: "contribution_tombstone",
-      target: contributionId,
-      origin,
-      outcome: "success",
-    });
-    return this.toContribution(next, true);
+    try {
+      return await this.store.withAtomic(async () => {
+        const row = await this.requireCase(caseId);
+        assertCanTombstone(row.legalHold);
+        const latest = await this.requireLatest(caseId, contributionId);
+        if (latest.tombstone) return this.toContribution(latest, true);
+        const next: RevisionRow = {
+          ...latest,
+          revision: latest.revision + 1,
+          predecessorRevision: latest.revision,
+          body: "",
+          contentHash: hashContributionContent(latest.kind, ""),
+          authorId: actor.id,
+          authorUsername: actor.username,
+          createdAt: new Date().toISOString(),
+          tombstone: true,
+        };
+        await this.store.insertRevision(next);
+        await this.store.appendTimeline(caseId, {
+          kind: "contribution_tombstoned",
+          actor,
+          targetId: contributionId,
+          clientTime: null,
+          payload: { revision: next.revision },
+        });
+        await this.audit.append({
+          identity: actor.id,
+          action: "contribution_tombstone",
+          target: contributionId,
+          origin,
+          outcome: "success",
+        });
+        return this.toContribution(next, true);
+      }, this.audit);
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        const latest = await this.requireLatest(caseId, contributionId);
+        throw new ContributionConflictError(latest.revision);
+      }
+      throw error;
+    }
   }
 
   async provenance(caseId: string, contributionId: string): Promise<ContributionV1[]> {
@@ -999,37 +1035,54 @@ export class CaseService {
   ): Promise<ContributionV1> {
     const canonicalTime = canonicalClientTime(clientTime);
     assertSupportedLinks(status, links);
-    const latest = await this.requireLatest(caseId, contributionId);
-    if (latest.kind !== "hypothesis" || latest.tombstone) {
-      throw new Error("hypothesis not found");
+    try {
+      return await this.store.withAtomic(async () => {
+        const latest = await this.requireLatest(caseId, contributionId);
+        if (latest.kind !== "hypothesis" || latest.tombstone) {
+          throw new Error("hypothesis not found");
+        }
+        if (
+          latest.hypothesisStatus === status
+          && sameHypothesisLinks(latest.hypothesisLinks, links)
+        ) {
+          return this.toContribution(latest, false);
+        }
+        const next: RevisionRow = {
+          ...latest,
+          revision: latest.revision + 1,
+          predecessorRevision: latest.revision,
+          contentHash: hashContributionContent(latest.kind, latest.body),
+          authorId: actor.id,
+          authorUsername: actor.username,
+          createdAt: new Date().toISOString(),
+          hypothesisStatus: status,
+          hypothesisLinks: links,
+        };
+        await this.store.insertRevision(next);
+        await this.store.appendTimeline(caseId, {
+          kind: "hypothesis_status",
+          actor,
+          targetId: contributionId,
+          clientTime: canonicalTime,
+          payload: { status, links },
+        });
+        await this.audit.append({
+          identity: actor.id,
+          action: "hypothesis_status",
+          target: `${contributionId}:${status}`,
+          origin,
+          outcome: "success",
+        });
+        return this.toContribution(next, false);
+      }, this.audit);
+    } catch (error) {
+      if (error instanceof ContributionConflictError) throw error;
+      if (isUniqueViolation(error)) {
+        const latest = await this.requireLatest(caseId, contributionId);
+        throw new ContributionConflictError(latest.revision);
+      }
+      throw error;
     }
-    const next: RevisionRow = {
-      ...latest,
-      revision: latest.revision + 1,
-      predecessorRevision: latest.revision,
-      contentHash: hashContributionContent(latest.kind, latest.body),
-      authorId: actor.id,
-      authorUsername: actor.username,
-      createdAt: new Date().toISOString(),
-      hypothesisStatus: status,
-      hypothesisLinks: links,
-    };
-    await this.store.insertRevision(next);
-    await this.store.appendTimeline(caseId, {
-      kind: "hypothesis_status",
-      actor,
-      targetId: contributionId,
-      clientTime: canonicalTime,
-      payload: { status, links },
-    });
-    await this.audit.append({
-      identity: actor.id,
-      action: "hypothesis_status",
-      target: `${contributionId}:${status}`,
-      origin,
-      outcome: "success",
-    });
-    return this.toContribution(next, false);
   }
 
   async addEvidence(
@@ -1086,6 +1139,9 @@ export class CaseService {
     if (!input.bytes) throw new Error("held artifact requires bytes");
     mediaType = mediaType ?? (input.kind === "email" ? "message/rfc822" : "text/plain");
     assertUploadAllowed(mediaType, input.bytes.byteLength);
+    if (expectedHash !== null && expectedHash !== sha256Hex(input.bytes)) {
+      throw new Error("held evidence hash mismatch");
+    }
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
     try {
@@ -1098,6 +1154,9 @@ export class CaseService {
           const stage = await this.evidence.stage(input.bytes!, { contentType: mediaType ?? undefined });
           meta = stage.meta;
           stages.push(stage);
+        }
+        if (expectedHash !== null && expectedHash !== meta.hash) {
+          throw new Error("held evidence hash mismatch");
         }
         const summaryInput: ContributionWriteInput = {
           kind: "upload",

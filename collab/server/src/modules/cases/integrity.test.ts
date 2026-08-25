@@ -19,24 +19,51 @@ class BoomArtifactStore extends MemoryCaseStore {
   }
 }
 
+class InjectedFailureStore extends MemoryCaseStore {
+  failTimelineKind: string | null = null;
+  override async appendTimeline(
+    caseId: string,
+    event: Parameters<MemoryCaseStore["appendTimeline"]>[1],
+  ): Promise<Awaited<ReturnType<MemoryCaseStore["appendTimeline"]>>> {
+    if (this.failTimelineKind && event.kind === this.failTimelineKind) {
+      throw new Error(`injected timeline failure:${event.kind}`);
+    }
+    return super.appendTimeline(caseId, event);
+  }
+}
+
+class InjectedFailureAudit extends MemoryAuditStore {
+  failAction: string | null = null;
+  override async append(
+    record: Parameters<MemoryAuditStore["append"]>[0],
+  ): ReturnType<MemoryAuditStore["append"]> {
+    if (this.failAction && record.action === this.failAction) {
+      throw new Error(`injected audit failure:${record.action}`);
+    }
+    return super.append(record);
+  }
+}
+
 async function withService(
   fn: (ctx: {
     service: CaseService;
     evidence: FilesystemEvidenceStore;
     store: MemoryCaseStore;
+    audit: MemoryAuditStore;
   }) => Promise<void>,
   store: MemoryCaseStore = new MemoryCaseStore(),
+  audit: MemoryAuditStore = new MemoryAuditStore(),
 ) {
   const root = await mkdtemp(join(tmpdir(), "contextdesk-integrity-"));
   const evidence = new FilesystemEvidenceStore({ rootDir: root });
   const service = new CaseService(
     evidence,
-    new MemoryAuditStore(),
+    audit,
     store,
     new CatalogService(),
   );
   try {
-    await fn({ service, evidence, store });
+    await fn({ service, evidence, store, audit });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -206,6 +233,267 @@ describe("case write integrity", () => {
       ]);
       const concluded = board?.findings.filter((finding) => finding.bucket === "newly_concluded") ?? [];
       expect(concluded.map((finding) => finding.statement)).toEqual(["Selected freeze conclusion."]);
+    });
+  });
+
+  it("refuses a mismatched expectedHash before any held evidence, timeline, or audit row", async () => {
+    await withService(async ({ service, evidence, audit }) => {
+      const created = await service.createCase(actor, { title: "Hash mismatch fixture" }, "test");
+      const bytes = new TextEncoder().encode("synthetic held log bytes\n");
+      await expect(
+        service.addEvidence(
+          created.id,
+          actor,
+          {
+            kind: "log",
+            filename: "held.log",
+            mediaType: "text/plain",
+            bytes,
+            expectedHash: "b".repeat(64),
+            summary: "Must not land when the digest disagrees.",
+          },
+          "test",
+        ),
+      ).rejects.toThrow(/held evidence hash mismatch/);
+      expect(await service.listArtifacts(created.id, actor, false)).toEqual([]);
+      expect(await service.listContributions(created.id, actor, false)).toEqual([]);
+      const timeline = await service.listTimeline(created.id);
+      expect(timeline.some((event) => event.kind === "evidence_registered")).toBe(false);
+      expect(timeline.some((event) => event.kind === "contribution_created")).toBe(false);
+      expect(await audit.list({ action: "evidence_register" })).toEqual([]);
+      expect(await evidence.head(sha256Hex(bytes))).toBeNull();
+    });
+  });
+
+  it("accepts a matching expectedHash and marks held evidence verified", async () => {
+    await withService(async ({ service }) => {
+      const created = await service.createCase(actor, { title: "Hash match fixture" }, "test");
+      const bytes = new TextEncoder().encode("synthetic held log bytes\n");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "held.log",
+          mediaType: "text/plain",
+          bytes,
+          expectedHash: sha256Hex(bytes),
+          summary: "Digest matches the held bytes.",
+        },
+        "test",
+      );
+      expect(uploaded.artifact.verificationStatus).toBe("verified");
+      expect(uploaded.artifact.contentHash).toBe(sha256Hex(bytes));
+      expect(uploaded.artifact.expectedHash).toBe(sha256Hex(bytes));
+    });
+  });
+
+  it("rolls snapshot, hypothesis, and tombstone writes back from each injected failure point", async () => {
+    const failures = [
+      {
+        title: "Snapshot freeze",
+        timelineKind: "snapshot_frozen",
+        auditAction: "snapshot_freeze",
+        setup: async (service: CaseService) => {
+          const created = await service.createCase(actor, { title: "Atomic snapshot fixture" }, "test");
+          const uploaded = await service.addEvidence(
+            created.id,
+            actor,
+            {
+              kind: "log",
+              filename: "checkout.log",
+              mediaType: "text/plain",
+              bytes: new TextEncoder().encode("checkout timed out"),
+              summary: "Checkout timed out.",
+            },
+            "test",
+          );
+          return { created, uploaded };
+        },
+        mutate: async (
+          service: CaseService,
+          ctx: { created: { id: string }; uploaded: { artifact: { id: string } } },
+        ) =>
+          service.createSnapshot(
+            ctx.created.id,
+            actor,
+            { evidenceIds: [ctx.uploaded.artifact.id] },
+            "test",
+          ),
+        assertRolledBack: async (
+          service: CaseService,
+          audit: MemoryAuditStore,
+          ctx: { created: { id: string } },
+        ) => {
+          expect(await service.listSnapshots(ctx.created.id, actor, false)).toEqual([]);
+          expect(
+            (await service.listTimeline(ctx.created.id)).some((event) => event.kind === "snapshot_frozen"),
+          ).toBe(false);
+          expect(await audit.list({ action: "snapshot_freeze" })).toEqual([]);
+        },
+      },
+      {
+        title: "Hypothesis status",
+        timelineKind: "hypothesis_status",
+        auditAction: "hypothesis_status",
+        setup: async (service: CaseService) => {
+          const created = await service.createCase(actor, { title: "Atomic hypothesis fixture" }, "test");
+          const hypothesis = await service.addContribution(
+            created.id,
+            actor,
+            { kind: "hypothesis", body: "Timeout is in the mailer." },
+            "test",
+          );
+          return { created, hypothesis };
+        },
+        mutate: async (
+          service: CaseService,
+          ctx: { created: { id: string }; hypothesis: { id: string } },
+        ) =>
+          service.setHypothesisStatus(
+            ctx.created.id,
+            ctx.hypothesis.id,
+            actor,
+            "superseded",
+            [],
+            "test",
+          ),
+        assertRolledBack: async (
+          service: CaseService,
+          audit: MemoryAuditStore,
+          ctx: { created: { id: string }; hypothesis: { id: string } },
+        ) => {
+          const listed = await service.listContributions(ctx.created.id, actor, false);
+          const current = listed.find((row) => row.id === ctx.hypothesis.id);
+          expect(current?.revision).toBe(1);
+          expect(
+            (await service.listTimeline(ctx.created.id)).some((event) => event.kind === "hypothesis_status"),
+          ).toBe(false);
+          expect(await audit.list({ action: "hypothesis_status" })).toEqual([]);
+        },
+      },
+      {
+        title: "Contribution tombstone",
+        timelineKind: "contribution_tombstoned",
+        auditAction: "contribution_tombstone",
+        setup: async (service: CaseService) => {
+          const created = await service.createCase(actor, { title: "Atomic tombstone fixture" }, "test");
+          const note = await service.addContribution(
+            created.id,
+            actor,
+            { kind: "note", body: "Synthetic observation." },
+            "test",
+          );
+          return { created, note };
+        },
+        mutate: async (
+          service: CaseService,
+          ctx: { created: { id: string }; note: { id: string } },
+        ) => service.tombstoneContribution(ctx.created.id, ctx.note.id, actor, "test"),
+        assertRolledBack: async (
+          service: CaseService,
+          audit: MemoryAuditStore,
+          ctx: { created: { id: string }; note: { id: string } },
+        ) => {
+          const listed = await service.listContributions(ctx.created.id, actor, false);
+          const current = listed.find((row) => row.id === ctx.note.id);
+          expect(current?.tombstoned).toBe(false);
+          expect(current?.revision).toBe(1);
+          expect(
+            (await service.listTimeline(ctx.created.id)).some((event) => event.kind === "contribution_tombstoned"),
+          ).toBe(false);
+          expect(await audit.list({ action: "contribution_tombstone" })).toEqual([]);
+        },
+      },
+    ] as const;
+
+    for (const failure of failures) {
+      const timelineStore = new InjectedFailureStore();
+      const timelineAudit = new MemoryAuditStore();
+      await withService(async ({ service, audit }) => {
+        const ctx = await failure.setup(service);
+        timelineStore.failTimelineKind = failure.timelineKind;
+        await expect(failure.mutate(service, ctx as never)).rejects.toThrow(/injected timeline failure/);
+        await failure.assertRolledBack(service, audit, ctx as never);
+      }, timelineStore, timelineAudit);
+
+      const auditStore = new MemoryCaseStore();
+      const boomAudit = new InjectedFailureAudit();
+      await withService(async ({ service, audit }) => {
+        const ctx = await failure.setup(service);
+        boomAudit.failAction = failure.auditAction;
+        await expect(failure.mutate(service, ctx as never)).rejects.toThrow(/injected audit failure/);
+        await failure.assertRolledBack(service, audit, ctx as never);
+      }, auditStore, boomAudit);
+    }
+  });
+
+  it("replays identical snapshot fingerprints and hypothesis/tombstone retries without forking history", async () => {
+    await withService(async ({ service }) => {
+      const created = await service.createCase(actor, { title: "Idempotent freeze fixture" }, "test");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "checkout.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("checkout timed out"),
+          summary: "Checkout timed out.",
+        },
+        "test",
+      );
+      const first = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [uploaded.artifact.id] },
+        "test",
+      );
+      const replay = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [uploaded.artifact.id], protocolVersion: first.protocolVersion },
+        "test",
+      );
+      expect(replay.id).not.toBe(first.id);
+      expect(replay.parentSnapshotId).toBe(first.id);
+
+      const hypothesis = await service.addContribution(
+        created.id,
+        actor,
+        { kind: "hypothesis", body: "Mailer retries exhausted." },
+        "test",
+      );
+      const status = await service.setHypothesisStatus(
+        created.id,
+        hypothesis.id,
+        actor,
+        "proposed",
+        [],
+        "test",
+      );
+      const statusReplay = await service.setHypothesisStatus(
+        created.id,
+        hypothesis.id,
+        actor,
+        "proposed",
+        [],
+        "test",
+      );
+      expect(statusReplay.revision).toBe(status.revision);
+      expect(statusReplay.id).toBe(hypothesis.id);
+
+      const note = await service.addContribution(
+        created.id,
+        actor,
+        { kind: "note", body: "Keep the original note." },
+        "test",
+      );
+      const tombstoned = await service.tombstoneContribution(created.id, note.id, actor, "test");
+      const tombstoneReplay = await service.tombstoneContribution(created.id, note.id, actor, "test");
+      expect(tombstoneReplay.revision).toBe(tombstoned.revision);
+      expect(tombstoneReplay.tombstoned).toBe(true);
+      expect((await service.provenance(created.id, note.id)).filter((row) => row.tombstoned)).toHaveLength(1);
     });
   });
 });

@@ -38,6 +38,25 @@ import {
 const SQLITE_SCHEMA_VERSION = "sqlite-current-v1";
 const TAG = "__cd_collab_state_type";
 
+/** Every CaseStore method that mutates durable state, including composite transactions. */
+export const CASE_SQLITE_MUTATORS: ReadonlySet<string> = new Set([
+  "insertCase",
+  "updateCaseMeta",
+  "updateSituationAtomic",
+  "addParticipant",
+  "appendTimeline",
+  "insertRevision",
+  "insertArtifact",
+  "insertIntakeBatch",
+  "insertContributionIdempotency",
+  "insertSnapshot",
+  "lockIntakeIdempotency",
+  "lockEvidenceDigest",
+  "lockContributionIdempotency",
+  "withAtomic",
+  "restore",
+]);
+
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 function encode(value: unknown): JsonValue {
@@ -272,28 +291,12 @@ export function createSqliteRuntime(
         { key: "cases", store: rawCases },
       ],
       operation,
-      (result) =>
-        typeof result === "object"
-        && result !== null
-        && "status" in result
-        && result.status === "updated",
     ));
   const cases = persistentMemoryStore(
     state,
     "cases",
     rawCases,
-    new Set([
-      "insertCase",
-      "updateCaseMeta",
-      "addParticipant",
-      "appendTimeline",
-      "insertRevision",
-      "insertArtifact",
-      "insertSnapshot",
-      "insertContributionIdempotency",
-      "withAtomic",
-      "restore",
-    ]),
+    CASE_SQLITE_MUTATORS,
   );
   const rawCatalog = new MemoryCatalogStore();
   const catalog = persistentMemoryStore(
