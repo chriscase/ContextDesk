@@ -462,6 +462,7 @@ export class CaseService {
       createdByUsername: actor.username,
       participants: [{ identityId: actor.id, username: actor.username }],
     };
+    return this.store.withAtomic(async () => {
     await this.store.insertCase(row);
     await this.store.appendTimeline(id, {
       kind: "case_created",
@@ -478,6 +479,7 @@ export class CaseService {
       outcome: "success",
     });
     return this.toCase(row);
+    }, this.audit);
   }
 
   async updateSituation(
@@ -555,6 +557,7 @@ export class CaseService {
   ): Promise<CaseV1> {
     const canonicalTime = canonicalClientTime(clientTime);
     const row = await this.requireCase(caseId);
+    return this.store.withAtomic(async () => {
     row.status = status;
     await this.store.updateCaseMeta(row);
     await this.store.appendTimeline(caseId, {
@@ -572,6 +575,7 @@ export class CaseService {
       outcome: "success",
     });
     return this.toCase(row);
+    }, this.audit);
   }
 
   async addParticipant(
@@ -581,6 +585,7 @@ export class CaseService {
     origin: string,
   ): Promise<CaseV1> {
     await this.requireCase(caseId);
+    return this.store.withAtomic(async () => {
     await this.store.addParticipant(caseId, participant, actor.id);
     await this.store.appendTimeline(caseId, {
       kind: "membership",
@@ -598,6 +603,7 @@ export class CaseService {
     });
     const updated = await this.requireCase(caseId);
     return this.toCase(updated);
+    }, this.audit);
   }
 
   async setLegalHold(
@@ -607,6 +613,7 @@ export class CaseService {
     origin: string,
   ): Promise<CaseV1> {
     const row = await this.requireCase(caseId);
+    return this.store.withAtomic(async () => {
     row.legalHold = legalHold;
     await this.store.updateCaseMeta(row);
     await this.store.appendTimeline(caseId, {
@@ -624,6 +631,7 @@ export class CaseService {
       outcome: "success",
     });
     return this.toCase(row);
+    }, this.audit);
   }
 
   async listTimeline(caseId: string): Promise<TimelineRow[]> {

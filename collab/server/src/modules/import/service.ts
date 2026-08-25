@@ -271,31 +271,40 @@ export class ImportService {
       throw new Error("corroboration must link at least one artifact or contribution");
     }
     const frozen = this.frozenSnapshot(before);
-    await this.runs.appendCorroboration({
-      runId,
-      state: input.state,
-      actorId: actor.id,
-      actorUsername: actor.username,
-      evidenceLinks: input.links,
+    const memoryRuns = this.runs instanceof MemoryRunStore ? this.runs : null;
+    return this.deps.cases.withAtomic(async () => {
+      const snapshot = memoryRuns?.capture();
+      try {
+        await this.runs.appendCorroboration({
+          runId,
+          state: input.state,
+          actorId: actor.id,
+          actorUsername: actor.username,
+          evidenceLinks: input.links,
+        });
+        const after = await this.runs.get(runId);
+        if (!after) throw new Error("run not found");
+        this.assertFrozen(frozen, after);
+        await this.deps.cases.appendDomainTimeline(caseId, {
+          kind: "run_corroboration",
+          actor,
+          targetId: runId,
+          clientTime: null,
+          payload: { state: input.state, links: input.links },
+        });
+        await this.deps.audit.append({
+          identity: actor.id,
+          action: "run_corroboration",
+          target: `${runId}:${input.state}`,
+          origin,
+          outcome: "success",
+        });
+        return this.toRun(after, input.state);
+      } catch (error) {
+        if (memoryRuns && snapshot !== undefined) memoryRuns.restore(snapshot);
+        throw error;
+      }
     });
-    const after = await this.runs.get(runId);
-    if (!after) throw new Error("run not found");
-    this.assertFrozen(frozen, after);
-    await this.deps.cases.appendDomainTimeline(caseId, {
-      kind: "run_corroboration",
-      actor,
-      targetId: runId,
-      clientTime: null,
-      payload: { state: input.state, links: input.links },
-    });
-    await this.deps.audit.append({
-      identity: actor.id,
-      action: "run_corroboration",
-      target: `${runId}:${input.state}`,
-      origin,
-      outcome: "success",
-    });
-    return this.toRun(after, input.state);
   }
 
   frozenInputs(row: FrozenRunRow): {

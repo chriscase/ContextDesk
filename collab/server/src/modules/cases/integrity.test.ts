@@ -428,6 +428,53 @@ describe("case write integrity", () => {
     }
   });
 
+  it("rolls back case create, status, membership, and legal-hold when timeline or audit fails", async () => {
+    const timelineStore = new InjectedFailureStore();
+    timelineStore.failTimelineKind = "case_created";
+    await withService(async ({ service, audit }) => {
+      await expect(
+        service.createCase(actor, { title: "Synthetic case atomic fixture" }, "test"),
+      ).rejects.toThrow(/injected timeline failure:case_created/);
+      expect(await service.listCases(actor, true)).toEqual([]);
+      expect(await audit.list({ action: "case_create" })).toEqual([]);
+    }, timelineStore);
+
+    await withService(async ({ service, audit, store }) => {
+      const created = await service.createCase(actor, { title: "Synthetic status atomic fixture" }, "test");
+      (store as InjectedFailureStore).failTimelineKind = "case_status";
+      await expect(service.setStatus(created.id, actor, "closed", "test")).rejects.toThrow(
+        /injected timeline failure:case_status/,
+      );
+      expect((await service.getCase(created.id, actor, true))?.status).toBe("open");
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "case_status")).toBe(false);
+      expect(await audit.list({ action: "case_status" })).toEqual([]);
+    }, new InjectedFailureStore());
+
+    await withService(async ({ service, audit, store }) => {
+      const created = await service.createCase(actor, { title: "Synthetic membership atomic fixture" }, "test");
+      (store as InjectedFailureStore).failTimelineKind = "membership";
+      await expect(
+        service.addParticipant(created.id, actor, { identityId: "bob", username: "bob" }, "test"),
+      ).rejects.toThrow(/injected timeline failure:membership/);
+      expect((await service.getCase(created.id, actor, true))?.participants.some((row) => row.identityId === "bob"))
+        .toBe(false);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "membership")).toBe(false);
+      expect(await audit.list({ action: "case_membership" })).toEqual([]);
+    }, new InjectedFailureStore());
+
+    const boomAudit = new InjectedFailureAudit();
+    await withService(async ({ service, audit }) => {
+      const created = await service.createCase(actor, { title: "Synthetic hold atomic fixture" }, "test");
+      boomAudit.failAction = "legal_hold";
+      await expect(service.setLegalHold(created.id, actor, true, "test")).rejects.toThrow(
+        /injected audit failure:legal_hold/,
+      );
+      expect((await service.getCase(created.id, actor, true))?.legalHold).toBe(false);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "legal_hold")).toBe(false);
+      expect(await audit.list({ action: "legal_hold" })).toEqual([]);
+    }, new MemoryCaseStore(), boomAudit);
+  });
+
   it("replays identical snapshot fingerprints and hypothesis/tombstone retries without forking history", async () => {
     await withService(async ({ service }) => {
       const created = await service.createCase(actor, { title: "Idempotent freeze fixture" }, "test");

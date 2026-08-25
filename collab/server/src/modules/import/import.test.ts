@@ -539,6 +539,75 @@ describe("external-run import", () => {
     expect(src.includes("initialCorroborationState()")).toBe(true);
   });
 
+  it("rolls back corroboration when timeline projection fails", async () => {
+    class InjectedFailureStore extends MemoryCaseStore {
+      failTimelineKind: string | null = null;
+      override async appendTimeline(
+        caseId: string,
+        event: Parameters<MemoryCaseStore["appendTimeline"]>[1],
+      ): Promise<Awaited<ReturnType<MemoryCaseStore["appendTimeline"]>>> {
+        if (this.failTimelineKind && event.kind === this.failTimelineKind) {
+          throw new Error(`injected timeline failure:${event.kind}`);
+        }
+        return super.appendTimeline(caseId, event);
+      }
+    }
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-corroborate-boom-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const store = new InjectedFailureStore();
+    const cases = new CaseService(evidence, audit, store, catalog);
+    const runs = new MemoryRunStore();
+    const imports = new ImportService({
+      evidence,
+      audit,
+      cases,
+      catalog,
+      runs,
+    });
+    try {
+      const created = await cases.createCase(actor, { title: "Corroboration atomic fixture" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const imported = await imports.importRun(
+        created.id,
+        actor,
+        {
+          outputText: "synthetic imported timeout transcript",
+          sourceId: source.id,
+          operatorId: "uid=operator,ou=people,dc=example,dc=test",
+          operatorUsername: "operator",
+        },
+        "test",
+        false,
+      );
+      const note = await cases.addContribution(
+        created.id,
+        actor,
+        { kind: "note", body: "Synthetic corroborating observation." },
+        "test",
+      );
+      store.failTimelineKind = "run_corroboration";
+      await expect(
+        imports.corroborate(
+          created.id,
+          imported.id,
+          actor,
+          { state: "corroborated", links: [{ kind: "contribution", id: note.id }] },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/injected timeline failure:run_corroboration/);
+      expect(await runs.listCorroborations(imported.id)).toEqual([]);
+      expect((await cases.listTimeline(created.id)).some((event) => event.kind === "run_corroboration")).toBe(false);
+      expect(await audit.list({ action: "run_corroboration" })).toEqual([]);
+      expect((await imports.getRun(created.id, imported.id, actor, false))?.corroborationState).toBe("unverified");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rolls back the contribution and staged bytes when run insert fails", async () => {
     class BoomRunStore extends MemoryRunStore {
       override async insert(): Promise<void> {
