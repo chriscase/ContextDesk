@@ -751,11 +751,18 @@ jobs:
       - name: record isolated collab routing
         if: needs.ci-path-filter.outputs.surface == 'collab-only'
         run: |
-          if [ -d collab ] || [ -d crates/cd-collab ]; then
-            echo "::error::collaboration source is present but has no dedicated validator; refusing a green filtered gate"
+          if [ -d collab ]; then
+            if [ ! -s .github/workflows/collab.yml ] || [ ! -s .github/workflows/collab-qualify.yml ]; then
+              echo "::error::collaboration source is present but a dedicated validator is missing; refusing a green filtered gate"
+              exit 1
+            fi
+            echo "Dedicated collab and collab-qualify validators are present; aggregate Rust shards are intentionally skipped."
+          elif [ -d crates/cd-collab ]; then
+            echo "::error::collaboration Rust source is present but has no dedicated validator; refusing a green filtered gate"
             exit 1
+          else
+            echo "No collaboration workspace crate is present on this revision; path-only collaboration documentation needs no Rust shard run."
           fi
-          echo "No collaboration workspace crate is present on this revision; path-only collaboration documentation needs no Rust shard run."
           git diff --check
       - name: download shard results
         if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
