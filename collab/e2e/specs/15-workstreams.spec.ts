@@ -164,9 +164,11 @@ test.describe("workstreams read like investigative work", () => {
 
     await page.setViewportSize({ width: 390, height: 844 });
     const workstreams = page.locator(".workstreams").first();
-    await workstreams.getByRole("link", { name: /workstream — / }).first().click();
+    const workstreamLink = workstreams.getByRole("heading", { level: 6 }).first().getByRole("link");
+    const workstreamName = (await workstreamLink.innerText()).trim();
+    await workstreamLink.click();
     const detail = page.locator(".workstreams__detail");
-    await expect(detail.getByRole("heading", { name: /workstream — / })).toBeVisible();
+    await expect(detail.getByRole("heading", { name: workstreamName })).toBeVisible();
     await expect(detail.getByRole("heading", { name: "What happened, in order" })).toBeVisible();
     // No horizontal overflow of the page itself on a phone-width viewport.
     const overflow = await page.evaluate(
