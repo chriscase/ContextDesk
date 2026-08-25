@@ -100,6 +100,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Use release-contract Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: unified + CLI release contracts
         run: |
           python3 scripts/release-contract/check_release_contract.py

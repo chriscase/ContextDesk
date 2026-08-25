@@ -33,6 +33,11 @@ jobs:
           ref: ${{ inputs.expected_git_sha }}
           fetch-depth: 0
 
+      - name: Use release-contract Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Refuse SHA mismatch
         env:
           TAG: ${{ inputs.tag }}
