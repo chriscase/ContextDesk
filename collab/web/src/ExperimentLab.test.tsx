@@ -298,6 +298,56 @@ const cockpitView = {
   },
 };
 
+describe("comparison lab header honesty", () => {
+  function stubExperiments() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [view] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+  }
+
+  it("says presence refreshes by polling rather than implying a live push channel", async () => {
+    stubExperiments();
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+    await screen.findAllByText("qwen-3.6-27b");
+    // The implementation polls on an interval; the copy must say so.
+    expect(screen.getByText(/live\s+refresh by polling/)).toBeTruthy();
+  });
+
+  it("names the investigation readably instead of shouting a bare identifier", async () => {
+    stubExperiments();
+    const caseId = "00000000-0000-4000-8000-000000000001";
+    render(
+      <ExperimentLab
+        caseId={caseId}
+        caseTitle="Checkout latency spike"
+        canWrite
+        canLead
+      />,
+    );
+    await screen.findAllByText("qwen-3.6-27b");
+    expect(screen.getByText("Investigation: Checkout latency spike")).toBeTruthy();
+    // The uppercase kicker names the surface, never the raw identifier.
+    expect(screen.getAllByText("Comparison lab").length).toBeGreaterThan(0);
+    expect(screen.queryByText(new RegExp(caseId, "i"))).toBeNull();
+  });
+
+  it("says the title is not recorded rather than substituting the identifier", async () => {
+    stubExperiments();
+    const caseId = "00000000-0000-4000-8000-000000000001";
+    render(<ExperimentLab caseId={caseId} canWrite canLead />);
+    await screen.findAllByText("qwen-3.6-27b");
+    expect(screen.getByText("Investigation title not recorded")).toBeTruthy();
+    expect(screen.queryByText(new RegExp(caseId, "i"))).toBeNull();
+  });
+});
+
 describe("experiment lab", () => {
   it("renders the candidate matrix and agreement caveat", async () => {
     vi.stubGlobal(

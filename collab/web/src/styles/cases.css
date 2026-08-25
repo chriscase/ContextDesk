@@ -757,6 +757,142 @@
   overflow-wrap: anywhere;
 }
 
+/* ---- Situation briefing -------------------------------------------------
+   Leads with the recorded working record (hypotheses, actions, observations,
+   unreviewed imported output) so a returning engineer reads content before
+   counts. Human groups and imported output are visually separated so model or
+   tool output never reads as a human finding. */
+
+.situation__briefing {
+  margin: 0 0 1.2rem;
+}
+
+.situation__briefing-head h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.situation__briefing-head p {
+  margin: 0.2rem 0 0.8rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  max-width: 62ch;
+}
+
+.situation__briefing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 0.7rem;
+  align-items: start;
+}
+
+.situation__briefing-group {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface);
+}
+
+.situation__briefing-group h5 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.situation__briefing-count {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.situation__briefing-meaning {
+  margin: 0.3rem 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.situation__briefing-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.situation__briefing-list {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.situation__briefing-list > li {
+  min-width: 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+
+.situation__briefing-list > li:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.situation__briefing-attribution {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.situation__briefing-open {
+  margin-top: 0.35rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.situation__briefing-open:hover,
+.situation__briefing-open:focus-visible {
+  text-decoration-thickness: 2px;
+}
+
+.situation__briefing-more {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.situation__briefing-evidence {
+  margin: 0.8rem 0 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
+.situation__briefing-evidence strong {
+  color: var(--fg);
+}
+
 .situation__activity,
 .situation__next {
   margin-bottom: 1.1rem;

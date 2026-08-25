@@ -15,6 +15,7 @@ import {
   type TimelineEvent,
 } from "./TriageWorkspace.js";
 import { isDiscussionSection, isWorkLocation, parsePathname, type WorkFocus } from "./app-location.js";
+import { ArtifactExcerpt } from "./evidence-excerpt.js";
 import { focusArrivalCopy } from "./route-focus-copy.js";
 import { protectedApiFetch } from "./protected-api.js";
 
@@ -141,6 +142,90 @@ function openedLine(row: CaseRow): string | null {
   if (when) return `Opened ${when}`;
   if (who) return `Opened by ${who}`;
   return null;
+}
+
+/**
+ * The Situation briefing groups. Each group reads only records this
+ * investigation already fetched for Capture — the briefing is a re-presentation
+ * of the working record, never a second source of truth and never a verdict.
+ */
+const BRIEFING_GROUPS: readonly {
+  id: string;
+  title: string;
+  /** Contribution kinds that belong to this group. */
+  kinds: readonly string[];
+  /** What the reader should take the entries to mean. Never a claim of truth. */
+  meaning: string;
+  empty: string;
+}[] = [
+  {
+    id: "hypotheses",
+    title: "Working hypotheses",
+    kinds: ["hypothesis"],
+    meaning: "Possibilities someone recorded to test. A hypothesis is not an established cause.",
+    empty: "No working hypothesis has been recorded yet.",
+  },
+  {
+    id: "actions",
+    title: "Next actions",
+    kinds: ["action"],
+    meaning: "Work someone recorded for a person to perform and report back on.",
+    empty: "No next action has been recorded yet.",
+  },
+  {
+    id: "observations",
+    title: "Latest observations",
+    kinds: ["note", "message"],
+    meaning: "What people reported seeing. Recorded observations, not conclusions.",
+    empty: "No observation has been recorded yet.",
+  },
+];
+
+/** Newest-first, tombstoned entries excluded from the working record. */
+function briefingEntries(
+  contributions: readonly ContributionView[],
+  kinds: readonly string[],
+): ContributionView[] {
+  return contributions
+    .filter((row) => !row.tombstoned && kinds.includes(row.kind) && (row.body ?? "").trim().length > 0)
+    .slice()
+    .reverse();
+}
+
+function contributionTime(value: string | undefined): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? null : parsed.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+/**
+ * Imported analysis nobody has read yet. Kept separate from the human groups
+ * above so model or tool output is never folded in among human findings.
+ */
+function unreviewedRuns(runs: readonly RunRow[]): RunRow[] {
+  return runs.filter(
+    (run) => run.corroborationState !== "corroborated" && run.corroborationState !== "contradicted",
+  );
+}
+
+/** Evidence signals restated from timeline events already loaded for this case. */
+function evidenceSignals(events: readonly TimelineEvent[]): {
+  registered: number;
+  snapshots: number;
+  intakeBatches: number;
+} {
+  let registered = 0;
+  let snapshots = 0;
+  let intakeBatches = 0;
+  for (const event of events) {
+    if (event.kind === "evidence_registered") registered += 1;
+    else if (event.kind === "snapshot_frozen") snapshots += 1;
+    else if (event.kind === "corpus_intake_committed") intakeBatches += 1;
+  }
+  return { registered, snapshots, intakeBatches };
 }
 
 function activityLabel(item: ActivityItem | LegacyActivityItem): string {
@@ -816,6 +901,10 @@ export function Cases(props: {
     props.focus && props.focus.navigation !== "preserve"
       ? focusArrivalCopy(props.focus)
       : null;
+  // Situation briefing inputs. Derived from the same records Capture renders,
+  // so the briefing restates the working record instead of forking it.
+  const pendingRuns = unreviewedRuns(runs);
+  const evidence = evidenceSignals(events);
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
@@ -1460,6 +1549,164 @@ export function Cases(props: {
                 </section>
               </div>
             )}
+          </section>
+          <section className="situation__briefing" aria-labelledby="situation-briefing-title">
+            <div className="situation__briefing-head">
+              <h4 id="situation-briefing-title">Where the investigation stands</h4>
+              <p>
+                The working record as people wrote it — what is suspected, what is outstanding, and
+                what was seen. Open any entry to read it in full where it was recorded.
+              </p>
+            </div>
+            <div className="situation__briefing-grid">
+              {BRIEFING_GROUPS.map((group) => {
+                const entries = briefingEntries(contributions, group.kinds);
+                const shown = entries.slice(0, 3);
+                return (
+                  <section
+                    key={group.id}
+                    className="situation__briefing-group"
+                    aria-labelledby={`situation-briefing-${group.id}`}
+                  >
+                    <h5 id={`situation-briefing-${group.id}`}>
+                      {group.title}
+                      <span className="situation__briefing-count">
+                        {entries.length === 0 ? "none recorded" : `${entries.length} recorded`}
+                      </span>
+                    </h5>
+                    <p className="situation__briefing-meaning">{group.meaning}</p>
+                    {shown.length === 0 ? (
+                      <p className="situation__briefing-empty">{group.empty}</p>
+                    ) : (
+                      <ul className="situation__briefing-list">
+                        {shown.map((row) => {
+                          const when = contributionTime(row.createdAt);
+                          return (
+                            <li key={row.id}>
+                              <p className="situation__briefing-attribution">
+                                <span className="triage-chip triage-chip--human">human-authored</span>
+                                <span>
+                                  {row.authorUsername ?? "author not recorded"}
+                                  {when ? ` · ${when}` : ""}
+                                </span>
+                              </p>
+                              <ArtifactExcerpt text={row.body ?? ""} label={group.title.toLowerCase()} />
+                              <button
+                                type="button"
+                                className="situation__briefing-open"
+                                onClick={() => {
+                                  const focus: WorkFocus = {
+                                    section: "triage-capture",
+                                    item: row.id,
+                                    itemKind: "contribution",
+                                    lane: null,
+                                    experiment: null,
+                                  };
+                                  if (props.onDeepNavigate) props.onDeepNavigate("capture", focus);
+                                  else selectStage("capture");
+                                }}
+                              >
+                                Open where this was recorded
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {entries.length > shown.length ? (
+                      <p className="situation__briefing-more">
+                        {entries.length - shown.length} more recorded in Capture.
+                      </p>
+                    ) : null}
+                  </section>
+                );
+              })}
+              <section
+                className="situation__briefing-group"
+                aria-labelledby="situation-briefing-imported"
+              >
+                <h5 id="situation-briefing-imported">
+                  Imported analysis awaiting a human read
+                  <span className="situation__briefing-count">
+                    {pendingRuns.length === 0
+                      ? "none pending"
+                      : `${pendingRuns.length} pending`}
+                  </span>
+                </h5>
+                <p className="situation__briefing-meaning">
+                  Output pasted from an AI, a tool, or a report. It stays unverified until a person
+                  corroborates or contradicts it, and is never a human finding.
+                </p>
+                {pendingRuns.length === 0 ? (
+                  <p className="situation__briefing-empty">
+                    {runs.length === 0
+                      ? "No external analysis has been imported."
+                      : "Every imported run has a recorded human judgment."}
+                  </p>
+                ) : (
+                  <ul className="situation__briefing-list">
+                    {pendingRuns.slice(0, 3).map((run) => (
+                      <li key={run.id}>
+                        <p className="situation__briefing-attribution">
+                          <span className="triage-chip triage-chip--imported">
+                            imported · unverified
+                          </span>
+                          <span>imported by {run.importerUsername}</span>
+                        </p>
+                        <ArtifactExcerpt text={run.outputText} label="imported output" />
+                        <button
+                          type="button"
+                          className="situation__briefing-open"
+                          onClick={() => {
+                            const focus: WorkFocus = {
+                              section: "triage-capture",
+                              item: run.id,
+                              itemKind: "imported-run",
+                              lane: null,
+                              experiment: null,
+                            };
+                            if (props.onDeepNavigate) props.onDeepNavigate("capture", focus);
+                            else selectStage("capture");
+                          }}
+                        >
+                          Open to record a human judgment
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </div>
+            <p className="situation__briefing-evidence">
+              <strong>Evidence recorded:</strong>{" "}
+              {evidence.registered === 0
+                ? "no evidence has been registered on this investigation yet"
+                : `${evidence.registered} item${evidence.registered === 1 ? "" : "s"} registered`}
+              {evidence.snapshots > 0
+                ? ` · ${evidence.snapshots} snapshot${evidence.snapshots === 1 ? "" : "s"} frozen`
+                : " · no snapshot frozen yet"}
+              {evidence.intakeBatches > 0
+                ? ` · ${evidence.intakeBatches} log intake batch${evidence.intakeBatches === 1 ? "" : "es"} committed`
+                : ""}
+              {". "}
+              <button
+                type="button"
+                className="situation__briefing-open"
+                onClick={() => {
+                  const focus: WorkFocus = {
+                    section: "triage-evidence-board",
+                    item: null,
+                    itemKind: null,
+                    lane: null,
+                    experiment: null,
+                  };
+                  if (props.onDeepNavigate) props.onDeepNavigate("analyze", focus);
+                  else selectStage("analyze");
+                }}
+              >
+                Open the evidence board
+              </button>
+            </p>
           </section>
           <dl className="situation__facts">
             <div>

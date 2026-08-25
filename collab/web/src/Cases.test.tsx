@@ -470,6 +470,230 @@ describe("war room overview", () => {
   });
 });
 
+describe("situation briefing", () => {
+  /** Records a returning engineer must be able to read without leaving Situation. */
+  function briefingFetch() {
+    return stubCaseFetch({
+      onRequest: (url) => {
+        if (url === "/api/cases/c1/timeline") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              events: [
+                { seq: 1, kind: "evidence_registered", actorUsername: "alice", targetId: "ev-1", serverTime: "2026-08-24T12:00:00.000Z", payload: "{}" },
+                { seq: 2, kind: "evidence_registered", actorUsername: "alice", targetId: "ev-2", serverTime: "2026-08-24T12:01:00.000Z", payload: "{}" },
+                { seq: 3, kind: "snapshot_frozen", actorUsername: "alice", targetId: "snap-1", serverTime: "2026-08-24T12:02:00.000Z", payload: "{}" },
+              ],
+            }),
+          });
+        }
+        if (url === "/api/cases/c1/contributions") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              contributions: [
+                {
+                  id: "obs-1",
+                  kind: "note",
+                  body: "Synthetic checkout requests stalled for 9s at the payment step.",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "alice",
+                  createdAt: "2026-08-24T12:03:00.000Z",
+                },
+                {
+                  id: "hyp-1",
+                  kind: "hypothesis",
+                  body: "The synthetic payment pool exhausts after each upstream retry storm.",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "dave",
+                  createdAt: "2026-08-24T12:04:00.000Z",
+                },
+                {
+                  id: "act-1",
+                  kind: "action",
+                  body: "Count distinct synthetic retry attempts per request id in the frozen log.",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "dave",
+                  createdAt: "2026-08-24T12:05:00.000Z",
+                },
+                {
+                  id: "gone-1",
+                  kind: "hypothesis",
+                  body: "Withdrawn synthetic guess that must not appear in the briefing.",
+                  privacyClass: "owner_only",
+                  tombstoned: true,
+                  authorUsername: "dave",
+                  createdAt: "2026-08-24T12:06:00.000Z",
+                },
+              ],
+            }),
+          });
+        }
+        if (url === "/api/cases/c1/imports") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              runs: [
+                {
+                  id: "run-1",
+                  sourceId: "src-1",
+                  outputText: "Synthetic assistant claim: queue depth is the root cause.",
+                  corroborationState: "unverified",
+                  evidenceVisibility: "importer_described",
+                  snapshotBinding: null,
+                  importerUsername: "dave",
+                  operatorUsername: "dave",
+                  promptText: null,
+                  promptCompleteness: "unknown",
+                },
+                {
+                  id: "run-2",
+                  sourceId: "src-1",
+                  outputText: "Synthetic assistant claim a person already contradicted.",
+                  corroborationState: "contradicted",
+                  evidenceVisibility: "importer_described",
+                  snapshotBinding: null,
+                  importerUsername: "dave",
+                  operatorUsername: "dave",
+                  promptText: null,
+                  promptCompleteness: "unknown",
+                },
+              ],
+            }),
+          });
+        }
+        return null;
+      },
+    });
+  }
+
+  function renderSituation(onDeepNavigate = vi.fn()) {
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c1"
+        stage="situation"
+        onOpenCase={vi.fn()}
+        onStageChange={vi.fn()}
+        onDeepNavigate={onDeepNavigate}
+      />,
+    );
+    return onDeepNavigate;
+  }
+
+  it("leads with what people recorded, not just how many records exist", async () => {
+    briefingFetch();
+    renderSituation();
+    const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
+
+    // The engineer reads the substance of each group without leaving Situation.
+    expect(
+      within(briefing).getByText(/synthetic payment pool exhausts after each upstream retry storm/i),
+    ).toBeTruthy();
+    expect(
+      within(briefing).getByText(/count distinct synthetic retry attempts per request id/i),
+    ).toBeTruthy();
+    expect(
+      within(briefing).getByText(/synthetic checkout requests stalled for 9s at the payment step/i),
+    ).toBeTruthy();
+
+    // A hypothesis is never presented as an established cause.
+    expect(
+      within(briefing).getByText(/a hypothesis is not an established cause/i),
+    ).toBeTruthy();
+  });
+
+  it("keeps a removed contribution out of the working record", async () => {
+    briefingFetch();
+    renderSituation();
+    const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
+    expect(
+      within(briefing).queryByText(/withdrawn synthetic guess/i),
+    ).toBeNull();
+    // One live hypothesis remains; the tombstoned one is not counted either.
+    const group = within(briefing).getByRole("region", { name: /Working hypotheses/ });
+    expect(within(group).getByText("1 recorded")).toBeTruthy();
+  });
+
+  it("separates imported output awaiting a human read and never labels it human-authored", async () => {
+    briefingFetch();
+    renderSituation();
+    const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
+    const imported = within(briefing).getByRole("region", {
+      name: /Imported analysis awaiting a human read/,
+    });
+    expect(within(imported).getByText(/queue depth is the root cause/i)).toBeTruthy();
+    expect(within(imported).getByText("imported · unverified")).toBeTruthy();
+    expect(within(imported).queryByText("human-authored")).toBeNull();
+    // A run a person already judged is no longer pending.
+    expect(within(imported).queryByText(/a person already contradicted/i)).toBeNull();
+    expect(within(imported).getByText("1 pending")).toBeTruthy();
+  });
+
+  it("restates recorded evidence and opens the board that owns it", async () => {
+    briefingFetch();
+    const nav = renderSituation(vi.fn());
+    const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
+    expect(within(briefing).getByText(/2 items registered/)).toBeTruthy();
+    expect(within(briefing).getByText(/1 snapshot frozen/)).toBeTruthy();
+    fireEvent.click(within(briefing).getByRole("button", { name: "Open the evidence board" }));
+    expect(nav).toHaveBeenCalledWith("analyze", {
+      section: "triage-evidence-board",
+      item: null,
+      itemKind: null,
+      lane: null,
+      experiment: null,
+    });
+  });
+
+  it("opens the exact record a briefing entry names", async () => {
+    briefingFetch();
+    const nav = renderSituation(vi.fn());
+    const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
+    const hypotheses = within(briefing).getByRole("region", { name: /Working hypotheses/ });
+    fireEvent.click(
+      within(hypotheses).getByRole("button", { name: "Open where this was recorded" }),
+    );
+    expect(nav).toHaveBeenCalledWith("capture", {
+      section: "triage-capture",
+      item: "hyp-1",
+      itemKind: "contribution",
+      lane: null,
+      experiment: null,
+    });
+
+    const imported = within(briefing).getByRole("region", {
+      name: /Imported analysis awaiting a human read/,
+    });
+    fireEvent.click(
+      within(imported).getByRole("button", { name: "Open to record a human judgment" }),
+    );
+    expect(nav).toHaveBeenCalledWith("capture", {
+      section: "triage-capture",
+      item: "run-1",
+      itemKind: "imported-run",
+      lane: null,
+      experiment: null,
+    });
+  });
+
+  it("states plainly when a group has nothing recorded", async () => {
+    stubCaseFetch();
+    renderSituation();
+    const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
+    expect(within(briefing).getByText("No working hypothesis has been recorded yet.")).toBeTruthy();
+    expect(within(briefing).getByText("No next action has been recorded yet.")).toBeTruthy();
+    expect(within(briefing).getByText("No external analysis has been imported.")).toBeTruthy();
+    expect(
+      within(briefing).getByText(/no evidence has been registered on this investigation yet/),
+    ).toBeTruthy();
+  });
+});
+
 describe("focused investigation view", () => {
   it("routes investigation-local activity to its exact typed record item", async () => {
     const onDeepNavigate = vi.fn();
