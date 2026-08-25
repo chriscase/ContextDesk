@@ -1946,10 +1946,29 @@ describe("portable investigation apply", () => {
     expect(sourceDiscussion?.locator.resourceId).toBeTruthy();
     expect(sourceEvidence?.locator.resourceId).toBe(row.evidenceId);
     expect(sourceFrozen?.locator.resourceId).toBeTruthy();
-    expect(sourceImported?.locator.kind).toBe("evidence_context");
+    expect(sourceImported?.locator.kind).toBe("imported_ai_run");
     expect(sourceImported?.locator.resourceId).toBeTruthy();
     expect(sourceImported?.locator.resourceId).not.toBe(row.caseId);
     expect(sourceImported?.locator.resourceId).not.toBe(sourceFrozen?.locator.resourceId);
+    expect(sourceImported?.humanFinding).toBe(false);
+    expect(sourceImported?.resolvedRoute).toContain("section=triage-capture");
+    expect(sourceImported?.resolvedRoute).toContain("kind=imported-run");
+    expect(sourceImported?.resolvedRoute).toContain(`item=${sourceImported?.locator.resourceId}`);
+    await expect(
+      activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceImported!.locator)),
+    ).resolves.toMatchObject({ authorized: true, resourceLabel: "Imported analysis" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: row.caseId,
+          kind: "evidence_context",
+          resourceId: sourceImported!.locator.resourceId,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
     expect(sourceDecision?.locator.kind).toBe("decision_revision");
     expect(sourceDecision?.locator.resourceId).toBeTruthy();
     expect(sourceDecision?.locator.resourceId).not.toBe(row.caseId);
@@ -2162,11 +2181,15 @@ describe("portable investigation apply", () => {
       expect(event.targetId).toBe(destFrozen?.locator.resourceId);
       expect(event.targetId).not.toBe(applied.investigationId);
     }
-    expect(destImported?.locator.kind).toBe("evidence_context");
+    expect(destImported?.locator.kind).toBe("imported_ai_run");
     expect(destImported?.locator.resourceId).toBeTruthy();
     expect(destImported?.locator.resourceId).not.toBe(sourceImported?.locator.resourceId);
     expect(destImported?.locator.resourceId).not.toBe(applied.investigationId);
     expect(destImported?.locator.resourceId).not.toBe(destFrozen?.locator.resourceId);
+    expect(destImported?.humanFinding).toBe(false);
+    expect(destImported?.resolvedRoute).toContain("section=triage-capture");
+    expect(destImported?.resolvedRoute).toContain("kind=imported-run");
+    expect(destImported?.resolvedRoute).toContain(`item=${destImported?.locator.resourceId}`);
     const destImportedEvents = destFrozenTimeline.filter((event) => event.kind === "external_run_imported");
     expect(destImportedEvents.length).toBeGreaterThan(0);
     for (const event of destImportedEvents) {
@@ -2387,6 +2410,30 @@ describe("portable investigation apply", () => {
           investigationId: applied.investigationId,
           kind: "comparison_finding",
           resourceId: destHelpfulness!.locator.resourceId,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: applied.investigationId,
+          kind: "evidence_context",
+          resourceId: destImported!.locator.resourceId,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: applied.investigationId,
+          kind: "imported_ai_run",
+          resourceId: destFrozen!.locator.resourceId,
         })),
       ),
     ).rejects.toMatchObject({ code: "not_found" });
@@ -3272,6 +3319,44 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
         resourceId: experiment!.locator.resourceId,
       }));
       await expect(activity.resolve(ACTOR, false, confusedExperiment)).rejects.toMatchObject({
+        code: "not_found",
+      });
+      const imported = page.items.find((item) => item.summary === "imported analysis was recorded");
+      const frozen = page.items.find((item) => item.activityKind === "evidence_frozen");
+      expect(imported?.locator.kind).toBe("imported_ai_run");
+      expect(imported?.locator.resourceId).toBeTruthy();
+      expect(imported?.locator.resourceId).not.toBe(investigationId);
+      expect(imported?.locator.resourceId).not.toBe(frozen?.locator.resourceId);
+      expect(imported?.humanFinding).toBe(false);
+      expect(imported?.resolvedRoute).toContain("section=triage-capture");
+      expect(imported?.resolvedRoute).toContain("kind=imported-run");
+      expect(frozen?.locator.kind).toBe("evidence_context");
+      await expect(
+        activity.resolve(ACTOR, false, formatCompactInvestigationLocator(imported!.locator)),
+      ).resolves.toMatchObject({ authorized: true, resourceLabel: "Imported analysis" });
+      await expect(
+        activity.resolve(
+          { id: "eve", username: "eve" },
+          false,
+          formatCompactInvestigationLocator(imported!.locator),
+        ),
+      ).rejects.toMatchObject({ code: "not_found" });
+      const confusedImported = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+        installationId: "inst-syntheticnorth",
+        investigationId,
+        kind: "evidence_context",
+        resourceId: imported!.locator.resourceId,
+      }));
+      await expect(activity.resolve(ACTOR, false, confusedImported)).rejects.toMatchObject({
+        code: "not_found",
+      });
+      const confusedImportedSnapshot = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+        installationId: "inst-syntheticnorth",
+        investigationId,
+        kind: "imported_ai_run",
+        resourceId: frozen!.locator.resourceId,
+      }));
+      await expect(activity.resolve(ACTOR, false, confusedImportedSnapshot)).rejects.toMatchObject({
         code: "not_found",
       });
     });

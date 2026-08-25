@@ -107,7 +107,9 @@ experiment id. `experiment_trace_imported` projects `interaction_trace` at
 `${experimentId}:${traceId}` and Compare `candidate-comparison-heading`, not
 the experiment id or `evidence_context`. `experiment_imported` projects
 `experiment` at the experiment id and Compare `candidate-comparison-heading`,
-not `comparison_finding`. Live `experiment_decision_*` writes address the
+not `comparison_finding`. `external_run_imported` and `run_corroboration`
+project `imported_ai_run` at the imported-run id and Capture `triage-capture`
+/ `kind=imported-run`, not snapshot `evidence_context`. Live `experiment_decision_*` writes address the
 decision id (`targetId` = decision id) so activity is not payload-dependent;
 portable persist refuses archives that drop `targetNamespace=decision`.
 

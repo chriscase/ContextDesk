@@ -41,6 +41,7 @@ export const INVESTIGATION_RESOURCE_KINDS = [
   "evidence_item",
   "intake_batch",
   "evidence_context",
+  "imported_ai_run",
   "workstream",
   "workstream_attempt",
   "workstream_rerun",
@@ -391,13 +392,20 @@ export function routedInvestigationFocus(
         lane: null,
       };
     case "evidence_context":
-      // Snapshots, corroboration, and imported-run context share this kind.
-      // Omit itemKind so the visible element with this id can match.
+      // Frozen snapshots only. Imported analysis uses imported_ai_run.
       return {
         stage: "analyze",
         section: "triage-evidence-board",
         item: resourceId,
         itemKind: null,
+        lane: null,
+      };
+    case "imported_ai_run":
+      return {
+        stage: "capture",
+        section: "triage-capture",
+        item: resourceId,
+        itemKind: "imported-run",
         lane: null,
       };
     case "workstream":
@@ -618,6 +626,7 @@ const RESOURCE_KIND_FALLBACK: Record<InvestigationResourceKindV1, string> = {
   evidence_item: "Evidence item",
   intake_batch: "Intake batch",
   evidence_context: "Evidence context",
+  imported_ai_run: "Imported analysis",
   workstream: "Workstream",
   workstream_attempt: "Workstream attempt",
   workstream_rerun: "Workstream rerun",
