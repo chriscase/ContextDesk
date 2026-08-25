@@ -4,6 +4,7 @@ import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
 import { TriageRunPanel } from "./TriageRunPanel.js";
+import { WORKSTREAMS_SECTION, Workstreams } from "./Workstreams.js";
 import {
   TriageAnchor,
   TriageStepSection,
@@ -203,13 +204,27 @@ function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkF
       },
     };
   }
+  if (item.kind.startsWith("triage_candidate")) {
+    // The recorded target is already `${runId}:${candidateId}` — the exact
+    // workstream address — so the link lands on that workstream's own record.
+    return {
+      stage: "analyze",
+      focus: {
+        section: WORKSTREAMS_SECTION,
+        item: item.targetId,
+        itemKind: "workstream",
+        lane: item.targetId,
+        experiment: null,
+      },
+    };
+  }
   if (item.kind.startsWith("triage_")) {
     return {
       stage: "analyze",
       focus: {
         section: "triage-lane-runner",
         item: item.targetId,
-        itemKind: item.kind.startsWith("triage_candidate") ? "triage-candidate" : "triage-run",
+        itemKind: "triage-run",
         lane: null,
         experiment: null,
       },
@@ -309,13 +324,25 @@ function investigationEventDestination(
       },
     };
   }
+  if (event.kind.startsWith("triage_candidate")) {
+    return {
+      stage: "analyze",
+      focus: {
+        section: WORKSTREAMS_SECTION,
+        item: event.targetId ?? null,
+        itemKind: "workstream",
+        lane: event.targetId ?? null,
+        experiment: null,
+      },
+    };
+  }
   if (event.kind.startsWith("triage_")) {
     return {
       stage: "analyze",
       focus: {
         section: "triage-lane-runner",
         item: event.targetId ?? null,
-        itemKind: event.kind.startsWith("triage_candidate") ? "triage-candidate" : "triage-run",
+        itemKind: "triage-run",
         lane: null,
         experiment: null,
       },
@@ -704,6 +731,9 @@ export function Cases(props: {
   }
 
   const current = cases.find((c) => c.id === focusCaseId);
+  // A workstream address focuses Analyze on that one workstream's record.
+  const workstreamFocused =
+    props.focus?.section === WORKSTREAMS_SECTION && Boolean(props.focus.lane);
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
@@ -1455,24 +1485,49 @@ export function Cases(props: {
             id="triage-analyze"
             step={2}
             title="Analyze"
-            lede="Curate the evidence the case may rely on, freeze a snapshot, then run ContextDesk model lanes against exactly that snapshot."
+            lede={
+              workstreamFocused
+                ? "One workstream, in full: what it was asked, what it examined, what it found, and what it left unknown."
+                : "Curate the evidence the investigation may rely on, freeze it, then read each workstream that examined exactly that evidence."
+            }
           >
-            <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
-              <CaseBoardPanel
+            <TriageAnchor id={WORKSTREAMS_SECTION} label="Workstreams">
+              <Workstreams
                 caseId={current.id}
-                canWrite={canWrite}
-                canLead={canLead}
-                readOnly={readOnly}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
+                {...(props.onDeepNavigate
+                  ? {
+                      onDeepNavigate: (focus: WorkFocus) =>
+                        props.onDeepNavigate?.("analyze", focus),
+                    }
+                  : {})}
               />
             </TriageAnchor>
-            <TriageAnchor id="triage-lane-runner" label="AI lane runner">
-              <TriageRunPanel
-                caseId={current.id}
-                canLead={canLead}
-                readOnly={readOnly}
-                {...(props.focus ? { routeFocus: props.focus } : {})}
-              />
+            {/* Opening one workstream is a real focus change, not a highlight:
+                the evidence board and the run launcher step aside so the
+                workstream's own record is the page. They also stop receiving
+                the route focus while hidden, so only the workstream record
+                claims keyboard focus for that address. */}
+            <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
+              <div hidden={workstreamFocused}>
+                <CaseBoardPanel
+                  caseId={current.id}
+                  canWrite={canWrite}
+                  canLead={canLead}
+                  readOnly={readOnly}
+                  {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                />
+              </div>
+            </TriageAnchor>
+            <TriageAnchor id="triage-lane-runner" label="Run history and launcher">
+              <div hidden={workstreamFocused}>
+                <TriageRunPanel
+                  caseId={current.id}
+                  canLead={canLead}
+                  readOnly={readOnly}
+                  {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                />
+              </div>
             </TriageAnchor>
           </TriageStepSection>
         </section>

@@ -1735,3 +1735,152 @@ describe("case discussion panel", () => {
     expect(screen.queryByRole("complementary", { name: "Discussion" })).toBeNull();
   });
 });
+
+describe("workstreams in the Analyze stage", () => {
+  const workstreamRow = {
+    key: "run-1:reviewer-lane",
+    caseId: "c1",
+    label: "Reviewer workstream — fixture-reviewer-a",
+    purpose: "What paused the fixture worker?",
+    operatorKind: "ai_assisted",
+    operatorLabel: "AI-assisted workstream — output is analysis, never a human finding",
+    assignedTo: "alice",
+    strategyLabel: "Standard synthetic strategy",
+    role: "reviewer",
+    inputs: {
+      question: "What paused the fixture worker?",
+      snapshotLabel: "Frozen evidence set 1",
+      snapshotEvidenceCount: 1,
+      snapshotFrozenAt: "2026-08-24T06:13:00.000Z",
+      sameSnapshot: true,
+      snapshotProofLabel: "Ran against the exact frozen evidence set, proven by the host.",
+    },
+    statusCode: "completed",
+    lifecycle: "settled",
+    statusLabel: "Completed",
+    statusDetail: "Finished and recorded its findings.",
+    startedAt: "2026-08-24T06:14:10.000Z",
+    finishedAt: "2026-08-24T06:14:25.000Z",
+    findings: "The fixture worker restarted while the queue was draining.",
+    outcome: "Recorded a written finding; it cited 0 evidence items.",
+    evidenceCited: [],
+    unknowns: [],
+    activity: [
+      { at: "2026-08-24T06:14:00.000Z", label: "Run queued", actor: "alice", detail: null },
+    ],
+    rerun: { isRerun: false, parentKey: null, note: "Not a rerun." },
+    agreementNotice: "Agreement is not proof of correctness.",
+    technical: {
+      workstreamKey: "run-1:reviewer-lane",
+      runId: "run-1",
+      candidateId: "reviewer-lane",
+      snapshotId: "snapshot-1",
+      snapshotFingerprint: "f".repeat(64),
+      requestFingerprint: "a".repeat(64),
+      taskFingerprint: "task-fingerprint",
+      strategyId: "contextdesk.standard.synthetic",
+      modelId: "fixture-reviewer-a",
+      modelVersion: null,
+      provider: "synthetic",
+      profileId: null,
+      outputHash: null,
+      benchmarkRunId: null,
+      parentRunId: null,
+      errorCode: null,
+      privacyClass: "share_safe",
+    },
+  };
+
+  function stubWithWorkstreams() {
+    return stubCaseFetch({
+      onRequest: (url) => {
+        if (url.endsWith("/workstreams")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ caseId: "c1", workstreams: [workstreamRow] }),
+          });
+        }
+        if (url.endsWith("/evidence") || url.endsWith("/snapshots")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ artifacts: [], snapshots: [] }),
+          });
+        }
+        if (url.endsWith("/triage-runs") || url === "/api/triage-profiles" || url === "/api/triage-capabilities") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ jobs: [], profiles: [], syntheticAvailable: true }),
+          });
+        }
+        return null;
+      },
+    });
+  }
+
+  it("lists workstreams beside the evidence board when none is opened", async () => {
+    stubWithWorkstreams();
+    render(<Cases roles={["case-lead"]} focusCaseId="c1" stage="analyze" onOpenCase={() => {}} onStageChange={() => {}} />);
+    expect(await screen.findByRole("heading", { name: "Workstreams" })).toBeTruthy();
+    expect(
+      await screen.findByRole("link", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    // The evidence board and the launcher are part of the same stage.
+    expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+  });
+
+  it("makes an opened workstream the stage, not a highlight beside everything else", async () => {
+    stubWithWorkstreams();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        focusCaseId="c1"
+        stage="analyze"
+        focus={{
+          section: "workstreams",
+          item: "run-1:reviewer-lane",
+          itemKind: "workstream",
+          lane: "run-1:reviewer-lane",
+          experiment: null,
+        }}
+        onOpenCase={() => {}}
+        onStageChange={() => {}}
+      />,
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    expect(screen.getByText("The fixture worker restarted while the queue was draining.")).toBeTruthy();
+    await waitFor(() => {
+      const board = screen.queryByRole("heading", { name: "Evidence and snapshots" });
+      expect(board).toBeNull();
+    });
+    expect(screen.getByRole("link", { name: "All workstreams" })).toBeTruthy();
+  });
+
+  it("gives keyboard focus to the opened workstream, not to a hidden panel", async () => {
+    stubWithWorkstreams();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        focusCaseId="c1"
+        stage="analyze"
+        focus={{
+          section: "workstreams",
+          item: "run-1:reviewer-lane",
+          itemKind: "workstream",
+          lane: "run-1:reviewer-lane",
+          experiment: null,
+        }}
+        onOpenCase={() => {}}
+        onStageChange={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" });
+    await waitFor(() => {
+      const record = document.querySelector(
+        "[data-route-item='run-1:reviewer-lane'][data-route-kind='workstream']",
+      );
+      expect(document.activeElement).toBe(record);
+    });
+  });
+});

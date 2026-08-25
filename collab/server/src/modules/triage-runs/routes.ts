@@ -9,7 +9,9 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import type { CaseService } from "../cases/index.js";
 import { TriageRunConflictError, TriageRunNotFoundError, TriageRunService } from "./service.js";
+import { listCaseWorkstreams } from "./workstreams.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -20,6 +22,12 @@ export interface TriageRunRouteDeps {
   roles: MutableGroupRoleMap;
   audit: AuditStore;
   runs: TriageRunService;
+  /**
+   * Supplied wherever the case domain is available. The readable workstream
+   * route needs evidence, snapshots, and the timeline to resolve identifiers
+   * into human labels; without it the route is simply not registered.
+   */
+  cases?: CaseService;
 }
 
 export async function registerTriageRunRoutes(
@@ -97,6 +105,29 @@ export async function registerTriageRunRoutes(
       jobs: await deps.runs.list(caseId, ctx.actor, ctx.isAdmin),
     };
   });
+
+  if (deps.cases) {
+    const cases = deps.cases;
+    app.get("/api/cases/:id/workstreams", async (request, reply) => {
+      const ctx = await sessionOf(request);
+      if (!ctx) {
+        void reply.code(401);
+        return authError("unauthenticated");
+      }
+      if (!ctx.canRead) {
+        void reply.code(403);
+        return authError("forbidden");
+      }
+      const caseId = (request.params as { id: string }).id;
+      return listCaseWorkstreams({
+        cases,
+        runs: deps.runs,
+        caseId,
+        actor: ctx.actor,
+        isAdmin: ctx.isAdmin,
+      });
+    });
+  }
 
   app.get("/api/cases/:id/triage-runs/:jid", async (request, reply) => {
     const ctx = await sessionOf(request);

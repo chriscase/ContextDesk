@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { MouseEvent, ReactNode } from "react";
 import type { WorkFocus } from "./app-location.js";
+import { ArtifactExcerpt } from "./evidence-excerpt.js";
 import { protectedApiFetch } from "./protected-api.js";
 
 interface CandidateRow {
@@ -220,57 +221,12 @@ function truncateText(value: string, max = 96): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-function readableTraceExcerpt(value: string): string {
-  const withoutTechnicalRefs = value
-    .replace(/(?:;\s*)?evidence\s+ev-[a-z0-9][a-z0-9-]*/gi, "")
-    .replace(/\s+([,.;:])/g, "$1")
-    .trim();
-  return withoutTechnicalRefs || "This step contains only a technical evidence reference.";
-}
-
 function readableUnknown(value: string): string {
   return value
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[_-]+/g, " ")
     .trim()
     .toLowerCase();
-}
-
-function ArtifactExcerpt(props: { text: string }) {
-  const fullText = props.text;
-  const previewText = readableTraceExcerpt(fullText);
-  const fullLines = fullText.split(/\r?\n/);
-  const previewLines = previewText.split(/\r?\n/);
-  const isLarge = fullLines.length > 6 || fullText.length > 480;
-  if (!isLarge) {
-    return <pre className="experiment-lab__artifact-excerpt">{previewText}</pre>;
-  }
-  const previewByLines = previewLines.slice(0, 6).join("\n");
-  const preview = previewByLines.length > 480
-    ? `${previewByLines.slice(0, 479)}…`
-    : `${previewByLines}\n…`;
-  const lineCount = `${fullLines.length} line${fullLines.length === 1 ? "" : "s"}`;
-  const excerptScale = `${lineCount} · ${fullText.length.toLocaleString()} characters`;
-  return (
-    <div className="experiment-lab__artifact-collapsible">
-      <pre className="experiment-lab__artifact-excerpt experiment-lab__artifact-preview">
-        {preview}
-      </pre>
-      <details>
-        <summary>
-          <span className="experiment-lab__artifact-expand">
-            Expand complete log or stack trace · {excerptScale}
-          </span>
-          <span className="experiment-lab__artifact-collapse">
-            Collapse complete log or stack trace · {excerptScale}
-          </span>
-        </summary>
-        <pre className="experiment-lab__artifact-excerpt experiment-lab__artifact-full">
-          {fullText}
-        </pre>
-      </details>
-    </div>
-  );
 }
 
 const COMPARE_WORKSPACE = [

@@ -665,6 +665,138 @@ describe("pathname shell routing", () => {
     }
   });
 
+  it("restores a shared workstream address on load, then survives Back and Forward", async () => {
+    const uuid = "22222222-2222-4222-8222-222222222222";
+    const workstreamKey = "run-1:reviewer-lane";
+    window.history.replaceState(
+      null,
+      "",
+      `/investigations/${uuid}/analyze?section=workstreams&item=${encodeURIComponent(workstreamKey)}&kind=workstream&lane=${encodeURIComponent(workstreamKey)}#workstreams`,
+    );
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            cases: [
+              { id: uuid, title: "Synthetic checkout timeouts", status: "open", severity: "high" },
+            ],
+          }),
+        } as Response);
+      }
+      if (url === `/api/cases/${uuid}/workstreams`) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.workstream_list.v1",
+            caseId: uuid,
+            workstreams: [
+              {
+                key: workstreamKey,
+                caseId: uuid,
+                label: "Reviewer workstream — fixture-reviewer-a",
+                purpose: "What caused the checkout timeout?",
+                operatorKind: "ai_assisted",
+                operatorLabel: "AI-assisted workstream — output is analysis, never a human finding",
+                assignedTo: "dave",
+                strategyLabel: "Standard synthetic strategy",
+                role: "reviewer",
+                inputs: {
+                  question: "What caused the checkout timeout?",
+                  snapshotLabel: "Frozen evidence set 1",
+                  snapshotEvidenceCount: 1,
+                  snapshotFrozenAt: "2026-08-24T06:13:00.000Z",
+                  sameSnapshot: true,
+                  snapshotProofLabel:
+                    "Ran against the exact frozen evidence set, proven by the host.",
+                },
+                statusCode: "completed",
+                lifecycle: "settled",
+                statusLabel: "Completed",
+                statusDetail: "Finished and recorded its findings.",
+                startedAt: "2026-08-24T06:14:10.000Z",
+                finishedAt: "2026-08-24T06:14:25.000Z",
+                findings: "Checkout waited on the inventory call before failing.",
+                outcome: "Recorded a written finding; it cited 0 evidence items.",
+                evidenceCited: [],
+                unknowns: [],
+                activity: [
+                  {
+                    at: "2026-08-24T06:14:00.000Z",
+                    label: "Run queued",
+                    actor: "dave",
+                    detail: null,
+                  },
+                ],
+                rerun: { isRerun: false, parentKey: null, note: "Not a rerun." },
+                agreementNotice: "Agreement is not proof of correctness.",
+                technical: {
+                  workstreamKey,
+                  runId: "run-1",
+                  candidateId: "reviewer-lane",
+                  snapshotId: "snapshot-1",
+                  snapshotFingerprint: "f".repeat(64),
+                  requestFingerprint: "a".repeat(64),
+                  taskFingerprint: "task-fingerprint",
+                  strategyId: "contextdesk.standard.synthetic",
+                  modelId: "fixture-reviewer-a",
+                  modelVersion: null,
+                  provider: "synthetic",
+                  profileId: null,
+                  outputHash: null,
+                  benchmarkRunId: null,
+                  parentRunId: null,
+                  errorCode: null,
+                  privacyClass: "share_safe",
+                },
+              },
+            ],
+          }),
+        } as Response);
+      }
+      if (url.startsWith(`/api/cases/${uuid}/`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ events: [], contributions: [], runs: [], artifacts: [], snapshots: [] }),
+        } as Response);
+      }
+      return null;
+    });
+
+    render(<App />);
+
+    // The shared address opens that exact workstream, not the investigations list.
+    expect(
+      await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    expect(window.location.pathname).toBe(`/investigations/${uuid}/analyze`);
+    expect(window.location.search).toContain(`lane=${encodeURIComponent(workstreamKey)}`);
+
+    // Returning to the list is a real navigation…
+    fireEvent.click(screen.getByRole("link", { name: "All workstreams" }));
+    await waitFor(() =>
+      expect(window.location.search).not.toContain(`lane=${encodeURIComponent(workstreamKey)}`),
+    );
+    expect(screen.getByRole("heading", { name: "Workstreams" })).toBeTruthy();
+
+    // …so Back restores the workstream and Forward returns to the list.
+    window.history.back();
+    await waitFor(() =>
+      expect(window.location.search).toContain(`lane=${encodeURIComponent(workstreamKey)}`),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    window.history.forward();
+    await waitFor(() =>
+      expect(window.location.search).not.toContain(`lane=${encodeURIComponent(workstreamKey)}`),
+    );
+    expect(screen.getByRole("heading", { name: "Workstreams" })).toBeTruthy();
+  });
+
   it("restores a direct area pathname after a signed-in load", async () => {
     window.history.replaceState(null, "", "/sources");
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
