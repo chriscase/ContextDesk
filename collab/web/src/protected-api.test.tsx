@@ -11,7 +11,8 @@ afterEach(() => {
 
 describe("protectedApiFetch CSRF", () => {
   it("attaches the canonical CSRF header to POST/PUT/PATCH/DELETE and not to GET", async () => {
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200 } as Response));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      ({ ok: true, status: 200 } as Response));
     vi.stubGlobal("fetch", fetchMock);
 
     await protectedApiFetch("/api/cases", { method: "POST", headers: { "content-type": "application/json" } });
@@ -20,21 +21,22 @@ describe("protectedApiFetch CSRF", () => {
     await protectedApiFetch("/api/authz/group-role-map", { method: "DELETE" });
     await protectedApiFetch("/api/cases");
 
-    const posts = fetchMock.mock.calls.filter(([, init]) => init && typeof init === "object" && "method" in init && init.method !== undefined);
-    expect((posts[0]?.[1] as RequestInit).headers).toMatchObject({
+    const calls = fetchMock.mock.calls as Array<[RequestInfo | URL, RequestInit?]>;
+    const posts = calls.filter(([, init]) => init?.method !== undefined);
+    expect(posts[0]?.[1]?.headers).toMatchObject({
       "content-type": "application/json",
       [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
     });
-    expect((posts[1]?.[1] as RequestInit).headers).toMatchObject({
+    expect(posts[1]?.[1]?.headers).toMatchObject({
       [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
     });
-    expect((posts[2]?.[1] as RequestInit).headers).toMatchObject({
+    expect(posts[2]?.[1]?.headers).toMatchObject({
       [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
     });
-    expect((posts[3]?.[1] as RequestInit).headers).toMatchObject({
+    expect(posts[3]?.[1]?.headers).toMatchObject({
       [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
     });
-    const getInit = fetchMock.mock.calls[4]?.[1] as RequestInit | undefined;
+    const getInit = calls[4]?.[1];
     expect(getInit?.headers?.[COLLAB_CSRF_HEADER as never]).toBeUndefined();
   });
 

@@ -99,7 +99,7 @@ export function injectWithoutBrowserCsrf(
   },
 ): ReturnType<FastifyInstance["inject"]> {
   const original = rawInject.get(app) ?? app.inject.bind(app);
-  return original(opts);
+  return (original as (options: unknown) => ReturnType<FastifyInstance["inject"]>)(opts);
 }
 
 function attachInjectCsrf(opts: Record<string, unknown>): Record<string, unknown> {
