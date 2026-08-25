@@ -3,8 +3,8 @@
 This is the fail-closed acceptance note for the unified desktop+CLI release
 path. It is honest about what this lane proves and what remains residual.
 
-**Authoritative orchestration:** `.github/workflows/release.yml`  
-**Promote (dispatch only):** `.github/workflows/release-promote.yml`  
+**Authoritative orchestration:** `.github/workflows/release.yml`
+**Promote (dispatch only):** `.github/workflows/release-promote.yml`
 **Builders (artifacts only):** `release-desktop.yml`, `cli-release.yml`
 
 ## What this contract requires
