@@ -5,7 +5,6 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import {
-  capabilityForbidden,
   requireSessionCapability,
   type SessionAuthorizationDeps,
 } from "../authz/index.js";

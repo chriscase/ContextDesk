@@ -18,9 +18,12 @@ import {
 } from "../auth/index.js";
 import { MemoryGroupRoleStore, MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CaseService } from "../cases/index.js";
-import { CSRF_HEADER, CSRF_HEADER_VALUE } from "../people/csrf.js";
-import { MemoryLocalGrantStore } from "../people/grants.js";
-import { MemoryUserProfileStore } from "../people/store.js";
+import {
+  CSRF_HEADER,
+  CSRF_HEADER_VALUE,
+  MemoryLocalGrantStore,
+  MemoryUserProfileStore,
+} from "../people/index.js";
 
 type UserRow = { password: string; identity: IdentityV1; groups: string[] };
 

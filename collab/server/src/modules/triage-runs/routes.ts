@@ -1,9 +1,7 @@
 import {
-  AUTH_ERROR_SCHEMA_ID,
   TRIAGE_JOB_LIST_SCHEMA_ID,
   parseTriageJobRequest,
   projectTriageJobShareSafe,
-  type AuthErrorV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
@@ -15,10 +13,6 @@ import {
 import type { CaseService } from "../cases/index.js";
 import { TriageRunConflictError, TriageRunNotFoundError, TriageRunService } from "./service.js";
 import { listCaseWorkstreams } from "./workstreams.js";
-
-function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
-  return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
-}
 
 export interface TriageRunRouteDeps {
   sessionAuth: SessionAuthorizationDeps;
