@@ -26,6 +26,11 @@ export interface CatalogStore {
   insert(row: SourceRow): Promise<void>;
   updateMeta(id: string, patch: { name: string; description: string | null }): Promise<void>;
   setLifecycle(id: string, lifecycle: SourceLifecycle): Promise<void>;
+  /**
+   * Returns the subset of `ids` that already key a row here. Host-owned and
+   * batched: cost follows the probed id count, never the corpus size.
+   */
+  probeExistingIds(ids: readonly string[]): Promise<string[]>;
 }
 
 export type Queryable = Pick<Pool, "query">;
@@ -88,6 +93,12 @@ export class MemoryCatalogStore implements CatalogStore {
     row.description = patch.description;
   }
 
+  async probeExistingIds(ids: readonly string[]): Promise<string[]> {
+    const wanted = new Set(ids);
+    if (wanted.size === 0) return [];
+    return [...this.rows.keys()].filter((id) => wanted.has(id)).sort();
+  }
+
   async setLifecycle(id: string, lifecycle: SourceLifecycle): Promise<void> {
     const row = this.rows.get(id);
     if (!row) throw new Error("source not found");
@@ -116,6 +127,15 @@ export class PgCatalogStore implements CatalogStore {
     );
     const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? asSource(row) : null;
+  }
+
+  async probeExistingIds(ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT id FROM catalog_sources WHERE id = ANY($1::uuid[])`,
+      [[...new Set(ids)]],
+    );
+    return result.rows.map((row) => String((row as Record<string, unknown>).id)).sort();
   }
 
   async insert(row: SourceRow): Promise<void> {

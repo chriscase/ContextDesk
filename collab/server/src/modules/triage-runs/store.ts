@@ -37,6 +37,11 @@ export interface TriageJobStore {
   /** Atomically converts one expired running job to its recovered terminal state. */
   recoverStale(job: TriageJobV1, now: string): Promise<boolean>;
   update(job: TriageJobV1): Promise<void>;
+  /**
+   * Returns the subset of `ids` that already key a triage job. Host-owned and
+   * batched: cost follows the probed id count, never the corpus size.
+   */
+  probeExistingIds(ids: readonly string[]): Promise<string[]>;
 }
 
 /** True when this worker still owns an unexpired running lease. */
@@ -89,6 +94,12 @@ export class MemoryTriageJobStore implements TriageJobStore {
   async insert(job: TriageJobV1): Promise<void> {
     if (this.jobs.has(job.id)) throw new Error("triage job already exists");
     this.jobs.set(job.id, cloneJob(job));
+  }
+
+  async probeExistingIds(ids: readonly string[]): Promise<string[]> {
+    const wanted = new Set(ids);
+    if (wanted.size === 0) return [];
+    return [...this.jobs.keys()].filter((id) => wanted.has(id)).sort();
   }
 
   async get(id: string): Promise<TriageJobV1 | null> {
@@ -231,6 +242,15 @@ export class PgTriageJobStore implements TriageJobStore {
             ? leaseExpiresAt.toISOString()
             : String(leaseExpiresAt),
     };
+  }
+
+  async probeExistingIds(ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT id FROM triage_jobs WHERE id = ANY($1::uuid[])`,
+      [[...new Set(ids)]],
+    );
+    return result.rows.map((row) => String((row as Record<string, unknown>).id)).sort();
   }
 
   async insert(job: TriageJobV1): Promise<void> {

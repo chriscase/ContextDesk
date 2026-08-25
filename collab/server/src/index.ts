@@ -225,6 +225,13 @@ async function main(): Promise<void> {
     experiments,
     audit,
     applyState: storage.applyState,
+    probe: {
+      cases: storage.cases,
+      catalog: storage.catalog,
+      experiments: storage.experiments,
+      runs: storage.runs,
+      jobs: storage.jobs,
+    },
     applyCoordination: storage.pool === null ? "single_instance" : "postgres_transactional",
     confirmationRestartDurable: storage.pool !== null || config.storage === "sqlite",
     ...(memoryBoundary

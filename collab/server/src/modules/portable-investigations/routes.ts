@@ -265,6 +265,7 @@ function portableError(
   }
   if (
     error.code === "stale_destination_catalog" ||
+    error.code === "destination_id_occupied" ||
     error.code === "identity_map_mismatch" ||
     error.code === "exact_reconstruction_required" ||
     error.code === "apply_refused"

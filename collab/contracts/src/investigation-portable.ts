@@ -192,6 +192,88 @@ export function portableDestinationUuid(
   );
 }
 
+/**
+ * How a namespace obtains its destination identifier. Collision scope follows
+ * directly from this: only a `minted` namespace can collide at the destination,
+ * and only against the exact deterministic UUID it would mint.
+ *
+ * - `minted` — the destination row is keyed by `portableDestinationUuid(...)`.
+ *   The raw source id is never written as a destination key, so a raw source id
+ *   that also appears at the destination is not a collision.
+ * - `content_addressed` — the destination key is the content digest itself.
+ *   Equal digests mean the destination already stores those exact bytes, which
+ *   is deduplication, not a collision, and never blocks reconstruction.
+ * - `destination_sequenced` — the destination assigns a fresh per-case sequence
+ *   on write. The source sequence survives only as provenance, so two
+ *   installations both numbering their own timelines from 1 never collide.
+ */
+/** Bounded deterministic remap ladder depth. Exhausting it fails closed. */
+export const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
+
+export const PORTABLE_ID_MINTING_MODES = [
+  "minted",
+  "content_addressed",
+  "destination_sequenced",
+] as const;
+export type PortableIdMintingMode = (typeof PORTABLE_ID_MINTING_MODES)[number];
+
+const PORTABLE_NAMESPACE_MINTING: Readonly<Record<PortableObjectKind, PortableIdMintingMode>> =
+  Object.freeze({
+    investigation: "minted",
+    actor: "minted",
+    contribution: "minted",
+    evidence: "minted",
+    content: "content_addressed",
+    source: "minted",
+    imported_ai_run: "minted",
+    snapshot: "minted",
+    triage_job: "minted",
+    experiment: "minted",
+    helpfulness: "minted",
+    decision: "minted",
+    gold: "minted",
+    alignment: "minted",
+    discussion: "minted",
+    timeline: "destination_sequenced",
+    audit: "minted",
+    attachment: "minted",
+  });
+
+export function portableIdMintingMode(namespace: PortableObjectKind): PortableIdMintingMode {
+  return PORTABLE_NAMESPACE_MINTING[namespace];
+}
+
+/** True when the destination key for `namespace` is a deterministic minted UUID. */
+export function portableMintsDestinationId(namespace: PortableObjectKind): boolean {
+  return PORTABLE_NAMESPACE_MINTING[namespace] === "minted";
+}
+
+export const PORTABLE_RAW_SOURCE_ID_IS_NOT_A_DESTINATION_KEY =
+  "A raw source id, a per-case timeline sequence, and a content digest are never destination keys for a minted namespace. Only the deterministic destination UUID can collide." as const;
+
+export const PORTABLE_DESTINATION_PROBE_IS_ARCHIVE_SCOPED =
+  "Destination collision evidence is an archive-scoped probe of the deterministic UUIDs this archive would mint. It is never an enumeration of the destination corpus, and it is never authorization." as const;
+
+/**
+ * The bounded, archive-scoped candidate set a host must probe to decide
+ * collisions fail-closed. Ladder depth is capped by
+ * `MAX_DETERMINISTIC_REMAP_ATTEMPTS`; a host probes rung 0 for every minted
+ * source id and escalates a rung only for an id whose previous rung came back
+ * occupied. Cost is a function of archive size, never of destination size.
+ */
+export function portableDestinationIdCandidates(
+  sourceInstallationId: string,
+  namespace: PortableObjectKind,
+  sourceId: string,
+  attempts: number,
+): string[] {
+  if (!portableMintsDestinationId(namespace)) return [];
+  const depth = Math.max(0, Math.min(attempts, MAX_DETERMINISTIC_REMAP_ATTEMPTS));
+  return Array.from({ length: depth }, (_unused, counter) =>
+    portableDestinationUuid(sourceInstallationId, namespace, sourceId, counter),
+  );
+}
+
 
 function requireNonEmpty(path: string, value: string, detail = "must not be empty"): string {
   if (!value.trim()) {
@@ -2291,7 +2373,6 @@ const preflightRequestShape: ObjectShape = {
   ),
 };
 
-const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
 
 function chooseDeterministicRemap(
   installationId: string,
@@ -2656,8 +2737,13 @@ export function preflightPortableInvestigation(
     }));
 
   for (const { kind, ids } of namespaces) {
-    const existing = new Set(request.destination.objectIds[kind] ?? []);
-    const occupied = new Set(existing);
+    // Only the deterministic UUID this bundle would mint can occupy a
+    // destination key. A raw source id present at the destination is not a
+    // collision, so it never seeds the occupied set: it would otherwise make
+    // every id the destination happens to reuse look like a conflict.
+    const occupied = new Set(
+      (request.destination.objectIds[kind] ?? []).filter((id) => isRfc4122Uuid(id)),
+    );
     const seenRaw = new Set<string>();
     for (const sourceId of ids) {
       if (seenRaw.has(sourceId)) continue;
@@ -2668,8 +2754,16 @@ export function preflightPortableInvestigation(
         sourceId,
         0,
       );
-      const collides = occupied.has(destinationId) || occupied.has(sourceId);
-      if (!collides) {
+      if (!portableMintsDestinationId(kind)) {
+        // Content is addressed by digest and timeline events are sequenced by
+        // the destination, so neither namespace keys a destination row and
+        // neither can collide. The remap entry stays a stable UUID for shape
+        // parity, but this namespace never consults the occupied set.
+        idRemap.push({ namespace: kind, sourceId, destinationId });
+        create += 1;
+        continue;
+      }
+      if (!occupied.has(destinationId)) {
         idRemap.push({ namespace: kind, sourceId, destinationId });
         occupied.add(destinationId);
         create += 1;
@@ -2682,7 +2776,7 @@ export function preflightPortableInvestigation(
         referential.push({
           code: "id_collision",
           path: `${kind}:${sourceId}`,
-          detail: "same raw id already exists at the destination",
+          detail: "deterministic destination id already exists at the destination",
         });
       } else {
         const remapped = chooseDeterministicRemap(

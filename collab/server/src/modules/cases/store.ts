@@ -275,6 +275,18 @@ function compareOverviewOpenCases(left: OverviewOpenCaseRow, right: OverviewOpen
   return byCreated !== 0 ? byCreated : left.id.localeCompare(right.id);
 }
 
+/**
+ * Destination keys this module owns, addressed one batch at a time. Portable
+ * apply probes these to decide collisions without enumerating the corpus.
+ */
+export const CASE_PROBE_KINDS = ["case", "contribution", "artifact", "snapshot"] as const;
+export type CaseProbeKind = (typeof CASE_PROBE_KINDS)[number];
+
+export interface ParticipantIdentityRow {
+  identityId: string;
+  username: string;
+}
+
 export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
@@ -319,6 +331,21 @@ export interface CaseStore {
   listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]>;
   getSnapshot(snapshotId: string): Promise<SnapshotRow | null>;
   insertSnapshot(row: SnapshotRow): Promise<void>;
+  /**
+   * Returns the subset of `ids` that already key a row of `kind`. Host-owned
+   * and batched: one round trip per kind, and cost follows the probed id count
+   * rather than the size of the destination corpus. Never filtered by actor
+   * visibility — an invisible row still occupies the key.
+   */
+  probeExistingIds(kind: CaseProbeKind, ids: readonly string[]): Promise<string[]>;
+  /**
+   * Distinct participant identities matching any supplied id or username.
+   * Targeted lookup for identity mapping; never an enumeration of people.
+   */
+  probeParticipants(input: {
+    identityIds?: readonly string[];
+    usernames?: readonly string[];
+  }): Promise<ParticipantIdentityRow[]>;
 }
 
 export type Queryable = Pick<Pool, "query">;
@@ -693,6 +720,48 @@ export class MemoryCaseStore implements CaseStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   }
 
+  async probeExistingIds(kind: CaseProbeKind, ids: readonly string[]): Promise<string[]> {
+    const wanted = new Set(ids);
+    if (wanted.size === 0) return [];
+    const keys =
+      kind === "case"
+        ? this.cases.keys()
+        : kind === "contribution"
+          ? this.revisions.keys()
+          : kind === "artifact"
+            ? this.artifacts.keys()
+            : this.snapshots.keys();
+    const hits: string[] = [];
+    for (const key of keys) {
+      if (wanted.has(key)) hits.push(key);
+    }
+    return hits.sort();
+  }
+
+  async probeParticipants(input: {
+    identityIds?: readonly string[];
+    usernames?: readonly string[];
+  }): Promise<ParticipantIdentityRow[]> {
+    const identityIds = new Set(input.identityIds ?? []);
+    const usernames = new Set(input.usernames ?? []);
+    if (identityIds.size === 0 && usernames.size === 0) return [];
+    const found = new Map<string, ParticipantIdentityRow>();
+    for (const row of this.cases.values()) {
+      for (const participant of row.participants) {
+        if (
+          identityIds.has(participant.identityId) ||
+          usernames.has(participant.username)
+        ) {
+          found.set(participant.identityId, {
+            identityId: participant.identityId,
+            username: participant.username,
+          });
+        }
+      }
+    }
+    return [...found.values()].sort((a, b) => a.identityId.localeCompare(b.identityId));
+  }
+
   async getSnapshot(snapshotId: string): Promise<SnapshotRow | null> {
     const row = this.snapshots.get(snapshotId);
     return row ? persistedSnapshot(row) : null;
@@ -718,6 +787,15 @@ const pgCaseTx = new AsyncLocalStorage<Queryable>();
 export function activeCaseQueryable(): Queryable | undefined {
   return pgCaseTx.getStore();
 }
+
+/** Destination key column backing each probe kind. */
+const CASE_PROBE_TABLES: Readonly<Record<CaseProbeKind, { table: string; column: string }>> =
+  Object.freeze({
+    case: { table: "cases", column: "id" },
+    contribution: { table: "contributions", column: "id" },
+    artifact: { table: "evidence_artifacts", column: "id" },
+    snapshot: { table: "snapshots", column: "id" },
+  });
 
 export class PgCaseStore implements CaseStore {
   private readonly pool: Queryable;
@@ -1212,6 +1290,41 @@ export class PgCaseStore implements CaseStore {
       [caseId],
     );
     return result.rows.map((row) => asSnapshot(row as Record<string, unknown>));
+  }
+
+  async probeExistingIds(kind: CaseProbeKind, ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const probe = CASE_PROBE_TABLES[kind];
+    const result = await this.db.query(
+      `SELECT ${probe.column} AS id FROM ${probe.table} WHERE ${probe.column} = ANY($1::uuid[])`,
+      [[...new Set(ids)]],
+    );
+    return result.rows
+      .map((row) => String((row as Record<string, unknown>).id))
+      .sort();
+  }
+
+  async probeParticipants(input: {
+    identityIds?: readonly string[];
+    usernames?: readonly string[];
+  }): Promise<ParticipantIdentityRow[]> {
+    const identityIds = [...new Set(input.identityIds ?? [])];
+    const usernames = [...new Set(input.usernames ?? [])];
+    if (identityIds.length === 0 && usernames.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT DISTINCT identity_id, username
+         FROM case_participants
+        WHERE identity_id = ANY($1::text[]) OR username = ANY($2::text[])
+        ORDER BY identity_id ASC`,
+      [identityIds, usernames],
+    );
+    return result.rows.map((row) => {
+      const value = row as Record<string, unknown>;
+      return {
+        identityId: String(value.identity_id),
+        username: String(value.username),
+      };
+    });
   }
 
   async getSnapshot(snapshotId: string): Promise<SnapshotRow | null> {

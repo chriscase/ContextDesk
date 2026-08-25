@@ -71,6 +71,13 @@ export interface ListOverviewProposedQuery extends OverviewScope {
   visibility: OverviewVisibilityBoundary | null;
 }
 
+/**
+ * Destination keys this module owns, addressed one batch at a time. Portable
+ * apply probes these to decide collisions without enumerating the corpus.
+ */
+export const EXPERIMENT_PROBE_KINDS = ["experiment", "helpfulness", "gold"] as const;
+export type ExperimentProbeKind = (typeof EXPERIMENT_PROBE_KINDS)[number];
+
 export interface ExperimentStore {
   insert(row: ExperimentRow): Promise<void>;
   get(id: string): Promise<ExperimentRow | null>;
@@ -88,6 +95,11 @@ export interface ExperimentStore {
   insertTrace(experimentId: string, row: InteractionTraceV1, fingerprint: string): Promise<void>;
   listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]>;
   insertAnnotation(row: TraceAnnotationRow): Promise<void>;
+  /**
+   * Returns the subset of `ids` that already key a row of `kind`. Host-owned
+   * and batched: cost follows the probed id count, never the corpus size.
+   */
+  probeExistingIds(kind: ExperimentProbeKind, ids: readonly string[]): Promise<string[]>;
 }
 
 const UNKNOWN_SNAPSHOT_PROOF: ExperimentSnapshotProof = {
@@ -302,6 +314,25 @@ export class MemoryExperimentStore implements ExperimentStore {
     for (const [id, value] of row.annotations) this.annotations.set(id, value);
   }
 
+  async probeExistingIds(kind: ExperimentProbeKind, ids: readonly string[]): Promise<string[]> {
+    const wanted = new Set(ids);
+    if (wanted.size === 0) return [];
+    if (kind === "experiment") {
+      return [...this.experiments.keys()].filter((id) => wanted.has(id)).sort();
+    }
+    const hits = new Set<string>();
+    if (kind === "helpfulness") {
+      for (const rows of this.observations.values()) {
+        for (const row of rows) if (wanted.has(row.id)) hits.add(row.id);
+      }
+    } else {
+      for (const rows of this.golds.values()) {
+        for (const row of rows) if (wanted.has(row.goldId)) hits.add(row.goldId);
+      }
+    }
+    return [...hits].sort();
+  }
+
   async insert(row: ExperimentRow): Promise<void> {
     this.experiments.set(row.id, {
       ...row,
@@ -472,8 +503,27 @@ export class MemoryExperimentStore implements ExperimentStore {
 
 export type Queryable = Pick<Pool, "query">;
 
+/** Destination key column backing each experiment probe kind. */
+const EXPERIMENT_PROBE_TABLES: Readonly<
+  Record<ExperimentProbeKind, { table: string; column: string }>
+> = Object.freeze({
+  experiment: { table: "experiment_packages", column: "id" },
+  helpfulness: { table: "experiment_helpfulness", column: "id" },
+  gold: { table: "gold_references", column: "gold_id" },
+});
+
 export class PgExperimentStore implements ExperimentStore {
   constructor(private readonly db: Queryable) {}
+
+  async probeExistingIds(kind: ExperimentProbeKind, ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const probe = EXPERIMENT_PROBE_TABLES[kind];
+    const result = await this.db.query(
+      `SELECT ${probe.column} AS id FROM ${probe.table} WHERE ${probe.column} = ANY($1::uuid[])`,
+      [[...new Set(ids)]],
+    );
+    return result.rows.map((row) => String((row as Record<string, unknown>).id)).sort();
+  }
 
   async insert(row: ExperimentRow): Promise<void> {
     await this.db.query(

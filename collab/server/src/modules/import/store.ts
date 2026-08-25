@@ -49,6 +49,11 @@ export interface RunStore {
   listByCase(caseId: string): Promise<FrozenRunRow[]>;
   listCorroborations(runId: string): Promise<CorroborationRow[]>;
   appendCorroboration(row: Omit<CorroborationRow, "seq" | "createdAt">): Promise<CorroborationRow>;
+  /**
+   * Returns the subset of `ids` that already key a row here. Host-owned and
+   * batched: cost follows the probed id count, never the corpus size.
+   */
+  probeExistingIds(ids: readonly string[]): Promise<string[]>;
 }
 
 export type Queryable = Pick<Pool, "query">;
@@ -78,6 +83,12 @@ export class MemoryRunStore implements RunStore {
   async insert(row: FrozenRunRow): Promise<void> {
     this.runs.set(row.id, Object.freeze({ ...row, claimedTraces: [...row.claimedTraces] }));
     this.events.set(row.id, []);
+  }
+
+  async probeExistingIds(ids: readonly string[]): Promise<string[]> {
+    const wanted = new Set(ids);
+    if (wanted.size === 0) return [];
+    return [...this.runs.keys()].filter((id) => wanted.has(id)).sort();
   }
 
   async get(id: string): Promise<FrozenRunRow | null> {
@@ -116,6 +127,15 @@ export class PgRunStore implements RunStore {
 
   private get db(): Queryable {
     return activeCaseQueryable() ?? this.pool;
+  }
+
+  async probeExistingIds(ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT id FROM imported_runs WHERE id = ANY($1::uuid[])`,
+      [[...new Set(ids)]],
+    );
+    return result.rows.map((row) => String((row as Record<string, unknown>).id)).sort();
   }
 
   async insert(row: FrozenRunRow): Promise<void> {
