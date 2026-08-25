@@ -1943,6 +1943,65 @@ describe("portable investigation apply", () => {
     expect(listed).toHaveLength(2);
   });
 
+  it("preserves proposed vs accepted decision revisions after portable restore", async () => {
+    const row = await fixture();
+    const comments = (await row.cases.listContributions(row.caseId, ACTOR, false))
+      .filter((item) => item.kind === "message");
+    const comment = comments[0];
+    if (!comment) throw new Error("fixture discussion comment is missing");
+    await row.cases.reviseContribution(
+      row.caseId,
+      comment.id,
+      ACTOR,
+      "Please verify the synthetic worker trace after the timeout.",
+      "fixture",
+      comment.revision,
+    );
+    const activity = new InvestigationActivityService({
+      cases: row.cases,
+      installationId: "inst-syntheticnorth",
+    });
+    const sourcePage = await activity.listPage({ actor: ACTOR, isAdmin: false, caseId: row.caseId });
+    const sourceProposed = sourcePage.items.find((item) => item.activityKind === "decision_proposed");
+    const sourceAccepted = sourcePage.items.find((item) =>
+      item.activityKind === "decision_accepted" && item.locator.kind === "decision_revision",
+    );
+    const sourceRevised = sourcePage.items.find((item) => item.summary === "revised a discussion comment");
+    expect(sourceProposed?.locator.revision).toBe(1);
+    expect(sourceAccepted?.locator.revision).toBe(2);
+    expect(sourceRevised?.locator.kind).toBe("discussion_message");
+    expect(sourceRevised?.locator.revision).toBe(comment.revision + 1);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const destPage = await activity.listPage({
+      actor: ACTOR,
+      isAdmin: false,
+      caseId: applied.investigationId,
+    });
+    const destProposed = destPage.items.find((item) => item.activityKind === "decision_proposed");
+    const destAccepted = destPage.items.find((item) =>
+      item.activityKind === "decision_accepted" && item.locator.kind === "decision_revision",
+    );
+    const destRevised = destPage.items.find((item) => item.summary === "revised a discussion comment");
+    expect(destProposed?.locator.revision).toBe(1);
+    expect(destAccepted?.locator.revision).toBe(2);
+    expect(destRevised?.locator.kind).toBe("discussion_message");
+    expect(destRevised?.locator.revision).toBe(comment.revision + 1);
+    expect(destAccepted?.locator.resourceId).not.toBe(sourceAccepted?.locator.resourceId);
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({

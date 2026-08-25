@@ -115,6 +115,36 @@ export function remapPortableTimelineTarget(
   return remapOf(report, namespace, targetId);
 }
 
+function isContributionHistoryKind(kind: string): boolean {
+  return kind === "contribution_created"
+    || kind === "contribution_revised"
+    || kind === "contribution_tombstoned";
+}
+
+function isDecisionHistoryKind(kind: string): boolean {
+  return /^experiment_decision_/.test(kind);
+}
+
+function historyRowForEvent<T extends { id: string; revision: number }>(
+  rows: readonly T[],
+  event: PortableArchiveV1["investigation"]["timeline"][number],
+  timeline: PortableArchiveV1["investigation"]["timeline"],
+  matchesKind: (kind: string) => boolean,
+): T | undefined {
+  if (!event.targetId) return undefined;
+  const chain = rows
+    .filter((row) => row.id === event.targetId)
+    .slice()
+    .sort((left, right) => left.revision - right.revision);
+  const events = timeline
+    .filter((row) => row.targetId === event.targetId && matchesKind(row.kind))
+    .slice()
+    .sort((left, right) => left.seq - right.seq);
+  const index = events.findIndex((row) => row.seq === event.seq);
+  if (index < 0) return chain[0];
+  return chain[index];
+}
+
 function importedTimelinePayload(
   event: PortableArchiveV1["investigation"]["timeline"][number],
   bundle: PortableArchiveV1["investigation"],
@@ -126,13 +156,21 @@ function importedTimelinePayload(
     sourceInstallationId: bundle.sourceInstallationId,
   };
   if (event.targetNamespace === "contribution" && event.targetId) {
-    const contribution = bundle.contributions.find((row) => row.id === event.targetId);
+    const contribution = isContributionHistoryKind(event.kind)
+      ? historyRowForEvent(
+        bundle.contributions,
+        event,
+        bundle.timeline,
+        isContributionHistoryKind,
+      )
+      : bundle.contributions.find((row) => row.id === event.targetId);
     if (contribution) {
       payload.kind = contribution.kind;
       payload.revision = contribution.revision;
       payload.privacyClass = contribution.privacyClass;
       payload.contentHash = contribution.contentHash;
       payload.sourceId = remapOf(report, "source", contribution.sourceId);
+      if (contribution.tombstoned) payload.tombstone = true;
     }
   }
   if (event.targetNamespace === "evidence" && event.targetId) {
@@ -144,7 +182,12 @@ function importedTimelinePayload(
     }
   }
   if (event.targetNamespace === "decision" && event.targetId) {
-    const decision = bundle.decisions.find((row) => row.id === event.targetId);
+    const decision = historyRowForEvent(
+      bundle.decisions,
+      event,
+      bundle.timeline,
+      isDecisionHistoryKind,
+    ) ?? bundle.decisions.find((row) => row.id === event.targetId);
     if (decision) {
       payload.decisionId = remapOf(report, "decision", decision.id);
       payload.revision = decision.revision;
@@ -749,6 +792,24 @@ export async function persistPortableArchive(input: {
       const parsed = event.targetId ? parsePortableTriageAttemptTarget(event.targetId) : null;
       if (event.targetNamespace !== "triage_job" || !event.targetId || parsed) {
         throw new Error("workstream job timeline is missing a portable job target");
+      }
+    }
+    if (isContributionHistoryKind(event.kind) && event.targetId) {
+      const chain = bundle.contributions.filter((row) => row.id === event.targetId);
+      const events = bundle.timeline.filter(
+        (row) => row.targetId === event.targetId && isContributionHistoryKind(row.kind),
+      );
+      if (chain.length !== events.length) {
+        throw new Error("contribution timeline cannot be reconstructed onto portable revisions exactly");
+      }
+    }
+    if (isDecisionHistoryKind(event.kind) && event.targetId) {
+      const chain = bundle.decisions.filter((row) => row.id === event.targetId);
+      const events = bundle.timeline.filter(
+        (row) => row.targetId === event.targetId && isDecisionHistoryKind(row.kind),
+      );
+      if (chain.length !== events.length) {
+        throw new Error("decision timeline cannot be reconstructed onto portable revisions exactly");
       }
     }
   }
