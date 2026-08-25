@@ -1926,6 +1926,19 @@ describe("decision readiness cockpit", () => {
     expect(window.location.search).toContain("lane=cand-programmatic-agent");
     expect(window.location.search).toContain("section=scan-heading");
 
+    act(() => {
+      window.dispatchEvent(new CustomEvent("contextdesk:experiment-created", {
+        detail: { experimentId: "exp-cockpit" },
+      }));
+    });
+    await waitFor(() => {
+      const experimentRefreshes = vi.mocked(fetch).mock.calls.filter(([input]) =>
+        String(input).endsWith("/experiments"),
+      );
+      expect(experimentRefreshes.length).toBeGreaterThanOrEqual(2);
+    });
+    expect(screen.getByText(/Highlighting programmatic-agent in place/)).toBeTruthy();
+
     const digest = screen.getByRole("article", { name: "programmatic-agent" });
     expect(within(digest).getByText("Question or input")).toBeTruthy();
     expect(within(digest).getByText("Evidence it used")).toBeTruthy();

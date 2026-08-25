@@ -1325,6 +1325,10 @@ export function ExperimentLab(props: {
   }, [props.caseId, props.routeFocus?.experiment, refresh]);
 
   useEffect(() => {
+    // A standalone/static consumer owns lane focus locally after pushState.
+    // Only a parent-routed consumer should re-project focus from props; otherwise
+    // a late experiment refresh can race a click and clear the just-selected lane.
+    if (!props.routeFocus) return;
     const requestedExperiment = props.routeFocus?.experiment;
     if (requestedExperiment && experiments.some((row) => row.id === requestedExperiment)) {
       setActive(requestedExperiment);
