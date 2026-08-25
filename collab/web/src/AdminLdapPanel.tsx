@@ -27,11 +27,18 @@ export function AdminLdapPanel() {
   const [probeUsername, setProbeUsername] = useState("");
   const [probePassword, setProbePassword] = useState("");
   const [loading, setLoading] = useState(true);
+  // Distinguishes the first read (nothing to show yet) from a reload of an
+  // already-rendered panel, which must stay on screen while it refreshes.
+  const [firstLoad, setFirstLoad] = useState(true);
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState("");
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
+    // A directory test describes the configuration it ran against. Re-reading
+    // the configuration can change that, so drop the previous report rather
+    // than let a stale "ready" be read as a verdict on the new values.
+    setReport(null);
     try {
       const response = await protectedApiFetch("/api/admin/ldap/config");
       if (!response.ok) {
@@ -50,6 +57,7 @@ export function AdminLdapPanel() {
       setConfig(null);
     } finally {
       setLoading(false);
+      setFirstLoad(false);
     }
   }, []);
 
@@ -88,7 +96,7 @@ export function AdminLdapPanel() {
     }
   }
 
-  if (loading) {
+  if (firstLoad) {
     return <p role="status">Loading directory configuration…</p>;
   }
 
@@ -107,6 +115,15 @@ export function AdminLdapPanel() {
           transport and bind settings are operator-owned environment or first-run draft values,
           not a save-to-directory form.
         </p>
+        <div className="admin-ldap__actions">
+          <button type="button" onClick={() => void loadConfig()} disabled={loading}>
+            {loading ? "Reloading…" : "Reload configuration"}
+          </button>
+          <span className="admin-ldap__hint">
+            Re-reads the operator-owned values this server is running with. Any previous test
+            report is cleared, because it described the configuration read before.
+          </span>
+        </div>
         {config ? (
           <dl className="admin-ldap__facts">
             <div>

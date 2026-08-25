@@ -431,3 +431,53 @@ export function parseUserProfileError(raw: unknown): UserProfileErrorV1 {
   checkObject("$", errorShape, raw);
   return raw as UserProfileErrorV1;
 }
+
+/**
+ * Placeholder substituted for a real directory subject in any non-admin
+ * projection. Deliberately not identifier-shaped: it records *that* a profile
+ * is directory-linked without carrying the LDAP DN or OIDC subject itself.
+ */
+export const REDACTED_DIRECTORY_SUBJECT = "directory-linked" as const;
+
+/**
+ * Placeholder substituted for the profile id in a self view.
+ *
+ * Under directory authentication `UserProfileV1.id` is the same LDAP DN as
+ * `directorySubject`, so redacting only the latter would leave the DN on the
+ * wire under a different key. "self" is the accurate name for this record in
+ * a self view: it is, by construction, the requester's own profile.
+ */
+export const REDACTED_SELF_PROFILE_ID = "self" as const;
+
+/**
+ * Self-view projection of a profile.
+ *
+ * `directorySubject` - and, under directory authentication, the equal-valued
+ * `id` - is the raw LDAP DN (or OIDC subject) that the directory assigned to
+ * this person. It is operator/administrator diagnostic data: it
+ * discloses directory tree structure (organizational units, naming attribute,
+ * base DN) to whoever receives it, and nothing in the self-service profile
+ * view needs its value - only whether a linkage exists. The self-service UI
+ * already tells the owner the "technical identifier [is] hidden", so shipping
+ * the DN in the same response would make that statement untrue.
+ *
+ * Substituting {@link REDACTED_DIRECTORY_SUBJECT} and
+ * {@link REDACTED_SELF_PROFILE_ID} rather than `null` keeps the result a valid
+ * `UserProfileV1`: `parseUserProfile` requires a non-empty id and a non-null
+ * subject for directory provenance, and the linkage indicator survives.
+ *
+ * A locally-provenanced profile is returned unchanged - its id is already an
+ * installation-local key and it has no directory subject.
+ *
+ * Administrative surfaces (`/api/admin/people/*`) intentionally do NOT use
+ * this projection - an admin holding `admin:users` is the audience the raw
+ * subject exists for.
+ */
+export function redactProfileForSelfView(profile: UserProfileV1): UserProfileV1 {
+  if (profile.directorySubject === null) return profile;
+  return {
+    ...profile,
+    id: REDACTED_SELF_PROFILE_ID,
+    directorySubject: REDACTED_DIRECTORY_SUBJECT,
+  };
+}

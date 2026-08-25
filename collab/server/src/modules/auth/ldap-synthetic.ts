@@ -300,6 +300,14 @@ export function exampleSyntheticDirectory(): SyntheticDirectoryOptions {
         cn: "admins",
         members: [],
       },
+      {
+        // Nested group: its member is another *group* DN, not a person DN.
+        // Present so tests can pin that group resolution is direct-membership
+        // only and never silently walks a group-of-groups chain.
+        dn: `cn=engineering,${groupBase}`,
+        cn: "engineering",
+        members: [`cn=contributors,${groupBase}`],
+      },
     ],
   };
 }

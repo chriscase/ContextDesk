@@ -8,6 +8,7 @@ import {
   type SyntheticDirectoryOptions,
 } from "./ldap-synthetic.js";
 import { createAuthLog } from "./log.js";
+import { parseGroupRoleMap, resolveRoles } from "../authz/index.js";
 
 function config(env: NodeJS.ProcessEnv = {}): LdapConfig {
   return loadLdapConfig({
@@ -154,5 +155,50 @@ describe("synthetic LDAP adapter", () => {
     expect(alice?.groups.some((group) => group.toLowerCase().includes("contributors"))).toBe(true);
     const bob = await ldap.authenticate("bob", "fixture-bob-secret");
     expect(bob?.groups.some((group) => group.toLowerCase().includes("unmapped"))).toBe(true);
+  });
+});
+
+describe("LDAP group resolution scope (documented non-claim)", () => {
+  const GROUP_BASE = "ou=groups,dc=example,dc=test";
+
+  /**
+   * `cn=engineering` in the fixture has `cn=contributors` as its member, so
+   * alice is a *transitive* member of engineering through contributors.
+   *
+   * ContextDesk resolves direct membership only - the memberOf attribute plus
+   * one `(member={dn})` search keyed on the user's own DN. It does not walk a
+   * group-of-groups chain and does not send an AD in-chain matching rule. This
+   * test pins that boundary so a nested-group deployment cannot quietly assume
+   * a role it was never granted, and so the limit is a tested statement rather
+   * than an undocumented gap.
+   */
+  it("resolves direct membership and does not walk a nested group chain", async () => {
+    const { adapter: ldap } = adapter(config());
+    const ok = await ldap.authenticate("alice", "fixture-alice-secret");
+    const groups = (ok?.groups ?? []).map((group) => group.toLowerCase());
+
+    expect(groups).toContain(`cn=contributors,${GROUP_BASE}`);
+    expect(groups).not.toContain(`cn=engineering,${GROUP_BASE}`);
+    expect(groups.some((group) => group.includes("engineering"))).toBe(false);
+  });
+
+  it("maps roles only from the directly-resolved groups", async () => {
+    const { adapter: ldap } = adapter(config());
+    const ok = await ldap.authenticate("alice", "fixture-alice-secret");
+    const mapping = parseGroupRoleMap(
+      `cn=engineering,${GROUP_BASE}=admin;cn=contributors,${GROUP_BASE}=contributor`,
+    );
+
+    // The parent group carries "admin" in this map. Because membership is not
+    // walked transitively, alice must resolve to contributor only.
+    expect(resolveRoles(ok?.groups ?? [], mapping)).toEqual(["contributor"]);
+  });
+
+  it("does not expose a nested parent group through live group lookup either", async () => {
+    const { adapter: ldap } = adapter(config());
+    const ok = await ldap.authenticate("alice", "fixture-alice-secret");
+    const live = await ldap.lookupGroups(ok!.identity);
+    expect(live.some((group) => group.toLowerCase().includes("engineering"))).toBe(false);
+    expect(live.some((group) => group.toLowerCase().includes("contributors"))).toBe(true);
   });
 });

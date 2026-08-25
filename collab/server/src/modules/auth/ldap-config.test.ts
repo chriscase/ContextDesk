@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ldapClientOptions, ldapTlsOptions } from "./ldap-adapter.js";
-import { loadLdapConfig } from "./ldap-config.js";
+import { loadLdapConfig, publicLdapConfig } from "./ldap-config.js";
 import { liveLdapConfigured } from "./ldap-coverage.js";
 import { escapeDn, escapeFilter, interpolate } from "./ldap-escape.js";
 
@@ -228,6 +228,91 @@ describe("LDAP AD-compatible configuration", () => {
           COLLAB_LDAP_BIND_PASSWORD_FILE: file,
         }),
       ).toThrow(/exactly one/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("LDAP bind-secret owner-local references", () => {
+  const baseEnv = {
+    COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+    COLLAB_LDAP_USER_DN_TEMPLATE: "uid={username},ou=people,dc=example,dc=test",
+    COLLAB_LDAP_BIND_DN: "cn=svc,ou=services,dc=example,dc=test",
+  };
+
+  it("accepts an absolute file: reference and refuses a relative one", async () => {
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join, isAbsolute } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "cd-ldap-secret-ref-"));
+    const file = join(dir, "bind-secret");
+    await writeFile(file, "fixture-ref-secret\n");
+    expect(isAbsolute(file)).toBe(true);
+    try {
+      expect(
+        loadLdapConfig({ ...baseEnv, COLLAB_LDAP_BIND_PASSWORD_REF: `file:${file}` }).bindPassword,
+      ).toBe("fixture-ref-secret");
+
+      // A relative reference resolves against the server process CWD, which
+      // differs between a unit file, a container, and a developer shell. Read
+      // the wrong file silently, or none - so refuse it outright.
+      for (const relative of ["file:bind-secret", "file:./bind-secret", "file:../bind-secret"]) {
+        expect(() =>
+          loadLdapConfig({ ...baseEnv, COLLAB_LDAP_BIND_PASSWORD_REF: relative }),
+        ).toThrow(/absolute file: path/);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a non-file scheme and a URL-shaped reference before touching the filesystem", () => {
+    for (const ref of [
+      "https://secrets.example.test/ldap-bind",
+      "file://secrets.example.test/ldap-bind",
+      "keychain:cd-collab-secrets",
+      "/etc/cd-collab/ldap-bind",
+    ]) {
+      expect(() =>
+        loadLdapConfig({ ...baseEnv, COLLAB_LDAP_BIND_PASSWORD_REF: ref }),
+      ).toThrow(/file: path/);
+    }
+  });
+
+  it("refuses more than one bind-secret source", async () => {
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "cd-ldap-secret-conflict-"));
+    const file = join(dir, "bind-secret");
+    await writeFile(file, "fixture-ref-secret\n");
+    try {
+      expect(() =>
+        loadLdapConfig({
+          ...baseEnv,
+          COLLAB_LDAP_BIND_PASSWORD_FILE: file,
+          COLLAB_LDAP_BIND_PASSWORD_REF: `file:${file}`,
+        }),
+      ).toThrow(/exactly one/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the loaded bind secret out of the share-safe public config", async () => {
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "cd-ldap-secret-public-"));
+    const file = join(dir, "bind-secret");
+    await writeFile(file, "fixture-ref-secret\n");
+    try {
+      const cfg = loadLdapConfig({ ...baseEnv, COLLAB_LDAP_BIND_PASSWORD_REF: `file:${file}` });
+      const published = JSON.stringify(publicLdapConfig(cfg, "ldap"));
+      expect(published).not.toContain("fixture-ref-secret");
+      expect(published).not.toContain(file);
+      expect(JSON.parse(published).bindPasswordConfigured).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

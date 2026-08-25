@@ -114,6 +114,37 @@
   color: var(--warning);
 }
 
+.self-profile__provenance {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+  padding: 0.65rem 0.9rem;
+}
+
+.self-profile__provenance > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.self-profile__provenance > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.self-profile__provenance[open] > summary {
+  margin-bottom: 0.6rem;
+}
+
+/* Already framed by the disclosure; avoid a second nested card. */
+.self-profile__provenance .self-profile__facts {
+  border: 0;
+  padding: 0;
+  background: none;
+}
+
 .self-profile__facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));

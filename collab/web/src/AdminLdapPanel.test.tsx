@@ -106,3 +106,89 @@ describe("AdminLdapPanel", () => {
     ).toBeTruthy();
   });
 });
+
+describe("AdminLdapPanel reload and failed-probe behaviour", () => {
+  it("re-reads the configuration on demand and drops the report it no longer describes", async () => {
+    let configReads = 0;
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/admin/ldap/config") {
+        configReads += 1;
+        // Second read reflects an operator changing the running configuration.
+        return {
+          ok: true,
+          status: 200,
+          json: async () =>
+            configReads === 1
+              ? publicConfig
+              : { ...publicConfig, starttls: true, url: "ldap://directory.example.test:389" },
+        } as Response;
+      }
+      if (url === "/api/admin/ldap/test") {
+        return { ok: true, status: 200, json: async () => readyReport } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(<AdminLdapPanel />);
+    expect(await screen.findByText("ldaps://directory.example.test:636")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Test directory" }));
+    expect(await screen.findByText("Every required stage passed or was skipped.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload configuration" }));
+
+    // New values are shown, and the earlier "ready" verdict is gone: it
+    // described the configuration read before this one.
+    expect(await screen.findByText("ldap://directory.example.test:389")).toBeTruthy();
+    expect(screen.getByText(/StartTLS/)).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByText("Every required stage passed or was skipped.")).toBeNull();
+    });
+    expect(screen.queryByRole("heading", { name: "Last test report" })).toBeNull();
+    expect(configReads).toBe(2);
+  });
+
+  it("keeps the panel usable and returns no secret when a probe fails", async () => {
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/admin/ldap/config") {
+        return { ok: true, status: 200, json: async () => publicConfig } as Response;
+      }
+      if (url === "/api/admin/ldap/test") {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ schemaId: "cd-collab.ldap_admin_error.v1", error: "unavailable" }),
+        } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(<AdminLdapPanel />);
+    fireEvent.change(await screen.findByLabelText("Probe username"), {
+      target: { value: "alice" },
+    });
+    fireEvent.change(screen.getByLabelText("Probe password (optional, never stored)"), {
+      target: { value: "fixture-alice-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Test directory" }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "The directory test could not run. No stored secret was returned.",
+    );
+    expect(screen.queryByRole("heading", { name: "Last test report" })).toBeNull();
+    // The probe password is cleared even on failure, and the panel stays usable.
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText("Probe password (optional, never stored)") as HTMLInputElement).value,
+      ).toBe("");
+    });
+    expect(document.body.textContent).not.toContain("fixture-alice-secret");
+    expect(screen.getByRole("button", { name: "Reload configuration" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Test directory" })).toBeTruthy();
+  });
+});

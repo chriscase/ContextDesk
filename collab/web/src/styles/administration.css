@@ -380,6 +380,21 @@
   gap: 1rem;
 }
 
+.admin-ldap__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 0.85rem;
+  margin: 0.9rem 0 0;
+}
+
+.admin-ldap__hint {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  flex: 1 1 18rem;
+}
+
 .admin-ldap__facts {
   display: grid;
   gap: 0.7rem;

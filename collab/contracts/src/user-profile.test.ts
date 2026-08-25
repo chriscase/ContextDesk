@@ -10,6 +10,9 @@ import {
   normalizeDisplayName,
   parseUserProfile,
   parseUserProfileUpdateRequest,
+  redactProfileForSelfView,
+  REDACTED_DIRECTORY_SUBJECT,
+  REDACTED_SELF_PROFILE_ID,
   type UserProfileV1,
 } from "./user-profile.js";
 import { ContractViolation } from "./parse.js";
@@ -229,5 +232,94 @@ describe("user profile contract", () => {
         }),
       ).toThrow(/unknown key/);
     });
+  });
+});
+
+describe("self-view directory-subject redaction", () => {
+  const LDAP_DN = "uid=dana,ou=people,dc=example,dc=test";
+
+  it("replaces an LDAP DN with a linkage marker that is still a valid profile", () => {
+    const profile = baseProfile({
+      id: LDAP_DN,
+      username: "dana",
+      provenance: "ldap",
+      directorySubject: LDAP_DN,
+      directorySyncStatus: "synced",
+    });
+    const redacted = redactProfileForSelfView(profile);
+
+    expect(redacted.directorySubject).toBe(REDACTED_DIRECTORY_SUBJECT);
+    // The id carries the same DN under directory auth, so it is redacted too.
+    expect(redacted.id).toBe(REDACTED_SELF_PROFILE_ID);
+    expect(JSON.stringify(redacted)).not.toContain("ou=people");
+    expect(JSON.stringify(redacted)).not.toContain("dc=example");
+    // Still parses: the linkage indicator survives, so the UI can keep
+    // distinguishing "linked" from "not linked".
+    expect(() => parseUserProfile(redacted)).not.toThrow();
+    expect(Boolean(redacted.directorySubject)).toBe(true);
+  });
+
+  it("redacts an OIDC subject and an imported historical subject too", () => {
+    for (const [provenance, subject, syncStatus] of [
+      ["oidc", "b3f1c0de-0000-4000-8000-000000000000", "synced"],
+      ["imported_historical", "imported:example-installation:actor-42", "not_synced"],
+    ] as const) {
+      const redacted = redactProfileForSelfView(
+        baseProfile({
+          id: subject,
+          provenance,
+          directorySubject: subject,
+          directorySyncStatus: syncStatus,
+        }),
+      );
+      expect(redacted.directorySubject).toBe(REDACTED_DIRECTORY_SUBJECT);
+      expect(redacted.id).toBe(REDACTED_SELF_PROFILE_ID);
+      expect(JSON.stringify(redacted)).not.toContain(subject);
+    }
+  });
+
+  it("leaves a local profile untouched and changes no other field", () => {
+    const local = baseProfile();
+    expect(redactProfileForSelfView(local)).toBe(local);
+
+    const directory = baseProfile({
+      provenance: "ldap",
+      directorySubject: LDAP_DN,
+      directorySyncStatus: "synced",
+    });
+    const redacted = redactProfileForSelfView(directory);
+    expect({ ...redacted, id: "x", directorySubject: null }).toEqual({
+      ...directory,
+      id: "x",
+      directorySubject: null,
+    });
+    // Non-mutating: the caller's record still holds the real subject for
+    // admin surfaces that legitimately need it.
+    expect(directory.directorySubject).toBe(LDAP_DN);
+  });
+
+  it("is idempotent", () => {
+    const once = redactProfileForSelfView(
+      baseProfile({
+        provenance: "ldap",
+        directorySubject: LDAP_DN,
+        directorySyncStatus: "synced",
+      }),
+    );
+    expect(redactProfileForSelfView(once)).toEqual(once);
+  });
+
+  it("does not leak a DN that carries filter or DN metacharacters", () => {
+    const injected = String.raw`uid=a*)(uid=*),ou=people\2Cdc=example,dc=test`;
+    const redacted = redactProfileForSelfView(
+      baseProfile({
+        id: injected,
+        provenance: "ldap",
+        directorySubject: injected,
+        directorySyncStatus: "synced",
+      }),
+    );
+    expect(redacted.directorySubject).toBe(REDACTED_DIRECTORY_SUBJECT);
+    expect(JSON.stringify(redacted)).not.toContain("uid=a*");
   });
 });

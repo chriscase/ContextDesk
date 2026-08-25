@@ -4,6 +4,7 @@ import {
   USER_PROFILE_ERROR_SCHEMA_ID,
   assertProfileUpdateAllowed,
   parseUserProfileUpdateRequest,
+  redactProfileForSelfView,
   type AuthErrorV1,
   type UserProfileErrorCode,
 } from "@cd-collab/contracts";
@@ -52,7 +53,8 @@ export async function registerSelfProfileRoutes(
       void reply.code(503);
       return profileError("unavailable");
     }
-    return profile;
+    // The owner never needs the raw LDAP DN / OIDC subject; only an admin does.
+    return redactProfileForSelfView(profile);
   });
 
   app.patch("/api/profile/me", async (request, reply) => {
@@ -115,7 +117,7 @@ export async function registerSelfProfileRoutes(
         origin: request.ip,
         outcome: "success",
       });
-      return result.profile;
+      return redactProfileForSelfView(result.profile);
     }
     await recordAudit(deps.audit, {
       identity: resolved.ctx.identity.id,
