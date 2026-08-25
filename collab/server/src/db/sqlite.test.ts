@@ -588,4 +588,48 @@ describe("SQLite local runtime", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("rolls a first-use human source back across SQLite reopen after contribution timeline failure", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-catalog-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "contribution_created") {
+          throw new Error("injected timeline failure:contribution_created");
+        }
+        return originalAppend(caseId, event);
+      };
+      const created = await cases.createCase(actor, { title: "SQLite catalog rollback" }, "test");
+      expect((await catalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      await expect(
+        cases.addContribution(
+          created.id,
+          actor,
+          { kind: "note", body: "Synthetic sqlite timeout observation before catalog mint." },
+          "test",
+        ),
+      ).rejects.toThrow(/injected timeline failure:contribution_created/);
+      expect(await cases.listContributions(created.id, actor, true)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "contribution_created")).toBe(false);
+      expect(await runtime.audit.list({ action: "contribution_create" })).toEqual([]);
+      expect(await runtime.audit.list({ action: "catalog_create" })).toEqual([]);
+      expect((await catalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      const reopenedCatalog = new CatalogService(reopened.catalog, reopened.audit);
+      expect((await reopenedCatalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "contribution_created")).toBe(false);
+      expect(await reopened.audit.list({ action: "catalog_create" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

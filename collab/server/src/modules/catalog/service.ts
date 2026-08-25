@@ -28,6 +28,30 @@ export class CatalogService {
     return row ? toSourceV1(row) : null;
   }
 
+  async findByIdentity(identityId: string): Promise<SourceV1 | null> {
+    const row = await this.store.findByIdentity(identityId);
+    return row ? toSourceV1(row) : null;
+  }
+
+  /**
+   * Snapshot durable catalog rows for a case transaction. PostgreSQL stores have
+   * no capture/restore; they join `activeCaseQueryable()` instead.
+   * SQLite wraps every method as async; capture/restore must be awaited or
+   * restore receives a Promise and throws DataCloneError.
+   */
+  async captureDurable(): Promise<unknown | undefined> {
+    const store = this.store as CatalogStore & { capture?: () => unknown };
+    if (typeof store.capture !== "function") return undefined;
+    return await Promise.resolve(store.capture());
+  }
+
+  async restoreDurable(snapshot: unknown | undefined): Promise<void> {
+    if (snapshot === undefined) return;
+    const store = this.store as CatalogStore & { restore?: (value: unknown) => void };
+    if (typeof store.restore !== "function") return;
+    await Promise.resolve(store.restore(snapshot));
+  }
+
   async create(
     actor: CatalogActor,
     input: {

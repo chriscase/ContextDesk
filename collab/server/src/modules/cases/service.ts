@@ -283,7 +283,15 @@ export class CaseService {
   ) {}
 
   async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
-    return this.store.withAtomic(operation, this.audit);
+    return this.store.withAtomic(async () => {
+      const snapshot = await this.catalog.captureDurable();
+      try {
+        return await operation();
+      } catch (error) {
+        await this.catalog.restoreDurable(snapshot);
+        throw error;
+      }
+    }, this.audit);
   }
 
   async appendDomainTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
@@ -794,9 +802,8 @@ export class CaseService {
     origin: string,
   ): Promise<ContributionV1> {
     try {
-      return await this.store.withAtomic(
+      return await this.withAtomic(
         () => this.persistContribution(caseId, actor, input, origin),
-        this.audit,
       );
     } catch (error) {
       if (input.idempotencyKey && isUniqueViolation(error)) {

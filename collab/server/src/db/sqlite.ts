@@ -287,11 +287,19 @@ export function createSqliteRuntime(
   const state = new SqliteState(path);
   const rawAudit = new MemoryAuditStore();
   const audit = persistentMemoryStore(state, "audit", rawAudit, new Set(["append", "restore"]));
+  const rawCatalog = new MemoryCatalogStore();
+  const catalog = persistentMemoryStore(
+    state,
+    "catalog",
+    rawCatalog,
+    new Set(["insert", "updateMeta", "setLifecycle", "restore"]),
+  );
   const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
     state.transaction(
       [
         { key: "audit", store: rawAudit },
         { key: "cases", store: rawCases },
+        { key: "catalog", store: rawCatalog },
       ],
       operation,
     ));
@@ -300,13 +308,6 @@ export function createSqliteRuntime(
     "cases",
     rawCases,
     CASE_SQLITE_MUTATORS,
-  );
-  const rawCatalog = new MemoryCatalogStore();
-  const catalog = persistentMemoryStore(
-    state,
-    "catalog",
-    rawCatalog,
-    new Set(["insert", "updateMeta", "setLifecycle", "restore"]),
   );
   const rawRuns = new MemoryRunStore();
   const runs = persistentMemoryStore(

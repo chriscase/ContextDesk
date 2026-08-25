@@ -7,6 +7,7 @@ import {
   type SourceLifecycle,
   type SourceV1,
 } from "@cd-collab/contracts";
+import { activeCaseQueryable } from "../cases/store.js";
 
 export interface SourceRow {
   id: string;
@@ -98,19 +99,23 @@ export class MemoryCatalogStore implements CatalogStore {
 export class PgCatalogStore implements CatalogStore {
   constructor(private readonly db: Queryable) {}
 
+  private get queryable(): Queryable {
+    return activeCaseQueryable() ?? this.db;
+  }
+
   async list(): Promise<SourceRow[]> {
-    const result = await this.db.query(`SELECT * FROM catalog_sources ORDER BY created_at ASC`);
+    const result = await this.queryable.query(`SELECT * FROM catalog_sources ORDER BY created_at ASC`);
     return result.rows.map((row) => asSource(row as Record<string, unknown>));
   }
 
   async get(id: string): Promise<SourceRow | null> {
-    const result = await this.db.query(`SELECT * FROM catalog_sources WHERE id = $1`, [id]);
+    const result = await this.queryable.query(`SELECT * FROM catalog_sources WHERE id = $1`, [id]);
     const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? asSource(row) : null;
   }
 
   async findByIdentity(identityId: string): Promise<SourceRow | null> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `SELECT * FROM catalog_sources WHERE identity_id = $1`,
       [identityId],
     );
@@ -119,7 +124,7 @@ export class PgCatalogStore implements CatalogStore {
   }
 
   async insert(row: SourceRow): Promise<void> {
-    await this.db.query(
+    await this.queryable.query(
       `INSERT INTO catalog_sources (
          id, name, kind, description, lifecycle, identity_id, created_at, created_by
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -137,7 +142,7 @@ export class PgCatalogStore implements CatalogStore {
   }
 
   async updateMeta(id: string, patch: { name: string; description: string | null }): Promise<void> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `UPDATE catalog_sources SET name = $2, description = $3 WHERE id = $1`,
       [id, patch.name, patch.description],
     );
@@ -145,7 +150,7 @@ export class PgCatalogStore implements CatalogStore {
   }
 
   async setLifecycle(id: string, lifecycle: SourceLifecycle): Promise<void> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `UPDATE catalog_sources SET lifecycle = $2 WHERE id = $1`,
       [id, lifecycle],
     );
