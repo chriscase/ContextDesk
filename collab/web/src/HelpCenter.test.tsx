@@ -208,6 +208,7 @@ describe("glossary", () => {
       "profile",
       "qualification",
       "host profile",
+      "user profile",
     ]) {
       expect(terms).toContain(required);
     }
@@ -270,5 +271,16 @@ describe("honest limitation copy", () => {
     expect(
       screen.getByText(/This web app shows no qualification status/),
     ).toBeTruthy();
+  });
+
+  it("explains My profile, LDAP ownership, roles versus capabilities, and historical attribution", () => {
+    const { onOpenArea } = renderHelp({ onOpenArea: vi.fn() });
+    fireEvent.click(screen.getByRole("button", { name: "My profile, directory ownership, and attribution" }));
+    expect(screen.getByText(/first-class page at \/profile/)).toBeTruthy();
+    expect(screen.getByText(/never rewrites those records/)).toBeTruthy();
+    expect(screen.getByText(/Capabilities decide what you can do/)).toBeTruthy();
+    expect(screen.getByText(/never contacts LDAP/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Go to My profile" }));
+    expect(onOpenArea).toHaveBeenCalledWith("profile");
   });
 });

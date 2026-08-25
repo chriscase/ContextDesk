@@ -36,7 +36,8 @@ forward-compatible provenance value; no OIDC adapter exists yet).
 | Capability model (10 fine-grained capabilities, role-default matrix, additive local grants) | Shipped | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts) | None known |
 | Memory + PostgreSQL profile/grant stores with CAS, login-time sync, fail-closed identity collision | Shipped | [`store.ts`](../../../collab/server/src/modules/people/store.ts), [`store.contract-tests.ts`](../../../collab/server/src/modules/people/store.contract-tests.ts) run against both backends by [`store.test.ts`](../../../collab/server/src/modules/people/store.test.ts) and [`pg-store.test.ts`](../../../collab/server/src/modules/people/pg-store.test.ts) | None known |
 | Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | CSRF header check covers only these new routes, not the pre-existing `authz`/`cases`/etc. mutation routes |
-| Self-service profile API (GET/PATCH own profile, directory-owned fields read-only) | Shipped | [`self-routes.ts`](../../../collab/server/src/modules/people/self-routes.ts), [`self-routes.test.ts`](../../../collab/server/src/modules/people/self-routes.test.ts) | No dedicated self-service UI ships (see §11 and §16) |
+| Self-service profile API (GET/PATCH own profile, directory-owned fields read-only) | Shipped | [`self-routes.ts`](../../../collab/server/src/modules/people/self-routes.ts), [`self-routes.test.ts`](../../../collab/server/src/modules/people/self-routes.test.ts) | None known for the API |
+| Self-service profile UI (`/profile`, account-menu destination) | Shipped | [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx), [`SelfProfilePanel.test.tsx`](../../../collab/web/src/SelfProfilePanel.test.tsx), [`App.test.tsx`](../../../collab/web/src/App.test.tsx), Help article `my-profile` | Live LDAP attribute values still follow §16 (the UI cannot invent directory writes) |
 | Admin People console (`/admin/people` tab inside Administration) | Shipped | [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), [`AdminPeoplePanel.test.tsx`](../../../collab/web/src/AdminPeoplePanel.test.tsx), [`Administration.test.tsx`](../../../collab/web/src/Administration.test.tsx) | Detail view is inline-expand, not its own URL per person |
 | LDAP-ready claims-to-profile mapping (provider-neutral, pure, admin-previewable) | Shipped as a mapping engine; **not** live-wired | [`directory-mapping.ts`](../../../collab/contracts/src/directory-mapping.ts), preview route in `admin-routes.ts` | Login-time sync never calls this with real directory claims — see §16, this is a named non-claim, not an oversight |
 | Portable-investigation interoperability (never grants access, never auto-maps) | Accepted design / already shipped upstream | [`investigation-portable.ts`](../../../collab/contracts/src/investigation-portable.ts) `historicalParticipantsAreAttributionOnly`, `destinationRoleGranted: false` | This chapter does not modify that subsystem; it only keeps `provenance: "imported_historical"` structurally incapable of authenticating or holding a capability (§5) |
@@ -274,15 +275,13 @@ mapping preview. Historical/imported rows show a fixed explanatory note
 instead of any action button - there is no code path that could grant one
 a capability, so the UI does not offer a control that would silently fail.
 
-**Residual, by design (§16):** a dedicated self-service profile page (any
-authenticated user editing their own display fields) is not part of this
-UI. The API and contract fully exist and are tested (§2); wiring a
-self-service surface into the shell was deliberately left for a follow-up
-because doing it safely requires either a new top-level area in
-`app-location.ts`'s `AREA_IDS` or a change to `App.tsx`'s render switch -
-both are shell-level changes this chapter's gate asked to avoid making
-unilaterally alongside concurrent War Room UX work. See §16 for the full
-follow-up spec.
+**Self-service profile** is a first-class authenticated destination at
+`/profile`, opened from the account menu as "My profile". It is not
+admin-gated. The panel reads and patches `/api/profile/me` with the CSRF
+header and `expectedRevision`, shows directory-owned fields as read-only
+plain language for LDAP/OIDC accounts, keeps local-only contact/avatar/
+custom fields editable, preserves a draft across stale-revision `409`
+recovery, and states that historical attribution is never rewritten.
 
 ## 12. Test matrix
 
@@ -292,7 +291,7 @@ follow-up spec.
 | Server/store | create/update/list, CAS success | stale revision, suspended-write refusal, collision refusal, not_found | `store.test.ts` + `store.contract-tests.ts` run against **both** Memory and Postgres (`pg-store.test.ts`), plus `grants.test.ts`/`pg-grants.test.ts`, `capabilities.test.ts` |
 | Server/routes | search, effective, status, grant/revoke, preview | missing CSRF header, idempotent retry after CAS staleness, enumeration-safe 403, historical-stub grant refusal, self-suspend zeroing admin access | `admin-routes.test.ts`, `self-routes.test.ts` (13 tests, full `buildApp` + real login flow) |
 | Database constraints | migration up/down in order | case-insensitive duplicate username, directory-subject-required check, JSONB custom-attribute round-trip | `pg-store.test.ts`, `migrate.test.ts` (updated for the new migration), `grants.test.ts` least-privilege pin |
-| Web/UI | list/search, manage/expand, suspend/grant/revoke confirm flow, preview | imported_historical never offered an action, tab switch preserves hidden-panel state, direct-load and browser-back on `/admin/people` | `AdminPeoplePanel.test.tsx`, `Administration.test.tsx` |
+| Web/UI | list/search, manage/expand, suspend/grant/revoke confirm flow, preview; self-service `/profile` load/edit/LDAP-readonly/409 draft recovery | imported_historical never offered an action, tab switch preserves hidden-panel state, direct-load and browser-back on `/admin/people` and `/profile` | `AdminPeoplePanel.test.tsx`, `Administration.test.tsx`, `SelfProfilePanel.test.tsx`, `App.test.tsx`, `HelpCenter.test.tsx` |
 
 All contracts, server, and web suites pass; PostgreSQL-backed tests were
 run against a real, locally started PostgreSQL 16 instance for this
@@ -307,7 +306,7 @@ counts.
   [`admin-people.ts`](../../../collab/contracts/src/admin-people.ts)
 - Server: [`collab/server/src/modules/people/`](../../../collab/server/src/modules/people/)
 - Migration: [`015_user_profiles.up.sql`](../../../collab/server/src/db/migrations/015_user_profiles.up.sql) / [`.down.sql`](../../../collab/server/src/db/migrations/015_user_profiles.down.sql)
-- Web: [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), the People tab in [`Administration.tsx`](../../../collab/web/src/Administration.tsx)
+- Web: [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), the People tab in [`Administration.tsx`](../../../collab/web/src/Administration.tsx), [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx) at `/profile`
 - Deployment/config: [`collab/deploy/README.md`](../../../collab/deploy/README.md)
 - No tracked issue number exists for this chapter at authoring time; residuals below are literal, not linked.
 
@@ -318,7 +317,7 @@ counts.
 | Profile/capability contracts, server stores, admin+self routes | Shipped | Full CRUD/CAS/audit path, tested against Memory and real Postgres | Not deployed to any environment by this chapter; that is an operator action |
 | Admin People UI | Shipped | Real, tested React panel reachable at `/admin/people` | Not a full user-detail page with its own URL per person |
 | LDAP claim mapping engine | Shipped | Pure, tested, admin-previewable against synthetic sample claims | **Not** wired to any live directory bind - see §16 |
-| Self-service profile UI | Not shipped | API/contract fully ships | No UI component exists yet; §16 has the follow-up spec |
+| Self-service profile UI | Shipped | Real, tested React page at `/profile` for any authenticated user | Does not write to LDAP/OIDC; live directory attribute sync remains unwired (§16) |
 | Directory-removal auto-disable | Not shipped | `disabled` status and manual admin path exist | No automatic detection of a person's removal from the directory |
 
 ## 15. Reimplementation notes
@@ -361,17 +360,12 @@ counts.
   result through `AuthSuccess` - deliberately not attempted here to avoid
   changing already-reviewed, security-sensitive bind/search code in a
   foundation PR. No issue is filed for this; it is a named non-claim.
-- **Self-service profile UI does not ship.** The API is complete and
-  tested (§2, §12). Follow-up spec: a `SelfProfilePanel.tsx` component,
-  reachable at a top-level `/profile` route available to any authenticated
-  user (not admin-gated), reading/writing `/api/profile/me` with the same
-  CSRF header and CAS-retry pattern `AdminPeoplePanel.tsx` already
-  demonstrates. Wiring it in requires either a new `AREA_ID` in
-  `app-location.ts` plus a render branch in `App.tsx`, or folding it into
-  an existing always-reachable area (e.g. a menu item off the topbar) -
-  a decision left to whoever owns the shell next, since this chapter's
-  gate asked to avoid unilateral `App.tsx` changes alongside concurrent
-  War Room UX work.
+- **Self-service profile UI ships.** `/profile` is reachable from the
+  authenticated account menu, survives direct load/reload/Back/Forward,
+  and uses GET/PATCH `/api/profile/me` with CSRF and CAS. Directory-owned
+  fields stay read-only for LDAP/OIDC; local-only contact/avatar/custom
+  fields remain editable. Historical attribution is unchanged. Live LDAP
+  attribute sync remains unwired (the residual above).
 - **Directory-removal auto-disable is not automatic.** The `disabled`
   status is a real, valid, tested state, settable by an admin through the
   same status endpoint used for suspend/reactivate, but nothing currently
@@ -412,8 +406,8 @@ commissioned to satisfy:
    idempotent, CAS'd, bounded errors, append-only audit. §6, §8, §9.
 5. **Self-service profile.** Shipped as an API (GET/PATCH own profile,
    directory-owned fields enforced read-only, principal/provenance/role
-   changes structurally impossible via contract drift rejection); UI is a
-   named residual with a full follow-up spec. §6.3, §11, §16.
+   changes structurally impossible via contract drift rejection) and as a
+   `/profile` UI for any authenticated user. §6.3, §11.
 6. **Attribution.** Unchanged and preserved - the pre-existing
    `(actor_id, actor_username)` capture-at-write-time pattern across
    cases/timeline/experiments is the shipped mechanism for this; this

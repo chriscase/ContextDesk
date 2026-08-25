@@ -4,6 +4,7 @@ export const AREA_IDS = [
   "sources",
   "administration",
   "help",
+  "profile",
 ] as const;
 export type AreaId = (typeof AREA_IDS)[number];
 
@@ -59,7 +60,17 @@ export const HOME: WorkLocation = {
   stage: "situation",
 };
 
+export const PROFILE: WorkLocation = {
+  area: "profile",
+  caseId: null,
+  stage: "situation",
+};
+
 export const SIGN_IN: SignInLocation = { kind: "sign-in" };
+
+export function isProfileLocation(value: unknown): value is WorkLocation {
+  return isWorkLocation(value) && value.area === "profile";
+}
 
 /**
  * Fragment ids that pre-shell surfaces still emit as plain `#anchor` links
@@ -253,6 +264,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/help") {
     return { area: "help", caseId: null, stage: "situation" };
   }
+  if (path === "/profile") {
+    return { ...PROFILE };
+  }
   if (path === "/administration" || path === "/admin/people") {
     // /admin/people is a focused sub-view the Administration component
     // itself renders (a People tab); it shares the same area gate (an
@@ -289,6 +303,9 @@ export function areaPathFor(location: WorkLocation): string {
   }
   if (location.area === "help") {
     return "/help";
+  }
+  if (location.area === "profile") {
+    return "/profile";
   }
   if (location.area === "administration") {
     return "/administration";
@@ -342,6 +359,9 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
   }
   if (location.area === "help") {
     return "Help · ContextDesk War Room";
+  }
+  if (location.area === "profile") {
+    return "My profile · ContextDesk War Room";
   }
   if (location.area === "administration") {
     return "Administration · ContextDesk War Room";
