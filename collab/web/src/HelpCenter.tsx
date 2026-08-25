@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { StageId } from "./Cases.js";
 
 /** Areas the shell can genuinely navigate to from a help article. */
-export type HelpAreaTarget = "overview" | "investigations" | "sources" | "profile";
+export type HelpAreaTarget = "overview" | "investigations" | "entities" | "sources" | "profile";
 
 type HelpActionTarget = { area: HelpAreaTarget } | { stage: StageId };
 
@@ -548,6 +548,138 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
     ],
   },
   {
+    id: "entities",
+    title: "Entities",
+    articles: [
+      {
+        id: "entity-registry",
+        title: "Who and what an investigation is about",
+        summary:
+          "Reusable labels name the organizations, customers, people, services, and systems investigations concern, so the same party is findable years later.",
+        keywords: [
+          "entity",
+          "entities",
+          "organization",
+          "customer",
+          "person",
+          "service",
+          "system",
+          "stakeholder",
+          "involved",
+          "party",
+          "affected",
+        ],
+        what:
+          "The Entities area stores reusable labels for what investigations are about: an organization, a customer, a person, a service, a system, or something that fits none of those. It is a different list from Attribution next door. Attribution answers where a piece of information came from; Entities answers who or what the work concerns. A vendor is often both, and stays two separate rows. Neither area stores logs, files, email, chat, or notes — those stay in the investigation where they were captured.",
+        when:
+          "Name the entities an investigation involves when you open it, or add them later. Use the entity filter on the investigation list to find every investigation that concerned the same party.",
+        steps: [
+          "Open Entities from the primary navigation to add or review a label.",
+          "In an investigation’s Situation stage, add the entities it involves and say how each one is involved.",
+          "End an involvement when it stops being true. The record keeps showing that it was once involved.",
+        ],
+        recorded:
+          "An involvement records the label and kind the entity had at the moment it was linked. Renaming or retiring the entity later never rewrites what an older investigation said; the current name is shown beside the recorded one so the difference is visible.",
+        limits:
+          "A label is not an account and creates no connection to the named party. A name stays inside the tool unless someone marks it as safe to leave in a share-safe export; otherwise an export shows the kind and a stable stand-in instead. Retiring needs the case-lead role.",
+        actions: [{ label: "Go to Entities", go: { area: "entities" } }],
+      },
+      {
+        id: "occurred-at",
+        title: "Work that happened before it was written down",
+        summary:
+          "An investigation records when something happened separately from when it was entered, and never guesses a time zone that was not recorded.",
+        keywords: [
+          "occurred",
+          "backfill",
+          "historical",
+          "old",
+          "date",
+          "when",
+          "time zone",
+          "timezone",
+          "recorded",
+        ],
+        what:
+          "Every investigation carries two dates. When it happened is what you type, and may be a year, a month, a date, or a full timestamp. When it was recorded here is set by the server and never changes. Backfilling an old investigation moves only the first one, so nothing in the audit history has to be rewritten to describe work that predates this tool.",
+        when:
+          "Use it whenever you open an investigation about something that already happened, or when you learn the date of one that was recorded without it.",
+        steps: [
+          "Enter a date in the creation form, or use “Record when it happened” in the Situation stage later.",
+          "Type only what you know: 2024, 2024-11, or 2024-11-04 are all complete answers.",
+          "Add a time zone only if you actually know it.",
+        ],
+        recorded:
+          "A date typed without a time zone is stored exactly as typed and shown that way, labelled as not recorded rather than read as UTC or as your local time. Changing it appends a timeline entry; it never edits the earlier record.",
+        limits:
+          "A date in the future is refused, as is a date that does not exist. This area sets no reminders and drives no scheduling.",
+        actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
+      },
+      {
+        id: "cross-investigation-references",
+        title: "Citing another investigation",
+        summary:
+          "A reference links to earlier work and says why. It copies nothing, changes nothing, and does not become evidence.",
+        keywords: [
+          "reference",
+          "cite",
+          "citation",
+          "link",
+          "related",
+          "prior",
+          "duplicate",
+          "cross-investigation",
+        ],
+        what:
+          "A reference points from this investigation to another one, or to one record inside it, together with the reason it is relevant. The link is the same address the activity feed uses, so it lands on a visible record.",
+        when:
+          "Cite an earlier investigation when this one repeats it, depends on it, or was caused by the same thing.",
+        steps: [
+          "Open the Situation stage and choose an investigation under “Other investigations this one cites”.",
+          "Say what connects the two.",
+          "Withdraw a reference that stops being relevant. The record still shows it was made.",
+        ],
+        recorded:
+          "A citation records the cited investigation’s title at the time it was made, who made it, and when. Nothing is written into the cited investigation.",
+        limits:
+          "You can only cite an investigation you can read, and reading a citation grants nothing: someone without access sees that a citation exists and where it points, and does not see its title. A citation never becomes supporting evidence for a hypothesis on its own.",
+        actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
+      },
+      {
+        id: "human-resolution",
+        title: "Resolving without a model run",
+        summary:
+          "People can conclude an investigation by reading the record. What is required is the reason, not a comparison.",
+        keywords: [
+          "resolve",
+          "resolved",
+          "decision",
+          "conclusion",
+          "rationale",
+          "unknowns",
+          "manual",
+          "human",
+          "exception",
+          "duplicate",
+        ],
+        what:
+          "Setting an investigation to resolved records a conclusion, so it asks for one. Reasoning it out from the notes and evidence is a first-class answer and needs no experiment. Closing a case without answering its question — a duplicate, withdrawn, or overtaken by events — is recorded explicitly as an exception rather than left as an unexplained status change.",
+        when:
+          "Use it when the work is finished, however it was finished.",
+        steps: [
+          "In the Decide stage, choose resolved and update the status.",
+          "Say how the conclusion was reached, why, and what is still unknown.",
+          "Save. The conclusion and the status are recorded together.",
+        ],
+        recorded:
+          "A resolution records the basis, who wrote it, the reasoning, and the open unknowns. Reopening an investigation withdraws the conclusion without deleting it, and resolving again needs a fresh one.",
+        limits:
+          "Resolving needs the case-lead role. The reasoning stays inside the tool: a share-safe export carries the basis and the number of open unknowns, not the text.",
+        actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
+      },
+    ],
+  },
+  {
     id: "sources",
     title: "Attribution",
     articles: [
@@ -558,7 +690,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Reusable labels show which person or tool supplied material. The material itself stays inside its investigation.",
         keywords: ["source", "catalog", "library", "register", "retire", "attribution", "external tool", "unknown"],
         what:
-          "The Attribution area stores reusable labels for the people and tools that supplied information. It does not store the logs, files, email, chat, or notes themselves; those stay in the investigation where they were captured. Labels can identify a person, an external tool, an internal system, ContextDesk, or an honestly unknown origin.",
+          "The Attribution area stores reusable labels for the people and tools that supplied information. It does not store the logs, files, email, chat, or notes themselves; those stay in the investigation where they were captured. Labels can identify a person, an external tool, an internal system, ContextDesk, or an honestly unknown origin. It is a separate list from Entities, which names who or what an investigation is about rather than where its information came from.",
         when:
           "Add a label when an investigation needs to credit a person or tool that is not listed yet. Browse the library to understand where recorded material came from.",
         steps: [

@@ -1,6 +1,11 @@
 export const AREA_IDS = [
   "overview",
   "investigations",
+  // The reusable registry of what investigations are about. Deliberately its
+  // own area rather than a tab inside Attribution: Attribution answers where
+  // information came from, Entities answers who or what the work concerns, and
+  // collapsing them would blur the boundary this area exists to make visible.
+  "entities",
   "sources",
   "administration",
   "help",
@@ -301,6 +306,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/investigations") {
     return { area: "investigations", caseId: null, stage: "situation" };
   }
+  if (path === "/entities") {
+    return { area: "entities", caseId: null, stage: "situation" };
+  }
   if (path === "/sources") {
     return { area: "sources", caseId: null, stage: "situation" };
   }
@@ -340,6 +348,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
 export function areaPathFor(location: WorkLocation): string {
   if (location.area === "overview") {
     return "/";
+  }
+  if (location.area === "entities") {
+    return "/entities";
   }
   if (location.area === "sources") {
     return "/sources";
@@ -396,6 +407,9 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
   }
   if (isUnknownLocation(location)) {
     return "Page not found · ContextDesk War Room";
+  }
+  if (location.area === "entities") {
+    return "Entities · ContextDesk War Room";
   }
   if (location.area === "sources") {
     return "Attribution · ContextDesk War Room";
