@@ -283,7 +283,7 @@ export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
   insertCase(row: CaseRow): Promise<void>;
-  updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void>;
+  updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void>;
   updateSituationAtomic(
     input: AtomicSituationUpdate,
     audit: AuditStore,
@@ -394,11 +394,14 @@ export class MemoryCaseStore implements CaseStore {
     this.timeline.set(row.id, []);
   }
 
-  async updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void> {
+  async updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void> {
     const existing = this.cases.get(row.id);
     if (!existing) throw new Error("case not found");
-    existing.status = row.status;
-    existing.legalHold = row.legalHold;
+    if (row.status === undefined && row.legalHold === undefined) {
+      throw new Error("case meta update requires status or legalHold");
+    }
+    if (row.status !== undefined) existing.status = row.status;
+    if (row.legalHold !== undefined) existing.legalHold = row.legalHold;
   }
 
   async updateSituationAtomic(
@@ -789,12 +792,32 @@ export class PgCaseStore implements CaseStore {
     }
   }
 
-  async updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void> {
-    const result = await this.db.query(
-      `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
-      [row.id, row.status, row.legalHold],
-    );
-    if (result.rowCount === 0) throw new Error("case not found");
+  async updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void> {
+    if (row.status !== undefined && row.legalHold !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
+        [row.id, row.status, row.legalHold],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    if (row.status !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET status = $2 WHERE id = $1`,
+        [row.id, row.status],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    if (row.legalHold !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET legal_hold = $2 WHERE id = $1`,
+        [row.id, row.legalHold],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    throw new Error("case meta update requires status or legalHold");
   }
 
   async updateSituationAtomic(

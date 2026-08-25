@@ -564,10 +564,9 @@ export class CaseService {
     clientTime?: string,
   ): Promise<CaseV1> {
     const canonicalTime = canonicalClientTime(clientTime);
-    const row = await this.requireCase(caseId);
     return this.store.withAtomic(async () => {
-    row.status = status;
-    await this.store.updateCaseMeta(row);
+    await this.requireCase(caseId);
+    await this.store.updateCaseMeta({ id: caseId, status });
     await this.store.appendTimeline(caseId, {
       kind: "case_status",
       actor,
@@ -582,7 +581,7 @@ export class CaseService {
       origin,
       outcome: "success",
     });
-    return this.toCase(row);
+    return this.toCase(await this.requireCase(caseId));
     }, this.audit);
   }
 
@@ -620,10 +619,9 @@ export class CaseService {
     legalHold: boolean,
     origin: string,
   ): Promise<CaseV1> {
-    const row = await this.requireCase(caseId);
     return this.store.withAtomic(async () => {
-    row.legalHold = legalHold;
-    await this.store.updateCaseMeta(row);
+    await this.requireCase(caseId);
+    await this.store.updateCaseMeta({ id: caseId, legalHold });
     await this.store.appendTimeline(caseId, {
       kind: "legal_hold",
       actor,
@@ -638,7 +636,7 @@ export class CaseService {
       origin,
       outcome: "success",
     });
-    return this.toCase(row);
+    return this.toCase(await this.requireCase(caseId));
     }, this.audit);
   }
 
