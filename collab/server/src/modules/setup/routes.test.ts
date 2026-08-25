@@ -1,3 +1,4 @@
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   SETUP_CLAIM_REQUEST_SCHEMA_ID,
@@ -16,6 +17,15 @@ import {
 } from "./state-store.js";
 
 const OWNER_TOKEN = "A".repeat(43);
+
+function syntheticDeploymentPaths(profile: string) {
+  const dataRoot = resolve("contextdesk-synthetic", profile);
+  return {
+    dataRoot,
+    evidenceRoot: join(dataRoot, "evidence"),
+    sqlitePath: join(dataRoot, "db", "contextdesk.sqlite"),
+  };
+}
 
 class MemorySetupStore implements SetupStateStore {
   state: PersistedSetupStateV1 | null = null;
@@ -138,6 +148,7 @@ describe("first-run setup HTTP boundary", () => {
   it("stages a redacted SQLite/local draft and reports bounded verification honestly", async () => {
     const { app } = await setupApp();
     await claim(app);
+    const paths = syntheticDeploymentPaths("single-node");
     const issued = await secret(
       app,
       "initial_admin_password",
@@ -148,11 +159,11 @@ describe("first-run setup HTTP boundary", () => {
       basedOnRevision: 1,
       draftRevision: 2,
       deploymentProfile: "single_node",
-      dataRoot: "/var/lib/contextdesk-synthetic",
-      evidenceRoot: "/var/lib/contextdesk-synthetic/evidence",
+      dataRoot: paths.dataRoot,
+      evidenceRoot: paths.evidenceRoot,
       storage: {
         kind: "sqlite",
-        sqlitePath: "/var/lib/contextdesk-synthetic/db/contextdesk.sqlite",
+        sqlitePath: paths.sqlitePath,
         databaseUrlRef: null,
         migrateDatabaseUrlRef: null,
       },
@@ -222,6 +233,7 @@ describe("first-run setup HTTP boundary", () => {
   it("stages PostgreSQL, LDAP, and gateway readiness without returning connection material", async () => {
     const { app } = await setupApp();
     await claim(app);
+    const paths = syntheticDeploymentPaths("team-room");
     const values = {
       database_url: "postgres://app:synthetic@db.example.test/contextdesk",
       migrate_database_url: "postgres://migrator:synthetic@db.example.test/contextdesk",
@@ -248,8 +260,8 @@ describe("first-run setup HTTP boundary", () => {
       basedOnRevision: 1,
       draftRevision: 2,
       deploymentProfile: "postgres_ldap",
-      dataRoot: "/srv/contextdesk-synthetic",
-      evidenceRoot: "/srv/contextdesk-synthetic/evidence",
+      dataRoot: paths.dataRoot,
+      evidenceRoot: paths.evidenceRoot,
       storage: {
         kind: "postgres",
         sqlitePath: null,
@@ -315,16 +327,17 @@ describe("first-run setup HTTP boundary", () => {
   it("fails closed on stale revisions, unknown handles, and configured state", async () => {
     const { app, store } = await setupApp();
     await claim(app);
+    const paths = syntheticDeploymentPaths("missing-handle");
     const baseDraft = {
       schemaId: SETUP_DEPLOYMENT_DRAFT_REQUEST_SCHEMA_ID,
       basedOnRevision: 1,
       draftRevision: 2,
       deploymentProfile: "single_node",
-      dataRoot: "/srv/contextdesk-synthetic",
-      evidenceRoot: "/srv/contextdesk-synthetic/evidence",
+      dataRoot: paths.dataRoot,
+      evidenceRoot: paths.evidenceRoot,
       storage: {
         kind: "sqlite",
-        sqlitePath: "/srv/contextdesk-synthetic/db/contextdesk.sqlite",
+        sqlitePath: paths.sqlitePath,
         databaseUrlRef: null,
         migrateDatabaseUrlRef: null,
       },

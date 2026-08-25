@@ -78,9 +78,9 @@ const context: TriageBatchExecutionContext = {
 };
 
 describe("RustBridgeTriageExecutor", () => {
-  it("uses the private host command and matches results by candidate id", async () => {
+  it("uses an immutable shell-free script prefix and matches results by candidate id", async () => {
     const root = await mkdtemp(join(tmpdir(), "contextdesk-runner-test-"));
-    const command = join(root, "runner.mjs");
+    const command = join(root, "runner with spaces.mjs");
     const output = JSON.stringify({
       ok: true,
       data: {
@@ -122,7 +122,12 @@ process.stdout.write(${JSON.stringify(output)});
       { mode: 0o755 },
     );
     try {
-      const executor = new RustBridgeTriageExecutor({ command });
+      const prefixArgs = [command];
+      const executor = new RustBridgeTriageExecutor({
+        command: process.execPath,
+        prefixArgs,
+      });
+      prefixArgs[0] = join(root, "missing runner.mjs");
       const results = await executor.executeBatch(context, new AbortController().signal);
       expect(results.map((result) => result.benchmarkRunId)).toEqual(["run-a", "run-b"]);
       expect(results.map((result) => result.summary)).toEqual([
@@ -144,7 +149,11 @@ process.stdout.write(${JSON.stringify(output)});
       { mode: 0o755 },
     );
     try {
-      const executor = new RustBridgeTriageExecutor({ command, timeoutMs: 25 });
+      const executor = new RustBridgeTriageExecutor({
+        command: process.execPath,
+        prefixArgs: [command],
+        timeoutMs: 25,
+      });
       await expect(executor.executeBatch(context, new AbortController().signal)).rejects.toThrow(
         "deadline exceeded",
       );
@@ -220,7 +229,10 @@ process.stdout.write(${JSON.stringify(output)});
     const startedResults: string[] = [];
     const progressResults: string[] = [];
     try {
-      const executor = new RustBridgeTriageExecutor({ command });
+      const executor = new RustBridgeTriageExecutor({
+        command: process.execPath,
+        prefixArgs: [command],
+      });
       const results = await executor.executeBatch({
         ...context,
         onCandidateStarted: (candidateId) => {
@@ -281,7 +293,10 @@ process.stdout.write(${JSON.stringify(output)});
       { mode: 0o755 },
     );
     try {
-      const executor = new RustBridgeTriageExecutor({ command });
+      const executor = new RustBridgeTriageExecutor({
+        command: process.execPath,
+        prefixArgs: [command],
+      });
       const results = await executor.executeBatch({
         ...context,
         request: { ...context.request, candidates },
@@ -308,7 +323,11 @@ process.stdout.write(${JSON.stringify(output)});
       { mode: 0o755 },
     );
     try {
-      const executor = new RustBridgeTriageExecutor({ command, timeoutMs: 5_000 });
+      const executor = new RustBridgeTriageExecutor({
+        command: process.execPath,
+        prefixArgs: [command],
+        timeoutMs: 5_000,
+      });
       await expect(executor.executeBatch(context, new AbortController().signal)).rejects.toThrow(
         "output overflow",
       );

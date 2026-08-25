@@ -37,6 +37,30 @@ describe("triage bridge runtime configuration", () => {
     })?.command).toBe("/new/contextdesk");
   });
 
+  it("launches a Windows .mjs bridge through Node with an immutable script prefix", () => {
+    const script = String.raw`C:\Program Files\ContextDesk\bridge runner.MJS`;
+    const options = triageBridgeOptions({ COLLAB_BRIDGE_BIN: script }, "win32");
+
+    expect(options).toEqual({
+      command: process.execPath,
+      prefixArgs: [script],
+      timeoutMs: 300_000,
+    });
+    expect(Object.isFrozen(options?.prefixArgs)).toBe(true);
+    expect(() => {
+      (options?.prefixArgs as string[])[0] = "replacement.mjs";
+    }).toThrow(TypeError);
+    expect(options?.prefixArgs).toEqual([script]);
+  });
+
+  it("preserves direct executable and shebang enforcement for POSIX .mjs bridges", () => {
+    const script = "/opt/contextdesk/bridge-runner.mjs";
+    expect(triageBridgeOptions({ COLLAB_BRIDGE_BIN: script }, "linux")).toEqual({
+      command: script,
+      timeoutMs: 300_000,
+    });
+  });
+
   it("leaves the gateway disabled when no bridge is configured", () => {
     expect(triageBridgeOptions({})).toBeNull();
   });

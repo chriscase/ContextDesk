@@ -1,4 +1,6 @@
-import { isAbsolute, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
+import { closeSync, fsyncSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   DOCTOR_CAVEATS,
   DOCTOR_CHECK_IDS,
@@ -117,6 +119,51 @@ function checkStorage(env: NodeJS.ProcessEnv, intent: Intent): DoctorCheckV1 {
   return check("storage", "ok", "postgres URL is configured; the database was not contacted");
 }
 
+/**
+ * Windows access checks do not prove that the current token can create a file.
+ * Use an exclusive, unpredictable probe and remove it before returning.
+ */
+export function probeWritableDirectory(path: string): boolean {
+  const probe = join(
+    path,
+    `.contextdesk-write-${process.pid}-${randomBytes(6).toString("hex")}.tmp`,
+  );
+  let descriptor: number | undefined;
+  let created = false;
+  let usable = true;
+  try {
+    descriptor = openSync(probe, "wx", 0o600);
+    created = true;
+    writeFileSync(descriptor, "contextdesk operator write probe\n", "utf8");
+    fsyncSync(descriptor);
+  } catch {
+    usable = false;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        usable = false;
+      }
+    }
+    if (created) {
+      try {
+        unlinkSync(probe);
+      } catch {
+        usable = false;
+      }
+    }
+  }
+  return usable;
+}
+
+function isWritableEvidenceDirectory(path: string, fs: OperatorFs): boolean {
+  if (process.platform === "win32" && fs === nodeOperatorFs) {
+    return probeWritableDirectory(path);
+  }
+  return fs.isWritableDirectory(path);
+}
+
 function checkEvidence(env: NodeJS.ProcessEnv, cwd: string, intent: Intent, fs: OperatorFs): DoctorCheckV1 {
   const raw = env.COLLAB_EVIDENCE_ROOT?.trim() || ".data/evidence";
   const path = resolvePath(cwd, raw);
@@ -128,7 +175,7 @@ function checkEvidence(env: NodeJS.ProcessEnv, cwd: string, intent: Intent, fs: 
   if (!fs.isDirectory(path)) {
     return check("evidence_root", "error", "evidence root is not a directory");
   }
-  if (!fs.isWritableDirectory(path)) {
+  if (!isWritableEvidenceDirectory(path, fs)) {
     return check("evidence_root", "error", "evidence root is not writable");
   }
   return check("evidence_root", "ok", "evidence root is a writable directory");

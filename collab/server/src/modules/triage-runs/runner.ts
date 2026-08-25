@@ -274,6 +274,8 @@ function mapProgressEvent(
 
 export interface RustBridgeTriageExecutorOptions {
   command: string;
+  /** Immutable arguments placed before ContextDesk's generated CLI arguments. */
+  prefixArgs?: readonly string[];
   library?: string;
   timeoutMs?: number;
   dataDir?: string;
@@ -281,7 +283,14 @@ export interface RustBridgeTriageExecutorOptions {
 
 /** Runs the existing Rust host bridge without putting credentials in Node or Postgres. */
 export class RustBridgeTriageExecutor implements TriageBatchRunExecutor {
-  constructor(private readonly options: RustBridgeTriageExecutorOptions) {}
+  private readonly options: Readonly<RustBridgeTriageExecutorOptions>;
+
+  constructor(options: RustBridgeTriageExecutorOptions) {
+    this.options = {
+      ...options,
+      prefixArgs: Object.freeze([...(options.prefixArgs ?? [])]),
+    };
+  }
 
   async executeBatch(
     context: TriageBatchExecutionContext,
@@ -411,7 +420,10 @@ export class RustBridgeTriageExecutor implements TriageBatchRunExecutor {
     onProgress: (raw: unknown) => void | Promise<void> = () => {},
   ): Promise<CliEnvelope> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.options.command, args, {
+      const child = spawn(this.options.command, [
+        ...(this.options.prefixArgs ?? []),
+        ...args,
+      ], {
         shell: false,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],

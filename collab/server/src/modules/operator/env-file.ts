@@ -2,7 +2,10 @@
 
 export function parseEnvFile(text: string): Record<string, string> {
   const out: Record<string, string> = {};
-  const lines = text.split(/\r?\n/);
+  // PowerShell and Windows editors may emit a UTF-8 BOM. Treat it as encoding
+  // metadata, not as part of the first environment key.
+  const normalized = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const lines = normalized.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
     const raw = lines[index] ?? "";
     const trimmed = raw.trim();

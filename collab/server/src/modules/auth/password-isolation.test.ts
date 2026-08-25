@@ -5,6 +5,18 @@ import { describe, expect, it } from "vitest";
 
 const serverSrc = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+function toPortablePath(filePath: string): string {
+  return filePath.replaceAll("\\", "/");
+}
+
+function shouldInspect(relativePath: string): boolean {
+  const rel = toPortablePath(relativePath);
+  if (rel.startsWith("modules/auth/")) return false;
+  if (rel.startsWith("modules/_fixtures/")) return false;
+  if (rel.endsWith(".test.ts")) return false;
+  return true;
+}
+
 function walk(dir: string, acc: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     const full = join(dir, name);
@@ -15,14 +27,21 @@ function walk(dir: string, acc: string[] = []): string[] {
 }
 
 describe("password isolation", () => {
+  it.each([
+    ["modules/auth/login.ts", false],
+    ["modules\\auth\\login.ts", false],
+    ["modules/_fixtures/auth.ts", false],
+    ["modules\\_fixtures\\auth.ts", false],
+    ["modules/authentication/login.ts", true],
+    ["modules\\authentication\\login.ts", true],
+    ["modules/cases/auth.ts", true],
+    ["modules\\cases\\auth.ts", true],
+  ])("classifies %s consistently across path separators", (path, expected) => {
+    expect(shouldInspect(path)).toBe(expected);
+  });
+
   it("no module outside auth imports ldapts or reads a password field", () => {
-    const files = walk(serverSrc).filter((f) => {
-      const rel = relative(serverSrc, f).split("/").join("/");
-      if (rel.startsWith("modules/auth/")) return false;
-      if (rel.startsWith("modules/_fixtures/")) return false;
-      if (rel.endsWith(".test.ts")) return false;
-      return true;
-    });
+    const files = walk(serverSrc).filter((f) => shouldInspect(relative(serverSrc, f)));
     const offenders: string[] = [];
     for (const file of files) {
       const body = readFileSync(file, "utf8");
