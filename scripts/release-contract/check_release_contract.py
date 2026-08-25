@@ -342,6 +342,8 @@ def test_partial_matrix() -> None:
         tdp = Path(td)
         rc.populate_complete_matrix(tdp, identity=identity, signed=True)
         (tdp / f"ContextDesk_{identity.package_version}_x64_en-US.msi").unlink()
+        (tdp / f"ContextDesk_{identity.package_version}_x64-setup.exe").unlink()
+        (tdp / f"ContextDesk_{identity.package_version}_x64-setup.exe.sig").unlink()
         try:
             _assemble_ok(tdp, identity, signed=True)
             check("missing Windows installer fails", False)
@@ -385,6 +387,29 @@ def test_missing_signatures() -> None:
             check("GA without updater signatures fails", False)
         except SystemExit:
             check("GA without updater signatures fails", True)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        rc.populate_complete_matrix(tdp, identity=identity, signed=True)
+        (tdp / "orphan-installer.exe.sig").write_text(
+            "placeholder", encoding="utf-8"
+        )
+        try:
+            _assemble_ok(tdp, identity, signed=True)
+            check("orphan updater signature fails", False)
+        except SystemExit:
+            check("orphan updater signature fails", True)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        rc_identity = _identity("v0.1.0-rc1", rc.RC_SHA)
+        rc.populate_complete_matrix(tdp, identity=rc_identity, signed=False)
+        (tdp / "orphan-installer.exe.sig").write_text(
+            "placeholder", encoding="utf-8"
+        )
+        try:
+            _assemble_ok(tdp, rc_identity, signed=False)
+            check("unsigned RC rejects an orphan updater signature", False)
+        except SystemExit:
+            check("unsigned RC rejects an orphan updater signature", True)
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         rc.populate_complete_matrix(tdp, identity=identity, signed=True)
@@ -531,6 +556,40 @@ def test_promote_bundle_integrity() -> None:
             allow_test_sig=True,
         )
         check("unchanged assembled bundle validates", not errors, str(errors))
+
+    # Simulate a self-consistent bundle emitted by an older/compromised
+    # unsigned-RC assembler: generated integrity metadata includes the orphan,
+    # so promotion must reject the sidecar itself rather than relying on a
+    # checksum mismatch to catch it.
+    with tempfile.TemporaryDirectory() as td:
+        directory = Path(td)
+        rc_identity = _identity("v0.1.0-rc1", rc.RC_SHA)
+        rc.populate_complete_matrix(directory, identity=rc_identity, signed=False)
+        _assemble_ok(directory, rc_identity, signed=False)
+        (directory / "orphan-installer.exe.sig").write_text(
+            "placeholder", encoding="utf-8"
+        )
+        raw = rc.collect_assets(directory, skip_generated=True)
+        rc.write_sha256sums(directory, [asset.path for asset in raw])
+        rc.write_inventory(directory, identity=rc_identity, assets=raw)
+        rc.write_sbom(directory, identity=rc_identity, assets=raw)
+        rc.write_manifest(
+            directory,
+            identity=rc_identity,
+            assets=raw,
+            signed_updater=False,
+            promotable=True,
+        )
+        errors = rc.validate_promote_payload(
+            identity=rc_identity,
+            directory=directory,
+            allow_test_sig=True,
+        )
+        check(
+            "unsigned RC promotion rejects an orphan updater signature",
+            bool(errors),
+            str(errors),
+        )
 
 
 def test_resumable_upload_plan() -> None:

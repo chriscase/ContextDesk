@@ -503,6 +503,7 @@ def infer_desktop_os(name: str) -> Optional[str]:
         lower.endswith(".appimage")
         or lower.endswith(".appimage.tar.gz")
         or lower.endswith(".deb")
+        or lower.endswith(".rpm")
     ):
         return "linux"
     return None
@@ -520,7 +521,15 @@ def infer_updater_triple(name: str) -> Optional[str]:
         ".nsis.zip"
     ):
         return "windows-x86_64"
+    # Tauri v2 signs the native NSIS installer itself.  The release workflow
+    # stages that exact `.exe` plus its `.exe.sig` sidecar rather than wrapping
+    # it in the legacy `.nsis.zip` shape.
+    if lower.endswith(".exe") and infer_cli_platform(name) is None:
+        return "windows-x86_64"
     if lower.endswith(".appimage.tar.gz"):
+        return "linux-x86_64"
+    # Tauri v2 likewise signs the AppImage directly.
+    if lower.endswith(".appimage"):
         return "linux-x86_64"
     return None
 
@@ -617,7 +626,14 @@ def detect_foreign_reuse(
 def desktop_os_present(assets: Sequence[Asset]) -> Dict[str, List[str]]:
     found: Dict[str, List[str]] = {os_name: [] for os_name in REQUIRED_DESKTOP}
     for asset in assets:
-        if asset.kind == "desktop" and asset.platform in found:
+        # A signed native installer is both the installable desktop artifact
+        # and the updater payload.  Keep its single released byte sequence in
+        # the updater class while allowing it to satisfy the desktop matrix.
+        if (
+            asset.kind in {"desktop", "updater"}
+            and not asset.name.endswith(".sig")
+            and asset.platform in found
+        ):
             found[asset.platform].append(asset.name)
     return found
 
@@ -694,6 +710,7 @@ def build_latest_json(
     allow_test_sig: bool,
 ) -> Dict[str, Any]:
     by_name = {a.name: a for a in assets}
+    verify_signature_sidecars(assets, allow_test_sig=allow_test_sig)
     platforms: Dict[str, Dict[str, str]] = {}
     for asset in assets:
         if asset.kind != "updater" or asset.name.endswith(".sig"):
@@ -734,6 +751,24 @@ def build_latest_json(
     }
 
 
+def verify_signature_sidecars(
+    assets: Sequence[Asset], *, allow_test_sig: bool
+) -> None:
+    """Require every staged updater signature to bind exact staged bytes."""
+    by_name = {asset.name: asset for asset in assets}
+    for sidecar in assets:
+        if not sidecar.name.endswith(".sig"):
+            continue
+        payload_name = sidecar.name[: -len(".sig")]
+        payload = by_name.get(payload_name)
+        if payload is None:
+            die(f"orphan updater signature {sidecar.name} has no staged payload")
+        signature = sidecar.path.read_text(encoding="utf-8").strip()
+        verify_artifact_signature(
+            payload.path.read_bytes(), signature, allow_test_sig=allow_test_sig
+        )
+
+
 def verify_latest_json(
     data: Mapping[str, Any],
     *,
@@ -746,6 +781,7 @@ def verify_latest_json(
         die("latest.json must be an object with platforms")
     names = {a.name for a in assets}
     by_name = {a.name: a for a in assets}
+    verify_signature_sidecars(assets, allow_test_sig=allow_test_sig)
     platforms = data.get("platforms") or {}
     if not platforms:
         die("latest.json platforms is empty")
@@ -961,6 +997,10 @@ def assemble(
     if reuse_errs:
         die("; ".join(reuse_errs))
     require_complete_matrices(assets)
+    # A staged signature is always a security claim, even when an RC does not
+    # require updater metadata.  Never let unsigned-release policy turn an
+    # orphan, stale, or invalid sidecar into an unchecked release asset.
+    verify_signature_sidecars(assets, allow_test_sig=allow_test_sig)
 
     signed = False
     latest_path = directory / "latest.json"
@@ -1398,6 +1438,7 @@ def validate_promote_payload(
         # drop generated metadata from matrix completeness by re-running assemble checks
         raw = collect_assets(directory, skip_generated=True)
         require_complete_matrices(raw)
+        verify_signature_sidecars(raw, allow_test_sig=allow_test_sig)
         reuse_errs = detect_foreign_reuse(
             names=[a.name for a in assets],
             urls=[],
@@ -1733,6 +1774,7 @@ def populate_complete_matrix(
     files = {
         f"ContextDesk_{identity.package_version}_aarch64.dmg": b"dmg-bytes",
         f"ContextDesk_{identity.package_version}_x64_en-US.msi": b"msi-bytes",
+        f"ContextDesk_{identity.package_version}_x64-setup.exe": b"nsis-bytes",
         f"ContextDesk_{identity.package_version}_amd64.AppImage": b"appimage-bytes",
         f"contextdesk_{identity.package_version}_amd64.deb": b"deb-bytes",
         f"contextdesk-{identity.version}-macos-arm64.tar.gz": b"cli-mac-arm",
@@ -1742,14 +1784,15 @@ def populate_complete_matrix(
     }
     updater = {
         "ContextDesk.app.tar.gz": b"macos-updater",
-        f"ContextDesk_{identity.package_version}_x64_en-US.msi.zip": b"win-updater",
-        f"ContextDesk_{identity.package_version}_amd64.AppImage.tar.gz": b"linux-updater",
+        f"ContextDesk_{identity.package_version}_x64-setup.exe": b"nsis-bytes",
+        f"ContextDesk_{identity.package_version}_amd64.AppImage": b"appimage-bytes",
     }
     for name, data in files.items():
         _write(directory / name, data)
     if signed:
         for name, data in updater.items():
-            _write(directory / name, data)
+            if not (directory / name).exists():
+                _write(directory / name, data)
             _write(directory / f"{name}.sig", test_signature(data))
     write_build_info(directory, identity)
     if extra:

@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "cd-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "cd-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "cd-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "cd-test-gateway"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "reqwest 0.12.28",
  "serde_json",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "cd-triage-bench"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "cd-triage-bench-adapter"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cd-core",
  "cd-triage-bench",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "cd-triage-bench-adapter-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "assert_cmd",
  "cd-triage-bench",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "cd-triage-bench-live"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cd-core",
  "cd-test-gateway",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "cd-triage-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "cd-triage-sdk",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "cd-triage-sdk"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "cd-workflow"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "cd-core",
