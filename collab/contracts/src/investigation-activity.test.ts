@@ -209,6 +209,7 @@ describe("human-readable presentation boundary", () => {
   it("never invents a label and uses bounded honest fallbacks", () => {
     expect(safeResourceLabel("evidence_item", null)).toBe("Evidence item");
     expect(safeResourceLabel("intake_batch", null)).toBe("Intake batch");
+    expect(safeResourceLabel("gold", null)).toBe("Outcome benchmark");
     expect(safeResourceLabel("workstream_attempt", CASE_A)).toBe("Workstream attempt");
     expect(safeResourceLabel("evidence_item", "ab".repeat(32))).toBe("Evidence item");
     expect(safeResourceLabel("evidence_item", "case_created")).toBe("Evidence item");
@@ -413,6 +414,7 @@ describe("routed locator focus against shipped War Room sections", () => {
       action: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
       observation: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
       decision_revision: { stage: "decide", section: "decision-heading", itemKind: null },
+      gold: { stage: "decide", section: "decision-heading", itemKind: null },
       export_event: { stage: "decide", section: "export-heading", itemKind: null },
       portable_archive_event: { stage: "decide", section: "export-heading", itemKind: null },
     };

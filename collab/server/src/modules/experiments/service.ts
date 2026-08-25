@@ -1127,7 +1127,7 @@ export class ExperimentService {
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_gold_promoted",
       actor,
-      targetId: experimentId,
+      targetId: gold.goldId,
       clientTime: null,
       payload: {
         goldId: gold.goldId,

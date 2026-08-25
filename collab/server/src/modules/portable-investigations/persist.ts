@@ -145,6 +145,18 @@ function importedTimelinePayload(
       if (experiment) payload.packageId = experiment.packageId;
     }
   }
+  if (event.targetNamespace === "gold" && event.targetId) {
+    const gold = bundle.gold.find((row) => row.goldId === event.targetId);
+    payload.goldId = remapOf(report, "gold", event.targetId);
+    if (gold) {
+      payload.version = gold.version;
+      payload.acceptedDecisionId = remapOf(report, "decision", gold.acceptedDecisionId);
+      payload.acceptedDecisionRevision = gold.acceptedDecisionRevision;
+      payload.predecessorGoldId = gold.predecessorGoldId
+        ? remapOf(report, "gold", gold.predecessorGoldId)
+        : null;
+    }
+  }
   if (event.targetNamespace === "triage_job" && event.targetId) {
     const attempt = parsePortableTriageAttemptTarget(event.targetId);
     payload.jobId = remapOf(report, "triage_job", attempt?.jobId ?? event.targetId);
@@ -659,6 +671,9 @@ export async function persistPortableArchive(input: {
   for (const event of bundle.timeline) {
     if (event.kind === "corpus_intake_committed" && (event.targetNamespace !== "intake_batch" || !event.targetId)) {
       throw new Error("corpus intake timeline is missing a portable intake-batch target");
+    }
+    if (event.kind === "experiment_gold_promoted" && (event.targetNamespace !== "gold" || !event.targetId)) {
+      throw new Error("experiment gold timeline is missing a portable gold target");
     }
   }
   const remapCandidateId = (candidateId: string): string => {

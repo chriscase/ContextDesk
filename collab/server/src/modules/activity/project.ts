@@ -230,8 +230,20 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
       return { activityKind: "decision_accepted", resourceKind: "decision_revision", resourceId: decisionId, provenance: "human", summary: "accepted a decision", humanFinding: true, revision: revision ?? 0, workstreamId: null };
     case "experiment_decision_superseded":
       return { activityKind: "decision_superseded", resourceKind: "decision_revision", resourceId: decisionId, provenance: "human", summary: "superseded a decision", humanFinding: true, revision: revision ?? 0, workstreamId: null };
-    case "experiment_gold_promoted":
-      return { activityKind: "decision_accepted", resourceKind: "decision_revision", resourceId: target, provenance: "human", summary: "recorded an accepted outcome benchmark", humanFinding: true, revision: revision ?? 0, workstreamId: null };
+    case "experiment_gold_promoted": {
+      const goldId = str(payload, "goldId") ?? target;
+      const version = num(payload, "version") ?? revision;
+      return {
+        activityKind: "decision_accepted",
+        resourceKind: "gold",
+        resourceId: goldId,
+        provenance: "human",
+        summary: "recorded an accepted outcome benchmark",
+        humanFinding: true,
+        revision: version,
+        workstreamId: null,
+      };
+    }
     case "external_run_imported":
     case "experiment_trace_imported":
       return { activityKind: "import_recorded", resourceKind: "evidence_context", resourceId: target, provenance: "ai_generated", summary: "imported analysis was recorded", humanFinding: false, revision: null, workstreamId: null };

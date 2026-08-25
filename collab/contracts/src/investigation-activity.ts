@@ -52,6 +52,7 @@ export const INVESTIGATION_RESOURCE_KINDS = [
   "action",
   "observation",
   "decision_revision",
+  "gold",
   "export_event",
   "portable_archive_event",
 ] as const;
@@ -443,6 +444,14 @@ export function routedInvestigationFocus(
         itemKind: null,
         lane: null,
       };
+    case "gold":
+      return {
+        stage: "decide",
+        section: "decision-heading",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
     case "export_event":
     case "portable_archive_event":
       return {
@@ -600,6 +609,7 @@ const RESOURCE_KIND_FALLBACK: Record<InvestigationResourceKindV1, string> = {
   action: "Action",
   observation: "Observation",
   decision_revision: "Decision",
+  gold: "Outcome benchmark",
   export_event: "Export",
   portable_archive_event: "Portable archive event",
 };

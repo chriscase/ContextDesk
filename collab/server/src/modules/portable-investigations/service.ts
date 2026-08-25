@@ -299,6 +299,13 @@ function portableTimelineTarget(
     }
     return null;
   }
+  if (row.kind === "experiment_gold_promoted") {
+    const goldId = typeof payload.goldId === "string" ? payload.goldId : row.targetId;
+    if (goldId && namespaces.get(goldId)?.has("gold")) {
+      return { targetId: goldId, namespace: "gold" };
+    }
+    return null;
+  }
   if (/^triage_candidate_/.test(row.kind)) {
     const attempt = parsePortableTriageAttemptTarget(row.targetId);
     if (attempt && namespaces.get(attempt.jobId)?.has("triage_job")) {
@@ -1008,6 +1015,12 @@ export class PortableInvestigationService {
         throw new PortableServerError(
           "unsupported_state",
           "experiment decision timeline is missing a portable decision target",
+        );
+      }
+      if (row.kind === "experiment_gold_promoted" && addressed?.namespace !== "gold") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment gold timeline is missing a portable gold target",
         );
       }
       if (/^triage_candidate_/.test(row.kind) && addressed?.namespace !== "triage_job") {
