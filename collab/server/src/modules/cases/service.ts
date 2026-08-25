@@ -51,6 +51,7 @@ import {
   type Actor,
   type ArtifactRow,
   type CaseStore,
+  type CaseTimelineRow,
   type OverviewActivityRow,
   type OverviewCounts,
   type OverviewOpenCaseRow,
@@ -60,9 +61,11 @@ import {
   type SnapshotRow,
   type TimelineInsert,
   type TimelineRow,
+  type ActivityPageCursor,
+  type ActivityPageQuery,
 } from "./store.js";
 
-export type { Actor, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, OverviewVisibilityBoundary, TimelineRow } from "./store.js";
+export type { Actor, ArtifactRow, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, OverviewVisibilityBoundary, RevisionRow, TimelineRow } from "./store.js";
 
 const ACTIVITY_DETAIL_KEYS = new Set([
   "kind",
@@ -224,6 +227,27 @@ export class CaseService {
     return rows.filter((c) => isAdmin || this.isMember(c, actor.id)).map((c) => this.toCase(c));
   }
 
+  async listActivityPage(
+    actor: Actor,
+    isAdmin: boolean,
+    query: { caseId?: string; limit: number; after?: ActivityPageCursor },
+  ): Promise<CaseTimelineRow[]> {
+    if (query.caseId) {
+      const row = await this.getCase(query.caseId, actor, isAdmin);
+      if (!row) return [];
+      return this.store.listActivityPage({
+        caseId: query.caseId,
+        limit: query.limit,
+        ...(query.after ? { after: query.after } : {}),
+      });
+    }
+    return this.store.listActivityPage({
+      scope: { actorId: actor.id, isAdmin },
+      limit: query.limit,
+      ...(query.after ? { after: query.after } : {}),
+    } satisfies ActivityPageQuery);
+  }
+
   async listRecentActivity(
     actor: Actor,
     isAdmin: boolean,
@@ -250,6 +274,43 @@ export class CaseService {
         occurredAt: event.serverTime,
         details: activityDetails(event.payload),
       }];
+    });
+  }
+
+  /**
+   * Membership-filtered timeline rows for activity projection.
+   * Investigation-scoped reads use the full authoritative timeline; overview
+   * reads use a bounded recent window over the same table.
+   */
+  async listAuthorizedTimelineSources(
+    actor: Actor,
+    isAdmin: boolean,
+    options: { caseId?: string; limit: number },
+  ): Promise<Array<{ caseId: string; title: string; event: CaseTimelineRow }>> {
+    const visible = (await this.store.listCases()).filter(
+      (row) => isAdmin || this.isMember(row, actor.id),
+    );
+    if (options.caseId) {
+      const row = visible.find((item) => item.id === options.caseId);
+      if (!row) return [];
+      const events = await this.store.listTimeline(row.id);
+      return events.map((event) => ({
+        caseId: row.id,
+        title: row.title,
+        event: { ...event, caseId: row.id },
+      }));
+    }
+    const limit = Math.max(0, Math.trunc(options.limit) || 0);
+    if (limit === 0) return [];
+    const events = await this.store.listActivityPage({
+      scope: { actorId: actor.id, isAdmin },
+      limit,
+    });
+    const byId = new Map(visible.map((row) => [row.id, row]));
+    return events.flatMap((event) => {
+      const row = byId.get(event.caseId);
+      if (!row) return [];
+      return [{ caseId: row.id, title: row.title, event }];
     });
   }
 

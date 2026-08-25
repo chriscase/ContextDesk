@@ -49,6 +49,7 @@ view state.
 | Model/detector proposal review queue (findings + report sections) | **Partial** | [`proposed.rs`](../../../crates/cd-core/src/investigations/proposed.rs) and [`report.rs`](../../../crates/cd-core/src/investigations/report.rs)                                       | Ranking, walkthrough, and deeper-analysis requests remain #646 |
 | Accepted-state report projection + Markdown export   | **Partial** | [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) `assemble_investigation_report`                                                                                  | Fuller #532 vocabulary, patches/undo, claim detection, HTML/PDF, evidence appendix |
 | War Room investigation-scoped file/ZIP/directory intake | **Local integration** | Collab contract `investigation-corpus-intake.ts`, module `collab/server/src/modules/corpus-intake/`, Capture UI `CorpusIntakePanel.tsx` | Parallel portable-investigation restore lane is out of scope here. PostgreSQL `withAtomic` now binds store queries to the transaction via async-local storage; filesystem blob orphans after a failed commit remain content-addressed residue. |
+| War Room activity feed and resource locators | **Local integration** | Collab contract `investigation-activity.ts`, module `collab/server/src/modules/activity/`, APIs `GET /api/investigation-activity` and `GET /api/investigation-resources/resolve` | Overview/web deep-link UI is not wired; locators reauthorize at resolve time and are not tokens. |
 
 ## 3. Reusable method
 
