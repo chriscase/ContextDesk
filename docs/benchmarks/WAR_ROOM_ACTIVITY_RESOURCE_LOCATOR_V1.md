@@ -112,7 +112,7 @@ not `comparison_finding`. `external_run_imported` and `run_corroboration`
 project `imported_ai_run` at the imported-run id and Capture `triage-capture`
 / `kind=imported-run`, not snapshot `evidence_context`. `snapshot_frozen`
 projects `evidence_context` at the snapshot id and Analyze
-`triage-evidence-board` / `kind=snapshot`. Live `experiment_decision_*` writes address the
+`triage-evidence-board` / `kind=snapshot`. Live `contribution_revised` and `contribution_tombstoned` writes include `kind` so copy-link stays on the contribution resource (discussion/hypothesis/note/action) instead of defaulting to `observation` and failing kind-strict resolve. Live `experiment_decision_*` writes address the
 decision id (`targetId` = decision id) so activity is not payload-dependent;
 portable persist refuses archives that drop `targetNamespace=decision`.
 

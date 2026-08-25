@@ -956,6 +956,7 @@ export class CaseService {
           targetId: contributionId,
           clientTime: canonicalTime,
           payload: {
+            kind: next.kind,
             revision: next.revision,
             predecessor: latest.revision,
             contentHash: next.contentHash,
@@ -1009,7 +1010,7 @@ export class CaseService {
           actor,
           targetId: contributionId,
           clientTime: null,
-          payload: { revision: next.revision },
+          payload: { kind: latest.kind, revision: next.revision, tombstone: true },
         });
         await this.audit.append({
           identity: actor.id,

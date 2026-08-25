@@ -149,16 +149,22 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
     case "snapshot_frozen":
       return { activityKind: "evidence_frozen", resourceKind: "evidence_context", resourceId: target, provenance: "system", summary: "froze an evidence snapshot", humanFinding: false, revision: null, workstreamId: null };
     case "contribution_tombstoned":
-      return {
-        activityKind: contribution === "upload" ? "evidence_omitted" : "observation_recorded",
-        resourceKind: contribution === "upload" ? "evidence_item" : "observation",
-        resourceId: target,
-        provenance: "human",
-        summary: contribution === "upload" ? "omitted evidence" : "omitted an investigation record",
-        humanFinding: false,
-        revision,
-        workstreamId: null,
-      };
+      if (contribution === "upload") {
+        return { activityKind: "evidence_omitted", resourceKind: "evidence_item", resourceId: target, provenance: "human", summary: "omitted evidence", humanFinding: false, revision, workstreamId: null };
+      }
+      if (contribution === "message") {
+        return { activityKind: "comment_added", resourceKind: "discussion_message", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
+      }
+      if (contribution === "note") {
+        return { activityKind: "observation_recorded", resourceKind: "observation", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
+      }
+      if (contribution === "hypothesis") {
+        return { activityKind: "hypothesis_updated", resourceKind: "hypothesis", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
+      }
+      if (contribution === "action") {
+        return { activityKind: assigned ? "assignment_recorded" : "action_recorded", resourceKind: "action", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
+      }
+      return { activityKind: "observation_recorded", resourceKind: "observation", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
     case "contribution_created":
     case "contribution_revised":
       if (contribution === "message") {
