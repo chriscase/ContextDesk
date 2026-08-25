@@ -1078,7 +1078,7 @@ export class CaseService {
           actor,
           targetId: contributionId,
           clientTime: canonicalTime,
-          payload: { status, links },
+          payload: { kind: next.kind, revision: next.revision, status, links },
         });
         await this.audit.append({
           identity: actor.id,

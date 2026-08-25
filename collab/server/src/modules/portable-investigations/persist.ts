@@ -118,7 +118,8 @@ export function remapPortableTimelineTarget(
 function isContributionHistoryKind(kind: string): boolean {
   return kind === "contribution_created"
     || kind === "contribution_revised"
-    || kind === "contribution_tombstoned";
+    || kind === "contribution_tombstoned"
+    || kind === "hypothesis_status";
 }
 
 function isDecisionHistoryKind(kind: string): boolean {
@@ -171,6 +172,7 @@ function importedTimelinePayload(
       payload.contentHash = contribution.contentHash;
       payload.sourceId = remapOf(report, "source", contribution.sourceId);
       if (contribution.tombstoned) payload.tombstone = true;
+      if (contribution.hypothesisStatus) payload.status = contribution.hypothesisStatus;
     }
   }
   if (event.targetNamespace === "evidence" && event.targetId) {

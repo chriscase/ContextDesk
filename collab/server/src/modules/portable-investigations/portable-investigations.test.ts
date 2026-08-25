@@ -2002,6 +2002,67 @@ describe("portable investigation apply", () => {
     expect(destAccepted?.locator.resourceId).not.toBe(sourceAccepted?.locator.resourceId);
   });
 
+  it("preserves hypothesis status revisions after portable restore", async () => {
+    const row = await fixture();
+    const hypothesis = await row.cases.addContribution(
+      row.caseId,
+      ACTOR,
+      {
+        kind: "hypothesis",
+        body: "The synthetic stall is a bounded queue wait.",
+        privacyClass: "share_safe",
+      },
+      "fixture",
+    );
+    const statused = await row.cases.setHypothesisStatus(
+      row.caseId,
+      hypothesis.id,
+      ACTOR,
+      "contradicted",
+      [],
+      "fixture",
+    );
+    expect(statused.revision).toBe(hypothesis.revision + 1);
+    const activity = new InvestigationActivityService({
+      cases: row.cases,
+      installationId: "inst-syntheticnorth",
+    });
+    const sourcePage = await activity.listPage({ actor: ACTOR, isAdmin: false, caseId: row.caseId });
+    const sourceUpdated = sourcePage.items.find((item) =>
+      item.summary === "updated a working hypothesis" && item.locator.resourceId === hypothesis.id,
+    );
+    expect(sourceUpdated?.locator.kind).toBe("hypothesis");
+    expect(sourceUpdated?.locator.revision).toBe(statused.revision);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const destPage = await activity.listPage({
+      actor: ACTOR,
+      isAdmin: false,
+      caseId: applied.investigationId,
+    });
+    const destUpdated = destPage.items.find((item) => item.summary === "updated a working hypothesis");
+    const destHypotheses = (await row.cases.listContributions(applied.investigationId, ACTOR, false))
+      .filter((item) => item.kind === "hypothesis");
+    expect(destHypotheses).toHaveLength(1);
+    expect(destHypotheses[0]?.hypothesisStatus).toBe("contradicted");
+    expect(destHypotheses[0]?.revision).toBe(statused.revision);
+    expect(destUpdated?.locator.kind).toBe("hypothesis");
+    expect(destUpdated?.locator.revision).toBe(statused.revision);
+    expect(destUpdated?.locator.resourceId).not.toBe(hypothesis.id);
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({
