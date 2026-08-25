@@ -10,6 +10,7 @@ import {
   loginAs,
   openCase,
   uniqueTitle,
+  stagePanel,
 } from "../src/helpers.js";
 import { FIXTURE_USERS, SEEDED_SOURCES } from "../src/users.js";
 
@@ -84,8 +85,10 @@ test.describe("complete war-room operator journey", () => {
 
     await addTimelineEntry(page, "note", humanNote);
     await expectFocusedStage(page, "capture");
-    await expect(page.getByText("human-authored").first()).toBeVisible();
-    await expect(page.getByText(humanNote)).toBeVisible();
+    // Situation restates the same note, so name the stage under test.
+    const capture = stagePanel(page, "Capture");
+    await expect(capture.getByText("human-authored").first()).toBeVisible();
+    await expect(capture.getByText(humanNote)).toBeVisible();
 
     await importChat(page, {
       output: fixtureText("chats", "external-triage-a.txt"),
@@ -103,10 +106,10 @@ test.describe("complete war-room operator journey", () => {
     await expect(imported).toContainText("Source: Fixture chat assistant · external-tool");
     await expect(imported).toContainText("visibility importer_described");
     await expect(imported).not.toContainText("human-authored");
-    await expect(page.getByText("imported output").first()).toBeVisible();
-    await expect(page.getByText("imported · unverified").first()).toBeVisible();
-    await expect(page.getByText(/\d+ human (entry|entries)/)).toBeVisible();
-    await expect(page.getByText(/1 imported run/)).toBeVisible();
+    await expect(capture.getByText("imported output").first()).toBeVisible();
+    await expect(capture.getByText("imported · unverified").first()).toBeVisible();
+    await expect(capture.getByText(/\d+ human (entry|entries)/)).toBeVisible();
+    await expect(capture.getByText(/1 imported run/)).toBeVisible();
 
     await gotoStage(page, "Analyze");
     await expectFocusedStage(page, "analyze");
@@ -291,8 +294,9 @@ test.describe("complete war-room operator journey", () => {
     await expect(completedLanes).toHaveCount(3);
 
     await gotoStage(page, "Capture");
-    await expect(page.getByText(humanNote)).toBeVisible();
-    await expect(page.getByText("human-authored").first()).toBeVisible();
+    const captureAgain = stagePanel(page, "Capture");
+    await expect(captureAgain.getByText(humanNote)).toBeVisible();
+    await expect(captureAgain.getByText("human-authored").first()).toBeVisible();
     await expect(imported.locator(".imported-run__banner")).toHaveText("Unverified imported run");
     await expect(page.getByText("imported output").first()).toBeVisible();
 
