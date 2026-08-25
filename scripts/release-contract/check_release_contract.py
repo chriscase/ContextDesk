@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -210,7 +211,13 @@ def test_identity() -> None:
     print("== mutation: identity ==")
     versions = rc.read_package_versions(ROOT)
     check("repo package versions agree", len(versions.unique()) == 1, str(versions))
-    sha = "0123456789abcdef0123456789abcdef01234567"
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     ident = rc.check_identity(
         repo_root=ROOT,
         tag="v0.1.0",
@@ -545,6 +552,48 @@ def test_resumable_upload_plan() -> None:
         except SystemExit:
             check("retry rejects remote-only asset", True)
 
+    print("== mutation: deterministic reassembly after partial upload ==")
+    identity = _identity()
+    with tempfile.TemporaryDirectory() as local_td, tempfile.TemporaryDirectory() as remote_td:
+        local = Path(local_td)
+        remote = Path(remote_td)
+        rc.populate_complete_matrix(local, identity=identity, signed=True)
+        _assemble_ok(local, identity, signed=True)
+        latest = json.loads((local / "latest.json").read_text(encoding="utf-8"))
+        sbom = json.loads((local / "sbom.cdx.json").read_text(encoding="utf-8"))
+        inventory = (local / "inventory.txt").read_text(encoding="utf-8")
+        check(
+            "all generated dates bind to the immutable release identity",
+            latest["pub_date"] == identity.source_timestamp
+            and sbom["metadata"]["timestamp"] == identity.source_timestamp
+            and f"# generated {identity.source_timestamp}" in inventory,
+        )
+        first_bytes = {
+            name: (local / name).read_bytes()
+            for name in sorted(rc.METADATA_NAMES)
+            if (local / name).is_file()
+        }
+        for name in sorted(first_bytes)[:3]:
+            shutil.copy2(local / name, remote / name)
+
+        _assemble_ok(local, identity, signed=True)
+        second_bytes = {
+            name: (local / name).read_bytes()
+            for name in sorted(first_bytes)
+        }
+        check(
+            "identical release identity reassembles byte-for-byte",
+            first_bytes == second_bytes,
+        )
+        plan = rc.plan_resumable_upload(local, remote)
+        check(
+            "partial metadata upload remains resumable after reassembly",
+            len(plan["skipped"]) == 3
+            and sorted(plan["upload"] + plan["skipped"])
+            == sorted(path.name for path in local.iterdir() if path.is_file()),
+            str(plan),
+        )
+
 
 def test_exact_release_object_state() -> None:
     print("== mutation: exact tag/target and idempotent publish state ==")
@@ -635,6 +684,19 @@ def test_duplicate_assets() -> None:
             check("two CLI archives for one platform fail", False)
         except SystemExit:
             check("two CLI archives for one platform fail", True)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        rc.populate_complete_matrix(tdp, identity=identity, signed=True)
+        duplicate = tdp / "ContextDesk-secondary.app.tar.gz"
+        duplicate.write_bytes(b"second-macos-updater")
+        (tdp / f"{duplicate.name}.sig").write_text(
+            rc.test_signature(duplicate.read_bytes()), encoding="utf-8"
+        )
+        try:
+            _assemble_ok(tdp, identity, signed=True)
+            check("two updater archives for one platform triple fail", False)
+        except SystemExit:
+            check("two updater archives for one platform triple fail", True)
 
 
 def test_rc5_reuse() -> None:

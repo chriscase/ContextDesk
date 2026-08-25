@@ -105,10 +105,6 @@ def die(msg: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -195,6 +191,10 @@ class ReleaseIdentity:
     git_describe: str
     channel: str
     kind: str
+    # Immutable release metadata uses the exact commit's timestamp. Keeping it
+    # in the identity makes reassembly byte-for-byte reproducible after a
+    # partially uploaded draft.
+    source_timestamp: str = "1970-01-01T00:00:00Z"
 
     @property
     def prerelease(self) -> bool:
@@ -238,6 +238,20 @@ def check_identity(
         )
     if kind == "ga" and version != package_version:
         die(f"GA tag version {version} must equal package version {package_version}")
+    try:
+        commit_date = subprocess.run(
+            ["git", "show", "-s", "--format=%cI", sha],
+            cwd=Path(repo_root),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        parsed_commit_date = datetime.fromisoformat(commit_date.replace("Z", "+00:00"))
+        source_timestamp = parsed_commit_date.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        die(f"cannot resolve exact commit timestamp for {sha}: {exc}")
     return ReleaseIdentity(
         tag=tag.strip(),
         version=version,
@@ -246,6 +260,7 @@ def check_identity(
         git_describe=describe,
         channel=ch,
         kind=kind,
+        source_timestamp=source_timestamp,
     )
 
 
@@ -537,6 +552,7 @@ def collect_assets(directory: Path, *, skip_generated: bool = True) -> List[Asse
             "inventory.txt",
             "sbom.cdx.json",
             "release-manifest.json",
+            "latest.json",
         }:
             continue
         kind, platform = classify_name(path.name)
@@ -637,6 +653,21 @@ def require_complete_matrices(assets: Sequence[Asset]) -> None:
     for plat, names in cli.items():
         if len(names) > 1:
             errors.append(f"duplicate CLI archives for {plat}: {names}")
+    updater_by_triple: Dict[str, str] = {}
+    for asset in assets:
+        if asset.kind != "updater" or asset.name.endswith(".sig"):
+            continue
+        triple = infer_updater_triple(asset.name)
+        if not triple:
+            errors.append(f"cannot infer updater platform for {asset.name}")
+            continue
+        previous = updater_by_triple.get(triple)
+        if previous:
+            errors.append(
+                f"duplicate updater archives for {triple}: {[previous, asset.name]}"
+            )
+        else:
+            updater_by_triple[triple] = asset.name
     if errors:
         die("; ".join(errors))
 
@@ -681,6 +712,8 @@ def build_latest_json(
             f"https://github.com/{download_repo}/releases/download/"
             f"{identity.tag}/{asset.name}"
         )
+        if triple in platforms:
+            die(f"duplicate updater archives for {triple}")
         platforms[triple] = {"signature": signature, "url": url}
     if not platforms:
         die("signed updater latest.json required but no updater archives were found")
@@ -696,7 +729,7 @@ def build_latest_json(
     return {
         "version": identity.package_version,
         "notes": f"ContextDesk {identity.tag} ({identity.git_sha})",
-        "pub_date": utc_now(),
+        "pub_date": identity.source_timestamp,
         "platforms": platforms,
     }
 
@@ -772,10 +805,12 @@ def write_sha256sums(directory: Path, files: Sequence[Path]) -> Path:
     return out
 
 
-def write_inventory(directory: Path, assets: Sequence[Asset]) -> Path:
+def write_inventory(
+    directory: Path, *, identity: ReleaseIdentity, assets: Sequence[Asset]
+) -> Path:
     lines = [
         f"# ContextDesk release inventory",
-        f"# generated {utc_now()}",
+        f"# generated {identity.source_timestamp}",
         "",
     ]
     for asset in sorted(assets, key=lambda a: a.name):
@@ -808,7 +843,7 @@ def write_sbom(
         "specVersion": "1.5",
         "version": 1,
         "metadata": {
-            "timestamp": utc_now(),
+            "timestamp": identity.source_timestamp,
             "component": {
                 "type": "application",
                 "name": "contextdesk-release",
@@ -955,20 +990,20 @@ def assemble(
         signed = True
     elif latest_path.is_file():
         latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        latest_asset = Asset(
+            name="latest.json",
+            path=latest_path,
+            sha256=sha256_file(latest_path),
+            kind="metadata",
+        )
         verify_latest_json(
             latest,
-            assets=assets + [
-                Asset(
-                    name="latest.json",
-                    path=latest_path,
-                    sha256=sha256_file(latest_path),
-                    kind="metadata",
-                )
-            ],
+            assets=assets + [latest_asset],
             identity=identity,
             allow_test_sig=allow_test_sig,
             download_repo=download_repo,
         )
+        assets.append(latest_asset)
         signed = True
 
     if identity.kind == "ga" and not signed:
@@ -976,7 +1011,7 @@ def assemble(
 
     checksum_files = [a.path for a in assets if a.name != "SHA256SUMS"]
     write_sha256sums(directory, checksum_files)
-    write_inventory(directory, assets)
+    write_inventory(directory, identity=identity, assets=assets)
     write_sbom(directory, identity=identity, assets=assets)
     promotable = True
     if identity.kind == "ga" and not signed:
