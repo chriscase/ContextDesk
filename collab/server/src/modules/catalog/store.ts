@@ -25,6 +25,7 @@ export interface CatalogStore {
   get(id: string): Promise<SourceRow | null>;
   findByIdentity(identityId: string): Promise<SourceRow | null>;
   insert(row: SourceRow): Promise<void>;
+  remove(id: string): Promise<void>;
   updateMeta(id: string, patch: { name: string; description: string | null }): Promise<void>;
   setLifecycle(id: string, lifecycle: SourceLifecycle): Promise<void>;
 }
@@ -80,6 +81,11 @@ export class MemoryCatalogStore implements CatalogStore {
 
   async insert(row: SourceRow): Promise<void> {
     this.rows.set(row.id, { ...row });
+  }
+
+  async remove(id: string): Promise<void> {
+    if (id === PERMANENT_UNKNOWN_SOURCE_ID) return;
+    this.rows.delete(id);
   }
 
   async updateMeta(id: string, patch: { name: string; description: string | null }): Promise<void> {
@@ -138,6 +144,14 @@ export class PgCatalogStore implements CatalogStore {
         row.createdAt,
         row.createdBy,
       ],
+    );
+  }
+
+  async remove(id: string): Promise<void> {
+    if (id === PERMANENT_UNKNOWN_SOURCE_ID) return;
+    await this.queryable.query(
+      `DELETE FROM catalog_sources WHERE id = $1 AND id <> $2`,
+      [id, PERMANENT_UNKNOWN_SOURCE_ID],
     );
   }
 

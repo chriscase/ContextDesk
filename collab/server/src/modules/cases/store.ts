@@ -641,21 +641,21 @@ export class MemoryCaseStore implements CaseStore {
   }
 
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
-    return this.atomicBoundary(async () => {
+    const run = async (): Promise<T> => {
       const snapshot = await Promise.resolve(this.capture());
-      const auditSnapshot = audit instanceof MemoryAuditStore
-        ? await Promise.resolve(audit.capture())
-        : null;
       try {
         return await operation();
       } catch (error) {
         await Promise.resolve(this.restore(snapshot));
-        if (audit instanceof MemoryAuditStore && auditSnapshot) {
-          await Promise.resolve(audit.restore(auditSnapshot));
+        if (audit instanceof MemoryAuditStore) {
+          await Promise.resolve(audit.rollbackTracked());
         }
         throw error;
       }
-    });
+    };
+    return this.atomicBoundary(() =>
+      (audit instanceof MemoryAuditStore ? audit.runTracked(run) : run()),
+    );
   }
 
   async lockIntakeIdempotency(_caseId: string, _key: string): Promise<void> {

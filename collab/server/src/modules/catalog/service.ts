@@ -1,4 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { SourceKind, SourceV1 } from "@cd-collab/contracts";
+import { PERMANENT_UNKNOWN_SOURCE_ID } from "@cd-collab/contracts";
 import type { AuditStore } from "../audit/index.js";
 import { isSourceKind } from "./model.js";
 
@@ -12,6 +14,15 @@ import {
   toSourceV1,
   type CatalogStore,
 } from "./store.js";
+
+const catalogCaseMutation = new AsyncLocalStorage<{ inserted: Set<string> }>();
+const humanSourceMint = new AsyncLocalStorage<boolean>();
+
+export function withCatalogCaseMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const existing = catalogCaseMutation.getStore();
+  if (existing) return operation();
+  return catalogCaseMutation.run({ inserted: new Set() }, operation);
+}
 
 export class CatalogService {
   constructor(
@@ -33,23 +44,14 @@ export class CatalogService {
     return row ? toSourceV1(row) : null;
   }
 
-  /**
-   * Snapshot durable catalog rows for a case transaction. PostgreSQL stores have
-   * no capture/restore; they join `activeCaseQueryable()` instead.
-   * SQLite wraps every method as async; capture/restore must be awaited or
-   * restore receives a Promise and throws DataCloneError.
-   */
-  async captureDurable(): Promise<unknown | undefined> {
-    const store = this.store as CatalogStore & { capture?: () => unknown };
-    if (typeof store.capture !== "function") return undefined;
-    return await Promise.resolve(store.capture());
-  }
-
-  async restoreDurable(snapshot: unknown | undefined): Promise<void> {
-    if (snapshot === undefined) return;
-    const store = this.store as CatalogStore & { restore?: (value: unknown) => void };
-    if (typeof store.restore !== "function") return;
-    await Promise.resolve(store.restore(snapshot));
+  async rollbackCaseInserts(): Promise<void> {
+    const inserted = catalogCaseMutation.getStore()?.inserted;
+    if (!inserted || inserted.size === 0) return;
+    for (const id of inserted) {
+      if (id === PERMANENT_UNKNOWN_SOURCE_ID) continue;
+      await this.store.remove(id);
+    }
+    inserted.clear();
   }
 
   async create(
@@ -77,6 +79,10 @@ export class CatalogService {
       createdBy: actor.id,
     };
     await this.store.insert(row);
+    const caseMutation = catalogCaseMutation.getStore();
+    if (caseMutation && humanSourceMint.getStore()) {
+      caseMutation.inserted.add(row.id);
+    }
     await this.audit?.append({
       identity: actor.id,
       action: "catalog_create",
@@ -131,15 +137,17 @@ export class CatalogService {
     const existing = await this.store.findByIdentity(actor.id);
     if (existing) return toSourceV1(existing);
     try {
-      return await this.create(
-        actor,
-        {
-          name: actor.username,
-          kind: "human",
-          description: "Directory identity",
-          identityId: actor.id,
-        },
-        "system",
+      return await humanSourceMint.run(true, () =>
+        this.create(
+          actor,
+          {
+            name: actor.username,
+            kind: "human",
+            description: "Directory identity",
+            identityId: actor.id,
+          },
+          "system",
+        ),
       );
     } catch (error) {
       // Concurrent first use may have won the identity uniqueness race.

@@ -25,7 +25,7 @@ import {
   type EvidenceWriteBatch,
 } from "../../evidence/store.js";
 import type { AuditStore } from "../audit/index.js";
-import { CatalogService } from "../catalog/index.js";
+import { CatalogService, withCatalogCaseMutation } from "../catalog/index.js";
 import {
   assertSupportedLinks,
   defaultPrivacy,
@@ -283,15 +283,14 @@ export class CaseService {
   ) {}
 
   async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
-    return this.store.withAtomic(async () => {
-      const snapshot = await this.catalog.captureDurable();
+    return withCatalogCaseMutation(async () => {
       try {
-        return await operation();
+        return await this.store.withAtomic(operation, this.audit);
       } catch (error) {
-        await this.catalog.restoreDurable(snapshot);
+        await this.catalog.rollbackCaseInserts();
         throw error;
       }
-    }, this.audit);
+    });
   }
 
   async appendDomainTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {

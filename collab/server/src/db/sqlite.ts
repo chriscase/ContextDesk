@@ -292,14 +292,13 @@ export function createSqliteRuntime(
     state,
     "catalog",
     rawCatalog,
-    new Set(["insert", "updateMeta", "setLifecycle", "restore"]),
+    new Set(["insert", "remove", "updateMeta", "setLifecycle", "restore"]),
   );
   const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
     state.transaction(
       [
         { key: "audit", store: rawAudit },
         { key: "cases", store: rawCases },
-        { key: "catalog", store: rawCatalog },
       ],
       operation,
     ));
