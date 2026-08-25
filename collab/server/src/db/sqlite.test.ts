@@ -1,11 +1,18 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../evidence/store.js";
 import { CatalogService } from "../modules/catalog/index.js";
 import { CaseService } from "../modules/cases/index.js";
+import { ExperimentService } from "../modules/experiments/index.js";
+import { ImportService } from "../modules/import/index.js";
 import { TriageRunService } from "../modules/triage-runs/index.js";
 import { createSqliteRuntime } from "./sqlite.js";
+
+const EXPERIMENT_SUMMARY = JSON.parse(
+  readFileSync(new URL("../../../contracts/fixtures/experiment-summary.valid.json", import.meta.url), "utf8"),
+) as unknown;
 
 describe("SQLite local runtime", () => {
   it("persists the collaboration stores across a process reopen", async () => {
@@ -413,6 +420,169 @@ describe("SQLite local runtime", () => {
       expect(await reopened.jobs.listByCase(created.id)).toEqual([]);
       expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "triage_job_created")).toBe(false);
       expect(await reopened.audit.list({ action: "triage_job_create" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls an experiment insert back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-experiment-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "experiment_imported") {
+          throw new Error("injected timeline failure:experiment_imported");
+        }
+        return originalAppend(caseId, event);
+      };
+      const service = new ExperimentService({
+        cases,
+        audit: runtime.audit,
+        experiments: runtime.experiments,
+      });
+      const created = await cases.createCase(actor, { title: "SQLite experiment rollback" }, "test");
+      await expect(
+        service.importEnvelope(created.id, actor, EXPERIMENT_SUMMARY, "test", false),
+      ).rejects.toThrow(/injected timeline failure:experiment_imported/);
+      expect(await runtime.experiments.listByCase(created.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "experiment_imported")).toBe(false);
+      expect(await runtime.audit.list({ action: "experiment_import" })).toEqual([]);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.experiments.listByCase(created.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "experiment_imported")).toBe(false);
+      expect(await reopened.audit.list({ action: "experiment_import" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls an imported run insert back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-import-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "external_run_imported") {
+          throw new Error("injected timeline failure:external_run_imported");
+        }
+        return originalAppend(caseId, event);
+      };
+      const imports = new ImportService({
+        evidence,
+        audit: runtime.audit,
+        cases,
+        catalog,
+        runs: runtime.runs,
+      });
+      const created = await cases.createCase(actor, { title: "SQLite import rollback" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      await expect(
+        imports.importRun(
+          created.id,
+          actor,
+          {
+            outputText: "synthetic sqlite imported timeout transcript",
+            sourceId: source.id,
+            operatorId: "local:operator",
+            operatorUsername: "operator",
+          },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/injected timeline failure:external_run_imported/);
+      expect(await runtime.runs.listByCase(created.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "external_run_imported")).toBe(false);
+      expect(await runtime.audit.list({ action: "external_run_import" })).toEqual([]);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.runs.listByCase(created.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "external_run_imported")).toBe(false);
+      expect(await reopened.audit.list({ action: "external_run_import" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls corroboration back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-corroborate-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const imports = new ImportService({
+        evidence,
+        audit: runtime.audit,
+        cases,
+        catalog,
+        runs: runtime.runs,
+      });
+      const created = await cases.createCase(actor, { title: "SQLite corroboration rollback" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const imported = await imports.importRun(
+        created.id,
+        actor,
+        {
+          outputText: "synthetic sqlite imported timeout transcript",
+          sourceId: source.id,
+          operatorId: "local:operator",
+          operatorUsername: "operator",
+        },
+        "test",
+        false,
+      );
+      const note = await cases.addContribution(
+        created.id,
+        actor,
+        { kind: "note", body: "Synthetic corroborating observation." },
+        "test",
+      );
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "run_corroboration") {
+          throw new Error("injected timeline failure:run_corroboration");
+        }
+        return originalAppend(caseId, event);
+      };
+      await expect(
+        imports.corroborate(
+          created.id,
+          imported.id,
+          actor,
+          { state: "corroborated", links: [{ kind: "contribution", id: note.id }] },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/injected timeline failure:run_corroboration/);
+      expect(await runtime.runs.listCorroborations(imported.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "run_corroboration")).toBe(false);
+      expect(await runtime.audit.list({ action: "run_corroboration" })).toEqual([]);
+      expect((await imports.getRun(created.id, imported.id, actor, false))?.corroborationState).toBe("unverified");
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.runs.listCorroborations(imported.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "run_corroboration")).toBe(false);
+      expect(await reopened.audit.list({ action: "run_corroboration" })).toEqual([]);
       reopened.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -110,111 +110,119 @@ export class ImportService {
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
     const memoryRuns = this.runs instanceof MemoryRunStore ? this.runs : null;
-    const runSnapshot = memoryRuns?.capture();
     try {
       evidenceBatch = await this.deps.evidence.beginWriteBatch?.() ?? null;
       const result = await this.deps.cases.withAtomic(async () => {
-        if (evidenceBatch) {
-          const outputMeta = await evidenceBatch.put(outputBytes, { contentType: "text/plain" });
-          if (outputMeta.hash !== outputHash) {
-            throw new Error("hash verification failed after storage");
-          }
-          if (promptBytes && promptHash) {
-            const promptMeta = await evidenceBatch.put(promptBytes, { contentType: "text/plain" });
-            if (promptMeta.hash !== promptHash) {
+        // SQLite wraps every method as async; capture/restore must be awaited
+        // or restore receives a Promise and throws DataCloneError.
+        const runSnapshot = memoryRuns ? await Promise.resolve(memoryRuns.capture()) : undefined;
+        try {
+          if (evidenceBatch) {
+            const outputMeta = await evidenceBatch.put(outputBytes, { contentType: "text/plain" });
+            if (outputMeta.hash !== outputHash) {
               throw new Error("hash verification failed after storage");
             }
-          }
-        } else {
-          const outputStage = await this.deps.evidence.stage(outputBytes, { contentType: "text/plain" });
-          stages.push(outputStage);
-          if (outputStage.meta.hash !== outputHash) {
-            throw new Error("hash verification failed after storage");
-          }
-          if (promptBytes && promptHash) {
-            const promptStage = await this.deps.evidence.stage(promptBytes, { contentType: "text/plain" });
-            stages.push(promptStage);
-            if (promptStage.meta.hash !== promptHash) {
+            if (promptBytes && promptHash) {
+              const promptMeta = await evidenceBatch.put(promptBytes, { contentType: "text/plain" });
+              if (promptMeta.hash !== promptHash) {
+                throw new Error("hash verification failed after storage");
+              }
+            }
+          } else {
+            const outputStage = await this.deps.evidence.stage(outputBytes, { contentType: "text/plain" });
+            stages.push(outputStage);
+            if (outputStage.meta.hash !== outputHash) {
               throw new Error("hash verification failed after storage");
             }
+            if (promptBytes && promptHash) {
+              const promptStage = await this.deps.evidence.stage(promptBytes, { contentType: "text/plain" });
+              stages.push(promptStage);
+              if (promptStage.meta.hash !== promptHash) {
+                throw new Error("hash verification failed after storage");
+              }
+            }
           }
-        }
 
-        const contribution = await this.deps.cases.persistContribution(
-          caseId,
-          actor,
-          contributionInput,
-          origin,
-        );
-        const now = new Date().toISOString();
-        const row: FrozenRunRow = {
-          id: randomUUID(),
-          caseId,
-          contributionId: contribution.id,
-          sourceId: source.id,
-          outputHash,
-          outputText: output,
-          promptHash,
-          promptText,
-          promptCompleteness,
-          outputCompleteness,
-          workflowCompleteness,
-          evidenceVisibility,
-          snapshotBinding,
-          visibilityNote: input.visibilityNote ?? null,
-          importerId: actor.id,
-          importerUsername: actor.username,
-          operatorId: input.operatorId,
-          operatorUsername: input.operatorUsername,
-          provider: input.provider ?? null,
-          model: input.model ?? null,
-          version: input.version ?? null,
-          claimedTraces: input.claimedTraces ?? [],
-          uncertainty: input.uncertainty ?? null,
-          timing: input.timing ?? null,
-          cost: input.cost ?? null,
-          redacted: input.redacted === true,
-          privacyClass: privacy,
-          createdAt: now,
-        };
-        await this.runs.insert(row);
-        await this.deps.cases.appendDomainTimeline(caseId, {
-          kind: "external_run_imported",
-          actor,
-          targetId: row.id,
-          clientTime: null,
-          payload: {
+          const contribution = await this.deps.cases.persistContribution(
+            caseId,
+            actor,
+            contributionInput,
+            origin,
+          );
+          const now = new Date().toISOString();
+          const row: FrozenRunRow = {
+            id: randomUUID(),
+            caseId,
+            contributionId: contribution.id,
             sourceId: source.id,
             outputHash,
-            corroborationState: initialCorroborationState(),
+            outputText: output,
+            promptHash,
+            promptText,
+            promptCompleteness,
+            outputCompleteness,
+            workflowCompleteness,
             evidenceVisibility,
             snapshotBinding,
-          },
-        });
-        await this.deps.audit.append({
-          identity: actor.id,
-          action: "external_run_import",
-          target: row.id,
-          origin,
-          outcome: "success",
-        });
-        if (evidenceBatch) {
-          await evidenceBatch.promote();
-        } else {
-          for (const stage of stages) await stage.commit();
+            visibilityNote: input.visibilityNote ?? null,
+            importerId: actor.id,
+            importerUsername: actor.username,
+            operatorId: input.operatorId,
+            operatorUsername: input.operatorUsername,
+            provider: input.provider ?? null,
+            model: input.model ?? null,
+            version: input.version ?? null,
+            claimedTraces: input.claimedTraces ?? [],
+            uncertainty: input.uncertainty ?? null,
+            timing: input.timing ?? null,
+            cost: input.cost ?? null,
+            redacted: input.redacted === true,
+            privacyClass: privacy,
+            createdAt: now,
+          };
+          await this.runs.insert(row);
+          await this.deps.cases.appendDomainTimeline(caseId, {
+            kind: "external_run_imported",
+            actor,
+            targetId: row.id,
+            clientTime: null,
+            payload: {
+              sourceId: source.id,
+              outputHash,
+              corroborationState: initialCorroborationState(),
+              evidenceVisibility,
+              snapshotBinding,
+            },
+          });
+          await this.deps.audit.append({
+            identity: actor.id,
+            action: "external_run_import",
+            target: row.id,
+            origin,
+            outcome: "success",
+          });
+          if (evidenceBatch) {
+            await evidenceBatch.promote();
+          } else {
+            for (const stage of stages) await stage.commit();
+          }
+          if (!(await this.deps.evidence.verify(outputHash))) {
+            throw new Error("hash verification failed after storage");
+          }
+          if (promptHash && !(await this.deps.evidence.verify(promptHash))) {
+            throw new Error("hash verification failed after storage");
+          }
+          return this.toRun(row, initialCorroborationState());
+        } catch (error) {
+          if (memoryRuns && runSnapshot !== undefined) {
+            await Promise.resolve(memoryRuns.restore(runSnapshot));
+          }
+          throw error;
         }
-        if (!(await this.deps.evidence.verify(outputHash))) {
-          throw new Error("hash verification failed after storage");
-        }
-        if (promptHash && !(await this.deps.evidence.verify(promptHash))) {
-          throw new Error("hash verification failed after storage");
-        }
-        return this.toRun(row, initialCorroborationState());
       });
       await evidenceBatch?.finalize();
       return result;
     } catch (error) {
-      if (memoryRuns && runSnapshot !== undefined) memoryRuns.restore(runSnapshot);
       if (evidenceBatch) {
         await evidenceBatch.rollback();
       } else {
@@ -273,7 +281,9 @@ export class ImportService {
     const frozen = this.frozenSnapshot(before);
     const memoryRuns = this.runs instanceof MemoryRunStore ? this.runs : null;
     return this.deps.cases.withAtomic(async () => {
-      const snapshot = memoryRuns?.capture();
+      // SQLite wraps every method as async; capture/restore must be awaited
+      // or restore receives a Promise and throws DataCloneError.
+      const snapshot = memoryRuns ? await Promise.resolve(memoryRuns.capture()) : undefined;
       try {
         await this.runs.appendCorroboration({
           runId,
@@ -301,7 +311,9 @@ export class ImportService {
         });
         return this.toRun(after, input.state);
       } catch (error) {
-        if (memoryRuns && snapshot !== undefined) memoryRuns.restore(snapshot);
+        if (memoryRuns && snapshot !== undefined) {
+          await Promise.resolve(memoryRuns.restore(snapshot));
+        }
         throw error;
       }
     });

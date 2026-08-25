@@ -395,11 +395,15 @@ export class ExperimentService {
   private async withExperimentAtomic<T>(operation: () => Promise<T>): Promise<T> {
     const memory = this.store instanceof MemoryExperimentStore ? this.store : null;
     return this.deps.cases.withAtomic(async () => {
-      const snapshot = memory?.capture();
+      // SQLite wraps every method as async; capture/restore must be awaited
+      // or restore receives a Promise and throws DataCloneError.
+      const snapshot = memory ? await Promise.resolve(memory.capture()) : undefined;
       try {
         return await operation();
       } catch (error) {
-        if (memory && snapshot !== undefined) memory.restore(snapshot);
+        if (memory && snapshot !== undefined) {
+          await Promise.resolve(memory.restore(snapshot));
+        }
         throw error;
       }
     });

@@ -208,6 +208,9 @@ function persistentMemoryStore<T extends object>(
   for (const name of methodNames(store)) {
     const original = Reflect.get(store, name);
     if (typeof original !== "function") continue;
+    // Every method becomes async, including capture()/restore(). Callers must
+    // await Promise.resolve(...) or restore receives a Promise and throws
+    // DataCloneError without rolling the SQLite document back.
     Reflect.set(store, name, async (...args: unknown[]) => {
       const result = await Reflect.apply(original, store, args);
       if (mutatingMethods.has(name)) state.write(key, storeState(store));
