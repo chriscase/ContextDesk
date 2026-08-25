@@ -262,7 +262,7 @@ describe("honest limitation copy", () => {
   it("describes the shipped admin console while keeping setup and qualification limits honest", () => {
     renderHelp();
     fireEvent.click(screen.getByRole("button", { name: "Administration and setup" }));
-    expect(screen.getByText(/visible only to the workspace admin role/)).toBeTruthy();
+    expect(screen.getByText(/visible only with the admin:users capability/)).toBeTruthy();
     expect(screen.getByText(/finding an identity or group grants nothing/)).toBeTruthy();
     expect(screen.getByText(/never displays or accepts directory credentials/)).toBeTruthy();
     expect(screen.getByText(/no graphical first-run setup wizard/)).toBeTruthy();

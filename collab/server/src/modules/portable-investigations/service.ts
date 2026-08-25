@@ -532,7 +532,12 @@ export class PortableInvestigationService {
     };
   }
 
-  async exportArchive(caseId: string, actor: Actor, isAdmin: boolean): Promise<PortableArchiveV1> {
+  async exportArchive(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<PortableArchiveV1> {
     const caseRow = await this.deps.cases.getCase(caseId, actor, isAdmin);
     if (!caseRow) throw new PortableServerError("not_found", "investigation not found");
 
@@ -655,7 +660,7 @@ export class PortableInvestigationService {
         );
       }
       const bytes = artifact.contentHash
-        ? await this.deps.cases.getArtifactBytes(caseId, artifact.id, actor, isAdmin)
+        ? await this.deps.cases.getArtifactBytes(caseId, artifact.id, actor, isAdmin, canReadPrivate)
         : null;
       if (artifact.contentHash && !bytes) {
         throw new PortableServerError("integrity_failure", "held evidence bytes are missing");

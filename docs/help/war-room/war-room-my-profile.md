@@ -55,5 +55,5 @@ other records already written. Those keep the author name captured at write
 time.
 
 > Important:
-> A suspended account can still open My profile but cannot save until an
-> administrator restores it.
+> A suspended, disabled, or historical account cannot stay signed in, so My
+> profile is not available until an administrator restores an active status.

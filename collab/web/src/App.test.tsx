@@ -26,7 +26,7 @@ function stubSignedOutFetch(): FetchStub {
 }
 
 function stubSignedInFetch(
-  identity: { username: string; displayName?: string; roles: string[] },
+  identity: { username: string; displayName?: string; roles: string[]; capabilities?: string[] },
   extra?: (url: string, init?: RequestInit) => Promise<Response> | null,
 ): FetchStub {
   const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
@@ -42,6 +42,7 @@ function stubSignedInFetch(
             displayName: identity.displayName ?? identity.username,
           },
           roles: identity.roles,
+          ...(identity.capabilities ? { capabilities: identity.capabilities } : {}),
         }),
       };
     }
@@ -286,11 +287,12 @@ describe("authenticated application shell", () => {
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
   });
 
-  it("shows Administration only to admins and does not fetch protected admin data for direct non-admin routes", async () => {
+  it("shows Administration only with admin:users and does not fetch protected admin data for direct routes without it", async () => {
     window.history.replaceState(null, "", "/administration");
     const nonAdminFetch = stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Administration is unavailable" })).toBeTruthy();
+    expect(screen.getByText(/admin:users capability/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
     expect(nonAdminFetch.mock.calls.map((call) => String(call[0]))).not.toContain(
       "/api/authz/group-role-map",
@@ -318,6 +320,31 @@ describe("authenticated application shell", () => {
     expect(await screen.findByRole("heading", { name: "Administration" })).toBeTruthy();
     expect(window.location.pathname).toBe("/administration");
     expect(document.title).toBe("Administration · ContextDesk War Room");
+    cleanup();
+
+    window.history.replaceState(null, "", "/");
+    stubSignedInFetch({
+      username: "viewer",
+      roles: ["viewer"],
+      capabilities: ["investigation:read", "admin:users"],
+    }, (url) => {
+      if (url === "/api/authz/group-role-map") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.admin_role_mapping_list.v1",
+            mappings: [],
+            limit: 500,
+            truncated: false,
+          }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Administration" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Start investigation" })).toBeNull();
   });
 
   it("treats /admin/people as the canonical People location and keeps /administration as the roles alias", async () => {

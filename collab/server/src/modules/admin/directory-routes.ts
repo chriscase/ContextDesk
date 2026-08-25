@@ -14,16 +14,14 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import {
-  resolveActiveSession,
-  type ActiveSessionDeps,
-} from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+  authorizeSession,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 
 const DIRECTORY_SEARCH_TIMEOUT_MS = 3_000;
 
 export interface AdminDirectoryRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
 }
 
@@ -64,7 +62,7 @@ export async function registerAdminDirectoryRoutes(
 
     try {
       const results = await withDeadline(
-        deps.auth.adapter.searchIdentities(term, {
+        deps.sessionAuth.auth.adapter.searchIdentities(term, {
           limit: ADMIN_DIRECTORY_MAX_RESULTS,
           timeoutMs: DIRECTORY_SEARCH_TIMEOUT_MS,
         }),
@@ -119,7 +117,7 @@ export async function registerAdminDirectoryRoutes(
 
     try {
       const results = await withDeadline(
-        deps.auth.adapter.searchDirectoryGroups(term, {
+        deps.sessionAuth.auth.adapter.searchDirectoryGroups(term, {
           limit: ADMIN_DIRECTORY_MAX_RESULTS,
           timeoutMs: DIRECTORY_SEARCH_TIMEOUT_MS,
         }),
@@ -156,32 +154,19 @@ async function authorizeAdminSearch(
 ): Promise<
   { identityId: string } | "unauthenticated" | "forbidden" | "unavailable"
 > {
-  const session = await resolveActiveSession(request, deps.auth);
-  if (!session) return "unauthenticated";
-  let groups = session.groups;
-  if (groups.length === 0) {
-    try {
-      groups = await deps.auth.adapter.lookupGroups(session.identity);
-    } catch {
-      await recordSearchBestEffort(
-        deps.audit,
-        session.identity.id,
-        target,
-        "failure",
-      );
-      return "unavailable";
-    }
-  }
-  if (!canPerform(deps.roles.resolve(groups), "admin")) {
+  const resolved = await authorizeSession(request, deps.sessionAuth);
+  if (resolved.kind === "unavailable") return "unavailable";
+  if (resolved.kind !== "ok") return "unauthenticated";
+  if (!resolved.ctx.has("admin:users")) {
     await recordSearchBestEffort(
       deps.audit,
-      session.identity.id,
+      resolved.ctx.identity.id,
       target,
       "denied",
     );
     return "forbidden";
   }
-  return { identityId: session.identity.id };
+  return { identityId: resolved.ctx.identity.id };
 }
 
 async function recordSearch(

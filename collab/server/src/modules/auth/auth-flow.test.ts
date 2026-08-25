@@ -159,6 +159,7 @@ describe("auth flow", () => {
       const session = parseSessionResponse(JSON.parse(res.body));
       expect(session.identity.username).toBe("alice");
       expect(session.roles).toEqual(["contributor"]);
+      expect(session.capabilities).toEqual(["investigation:read", "investigation:write"]);
       const setCookie = String(res.headers["set-cookie"] ?? "");
       expect(setCookie).toMatch(/HttpOnly/i);
       expect(setCookie).toMatch(/SameSite=Lax/i);

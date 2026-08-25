@@ -395,7 +395,7 @@ describe("admin people routes", () => {
         headers: { cookie: adminCookie },
         payload: searchBody(),
       });
-      expect(searchAfterSelfSuspend.statusCode).toBe(403);
+      expect(searchAfterSelfSuspend.statusCode).toBe(401);
     });
   });
 });

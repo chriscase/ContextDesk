@@ -310,7 +310,7 @@ export class TriageRunService {
         continue;
       }
       queueMicrotask(() => {
-        void this.execute(job.id, actor, false);
+        void this.execute(job.id, actor, false, false);
       });
     }
     for (const job of staleRunning) {
@@ -394,6 +394,7 @@ export class TriageRunService {
     request: TriageJobRequestV1,
     origin: string,
     isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<TriageJobV1> {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) {
       throw new TriageRunNotFoundError();
@@ -509,7 +510,7 @@ export class TriageRunService {
       outcome: "success",
     });
     queueMicrotask(() => {
-      void this.execute(job.id, actor, isAdmin);
+      void this.execute(job.id, actor, isAdmin, canReadPrivate);
     });
     return job;
   }
@@ -569,7 +570,12 @@ export class TriageRunService {
     return cancelled;
   }
 
-  private async execute(jobId: string, actor: Actor, isAdmin: boolean): Promise<void> {
+  private async execute(
+    jobId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<void> {
     const controller = new AbortController();
     this.controllers.set(jobId, controller);
     let leaseTimer: ReturnType<typeof setInterval> | undefined;
@@ -646,8 +652,8 @@ export class TriageRunService {
       const caseRow = await this.deps.cases.getCase(job.caseId, actor, isAdmin);
       if (!caseRow) throw new Error("case disappeared before execution");
       const evidence = job.request.mode === "gateway"
-        ? await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, true)
-        : await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, false);
+        ? await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, canReadPrivate, true)
+        : await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, canReadPrivate, false);
       const persistCandidate = async (result: TriageCandidateRunV1): Promise<void> => {
         if (leaseLost) return;
         const latest = await this.deps.jobs.get(currentJob.id);
@@ -922,6 +928,7 @@ export class TriageRunService {
     snapshot: SnapshotV1,
     actor: Actor,
     isAdmin: boolean,
+    canReadPrivate: boolean,
     requireContent: boolean,
   ): Promise<TriageExecutionEvidence[]> {
     const evidence: TriageExecutionEvidence[] = [];
@@ -929,7 +936,13 @@ export class TriageRunService {
     for (const item of snapshot.evidence) {
       const artifact = await this.deps.cases.getArtifact(caseId, item.evidenceId);
       if (!artifact) throw new Error("snapshot evidence disappeared before execution");
-      const bytes = await this.deps.cases.getArtifactBytes(caseId, item.evidenceId, actor, isAdmin);
+      const bytes = await this.deps.cases.getArtifactBytes(
+        caseId,
+        item.evidenceId,
+        actor,
+        isAdmin,
+        canReadPrivate,
+      );
       if (requireContent && item.contentHash && !bytes) {
         throw new Error("snapshot evidence content is unavailable to the gateway runner");
       }

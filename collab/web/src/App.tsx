@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  APP_ROLES,
+  hasCapability,
+  isCapability,
+  roleCapabilities,
+  type AppRole,
+  type Capability,
+} from "@cd-collab/contracts/admin";
+import {
   ADMINISTRATION,
   HOME,
   PEOPLE,
@@ -34,6 +42,18 @@ interface SessionView {
   username: string;
   displayName: string;
   roles: string[];
+  capabilities?: string[];
+}
+
+function asAppRoles(roles: readonly string[]): AppRole[] {
+  return roles.filter((role): role is AppRole => (APP_ROLES as readonly string[]).includes(role));
+}
+
+function sessionCapabilities(session: SessionView): Capability[] {
+  if (session.capabilities) {
+    return session.capabilities.filter(isCapability);
+  }
+  return roleCapabilities(asAppRoles(session.roles));
 }
 
 // The stored ids stay stable so existing saved preferences keep resolving;
@@ -275,12 +295,14 @@ export function App() {
     const body = (await res.json()) as {
       identity?: { username?: string; displayName?: string };
       roles?: string[];
+      capabilities?: string[];
     };
     const username = body.identity?.username ?? "";
     setSession({
       username,
       displayName: body.identity?.displayName?.trim() || username,
       roles: body.roles ?? [],
+      ...(body.capabilities ? { capabilities: body.capabilities } : {}),
     });
     setReady(true);
   }, []);
@@ -525,12 +547,13 @@ export function App() {
   }
 
   const roles = session.roles;
-  const canWrite =
-    !staticReadOnly &&
-    (roles.includes("case-lead") || roles.includes("admin") || roles.includes("contributor"));
+  const capabilities = sessionCapabilities(session);
+  const canWrite = !staticReadOnly && hasCapability(capabilities, "investigation:write");
   const canLeadCatalog =
-    !staticReadOnly && (roles.includes("case-lead") || roles.includes("admin"));
-  const canAdmin = !staticReadOnly && roles.includes("admin");
+    !staticReadOnly &&
+    (hasCapability(capabilities, "run:strategies") ||
+      hasCapability(capabilities, "admin:system_config"));
+  const canAdmin = !staticReadOnly && hasCapability(capabilities, "admin:users");
   const work: WorkLocation = isWorkLocation(location) ? location : HOME;
   const inCasesArea = work.area === "overview" || work.area === "investigations";
   const unknown = isUnknownLocation(location);
@@ -644,6 +667,7 @@ export function App() {
               <Cases
                 onFocusedCaseTitle={setFocusedCaseTitle}
                 roles={roles}
+                capabilities={capabilities}
                 readOnly={staticReadOnly}
                 participant={{ username: session.username, roles }}
                 view={work.area === "investigations" ? "investigations" : "overview"}
@@ -739,8 +763,8 @@ export function App() {
                     Administration is unavailable
                   </h2>
                   <p className="not-found__copy" role="status">
-                    Your current workspace role does not allow administration. No directory or
-                    permission data was requested.
+                    Your current account does not include the admin:users capability, so
+                    administration is unavailable. No directory or permission data was requested.
                   </p>
                   <button type="button" className="not-found__home" onClick={() => guardedNavigate(HOME)}>
                     Back to overview

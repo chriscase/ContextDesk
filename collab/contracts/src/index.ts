@@ -665,3 +665,4 @@ export * from "./capability.js";
 export * from "./user-profile.js";
 export * from "./directory-mapping.js";
 export * from "./admin-people.js";
+export * from "./admin-audit.js";

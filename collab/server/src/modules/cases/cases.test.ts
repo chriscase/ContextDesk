@@ -636,10 +636,17 @@ describe("cases timeline evidence provenance", () => {
       );
       expect(statusRes.status).toBe("monitoring");
 
-      const bytesOk = await app.inject({
+      const bytesDeniedMember = await app.inject({
         method: "GET",
         url: `/api/cases/${caseId}/evidence/${logArt.id}/bytes`,
         headers: { cookie: alice },
+      });
+      expect(bytesDeniedMember.statusCode).toBe(403);
+
+      const bytesOk = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/evidence/${logArt.id}/bytes`,
+        headers: { cookie: dave },
       });
       expect(bytesOk.statusCode).toBe(200);
       expect(

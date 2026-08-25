@@ -3,10 +3,13 @@ import { APP_ROLES } from "./auth.js";
 import {
   CAPABILITIES,
   ROLE_CAPABILITIES,
+  canUse,
   hasCapability,
   isCapability,
+  profileCanUseCapabilities,
   resolveCapabilities,
   roleCapabilities,
+  usableCapabilities,
 } from "./capability.js";
 
 describe("capability model", () => {
@@ -56,5 +59,25 @@ describe("capability model", () => {
   it("local grants cannot remove a role capability", () => {
     const effective = resolveCapabilities(["case-lead"], []);
     expect(effective).toContain("decision:accept");
+  });
+
+  it("zeroes usable capabilities for suspended, disabled, and historical profiles", () => {
+    expect(
+      usableCapabilities({ status: "suspended", provenance: "local" }, ["admin"], ["audit:view"]),
+    ).toEqual([]);
+    expect(
+      usableCapabilities({ status: "disabled", provenance: "local" }, ["admin"], []),
+    ).toEqual([]);
+    expect(
+      usableCapabilities(
+        { status: "active", provenance: "imported_historical" },
+        ["admin"],
+        ["investigation:write"],
+      ),
+    ).toEqual([]);
+    expect(profileCanUseCapabilities({ status: "active", provenance: "local" })).toBe(true);
+    expect(
+      canUse({ status: "active", provenance: "local" }, ["viewer"], ["investigation:write"], "investigation:write"),
+    ).toBe(true);
   });
 });

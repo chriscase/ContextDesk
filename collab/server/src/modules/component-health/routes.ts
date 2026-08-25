@@ -6,8 +6,10 @@ import {
   type ComponentHealthResponseV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import {
+  requireSessionCapability,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 import type { Config } from "../../config.js";
 
 export type ComponentHealthProvider = () =>
@@ -15,13 +17,8 @@ export type ComponentHealthProvider = () =>
   | Promise<ComponentHealthProjectorInputV1>;
 
 export interface ComponentHealthRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   provider: ComponentHealthProvider;
-}
-
-function authError(error: "unauthenticated" | "forbidden") {
-  return { schemaId: "cd-collab.auth-error.v1" as const, error };
 }
 
 export function runtimeComponentHealth(
@@ -98,15 +95,13 @@ export async function registerComponentHealthRoutes(
   deps: ComponentHealthRouteDeps,
 ): Promise<void> {
   app.get("/api/admin/component-health", async (request: FastifyRequest, reply) => {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!canPerform(deps.roles.resolve(session.groups), "admin")) {
-      void reply.code(403);
-      return authError("forbidden");
-    }
+    const loaded = await requireSessionCapability(
+      request,
+      reply,
+      deps.sessionAuth,
+      "admin:system_config",
+    );
+    if ("denied" in loaded) return loaded.denied;
     try {
       const response: ComponentHealthResponseV1 = projectComponentHealth(await deps.provider());
       parseComponentHealthResponse(response);

@@ -1482,12 +1482,14 @@ export class CaseService {
     artifactId: string,
     actor: Actor,
     isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<Uint8Array | null> {
     const caseRow = await this.requireCase(caseId);
     const row = await this.store.getArtifact(artifactId);
     if (!row || row.caseId !== caseId || !row.contentHash) return null;
-    if (row.privacyClass === "owner_only" && !isAdmin && !this.isMember(caseRow, actor.id)) {
-      return null;
+    if (row.privacyClass === "owner_only") {
+      if (!canReadPrivate) return null;
+      if (!isAdmin && !this.isMember(caseRow, actor.id)) return null;
     }
     return this.evidence.get(row.contentHash);
   }

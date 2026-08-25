@@ -86,3 +86,37 @@ export function hasCapability(
 ): boolean {
   return effective.includes(capability);
 }
+
+/**
+ * Account-status gate used by every capability-gated route. A non-active
+ * profile and an imported_historical attribution stub are structurally
+ * incapable of using a capability, regardless of role or local grant.
+ */
+export function profileCanUseCapabilities(profile: {
+  status: string;
+  provenance: string;
+}): boolean {
+  return profile.status === "active" && profile.provenance !== "imported_historical";
+}
+
+/**
+ * What the account can actually use right now. Route code must call this
+ * (or canUse) rather than resolveCapabilities, which ignores status.
+ */
+export function usableCapabilities(
+  profile: { status: string; provenance: string },
+  roles: readonly AppRole[],
+  localGrants: readonly Capability[] = [],
+): Capability[] {
+  if (!profileCanUseCapabilities(profile)) return [];
+  return resolveCapabilities(roles, localGrants);
+}
+
+export function canUse(
+  profile: { status: string; provenance: string },
+  roles: readonly AppRole[],
+  localGrants: readonly Capability[],
+  capability: Capability,
+): boolean {
+  return hasCapability(usableCapabilities(profile, roles, localGrants), capability);
+}

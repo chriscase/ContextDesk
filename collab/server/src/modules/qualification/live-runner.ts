@@ -331,6 +331,7 @@ export async function runLiveQualification(
         },
         "qualification-live",
         true,
+        true,
       );
       let finalJob = await waitForTerminal(options.triageRuns, fixture.caseId, created.id, actor, timeoutMs);
       if (!finalJob) {
