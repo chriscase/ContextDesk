@@ -727,6 +727,12 @@ export async function persistPortableArchive(input: {
     if (event.kind === "snapshot_frozen" && (event.targetNamespace !== "snapshot" || !event.targetId)) {
       throw new Error("snapshot timeline is missing a portable snapshot target");
     }
+    if (
+      event.kind === "external_run_imported"
+      && (event.targetNamespace !== "imported_ai_run" || !event.targetId)
+    ) {
+      throw new Error("imported-run timeline is missing a portable imported-run target");
+    }
   }
   const remapCandidateId = (candidateId: string): string => {
     const imported = bundle.importedAiRuns.find((run) => candidateId === `chat-${run.id}`);

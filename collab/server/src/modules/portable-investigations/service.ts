@@ -1076,6 +1076,12 @@ export class PortableInvestigationService {
           "snapshot timeline is missing a portable snapshot target",
         );
       }
+      if (row.kind === "external_run_imported" && addressed?.namespace !== "imported_ai_run") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "imported-run timeline is missing a portable imported-run target",
+        );
+      }
       if (row.kind === "corpus_intake_committed" && addressed?.namespace !== "intake_batch") {
         throw new PortableServerError(
           "unsupported_state",

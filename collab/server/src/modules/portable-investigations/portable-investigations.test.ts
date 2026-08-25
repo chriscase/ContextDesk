@@ -997,6 +997,45 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable snapshot target/);
   });
 
+  it("refuses apply when imported-run timeline lacks an imported-run target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "external_run_imported");
+      if (!event) throw new Error("imported-run timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable imported-run target/);
+  });
+
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1644,6 +1683,7 @@ describe("portable investigation apply", () => {
     const sourceDiscussion = sourcePage.items.find((item) => item.activityKind === "comment_added");
     const sourceEvidence = sourcePage.items.find((item) => item.activityKind === "evidence_added");
     const sourceFrozen = sourcePage.items.find((item) => item.activityKind === "evidence_frozen");
+    const sourceImported = sourcePage.items.find((item) => item.summary === "imported analysis was recorded");
     const sourceDecision = sourcePage.items.find((item) => item.activityKind === "decision_proposed");
     const sourceGold = sourcePage.items.find((item) => item.summary === "recorded an accepted outcome benchmark");
     const sourceHelpfulness = sourcePage.items.find((item) => item.summary === "recorded a comparison observation");
@@ -1701,6 +1741,10 @@ describe("portable investigation apply", () => {
     expect(sourceDiscussion?.locator.resourceId).toBeTruthy();
     expect(sourceEvidence?.locator.resourceId).toBe(row.evidenceId);
     expect(sourceFrozen?.locator.resourceId).toBeTruthy();
+    expect(sourceImported?.locator.kind).toBe("evidence_context");
+    expect(sourceImported?.locator.resourceId).toBeTruthy();
+    expect(sourceImported?.locator.resourceId).not.toBe(row.caseId);
+    expect(sourceImported?.locator.resourceId).not.toBe(sourceFrozen?.locator.resourceId);
     expect(sourceDecision?.locator.kind).toBe("decision_revision");
     expect(sourceDecision?.locator.resourceId).toBeTruthy();
     expect(sourceDecision?.locator.resourceId).not.toBe(row.caseId);
@@ -1860,6 +1904,7 @@ describe("portable investigation apply", () => {
     const destDiscussion = destPage.items.find((item) => item.activityKind === "comment_added");
     const destEvidence = destPage.items.find((item) => item.activityKind === "evidence_added");
     const destFrozen = destPage.items.find((item) => item.activityKind === "evidence_frozen");
+    const destImported = destPage.items.find((item) => item.summary === "imported analysis was recorded");
     const destDecision = destPage.items.find((item) => item.activityKind === "decision_proposed");
     const destGold = destPage.items.find((item) => item.summary === "recorded an accepted outcome benchmark");
     const destHelpfulness = destPage.items.find((item) => item.summary === "recorded a comparison observation");
@@ -1890,6 +1935,18 @@ describe("portable investigation apply", () => {
     for (const event of destFrozenEvents) {
       expect(event.targetId).toBe(destFrozen?.locator.resourceId);
       expect(event.targetId).not.toBe(applied.investigationId);
+    }
+    expect(destImported?.locator.kind).toBe("evidence_context");
+    expect(destImported?.locator.resourceId).toBeTruthy();
+    expect(destImported?.locator.resourceId).not.toBe(sourceImported?.locator.resourceId);
+    expect(destImported?.locator.resourceId).not.toBe(applied.investigationId);
+    expect(destImported?.locator.resourceId).not.toBe(destFrozen?.locator.resourceId);
+    const destImportedEvents = destFrozenTimeline.filter((event) => event.kind === "external_run_imported");
+    expect(destImportedEvents.length).toBeGreaterThan(0);
+    for (const event of destImportedEvents) {
+      expect(event.targetId).toBe(destImported?.locator.resourceId);
+      expect(event.targetId).not.toBe(applied.investigationId);
+      expect(event.targetId).not.toBe(destFrozen?.locator.resourceId);
     }
     expect(destDecision?.locator.kind).toBe("decision_revision");
     expect(destDecision?.locator.resourceId).not.toBe(sourceDecision?.locator.resourceId);
@@ -2007,7 +2064,7 @@ describe("portable investigation apply", () => {
     const destIntakeEvidence = destArtifacts.find((item) => item.relativePath === "router/locator.log");
     expect(destIntakeEvidence?.intakeBatchId).toBe(destIntake?.locator.resourceId);
 
-    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destGold, destHelpfulness, destExperiment, destTrace, destAttempt, destIntake]) {
+    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destImported, destDecision, destGold, destHelpfulness, destExperiment, destTrace, destAttempt, destIntake]) {
       await expect(
         activity.resolve(ACTOR, false, formatCompactInvestigationLocator(item!.locator)),
       ).resolves.toMatchObject({ authorized: true, locator: item!.locator });

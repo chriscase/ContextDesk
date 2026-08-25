@@ -87,7 +87,9 @@ composites from `targetNamespace=experiment` (`experiment_trace_imported`),
 and `${jobId}:${candidateId}` composites from `targetNamespace=triage_job`
 (`triage_candidate_*`; persist refuses dropped or bare-job targets), and
 snapshot ids from `targetNamespace=snapshot` (`snapshot_frozen`; persist
-refuses dropped snapshot targets);
+refuses dropped snapshot targets), and imported-run ids from
+`targetNamespace=imported_ai_run` (`external_run_imported`; persist refuses
+dropped imported-run targets);
 resolve is re-run
 against the destination identities after apply and remains `not_found` for
 kind-confused or unauthorized locators. `experiment_gold_promoted` projects
