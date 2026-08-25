@@ -156,6 +156,7 @@ async function main(): Promise<void> {
     experiments,
     audit,
     applyState,
+    publicIdentities,
     withTransaction: applyBoundary.withTransaction,
     applyCoordination: "single_instance",
     confirmationRestartDurable: false,
