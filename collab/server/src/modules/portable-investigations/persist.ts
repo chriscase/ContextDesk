@@ -93,6 +93,50 @@ function remapOf(
   return hit?.destinationId ?? sourceId;
 }
 
+function importedTimelinePayload(
+  event: PortableArchiveV1["investigation"]["timeline"][number],
+  bundle: PortableArchiveV1["investigation"],
+  report: ArchivePreflightReportV1,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    imported: true,
+    sourceSeq: event.seq,
+    sourceInstallationId: bundle.sourceInstallationId,
+  };
+  if (event.targetNamespace === "contribution" && event.targetId) {
+    const contribution = bundle.contributions.find((row) => row.id === event.targetId);
+    if (contribution) {
+      payload.kind = contribution.kind;
+      payload.revision = contribution.revision;
+      payload.privacyClass = contribution.privacyClass;
+      payload.contentHash = contribution.contentHash;
+      payload.sourceId = remapOf(report, "source", contribution.sourceId);
+    }
+  }
+  if (event.targetNamespace === "evidence" && event.targetId) {
+    const evidence = bundle.evidence.find((row) => row.id === event.targetId);
+    if (evidence) {
+      payload.artifactKind = evidence.artifactKind ?? null;
+      payload.privacyClass = evidence.privacyClass;
+      payload.contentHash = evidence.digest;
+    }
+  }
+  if (event.targetNamespace === "decision" && event.targetId) {
+    const decision = bundle.decisions.find((row) => row.id === event.targetId);
+    if (decision) {
+      payload.decisionId = remapOf(report, "decision", decision.id);
+      payload.revision = decision.revision;
+    }
+  }
+  if (event.targetNamespace === "triage_job" && event.targetId) {
+    payload.jobId = remapOf(report, "triage_job", event.targetId);
+  }
+  if (event.targetNamespace === "snapshot" && event.targetId) {
+    payload.snapshotId = remapOf(report, "snapshot", event.targetId);
+  }
+  return payload;
+}
+
 function actorAttribution(
   sourceActorId: string,
   identityMap: IdentityMapEntryV1[],
@@ -1033,11 +1077,7 @@ export async function persistPortableArchive(input: {
           : event.targetId,
       clientTime: null,
       serverTime: event.serverTime,
-      payload: {
-        imported: true,
-        sourceSeq: event.seq,
-        sourceInstallationId: bundle.sourceInstallationId,
-      },
+      payload: importedTimelinePayload(event, bundle, report),
     });
   }
 

@@ -8,6 +8,8 @@ import {
   PORTABLE_APPLY_REQUEST_SCHEMA_ID,
   TRIAGE_JOB_REQUEST_SCHEMA_ID,
   attachPortableIntegrity,
+  formatCompactInvestigationLocator,
+  formatInvestigationResourceLocator,
   parsePortableArchive,
   portableApplyDeepLink,
   portableDestinationUuid,
@@ -26,6 +28,7 @@ import {
   sha256Hex,
   type EvidenceWriteBatch,
 } from "../../evidence/store.js";
+import { InvestigationActivityService } from "../activity/index.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import {
   MapAuthAdapter,
@@ -1186,6 +1189,103 @@ describe("portable investigation apply", () => {
       (item) => item.title === "Synthetic queue stall",
     );
     expect(listed).toHaveLength(2);
+  });
+
+  it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
+    const row = await fixture();
+    const activity = new InvestigationActivityService({
+      cases: row.cases,
+      installationId: "inst-syntheticnorth",
+    });
+    const sourcePage = await activity.listPage({ actor: ACTOR, isAdmin: false, caseId: row.caseId });
+    const sourceObservation = sourcePage.items.find((item) => item.activityKind === "observation_recorded");
+    const sourceDiscussion = sourcePage.items.find((item) => item.activityKind === "comment_added");
+    const sourceEvidence = sourcePage.items.find((item) => item.activityKind === "evidence_added");
+    const sourceFrozen = sourcePage.items.find((item) => item.activityKind === "evidence_frozen");
+    expect(sourceObservation?.locator.resourceId).toBeTruthy();
+    expect(sourceDiscussion?.locator.resourceId).toBeTruthy();
+    expect(sourceEvidence?.locator.resourceId).toBe(row.evidenceId);
+    expect(sourceFrozen?.locator.resourceId).toBeTruthy();
+    await expect(
+      activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceObservation!.locator)),
+    ).resolves.toMatchObject({ authorized: true, resourceLabel: "Observation" });
+
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    expect(applied.investigationId).not.toBe(row.caseId);
+
+    const destPage = await activity.listPage({
+      actor: ACTOR,
+      isAdmin: false,
+      caseId: applied.investigationId,
+    });
+    const destReload = await activity.listPage({
+      actor: ACTOR,
+      isAdmin: false,
+      caseId: applied.investigationId,
+    });
+    expect(activity.canonicalPageBytes(destPage)).toBe(activity.canonicalPageBytes(destReload));
+
+    const destObservation = destPage.items.find((item) => item.activityKind === "observation_recorded");
+    const destDiscussion = destPage.items.find((item) => item.activityKind === "comment_added");
+    const destEvidence = destPage.items.find((item) => item.activityKind === "evidence_added");
+    const destFrozen = destPage.items.find((item) => item.activityKind === "evidence_frozen");
+    expect(destObservation?.locator.investigationId).toBe(applied.investigationId);
+    expect(destDiscussion?.locator.investigationId).toBe(applied.investigationId);
+    expect(destEvidence?.locator.investigationId).toBe(applied.investigationId);
+    expect(destFrozen?.locator.investigationId).toBe(applied.investigationId);
+    expect(destObservation?.humanFinding).toBe(false);
+    expect(destDiscussion?.humanFinding).toBe(false);
+    expect(destObservation?.provenanceClass).toBe("historical_restored");
+    expect(destDiscussion?.provenanceClass).toBe("historical_restored");
+    expect(destObservation?.locator.resourceId).not.toBe(sourceObservation?.locator.resourceId);
+    expect(destDiscussion?.locator.resourceId).not.toBe(sourceDiscussion?.locator.resourceId);
+    expect(destEvidence?.locator.resourceId).not.toBe(sourceEvidence?.locator.resourceId);
+    expect(destFrozen?.locator.resourceId).not.toBe(sourceFrozen?.locator.resourceId);
+
+    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen]) {
+      await expect(
+        activity.resolve(ACTOR, false, formatCompactInvestigationLocator(item!.locator)),
+      ).resolves.toMatchObject({ authorized: true, locator: item!.locator });
+    }
+
+    const confused = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+      installationId: "inst-syntheticnorth",
+      investigationId: applied.investigationId,
+      kind: "evidence_item",
+      resourceId: destObservation!.locator.resourceId,
+    }));
+    await expect(activity.resolve(ACTOR, false, confused)).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(
+        { id: "eve", username: "eve" },
+        false,
+        formatCompactInvestigationLocator(destEvidence!.locator),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+
+    const swapped = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+      installationId: "inst-syntheticnorth",
+      investigationId: applied.investigationId,
+      kind: "evidence_item",
+      resourceId: sourceEvidence!.locator.resourceId,
+    }));
+    await expect(activity.resolve(ACTOR, false, swapped)).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceEvidence!.locator)),
+    ).resolves.toMatchObject({ authorized: true });
   });
 
   it("rejects resealed nonterminal history and blocks legacy incomplete candidate state", async () => {

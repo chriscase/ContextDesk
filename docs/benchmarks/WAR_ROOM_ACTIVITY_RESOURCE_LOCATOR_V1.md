@@ -73,6 +73,9 @@ existence is not leaked. Timeline fallback matches the same projected
 `locator.kind` + `resourceId` (+ revision when supplied) as the activity feed;
 contribution provenance also requires the durable kind (`message`, `note` /
 `handoff`, `hypothesis`, `action`) rather than any row with that id.
+Portable restore remaps investigation and resource ids; resolve is re-run
+against the destination identities after apply and remains `not_found` for
+kind-confused or unauthorized locators.
 
 ## Privacy and authorization
 
