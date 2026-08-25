@@ -510,3 +510,44 @@ describe("focused workstream", () => {
     expect(within(item).getByRole("heading", { name: "checkout.log" })).toBeTruthy();
   });
 });
+
+describe("imported analysis and the workstream boundary", () => {
+  function stubNoWorkstreams() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ workstreams: [] }),
+        text: async () => JSON.stringify({ workstreams: [] }),
+      })),
+    );
+  }
+
+  it("says nothing about imports when none were recorded", async () => {
+    stubNoWorkstreams();
+    render(<Workstreams caseId="case-1" />);
+    expect(await screen.findByText(/No workstream has run on this investigation yet/)).toBeTruthy();
+    expect(screen.queryByText(/imported from elsewhere/)).toBeNull();
+  });
+
+  it("names the imported analysis and why it is not a workstream", async () => {
+    // Capture reports "1 imported run" while Analyze said only "no workstream
+    // has run", which reads as the import having been lost.
+    stubNoWorkstreams();
+    render(<Workstreams caseId="case-1" importedRunCount={1} />);
+    const empty = await screen.findByText(/No workstream has run on this investigation yet/);
+    expect(empty.textContent).toContain("One analysis was imported from elsewhere");
+    expect(empty.textContent).toContain("is not a workstream");
+    // The boundary is stated, and no evidence is implied for it.
+    expect(empty.textContent).toContain("no frozen evidence behind it");
+    expect(empty.textContent).toContain("once one has run");
+  });
+
+  it("counts more than one import without inventing a singular", async () => {
+    stubNoWorkstreams();
+    render(<Workstreams caseId="case-1" importedRunCount={3} />);
+    const empty = await screen.findByText(/No workstream has run on this investigation yet/);
+    expect(empty.textContent).toContain("3 analyses were imported from elsewhere");
+  });
+});

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/investigation-entity.v1.json",
+  "title": "cd-collab Investigation Entity v1",
+  "description": "A reusable label for something an investigation is about. Holds no evidence, log, email, or chat content; those stay investigation-scoped.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "kind",
+    "label",
+    "profile",
+    "privacyClass",
+    "lifecycle",
+    "createdAt",
+    "createdBy",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.investigation_entity.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "kind": {
+      "type": "string",
+      "enum": ["organization", "customer", "person", "service", "system", "other"]
+    },
+    "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "profile": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["summary", "reference"],
+      "properties": {
+        "summary": { "type": "string", "maxLength": 400 },
+        "reference": { "type": "string", "maxLength": 120 }
+      }
+    },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "lifecycle": { "type": "string", "enum": ["active", "retired"] },
+    "createdAt": { "type": "string", "minLength": 1 },
+    "createdBy": { "type": "string", "minLength": 1 },
+    "updatedAt": { "type": "string", "minLength": 1 }
+  }
+}

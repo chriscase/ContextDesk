@@ -33,6 +33,7 @@ import {
 } from "./app-location.js";
 import { Cases } from "./Cases.js";
 import { Catalog } from "./Catalog.js";
+import { Entities } from "./Entities.js";
 import { Administration } from "./Administration.js";
 import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
@@ -99,6 +100,7 @@ declare global {
 const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
   { area: "overview", label: "Overview" },
   { area: "investigations", label: "Investigations" },
+  { area: "entities", label: "Entities" },
   { area: "sources", label: "Attribution" },
   { area: "administration", label: "Administration" },
   { area: "help", label: "Help" },
@@ -717,6 +719,13 @@ export function App() {
                   navigate({ area: target, caseId: null, stage: "situation" })
                 }
               />
+            </section>
+            <section
+              className="app__area"
+              aria-label="Entities"
+              hidden={work.area !== "entities"}
+            >
+              <Entities canWrite={canWrite} canLead={canLeadCatalog} />
             </section>
             <section
               className="app__area"

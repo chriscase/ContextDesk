@@ -10,7 +10,11 @@ import {
   snapshotFingerprint,
   type ArtifactKind,
   type ArtifactV1,
+  normalizeOccurredAt,
+  statusRequiresResolution,
   type CaseSeverity,
+  type OccurredAtPrecision,
+  type OccurredAtZone,
   type CaseStatus,
   type CaseV1,
   type ContributionV1,
@@ -24,6 +28,7 @@ import {
   type EvidenceStore,
   type EvidenceWriteBatch,
 } from "../../evidence/store.js";
+import { ResolutionRequiredError } from "../resolutions/index.js";
 import type { AuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
 import {
@@ -273,12 +278,40 @@ function cleanSituation(input: CaseSituationInput): CaseSituationInput {
   };
 }
 
+/**
+ * Gate consulted before every status transition.
+ *
+ * A status that claims the question was answered must have a record behind it.
+ * The check lives on the service rather than the route so it cannot be skipped
+ * by calling the status endpoint directly; the implementation lives in the
+ * resolutions module, which owns what a valid record is.
+ */
+export interface StatusResolutionGuard {
+  authorizeStatus(input: {
+    caseId: string;
+    status: CaseStatus;
+    previousStatus: CaseStatus;
+    actor: Actor;
+    origin: string;
+    resolution?: unknown;
+    expectedResolutionRevision?: number;
+  }): Promise<void>;
+}
+
+export interface StatusChangeOptions {
+  clientTime?: string;
+  /** Recorded atomically with the transition when the caller supplies one. */
+  resolution?: unknown;
+  expectedResolutionRevision?: number;
+}
+
 export class CaseService {
   constructor(
     private readonly evidence: EvidenceStore,
     private readonly audit: AuditStore,
     private readonly store: CaseStore = new MemoryCaseStore(),
     private readonly catalog: CatalogService = new CatalogService(),
+    private readonly resolutionGuard?: StatusResolutionGuard,
   ) {}
 
   async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
@@ -435,12 +468,19 @@ export class CaseService {
       impact?: string;
       scope?: string;
       openQuestions?: string[];
+      occurredAt?: unknown;
+      occurredAtPrecision?: unknown;
+      occurredAtZone?: unknown;
     },
     origin: string,
   ): Promise<CaseV1> {
     const clientTime = canonicalClientTime(input.clientTime);
     const id = randomUUID();
     const now = new Date().toISOString();
+    // Two clocks from the first moment: `now` records when this row was
+    // written, the occurrence records when the work happened. A historical
+    // investigation opened today is ordinary, not an anomaly to correct.
+    const occurrence = normalizeOccurredAt(input, { path: "$" });
     const situation = cleanSituation({
       problemStatement: input.problemStatement ?? "",
       affectedParties: input.affectedParties ?? "",
@@ -453,6 +493,9 @@ export class CaseService {
       title: input.title,
       ...situation,
       situationVersion: 0,
+      occurredAt: occurrence.occurredAt,
+      occurredAtPrecision: occurrence.occurredAtPrecision,
+      occurredAtZone: occurrence.occurredAtZone,
       severity: input.severity ?? "medium",
       status: "open" as const,
       legalHold: false,
@@ -468,7 +511,10 @@ export class CaseService {
       actor,
       targetId: id,
       clientTime,
-      payload: { title: row.title },
+      payload: {
+        title: row.title,
+        ...(occurrence.occurredAt === null ? {} : { occurredAt: occurrence.occurredAt }),
+      },
     });
     await this.audit.append({
       identity: actor.id,
@@ -478,6 +524,49 @@ export class CaseService {
       outcome: "success",
     });
     return this.toCase(row);
+  }
+
+  /**
+   * Backfills when the investigated work happened.
+   *
+   * Moves the occurrence only. `createdAt`, the audit trail, and the timeline
+   * sequence keep saying when each record was written, so describing something
+   * that predates this tool never requires rewriting history. Clearing it back
+   * to unrecorded is allowed and is itself recorded.
+   */
+  async setOccurredAt(
+    caseId: string,
+    actor: Actor,
+    input: { occurredAt?: unknown; occurredAtPrecision?: unknown; occurredAtZone?: unknown },
+    origin: string,
+    clientTime?: string,
+  ): Promise<CaseV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
+    const row = await this.requireCase(caseId);
+    const occurrence = normalizeOccurredAt(input, { path: "$" });
+    const previous = row.occurredAt ?? null;
+    await this.store.updateOccurredAt(caseId, occurrence);
+    await this.store.appendTimeline(caseId, {
+      kind: "case_occurred_at",
+      actor,
+      targetId: caseId,
+      clientTime: canonicalTime,
+      payload: {
+        occurredAt: occurrence.occurredAt,
+        occurredAtPrecision: occurrence.occurredAtPrecision,
+        occurredAtZone: occurrence.occurredAtZone,
+        previousOccurredAt: previous,
+      },
+    });
+    await this.audit.append({
+      identity: actor.id,
+      action: "case_occurred_at",
+      target: `${caseId}:${occurrence.occurredAt ?? "unrecorded"}`,
+      origin,
+      outcome: "success",
+    });
+    const updated = await this.requireCase(caseId);
+    return this.toCase(updated);
   }
 
   async updateSituation(
@@ -551,10 +640,37 @@ export class CaseService {
     actor: Actor,
     status: CaseStatus,
     origin: string,
-    clientTime?: string,
+    clientTimeOrOptions?: string | StatusChangeOptions,
   ): Promise<CaseV1> {
-    const canonicalTime = canonicalClientTime(clientTime);
+    const options: StatusChangeOptions =
+      typeof clientTimeOrOptions === "string"
+        ? { clientTime: clientTimeOrOptions }
+        : (clientTimeOrOptions ?? {});
+    const canonicalTime = canonicalClientTime(options.clientTime);
     const row = await this.requireCase(caseId);
+    const previousStatus = row.status;
+    // Fail closed rather than fail open. An installation wired without a
+    // resolution guard cannot reach a status that claims the question was
+    // answered — the absence of a guard is treated as "nothing authorises
+    // this", never as "no check applies".
+    if (!this.resolutionGuard && statusRequiresResolution(status)) {
+      throw new ResolutionRequiredError(status);
+    }
+    // Runs before anything is written: a refused transition must leave the
+    // investigation exactly as it was, with nothing half-recorded.
+    if (this.resolutionGuard) {
+      await this.resolutionGuard.authorizeStatus({
+        caseId,
+        status,
+        previousStatus,
+        actor,
+        origin,
+        ...(options.resolution !== undefined ? { resolution: options.resolution } : {}),
+        ...(options.expectedResolutionRevision !== undefined
+          ? { expectedResolutionRevision: options.expectedResolutionRevision }
+          : {}),
+      });
+    }
     row.status = status;
     await this.store.updateCaseMeta(row);
     await this.store.appendTimeline(caseId, {
@@ -1654,6 +1770,9 @@ export class CaseService {
     scope?: string;
     openQuestions?: string[];
     situationVersion?: number;
+    occurredAt?: string | null;
+    occurredAtPrecision?: OccurredAtPrecision;
+    occurredAtZone?: OccurredAtZone;
     severity: CaseSeverity;
     status: CaseStatus;
     legalHold: boolean;
@@ -1672,6 +1791,9 @@ export class CaseService {
       scope: row.scope ?? "",
       openQuestions: row.openQuestions ? [...row.openQuestions] : [],
       situationVersion: row.situationVersion ?? 0,
+      occurredAt: row.occurredAt ?? null,
+      occurredAtPrecision: row.occurredAtPrecision ?? "unknown",
+      occurredAtZone: row.occurredAtZone ?? "unspecified",
       severity: row.severity,
       status: row.status,
       legalHold: row.legalHold,

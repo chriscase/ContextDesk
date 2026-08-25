@@ -570,6 +570,11 @@ export function looksLikeOpaqueIdentifier(value: string): boolean {
   if (INVESTIGATION_INSTALLATION_ID_RE.test(trimmed)) return true;
   if (/^(?:pkg|package|fp|fingerprint|hash|sha256)[-_:]/i.test(trimmed)) return true;
   if (/^[0-9a-f]{32,}$/i.test(trimmed)) return true;
+  // A truncated hash is still an identifier, and a shortened one is worse than
+  // the whole: it names nothing to a reader and cannot be matched exactly
+  // against another system either. Eight hex characters is past the length any
+  // ordinary label reaches by accident, with or without a trailing ellipsis.
+  if (/^[0-9a-f]{8,}(?:\u2026|\.{3})?$/i.test(trimmed)) return true;
   if (OPAQUE_EVENT_NAME_RE.test(trimmed) && trimmed.includes("_")) return true;
   return false;
 }

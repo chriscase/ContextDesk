@@ -1,0 +1,23 @@
+{
+  "schemaId": "cd-collab.investigation_resolution.v1",
+  "id": "8f7e6d5c-4b3a-4291-8a8f-7d6e5f4a3b2c",
+  "investigationId": "11111111-1111-4111-8111-111111111111",
+  "revision": 2,
+  "predecessorRevision": 1,
+  "basis": "reasoned_exception",
+  "provenance": "human",
+  "status": "resolved",
+  "rationale": "Superseded by the synthetic consolidated investigation; this record is closed without its own conclusion so the two do not diverge.",
+  "unknowns": [],
+  "experimentDecisionId": null,
+  "exceptionReason": "Duplicate of an investigation that carries the substantive conclusion.",
+  "citedArtifactIds": [],
+  "citedContributionIds": [],
+  "occurredAt": null,
+  "occurredAtPrecision": "unknown",
+  "occurredAtZone": "unspecified",
+  "recordedAt": "2026-08-25T15:11:00.000Z",
+  "recordedBy": "synthetic-operator",
+  "recordedByUsername": "synthetic-operator",
+  "supersededAt": null
+}

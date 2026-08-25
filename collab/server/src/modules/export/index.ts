@@ -2,7 +2,8 @@
 export const MODULE_ID = "export" as const;
 
 export { ExportService, PrivacyScanError, isPrivacyClass } from "./service.js";
-export type { ExportSelection } from "./service.js";
+export type { ExportSelection, InvestigationRecordSource } from "./service.js";
+export { shareSafeEntityHandle } from "./project.js";
 export { registerExportRoutes } from "./routes.js";
 export type { ExportRouteDeps } from "./routes.js";
 export {

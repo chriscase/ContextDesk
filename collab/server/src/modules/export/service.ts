@@ -4,6 +4,9 @@ import {
   type ArtifactV1,
   type ExportEnvelopeV1,
   type ExportInventoryV1,
+  type InvestigationInvolvementV1,
+  type InvestigationReferenceV1,
+  type InvestigationResolutionV1,
   type PrivacyClass,
   type SourceV1,
 } from "@cd-collab/contracts";
@@ -25,6 +28,17 @@ export interface ExportSelection {
   id: string;
 }
 
+/**
+ * The read-only view of the investigation record graph the export projection
+ * needs. Export never creates, edits, or reinterprets what it reads.
+ */
+export interface InvestigationRecordSource {
+  involvementFor(caseId: string): Promise<readonly InvestigationInvolvementV1[]>;
+  entityPrivacy(): Promise<ReadonlyMap<string, PrivacyClass>>;
+  referencesFor(caseId: string): Promise<readonly InvestigationReferenceV1[]>;
+  activeResolutionFor(caseId: string): Promise<InvestigationResolutionV1 | null>;
+}
+
 export class ExportService {
   constructor(
     private readonly deps: {
@@ -33,6 +47,12 @@ export class ExportService {
       imports: ImportService;
       audit: AuditStore;
       privacy: ExportPrivacyConfig;
+      /**
+       * Optional so an installation without the investigation record graph
+       * still exports. Absent means the brief carries empty arrays, which
+       * reads as "nothing recorded", not as "withheld".
+       */
+      record?: InvestigationRecordSource;
     },
   ) {}
 
@@ -84,6 +104,7 @@ export class ExportService {
     canReadPrivate: boolean,
   ): Promise<ExportEnvelopeV1> {
     const snapshot = await this.loadSnapshot(caseId, actor, isAdmin, canReadPrivate);
+    const record = await this.loadRecordGraph(caseId);
     const payload = projectBrief({
       variant,
       caseRow: snapshot.caseRow,
@@ -94,6 +115,10 @@ export class ExportService {
       sources: snapshot.sources,
       artifactContent: snapshot.artifactContent,
       privacy: this.deps.privacy,
+      involvement: record.involvement,
+      entityPrivacy: record.entityPrivacy,
+      references: record.references,
+      resolution: record.resolution,
       ...(snapshot.memory === undefined ? {} : { memory: snapshot.memory }),
     });
     const markdown = briefMarkdown(payload);
@@ -170,6 +195,30 @@ export class ExportService {
       payload,
       markdown,
     };
+  }
+
+  /**
+   * Reads the record graph for a brief. Absent wiring yields empty arrays, so
+   * an installation without the graph produces a brief that says nothing was
+   * recorded rather than one that looks redacted.
+   */
+  private async loadRecordGraph(caseId: string): Promise<{
+    involvement: readonly InvestigationInvolvementV1[];
+    entityPrivacy: ReadonlyMap<string, PrivacyClass>;
+    references: readonly InvestigationReferenceV1[];
+    resolution: InvestigationResolutionV1 | null;
+  }> {
+    const source = this.deps.record;
+    if (!source) {
+      return { involvement: [], entityPrivacy: new Map(), references: [], resolution: null };
+    }
+    const [involvement, entityPrivacy, references, resolution] = await Promise.all([
+      source.involvementFor(caseId),
+      source.entityPrivacy(),
+      source.referencesFor(caseId),
+      source.activeResolutionFor(caseId),
+    ]);
+    return { involvement, entityPrivacy, references, resolution };
   }
 
   private async loadSnapshot(caseId: string, actor: Actor, isAdmin: boolean, canReadPrivate: boolean) {

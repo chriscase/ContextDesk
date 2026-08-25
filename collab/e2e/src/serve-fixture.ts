@@ -24,9 +24,18 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../../server/src/modules
 import { CatalogService, MemoryCatalogStore } from "../../server/src/modules/catalog/index.js";
 import { CaseService, MemoryCaseStore } from "../../server/src/modules/cases/index.js";
 import { ExportService, testExportPrivacyConfig } from "../../server/src/modules/export/index.js";
+import { EntityService } from "../../server/src/modules/entities/index.js";
+import { ReferenceService } from "../../server/src/modules/references/index.js";
+import { ResolutionService } from "../../server/src/modules/resolutions/index.js";
 import { ImportService, MemoryRunStore } from "../../server/src/modules/import/index.js";
 import { ExperimentService, MemoryExperimentStore } from "../../server/src/modules/experiments/index.js";
 import { PresenceService } from "../../server/src/modules/presence/index.js";
+import {
+  LogTimeService,
+  MemoryLogTimeStore,
+  ProcessLogTimeBridge,
+  createLogTimeCasePort,
+} from "../../server/src/modules/log-time/index.js";
 import {
   MemoryLocalGrantStore,
   MemoryUserProfileStore,
@@ -95,7 +104,28 @@ async function main(): Promise<void> {
   const profiles = new MemoryUserProfileStore();
   const grants = new MemoryLocalGrantStore();
   const catalog = new CatalogService(catalogStore, audit);
-  const domain = new CaseService(store, audit, caseStore, catalog);
+  // Same construction order as production: the resolution guard exists before
+  // the case service, so a resolved status can never be reached without a
+  // record even in the browser fixture.
+  const resolutions = new ResolutionService({ audit });
+  const domain = new CaseService(store, audit, caseStore, catalog, resolutions);
+  const investigations = {
+    getCase: (id: string, who: { id: string; username: string }, isAdmin: boolean) =>
+      domain.getCase(id, who, isAdmin),
+    appendDomainTimeline: (
+      caseId: string,
+      event: {
+        kind: string;
+        actor: { id: string; username: string };
+        targetId: string | null;
+        clientTime: string | null;
+        payload: unknown;
+      },
+    ) => domain.appendDomainTimeline(caseId, event),
+  };
+  resolutions.bindInvestigations(investigations);
+  const entities = new EntityService({ audit, investigations });
+  const references = new ReferenceService({ audit, investigations });
   const imports = new ImportService({
     evidence: store,
     audit,
@@ -162,6 +192,28 @@ async function main(): Promise<void> {
     applyCoordination: "single_instance",
     confirmationRestartDurable: false,
   });
+  // Log-time review runs against the real `contextdesk` host binary when one
+  // is configured, so the browser suite exercises the shipped pipeline rather
+  // than a stand-in. Without it the routes stay unregistered and the spec
+  // skips, which is honest: there is nothing to review without the pipeline.
+  const logTimeBin = process.env.COLLAB_E2E_LOG_TIME_BIN?.trim();
+  const logTime = logTimeBin
+    ? new LogTimeService({
+        store: new MemoryLogTimeStore(),
+        bridge: new ProcessLogTimeBridge({
+          command: logTimeBin,
+          cacheRoot: join(root, "log-corpora"),
+          timeoutMs: 60_000,
+        }),
+        cases: createLogTimeCasePort({
+          cases: caseStore,
+          domain,
+          evidence: store,
+          jobs: jobStore,
+        }),
+        audit,
+      })
+    : null;
   const presence = new PresenceService();
   const exporter = new ExportService({
     cases: domain,
@@ -169,6 +221,12 @@ async function main(): Promise<void> {
     imports,
     audit,
     privacy: testExportPrivacyConfig(),
+    record: {
+      involvementFor: (caseId) => entities.involvementsForExport(caseId),
+      entityPrivacy: () => entities.entityPrivacyMap(),
+      referencesFor: (caseId) => references.exportProjection(caseId),
+      activeResolutionFor: (caseId) => resolutions.active(caseId),
+    },
   });
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(FIXTURE_ROLE_MAP));
   const actor = { id: "fixture-seed", username: "fixture" };
@@ -206,9 +264,13 @@ async function main(): Promise<void> {
     imports,
     triageRuns,
     presence,
+    ...(logTime ? { logTime } : {}),
     experiments,
     exporter,
     portable,
+    entities,
+    references,
+    resolutions,
     profiles,
     grants,
     security: {

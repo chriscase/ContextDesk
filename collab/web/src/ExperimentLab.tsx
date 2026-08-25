@@ -2,6 +2,13 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import type { MouseEvent, ReactNode } from "react";
 import { pathFor, type RouteItemKind, type WorkFocus } from "./app-location.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
+import {
+  disambiguateIdentities,
+  evidenceIdentity,
+  readableReferenceName,
+  type EvidenceIdentity,
+  type EvidenceIdentityContext,
+} from "./evidence-identity.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { matchingRouteItem, visibleSectionTarget } from "./route-focus.js";
 
@@ -20,6 +27,8 @@ interface CandidateRow {
 interface ExperimentView {
   id: string;
   packageId: string;
+  /** When this comparison was recorded. Drives ordering and the latest marker. */
+  createdAt?: string;
   taskFingerprint: string;
   snapshotFingerprint: string;
   candidates: CandidateRow[];
@@ -190,6 +199,38 @@ function latencyLabel(value: CandidateRow["observedLatency"]): string {
     : "unknown";
 }
 
+/**
+ * Comparisons newest first.
+ *
+ * The API returns them oldest first, which is the right storage order and the
+ * wrong reading order: the newest comparison is the one a decision should be
+ * based on, so it belongs at the top and it is what an unspecified selection
+ * must resolve to.
+ */
+function newestFirst(experiments: ExperimentView[]): ExperimentView[] {
+  return [...experiments].sort((left, right) => {
+    const byTime = (right.createdAt ?? "").localeCompare(left.createdAt ?? "");
+    if (byTime !== 0) return byTime;
+    // Without timestamps the API order is the only ordering fact there is;
+    // preserve it reversed rather than inventing one from the ids.
+    return experiments.indexOf(right) - experiments.indexOf(left);
+  });
+}
+
+/** The comparison a decision defaults to when the address names none. */
+function defaultExperimentId(experiments: ExperimentView[]): string | null {
+  return newestFirst(experiments)[0]?.id ?? null;
+}
+
+/** When a comparison was recorded, in local time. */
+function recordedAtLabel(experiment: ExperimentView): string {
+  const stamp = experiment.createdAt;
+  if (!stamp) return "recorded time not captured";
+  const parsed = new Date(stamp);
+  if (Number.isNaN(parsed.getTime())) return "recorded time not captured";
+  return parsed.toLocaleString();
+}
+
 function candidateRunSummary(candidates: CandidateRow[]): string {
   const counts = new Map<string, number>();
   for (const candidate of candidates) {
@@ -311,6 +352,30 @@ function isModifiedClick(event: MouseEvent<HTMLAnchorElement>): boolean {
   return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
 }
 
+/**
+ * Who took a recorded step, in words.
+ *
+ * "actor tool" and "actor assistant" are the transcript's own vocabulary. A
+ * reader needs to know whether a person, an automated lane, or a tool call
+ * produced the step, because that changes how much the step is worth.
+ */
+function actorMeaning(actor: string, authorUsername?: string): string {
+  const named = authorUsername?.trim();
+  if (named) return `recorded by ${named}`;
+  switch (actor.toLowerCase()) {
+    case "human":
+      return "entered by a person";
+    case "assistant":
+      return "produced by the analysis lane";
+    case "tool":
+      return "returned by a tool the lane called";
+    case "system":
+      return "recorded by the system";
+    default:
+      return `recorded by ${actor}`;
+  }
+}
+
 function traceEventMeaning(kind: string): string {
   const normalized = kind.toLowerCase();
   if (/input|prompt|question|evidence|retriev|search|tool/.test(normalized)) {
@@ -369,12 +434,46 @@ interface LoadedEvidenceExcerpt {
   truncated: boolean;
 }
 
-function artifactSource(artifact: EvidenceArtifactView): string {
-  return [
-    artifact.kind.replaceAll("_", " "),
-    artifact.verificationStatus?.replaceAll("_", " ") ?? "verification unknown",
-    artifact.privacyClass.replaceAll("_", " "),
-  ].join(" · ");
+/**
+ * Adapter from a recorded evidence reference to the presentation shape the lab
+ * renders. All naming, attribution, and excerpt-scoping rules live in
+ * `evidence-identity`, so every surface answers the same way for the same
+ * reference and two distinct references never render as one.
+ */
+function identityContext(
+  view: ExperimentView,
+  artifacts: EvidenceArtifactView[],
+  excerpts: Record<string, LoadedEvidenceExcerpt>,
+  preferLane?: string | null,
+): EvidenceIdentityContext {
+  return {
+    artifacts,
+    traces: view.traces ?? [],
+    laneName: (candidateId) =>
+      view.candidates.find((row) => row.candidateId === candidateId)?.modelLabel
+      ?? "an unnamed lane",
+    loadedText: excerpts,
+    preferLane: preferLane ?? null,
+  };
+}
+
+/**
+ * Every reference this comparison mentions, named and disambiguated together.
+ *
+ * Names are resolved as a set rather than one at a time so a repeated name can
+ * gain a distinguishing suffix; resolving in isolation cannot see the clash.
+ */
+function evidenceIdentityIndex(
+  view: ExperimentView,
+  artifacts: EvidenceArtifactView[] = [],
+  excerpts: Record<string, LoadedEvidenceExcerpt> = {},
+  preferLane?: string | null,
+): Map<string, EvidenceIdentity> {
+  const context = identityContext(view, artifacts, excerpts, preferLane);
+  const identities = disambiguateIdentities(
+    evidenceRefsFor(view).map((ref) => evidenceIdentity(ref, context)),
+  );
+  return new Map(identities.map((identity) => [identity.reference, identity]));
 }
 
 function supportingArtifact(
@@ -382,45 +481,16 @@ function supportingArtifact(
   evidenceRef: string,
   artifacts: EvidenceArtifactView[] = [],
   excerpts: Record<string, LoadedEvidenceExcerpt> = {},
+  preferLane?: string | null,
 ): SupportingArtifact {
-  const artifact = artifacts.find((row) => row.id === evidenceRef);
-  const loaded = excerpts[evidenceRef];
-  const traceEvent = (view.traces ?? []).flatMap((trace) =>
-    trace.events.map((event) => ({ trace, event })),
-  ).find(({ event }) => event.evidenceRefs.includes(evidenceRef) && Boolean(event.excerpt?.trim()));
-  if (artifact) {
-    const label = evidenceArtifactLabel(artifact) ?? "Recorded evidence";
-    return {
-      label,
-      source: artifactSource(artifact),
-      excerpt: loaded?.text ?? traceEvent?.event.excerpt ?? null,
-      context: loaded
-        ? `Text loaded from the recorded evidence artifact${loaded.truncated ? "; the displayed content is a bounded excerpt" : ""}.`
-        : traceEvent
-          ? `The recorded lane captured this excerpt from ${label}; inspect the evidence board for the complete artifact.`
-          : `The evidence record is available as ${label}, but no readable excerpt was loaded.`,
-    };
-  }
-  for (const trace of view.traces ?? []) {
-    const event = trace.events.find((row) =>
-      row.evidenceRefs.includes(evidenceRef) && Boolean(row.excerpt?.trim()),
-    );
-    if (event?.excerpt) {
-      const model = view.candidates.find((row) => row.candidateId === trace.candidateId)?.modelLabel ??
-        "recorded lane";
-      return {
-        label: `Recorded evidence cited by ${model}`,
-        source: `recorded lane transcript · ${model}`,
-        excerpt: event.excerpt,
-        context: `Trace step ${event.sequence} · ${event.kind} by ${event.authorUsername ?? event.actor}. Timestamp and component were not captured by this experiment record.`,
-      };
-    }
-  }
+  const index = evidenceIdentityIndex(view, artifacts, excerpts, preferLane);
+  const identity = index.get(evidenceRef)
+    ?? evidenceIdentity(evidenceRef, identityContext(view, artifacts, excerpts, preferLane));
   return {
-    label: "Supporting evidence needs inspection",
-    source: "Evidence reference recorded; source label was not captured in this experiment view",
-    excerpt: null,
-    context: "Supporting excerpt, timestamp, and component were not captured. ContextDesk will not reconstruct them from an identifier.",
+    label: identity.name,
+    source: identity.source,
+    excerpt: identity.excerpt,
+    context: identity.excerptCaveat ?? "",
   };
 }
 
@@ -437,19 +507,6 @@ function evidenceRefsFor(view: ExperimentView): string[] {
     }
   }
   return [...refs].sort((left, right) => left.localeCompare(right));
-}
-
-function evidenceArtifactLabel(artifact: EvidenceArtifactView | undefined): string | null {
-  if (!artifact) return null;
-  const filename = artifact.filename?.trim();
-  if (filename) return filename;
-  const uri = artifact.uri?.trim();
-  if (uri) {
-    const withoutQuery = uri.split(/[?#]/, 1)[0] ?? uri;
-    const basename = withoutQuery.split(/[\\/]/).filter(Boolean).at(-1);
-    if (basename) return basename;
-  }
-  return `${artifact.kind.replaceAll("_", " ")} evidence`;
 }
 
 const MAX_EVIDENCE_EXCERPT_BYTES = 64 * 1024;
@@ -477,17 +534,17 @@ function EvidencePicker(props: {
   const [query, setQuery] = useState("");
   const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set());
   const fieldsetRef = useRef<HTMLFieldSetElement>(null);
-  const artifactsById = new Map(props.artifacts.map((artifact) => [artifact.id, artifact]));
+  // Resolve the whole set at once: picking one reference at a time cannot see
+  // that two of them would render under the same name, and a chooser whose
+  // options read identically cannot be used to choose.
+  const identities = evidenceIdentityIndex(props.view, props.artifacts);
   const choices = evidenceRefsFor(props.view).map((ref) => {
-    const artifact = artifactsById.get(ref);
-    const support = supportingArtifact(props.view, ref, props.artifacts);
+    const identity = identities.get(ref);
     return {
       ref,
-      label: evidenceArtifactLabel(artifact) ?? support.label,
-      source: artifact
-        ? `${artifact.kind.replaceAll("_", " ")} · ${artifact.privacyClass.replaceAll("_", " ")}${artifact.verificationStatus ? ` · ${artifact.verificationStatus}` : ""}`
-        : support.source,
-      excerpt: support.excerpt,
+      label: identity?.name ?? readableReferenceName(ref),
+      source: identity?.source ?? "named from the recorded reference",
+      excerpt: identity?.excerpt ?? null,
     };
   });
   const normalized = query.trim().toLowerCase();
@@ -788,6 +845,33 @@ const REVIEW_QUEUE_CATEGORIES = [
   "Benchmark comparison",
   "Decision state",
 ] as const;
+
+/**
+ * What a person can actually do about one queue category.
+ *
+ * Every entry used to end with the same sentence — "Open the recorded context
+ * and resolve or annotate this item" — which tells a triage engineer nothing
+ * they did not already know from having read the entry. These name the actual
+ * next move, and each one is something this record can be moved forward with.
+ */
+const REVIEW_QUEUE_NEXT_STEP: Record<string, string> = {
+  "Run completion":
+    "Open the lane's run facts to see how far it got. A lane that did not complete contributes partial facts at most, so decide whether to rerun it or to proceed without it and say so in the decision.",
+  "Recorded conflicts":
+    "Open the evidence and read the surrounding log or trace context yourself, then record which reading the evidence supports. A role conflict changes what the remediation should be.",
+  "Single-lane evidence":
+    "Confirm where this evidence came from and whether anything else corroborates it, then either attach the corroboration or note in the decision that the conclusion rests on one uncorroborated lane.",
+  "Unknown measurements":
+    "These were never reported, so they cannot be recovered from this record. Import a run that carries them if the measurement matters to the decision; otherwise record that you decided without it.",
+  "Trace completeness":
+    "Open the lane's recorded path and read how far it can vouch for itself. Attach the missing transcript if you have it; if not, treat the unrecorded steps as unknown rather than as agreement.",
+  "Human observations":
+    "Read this lane's answer and record a helpfulness observation for it. An unreviewed lane carries no human judgment at all, which is different from a lane judged unhelpful.",
+  "Benchmark comparison":
+    "Alignment stays unknown until a case lead promotes an accepted decision to a benchmark. Promote one when the team has agreed, or compare the lanes directly without a benchmark.",
+  "Decision state":
+    "Propose a decision in Decide, with the evidence it rests on and the questions it leaves open. Nothing here decides for you.",
+};
 
 function buildReviewQueue(view: ExperimentView): ReviewQueueItem[] {
   const items: ReviewQueueItem[] = [];
@@ -1190,6 +1274,39 @@ async function responseError(response: Response, fallback: string): Promise<stri
   return fallback;
 }
 
+/**
+ * The notes At a glance adds under its own summary, stated once each.
+ *
+ * `agreement.notes` and `comparison.notes` are independent sources that both
+ * routinely carry the agreement-is-not-correctness boundary, and the section
+ * states that boundary itself, in full, on the "What agrees" card. Joined
+ * as-is the reader met it two or three times in one paragraph, which buries
+ * the findings the section exists to show and reads as hedging rather than as
+ * a boundary worth respecting.
+ *
+ * So: the boundary is kept exactly once, where it is stated in full, and every
+ * other note survives — deduplicated, in order. Nothing truthful is dropped.
+ */
+export function scanSectionNotes(
+  agreementNotes: readonly string[],
+  comparisonNotes: readonly string[],
+): string[] {
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const note of [...agreementNotes, ...comparisonNotes]) {
+    const text = note.trim();
+    if (!text) continue;
+    const normalized = text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (seen.has(normalized)) continue;
+    // Restatements of the boundary the section already prints in full.
+    if (normalized.startsWith("agreement is not proof of correctness")) continue;
+    if (normalized.startsWith("agreement is not correctness")) continue;
+    seen.add(normalized);
+    kept.push(text);
+  }
+  return kept;
+}
+
 export function ExperimentLab(props: {
   caseId: string;
   canWrite: boolean;
@@ -1198,6 +1315,12 @@ export function ExperimentLab(props: {
   caseTitle?: string;
   caseStatus?: string;
   caseSeverity?: string;
+  /**
+   * Questions the investigation recorded about itself in Situation. Compare
+   * used to read only the unknowns a decision left open, so questions a person
+   * had already written down were reported here as "none recorded".
+   */
+  caseOpenQuestions?: string[];
   participant?: { username: string; roles: string[] };
   /**
    * Which part of the lab to present. "full" (the default, and the behavior
@@ -1346,7 +1469,9 @@ export function ExperimentLab(props: {
     }
     const requestedLane = props.routeFocus?.lane;
     const selected = experiments.find((row) =>
-      (requestedExperiment ? row.id === requestedExperiment : row.id === (active ?? experiments[0]?.id)),
+      (requestedExperiment
+        ? row.id === requestedExperiment
+        : row.id === (active ?? defaultExperimentId(experiments))),
     );
     setFocusedCandidateId(
       requestedLane && selected?.candidates.some((row) => row.candidateId === requestedLane)
@@ -1424,7 +1549,12 @@ export function ExperimentLab(props: {
     };
   }, [props.caseId, props.participant?.username, readOnly]);
 
-  const current = experiments.find((row) => row.id === active) ?? experiments[0] ?? null;
+  // An explicit selection always wins; otherwise the newest comparison is the
+  // decision basis, so a stale run can never quietly become one.
+  const current =
+    experiments.find((row) => row.id === active)
+    ?? experiments.find((row) => row.id === defaultExperimentId(experiments))
+    ?? null;
 
   useEffect(() => {
     if (!current) return undefined;
@@ -1460,11 +1590,18 @@ export function ExperimentLab(props: {
   }, [current, evidenceArtifacts, props.caseId]);
 
   const evidenceRouteItems = new Set(current ? evidenceRefsFor(current) : []);
+  const laneRouteItems = new Set((current?.candidates ?? []).map((row) => row.candidateId));
   const routeFor = (
     section: string,
     item: string | null = null,
     lane: string | null = null,
-    itemKind: RouteItemKind | null = item && evidenceRouteItems.has(item) ? "evidence" : null,
+    itemKind: RouteItemKind | null = !item
+      ? null
+      : evidenceRouteItems.has(item)
+        ? "evidence"
+        : laneRouteItems.has(item)
+          ? "lane"
+          : null,
   ): WorkFocus => ({
     section,
     item,
@@ -1554,17 +1691,33 @@ export function ExperimentLab(props: {
   // Scan-strip projections: every line restates a fact already present in the
   // response. Nothing here ranks, scores, or infers a winner.
   const runFactsSummary = candidateRunSummary(current?.candidates ?? []);
+  const scanNotes = scanSectionNotes(
+    current?.agreement.notes ?? [],
+    current?.comparison?.notes ?? [],
+  );
   const goldConvergenceCount = (current?.comparison?.convergence ?? []).filter(
     (row) => row.inGold,
   ).length;
   // Keep investigative unknowns separate from run telemetry. Missing cost,
   // token usage, traces, or a benchmark matters for auditability, but none of
   // those facts is an unanswered question about the incident itself.
-  const caseUnknowns = [...new Set(
-    (latestDecision?.remainingUnknowns ?? [])
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0),
-  )];
+  // Both sources are real open questions, and each says where it came from:
+  // one was written down when the investigation was framed, the other was left
+  // open by the latest decision. Neither is inferred from the other.
+  const recordedOpenQuestions = (props.caseOpenQuestions ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .map((item) => ({ text: item, source: "recorded in Situation" }));
+  const decisionUnknowns = (latestDecision?.remainingUnknowns ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .map((item) => ({ text: item, source: "left open by the latest decision" }));
+  const seenUnknowns = new Set<string>();
+  const caseUnknowns = [...recordedOpenQuestions, ...decisionUnknowns].filter((row) => {
+    if (seenUnknowns.has(row.text)) return false;
+    seenUnknowns.add(row.text);
+    return true;
+  });
   const runDetailGaps: string[] = [];
   const candidateCount = current?.candidates.length ?? 0;
   const unknownLatencyCount = (current?.candidates ?? []).filter(
@@ -2039,6 +2192,15 @@ export function ExperimentLab(props: {
       {showComparison && canWrite ? (
         <details className="experiment-lab__tools">
           <summary>Add or import analysis</summary>
+          {/* An analysis pasted into Capture does not appear in this list, and
+              the options below do not accept one. Saying so here is the
+              difference between a boundary and a page that looks broken. */}
+          <p className="experiment-lab__section-note">
+            These bring in an already-recorded comparison. An analysis pasted into Capture is not
+            one of them: it becomes comparable from Analyze, through &ldquo;Review in Experiment
+            Lab&rdquo; on a workstream that has run, which is what binds it to that run&rsquo;s
+            frozen evidence. Nothing here will invent that evidence for it.
+          </p>
           <details className="experiment-lab__tools">
             <summary>Import another experiment package</summary>
             <form className="composer" onSubmit={(event) => void importPackage(event)}>
@@ -2085,27 +2247,49 @@ export function ExperimentLab(props: {
         </p>
       ) : null}
       {experiments.length > 1 ? (
-        <nav className="experiment-lab__experiments" aria-label="Historical triage artifacts">
-          <p className="experiment-lab__eyebrow">Historical artifacts</p>
+        <nav className="experiment-lab__experiments" aria-label="Comparisons on this investigation">
+          <p className="experiment-lab__eyebrow">Comparisons on this investigation</p>
+          <p className="experiment-lab__section-note">
+            Newest first. {surface === "decision" ? "A decision" : "This workspace"} uses the newest
+            comparison unless you pick an older one here.
+          </p>
           <ul className="case-list__items">
-            {experiments.map((row, index) => (
-              <li key={row.id}>
-                <button
-                  type="button"
-                  aria-current={row.id === current?.id ? "page" : undefined}
-                  aria-pressed={row.id === current?.id}
-                  onClick={() => selectExperiment(row.id)}
-                >
-                  Comparison {index + 1}: {candidateModelSummary(row.candidates) || "Unlabeled models"}
-                  {" · "}
-                  {row.candidates.length} lane
-                  {row.candidates.length === 1 ? "" : "s"}
-                  {candidateRunSummary(row.candidates)
-                    ? ` · ${candidateRunSummary(row.candidates)}`
-                    : ""}
-                </button>
-              </li>
-            ))}
+            {newestFirst(experiments).map((row, position) => {
+              // The number stays the recording order, so a comparison can be
+              // named out loud and keep that name; the row order and the
+              // marker carry recency instead.
+              const ordinal = experiments.findIndex((item) => item.id === row.id) + 1;
+              const latest = position === 0;
+              const selected = row.id === current?.id;
+              return (
+                <li key={row.id}>
+                  <button
+                    type="button"
+                    aria-current={selected ? "page" : undefined}
+                    aria-pressed={selected}
+                    onClick={() => selectExperiment(row.id)}
+                  >
+                    <span className="experiment-lab__experiment-name">
+                      Comparison {ordinal}:{" "}
+                      {candidateModelSummary(row.candidates) || "Unlabeled lanes"}
+                    </span>
+                    <span className="experiment-lab__experiment-meta">
+                      {latest ? "Latest" : "Earlier"} · recorded {recordedAtLabel(row)} ·{" "}
+                      {row.candidates.length} lane
+                      {row.candidates.length === 1 ? "" : "s"}
+                      {candidateRunSummary(row.candidates)
+                        ? ` · ${candidateRunSummary(row.candidates)}`
+                        : ""}
+                    </span>
+                    {!latest && selected ? (
+                      <span className="experiment-lab__focus-flag">
+                        You are reading an earlier comparison, not the latest one
+                      </span>
+                    ) : null}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </nav>
       ) : null}
@@ -2183,12 +2367,13 @@ export function ExperimentLab(props: {
             </div>
             <p className="experiment-lab__focus-legend">
               Focus stays on this section and highlights matching cards, table columns, and review
-              references in place. It never filters the other lanes or changes the decision basis.
+              references in place. It never filters the other lanes, opens another panel, or
+              changes the decision basis.
             </p>
             {focusedCandidate ? (
               <p className="experiment-lab__focus-status" role="status">
-                Highlighting {focusedCandidate.modelLabel} in place. The page will not jump; other
-                lanes stay visible in the comparison, benchmark, and accepted decision.
+                Highlighting {focusedCandidate.modelLabel} in place. You stay in this section, and
+                other lanes stay visible in the comparison, benchmark, and accepted decision.
               </p>
             ) : null}
           </nav>
@@ -2207,12 +2392,7 @@ export function ExperimentLab(props: {
               {" · runs: "}
               {runFactsSummary || "none recorded"}. Read what agrees, what differs, and what stays
               unknown before the human decision.
-              {current.agreement.notes.length
-                ? ` ${current.agreement.notes.join(" ")}`
-                : ""}
-              {current.comparison?.notes?.length
-                ? ` ${current.comparison.notes.join(" ")}`
-                : ""}
+              {scanNotes.length ? ` ${scanNotes.join(" ")}` : ""}
               {" "}
               Review queue, Evidence, Strategy paths, and Signals stay one workspace away.
             </p>
@@ -2313,7 +2493,9 @@ export function ExperimentLab(props: {
                 {caseUnknowns.length ? (
                   <ul className="experiment-lab__scan-list">
                     {caseUnknowns.map((item) => (
-                      <li key={item}>{item}</li>
+                      <li key={item.text}>
+                        {item.text} <small className="experiment-lab__finding-source">{item.source}</small>
+                      </li>
                     ))}
                   </ul>
                 ) : (
@@ -2676,8 +2858,17 @@ export function ExperimentLab(props: {
                                 ? "experiment-lab__queue-item experiment-lab__route-target"
                                 : "experiment-lab__queue-item"
                             }
-                            data-route-item={item.evidenceRef ?? item.id}
-                            data-route-kind={item.evidenceRef ? "evidence" : undefined}
+                            data-route-item={
+                              item.evidenceRef
+                              ?? (item.candidateIds.length === 1 ? item.candidateIds[0] : item.id)
+                            }
+                            data-route-kind={
+                              item.evidenceRef
+                                ? "evidence"
+                                : item.candidateIds.length === 1
+                                  ? "lane"
+                                  : undefined
+                            }
                             tabIndex={-1}
                           >
                             <h6 className="experiment-lab__queue-text">{primary}</h6>
@@ -2702,12 +2893,21 @@ export function ExperimentLab(props: {
                                 <p><strong>Next step:</strong> {finding.nextStep}</p>
                               </>
                             ) : (
-                              <p><strong>Next step:</strong> Open the recorded context and resolve or annotate this item.</p>
+                              <p>
+                                <strong>Next step:</strong>{" "}
+                                {REVIEW_QUEUE_NEXT_STEP[item.category]
+                                  ?? "Open the recorded context and record what you find."}
+                              </p>
                             )}
                             {deepLink(
                               item.hrefLabel,
                               item.href.replace(/^#/, ""),
-                              item.evidenceRef ?? item.id,
+                              // Address the resource the entry is about. The
+                              // queue position was neither stable across
+                              // record changes nor present on any target, so
+                              // every link fell back to its section heading.
+                              item.evidenceRef
+                                ?? (item.candidateIds.length === 1 ? item.candidateIds[0]! : null),
                               item.candidateIds.length === 1 ? item.candidateIds[0] : null,
                               "experiment-lab__queue-link",
                             )}
@@ -2809,6 +3009,9 @@ export function ExperimentLab(props: {
                   <tr
                     key={row.candidateId}
                     data-route-lane={row.candidateId}
+                    data-route-item={row.candidateId}
+                    data-route-kind="lane"
+                    tabIndex={-1}
                     className={
                       focusedCandidate?.candidateId === row.candidateId
                         ? "experiment-lab__matrix-row--focused"
@@ -2879,8 +3082,24 @@ export function ExperimentLab(props: {
                   <ul className="experiment-lab__detail-list">
                     {current.agreement.candidateSpecific.map((row) => (
                       <li key={row.candidateId}>
-                        <strong>{candidateLabel(row.candidateId)} uses evidence no other lane cites.</strong>{" "}
-                        Inspect and corroborate it before relying on the lane.
+                        {row.evidenceRefs.length ? (
+                          <>
+                            <strong>{candidateLabel(row.candidateId)} uses evidence no other lane cites.</strong>{" "}
+                            Inspect and corroborate it before relying on the lane.
+                          </>
+                        ) : (
+                          // An empty reference list is a gap in the record, not
+                          // uncorroborated evidence. Claiming unique evidence
+                          // and then reporting none contradicts itself.
+                          <>
+                            <strong>
+                              {candidateLabel(row.candidateId)} is listed as citing evidence no other
+                              lane cites, but no evidence reference was recorded for it.
+                            </strong>{" "}
+                            There is nothing here to inspect; treat the lane as uncorroborated until
+                            a reference is attached.
+                          </>
+                        )}
                         {row.evidenceRefs.length ? (
                           <ul className="experiment-lab__detail-list">
                             {row.evidenceRefs.map((evidenceRef) => {
@@ -2898,9 +3117,7 @@ export function ExperimentLab(props: {
                               );
                             })}
                           </ul>
-                        ) : (
-                          <span> No supporting artifact was recorded.</span>
-                        )}
+                        ) : null}
                       </li>
                     ))}
                     {current.agreement.roleConflicts.map((row) => {
@@ -3212,6 +3429,9 @@ export function ExperimentLab(props: {
                 <article
                   key={trace.candidateId}
                   data-route-lane={trace.candidateId}
+                  data-route-item={trace.candidateId}
+                  data-route-kind="lane"
+                  tabIndex={-1}
                   className={
                     focusedCandidate?.candidateId === trace.candidateId
                       ? "experiment-lab__path experiment-lab__path--focused"
@@ -3244,15 +3464,18 @@ export function ExperimentLab(props: {
                     {trace.efficiency.evidenceAcquisitionSteps.status === "observed"
                       ? trace.efficiency.evidenceAcquisitionSteps.count
                       : "unknown"}
-                    {" · "}
-                    cost {trace.efficiency.cost.status}
-                    {trace.unknowns.length ? ` · unknown: ${trace.unknowns.join(", ")}` : ""}
+                    {/* Cost and usage are reported once, in the readiness facet and
+                        the run details. Repeating "cost unknown" on every lane
+                        card adds a word a reader has to skip, not a fact. */}
+                    {trace.unknowns.length
+                      ? ` · not recorded: ${trace.unknowns.map(readableUnknown).join(", ")}`
+                      : ""}
                   </p>
                   <ol className="experiment-lab__path-events">
                     {trace.events.map((event) => (
                       <li key={event.eventId}>
                         <strong>{traceEventMeaning(event.kind)}</strong>
-                        <span> · {event.authorUsername ?? event.actor}</span>
+                        <span> · {actorMeaning(event.actor, event.authorUsername)}</span>
                         {event.excerpt ? (
                           <ArtifactExcerpt text={event.excerpt} />
                         ) : (
@@ -3263,7 +3486,13 @@ export function ExperimentLab(props: {
                         )}
                         <details>
                           <summary>Trace details</summary>
-                          <p>Step {event.sequence} · {event.kind} · actor {event.authorUsername ?? event.actor}</p>
+                          <p>
+                            Step {event.sequence} · {traceEventMeaning(event.kind)} ·{" "}
+                            {actorMeaning(event.actor, event.authorUsername)}
+                          </p>
+                          <p className="case-memory__note">
+                            Recorded in this transcript as “{event.kind}” by “{event.actor}”.
+                          </p>
                           {event.evidenceRefs.length ? (
                             <p>
                               Evidence: {event.evidenceRefs.map((evidenceRef) => supportingArtifact(
@@ -3410,7 +3639,13 @@ export function ExperimentLab(props: {
           </p>
           <ul className="timeline">
             {(current.alignments ?? []).map((row) => (
-              <li key={row.candidateId} className="timeline__item">
+              <li
+                key={row.candidateId}
+                className="timeline__item"
+                data-route-item={row.candidateId}
+                data-route-kind="lane"
+                tabIndex={-1}
+              >
                 <span className="experiment-lab__alignment-summary">
                   {candidateLabel(row.candidateId)}: {ALIGNMENT_STATUS_LABELS[row.status] ?? row.status}
                   {row.matchedAnchors.length

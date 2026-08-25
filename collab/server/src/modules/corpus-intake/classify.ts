@@ -18,6 +18,50 @@ const EXT_MEDIA: Record<string, CorpusAllowedMedia> = {
   ".eml": "message/rfc822",
 };
 
+/**
+ * Header block an RFC 5322 message starts with, e.g. `From:` / `Subject:`.
+ *
+ * A mail client that exports one message per file routinely writes it with a
+ * `.txt` extension, so extension and declared media type alone cannot separate
+ * a saved email from a log. Reading the header block is what tells them apart.
+ */
+const EMAIL_HEADER = /^(from|to|cc|bcc|subject|date|message-id|reply-to|sender|return-path)\s*:/i;
+
+/** True when the text opens with an RFC 5322 header block. */
+function looksLikeEmail(text: string): boolean {
+  const lines = text.split(/\r?\n/, 24);
+  let headers = 0;
+  let sawSubjectOrFrom = false;
+  for (const line of lines) {
+    // A blank line closes the header block; everything after it is the body.
+    if (!line.trim()) break;
+    // Continuation lines (leading whitespace) belong to the previous header.
+    if (/^\s/.test(line) && headers > 0) continue;
+    if (!EMAIL_HEADER.test(line)) return false;
+    if (/^(from|subject)\s*:/i.test(line)) sawSubjectOrFrom = true;
+    headers += 1;
+  }
+  // Require more than a single header so a log line like `date: ...` on its own
+  // is not promoted to an email.
+  return sawSubjectOrFrom && headers >= 2;
+}
+
+/**
+ * The evidence kind a reader should see for one intake member.
+ *
+ * Calling every text file a "log" mislabels saved email and structured
+ * attachments on the evidence board, where the kind is the first thing a
+ * triage engineer reads. Classify only what the bytes actually support and
+ * fall back to `log` for line-oriented text.
+ */
+function artifactKindFor(media: CorpusAllowedMedia, text: string): ArtifactKind {
+  if (media === "message/rfc822") return "email";
+  if (looksLikeEmail(text)) return "email";
+  if (media === "text/x-log" || media === "text/plain") return "log";
+  // CSV, JSON, XML, and Markdown are documents, not logs.
+  return "attachment";
+}
+
 export interface ClassifiedFile {
   relativePath: string;
   mediaType: CorpusAllowedMedia;
@@ -169,7 +213,7 @@ export function classifyBytes(
       };
     }
   }
-  const artifactKind: ArtifactKind = media === "message/rfc822" ? "email" : "log";
+  const artifactKind: ArtifactKind = artifactKindFor(media, text);
   return {
     relativePath: normalized.path,
     mediaType: media,

@@ -169,6 +169,42 @@ describe("investigation activity projection", () => {
     expect(again.items.map((item) => item.activityId)).toEqual(page.items.map((item) => item.activityId));
   });
 
+  it("reports a recorded note as a note, not as an observation", async () => {
+    // The investigation record renders a note as "A human note was recorded".
+    // The feed used to restate the same target as "recorded an observation",
+    // so following the deep link showed a record whose kind did not match the
+    // row that led there.
+    const { cases, activity } = await harness();
+    const created = await cases.createCase(ALICE, { title: "Synthetic note kind" }, "test");
+    const noteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    await cases.appendDomainTimeline(created.id, {
+      kind: "contribution_created",
+      actor: ALICE,
+      targetId: noteId,
+      clientTime: null,
+      serverTime: "2026-08-24T15:05:00.000Z",
+      payload: { kind: "note", privacyClass: "share_safe" },
+    });
+    await cases.appendDomainTimeline(created.id, {
+      kind: "contribution_revised",
+      actor: ALICE,
+      targetId: noteId,
+      clientTime: null,
+      serverTime: "2026-08-24T15:06:00.000Z",
+      payload: { kind: "note", privacyClass: "share_safe", revision: 2 },
+    });
+
+    const page = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const summaries = page.items
+      .filter((item) => item.locator.resourceId === noteId)
+      .map((item) => item.summary);
+    expect(summaries).toContain("recorded a note");
+    expect(summaries).toContain("revised a note");
+    // Never restated as a different kind of record, and never promoted to a
+    // finding by wording.
+    expect(summaries.join(" ")).not.toMatch(/observation|finding/);
+  });
+
   it("rejects malformed and stale cursors instead of restarting", async () => {
     const { cases, activity } = await harness();
     const created = await cases.createCase(ALICE, { title: "Synthetic pagination" }, "test");

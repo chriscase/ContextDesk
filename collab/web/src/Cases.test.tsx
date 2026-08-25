@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CaseDiscussion } from "./CaseDiscussion.js";
-import { Cases } from "./Cases.js";
+import { Cases, activityLabel } from "./Cases.js";
 
 afterEach(() => {
   cleanup();
@@ -465,7 +465,9 @@ describe("war room overview", () => {
     });
 
     render(<Cases roles={["case-lead"]} />);
-    await screen.findByText("Showing the 10 most recent of 12 recorded events.");
+    // Twelve distinct records: each opens a different comment, so grouping
+    // leaves all twelve and the line counts activities, not raw events.
+    await screen.findByText("Showing the 10 most recent of 12 recorded activities.");
     expect(document.querySelectorAll(".activity-feed__item")).toHaveLength(10);
   });
 });
@@ -531,6 +533,43 @@ describe("operational overview", () => {
     expect(within(panel).getByText("human-authored")).toBeTruthy();
     expect(within(panel).getByText("AI-assisted · not a human finding")).toBeTruthy();
     expect(within(panel).getByText("private to this case")).toBeTruthy();
+  });
+
+  it("keeps restored history in the feed without raising it as open work", async () => {
+    stubActivities([
+      activity({
+        activityId: "7".repeat(64),
+        activityKind: "import_recorded",
+        summary: "imported analysis was recorded",
+        provenanceClass: "historical_restored",
+        humanFinding: false,
+      }),
+      activity({
+        activityId: "8".repeat(64),
+        activityKind: "workstream_failed",
+        summary: "failed a workstream",
+        provenanceClass: "historical_restored",
+        humanFinding: false,
+      }),
+    ]);
+    render(<Cases roles={["case-lead"]} />);
+
+    // An exact restore replays work that already happened elsewhere. It stays
+    // in the feed, where its provenance is stated, but a successful restore
+    // must not open a thread for every event it replayed.
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+    expect(within(panel).getAllByText(/restored history/i).length).toBeGreaterThan(0);
+    const threads = await screen.findByRole("complementary", { name: "Open threads" });
+    expect(
+      within(threads).getByText(
+        /Nothing in recent activity is recorded as stopped, disagreeing, unread, or waiting/,
+      ),
+    ).toBeTruthy();
+    expect(within(threads).queryByRole("heading", { name: /Analysis that stopped short/ })).toBeNull();
+    expect(
+      within(threads).queryByRole("heading", { name: /Imported or AI output not yet read/ }),
+    ).toBeNull();
   });
 
   it("collects stalled, disagreeing, and unread work with a direct path to each", async () => {
@@ -676,6 +715,73 @@ describe("operational overview", () => {
     await waitFor(() =>
       expect(within(panel).queryByText(/recorded an observation/)).toBeTruthy(),
     );
+  });
+
+  it("shows one imported analysis once, saying how many times it was recorded", async () => {
+    // Importing one analysis and then comparing it wrote several entries that
+    // said the same thing about the same record. Ten of them filled every slot
+    // of Latest activity and pushed the operational story out.
+    const importedRoute = `/investigations/${CASE_A}/analyze?item=run-1`;
+    const repeated = (id: string, occurredAt: string) => activity({
+      activityId: id.repeat(64).slice(0, 64),
+      summary: "imported analysis was recorded",
+      activityKind: "import_recorded",
+      resolvedRoute: importedRoute,
+      provenanceClass: "ai_generated",
+      humanFinding: false,
+      occurredAt,
+    });
+    stubActivities([
+      repeated("1", "2026-08-24T12:02:00.000Z"),
+      repeated("2", "2026-08-24T12:01:00.000Z"),
+      repeated("3", "2026-08-24T12:00:00.000Z"),
+      activity({
+        activityId: "4".repeat(64),
+        summary: "froze an evidence snapshot",
+        activityKind: "evidence_frozen",
+        occurredAt: "2026-08-24T11:59:00.000Z",
+      }),
+    ]);
+    render(<Cases roles={["case-lead"]} view="overview" />);
+
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+    await waitFor(() =>
+      expect(within(panel).getAllByText(/imported analysis was recorded/)).toHaveLength(1),
+    );
+    // Collapsed, never silently: the row states the repeat.
+    expect(within(panel).getByText("recorded 3 times")).toBeTruthy();
+    // And the work it was crowding out is still on the page.
+    expect(within(panel).getByText(/froze an evidence snapshot/)).toBeTruthy();
+  });
+
+  it("does not fold two people's identical work into one row", async () => {
+    const importedRoute = `/investigations/${CASE_A}/analyze?item=run-1`;
+    stubActivities([
+      activity({
+        activityId: "1".repeat(64),
+        actorLabel: "dave",
+        summary: "imported analysis was recorded",
+        activityKind: "import_recorded",
+        resolvedRoute: importedRoute,
+      }),
+      activity({
+        activityId: "2".repeat(64),
+        actorLabel: "erin",
+        summary: "imported analysis was recorded",
+        activityKind: "import_recorded",
+        resolvedRoute: importedRoute,
+        occurredAt: "2026-08-24T11:00:00.000Z",
+      }),
+    ]);
+    render(<Cases roles={["case-lead"]} view="overview" />);
+
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+    await waitFor(() =>
+      expect(within(panel).getAllByText(/imported analysis was recorded/)).toHaveLength(2),
+    );
+    expect(within(panel).queryByText(/recorded 2 times/)).toBeNull();
   });
 
   it("says nothing about stage or restriction when the projection omits them", async () => {
@@ -998,7 +1104,9 @@ describe("focused investigation view", () => {
         onDeepNavigate={onDeepNavigate}
       />,
     );
-    fireEvent.click(await screen.findByRole("button", { name: /recorded an observation alice/ }));
+    // The row names the kind the person recorded — a note — and the deep link
+    // resolves to that same note.
+    fireEvent.click(await screen.findByRole("button", { name: /recorded a note alice/ }));
     expect(onDeepNavigate).toHaveBeenCalledWith("capture", {
       section: "triage-capture",
       item: "note-12",
@@ -1304,7 +1412,11 @@ describe("focused investigation view", () => {
 
     expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Situation" })).toBeTruthy();
-    expect(screen.getByText(/Opened Discussion to the comment this activity recorded/)).toBeTruthy();
+    // The surface opened, and the announcement says exactly that. This fixture
+    // renders no such comment, so the page must not claim it opened one — that
+    // false success is what made every dead deep link read as a lie.
+    expect(await screen.findByText("Opened Discussion.")).toBeTruthy();
+    expect(screen.queryByText(/Opened Discussion to the comment/)).toBeNull();
   });
 
   it("explains a job-level run locator instead of treating it as a missing workstream", async () => {
@@ -1325,9 +1437,11 @@ describe("focused investigation view", () => {
         onStageChange={() => {}}
       />,
     );
-    expect(
-      await screen.findByText(/Opened the workstream run this activity named/),
-    ).toBeTruthy();
+    // A job-level locator still opens Analyze run history and says so; it is
+    // not reported as a missing workstream. The fixture renders no such run,
+    // so the announcement stops at the surface rather than claiming the record.
+    expect(await screen.findByText("Opened Analyze run history.")).toBeTruthy();
+    expect(screen.queryByText(/Opened Analyze run history to the recorded item/)).toBeNull();
     expect(screen.queryByText(/not part of this investigation/)).toBeNull();
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
   });
@@ -1352,7 +1466,11 @@ describe("focused investigation view", () => {
     );
 
     expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
-    expect(screen.getByText(/Opened Discussion to the comment this activity recorded/)).toBeTruthy();
+    // The surface opened, and the announcement says exactly that. This fixture
+    // renders no such comment, so the page must not claim it opened one — that
+    // false success is what made every dead deep link read as a lie.
+    expect(await screen.findByText("Opened Discussion.")).toBeTruthy();
+    expect(screen.queryByText(/Opened Discussion to the comment/)).toBeNull();
   });
 
   it("does not render mutation controls in static read-only mode", async () => {
@@ -2430,5 +2548,41 @@ describe("workstreams in the Analyze stage", () => {
       );
       expect(document.activeElement).toBe(record);
     });
+  });
+});
+
+describe("recorded contribution kinds", () => {
+  function legacy(kind: string, details: Record<string, unknown>) {
+    return {
+      caseId: "11111111-1111-4111-8111-111111111111",
+      caseTitle: "Checkout latency spike",
+      caseStatus: "open",
+      caseSeverity: "sev2",
+      seq: 1,
+      kind,
+      actorUsername: "alice",
+      targetId: "note-12",
+      details,
+    } as Parameters<typeof activityLabel>[0];
+  }
+
+  // The case record renders a note as "A human note was recorded". The feed
+  // called the same target an observation, so following the link showed a
+  // record of a different kind than the row that led there.
+  it("calls a recorded note a note", () => {
+    expect(activityLabel(legacy("contribution_created", { kind: "note" }))).toBe("recorded a note");
+  });
+
+  it("never restates a note as an observation or promotes it to a finding", () => {
+    const label = activityLabel(legacy("contribution_created", { kind: "note" }));
+    expect(label).not.toMatch(/observation/i);
+    expect(label).not.toMatch(/finding/i);
+  });
+
+  it("leaves the other recorded kinds saying what they are", () => {
+    expect(activityLabel(legacy("contribution_created", { kind: "message" }))).toBe("added a discussion comment");
+    expect(activityLabel(legacy("contribution_created", { kind: "hypothesis" }))).toBe("proposed a working hypothesis");
+    expect(activityLabel(legacy("contribution_created", { kind: "action" }))).toBe("recorded a next action");
+    expect(activityLabel(legacy("contribution_created", { kind: "upload" }))).toBe("recorded an evidence upload");
   });
 });

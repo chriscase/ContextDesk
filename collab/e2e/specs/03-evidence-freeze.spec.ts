@@ -126,6 +126,22 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     ]);
     expect(posted.ok(), await posted.text()).toBeTruthy();
     await expect(page.getByText("ui-upload.log", { exact: true })).toBeVisible();
-    await expect(page.getByText(/hash [0-9a-f]{12}… · share_safe/)).toBeVisible();
+    // The privacy class leads; the digest does not. A truncated hash cannot be
+    // matched against another system, so it is not what the card opens with.
+    await expect(page.getByText("share_safe", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(/hash [0-9a-f]{12}…/)).toHaveCount(0);
+    // The exact value is still there, in full, one disclosure away. A closed
+    // disclosure is out of the accessibility tree, so it is opened rather than
+    // asserted through — which also proves the disclosure itself works.
+    const identifiers = page.locator("details.technical-id").filter({
+      has: page.locator('button[aria-label="Copy content hash for ui-upload.log"]'),
+    });
+    await expect(identifiers).toBeAttached();
+    await identifiers.locator("summary").click();
+    await expect(
+      identifiers.getByRole("button", { name: "Copy content hash for ui-upload.log" }),
+    ).toBeVisible();
+    // Complete, never truncated.
+    await expect(identifiers.locator("code.technical-id__value").first()).toHaveText(/^[0-9a-f]{64}$/);
   });
 });

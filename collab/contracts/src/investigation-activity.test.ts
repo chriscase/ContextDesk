@@ -210,6 +210,15 @@ describe("human-readable presentation boundary", () => {
     expect(safeResourceLabel("evidence_item", null)).toBe("Evidence item");
     expect(safeResourceLabel("workstream_attempt", CASE_A)).toBe("Workstream attempt");
     expect(safeResourceLabel("evidence_item", "ab".repeat(32))).toBe("Evidence item");
+    // A shortened hash is still an identifier — and worse than the whole one:
+    // it names nothing to a reader and no longer matches another system either.
+    expect(safeResourceLabel("workstream", "befd483ad67c")).toBe("Workstream");
+    expect(safeResourceLabel("workstream", "befd483ad67c\u2026")).toBe("Workstream");
+    expect(safeResourceLabel("evidence_item", "0a1b2c3d")).toBe("Evidence item");
+    // Ordinary labels that merely happen to use those letters are kept.
+    expect(safeResourceLabel("workstream", "checkout-timeout.log")).toBe("checkout-timeout.log");
+    expect(safeResourceLabel("workstream", "decade")).toBe("decade");
+    expect(safeResourceLabel("evidence_item", "Payment retry log")).toBe("Payment retry log");
     expect(safeResourceLabel("evidence_item", "case_created")).toBe("Evidence item");
     expect(safeResourceLabel("evidence_item", "Synthetic timeout log")).toBe("Synthetic timeout log");
     expect(safeResourceLabel("timeline_event", null, "12")).toBe("Timeline event 12");

@@ -1,0 +1,399 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+const CASE_ID = "11111111-1111-4111-8111-111111111111";
+const FINGERPRINT = "a".repeat(64);
+
+function sourceStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    source: "worker/batch.log",
+    unresolvedLocalRecords: 5,
+    resolvedLocalRecords: 0,
+    explicitWallClockRecords: 0,
+    otherOrderOnlyRecords: 0,
+    declaration: null,
+    ...overrides,
+  };
+}
+
+function stateBody(overrides: Record<string, unknown> = {}, dependents: unknown[] = []) {
+  return {
+    state: {
+      caseId: CASE_ID,
+      corpusId: "corpus-synthetic-0001",
+      corpusRevision: 1,
+      builtAt: "2024-03-11T12:00:00Z",
+      privacyClass: "owner_only",
+      sources: [sourceStatus()],
+      reviewOutstanding: true,
+      undoableRevision: null,
+      ...overrides,
+    },
+    dependents,
+  };
+}
+
+const PREVIEW = {
+  schemaId: "cd-collab.log_time_preview.v1",
+  caseId: CASE_ID,
+  corpusId: "corpus-synthetic-0001",
+  corpusRevision: 1,
+  declarationFingerprint: FINGERPRINT,
+  source: "worker/batch.log",
+  ianaTimezone: "America/Chicago",
+  affectedRecords: 4,
+  existingWallClockRecords: 0,
+  unchangedOrderOnlyRecords: 0,
+  firstResolvedInstant: "2024-03-10T07:30:00Z",
+  lastResolvedInstant: "2024-03-10T08:20:00Z",
+  dstGapCount: 1,
+  dstFoldCount: 0,
+  unsupportedTimestampCount: 0,
+  zoneAbbreviationMismatchCount: 0,
+  outOfRangeCount: 0,
+  samples: [
+    {
+      ordinal: 3,
+      outcome: "resolved",
+      rawTimestamp: "2024-03-10 01:30:00",
+      normalizedInstant: "2024-03-10T07:30:00Z",
+      utcOffsetSeconds: -21600,
+      unresolvedReason: null,
+      excerpt: "batch worker starting scheduled sweep",
+    },
+    {
+      ordinal: 5,
+      outcome: "unresolved",
+      rawTimestamp: "2024-03-10 02:30:00",
+      normalizedInstant: null,
+      utcOffsetSeconds: null,
+      unresolvedReason: "nonexistent_dst_gap",
+      excerpt: "batch worker heartbeat late",
+    },
+  ],
+};
+
+/** Route fetches by URL suffix; records every request for assertions. */
+function stubFetch(
+  handlers: Record<string, (body: Record<string, unknown>) => unknown>,
+  calls: { url: string; body: Record<string, unknown> }[] = [],
+) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ url, body });
+      for (const [suffix, handler] of Object.entries(handlers)) {
+        if (url.endsWith(suffix)) {
+          const result = handler(body);
+          if (result instanceof Error) {
+            return { ok: false, status: 409, json: async () => ({ error: result.message }) };
+          }
+          return { ok: true, status: 200, json: async () => result };
+        }
+      }
+      return { ok: false, status: 404, json: async () => ({ error: "not_found" }) };
+    }),
+  );
+  return calls;
+}
+
+function panel(props: Partial<{ canWrite: boolean; readOnly: boolean }> = {}) {
+  return (
+    <LogTimeReviewPanel
+      caseId={CASE_ID}
+      canWrite={props.canWrite ?? true}
+      readOnly={props.readOnly ?? false}
+    />
+  );
+}
+
+describe("LogTimeReviewPanel", () => {
+  it("says plainly that a timezone is missing and that nothing will be guessed", async () => {
+    stubFetch({ "/log-time": () => stateBody() });
+    render(panel());
+
+    expect(
+      await screen.findByText(/records a clock time but not which timezone/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/ContextDesk will not guess/i)).toBeTruthy();
+    expect(screen.getByText(/5 lines still in file order only/i)).toBeTruthy();
+  });
+
+  it("offers no timezone until a person types one", async () => {
+    stubFetch({ "/log-time": () => stateBody() });
+    render(panel());
+
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    const input = screen.getByLabelText(/which timezone was this file written in/i);
+    expect((input as HTMLInputElement).value).toBe("");
+    expect(
+      screen.getByRole("button", { name: /show me what this would do/i }),
+    ).toHaveProperty("disabled", true);
+  });
+
+  it("shows raw and normalized timestamps side by side, including the DST gap", async () => {
+    stubFetch({
+      "/log-time/preview": () => PREVIEW,
+      "/log-time": () => stateBody(),
+    });
+    render(panel());
+
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+
+    const table = await screen.findByRole("table");
+    const rows = within(table).getAllByRole("row");
+    // Header plus the two sampled lines.
+    expect(rows).toHaveLength(3);
+    const [, resolvedRow, unresolvedRow] = rows as [HTMLElement, HTMLElement, HTMLElement];
+
+    expect(within(resolvedRow).getByText("2024-03-10 01:30:00")).toBeTruthy();
+    expect(within(resolvedRow).getByText("2024-03-10T07:30:00Z")).toBeTruthy();
+    expect(within(resolvedRow).getByText(/UTC−06:00/)).toBeTruthy();
+    expect(
+      within(resolvedRow).getByText(/batch worker starting scheduled sweep/),
+    ).toBeTruthy();
+
+    expect(within(unresolvedRow).getByText("2024-03-10 02:30:00")).toBeTruthy();
+    expect(
+      within(unresolvedRow).getByText(/clocks jumped forward past it/i),
+    ).toBeTruthy();
+  });
+
+  it("explains the DST gap in plain language before anything is applied", async () => {
+    stubFetch({ "/log-time/preview": () => PREVIEW, "/log-time": () => stateBody() });
+    render(panel());
+
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+
+    expect(
+      await screen.findByText(/fall in the hour this zone skips when clocks go forward/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/those lines keep file order instead/i)).toBeTruthy();
+  });
+
+  it("sends the exact previewed fingerprint and revision when applying", async () => {
+    const calls: { url: string; body: Record<string, unknown> }[] = [];
+    stubFetch(
+      {
+        "/log-time/preview": () => PREVIEW,
+        "/log-time/apply": () => ({ schemaId: "cd-collab.log_time_outcome.v1" }),
+        "/log-time": () => stateBody(),
+      },
+      calls,
+    );
+    render(panel());
+
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /apply America\/Chicago to this file/i }),
+    );
+
+    await waitFor(() => {
+      expect(calls.some((call) => call.url.endsWith("/log-time/apply"))).toBe(true);
+    });
+    const apply = calls.find((call) => call.url.endsWith("/log-time/apply"));
+    expect(apply?.body.declarationFingerprint).toBe(FINGERPRINT);
+    expect(apply?.body.expectedRevision).toBe(1);
+    expect(apply?.body.ianaTimezone).toBe("America/Chicago");
+  });
+
+  it("shows how a declared timezone was decided, including its fingerprint", async () => {
+    stubFetch({
+      "/log-time": () =>
+        stateBody({
+          corpusRevision: 2,
+          reviewOutstanding: false,
+          sources: [
+            sourceStatus({
+              unresolvedLocalRecords: 0,
+              resolvedLocalRecords: 4,
+              declaration: {
+                source: "worker/batch.log",
+                ianaTimezone: "America/Chicago",
+                basis: "user_declared",
+                declaredAt: 1710093600,
+                appliedRevision: 2,
+                declarationFingerprint: FINGERPRINT,
+                declaredBy: "analyst-synthetic-01",
+              },
+            }),
+          ],
+        }),
+    });
+    render(panel());
+
+    fireEvent.click(await screen.findByText(/how this timezone was decided/i));
+    expect(screen.getByText("analyst-synthetic-01")).toBeTruthy();
+    expect(screen.getByText(/A person chose this zone here/i)).toBeTruthy();
+    expect(screen.getByText(`${FINGERPRINT.slice(0, 16)}…`)).toBeTruthy();
+  });
+
+  it("distinguishes a saved default from an in-the-moment choice", async () => {
+    stubFetch({
+      "/log-time": () =>
+        stateBody({
+          corpusRevision: 2,
+          reviewOutstanding: false,
+          sources: [
+            sourceStatus({
+              unresolvedLocalRecords: 0,
+              resolvedLocalRecords: 4,
+              declaration: {
+                source: "worker/batch.log",
+                ianaTimezone: "America/Chicago",
+                basis: "configured_default",
+                declaredAt: 1710093600,
+                appliedRevision: 2,
+                declarationFingerprint: FINGERPRINT,
+                declaredBy: "analyst-synthetic-01",
+              },
+            }),
+          ],
+        }),
+    });
+    render(panel());
+
+    fireEvent.click(await screen.findByText(/how this timezone was decided/i));
+    expect(screen.getByText(/not chosen in the moment/i)).toBeTruthy();
+  });
+
+  it("discloses that a snapshot reads differently and a run is no longer current", async () => {
+    stubFetch({
+      "/log-time": () =>
+        stateBody({ corpusRevision: 2, undoableRevision: 1 }, [
+          {
+            kind: "snapshot",
+            id: "snapshot-synthetic-0001",
+            disposition: "revised",
+            reason: "The files themselves have not changed; any timing needs a fresh look.",
+            observedRevision: 1,
+          },
+          {
+            kind: "triage_run",
+            id: "run-synthetic-0001",
+            disposition: "invalidated",
+            reason: "Its conclusions are no longer current.",
+            observedRevision: 1,
+          },
+        ]),
+    });
+    render(panel());
+
+    expect(await screen.findByText(/reads differently now/i)).toBeTruthy();
+    // The chip and the explanation both say it, which is the point: the label
+    // is scannable and the sentence below it is the reason.
+    expect(screen.getAllByText(/no longer current/i).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/Evidence set snapshot-synthetic-0001/)).toBeTruthy();
+    expect(screen.getByText(/Run run-synthetic-0001/)).toBeTruthy();
+  });
+
+  it("offers undo only once there is a revision to step back from", async () => {
+    stubFetch({ "/log-time": () => stateBody() });
+    render(panel());
+    await screen.findByText(/records a clock time/i);
+    expect(screen.queryByRole("button", { name: /undo the last time change/i })).toBeNull();
+
+    cleanup();
+    stubFetch({ "/log-time": () => stateBody({ corpusRevision: 2, undoableRevision: 1 }) });
+    render(panel());
+    expect(
+      await screen.findByRole("button", { name: /undo the last time change/i }),
+    ).toBeTruthy();
+  });
+
+  it("surfaces a conflict and re-reads instead of retrying blind", async () => {
+    const calls: { url: string; body: Record<string, unknown> }[] = [];
+    stubFetch(
+      {
+        "/log-time/preview": () =>
+          new Error("stale timezone preview: expected revision 1, current 3"),
+        "/log-time": () => stateBody(),
+      },
+      calls,
+    );
+    render(panel());
+
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "stale timezone preview: expected revision 1, current 3",
+    );
+    await waitFor(() => {
+      expect(calls.filter((call) => call.url.endsWith("/log-time")).length).toBeGreaterThan(1);
+    });
+    expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("offers a reviewer with read-only access no way to change the reading", async () => {
+    stubFetch({ "/log-time": () => stateBody() });
+    render(panel({ canWrite: false }));
+
+    await screen.findByText(/records a clock time/i);
+    expect(screen.queryByRole("button", { name: /declare a timezone/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /remove this timezone/i })).toBeNull();
+  });
+
+  it("renders nothing when this deployment has no log-time pipeline", async () => {
+    // The routes are unregistered without a configured host binary. That is a
+    // deliberate absence, so the panel must not add an error or a live region
+    // to the Analyze stage.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        json: async () => ({ error: "not_found" }),
+      })),
+    );
+    const { container } = render(panel());
+
+    await waitFor(() => {
+      expect(container.querySelector("#log-time")).toBeNull();
+    });
+    expect(screen.queryByText(/not_found/i)).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("invites building the corpus when the case has none yet", async () => {
+    stubFetch({
+      "/log-time": () =>
+        stateBody({
+          corpusId: null,
+          corpusRevision: 0,
+          builtAt: null,
+          sources: [],
+          reviewOutstanding: false,
+        }),
+    });
+    render(panel());
+
+    expect(
+      await screen.findByRole("button", { name: /build the log corpus/i }),
+    ).toBeTruthy();
+  });
+});

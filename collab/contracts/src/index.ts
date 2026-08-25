@@ -270,6 +270,49 @@ export type {
 } from "./investigation-corpus-intake.js";
 
 export {
+  LOG_CORPUS_STATE_SCHEMA_ID,
+  LOG_TIME_APPLY_REQUEST_SCHEMA_ID,
+  LOG_TIME_CLEAR_REQUEST_SCHEMA_ID,
+  LOG_TIME_DECLARATION_BASES,
+  LOG_TIME_DEPENDENT_DISPOSITIONS,
+  LOG_TIME_DEPENDENT_KINDS,
+  LOG_TIME_LIMITS,
+  LOG_TIME_OPERATIONS,
+  LOG_TIME_OUTCOME_SCHEMA_ID,
+  LOG_TIME_PREVIEW_REQUEST_SCHEMA_ID,
+  LOG_TIME_PREVIEW_SCHEMA_ID,
+  LOG_TIME_SAMPLE_OUTCOMES,
+  LOG_TIME_UNDO_REQUEST_SCHEMA_ID,
+  LOG_TIME_UNRESOLVED_REASONS,
+  assertIanaTimezone,
+  parseLogCorpusState,
+  parseLogTimeApplyRequest,
+  parseLogTimeClearRequest,
+  parseLogTimeOutcome,
+  parseLogTimePreview,
+  parseLogTimePreviewRequest,
+  parseLogTimeUndoRequest,
+} from "./investigation-log-time.js";
+export type {
+  LogCorpusStateV1,
+  LogTimeApplyRequestV1,
+  LogTimeClearRequestV1,
+  LogTimeDeclarationBasis,
+  LogTimeDeclarationV1,
+  LogTimeDependentDisposition,
+  LogTimeDependentKind,
+  LogTimeDependentV1,
+  LogTimeOperation,
+  LogTimeOutcomeV1,
+  LogTimePreviewRequestV1,
+  LogTimePreviewV1,
+  LogTimeSampleOutcome,
+  LogTimeSampleV1,
+  LogTimeSourceStatusV1,
+  LogTimeUnresolvedReason,
+} from "./investigation-log-time.js";
+
+export {
   SNAPSHOT_FAIRNESS_CLASSES,
   SNAPSHOT_LIST_SCHEMA_ID,
   SNAPSHOT_SCHEMA_ID,
@@ -408,6 +451,7 @@ export type {
 export {
   BRIEF_SCHEMA_ID,
   IMPORTED_RESPONSE_PRESENTATION,
+  SHARE_SAFE_ENTITY_HANDLE_PREFIX,
   parseBrief,
 } from "./brief.js";
 export type {
@@ -417,8 +461,11 @@ export type {
   BriefHeaderV1,
   BriefHypothesisV1,
   BriefImportedRunV1,
+  BriefInvolvementV1,
   BriefLinkV1,
   BriefMemorySummaryV1,
+  BriefReferenceV1,
+  BriefResolutionV1,
   BriefTimelineEventV1,
   BriefV1,
 } from "./brief.js";
@@ -675,6 +722,10 @@ export * from "./investigation-portable-archive.js";
 export * from "./investigation-portable-apply.js";
 export * from "./investigation-strategy-connector.js";
 export * from "./investigation-activity.js";
+export * from "./temporal.js";
+export * from "./investigation-entity.js";
+export * from "./investigation-reference.js";
+export * from "./investigation-resolution.js";
 export * from "./capability.js";
 export * from "./user-profile.js";
 export * from "./directory-mapping.js";

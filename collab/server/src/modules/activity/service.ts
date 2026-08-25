@@ -33,6 +33,7 @@ import {
 import type { Actor, CaseService } from "../cases/index.js";
 import {
   INVESTIGATION_ACTIVITY_SOURCE_WINDOW,
+  dedupeProjectedActivity,
   projectTimelineSource,
   resourceLabelForKind,
   type ProjectedInvestigationActivity,
@@ -222,8 +223,11 @@ export class InvestigationActivityService {
         this.deps.publicIdentityId?.(input.actor.id) ?? input.actor.id,
       ))
       .sort((left, right) => compareInvestigationActivityItems(left.item, right.item));
+    // Collapse rows that describe the same recorded work before paging, so a
+    // cursor is built from the same list a reader sees.
+    const deduped = dedupeProjectedActivity(projected);
     if (cursor) {
-      const found = projected.some((row) =>
+      const found = deduped.some((row) =>
         row.item.activityId === cursor.activityId
         && row.item.occurredAt === cursor.occurredAt
         && row.item.investigationId === cursor.investigationId
@@ -232,8 +236,8 @@ export class InvestigationActivityService {
       if (!found) throw new InvestigationActivityError("stale_cursor");
     }
     const following = cursor
-      ? projected.filter((row) => activityItemIsAfterCursor(row.item, cursor))
-      : projected;
+      ? deduped.filter((row) => activityItemIsAfterCursor(row.item, cursor))
+      : deduped;
     const pageItems = following.slice(0, limit).map((row) => row.item);
     const last = pageItems[pageItems.length - 1];
     const nextCursor = last && following.length > limit

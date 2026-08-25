@@ -139,6 +139,10 @@ describe("triage workspace capture paths", () => {
     const importForm = screen
       .getByRole("button", { name: "Import external run" })
       .closest("form") as HTMLFormElement;
+    // An import has to say where it came from, so the happy path states it.
+    fireEvent.change(screen.getByRole("combobox", { name: "External run source" }), {
+      target: { value: "s1" },
+    });
     fireEvent.submit(importForm);
     expect(props.onImportRun).toHaveBeenCalledTimes(1);
   });
@@ -379,6 +383,60 @@ describe("retired-source-safe manual intake", () => {
   function sourceChooser(): HTMLSelectElement {
     return screen.getByRole("combobox", { name: "External run source" }) as HTMLSelectElement;
   }
+
+  /** The reported journey: the analysis is pasted, the source is not chosen. */
+  function pasteAnalysis() {
+    fireEvent.change(document.querySelector('textarea[name="outputText"]') as HTMLTextAreaElement, {
+      target: { value: "Synthetic pasted analysis." },
+    });
+  }
+
+  it("says why an unlabelled import did not go through, instead of doing nothing", () => {
+    // Clicking with "Choose a label" still showing used to hand the browser's
+    // own `required` handling a submit it silently swallowed: the combobox
+    // took focus, a tooltip flashed, and the page looked broken.
+    const props = makeProps({ sources: [activeSource] });
+    render(<TriageWorkspace {...props} />);
+    const chooser = sourceChooser();
+    expect(chooser.value).toBe("");
+    pasteAnalysis();
+
+    fireEvent.click(screen.getByRole("button", { name: "Import external run" }));
+
+    expect(props.onImportRun).not.toHaveBeenCalled();
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toMatch(/Choose where this analysis came from/);
+    // Announced against the control it is about, and the control is marked
+    // invalid so assistive technology reaches the same conclusion.
+    expect(chooser.getAttribute("aria-invalid")).toBe("true");
+    expect(alert.id).toBe(chooser.getAttribute("aria-describedby"));
+    expect(document.activeElement).toBe(chooser);
+  });
+
+  it("clears the requirement and imports once a source is chosen", () => {
+    const props = makeProps({ sources: [activeSource] });
+    render(<TriageWorkspace {...props} />);
+    pasteAnalysis();
+    fireEvent.click(screen.getByRole("button", { name: "Import external run" }));
+    expect(screen.getByRole("alert")).toBeTruthy();
+
+    fireEvent.change(sourceChooser(), { target: { value: "s1" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(sourceChooser().getAttribute("aria-invalid")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Import external run" }));
+    expect(props.onImportRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not offer an import it could not record when no label is available", () => {
+    // Guidance already explains why; the control now matches it rather than
+    // inviting a click that cannot succeed.
+    const props = makeProps({ sources: [retiredSource] });
+    render(<TriageWorkspace {...props} />);
+    expect((screen.getByRole("button", { name: "Import external run" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(sourceChooser().disabled).toBe(true);
+    expect(screen.getByText(/All attribution labels are retired/)).toBeTruthy();
+  });
 
   it("offers active sources in the new-intake chooser and excludes retired ones", () => {
     render(<TriageWorkspace {...makeProps({ sources: [activeSource, retiredSource] })} />);

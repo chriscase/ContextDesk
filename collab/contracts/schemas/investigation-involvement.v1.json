@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/investigation-involvement.v1.json",
+  "title": "cd-collab Investigation Involvement v1",
+  "description": "Links a reusable entity to one investigation. recordedLabel/recordedKind are immutable historical attribution; occurredAt and recordedAt are separate clocks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "investigationId",
+    "entityId",
+    "relationship",
+    "state",
+    "note",
+    "recordedLabel",
+    "recordedKind",
+    "currentLabel",
+    "currentKind",
+    "currentLifecycle",
+    "occurredAt",
+    "occurredAtPrecision",
+    "occurredAtZone",
+    "recordedAt",
+    "recordedBy",
+    "recordedByUsername",
+    "releasedAt"
+  ],
+  "properties": {
+    "schemaId": {
+      "type": "string",
+      "const": "cd-collab.investigation_involvement.v1"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "investigationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entityId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "relationship": {
+      "type": "string",
+      "enum": [
+        "affected",
+        "reporting",
+        "responsible",
+        "observing",
+        "referenced",
+        "other"
+      ]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "active",
+        "released"
+      ]
+    },
+    "note": {
+      "type": "string",
+      "maxLength": 400
+    },
+    "recordedLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "recordedKind": {
+      "type": "string",
+      "enum": [
+        "organization",
+        "customer",
+        "person",
+        "service",
+        "system",
+        "other"
+      ]
+    },
+    "currentLabel": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "currentKind": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "organization",
+        "customer",
+        "person",
+        "service",
+        "system",
+        "other",
+        null
+      ]
+    },
+    "currentLifecycle": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "active",
+        "retired",
+        null
+      ]
+    },
+    "occurredAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occurredAtPrecision": {
+      "type": "string",
+      "enum": [
+        "year",
+        "month",
+        "day",
+        "minute",
+        "second",
+        "unknown"
+      ]
+    },
+    "recordedAt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recordedBy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recordedByUsername": {
+      "type": "string",
+      "minLength": 1
+    },
+    "releasedAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occurredAtZone": {
+      "type": "string",
+      "enum": [
+        "explicit",
+        "unspecified"
+      ]
+    }
+  }
+}

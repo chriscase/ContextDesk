@@ -1,0 +1,26 @@
+{
+  "schemaId": "cd-collab.investigation_resolution.v1",
+  "id": "7e6d5c4b-3a29-4180-bf7e-6c5d4e3f2a1b",
+  "investigationId": "11111111-1111-4111-8111-111111111111",
+  "revision": 1,
+  "predecessorRevision": null,
+  "basis": "human_only",
+  "provenance": "human",
+  "status": "resolved",
+  "rationale": "Reviewed the synthetic retry log and the two recorded observations; the timeout window matches the scheduled batch and stopped when the batch was rescheduled. No model run was needed or performed.",
+  "unknowns": [
+    "Whether the same batch overlap occurred before the retained log window.",
+    "Which upstream change moved the batch schedule."
+  ],
+  "experimentDecisionId": null,
+  "exceptionReason": null,
+  "citedArtifactIds": ["9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"],
+  "citedContributionIds": ["1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"],
+  "occurredAt": "2024-11-04",
+  "occurredAtPrecision": "day",
+  "occurredAtZone": "unspecified",
+  "recordedAt": "2026-08-25T14:02:00.000Z",
+  "recordedBy": "synthetic-operator",
+  "recordedByUsername": "synthetic-operator",
+  "supersededAt": null
+}
