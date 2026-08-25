@@ -164,7 +164,8 @@ jobs:
           fi
           find "$bundle" -type f \( \
             -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o \
-            -name '*.AppImage' -o -name '*.deb' -o -name '*.sig' -o \
+            -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o \
+            -name '*.sig' -o \
             -name '*.tar.gz' -o -name '*.zip' \
           \) -exec cp -a {} dist/desktop/ \;
           ls -la dist/desktop

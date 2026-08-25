@@ -390,6 +390,17 @@ def test_missing_signatures() -> None:
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         rc.populate_complete_matrix(tdp, identity=identity, signed=True)
+        (tdp / "orphan-installer.exe.sig").write_text(
+            "placeholder", encoding="utf-8"
+        )
+        try:
+            _assemble_ok(tdp, identity, signed=True)
+            check("orphan updater signature fails", False)
+        except SystemExit:
+            check("orphan updater signature fails", True)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        rc.populate_complete_matrix(tdp, identity=identity, signed=True)
         list(tdp.glob("*.sig"))[0].write_text("placeholder", encoding="utf-8")
         try:
             _assemble_ok(tdp, identity, signed=True)

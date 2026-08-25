@@ -503,6 +503,7 @@ def infer_desktop_os(name: str) -> Optional[str]:
         lower.endswith(".appimage")
         or lower.endswith(".appimage.tar.gz")
         or lower.endswith(".deb")
+        or lower.endswith(".rpm")
     ):
         return "linux"
     return None
@@ -709,6 +710,7 @@ def build_latest_json(
     allow_test_sig: bool,
 ) -> Dict[str, Any]:
     by_name = {a.name: a for a in assets}
+    verify_signature_sidecars(assets, allow_test_sig=allow_test_sig)
     platforms: Dict[str, Dict[str, str]] = {}
     for asset in assets:
         if asset.kind != "updater" or asset.name.endswith(".sig"):
@@ -749,6 +751,24 @@ def build_latest_json(
     }
 
 
+def verify_signature_sidecars(
+    assets: Sequence[Asset], *, allow_test_sig: bool
+) -> None:
+    """Require every staged updater signature to bind exact staged bytes."""
+    by_name = {asset.name: asset for asset in assets}
+    for sidecar in assets:
+        if not sidecar.name.endswith(".sig"):
+            continue
+        payload_name = sidecar.name[: -len(".sig")]
+        payload = by_name.get(payload_name)
+        if payload is None:
+            die(f"orphan updater signature {sidecar.name} has no staged payload")
+        signature = sidecar.path.read_text(encoding="utf-8").strip()
+        verify_artifact_signature(
+            payload.path.read_bytes(), signature, allow_test_sig=allow_test_sig
+        )
+
+
 def verify_latest_json(
     data: Mapping[str, Any],
     *,
@@ -761,6 +781,7 @@ def verify_latest_json(
         die("latest.json must be an object with platforms")
     names = {a.name for a in assets}
     by_name = {a.name: a for a in assets}
+    verify_signature_sidecars(assets, allow_test_sig=allow_test_sig)
     platforms = data.get("platforms") or {}
     if not platforms:
         die("latest.json platforms is empty")
