@@ -7,7 +7,7 @@ import {
   type SourceLifecycle,
   type SourceV1,
 } from "@cd-collab/contracts";
-import { activeCaseQueryable } from "../cases/store.js";
+import { activeCaseQueryable } from "../cases/index.js";
 
 export interface SourceRow {
   id: string;
