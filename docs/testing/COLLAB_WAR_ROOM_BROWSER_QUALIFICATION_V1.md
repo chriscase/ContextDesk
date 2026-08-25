@@ -50,7 +50,11 @@ npm run test -w @cd-collab/e2e
 The Playwright config starts `collab/e2e/src/serve-fixture.ts`, which wires the
 **existing** `MapAuthAdapter` + memory case/catalog/import/export stores and
 serves `collab/web/dist`. Fixture passwords are the same `fixture-*-secret`
-values already used by collab HTTP tests.
+values already used by collab HTTP tests. The authenticated fixture creates an
+installation-local public-identity key inside its disposable evidence root and
+passes that durable codec to the server explicitly. This exercises the
+production startup boundary without weakening the requirement that authenticated
+production deployments have a durable codec.
 
 | Identity | Role | Notes |
 | --- | --- | --- |

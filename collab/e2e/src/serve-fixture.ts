@@ -19,6 +19,7 @@ import {
   createAuthLog,
   createRateLimiter,
   defaultSessionPolicy,
+  loadPublicIdentityCodec,
 } from "../../server/src/modules/auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../../server/src/modules/authz/index.js";
 import { CatalogService, MemoryCatalogStore } from "../../server/src/modules/catalog/index.js";
@@ -83,6 +84,10 @@ async function main(): Promise<void> {
     );
   }
   const root = await mkdtemp(join(tmpdir(), "cd-collab-e2e-"));
+  // Exercise the production identity boundary explicitly. The fixture root is
+  // synthetic and disposable, but its installation key remains durable for
+  // this server process instead of relying on NODE_ENV-based test fallback.
+  const publicIdentities = await loadPublicIdentityCodec(root);
   const store = new FilesystemEvidenceStore({ rootDir: root });
   await store.ping();
   const audit = new MemoryAuditStore();
@@ -202,6 +207,7 @@ async function main(): Promise<void> {
     experiments,
     exporter,
     portable,
+    publicIdentities,
     profiles,
     grants,
     security: {
