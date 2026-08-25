@@ -30,7 +30,7 @@ import {
   type InvestigationResourceResolveV1,
   type InvestigationStageV1,
 } from "@cd-collab/contracts";
-import type { Actor, CaseService, CaseTimelineRow } from "../cases/index.js";
+import type { Actor, CaseService, TimelineRow } from "../cases/index.js";
 import {
   INVESTIGATION_ACTIVITY_SOURCE_WINDOW,
   projectTimelineSource,
@@ -378,12 +378,12 @@ function contributionKindMatchesLocator(
 function projectedLocatorMatches(
   installationId: string,
   caseId: string,
-  event: CaseTimelineRow,
+  event: TimelineRow,
   locator: InvestigationResourceLocatorV1,
 ): boolean {
   const projected = projectTimelineSource({
     installationId,
-    source: { caseId, title: "Investigation", event },
+    source: { caseId, title: "Investigation", event: { ...event, caseId } },
   });
   if (!projected) return false;
   if (projected.item.locator.kind !== locator.kind) return false;
