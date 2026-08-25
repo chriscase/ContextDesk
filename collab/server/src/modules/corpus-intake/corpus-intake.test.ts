@@ -396,7 +396,8 @@ describe("investigation corpus intake API", () => {
       expect(new Set(listed.artifacts.map((row) => row.id)).size).toBe(2);
       expect(new Set(listed.artifacts.map((row) => row.contentHash)).size).toBe(1);
       expect(listed.artifacts.every((row) => row.privacyClass === "owner_only")).toBe(true);
-      expect(listed.artifacts.every((row) => row.uploaderId === ALICE_ID)).toBe(true);
+      expect(listed.artifacts.every((row) => /^usr-[a-f0-9]{32}$/.test(row.uploaderId))).toBe(true);
+      expect(new Set(listed.artifacts.map((row) => row.uploaderId)).size).toBe(1);
       expect(new Set(listed.artifacts.map((row) => row.sourceId)).size).toBe(1);
       expect(listed.artifacts.every((row) => row.intakeBatchId !== null)).toBe(true);
     });

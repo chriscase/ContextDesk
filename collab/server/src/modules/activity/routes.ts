@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { PublicIdentityCodec } from "../auth/index.js";
 import {
   requireSessionCapability,
   type SessionAuthorizationDeps,
@@ -22,6 +23,7 @@ export interface InvestigationActivityRouteDeps {
   sessionAuth: SessionAuthorizationDeps;
   domain: CaseService;
   installationId: string;
+  publicIdentities?: PublicIdentityCodec;
 }
 
 export async function registerInvestigationActivityRoutes(
@@ -31,6 +33,9 @@ export async function registerInvestigationActivityRoutes(
   const activity = new InvestigationActivityService({
     cases: deps.domain,
     installationId: deps.installationId,
+    ...(deps.publicIdentities
+      ? { publicIdentityId: (raw: string) => deps.publicIdentities!.publicId(raw) }
+      : {}),
   });
 
   async function sessionOf(request: FastifyRequest, reply: { code: (status: number) => unknown }) {

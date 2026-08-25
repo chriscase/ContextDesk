@@ -67,6 +67,7 @@ export interface InvestigationActivityListInput {
 export interface InvestigationActivityServiceDeps {
   cases: CaseService;
   installationId: string;
+  publicIdentityId?: (raw: string) => string;
 }
 
 const ACTIVITY_KINDS = new Set<string>([
@@ -206,10 +207,20 @@ export class InvestigationActivityService {
     }
     const projected = sources
       .flatMap((source) => {
-        const item = projectTimelineSource({ installationId: this.deps.installationId, source });
+        const item = projectTimelineSource({
+          installationId: this.deps.installationId,
+          source,
+          ...(this.deps.publicIdentityId
+            ? { publicIdentityId: this.deps.publicIdentityId }
+            : {}),
+        });
         return item ? [item] : [];
       })
-      .filter((item) => matchesFilter(item, filter, input.actor.id))
+      .filter((item) => matchesFilter(
+        item,
+        filter,
+        this.deps.publicIdentityId?.(input.actor.id) ?? input.actor.id,
+      ))
       .sort((left, right) => compareInvestigationActivityItems(left.item, right.item));
     if (cursor) {
       const found = projected.some((row) =>
