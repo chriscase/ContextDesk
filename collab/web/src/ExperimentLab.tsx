@@ -352,6 +352,30 @@ function isModifiedClick(event: MouseEvent<HTMLAnchorElement>): boolean {
   return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
 }
 
+/**
+ * Who took a recorded step, in words.
+ *
+ * "actor tool" and "actor assistant" are the transcript's own vocabulary. A
+ * reader needs to know whether a person, an automated lane, or a tool call
+ * produced the step, because that changes how much the step is worth.
+ */
+function actorMeaning(actor: string, authorUsername?: string): string {
+  const named = authorUsername?.trim();
+  if (named) return `recorded by ${named}`;
+  switch (actor.toLowerCase()) {
+    case "human":
+      return "entered by a person";
+    case "assistant":
+      return "produced by the analysis lane";
+    case "tool":
+      return "returned by a tool the lane called";
+    case "system":
+      return "recorded by the system";
+    default:
+      return `recorded by ${actor}`;
+  }
+}
+
 function traceEventMeaning(kind: string): string {
   const normalized = kind.toLowerCase();
   if (/input|prompt|question|evidence|retriev|search|tool/.test(normalized)) {
@@ -821,6 +845,33 @@ const REVIEW_QUEUE_CATEGORIES = [
   "Benchmark comparison",
   "Decision state",
 ] as const;
+
+/**
+ * What a person can actually do about one queue category.
+ *
+ * Every entry used to end with the same sentence — "Open the recorded context
+ * and resolve or annotate this item" — which tells a triage engineer nothing
+ * they did not already know from having read the entry. These name the actual
+ * next move, and each one is something this record can be moved forward with.
+ */
+const REVIEW_QUEUE_NEXT_STEP: Record<string, string> = {
+  "Run completion":
+    "Open the lane's run facts to see how far it got. A lane that did not complete contributes partial facts at most, so decide whether to rerun it or to proceed without it and say so in the decision.",
+  "Recorded conflicts":
+    "Open the evidence and read the surrounding log or trace context yourself, then record which reading the evidence supports. A role conflict changes what the remediation should be.",
+  "Single-lane evidence":
+    "Confirm where this evidence came from and whether anything else corroborates it, then either attach the corroboration or note in the decision that the conclusion rests on one uncorroborated lane.",
+  "Unknown measurements":
+    "These were never reported, so they cannot be recovered from this record. Import a run that carries them if the measurement matters to the decision; otherwise record that you decided without it.",
+  "Trace completeness":
+    "Open the lane's recorded path and read how far it can vouch for itself. Attach the missing transcript if you have it; if not, treat the unrecorded steps as unknown rather than as agreement.",
+  "Human observations":
+    "Read this lane's answer and record a helpfulness observation for it. An unreviewed lane carries no human judgment at all, which is different from a lane judged unhelpful.",
+  "Benchmark comparison":
+    "Alignment stays unknown until a case lead promotes an accepted decision to a benchmark. Promote one when the team has agreed, or compare the lanes directly without a benchmark.",
+  "Decision state":
+    "Propose a decision in Decide, with the evidence it rests on and the questions it leaves open. Nothing here decides for you.",
+};
 
 function buildReviewQueue(view: ExperimentView): ReviewQueueItem[] {
   const items: ReviewQueueItem[] = [];
@@ -2776,7 +2827,11 @@ export function ExperimentLab(props: {
                                 <p><strong>Next step:</strong> {finding.nextStep}</p>
                               </>
                             ) : (
-                              <p><strong>Next step:</strong> Open the recorded context and resolve or annotate this item.</p>
+                              <p>
+                                <strong>Next step:</strong>{" "}
+                                {REVIEW_QUEUE_NEXT_STEP[item.category]
+                                  ?? "Open the recorded context and record what you find."}
+                              </p>
                             )}
                             {deepLink(
                               item.hrefLabel,
@@ -3343,15 +3398,18 @@ export function ExperimentLab(props: {
                     {trace.efficiency.evidenceAcquisitionSteps.status === "observed"
                       ? trace.efficiency.evidenceAcquisitionSteps.count
                       : "unknown"}
-                    {" · "}
-                    cost {trace.efficiency.cost.status}
-                    {trace.unknowns.length ? ` · unknown: ${trace.unknowns.join(", ")}` : ""}
+                    {/* Cost and usage are reported once, in the readiness facet and
+                        the run details. Repeating "cost unknown" on every lane
+                        card adds a word a reader has to skip, not a fact. */}
+                    {trace.unknowns.length
+                      ? ` · not recorded: ${trace.unknowns.map(readableUnknown).join(", ")}`
+                      : ""}
                   </p>
                   <ol className="experiment-lab__path-events">
                     {trace.events.map((event) => (
                       <li key={event.eventId}>
                         <strong>{traceEventMeaning(event.kind)}</strong>
-                        <span> · {event.authorUsername ?? event.actor}</span>
+                        <span> · {actorMeaning(event.actor, event.authorUsername)}</span>
                         {event.excerpt ? (
                           <ArtifactExcerpt text={event.excerpt} />
                         ) : (
@@ -3362,7 +3420,13 @@ export function ExperimentLab(props: {
                         )}
                         <details>
                           <summary>Trace details</summary>
-                          <p>Step {event.sequence} · {event.kind} · actor {event.authorUsername ?? event.actor}</p>
+                          <p>
+                            Step {event.sequence} · {traceEventMeaning(event.kind)} ·{" "}
+                            {actorMeaning(event.actor, event.authorUsername)}
+                          </p>
+                          <p className="case-memory__note">
+                            Recorded in this transcript as “{event.kind}” by “{event.actor}”.
+                          </p>
                           {event.evidenceRefs.length ? (
                             <p>
                               Evidence: {event.evidenceRefs.map((evidenceRef) => supportingArtifact(

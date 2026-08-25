@@ -614,7 +614,7 @@ describe("experiment lab", () => {
     openCompareWorkspace("Strategy paths");
     expect(screen.getByText(/Question path: What timed out in checkout/)).toBeTruthy();
     expect(screen.getByText(/Models converge on supporting evidence in the human benchmark/)).toBeTruthy();
-    expect(screen.getByText(/unknown: turns, tools/)).toBeTruthy();
+    expect(screen.getByText(/not recorded: turns, tools/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import trace" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Annotate trace" })).toBeTruthy();
   });
