@@ -1057,7 +1057,7 @@ export class CaseService {
     const id = randomUUID();
     const uri: string | null = input.uri ?? null;
     let mediaType = input.mediaType ?? null;
-    let expectedHash: string | null = input.expectedHash ?? null;
+    const expectedHash: string | null = input.expectedHash ?? null;
 
     if (input.kind === "file_server_ref") {
       if (!input.uri) throw new Error("file-server reference requires a URI");
