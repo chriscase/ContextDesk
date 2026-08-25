@@ -88,6 +88,41 @@ describe("deriveCaseBoard", () => {
     expect(concluded[0]?.confidence).toBe("unknown");
   });
 
+  it("excludes accepted decisions bound to another snapshot fingerprint", () => {
+    const selected = "a".repeat(64);
+    const other = "b".repeat(64);
+    const board = deriveCaseBoard({
+      caseId: "case-1",
+      snapshotId: "snapshot-a",
+      selectedSnapshotFingerprint: selected,
+      generatedAt: "2026-08-20T00:00:00.000Z",
+      artifacts: [],
+      contributions: [],
+      acceptedDecisions: [
+        {
+          id: "decision-selected",
+          statement: "Selected freeze conclusion.",
+          evidenceRefs: ["evidence-1"],
+          snapshotFingerprint: `snap-${selected}`,
+        },
+        {
+          id: "decision-other",
+          statement: "Other freeze conclusion must not bleed.",
+          evidenceRefs: ["evidence-2"],
+          snapshotFingerprint: other,
+        },
+        {
+          id: "decision-unknown",
+          statement: "Unverifiable identity must not claim the selected freeze.",
+          evidenceRefs: [],
+          snapshotFingerprint: "not-a-hash",
+        },
+      ],
+    });
+    const concluded = board.findings.filter((finding) => finding.bucket === "newly_concluded");
+    expect(concluded.map((finding) => finding.statement)).toEqual(["Selected freeze conclusion."]);
+  });
+
   it("marks shared evidence as agreement without treating it as correctness", () => {
     const first = hypothesis("hypothesis-1", "supported");
     const second = hypothesis("hypothesis-2", "supported");

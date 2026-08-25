@@ -23,7 +23,7 @@ import {
 } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
-import { CaseService } from "../cases/index.js";
+import { CaseService, MemoryCaseStore } from "../cases/index.js";
 import { ImportService, MemoryRunStore } from "./index.js";
 import { initialCorroborationState } from "./model.js";
 
@@ -537,5 +537,50 @@ describe("external-run import", () => {
     expect(src).not.toMatch(/corroborationState:\s*"corroborated"/);
     expect(src).not.toMatch(/corroborationState:\s*"verified"/);
     expect(src.includes("initialCorroborationState()")).toBe(true);
+  });
+
+  it("rolls back the contribution and staged bytes when run insert fails", async () => {
+    class BoomRunStore extends MemoryRunStore {
+      override async insert(): Promise<void> {
+        throw new Error("run insert failed");
+      }
+    }
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-import-boom-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const cases = new CaseService(evidence, audit, new MemoryCaseStore(), catalog);
+    const imports = new ImportService({
+      evidence,
+      audit,
+      cases,
+      catalog,
+      runs: new BoomRunStore(),
+    });
+    try {
+      const created = await cases.createCase(actor, { title: "Import rollback fixture" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const outputText = "synthetic imported timeout transcript";
+      await expect(
+        imports.importRun(
+          created.id,
+          actor,
+          {
+            outputText,
+            sourceId: source.id,
+            operatorId: "uid=operator,ou=people,dc=example,dc=test",
+            operatorUsername: "operator",
+          },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/run insert failed/);
+      expect(await cases.listContributions(created.id, actor, false)).toEqual([]);
+      expect(await imports.listRuns(created.id, actor, false)).toEqual([]);
+      expect(await evidence.head(sha256Hex(new TextEncoder().encode(outputText)))).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

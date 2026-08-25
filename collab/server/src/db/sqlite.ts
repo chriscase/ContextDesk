@@ -282,6 +282,8 @@ export function createSqliteRuntime(
       "insertRevision",
       "insertArtifact",
       "insertSnapshot",
+      "insertContributionIdempotency",
+      "withAtomic",
       "restore",
     ]),
   );

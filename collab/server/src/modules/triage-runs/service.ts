@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   TRIAGE_JOB_SCHEMA_ID,
   TRIAGE_JOB_CAPABILITIES_SCHEMA_ID,
+  snapshotFairness,
+  snapshotFingerprint,
+  snapshotFingerprintDigest,
+  snapshotItemContentHash,
   type CaseV1,
   type TriageJobMode,
   type TriageJobCapabilitiesV1,
@@ -26,6 +30,24 @@ const MAX_GATEWAY_EVIDENCE_AGGREGATE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_WORKER_LEASE_MS = 60_000;
 const WORKER_HEARTBEAT_MS = 20_000;
 const AGREEMENT_NOTICE = "Agreement is not proof of correctness." as const;
+
+function evaluateSameSnapshot(snapshot: SnapshotV1): boolean | null {
+  const claimed = snapshotFingerprintDigest(snapshot.fingerprint);
+  if (!claimed) return null;
+  if (snapshot.fairnessClass !== "same_snapshot") return null;
+  if (snapshotFairness(snapshot.evidence) !== "same_snapshot") return null;
+  if (!snapshot.evidence.every((item) => snapshotItemContentHash(item) !== null)) return null;
+  const actual = snapshotFingerprintDigest(
+    snapshotFingerprint({
+      parentSnapshotId: snapshot.parentSnapshotId,
+      evidence: snapshot.evidence,
+      visibility: snapshot.visibility,
+      protocolVersion: snapshot.protocolVersion,
+    }),
+  );
+  if (!actual) return null;
+  return actual === claimed;
+}
 
 export class TriageRunNotFoundError extends Error {
   constructor() {
@@ -679,7 +701,7 @@ export class TriageRunService {
             },
           }, controller.signal);
           if (results.length !== currentJob.candidates.length) throw new Error("gateway returned an incomplete candidate set");
-          currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
+          currentJob = { ...currentJob, updatedAt: now() };
           await this.deps.jobs.update(currentJob);
           for (const result of results) {
             if (!progressCandidates.has(result.candidateId)) await recordCandidate(result);
@@ -712,7 +734,7 @@ export class TriageRunService {
         }
       } else {
         const executor = this.deps.executor ?? new DeterministicMockTriageExecutor();
-        currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
+        currentJob = { ...currentJob, updatedAt: now() };
         await this.deps.jobs.update(currentJob);
         for (let index = 0; index < job.candidates.length; index += 1) {
           if (leaseLost) return;
@@ -789,6 +811,7 @@ export class TriageRunService {
         currentJob = {
           ...currentJob,
           status: finalStatus,
+          sameSnapshot: evaluateSameSnapshot(snapshot),
           finishedAt,
           updatedAt: finishedAt,
           stoppedReason: currentJob.cancelRequestedAt !== null ? "cancel_requested" : null,

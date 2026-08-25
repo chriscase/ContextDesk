@@ -17,7 +17,7 @@ import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
 import { MemoryAuditStore, PgAuditStore, type AuditStore } from "../audit/index.js";
 import { CatalogService, PgCatalogStore } from "../catalog/index.js";
 import { corpusIntakeRequestDigest } from "../corpus-intake/index.js";
-import { CaseService } from "./service.js";
+import { CaseService, ContributionConflictError } from "./service.js";
 import {
   MemoryCaseStore,
   PgCaseStore,
@@ -400,7 +400,7 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
           { kind: "note", body: "revision 1" },
           "test",
         );
-        await first.reviseContribution(created.id, note.id, actor, "revision 2", "test");
+        await first.reviseContribution(created.id, note.id, actor, "revision 2", "test", 1);
 
         const second = new CaseService(store, audit, new PgCaseStore(client), catalog);
         const reloaded = await second.getCase(created.id, actor, false);
@@ -413,6 +413,62 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
         expect(chain[1]?.body).toBe("revision 2");
         expect(chain[1]?.predecessorRevision).toBe(1);
       } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("replays identical contribution writes and fails closed on stale revisions", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 4 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-contrib-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(pool), catalog);
+      const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      try {
+        const created = await cases.createCase(actor, { title: "PG contribution integrity" }, "test");
+        const first = await cases.addContribution(
+          created.id,
+          actor,
+          { kind: "note", body: "Durable retry body.", idempotencyKey: "msg-syn-pg01" },
+          "test",
+        );
+        const replay = await cases.addContribution(
+          created.id,
+          actor,
+          { kind: "note", body: "Durable retry body.", idempotencyKey: "msg-syn-pg01" },
+          "test",
+        );
+        expect(replay.id).toBe(first.id);
+        await expect(
+          cases.addContribution(
+            created.id,
+            actor,
+            { kind: "note", body: "Different durable body.", idempotencyKey: "msg-syn-pg01" },
+            "test",
+          ),
+        ).rejects.toBeInstanceOf(ContributionConflictError);
+
+        const note = await cases.addContribution(
+          created.id,
+          actor,
+          { kind: "note", body: "cas-1" },
+          "test",
+        );
+        const results = await Promise.allSettled([
+          cases.reviseContribution(created.id, note.id, actor, "cas-a", "test", 1),
+          cases.reviseContribution(created.id, note.id, actor, "cas-b", "test", 1),
+        ]);
+        expect(results.filter((row) => row.status === "fulfilled")).toHaveLength(1);
+        expect(results.filter(
+          (row) => row.status === "rejected" && row.reason instanceof ContributionConflictError,
+        )).toHaveLength(1);
+        expect(await cases.provenance(created.id, note.id)).toHaveLength(2);
+      } finally {
+        await pool.end();
         await rm(root, { recursive: true, force: true });
       }
     });

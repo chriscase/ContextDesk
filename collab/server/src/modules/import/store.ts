@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import type { Completeness, EvidenceVisibility } from "@cd-collab/contracts";
+import { activeCaseQueryable } from "../cases/index.js";
 
 export interface FrozenRunRow {
   id: string;
@@ -111,7 +112,11 @@ export class MemoryRunStore implements RunStore {
 }
 
 export class PgRunStore implements RunStore {
-  constructor(private readonly db: Queryable) {}
+  constructor(private readonly pool: Queryable) {}
+
+  private get db(): Queryable {
+    return activeCaseQueryable() ?? this.pool;
+  }
 
   async insert(row: FrozenRunRow): Promise<void> {
     await this.db.query(
