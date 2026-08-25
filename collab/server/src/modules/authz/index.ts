@@ -29,3 +29,13 @@ export type {
   SessionGrantLookup,
   SessionProfileLookup,
 } from "./session-authorization.js";
+export {
+  authorizeRecoveryRequester,
+  bindRecoveryAuthorization,
+} from "./recovery-authorization.js";
+export type {
+  RecoveryAuthResult,
+  RecoveryAuthorizationDeps,
+  RecoveryInactiveReason,
+  RecoveryRequester,
+} from "./recovery-authorization.js";

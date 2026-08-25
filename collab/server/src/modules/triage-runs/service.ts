@@ -16,11 +16,27 @@ import {
   type TriageJobStatus,
   type TriageJobV1,
 } from "@cd-collab/contracts";
+import type { RecoveryAuthResult, RecoveryInactiveReason } from "../authz/index.js";
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
 import type { OverviewJobQuery, OverviewListedJob, TriageJobStore } from "./store.js";
 import { triageRunningLeaseExpired, triageWorkerHoldsLiveLease } from "./store.js";
 import type { TriageProfileOption } from "./profiles.js";
+
+export type TriageRecoveryAuthorization = (
+  requester: { id: string; username: string },
+) => Promise<RecoveryAuthResult>;
+
+export type RecoveryRefusalReason =
+  | "requester_not_member"
+  | "requester_suspended"
+  | "requester_disabled"
+  | "requester_historical"
+  | "requester_inactive"
+  | "requester_run_revoked"
+  | "requester_private_read_revoked"
+  | "requester_unauthorized"
+  | "recovery_authorization_unavailable";
 
 const MAX_CANDIDATES = 16;
 const MIN_GATEWAY_CANDIDATES = 2;
@@ -162,6 +178,47 @@ function isTerminal(status: TriageJobStatus): boolean {
   return status === "completed" || status === "partial" || status === "failed" || status === "timed_out" || status === "cancelled";
 }
 
+function snapshotRequiresPrivateRead(snapshot: SnapshotV1): boolean {
+  return snapshot.visibility === "owner_only"
+    || snapshot.evidence.some((item) => item.privacyClass === "owner_only");
+}
+
+function inactiveRecoveryReason(reason: RecoveryInactiveReason): RecoveryRefusalReason {
+  switch (reason) {
+    case "suspended":
+      return "requester_suspended";
+    case "disabled":
+      return "requester_disabled";
+    case "imported_historical":
+      return "requester_historical";
+    case "missing_profile":
+      return "requester_inactive";
+  }
+}
+
+function recoveryRefusalCopy(reason: RecoveryRefusalReason): { unknown: string } {
+  switch (reason) {
+    case "requester_not_member":
+      return { unknown: "requester is no longer a case member" };
+    case "requester_suspended":
+      return { unknown: "requester is suspended" };
+    case "requester_disabled":
+      return { unknown: "requester is disabled" };
+    case "requester_historical":
+      return { unknown: "requester is an imported historical identity" };
+    case "requester_inactive":
+      return { unknown: "requester is not an active authorized profile" };
+    case "requester_run_revoked":
+      return { unknown: "requester is no longer permitted to run strategies" };
+    case "requester_private_read_revoked":
+      return { unknown: "requester is no longer permitted to read private evidence" };
+    case "requester_unauthorized":
+      return { unknown: "requester is no longer authorized to recover this job" };
+    case "recovery_authorization_unavailable":
+      return { unknown: "recovery authorization store is unavailable" };
+  }
+}
+
 function terminalStatus(candidates: TriageCandidateRunV1[], cancelled: boolean): TriageJobStatus {
   const statuses = candidates.map((candidate) => candidate.status);
   const completed = statuses.filter((status) => status === "completed").length;
@@ -239,6 +296,8 @@ export class TriageRunService {
       profiles?: TriageProfileOption[];
       workerId?: string;
       workerLeaseMs?: number;
+      /** Live requester re-resolution. Never a cached session role list. */
+      recoveryAuthorization?: TriageRecoveryAuthorization;
     },
   ) {
     this.workerId = deps.workerId?.trim() || `triage-worker:${randomUUID()}`;
@@ -304,13 +363,13 @@ export class TriageRunService {
     const queued = await this.deps.jobs.listByStatuses(["queued"]);
     const staleRunning = await this.deps.jobs.listStaleRunning(now());
     for (const job of queued) {
-      const actor = { id: job.requestedBy, username: job.requestedByUsername };
-      if (!(await this.deps.cases.isMemberOf(job.caseId, job.requestedBy))) {
-        await this.refuseUnauthorizedPendingJob(job);
+      const decision = await this.authorizeRecoveredQueuedJob(job);
+      if (decision.kind === "denied") {
+        await this.refuseUnauthorizedPendingJob(job, decision.reason);
         continue;
       }
       queueMicrotask(() => {
-        void this.execute(job.id, actor, false, false);
+        void this.resumeRecoveredQueuedJob(job.id);
       });
     }
     for (const job of staleRunning) {
@@ -350,8 +409,83 @@ export class TriageRunService {
     }
   }
 
-  private async refuseUnauthorizedPendingJob(job: TriageJobV1): Promise<void> {
+  private async resumeRecoveredQueuedJob(jobId: string): Promise<void> {
+    const latest = await this.deps.jobs.get(jobId);
+    if (!latest || latest.status !== "queued") return;
+    const decision = await this.authorizeRecoveredQueuedJob(latest);
+    if (decision.kind === "denied") {
+      await this.refuseUnauthorizedPendingJob(latest, decision.reason);
+      return;
+    }
+    await this.execute(jobId, decision.actor, decision.isAdmin, decision.canReadPrivate);
+  }
+
+  private async authorizeRecoveredQueuedJob(
+    job: TriageJobV1,
+  ): Promise<
+    | { kind: "ok"; actor: Actor; isAdmin: boolean; canReadPrivate: boolean }
+    | { kind: "denied"; reason: RecoveryRefusalReason }
+  > {
+    const authorizer = this.deps.recoveryAuthorization;
+    if (!authorizer) {
+      return { kind: "denied", reason: "recovery_authorization_unavailable" };
+    }
+    let resolved: RecoveryAuthResult;
+    try {
+      resolved = await authorizer({
+        id: job.requestedBy,
+        username: job.requestedByUsername,
+      });
+    } catch {
+      return { kind: "denied", reason: "recovery_authorization_unavailable" };
+    }
+    if (resolved.kind === "unavailable") {
+      return { kind: "denied", reason: "recovery_authorization_unavailable" };
+    }
+    if (resolved.kind === "inactive") {
+      return { kind: "denied", reason: inactiveRecoveryReason(resolved.reason) };
+    }
+
+    try {
+      const caseRow = await this.deps.cases.getCase(job.caseId, resolved.actor, resolved.isAdmin);
+      if (!caseRow) {
+        return {
+          kind: "denied",
+          reason: resolved.isAdmin ? "requester_unauthorized" : "requester_not_member",
+        };
+      }
+      if (!resolved.has("run:strategies")) {
+        return { kind: "denied", reason: "requester_run_revoked" };
+      }
+      const snapshot = (await this.deps.cases.listSnapshots(
+        job.caseId,
+        resolved.actor,
+        resolved.isAdmin,
+      )).find((item) => item.id === job.snapshotId);
+      if (!snapshot) {
+        return { kind: "denied", reason: "requester_unauthorized" };
+      }
+      const canReadPrivate = resolved.has("evidence:private:read");
+      if (snapshotRequiresPrivateRead(snapshot) && !canReadPrivate) {
+        return { kind: "denied", reason: "requester_private_read_revoked" };
+      }
+      return {
+        kind: "ok",
+        actor: resolved.actor,
+        isAdmin: resolved.isAdmin,
+        canReadPrivate,
+      };
+    } catch {
+      return { kind: "denied", reason: "recovery_authorization_unavailable" };
+    }
+  }
+
+  private async refuseUnauthorizedPendingJob(
+    job: TriageJobV1,
+    reason: RecoveryRefusalReason = "requester_not_member",
+  ): Promise<void> {
     const finishedAt = now();
+    const copy = recoveryRefusalCopy(reason);
     const refusedCandidates = job.candidates.map((candidate) =>
       candidate.status === "queued" || candidate.status === "running"
         ? {
@@ -360,8 +494,8 @@ export class TriageRunService {
             outputHash: null,
             summary: null,
             evidenceRefs: [],
-            unknowns: ["requester is no longer a case member"],
-            errorCode: "requester_not_member",
+            unknowns: [copy.unknown],
+            errorCode: reason,
             finishedAt,
           }
         : candidate,
@@ -373,7 +507,7 @@ export class TriageRunService {
         candidates: refusedCandidates,
         finishedAt,
         updatedAt: finishedAt,
-        stoppedReason: "requester_not_member",
+        stoppedReason: reason,
         leaseExpiresAt: null,
       });
     } catch {
@@ -382,7 +516,7 @@ export class TriageRunService {
     await this.deps.audit.append({
       identity: job.requestedBy,
       action: "triage_job_recovered",
-      target: `${job.id}:requester_not_member`,
+      target: `${job.id}:${reason}`,
       origin: "triage-runner",
       outcome: "failure",
     });

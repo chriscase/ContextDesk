@@ -14,8 +14,15 @@ import { migrateUp } from "../../db/migrate.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
 import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
 import { MemoryAuditStore, PgAuditStore } from "../audit/index.js";
+import {
+  bindRecoveryAuthorization,
+  MutableGroupRoleMap,
+  parseGroupRoleMap,
+} from "../authz/index.js";
 import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
 import { CatalogService, PgCatalogStore } from "../catalog/index.js";
+import { MapAuthAdapter } from "../auth/index.js";
+import { MemoryLocalGrantStore, MemoryUserProfileStore } from "../people/index.js";
 import {
   DeterministicMockTriageExecutor,
   TriageRunService,
@@ -175,11 +182,39 @@ describe("snapshot-bound triage runs", () => {
     const caseStore = new MemoryCaseStore();
     const cases = new CaseService(evidence, audit, caseStore, new CatalogService());
     const jobs = new MemoryTriageJobStore();
+    const profiles = new MemoryUserProfileStore();
+    const grants = new MemoryLocalGrantStore();
+    await profiles.touchOnLogin({
+      id: actor.id,
+      username: actor.username,
+      displayName: actor.username,
+      provenance: "local",
+      directorySubject: null,
+    });
+    const recoveryAuthorization = bindRecoveryAuthorization({
+      lookupGroups: (identity) =>
+        new MapAuthAdapter(
+          new Map([
+            [
+              actor.username,
+              {
+                password: "unused",
+                identity: { id: actor.id, username: actor.username, displayName: actor.username },
+                groups: ["local:case-leads"],
+              },
+            ],
+          ]),
+        ).lookupGroups(identity),
+      roles: new MutableGroupRoleMap(parseGroupRoleMap("local:case-leads=case-lead")),
+      profiles,
+      grants,
+    });
     const service = new TriageRunService({
       cases,
       audit,
       jobs,
       workerId: "worker-a",
+      recoveryAuthorization,
     });
     try {
       const created = await cases.createCase(actor, { title: "Lease membership fixture" }, "test");

@@ -12,7 +12,9 @@ export type {
   TriageBatchRunExecutor,
   TriageExecutionContext,
   TriageExecutionEvidence,
+  TriageRecoveryAuthorization,
   TriageRunExecutor,
+  RecoveryRefusalReason,
 } from "./service.js";
 export { MemoryTriageJobStore, PgTriageJobStore, triageRunningLeaseExpired, triageWorkerHoldsLiveLease } from "./store.js";
 export type { OverviewJobQuery, OverviewListedJob, TriageJobStore } from "./store.js";

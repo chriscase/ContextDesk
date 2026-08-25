@@ -58,6 +58,8 @@ function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
  * Single session authorization path for War Room routes: cookie session,
  * live group→role map, current profile status/provenance, and additive
  * local grants. Capabilities are never cached on the session record.
+ * Restart recovery of queued triage jobs uses authorizeRecoveryRequester
+ * in recovery-authorization.ts instead of this cookie path.
  */
 export async function authorizeSession(
   request: FastifyRequest,
