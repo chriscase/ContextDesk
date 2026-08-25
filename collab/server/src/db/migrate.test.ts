@@ -106,6 +106,12 @@ describe.skipIf(!adminUrl())("migrations", () => {
           '33333333-3333-4333-8333-333333333333'
         )
       `)).rejects.toThrow(/evidence_artifacts_intake_batch_fk/);
+      // Proven present before it is proven gone, so a rollback assertion
+      // cannot pass against a migration that never created the tables.
+      const logTimeBeforeRollback = await client.query<{ to_regclass: string | null }>(
+        `SELECT to_regclass('public.log_corpora') AS to_regclass`,
+      );
+      expect(logTimeBeforeRollback.rows[0]?.to_regclass).not.toBeNull();
       // 018 unwinds first: it is the head, and its tables reference cases but
       // nothing in the record graph, so it rolls back independently.
       expect((await migrateDown(client)).rolledBack).toBe("018_log_time");

@@ -23,7 +23,7 @@ export type {
   RevisionRow,
   TimelineRow,
 } from "./service.js";
-export type { ActivityPageCursor, ActivityPageQuery } from "./store.js";
+export type { ActivityPageCursor, ActivityPageQuery, CaseRow } from "./store.js";
 export { activityComesAfter, compareActivityDesc, overviewVisiblePredicate, isOverviewVisibleCase, activeCaseQueryable } from "./store.js";
 export { deriveCaseBoard } from "./board.js";
 export type { AcceptedDecisionBoardInput, CaseBoardInput } from "./board.js";
