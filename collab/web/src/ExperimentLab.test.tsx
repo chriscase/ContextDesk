@@ -484,11 +484,19 @@ describe("experiment lab", () => {
     ]);
     const selectedEvidence = within(benchmarkEvidence).getAllByRole("checkbox")[0]!;
     fireEvent.click(selectedEvidence);
-    await waitFor(() => expect((selectedEvidence as HTMLInputElement).checked).toBe(true));
-    fireEvent.change(roleSelectors[0]!, {
+    await waitFor(() =>
+      expect(
+        (within(benchmarkEvidence).getAllByRole("checkbox")[0] as HTMLInputElement).checked,
+      ).toBe(true),
+    );
+    fireEvent.change(within(benchmarkEvidence).getAllByRole("combobox")[0]!, {
       target: { value: "symptom" },
     });
-    await waitFor(() => expect((roleSelectors[0] as HTMLSelectElement).value).toBe("symptom"));
+    await waitFor(() =>
+      expect(
+        (within(benchmarkEvidence).getAllByRole("combobox")[0] as HTMLSelectElement).value,
+      ).toBe("symptom"),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
 
     await waitFor(() =>
