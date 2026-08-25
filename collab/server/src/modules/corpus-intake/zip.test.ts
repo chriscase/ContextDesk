@@ -142,6 +142,46 @@ describe("extractZip adversarial matrix", () => {
     expect(() => extractZip(truncated)).toThrow(ZipError);
   });
 
+  it("rejects invalid encodings and ZIP names that omit the UTF-8 language bit", () => {
+    const invalidUtf8 = Buffer.concat([
+      Buffer.from("mailer/"),
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from(".log"),
+    ]);
+    const invalid = extractZip(
+      buildTestZip([{ name: "mailer/placeholder.log", data: LOG, nameBytes: invalidUtf8, flags: 0x0800 }]),
+    );
+    expect(reasons(invalid)).toContain("invalid_encoding");
+    expect(names(invalid)).toEqual([]);
+    expect(invalid.rejected.every((row) => !row.detail.includes("\uFFFD"))).toBe(true);
+
+    const unmarked = extractZip(
+      buildTestZip([{ name: "café/mailer.log", data: LOG, flags: 0 }]),
+    );
+    expect(reasons(unmarked)).toContain("invalid_encoding");
+    expect(names(unmarked)).toEqual([]);
+
+    const marked = extractZip(buildTestZip([{ name: "café/mailer.log", data: LOG, flags: 0x0800 }]));
+    expect(names(marked)).toEqual(["café/mailer.log"]);
+    expect(marked.rejected).toEqual([]);
+
+    const ascii = extractZip(buildTestZip([{ name: "mailer/shared-timeout.log", data: LOG, flags: 0 }]));
+    expect(names(ascii)).toEqual(["mailer/shared-timeout.log"]);
+
+    const mixed = extractZip(
+      buildTestZip([
+        { name: "mailer/shared-timeout.log", data: LOG },
+        { name: "mailer/placeholder.log", data: LOG, nameBytes: invalidUtf8, flags: 0x0800 },
+      ]),
+    );
+    expect(names(mixed)).toEqual(["mailer/shared-timeout.log"]);
+    expect(reasons(mixed)).toContain("invalid_encoding");
+
+    const disagreed = Buffer.from(buildTestZip([{ name: "café/mailer.log", data: LOG, flags: 0x0800 }]));
+    disagreed.writeUInt16LE(0, 6);
+    expect(() => extractZip(disagreed)).toThrow(/encoding does not match/);
+  });
+
   it("does not leak file bytes in ZipError messages", () => {
     const secret = "SYNTHETIC_FIXTURE_TOKEN_NOT_A_SECRET";
     try {

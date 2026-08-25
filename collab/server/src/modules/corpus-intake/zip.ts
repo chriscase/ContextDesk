@@ -58,8 +58,38 @@ function u32(buf: Uint8Array, offset: number): number {
   );
 }
 
-function decodeDos(buf: Uint8Array, offset: number, length: number): string {
-  return Buffer.from(buf.subarray(offset, offset + length)).toString("utf8");
+const ZIP_LANGUAGE_UTF8 = 0x0800;
+const ZIP_ENCRYPTED = 0x0001;
+
+function decodeZipName(
+  buf: Uint8Array,
+  offset: number,
+  length: number,
+  flags: number,
+): { ok: true; name: string } | { ok: false; reason: CorpusRejectionReason; detail: string } {
+  const bytes = buf.subarray(offset, offset + length);
+  if (bytes.includes(0)) {
+    return { ok: false, reason: "nul_in_path", detail: "NUL in path" };
+  }
+  if ((flags & ZIP_LANGUAGE_UTF8) !== 0) {
+    try {
+      return { ok: true, name: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+    } catch {
+      return {
+        ok: false,
+        reason: "invalid_encoding",
+        detail: "ZIP UTF-8 language bit is set but the name is not valid UTF-8",
+      };
+    }
+  }
+  if ([...bytes].some((octet) => octet > 0x7f)) {
+    return {
+      ok: false,
+      reason: "invalid_encoding",
+      detail: "ZIP name has non-ASCII bytes without the UTF-8 language bit",
+    };
+  }
+  return { ok: true, name: Buffer.from(bytes).toString("ascii") };
 }
 
 export function normalizeIntakePath(raw: string): { ok: true; path: string } | { ok: false; reason: CorpusRejectionReason; detail: string } {
@@ -102,7 +132,9 @@ export function isNestedArchive(path: string): boolean {
 }
 
 interface CdEntry {
-  name: string;
+  name:
+    | { ok: true; name: string }
+    | { ok: false; reason: CorpusRejectionReason; detail: string };
   method: number;
   flags: number;
   crc: number;
@@ -165,7 +197,7 @@ function parseCentralDirectory(buf: Uint8Array): CdEntry[] {
       }
       extra += 4 + dataSize;
     }
-    const name = decodeDos(buf, cursor + 46, nameLen);
+    const name = decodeZipName(buf, cursor + 46, nameLen, flags);
     entries.push({
       name,
       method,
@@ -194,12 +226,15 @@ function extractLocal(buf: Uint8Array, entry: CdEntry): Uint8Array {
   const method = u16(buf, offset + 8);
   const nameLen = u16(buf, offset + 26);
   const extraLen = u16(buf, offset + 28);
-  const name = decodeDos(buf, offset + 30, nameLen);
-  if (name.replace(/\\/g, "/") !== entry.name.replace(/\\/g, "/")) {
-    throw new ZipError("malformed_zip", "local name does not match central directory");
+  if ((flags & ZIP_LANGUAGE_UTF8) !== (entry.flags & ZIP_LANGUAGE_UTF8)) {
+    throw new ZipError("malformed_zip", "local name encoding does not match central directory");
   }
-  if (method !== entry.method || (flags & 1) !== (entry.flags & 1)) {
+  if ((flags & ZIP_ENCRYPTED) !== (entry.flags & ZIP_ENCRYPTED) || method !== entry.method) {
     throw new ZipError("malformed_zip", "local header disagrees with central directory");
+  }
+  const name = decodeZipName(buf, offset + 30, nameLen, flags);
+  if (!entry.name.ok || !name.ok || name.name.replace(/\\/g, "/") !== entry.name.name.replace(/\\/g, "/")) {
+    throw new ZipError("malformed_zip", "local name does not match central directory");
   }
   const dataStart = offset + 30 + nameLen + extraLen;
   const dataEnd = dataStart + entry.compressed;
@@ -246,9 +281,18 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
     if (Date.now() - startedAt > CORPUS_INTAKE_LIMITS.maxProcessingMs) {
       throw new ZipError("processing_timeout", "extraction exceeded time cap");
     }
-    if (entry.flags & 0x0001) {
+    if (!entry.name.ok) {
       rejected.push({
-        relativePath: entry.name,
+        relativePath: "<invalid-encoding>",
+        reason: entry.name.reason,
+        detail: entry.name.detail,
+      });
+      continue;
+    }
+    const entryName = entry.name.name;
+    if (entry.flags & ZIP_ENCRYPTED) {
+      rejected.push({
+        relativePath: entryName,
         reason: "encrypted_archive",
         detail: "encrypted ZIP entries are rejected",
       });
@@ -256,25 +300,25 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
     }
     const dosAttr = entry.externalAttr & 0xff;
     if ((dosAttr & 0x08) !== 0) {
-      rejected.push({ relativePath: entry.name, reason: "device_entry", detail: "volume or device label" });
+      rejected.push({ relativePath: entryName, reason: "device_entry", detail: "volume or device label" });
       continue;
     }
-    if ((dosAttr & 0x10) !== 0 || entry.name.endsWith("/")) continue;
+    if ((dosAttr & 0x10) !== 0 || entryName.endsWith("/")) continue;
     const mode = unixMode(entry);
     if (mode !== null) {
       const type = mode & S_IFMT;
       if (type === S_IFLNK) {
-        rejected.push({ relativePath: entry.name, reason: "symlink_or_hardlink", detail: "symlink" });
+        rejected.push({ relativePath: entryName, reason: "symlink_or_hardlink", detail: "symlink" });
         continue;
       }
       if (type === S_IFBLK || type === S_IFCHR || type === S_IFIFO || type === S_IFSOCK) {
-        rejected.push({ relativePath: entry.name, reason: "device_entry", detail: "device or ipc entry" });
+        rejected.push({ relativePath: entryName, reason: "device_entry", detail: "device or ipc entry" });
         continue;
       }
     }
-    const normalized = normalizeIntakePath(entry.name);
+    const normalized = normalizeIntakePath(entryName);
     if (!normalized.ok) {
-      rejected.push({ relativePath: entry.name, reason: normalized.reason, detail: normalized.detail });
+      rejected.push({ relativePath: entryName, reason: normalized.reason, detail: normalized.detail });
       continue;
     }
     const foldKey = normalized.path.toLocaleLowerCase("en-US");
@@ -349,19 +393,22 @@ export function buildTestZip(
     unixMode?: number;
     extra?: Uint8Array;
     dosAttr?: number;
+    flags?: number;
+    nameBytes?: Uint8Array;
   }>,
 ): Uint8Array {
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
   let offset = 0;
   for (const file of files) {
-    const name = Buffer.from(file.name, "utf8");
+    const name = Buffer.from(file.nameBytes ?? Buffer.from(file.name, "utf8"));
     const raw = Buffer.from(file.data);
     const extra = file.extra ? Buffer.from(file.extra) : Buffer.alloc(0);
     const method = file.method ?? 0;
     const payload = method === 8 ? deflateRawSync(raw) : raw;
     const crc = crc32(raw) >>> 0;
-    const flags = file.encrypted ? 1 : 0;
+    const high = [...name].some((octet) => octet > 0x7f);
+    const flags = file.flags ?? ((file.encrypted ? 1 : 0) | (high ? 0x0800 : 0));
     const local = Buffer.alloc(30 + name.length + extra.length + payload.length);
     local.writeUInt32LE(SIG_LOCAL, 0);
     local.writeUInt16LE(20, 4);

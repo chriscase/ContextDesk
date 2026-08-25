@@ -42,6 +42,7 @@ export const CORPUS_REJECTION_REASONS = [
   "redaction_failed",
   "empty_path",
   "nul_in_path",
+  "invalid_encoding",
 ] as const;
 export type CorpusRejectionReason = (typeof CORPUS_REJECTION_REASONS)[number];
 
