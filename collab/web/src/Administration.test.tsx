@@ -1,6 +1,7 @@
 import {
   ADMIN_DIRECTORY_GROUPS_SCHEMA_ID,
   ADMIN_DIRECTORY_IDENTITIES_SCHEMA_ID,
+  ADMIN_PEOPLE_LIST_SCHEMA_ID,
   ADMIN_ROLE_MAPPING_LIST_SCHEMA_ID,
   ADMIN_ROLE_MAPPING_MAX_RESULTS,
   type AppRole,
@@ -12,7 +13,34 @@ import { Administration } from "./Administration.js";
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  window.history.pushState({}, "", "/");
 });
+
+function rolesAndPeopleFetch(): typeof fetch {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === "/api/authz/group-role-map") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schemaId: ADMIN_ROLE_MAPPING_LIST_SCHEMA_ID,
+          mappings: [{ group: "local:admins", role: "admin" }],
+          limit: ADMIN_ROLE_MAPPING_MAX_RESULTS,
+          truncated: false,
+        }),
+      } as Response;
+    }
+    if (url === "/api/admin/people/search") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ schemaId: ADMIN_PEOPLE_LIST_SCHEMA_ID, people: [], nextCursor: null }),
+      } as Response;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as Response;
+  });
+}
 
 function response(body: unknown, status = 200): Response {
   return {
@@ -161,5 +189,57 @@ describe("Administration", () => {
     expect((screen.getByLabelText("Role for local:admins") as HTMLSelectElement).value).toBe(
       "case-lead",
     );
+  });
+});
+
+describe("Administration People tab", () => {
+  it("switches to People on click, pushes /admin/people, and updates the document title", async () => {
+    vi.stubGlobal("fetch", rolesAndPeopleFetch());
+    render(<Administration />);
+    await screen.findByText("local:admins");
+
+    const rolesTab = screen.getByRole("tab", { name: "Group role mappings" });
+    const peopleTab = screen.getByRole("tab", { name: "People" });
+    expect(rolesTab.getAttribute("aria-selected")).toBe("true");
+    expect(peopleTab.getAttribute("aria-selected")).toBe("false");
+
+    fireEvent.click(peopleTab);
+    expect(await screen.findByText("No people match this search.")).toBeTruthy();
+    // The roles panel is hidden (not unmounted, so its state survives a tab
+    // switch) - assert that directly by id rather than fighting a plain
+    // text query, which does not respect the hidden attribute at all.
+    expect(document.getElementById("administration-roles-panel")?.hasAttribute("hidden")).toBe(true);
+    expect(peopleTab.getAttribute("aria-selected")).toBe("true");
+    expect(window.location.pathname).toBe("/admin/people");
+    expect(document.title).toContain("People");
+
+    fireEvent.click(rolesTab);
+    expect(await screen.findByText("local:admins")).toBeTruthy();
+    expect(window.location.pathname).toBe("/administration");
+  });
+
+  it("direct-loads and reloads on /admin/people with the People tab already selected", async () => {
+    window.history.pushState({}, "", "/admin/people");
+    vi.stubGlobal("fetch", rolesAndPeopleFetch());
+    render(<Administration />);
+    expect(await screen.findByText("No people match this search.")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "People" }).getAttribute("aria-selected")).toBe("true");
+    // The roles panel exists but is hidden, not unmounted with stale data lost.
+    expect(document.getElementById("administration-roles-panel")?.hasAttribute("hidden")).toBe(true);
+  });
+
+  it("restores the People tab across simulated back/forward navigation", async () => {
+    vi.stubGlobal("fetch", rolesAndPeopleFetch());
+    render(<Administration />);
+    await screen.findByText("local:admins");
+    fireEvent.click(screen.getByRole("tab", { name: "People" }));
+    await screen.findByText("No people match this search.");
+
+    // Simulate the browser Back button: the URL changes without any click
+    // in this component, so only a popstate listener can catch it.
+    window.history.pushState({}, "", "/administration");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(await screen.findByText("local:admins")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Group role mappings" }).getAttribute("aria-selected")).toBe("true");
   });
 });
