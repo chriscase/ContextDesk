@@ -139,6 +139,17 @@ function remapHypothesisLinks(
     });
 }
 
+function restoredImportedRunBytes(
+  digest: string | null | undefined,
+  digestBytes: Map<string, Uint8Array>,
+  missing: string,
+): { hash: string | null; text: string | null } {
+  if (!digest) return { hash: null, text: null };
+  const bytes = digestBytes.get(digest);
+  if (!bytes) throw new Error(missing);
+  return { hash: digest, text: Buffer.from(bytes).toString("utf8") };
+}
+
 function remappedImportedRunContributionId(
   report: ArchivePreflightReportV1,
   run: PortableArchiveV1["investigation"]["importedAiRuns"][number],
@@ -1056,22 +1067,43 @@ export async function persistPortableArchive(input: {
   }
 
   for (const run of bundle.importedAiRuns) {
-    const output = digestBytes.get(run.outputDigest ?? "") ?? new Uint8Array();
-    const outputText = Buffer.from(output).toString("utf8");
+    const output = restoredImportedRunBytes(
+      run.outputDigest,
+      digestBytes,
+      "imported output digest is missing from materialized content",
+    );
+    if (!output.hash || output.text === null) {
+      throw new Error("imported run is missing output bytes");
+    }
+    const prompt = restoredImportedRunBytes(
+      run.promptDigest,
+      digestBytes,
+      "imported prompt digest is missing from materialized content",
+    );
+    if (run.promptCompleteness === "exact" && (prompt.hash === null || prompt.text === null)) {
+      throw new Error("imported run exact prompt completeness requires prompt bytes");
+    }
+    let snapshotBinding: string | null = null;
+    if (run.snapshotId) {
+      snapshotBinding = destSnapshotFingerprints.get(run.snapshotId) ?? null;
+      if (!snapshotBinding) {
+        throw new Error("imported run snapshot binding is missing from the destination snapshots");
+      }
+    }
     const row: FrozenRunRow = {
       id: remapOf(report, "imported_ai_run", run.id),
       caseId: investigationId,
       contributionId: remappedImportedRunContributionId(report, run, bundle),
       sourceId: remapOf(report, "source", run.sourceId),
-      outputHash: run.outputDigest ?? "00".repeat(32),
-      outputText,
-      promptHash: null,
-      promptText: null,
-      promptCompleteness: "unknown",
-      outputCompleteness: "unknown",
-      workflowCompleteness: "unknown",
-      evidenceVisibility: "unknown",
-      snapshotBinding: null,
+      outputHash: output.hash,
+      outputText: output.text,
+      promptHash: prompt.hash,
+      promptText: prompt.text,
+      promptCompleteness: run.promptCompleteness ?? "unknown",
+      outputCompleteness: run.outputCompleteness ?? "unknown",
+      workflowCompleteness: run.workflowCompleteness ?? "unknown",
+      evidenceVisibility: run.evidenceVisibility ?? "unknown",
+      snapshotBinding,
       visibilityNote: null,
       importerId: actor.id,
       importerUsername: actor.username,
@@ -1085,7 +1117,7 @@ export async function persistPortableArchive(input: {
       timing: null,
       cost: null,
       redacted: false,
-      privacyClass: "owner_only",
+      privacyClass: run.privacyClass ?? "owner_only",
       createdAt: run.importedAt,
     };
     await ports.runs.insert(row);

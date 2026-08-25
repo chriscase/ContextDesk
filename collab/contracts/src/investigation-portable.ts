@@ -12,6 +12,7 @@ import {
   type CorpusIntakeOrigin,
 } from "./investigation-corpus-intake.js";
 import { GOLD_ALIGNMENT_NOT_CORRECTNESS, GOLD_ALIGNMENT_STATUSES, GOLD_IS_HUMAN_BENCHMARK } from "./gold.js";
+import { COMPLETENESS, EVIDENCE_VISIBILITY } from "./run.js";
 import {
   DECISION_STATUSES,
   HELPFULNESS_DIMENSIONS,
@@ -322,6 +323,21 @@ function requireSha256(path: string, value: string): void {
   }
 }
 
+function requirePresentContentDigest(
+  contents: readonly { digest: string; inclusion: string }[],
+  digest: string,
+  path: string,
+): void {
+  requireSha256(path, digest);
+  const content = contents.find((item) => item.digest === digest);
+  if (!content) {
+    throw new ContractViolation(path, "dangling content digest");
+  }
+  if (content.inclusion !== "present") {
+    throw new ContractViolation(path, "missing required content");
+  }
+}
+
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
   if (value && typeof value === "object") {
@@ -563,6 +579,13 @@ const importedRunShape: ObjectShape = {
   costStatus: f.req(f.en(UNKNOWN_STATUS)),
   outputDigest: f.nul(f.str),
   contributionId: f.opt(f.str),
+  promptDigest: f.optNul(f.str),
+  promptCompleteness: f.opt(f.en(...COMPLETENESS)),
+  outputCompleteness: f.opt(f.en(...COMPLETENESS)),
+  workflowCompleteness: f.opt(f.en(...COMPLETENESS)),
+  evidenceVisibility: f.opt(f.en(...EVIDENCE_VISIBILITY)),
+  snapshotId: f.optNul(f.str),
+  privacyClass: f.opt(f.en(...PRIVACY_CLASSES)),
   opaquePayloadJson: f.nul(f.str),
   objectHash: f.req(f.str),
 };
@@ -887,6 +910,13 @@ export interface PortableImportedAiRunV1 {
   costStatus: "unknown";
   outputDigest: string | null;
   contributionId?: string;
+  promptDigest?: string | null;
+  promptCompleteness?: (typeof COMPLETENESS)[number];
+  outputCompleteness?: (typeof COMPLETENESS)[number];
+  workflowCompleteness?: (typeof COMPLETENESS)[number];
+  evidenceVisibility?: (typeof EVIDENCE_VISIBILITY)[number];
+  snapshotId?: string | null;
+  privacyClass?: (typeof PRIVACY_CLASSES)[number];
   opaquePayloadJson: string | null;
   objectHash: string;
 }
@@ -1853,7 +1883,32 @@ export function parsePortableInvestigation(
         "opaquePayloadJson must be canonical JSON",
       );
     }
-    if (row.outputDigest !== null) requireSha256(`$.importedAiRuns[${i}].outputDigest`, row.outputDigest);
+    if (row.outputDigest !== null) {
+      requirePresentContentDigest(
+        bundle.contentObjects,
+        row.outputDigest,
+        `$.importedAiRuns[${i}].outputDigest`,
+      );
+    }
+    if (row.outputCompleteness === "exact" && !row.outputDigest) {
+      throw new ContractViolation(
+        `$.importedAiRuns[${i}].outputDigest`,
+        "exact output completeness requires an output digest",
+      );
+    }
+    if (row.promptDigest) {
+      requirePresentContentDigest(
+        bundle.contentObjects,
+        row.promptDigest,
+        `$.importedAiRuns[${i}].promptDigest`,
+      );
+    }
+    if (row.promptCompleteness === "exact" && !row.promptDigest) {
+      throw new ContractViolation(
+        `$.importedAiRuns[${i}].promptDigest`,
+        "exact prompt completeness requires a prompt digest",
+      );
+    }
     if (row.contributionId) {
       const bound = bundle.contributions.find((item) => item.id === row.contributionId);
       if (!bound) {
@@ -1880,6 +1935,11 @@ export function parsePortableInvestigation(
     bundle.snapshots.map((row) => row.id),
   );
   const snapshots = byId(bundle.snapshots);
+  for (const [i, row] of bundle.importedAiRuns.entries()) {
+    if (row.snapshotId && !snapshots.has(row.snapshotId)) {
+      throw new ContractViolation(`$.importedAiRuns[${i}].snapshotId`, "dangling snapshot reference");
+    }
+  }
   for (const [i, snap] of bundle.snapshots.entries()) {
     requireActor(actors, snap.createdBy, `$.snapshots[${i}].createdBy`);
     assertShareSafeTimestamp(`$.snapshots[${i}].createdAt`, snap.createdAt);

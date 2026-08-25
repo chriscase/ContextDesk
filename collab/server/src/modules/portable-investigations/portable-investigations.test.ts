@@ -587,6 +587,22 @@ describe("portable investigation service", () => {
     expect(archive.investigation.contentObjects.find((item) => item.digest === row.evidenceHash)?.payloadBase64)
       .toBe(Buffer.from(LOG_BYTES).toString("base64"));
     expect(archive.investigation.importedAiRuns).toHaveLength(1);
+    expect(archive.investigation.importedAiRuns[0]).toMatchObject({
+      promptCompleteness: "exact",
+      outputCompleteness: "exact",
+      workflowCompleteness: "partial",
+      privacyClass: "owner_only",
+      snapshotId: archive.investigation.snapshots[0]?.id,
+    });
+    expect(archive.investigation.importedAiRuns[0]?.promptDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      archive.investigation.contentObjects.some(
+        (item) =>
+          item.digest === archive.investigation.importedAiRuns[0]?.promptDigest
+          && item.inclusion === "present"
+          && item.payloadBase64 !== null,
+      ),
+    ).toBe(true);
     expect(archive.investigation.triageJobs[0]?.candidates).toHaveLength(2);
     expect(archive.investigation.triageJobs[0]).toMatchObject({
       status: "completed",
@@ -1490,6 +1506,8 @@ describe("portable investigation service", () => {
     }
     expect(response.report.applyAuthorized).toBe(false);
     expect(response.unsupported).not.toContain("investigation_situation_fields");
+    expect(response.unsupported).not.toContain("imported_prompt_and_opaque_run_details");
+    expect(response.unsupported).toContain("imported_opaque_run_details");
     expect(response.unsupported).toContain("imported_content_privacy_is_not_contract_bound");
     expect(response.unsupported).toContain("imported_run_corroboration");
   });
@@ -2204,6 +2222,40 @@ describe("portable investigation apply", () => {
     expect(JSON.parse(destEvent?.payload ?? "{}").links).toEqual([
       { kind: "artifact", id: destEvidence.find((item) => item.contentHash === row.evidenceHash)?.id },
     ]);
+  });
+
+  it("preserves imported-run prompt, completeness, and snapshot binding after portable restore", async () => {
+    const row = await fixture();
+    const sourceRun = (await row.imports.listRuns(row.caseId, ACTOR, true))[0];
+    if (!sourceRun) throw new Error("fixture imported run is missing");
+    expect(sourceRun.promptCompleteness).toBe("exact");
+    expect(sourceRun.outputCompleteness).toBe("exact");
+    expect(sourceRun.promptText).toBe("Inspect the synthetic queue evidence.");
+    expect(sourceRun.snapshotBinding).toBeTruthy();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const destRun = (await row.imports.listRuns(applied.investigationId, ACTOR, true))[0];
+    const destSnapshots = await row.cases.listSnapshots(applied.investigationId, ACTOR, true);
+    expect(destRun?.promptCompleteness).toBe("exact");
+    expect(destRun?.outputCompleteness).toBe("exact");
+    expect(destRun?.workflowCompleteness).toBe("partial");
+    expect(destRun?.privacyClass).toBe("owner_only");
+    expect(destRun?.promptHash).toBe(sourceRun.promptHash);
+    expect(destRun?.promptText).toBe(sourceRun.promptText);
+    expect(destSnapshots.some((snap) => snap.fingerprint === destRun?.snapshotBinding)).toBe(true);
+    expect(destRun?.snapshotBinding).not.toBe(sourceRun.snapshotBinding);
   });
 
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
@@ -3704,7 +3756,14 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
       expect((await pgCases.listTimeline(investigationId)).some((event) => event.kind === "run_corroboration"))
         .toBe(false);
       const destRuns = await new PgRunStore(client).listByCase(investigationId);
-      expect(destRuns.length).toBeGreaterThan(0);
+      expect(destRuns).toHaveLength(1);
+      expect(destRuns[0]?.promptCompleteness).toBe("exact");
+      expect(destRuns[0]?.outputCompleteness).toBe("exact");
+      expect(destRuns[0]?.workflowCompleteness).toBe("partial");
+      expect(destRuns[0]?.promptText).toBe("Inspect the synthetic queue evidence.");
+      expect(destRuns[0]?.promptHash).toBeTruthy();
+      const destSnapshots = await new PgCaseStore(client).listSnapshotsByCase(investigationId);
+      expect(destSnapshots.some((snap) => snap.fingerprint === destRuns[0]?.snapshotBinding)).toBe(true);
       for (const run of destRuns) {
         expect(await new PgRunStore(client).listCorroborations(run.id)).toEqual([]);
       }

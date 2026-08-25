@@ -368,6 +368,14 @@
           "usageStatus": { "$ref": "#/$defs/unknownStatus" },
           "costStatus": { "$ref": "#/$defs/unknownStatus" },
           "outputDigest": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+          "contributionId": { "type": "string", "minLength": 1 },
+          "promptDigest": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+          "promptCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+          "outputCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+          "workflowCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+          "evidenceVisibility": { "type": "string", "enum": ["unknown", "importer_described"] },
+          "snapshotId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+          "privacyClass": { "$ref": "#/$defs/privacy" },
           "opaquePayloadJson": { "$ref": "#/$defs/opaquePayloadJson" },
           "objectHash": { "$ref": "#/$defs/objectHash" }
         }

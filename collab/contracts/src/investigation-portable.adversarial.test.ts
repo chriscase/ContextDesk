@@ -613,6 +613,39 @@ describe("portable investigation adversarial lab", () => {
     danglingTimeline.timeline[0]!.targetId = "ghost-note";
     expect(() => parsePortableInvestigation(reseal(danglingTimeline))).toThrow(/dangling/);
 
+    const danglingImportedPrompt = syntheticSeal();
+    danglingImportedPrompt.importedAiRuns[0]!.promptDigest = "ab".repeat(32);
+    expect(() => parsePortableInvestigation(reseal(danglingImportedPrompt))).toThrow(
+      /dangling content digest/,
+    );
+
+    const exactImportedPrompt = syntheticSeal();
+    exactImportedPrompt.importedAiRuns[0]!.promptCompleteness = "exact";
+    expect(() => parsePortableInvestigation(reseal(exactImportedPrompt))).toThrow(
+      /exact prompt completeness requires a prompt digest/,
+    );
+
+    const withheldImportedPrompt = syntheticSeal();
+    const withheld = withheldImportedPrompt.contentObjects.find((row) => row.inclusion === "private");
+    withheldImportedPrompt.importedAiRuns[0]!.promptDigest = withheld?.digest;
+    expect(() => parsePortableInvestigation(reseal(withheldImportedPrompt))).toThrow(
+      /missing required content/,
+    );
+
+    const danglingImportedSnapshot = syntheticSeal();
+    danglingImportedSnapshot.importedAiRuns[0]!.snapshotId = "ghost-snap";
+    expect(() => parsePortableInvestigation(reseal(danglingImportedSnapshot))).toThrow(
+      /dangling snapshot/,
+    );
+
+    const boundImported = syntheticSeal();
+    boundImported.importedAiRuns[0]!.promptDigest = boundImported.contentObjects.find(
+      (row) => row.inclusion === "present",
+    )?.digest;
+    boundImported.importedAiRuns[0]!.promptCompleteness = "exact";
+    boundImported.importedAiRuns[0]!.snapshotId = boundImported.snapshots[0]!.id;
+    expect(() => parsePortableInvestigation(reseal(boundImported))).not.toThrow();
+
     const danglingIntake = syntheticSeal();
     danglingIntake.timeline[0]!.targetNamespace = "intake_batch";
     danglingIntake.timeline[0]!.targetId = "ghost-batch";

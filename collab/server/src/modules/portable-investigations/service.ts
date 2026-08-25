@@ -61,7 +61,7 @@ export const PORTABLE_CONTRACT_UNSUPPORTED = [
   "triage_worker_leases_and_cancellation_capabilities",
   "experiment_agreement_and_interaction_traces",
   "source_membership_and_source_identity_ownership",
-  "imported_prompt_and_opaque_run_details",
+  "imported_opaque_run_details",
   "imported_run_corroboration",
   "imported_content_privacy_is_not_contract_bound",
   "discussion_containers_presence_and_live_chat_state",
@@ -810,6 +810,10 @@ export class PortableInvestigationService {
       if ((run.promptHash === null) !== (run.promptText === null)) {
         throw new PortableServerError("integrity_failure", "imported prompt hash and bytes disagree");
       }
+      if (run.promptHash && run.promptText) {
+        const prompt = new TextEncoder().encode(run.promptText);
+        addContent(run.promptHash, prompt, "text/plain", prompt.byteLength);
+      }
     }
 
     const contentRows = (): PortableContentObjectV1[] =>
@@ -1226,21 +1230,37 @@ export class PortableInvestigationService {
         createdBy: row.createdBy,
         objectHash: "",
       })),
-      importedAiRuns: importedRuns.map((row) => ({
-        id: row.id,
-        sourceId: row.sourceId,
-        importedAt: row.createdAt,
-        providerKind: providerKind(row.provider),
-        model: row.model ?? "unknown",
-        version: row.version,
-        profileId: null,
-        usageStatus: "unknown",
-        costStatus: "unknown",
-        outputDigest: row.outputHash,
-        contributionId: row.contributionId,
-        opaquePayloadJson: null,
-        objectHash: "",
-      })),
+      importedAiRuns: importedRuns.map((row) => {
+        const boundSnapshot = snapshots.find((snap) => snap.fingerprint === row.snapshotBinding);
+        if (row.snapshotBinding && !boundSnapshot) {
+          throw new PortableServerError(
+            "integrity_failure",
+            "imported run snapshot binding is missing from the portable archive",
+          );
+        }
+        return {
+          id: row.id,
+          sourceId: row.sourceId,
+          importedAt: row.createdAt,
+          providerKind: providerKind(row.provider),
+          model: row.model ?? "unknown",
+          version: row.version,
+          profileId: null,
+          usageStatus: "unknown" as const,
+          costStatus: "unknown" as const,
+          outputDigest: row.outputHash,
+          contributionId: row.contributionId,
+          promptDigest: row.promptHash,
+          promptCompleteness: row.promptCompleteness,
+          outputCompleteness: row.outputCompleteness,
+          workflowCompleteness: row.workflowCompleteness,
+          evidenceVisibility: row.evidenceVisibility,
+          snapshotId: boundSnapshot?.id ?? null,
+          privacyClass: row.privacyClass,
+          opaquePayloadJson: null,
+          objectHash: "",
+        };
+      }),
       snapshots: portableSnapshots,
       triageJobs: portableJobs,
       experiments: portableExperiments,
