@@ -53,7 +53,7 @@ test.describe("routing, activity locators, and operator UX", () => {
     await expect(panel).toBeVisible();
     await panel.getByRole("textbox", { name: "Message" }).fill("Synthetic discussion comment for locator routing.");
     await panel.getByRole("button", { name: "Post to discussion" }).click();
-    await expect(panel.getByText("Synthetic discussion comment for locator routing.")).toBeVisible();
+    await expect(panel.getByLabel("Discussion messages").getByText("Synthetic discussion comment for locator routing.")).toBeVisible();
 
     const activity = await page.request.get("/api/investigation-activity?limit=30");
     expect(activity.ok(), await activity.text()).toBeTruthy();
@@ -70,7 +70,9 @@ test.describe("routing, activity locators, and operator UX", () => {
     await page.goto(comment!.resolvedRoute!);
     await expect(page.getByRole("complementary", { name: "Discussion" })).toBeVisible();
     await expect(page.getByText(/Opened Discussion to the comment this activity recorded/)).toBeVisible();
-    await expect(page.getByText("Synthetic discussion comment for locator routing.")).toBeVisible();
+    await expect(
+      page.getByLabel("Discussion messages").getByText("Synthetic discussion comment for locator routing."),
+    ).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/investigations/${caseId}/situation`));
     await expect(page).toHaveURL(/section=discussion/);
   });
