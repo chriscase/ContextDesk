@@ -11,7 +11,11 @@ const webServer = {
   command: "node --import tsx/esm src/serve-fixture.ts",
   cwd: here,
   url: `${baseURL}/health`,
-  reuseExistingServer: !process.env.CI,
+  // Never silently qualify whatever happens to own the fixture port. An
+  // unrelated ContextDesk demo can expose the same /health contract while
+  // using different auth, data, or code. External-server runs are already an
+  // explicit path through COLLAB_E2E_START_FIXTURE=0.
+  reuseExistingServer: false,
   timeout: 120_000,
   stdout: "pipe" as const,
   stderr: "pipe" as const,
