@@ -45,10 +45,10 @@ test.describe("routing, activity locators, and operator UX", () => {
     page,
   }) => {
     await loginAs(page, FIXTURE_USERS.dave);
-    const title = uniqueTitle("Discussion locator");
+    const title = uniqueTitle("Comment locator routing");
     await createCase(page, title);
     const caseId = await caseIdForTitle(page, title);
-    await page.getByRole("button", { name: "Discussion" }).click();
+    await page.getByRole("button", { name: "Discussion", exact: true }).click();
     const panel = page.getByRole("complementary", { name: "Discussion" });
     await expect(panel).toBeVisible();
     await panel.getByLabel("Message").fill("Synthetic discussion comment for locator routing.");
