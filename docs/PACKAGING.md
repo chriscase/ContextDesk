@@ -55,12 +55,16 @@ and `desktop/package.json` versions must agree (prerelease tags keep the
 The assemble step refuses a partial Windows/macOS/Linux desktop or CLI matrix,
 duplicate basenames, a foreign git SHA, and reuse of `v0.1.0-rc5` (or any other)
 assets on a different tag. It writes one `SHA256SUMS`, `inventory.txt`,
-`sbom.cdx.json`, and `release-manifest.json` covering **every** released asset
-(desktop installers, CLI archives, updater payloads, and `latest.json`).
+`sbom.cdx.json`, and `release-manifest.json`. The manifest binds every payload
+asset by SHA-256 and binds the generated checksum, inventory, and SBOM bytes;
+promotion downloads the draft again and requires that exact flat asset set and
+every recorded digest before publishing.
 
 GA (`vX.Y.Z` with no prerelease suffix) requires a signed `latest.json` whose
-URLs and signatures bind to those exact artifacts. Missing updater signing
-prerequisites fail in preflight **before** any publishable release state.
+URLs bind to the exact tag and whose Tauri Base64-wrapped minisign signatures
+cryptographically verify the exact updater bytes against the public key pinned
+in `tauri.conf.json`. Missing updater signing prerequisites or a mismatched key,
+signature, or payload fail before the draft is accepted for promotion.
 Prerelease tags may draft without updater signatures; they still cannot be
 promoted to GA rules.
 
@@ -82,12 +86,15 @@ release. Do not describe a GitHub Release as shipping War Room.
    This is **not** a no-tag dry run.
 4. Wait for **release** to finish. Confirm the draft title/body/prerelease
    match the locked contract and that `SHA256SUMS` lists every desktop, CLI,
-   and updater asset.
+   and updater asset. A retry resumes only when every existing same-name draft
+   asset has the exact local digest; it never clobbers a mismatch.
 5. Smoke-test installers and CLI archives from that draft only. Never copy
    `v0.1.0-rc5` (or any other SHA/tag) assets onto a new cut.
 6. Promote **only** via Actions → **release-promote** with the exact 40-char
    SHA and `confirm_publish=publish`. Any other confirm value, or any
-   validation failure, leaves the draft unpublished.
+   validation failure, leaves the draft unpublished. Retrying an already
+   published release is a successful no-op only when its tag, target SHA,
+   locked metadata, and downloaded assets still match exactly.
 7. Updater signing secret **names** (values stay in GitHub Actions; never
    commit them): `TAURI_SIGNING_PRIVATE_KEY`, optional
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. GA preflight fails closed if the
@@ -139,8 +146,9 @@ Non-loopback requires `--allow-lan` **and** at least one API key (startup refuse
 - **Endpoint:** HTTPS only — `https://github.com/chriscase/ContextDesk/releases/latest/download/latest.json`
 - **Artifacts:** `bundle.createUpdaterArtifacts: true` on GA/signed runs. The
   orchestrator assembles one `latest.json` after the desktop matrix finishes
-  and verifies URL/signature binding. Builders do not attach updater JSON
-  themselves.
+  and verifies URL binding plus both minisign Ed25519 signatures against the
+  exact pinned updater public key. Builders do not attach updater JSON
+  themselves. Release verification requires OpenSSL 3.x's Ed25519 verifier.
 - **UX:** Settings → General → **Check for updates**. No background auto-install; confirm dialog before download+install.
 - **CSP:** Update fetch runs in Rust, not the webview; `connect-src` does not need the GitHub host.
 
@@ -154,10 +162,10 @@ npx @tauri-apps/cli signer generate -w ./cd.key
 
 If you lose the private key, generate a new pair, update the committed pubkey, and cut a fresh release — prior installers cannot verify new signatures until they ship with the new pubkey (or users reinstall).
 
-GA assemble verifies that `latest.json` URLs use
+GA assemble and promote verify that `latest.json` URLs use
 `/releases/download/<exact-tag>/` (never `/latest/` or another tag such as
 `v0.1.0-rc5`) and that each signature binds to the exact updater artifact
-bytes in the inventory.
+bytes in the inventory under the public key embedded in the desktop app.
 
 ## CLI multi-platform archives
 

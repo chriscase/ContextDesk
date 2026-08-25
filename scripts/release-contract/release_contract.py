@@ -12,10 +12,15 @@ supplied by the caller; unit tests use an in-memory store.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.error
 import urllib.request
@@ -36,7 +41,10 @@ VERSION_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 TEST_SIG_PREFIX = "cd-test-sig:"
-MINISIGN_HINTS = ("untrusted comment", "RW", "dW50cnVzdGVk")
+OPENSSL_VERSION_RE = re.compile(r"^OpenSSL 3\.")
+MINISIGN_PUBLIC_KEY_ALGORITHMS = {b"Ed", b"ED"}
+MINISIGN_SIGNATURE_ALGORITHMS = {b"Ed", b"ED"}
+MINISIGN_PUBLIC_KEY_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
 
 REQUIRED_DESKTOP = ("macos", "windows", "linux")
 REQUIRED_CLI = ("macos-arm64", "macos-x64", "linux-x64", "windows-x64")
@@ -53,6 +61,10 @@ METADATA_NAMES = frozenset(
         "latest.json",
     }
 )
+GENERATED_METADATA_NAMES = frozenset(
+    {"SHA256SUMS", "inventory.txt", "sbom.cdx.json"}
+)
+RELEASE_MANIFEST_NAME = "release-manifest.json"
 
 # Honest signing posture. Apple/Authenticode remain unset until a future
 # workflow actually wires named secrets and jobs. Do not invent secret names.
@@ -256,11 +268,147 @@ def test_signature(artifact: bytes, key: str = "fixture") -> str:
     return f"{TEST_SIG_PREFIX}{digest}"
 
 
-def looks_like_minisign(signature: str) -> bool:
-    text = (signature or "").strip()
+def pinned_updater_public_key(repo_root: Path) -> str:
+    config_path = Path(repo_root) / "desktop" / "src-tauri" / "tauri.conf.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        public_key = str(config["plugins"]["updater"]["pubkey"] or "").strip()
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        die(f"cannot read pinned updater public key from {config_path}: {exc}")
+    if not public_key:
+        die(f"pinned updater public key is empty in {config_path}")
+    return public_key
+
+
+def _decode_tauri_base64_wrapper(value: str, *, label: str) -> str:
+    text = (value or "").strip()
     if not text:
-        return False
-    return any(h in text for h in MINISIGN_HINTS) or text.startswith("dW50")
+        die(f"{label} is empty")
+    try:
+        decoded = base64.b64decode(text, validate=True)
+        return decoded.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        die(f"{label} is not valid Tauri base64-wrapped UTF-8: {exc}")
+
+
+def _decode_minisign_line(value: str, *, label: str, expected_size: int) -> bytes:
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except ValueError as exc:
+        die(f"{label} is not valid base64: {exc}")
+    if len(decoded) != expected_size:
+        die(f"{label} has {len(decoded)} bytes; expected {expected_size}")
+    return decoded
+
+
+def _parse_tauri_public_key(public_key: str) -> tuple[bytes, bytes]:
+    decoded = _decode_tauri_base64_wrapper(public_key, label="updater public key")
+    lines = decoded.splitlines()
+    if len(lines) != 2 or not lines[0].startswith("untrusted comment: "):
+        die("updater public key is not a two-line minisign public key")
+    payload = _decode_minisign_line(
+        lines[1], label="minisign public key payload", expected_size=42
+    )
+    if payload[:2] not in MINISIGN_PUBLIC_KEY_ALGORITHMS:
+        die("updater public key uses an unsupported minisign algorithm")
+    return payload[2:10], payload[10:42]
+
+
+def _parse_tauri_signature(signature: str) -> tuple[bytes, bytes, bytes, bytes, bool]:
+    decoded = _decode_tauri_base64_wrapper(signature, label="updater signature")
+    lines = decoded.splitlines()
+    if (
+        len(lines) != 4
+        or not lines[0].startswith("untrusted comment: ")
+        or not lines[2].startswith("trusted comment: ")
+    ):
+        die("updater signature is not a four-line minisign signature")
+    primary = _decode_minisign_line(
+        lines[1], label="minisign primary signature", expected_size=74
+    )
+    global_signature = _decode_minisign_line(
+        lines[3], label="minisign global signature", expected_size=64
+    )
+    algorithm = primary[:2]
+    if algorithm not in MINISIGN_SIGNATURE_ALGORITHMS:
+        die("updater signature uses an unsupported minisign algorithm")
+    trusted_comment = lines[2][len("trusted comment: ") :].encode("utf-8")
+    return (
+        primary[2:10],
+        primary[10:74],
+        global_signature,
+        trusted_comment,
+        algorithm == b"ED",
+    )
+
+
+def _openssl_binary() -> str:
+    configured = os.environ.get("CONTEXTDESK_RELEASE_OPENSSL", "").strip()
+    candidate = configured or shutil.which("openssl") or ""
+    if not candidate:
+        die("OpenSSL 3 is required for updater signature verification")
+    path = Path(candidate)
+    if not path.is_absolute():
+        resolved = shutil.which(candidate)
+        if not resolved:
+            die(f"configured OpenSSL verifier is not executable: {candidate}")
+        path = Path(resolved)
+    try:
+        result = subprocess.run(
+            [str(path), "version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        die(f"cannot execute OpenSSL verifier {path}: {exc}")
+    version = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0 or not OPENSSL_VERSION_RE.match(version):
+        die(f"updater verification requires OpenSSL 3.x (got {version!r})")
+    return str(path)
+
+
+def _verify_ed25519(
+    *, public_key: bytes, message: bytes, signature: bytes, label: str
+) -> None:
+    if len(public_key) != 32 or len(signature) != 64:
+        die(f"{label} has invalid Ed25519 key/signature length")
+    der = MINISIGN_PUBLIC_KEY_DER_PREFIX + public_key
+    with tempfile.TemporaryDirectory(prefix="contextdesk-release-verify-") as td:
+        directory = Path(td)
+        key_path = directory / "key.der"
+        message_path = directory / "message.bin"
+        signature_path = directory / "signature.bin"
+        key_path.write_bytes(der)
+        message_path.write_bytes(message)
+        signature_path.write_bytes(signature)
+        try:
+            result = subprocess.run(
+                [
+                    _openssl_binary(),
+                    "pkeyutl",
+                    "-verify",
+                    "-pubin",
+                    "-inkey",
+                    str(key_path),
+                    "-keyform",
+                    "DER",
+                    "-rawin",
+                    "-in",
+                    str(message_path),
+                    "-sigfile",
+                    str(signature_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            die(f"{label} verifier failed to execute: {exc}")
+    if result.returncode != 0:
+        die(f"{label} failed cryptographic verification")
 
 
 def verify_artifact_signature(
@@ -268,6 +416,8 @@ def verify_artifact_signature(
     signature: str,
     *,
     allow_test_sig: bool,
+    public_key: Optional[str] = None,
+    repo_root: Optional[Path] = None,
 ) -> None:
     sig = (signature or "").strip()
     if not sig or sig in {"unsigned", "missing", "TODO", "placeholder"}:
@@ -279,9 +429,28 @@ def verify_artifact_signature(
         if sig != expected:
             die("test signature does not bind to this exact artifact digest")
         return
-    if looks_like_minisign(sig):
-        return
-    die("unrecognized updater signature format")
+    pinned = public_key or pinned_updater_public_key(
+        repo_root or Path(__file__).resolve().parents[2]
+    )
+    key_id, key = _parse_tauri_public_key(pinned)
+    signature_key_id, primary, global_signature, trusted_comment, prehashed = (
+        _parse_tauri_signature(sig)
+    )
+    if signature_key_id != key_id:
+        die("updater signature key id does not match the pinned updater public key")
+    message = hashlib.blake2b(artifact, digest_size=64).digest() if prehashed else artifact
+    _verify_ed25519(
+        public_key=key,
+        message=message,
+        signature=primary,
+        label="updater artifact signature",
+    )
+    _verify_ed25519(
+        public_key=key,
+        message=primary + trusted_comment,
+        signature=global_signature,
+        label="updater trusted-comment signature",
+    )
 
 
 @dataclass
@@ -697,6 +866,10 @@ def write_manifest(
             }
             for a in sorted(assets, key=lambda x: x.name)
         ],
+        "generated_metadata": {
+            name: sha256_file(Path(directory) / name)
+            for name in sorted(GENERATED_METADATA_NAMES)
+        },
         "checksums_file": "SHA256SUMS",
         "inventory_file": "inventory.txt",
         "sbom_file": "sbom.cdx.json",
@@ -819,6 +992,141 @@ def assemble(
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
+def _manifest_assets(manifest: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    entries = manifest.get("assets")
+    if not isinstance(entries, list) or not entries:
+        die("release manifest assets must be a non-empty list")
+    assets: Dict[str, Mapping[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            die("release manifest asset entry must be an object")
+        name = str(entry.get("name") or "")
+        digest = str(entry.get("sha256") or "")
+        if not name or Path(name).name != name or "/" in name or "\\" in name:
+            die(f"release manifest carries unsafe asset name {name!r}")
+        if name in assets:
+            die(f"release manifest repeats asset {name}")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            die(f"release manifest asset {name} has invalid sha256")
+        assets[name] = entry
+    return assets
+
+
+def _manifest_generated_metadata(manifest: Mapping[str, Any]) -> Dict[str, str]:
+    generated = manifest.get("generated_metadata")
+    if not isinstance(generated, Mapping):
+        die("release manifest generated_metadata must be an object")
+    if set(generated) != set(GENERATED_METADATA_NAMES):
+        die(
+            "release manifest generated_metadata set mismatch: "
+            f"expected {sorted(GENERATED_METADATA_NAMES)}, got {sorted(generated)}"
+        )
+    result: Dict[str, str] = {}
+    for name in sorted(GENERATED_METADATA_NAMES):
+        digest = str(generated.get(name) or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            die(f"release manifest generated metadata {name} has invalid sha256")
+        result[name] = digest
+    return result
+
+
+def _read_sha256sums(path: Path) -> Dict[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        die(f"cannot read SHA256SUMS: {exc}")
+    sums: Dict[str, str] = {}
+    for line_number, line in enumerate(lines, start=1):
+        if not line:
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  ([^/\\\r\n]+)", line)
+        if not match:
+            die(f"SHA256SUMS line {line_number} is malformed")
+        digest, name = match.groups()
+        if name in sums:
+            die(f"SHA256SUMS repeats asset {name}")
+        sums[name] = digest
+    if not sums:
+        die("SHA256SUMS is empty")
+    return sums
+
+
+def verify_release_bundle_integrity(
+    directory: Path, *, manifest: Mapping[str, Any]
+) -> None:
+    directory = Path(directory)
+    nested = [
+        str(path.relative_to(directory))
+        for path in directory.rglob("*")
+        if path.is_file() and path.parent != directory
+    ]
+    if nested:
+        die(f"release bundle must be flat; nested files found: {sorted(nested)}")
+    actual = {path.name: path for path in directory.iterdir() if path.is_file()}
+    manifest_assets = _manifest_assets(manifest)
+    generated = _manifest_generated_metadata(manifest)
+    expected_names = (
+        set(manifest_assets) | set(generated) | {RELEASE_MANIFEST_NAME}
+    )
+    if set(actual) != expected_names:
+        missing = sorted(expected_names - set(actual))
+        extra = sorted(set(actual) - expected_names)
+        die(f"release asset set mismatch: missing={missing}, extra={extra}")
+
+    checksums = _read_sha256sums(actual["SHA256SUMS"])
+    if set(checksums) != set(manifest_assets):
+        missing = sorted(set(manifest_assets) - set(checksums))
+        extra = sorted(set(checksums) - set(manifest_assets))
+        die(f"SHA256SUMS asset set mismatch: missing={missing}, extra={extra}")
+    for name, entry in manifest_assets.items():
+        recorded = str(entry["sha256"])
+        actual_digest = sha256_file(actual[name])
+        if checksums[name] != recorded:
+            die(
+                f"SHA256SUMS digest for {name} does not match release manifest "
+                f"({checksums[name]} != {recorded})"
+            )
+        if actual_digest != recorded:
+            die(
+                f"downloaded asset {name} digest does not match release manifest "
+                f"({actual_digest} != {recorded})"
+            )
+    for name, recorded in generated.items():
+        actual_digest = sha256_file(actual[name])
+        if actual_digest != recorded:
+            die(
+                f"downloaded generated metadata {name} digest does not match "
+                f"release manifest ({actual_digest} != {recorded})"
+            )
+
+
+def plan_resumable_upload(directory: Path, existing_directory: Path) -> Dict[str, Any]:
+    local_dir = Path(directory)
+    existing_dir = Path(existing_directory)
+    local = {path.name: path for path in local_dir.iterdir() if path.is_file()}
+    existing = {
+        path.name: path for path in existing_dir.iterdir() if path.is_file()
+    }
+    extra = sorted(set(existing) - set(local))
+    if extra:
+        die(f"existing draft has assets absent from local release bundle: {extra}")
+    upload: List[str] = []
+    skipped: List[str] = []
+    for name, path in sorted(local.items()):
+        if name not in existing:
+            upload.append(name)
+            continue
+        local_digest = sha256_file(path)
+        existing_digest = sha256_file(existing[name])
+        if local_digest != existing_digest:
+            die(
+                f"refusing to replace existing draft asset {name}: "
+                f"remote {existing_digest} != local {local_digest}"
+            )
+        skipped.append(name)
+    return {"upload": upload, "skipped": skipped}
+
+
 def assert_draft_only(manifest_path: Path) -> None:
     data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     if data.get("published") is True:
@@ -855,6 +1163,42 @@ def locked_release_body(identity: ReleaseIdentity) -> str:
         "the complete exact-SHA matrix. Never reuse v0.1.0-rc5 assets or "
         "another SHA.\n"
     )
+
+
+def validate_release_object_metadata(
+    metadata: Mapping[str, Any],
+    *,
+    identity: ReleaseIdentity,
+    allow_published: bool,
+) -> str:
+    errors: List[str] = []
+    if metadata.get("tagName") != identity.tag:
+        errors.append(f"tagName {metadata.get('tagName')!r} != {identity.tag!r}")
+    if metadata.get("targetCommitish") != identity.git_sha:
+        errors.append(
+            f"targetCommitish {metadata.get('targetCommitish')!r} "
+            f"!= exact SHA {identity.git_sha}"
+        )
+    if metadata.get("name") != locked_release_name(identity):
+        errors.append(
+            f"release name {metadata.get('name')!r} "
+            f"!= {locked_release_name(identity)!r}"
+        )
+    if (metadata.get("body") or "") != locked_release_body(identity):
+        errors.append("release body does not match locked exact-SHA notes")
+    if (
+        type(metadata.get("isPrerelease")) is not bool
+        or metadata.get("isPrerelease") != identity.prerelease
+    ):
+        errors.append("release prerelease flag does not match tag kind")
+    draft = metadata.get("isDraft")
+    if type(draft) is not bool:
+        errors.append("release isDraft must be a boolean")
+    elif draft is False and not allow_published:
+        errors.append("existing release is published; refusing draft mutation")
+    if errors:
+        raise ContractError("; ".join(errors))
+    return "draft" if draft is True else "published"
 
 
 @dataclass
@@ -1014,6 +1358,7 @@ def validate_promote_payload(
     if manifest.get("promotable") is not True:
         errors.append("manifest is not promotable")
     try:
+        verify_release_bundle_integrity(directory, manifest=manifest)
         assets = collect_assets(directory, skip_generated=False)
         # drop generated metadata from matrix completeness by re-running assemble checks
         raw = collect_assets(directory, skip_generated=True)
@@ -1488,6 +1833,44 @@ def cmd_validate_promote(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_upload(args: argparse.Namespace) -> int:
+    plan = plan_resumable_upload(Path(args.dir), Path(args.existing_dir))
+    Path(args.output).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {"ok": True, "upload": len(plan["upload"]), "skipped": len(plan["skipped"])},
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_validate_release_state(args: argparse.Namespace) -> int:
+    version, package_version, kind = parse_tag(args.tag)
+    identity = ReleaseIdentity(
+        tag=args.tag,
+        version=version,
+        package_version=package_version,
+        git_sha=require_full_sha(args.expected_git_sha),
+        git_describe=args.git_describe,
+        channel=CHANNEL_INSTALLED,
+        kind=kind,
+    )
+    metadata = json.loads(Path(args.metadata).read_text(encoding="utf-8"))
+    if not isinstance(metadata, Mapping):
+        die("GitHub release metadata must be an object")
+    allow_published = str(args.allow_published).lower() in {"1", "true", "yes"}
+    try:
+        state = validate_release_object_metadata(
+            metadata, identity=identity, allow_published=allow_published
+        )
+    except ContractError as exc:
+        die(str(exc))
+    Path(args.output_state).write_text(state + "\n", encoding="utf-8")
+    print(f"validate-release-state: {state}")
+    return 0
+
+
 def cmd_promote_local(args: argparse.Namespace) -> int:
     """Offline promote against a serialized MemoryReleaseStore snapshot.
 
@@ -1573,6 +1956,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-test-sig", default="false")
     p.add_argument("--download-repo", default=DEFAULT_DOWNLOAD_REPO)
     p.set_defaults(func=cmd_validate_promote)
+
+    p = sub.add_parser("plan-upload")
+    p.add_argument("--dir", required=True)
+    p.add_argument("--existing-dir", required=True)
+    p.add_argument("--output", required=True)
+    p.set_defaults(func=cmd_plan_upload)
+
+    p = sub.add_parser("validate-release-state")
+    p.add_argument("--metadata", required=True)
+    p.add_argument("--tag", required=True)
+    p.add_argument("--expected-git-sha", required=True)
+    p.add_argument("--git-describe", required=True)
+    p.add_argument("--allow-published", default="false")
+    p.add_argument("--output-state", required=True)
+    p.set_defaults(func=cmd_validate_release_state)
 
     p = sub.add_parser("promote-local")
     p.add_argument("--dir", required=True)

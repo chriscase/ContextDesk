@@ -120,6 +120,25 @@ jobs:
           ref: ${{ needs.preflight.outputs.git_sha }}
           fetch-depth: 0
 
+      - name: Resolve exact remote tag
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          EXPECTED: ${{ needs.preflight.outputs.git_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          RESOLVED="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          if [ "$RESOLVED" != "$EXPECTED" ]; then
+            echo "tag $TAG resolves to $RESOLVED, expected $EXPECTED" >&2
+            exit 1
+          fi
+
+      - name: Verify pinned updater verifier
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/openssl
+          /usr/bin/openssl version | grep -E '^OpenSSL 3\.'
+
       - name: Download desktop and CLI artifacts
         uses: actions/download-artifact@v4
         with:
@@ -163,6 +182,7 @@ jobs:
           CD_GIT_SHA: ${{ needs.preflight.outputs.git_sha }}
           CD_GIT_DESCRIBE: ${{ needs.preflight.outputs.git_describe }}
           CD_CHANNEL: installed
+          CONTEXTDESK_RELEASE_OPENSSL: /usr/bin/openssl
         run: |
           set -euo pipefail
           python3 scripts/release-contract/release_contract.py assemble \
@@ -209,42 +229,55 @@ jobs:
             PRE_ARGS+=(--prerelease)
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release view "$TAG" --json name,body,isDraft,isPrerelease \
+            gh release view "$TAG" --json name,body,isDraft,isPrerelease,tagName,targetCommitish \
               > /tmp/cd-existing-release.json
-            python3 - <<'PY'
-          import json
-          import os
-          import sys
-          view = json.loads(open("/tmp/cd-existing-release.json", encoding="utf-8").read())
-          name = open("/tmp/cd-release-name.txt", encoding="utf-8").read().strip()
-          body = open("/tmp/cd-release-notes.md", encoding="utf-8").read()
-          kind = os.environ["KIND"]
-          errors = []
-          if view.get("name") != name:
-              errors.append(f"existing title {view.get('name')!r} != locked {name!r}")
-          if (view.get("body") or "") != body:
-              errors.append("existing body does not match locked notes")
-          if view.get("isDraft") is not True:
-              errors.append("existing release is not a draft; refusing to mutate")
-          expected_pre = kind == "prerelease"
-          if bool(view.get("isPrerelease")) != expected_pre:
-              errors.append("existing prerelease flag does not match locked metadata")
-          if errors:
-              print("release_contract: refusing to clobber:", file=sys.stderr)
-              print("\n".join(errors), file=sys.stderr)
-              sys.exit(2)
-          print("existing draft metadata matches locked contract")
-          PY
+            python3 scripts/release-contract/release_contract.py validate-release-state \
+              --metadata /tmp/cd-existing-release.json \
+              --tag "$TAG" \
+              --expected-git-sha "$GIT_SHA" \
+              --git-describe "$GIT_DESCRIBE" \
+              --allow-published false \
+              --output-state /tmp/cd-release-state
           else
             gh release create "$TAG" \
               --draft \
+              --verify-tag \
               --title "$NAME" \
               --notes-file /tmp/cd-release-notes.md \
               --target "$GIT_SHA" \
               "${PRE_ARGS[@]}"
           fi
-          # Never --clobber: a second digest under the same name must fail.
-          gh release upload "$TAG" dist/release/* 
+          # Resume only across exact bytes. Existing same-name assets are
+          # downloaded and hashed; identical bytes are skipped, differences
+          # and remote-only assets fail closed. Never use --clobber.
+          rm -rf /tmp/cd-existing-assets /tmp/cd-upload-plan.json
+          mkdir -p /tmp/cd-existing-assets
+          ASSET_COUNT="$(gh release view "$TAG" --json assets --jq '.assets | length')"
+          if [ "$ASSET_COUNT" -gt 0 ]; then
+            gh release download "$TAG" --dir /tmp/cd-existing-assets
+          fi
+          python3 scripts/release-contract/release_contract.py plan-upload \
+            --dir dist/release \
+            --existing-dir /tmp/cd-existing-assets \
+            --output /tmp/cd-upload-plan.json
+          while IFS= read -r name; do
+            test -n "$name"
+            gh release upload "$TAG" "dist/release/$name"
+          done < <(python3 -c 'import json; [print(name) for name in json.load(open("/tmp/cd-upload-plan.json"))["upload"]]')
+
+          # Verify the bytes actually attached to the draft, not merely the
+          # local assembly directory used before upload.
+          rm -rf /tmp/cd-attached-assets
+          mkdir -p /tmp/cd-attached-assets
+          gh release download "$TAG" --dir /tmp/cd-attached-assets
+          CONTEXTDESK_RELEASE_OPENSSL=/usr/bin/openssl \
+            python3 scripts/release-contract/release_contract.py validate-promote \
+              --dir /tmp/cd-attached-assets \
+              --tag "$TAG" \
+              --expected-git-sha "$GIT_SHA" \
+              --git-describe "$GIT_DESCRIBE" \
+              --repo-root . \
+              --allow-test-sig false
 
       - name: Upload assembled inventory
         uses: actions/upload-artifact@v4

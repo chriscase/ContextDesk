@@ -16,6 +16,7 @@ Run: python3 scripts/release-contract/check_release_contract.py
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import sys
@@ -38,6 +39,17 @@ DOCS = [
 ]
 
 failures: list[str] = []
+
+KNOWN_MINISIGN_PUBLIC_KEY = """untrusted comment: minisign public key E7620F1842B4E81F
+RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"""
+KNOWN_MINISIGN_SIGNATURE = """untrusted comment: signature from minisign secret key
+RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=
+trusted comment: timestamp:1556193335\tfile:test
+y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg=="""
+
+
+def _tauri_wrap(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -95,6 +107,9 @@ def test_workflow_structure() -> None:
         "orchestrator never auto-publishes",
         "draft: false" not in orch and "gh release edit" not in orch,
     )
+    check("orchestrator resolves exact remote tag", "refs/tags/$TAG" in orch)
+    check("orchestrator plans resumable uploads", "plan-upload" in orch)
+    check("orchestrator verifies attached draft bytes", "validate-promote" in orch)
 
     check("desktop builder has no tag trigger", "tags:" not in desktop)
     check(
@@ -126,6 +141,12 @@ def test_workflow_structure() -> None:
     check(
         "promote runs contract validator first",
         "release-contract" in promote and "promote" in promote,
+    )
+    check("promote resolves exact remote tag", "refs/tags/$TAG" in promote)
+    check("promote accepts exact published retry", "already published exact release" in promote)
+    check(
+        "promote requires exact targetCommitish",
+        "validate-release-state" in promote and "targetCommitish" in promote,
     )
 
 
@@ -368,6 +389,214 @@ def test_missing_signatures() -> None:
         except SystemExit:
             check("signature bound to the wrong bytes fails", True)
         _ = archive  # keep name for readability
+
+
+def test_production_minisign_verification() -> None:
+    print("== mutation: cryptographic updater signature verification ==")
+    try:
+        key_id, key = rc._parse_tauri_public_key(rc.pinned_updater_public_key(ROOT))
+        check("committed Tauri updater public key parses", len(key_id) == 8 and len(key) == 32)
+    except SystemExit:
+        check("committed Tauri updater public key parses", False)
+    public_key = _tauri_wrap(KNOWN_MINISIGN_PUBLIC_KEY)
+    signature = _tauri_wrap(KNOWN_MINISIGN_SIGNATURE)
+    try:
+        rc.verify_artifact_signature(
+            b"test",
+            signature,
+            allow_test_sig=False,
+            public_key=public_key,
+        )
+        check("known Tauri-wrapped minisign vector verifies", True)
+    except SystemExit:
+        check("known Tauri-wrapped minisign vector verifies", False)
+
+    for name, artifact, candidate_key, candidate_signature in (
+        ("changed artifact", b"Test", public_key, signature),
+        (
+            "minisign-looking garbage",
+            b"test",
+            public_key,
+            _tauri_wrap("untrusted comment: not a signature\ndW50-garbage"),
+        ),
+    ):
+        try:
+            rc.verify_artifact_signature(
+                artifact,
+                candidate_signature,
+                allow_test_sig=False,
+                public_key=candidate_key,
+            )
+            check(f"production rejects {name}", False)
+        except SystemExit:
+            check(f"production rejects {name}", True)
+
+    signature_lines = KNOWN_MINISIGN_SIGNATURE.splitlines()
+    global_payload = bytearray(base64.b64decode(signature_lines[3]))
+    global_payload[-1] ^= 1
+    signature_lines[3] = base64.b64encode(global_payload).decode("ascii")
+    try:
+        rc.verify_artifact_signature(
+            b"test",
+            _tauri_wrap("\n".join(signature_lines)),
+            allow_test_sig=False,
+            public_key=public_key,
+        )
+        check("production rejects changed trusted-comment signature", False)
+    except SystemExit:
+        check("production rejects changed trusted-comment signature", True)
+
+    public_lines = KNOWN_MINISIGN_PUBLIC_KEY.splitlines()
+    payload = bytearray(base64.b64decode(public_lines[1]))
+    payload[-1] ^= 1
+    wrong_key = _tauri_wrap(
+        public_lines[0] + "\n" + base64.b64encode(payload).decode("ascii")
+    )
+    try:
+        rc.verify_artifact_signature(
+            b"test", signature, allow_test_sig=False, public_key=wrong_key
+        )
+        check("production rejects valid signature from another public key", False)
+    except SystemExit:
+        check("production rejects valid signature from another public key", True)
+
+
+def test_promote_bundle_integrity() -> None:
+    print("== mutation: promote binds exact downloaded bytes and asset set ==")
+    identity = _identity()
+
+    def assembled() -> tuple[tempfile.TemporaryDirectory[str], Path]:
+        temp = tempfile.TemporaryDirectory()
+        directory = Path(temp.name)
+        rc.populate_complete_matrix(directory, identity=identity, signed=True)
+        _assemble_ok(directory, identity, signed=True)
+        return temp, directory
+
+    mutations = []
+    temp, directory = assembled()
+    victim = directory / f"contextdesk-{identity.version}-linux-x64.tar.gz"
+    victim.write_bytes(b"post-assembly replacement")
+    mutations.append(("changed payload bytes", temp, directory))
+
+    temp, directory = assembled()
+    (directory / "unexpected-post-assembly.exe").write_bytes(b"unexpected")
+    mutations.append(("unexpected downloaded asset", temp, directory))
+
+    temp, directory = assembled()
+    (directory / "inventory.txt").write_text("changed\n", encoding="utf-8")
+    mutations.append(("changed generated metadata", temp, directory))
+
+    temp, directory = assembled()
+    (directory / "SHA256SUMS").write_text("0" * 64 + "  fake\n", encoding="utf-8")
+    mutations.append(("changed SHA256SUMS", temp, directory))
+
+    temp, directory = assembled()
+    (directory / f"contextdesk-{identity.version}-windows-x64.zip").unlink()
+    mutations.append(("missing downloaded asset", temp, directory))
+
+    for name, temp, directory in mutations:
+        errors = rc.validate_promote_payload(
+            identity=identity,
+            directory=directory,
+            allow_test_sig=True,
+        )
+        check(f"promote rejects {name}", bool(errors), str(errors))
+        temp.cleanup()
+
+    with tempfile.TemporaryDirectory() as td:
+        directory = Path(td)
+        rc.populate_complete_matrix(directory, identity=identity, signed=True)
+        _assemble_ok(directory, identity, signed=True)
+        errors = rc.validate_promote_payload(
+            identity=identity,
+            directory=directory,
+            allow_test_sig=True,
+        )
+        check("unchanged assembled bundle validates", not errors, str(errors))
+
+
+def test_resumable_upload_plan() -> None:
+    print("== mutation: resumable exact-digest draft upload ==")
+    with tempfile.TemporaryDirectory() as local_td, tempfile.TemporaryDirectory() as remote_td:
+        local = Path(local_td)
+        remote = Path(remote_td)
+        (local / "one.bin").write_bytes(b"one")
+        (local / "two.bin").write_bytes(b"two")
+        plan = rc.plan_resumable_upload(local, remote)
+        check("empty draft uploads every local asset", plan["upload"] == ["one.bin", "two.bin"])
+
+        (remote / "one.bin").write_bytes(b"one")
+        plan = rc.plan_resumable_upload(local, remote)
+        check("retry skips identical existing asset", plan["skipped"] == ["one.bin"])
+        check("retry uploads only missing asset", plan["upload"] == ["two.bin"])
+
+        (remote / "one.bin").write_bytes(b"different")
+        try:
+            rc.plan_resumable_upload(local, remote)
+            check("retry rejects same-name different-digest asset", False)
+        except SystemExit:
+            check("retry rejects same-name different-digest asset", True)
+
+        (remote / "one.bin").write_bytes(b"one")
+        (remote / "extra.bin").write_bytes(b"extra")
+        try:
+            rc.plan_resumable_upload(local, remote)
+            check("retry rejects remote-only asset", False)
+        except SystemExit:
+            check("retry rejects remote-only asset", True)
+
+
+def test_exact_release_object_state() -> None:
+    print("== mutation: exact tag/target and idempotent publish state ==")
+    identity = _identity()
+    exact = {
+        "tagName": identity.tag,
+        "targetCommitish": identity.git_sha,
+        "name": rc.locked_release_name(identity),
+        "body": rc.locked_release_body(identity),
+        "isPrerelease": identity.prerelease,
+        "isDraft": True,
+    }
+    try:
+        state = rc.validate_release_object_metadata(
+            exact, identity=identity, allow_published=False
+        )
+        check("exact draft metadata validates", state == "draft")
+    except rc.ContractError:
+        check("exact draft metadata validates", False)
+
+    published = dict(exact, isDraft=False)
+    try:
+        state = rc.validate_release_object_metadata(
+            published, identity=identity, allow_published=True
+        )
+        check("already-published exact release is idempotent", state == "published")
+    except rc.ContractError:
+        check("already-published exact release is idempotent", False)
+
+    try:
+        rc.validate_release_object_metadata(
+            published, identity=identity, allow_published=False
+        )
+        check("draft assembler refuses published release", False)
+    except rc.ContractError:
+        check("draft assembler refuses published release", True)
+
+    for label, changed in (
+        ("symbolic target", dict(exact, targetCommitish="main")),
+        ("wrong exact target", dict(exact, targetCommitish=rc.FOREIGN_SHA)),
+        ("wrong tag", dict(exact, tagName="v0.1.1")),
+        ("wrong title", dict(exact, name="ContextDesk other")),
+        ("wrong body", dict(exact, body="other")),
+        ("wrong prerelease", dict(exact, isPrerelease=True)),
+    ):
+        try:
+            rc.validate_release_object_metadata(
+                changed, identity=identity, allow_published=True
+            )
+            check(f"release state rejects {label}", False)
+        except rc.ContractError:
+            check(f"release state rejects {label}", True)
 
 
 def test_duplicate_assets() -> None:
@@ -616,6 +845,10 @@ def main() -> int:
     test_partial_matrix()
     test_wrong_sha()
     test_missing_signatures()
+    test_production_minisign_verification()
+    test_promote_bundle_integrity()
+    test_resumable_upload_plan()
+    test_exact_release_object_state()
     test_duplicate_assets()
     test_rc5_reuse()
     test_release_clobber_and_rollback()

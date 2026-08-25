@@ -17,14 +17,17 @@ path. It is honest about what this lane proves and what remains residual.
 3. Promotion requires the complete Windows/macOS/Linux desktop matrix **and**
    the CLI matrix (`macos-arm64`, `macos-x64`, `linux-x64`, `windows-x64`).
 4. One `SHA256SUMS`, `inventory.txt`, `sbom.cdx.json`, and
-   `release-manifest.json` covering every released asset, including desktop
-   installers and updater metadata.
-5. GA requires a signed `latest.json` whose URLs and signatures bind to those
-   exact artifacts. Missing `TAURI_SIGNING_PRIVATE_KEY` fails before any
-   publishable release state.
+   `release-manifest.json`; promotion re-downloads the flat draft asset set and
+   verifies every payload digest plus the generated metadata digests.
+5. GA requires a signed `latest.json` whose URLs bind to the exact tag and whose
+   Tauri Base64-wrapped minisign signatures cryptographically verify the exact
+   updater bytes against the public key pinned in `tauri.conf.json`. Missing
+   `TAURI_SIGNING_PRIVATE_KEY` fails before any publishable release state.
 6. Apple notarization and Windows Authenticode remain **not_configured**.
-7. `release-promote` publishes only a complete exact-SHA draft after
-   validation. Any other outcome leaves the draft unpublished.
+7. `release-promote` resolves the remote tag and release target to the exact
+   SHA, then publishes only a complete validated draft. Exact upload and
+   already-published retries are idempotent; differing bytes or metadata fail
+   closed.
 8. Never reuse `v0.1.0-rc5` assets or another SHA.
 
 ## War Room
@@ -43,8 +46,12 @@ python3 scripts/cli-release/check_cli_release_contract.py
 ```
 
 Synthetic fixtures cover: partial matrices, version mismatch, wrong SHA,
-missing signatures, duplicate assets, release-object clobbering, and safe
-rollback.
+missing or wrong-key signatures, altered downloaded bytes, checksum/manifest
+drift, extra and missing assets, resumable exact-digest upload, duplicate
+assets, symbolic release targets, release-object clobbering, idempotent
+already-published completion, and safe rollback. A public minisign test vector
+exercises the same OpenSSL 3.x Ed25519 verification used by production; no
+private release key is present in the fixture.
 
 ## Required secret names (values never in git)
 

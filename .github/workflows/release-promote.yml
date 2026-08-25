@@ -34,10 +34,12 @@ jobs:
           fetch-depth: 0
 
       - name: Refuse SHA mismatch
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED: ${{ inputs.expected_git_sha }}
         run: |
           set -euo pipefail
           HEAD="$(git rev-parse HEAD)"
-          EXPECTED="${{ inputs.expected_git_sha }}"
           if [ "$HEAD" != "$EXPECTED" ]; then
             echo "checkout $HEAD != expected $EXPECTED" >&2
             exit 1
@@ -49,6 +51,18 @@ jobs:
               print("expected_git_sha must be the exact 40-char SHA", file=sys.stderr)
               sys.exit(2)
           PY
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          RESOLVED="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          if [ "$RESOLVED" != "$EXPECTED" ]; then
+            echo "tag $TAG resolves to $RESOLVED, expected $EXPECTED" >&2
+            exit 1
+          fi
+
+      - name: Verify pinned updater verifier
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/openssl
+          /usr/bin/openssl version | grep -E '^OpenSSL 3\.'
 
       - name: Download draft assets
         env:
@@ -65,6 +79,7 @@ jobs:
         env:
           CD_GIT_SHA: ${{ inputs.expected_git_sha }}
           CD_CHANNEL: installed
+          CONTEXTDESK_RELEASE_OPENSSL: /usr/bin/openssl
         run: |
           set -euo pipefail
           DESCRIBE="$(git describe --always --dirty --tags 2>/dev/null || git rev-parse HEAD)"
@@ -88,25 +103,31 @@ jobs:
             echo "confirm_publish is not 'publish'; leaving draft unpublished"
             exit 0
           fi
-          gh release view "$TAG" --json isDraft,targetCommitish,name \
+          DESCRIBE="$(git describe --always --dirty --tags 2>/dev/null || git rev-parse HEAD)"
+          gh release view "$TAG" \
+            --json isDraft,isPrerelease,targetCommitish,tagName,name,body \
             > /tmp/cd-promote-meta.json
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-          meta = json.loads(open("/tmp/cd-promote-meta.json", encoding="utf-8").read())
-          expected = os.environ["EXPECTED"]
-          if meta.get("isDraft") is not True:
-              print("refusing to mutate a non-draft release", file=sys.stderr)
-              sys.exit(2)
-          target = str(meta.get("targetCommitish") or "")
-          if len(target) == 40 and target != expected:
-              print(
-                  f"GitHub targetCommitish {target} != expected {expected}",
-                  file=sys.stderr,
-              )
-              sys.exit(2)
-          print("draft confirmed; publishing exact-SHA release")
-          PY
-          gh release edit "$TAG" --draft=false
+          python3 scripts/release-contract/release_contract.py validate-release-state \
+            --metadata /tmp/cd-promote-meta.json \
+            --tag "$TAG" \
+            --expected-git-sha "$EXPECTED" \
+            --git-describe "$DESCRIBE" \
+            --allow-published true \
+            --output-state /tmp/cd-publish-state
+          if [ "$(cat /tmp/cd-publish-state)" = "draft" ]; then
+            gh release edit "$TAG" --verify-tag --draft=false
+          else
+            echo "already published exact release; idempotent success"
+          fi
+          gh release view "$TAG" \
+            --json isDraft,isPrerelease,targetCommitish,tagName,name,body \
+            > /tmp/cd-published-meta.json
+          python3 scripts/release-contract/release_contract.py validate-release-state \
+            --metadata /tmp/cd-published-meta.json \
+            --tag "$TAG" \
+            --expected-git-sha "$EXPECTED" \
+            --git-describe "$DESCRIBE" \
+            --allow-published true \
+            --output-state /tmp/cd-final-publish-state
+          test "$(cat /tmp/cd-final-publish-state)" = "published"
           echo "published $TAG at $EXPECTED"
