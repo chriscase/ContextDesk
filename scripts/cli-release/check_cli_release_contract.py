@@ -3,6 +3,7 @@
 
 Fail-closed cases:
   - missing platform in workflow matrix
+  - independent tag trigger or GitHub Release mutation (race with release.yml)
   - draft:false / auto-publish
   - smoke step absent or skippable without guard
   - empty/stale identity packaging
@@ -47,7 +48,8 @@ def main() -> int:
     print("== structural: workflow ==")
     check("workflow file exists", WF.is_file(), str(WF))
     text = WF.read_text(encoding="utf-8") if WF.is_file() else ""
-    check("tag trigger v*", 'tags:' in text and '"v*"' in text or "- \"v*\"" in text or "- 'v*'" in text)
+    check("reusable workflow_call (no independent tag race)", "workflow_call" in text)
+    check("no independent tag trigger", "tags:" not in text)
     check("workflow_dispatch", "workflow_dispatch" in text)
     for p in REQUIRED:
         check(f"platform {p} in matrix", p in text)
@@ -61,7 +63,8 @@ def main() -> int:
     check("CD_CHANNEL embed", "CD_CHANNEL" in text)
     check("smoke script invoked", "smoke_cli_artifact.sh" in text)
     check("smoke required / no skip", "CLI_SMOKE_REQUIRED" in text)
-    check("draft: true", "draft: true" in text)
+    check("does not attach a GitHub Release", "softprops/action-gh-release" not in text)
+    check("does not call gh release", "gh release" not in text)
     # Fail only on a YAML assignment line that turns draft off (not prose).
     import re
 

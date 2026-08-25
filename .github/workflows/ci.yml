@@ -95,6 +95,16 @@ jobs:
           CLOSE_PROOF_CUTOFF: "2026-07-18"
         run: sh scripts/check_close_proof.sh
 
+  release-contract:
+    name: release contract (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: unified + CLI release contracts
+        run: |
+          python3 scripts/release-contract/check_release_contract.py
+          python3 scripts/cli-release/check_cli_release_contract.py
+
   gui-accept-contracts:
     name: GUI integration contracts (no WebDriver)
     runs-on: ubuntu-latest

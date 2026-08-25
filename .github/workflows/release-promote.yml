@@ -1,0 +1,112 @@
+# Deterministic promote: publish only a complete exact-SHA draft.
+# Never runs on tag push. Validation failure leaves the draft unpublished.
+name: release-promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Draft tag to validate or publish (e.g. v0.1.0)"
+        required: true
+        type: string
+      expected_git_sha:
+        description: "Exact 40-char SHA that must match the draft and assets"
+        required: true
+        type: string
+      confirm_publish:
+        description: "Type publish to publish; any other value is validate-only"
+        required: true
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: validate-and-maybe-publish
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout expected SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_git_sha }}
+          fetch-depth: 0
+
+      - name: Refuse SHA mismatch
+        run: |
+          set -euo pipefail
+          HEAD="$(git rev-parse HEAD)"
+          EXPECTED="${{ inputs.expected_git_sha }}"
+          if [ "$HEAD" != "$EXPECTED" ]; then
+            echo "checkout $HEAD != expected $EXPECTED" >&2
+            exit 1
+          fi
+          python3 - <<PY
+          import re, sys
+          sha = "${{ inputs.expected_git_sha }}"
+          if not re.fullmatch(r"[0-9a-f]{40}", sha):
+              print("expected_git_sha must be the exact 40-char SHA", file=sys.stderr)
+              sys.exit(2)
+          PY
+
+      - name: Download draft assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          gh release download "${{ inputs.tag }}" --dir dist/release
+          ls -la dist/release
+          test -f dist/release/release-manifest.json
+          test -f dist/release/SHA256SUMS
+
+      - name: Validate complete exact-SHA draft
+        env:
+          CD_GIT_SHA: ${{ inputs.expected_git_sha }}
+          CD_CHANNEL: installed
+        run: |
+          set -euo pipefail
+          DESCRIBE="$(git describe --always --dirty --tags 2>/dev/null || git rev-parse HEAD)"
+          python3 scripts/release-contract/release_contract.py validate-promote \
+            --dir dist/release \
+            --tag "${{ inputs.tag }}" \
+            --expected-git-sha "${{ inputs.expected_git_sha }}" \
+            --git-describe "$DESCRIBE" \
+            --repo-root . \
+            --allow-test-sig false
+
+      - name: Publish only after confirm=publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          CONFIRM: ${{ inputs.confirm_publish }}
+          EXPECTED: ${{ inputs.expected_git_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "publish" ]; then
+            echo "confirm_publish is not 'publish'; leaving draft unpublished"
+            exit 0
+          fi
+          gh release view "$TAG" --json isDraft,targetCommitish,name \
+            > /tmp/cd-promote-meta.json
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          meta = json.loads(open("/tmp/cd-promote-meta.json", encoding="utf-8").read())
+          expected = os.environ["EXPECTED"]
+          if meta.get("isDraft") is not True:
+              print("refusing to mutate a non-draft release", file=sys.stderr)
+              sys.exit(2)
+          target = str(meta.get("targetCommitish") or "")
+          if len(target) == 40 and target != expected:
+              print(
+                  f"GitHub targetCommitish {target} != expected {expected}",
+                  file=sys.stderr,
+              )
+              sys.exit(2)
+          print("draft confirmed; publishing exact-SHA release")
+          PY
+          gh release edit "$TAG" --draft=false
+          echo "published $TAG at $EXPECTED"
