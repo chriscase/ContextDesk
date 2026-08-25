@@ -1500,11 +1500,18 @@ export function ExperimentLab(props: {
   }, [current, evidenceArtifacts, props.caseId]);
 
   const evidenceRouteItems = new Set(current ? evidenceRefsFor(current) : []);
+  const laneRouteItems = new Set((current?.candidates ?? []).map((row) => row.candidateId));
   const routeFor = (
     section: string,
     item: string | null = null,
     lane: string | null = null,
-    itemKind: RouteItemKind | null = item && evidenceRouteItems.has(item) ? "evidence" : null,
+    itemKind: RouteItemKind | null = !item
+      ? null
+      : evidenceRouteItems.has(item)
+        ? "evidence"
+        : laneRouteItems.has(item)
+          ? "lane"
+          : null,
   ): WorkFocus => ({
     section,
     item,
@@ -2240,12 +2247,13 @@ export function ExperimentLab(props: {
             </div>
             <p className="experiment-lab__focus-legend">
               Focus stays on this section and highlights matching cards, table columns, and review
-              references in place. It never filters the other lanes or changes the decision basis.
+              references in place. It never filters the other lanes, opens another panel, or
+              changes the decision basis.
             </p>
             {focusedCandidate ? (
               <p className="experiment-lab__focus-status" role="status">
-                Highlighting {focusedCandidate.modelLabel} in place. The page will not jump; other
-                lanes stay visible in the comparison, benchmark, and accepted decision.
+                Highlighting {focusedCandidate.modelLabel} in place. You stay in this section, and
+                other lanes stay visible in the comparison, benchmark, and accepted decision.
               </p>
             ) : null}
           </nav>
@@ -2733,8 +2741,17 @@ export function ExperimentLab(props: {
                                 ? "experiment-lab__queue-item experiment-lab__route-target"
                                 : "experiment-lab__queue-item"
                             }
-                            data-route-item={item.evidenceRef ?? item.id}
-                            data-route-kind={item.evidenceRef ? "evidence" : undefined}
+                            data-route-item={
+                              item.evidenceRef
+                              ?? (item.candidateIds.length === 1 ? item.candidateIds[0] : item.id)
+                            }
+                            data-route-kind={
+                              item.evidenceRef
+                                ? "evidence"
+                                : item.candidateIds.length === 1
+                                  ? "lane"
+                                  : undefined
+                            }
                             tabIndex={-1}
                           >
                             <h6 className="experiment-lab__queue-text">{primary}</h6>
@@ -2764,7 +2781,12 @@ export function ExperimentLab(props: {
                             {deepLink(
                               item.hrefLabel,
                               item.href.replace(/^#/, ""),
-                              item.evidenceRef ?? item.id,
+                              // Address the resource the entry is about. The
+                              // queue position was neither stable across
+                              // record changes nor present on any target, so
+                              // every link fell back to its section heading.
+                              item.evidenceRef
+                                ?? (item.candidateIds.length === 1 ? item.candidateIds[0]! : null),
                               item.candidateIds.length === 1 ? item.candidateIds[0] : null,
                               "experiment-lab__queue-link",
                             )}
@@ -2866,6 +2888,9 @@ export function ExperimentLab(props: {
                   <tr
                     key={row.candidateId}
                     data-route-lane={row.candidateId}
+                    data-route-item={row.candidateId}
+                    data-route-kind="lane"
+                    tabIndex={-1}
                     className={
                       focusedCandidate?.candidateId === row.candidateId
                         ? "experiment-lab__matrix-row--focused"
@@ -3283,6 +3308,9 @@ export function ExperimentLab(props: {
                 <article
                   key={trace.candidateId}
                   data-route-lane={trace.candidateId}
+                  data-route-item={trace.candidateId}
+                  data-route-kind="lane"
+                  tabIndex={-1}
                   className={
                     focusedCandidate?.candidateId === trace.candidateId
                       ? "experiment-lab__path experiment-lab__path--focused"
@@ -3480,7 +3508,13 @@ export function ExperimentLab(props: {
           </p>
           <ul className="timeline">
             {(current.alignments ?? []).map((row) => (
-              <li key={row.candidateId} className="timeline__item">
+              <li
+                key={row.candidateId}
+                className="timeline__item"
+                data-route-item={row.candidateId}
+                data-route-kind="lane"
+                tabIndex={-1}
+              >
                 <span className="experiment-lab__alignment-summary">
                   {candidateLabel(row.candidateId)}: {ALIGNMENT_STATUS_LABELS[row.status] ?? row.status}
                   {row.matchedAnchors.length

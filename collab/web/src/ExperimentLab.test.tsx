@@ -2645,8 +2645,14 @@ describe("focused Compare workspace", () => {
 
     openCompareWorkspace("Review queue");
     fireEvent.click(screen.getAllByRole("link", { name: "open run facts" })[0]!);
-    const candidateHeading = await screen.findByRole("heading", { name: "Candidate comparison" });
-    await waitFor(() => expect(document.activeElement).toBe(candidateHeading));
+    await screen.findByRole("heading", { name: "Candidate comparison" });
+    // A queue entry about one lane opens that lane's row, not the heading
+    // above a table the reader then has to search.
+    const laneRow = document.querySelector<HTMLElement>(
+      "tr[data-route-item='cand-programmatic-agent'][data-route-kind='lane']",
+    );
+    expect(laneRow).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(laneRow));
     expect(screen.queryByRole("region", { name: "Human review queue" })).toBeNull();
   });
 
