@@ -24,6 +24,7 @@ import {
   type ArchivePreflightReportV1,
   type CollisionPolicy,
   type DestinationCatalogV1,
+  type DestinationIdentityV1,
   type IdentityMapEntryV1,
   type PortableApplyResponseV1,
   type PortableArchiveV1,
@@ -34,6 +35,12 @@ import {
   type PrivacyClass,
   type ProviderKind,
 } from "@cd-collab/contracts";
+import {
+  assertDestinationIdsUnoccupied,
+  PortableDestinationOccupiedError,
+  probePortableCollisions,
+  type PortableCollisionProbePorts,
+} from "./collision-probe.js";
 import {
   persistPortableArchive,
   PortableCommitOutcomeUnknownError,
@@ -84,6 +91,7 @@ export type PortableServerErrorCode =
   | "confirmation_invalid"
   | "exact_reconstruction_required"
   | "stale_destination_catalog"
+  | "destination_id_occupied"
   | "identity_map_mismatch"
   | "actor_mismatch"
   | "apply_outcome_unknown";
@@ -127,7 +135,7 @@ export interface PortablePreflightResponse {
     requiredRole: "case-lead_or_admin";
     evaluatedRole: "case-lead" | "admin";
     actorId: string;
-    destinationCatalogSource: "host_visible_catalog";
+    destinationCatalogSource: "host_owned_targeted_probe";
     destinationCatalogDigest: string;
     sourceRolesTrusted: false;
     destinationMembershipGranted: false;
@@ -171,6 +179,12 @@ interface PortableDeps {
   experiments: ExperimentService;
   audit: AuditStore;
   applyState: PortableApplyStateStore;
+  /**
+   * Host-owned stores used only to probe whether a deterministic destination id
+   * is already taken. Never actor-filtered: an object the caller cannot see
+   * still occupies its key, and an occupied key is evidence, not authorization.
+   */
+  probe: PortableCollisionProbePorts;
   withTransaction: <T>(operation: (ports: PortablePersistPorts) => Promise<T>) => Promise<T>;
   applyCoordination: "single_instance" | "postgres_transactional";
   confirmationRestartDurable: boolean;
@@ -216,20 +230,6 @@ function addActor(actors: Map<string, string>, seed: ActorSeed): void {
   if (!existing || existing.startsWith("historical-")) {
     actors.set(seed.id, username || safeActorLabel(seed.id));
   }
-}
-
-function addObjectId(
-  catalog: Partial<Record<PortableObjectKind, Set<string>>>,
-  kind: PortableObjectKind,
-  id: string,
-): void {
-  const set = catalog[kind] ?? new Set<string>();
-  set.add(id);
-  catalog[kind] = set;
-}
-
-function portableDiscussionId(caseId: string): string {
-  return `discussion-${sha256Text(caseId).slice(0, 24)}`;
 }
 
 function ensureSha256(value: string, label: string): void {
@@ -1163,7 +1163,12 @@ export class PortableInvestigationService {
     // Validate every supplied entry even when another missing blob makes the
     // overall archive ineligible for exact apply.
     validateSuppliedBlobs(archive, input.suppliedBlobs ?? []);
-    const catalog = await this.destinationCatalog(actor, isAdmin);
+    const catalog = await this.probedDestinationCatalog(
+      archive,
+      input.identityMap,
+      actor,
+      isAdmin,
+    );
     const catalogDigest = destinationCatalogDigest(catalog);
     let report: ArchivePreflightReportV1;
     try {
@@ -1210,7 +1215,7 @@ export class PortableInvestigationService {
           requiredRole: "case-lead_or_admin",
           evaluatedRole: isAdmin ? "admin" : "case-lead",
           actorId: actor.id,
-          destinationCatalogSource: "host_visible_catalog",
+          destinationCatalogSource: "host_owned_targeted_probe",
           destinationCatalogDigest: report.destinationCatalogDigest,
           sourceRolesTrusted: false,
           destinationMembershipGranted: false,
@@ -1385,6 +1390,19 @@ export class PortableInvestigationService {
             investigationId: prior.appliedInvestigationId,
           };
         }
+        // Last-write guard. The preflight probe settled collisions before the
+        // transaction opened, so a key taken since then belongs to a concurrent
+        // writer. Re-probing the exact destination ids this report will write,
+        // inside the transaction, turns that race into a rollback instead of a
+        // silent overwrite — and keeps the memory boundary refusing what a
+        // PostgreSQL primary key would refuse.
+        await assertDestinationIdsUnoccupied(preview.report, {
+          cases: ports.cases,
+          catalog: ports.catalog,
+          experiments: ports.experiments,
+          runs: ports.runs,
+          jobs: ports.jobs,
+        });
         const investigationId = await persistPortableArchive({
           archive: preview.archive,
           report: preview.report,
@@ -1416,6 +1434,12 @@ export class PortableInvestigationService {
       );
     } catch (error) {
       if (error instanceof PortableServerError) throw error;
+      if (error instanceof PortableDestinationOccupiedError) {
+        throw new PortableServerError(
+          "destination_id_occupied",
+          "a destination id this apply would write was taken concurrently; the apply rolled back",
+        );
+      }
       if (error instanceof PortableCommitOutcomeUnknownError) {
         throw new PortableServerError(
           "apply_outcome_unknown",
@@ -1448,77 +1472,95 @@ export class PortableInvestigationService {
     };
   }
 
-  private async destinationCatalog(actor: Actor, isAdmin: boolean): Promise<DestinationCatalogV1> {
-    const cases = await this.deps.cases.listCases(actor, isAdmin);
-    const identities = new Map<string, { actorId: string; username: string; email: null; displayName: string }>();
+  /**
+   * Archive-scoped, host-owned destination evidence for one preflight.
+   *
+   * This is deliberately *not* an enumeration of the destination corpus. The
+   * only destination keys an archive can collide with are the deterministic
+   * UUIDs it would itself mint, so the host probes exactly those and reports
+   * only the ones it found occupied. Cost is a bounded number of batched store
+   * calls that follows archive size, never the number of cases, contributions,
+   * or timeline events already at the destination.
+   *
+   * Identities are resolved the same way: only the destination actors this
+   * identity map names, plus the usernames the bundle's own actors would
+   * shadow, plus the acting actor. Nothing here is authorization — the caller
+   * must still revalidate, and an occupied key never grants anything.
+   */
+  private async probedDestinationCatalog(
+    archive: PortableArchiveV1,
+    identityMap: IdentityMapEntryV1[],
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<DestinationCatalogV1> {
+    const bundle = archive.investigation;
+    const probe = await probePortableCollisions(bundle, this.deps.probe);
+
+    const identities = new Map<string, DestinationIdentityV1>();
     identities.set(actor.id, {
       actorId: actor.id,
       username: actor.username,
       email: null,
       displayName: actor.username,
     });
-    const ids: Partial<Record<PortableObjectKind, Set<string>>> = {};
-    const sources = await this.deps.catalog.list();
-    for (const source of sources) addObjectId(ids, "source", source.id);
-    for (const caseRow of cases) {
-      addObjectId(ids, "investigation", caseRow.id);
-      for (const participant of caseRow.participants) {
-        identities.set(participant.identityId, {
-          actorId: participant.identityId,
-          username: participant.username,
-          email: null,
-          displayName: participant.username,
-        });
-        addObjectId(ids, "actor", participant.identityId);
-      }
-      const [contributions, artifacts, snapshots, runs, jobs, experiments, timeline] = await Promise.all([
-        this.deps.cases.listContributions(caseRow.id, actor, isAdmin),
-        this.deps.cases.listArtifacts(caseRow.id, actor, isAdmin),
-        this.deps.cases.listSnapshots(caseRow.id, actor, isAdmin),
-        this.deps.imports.listRuns(caseRow.id, actor, isAdmin),
-        this.deps.triageRuns.list(caseRow.id, actor, isAdmin),
-        this.deps.experiments.list(caseRow.id, actor, isAdmin),
-        this.deps.cases.listTimeline(caseRow.id),
-      ]);
-      for (const row of contributions) addObjectId(ids, "contribution", row.id);
-      for (const row of artifacts) {
-        addObjectId(ids, "evidence", row.id);
-        if (row.contentHash) addObjectId(ids, "content", row.contentHash);
-        if (row.kind === "attachment") addObjectId(ids, "attachment", row.id);
-      }
-      for (const row of snapshots) addObjectId(ids, "snapshot", row.id);
-      for (const row of runs) addObjectId(ids, "imported_ai_run", row.id);
-      for (const row of jobs) addObjectId(ids, "triage_job", row.id);
-      for (const row of experiments) {
-        addObjectId(ids, "experiment", row.id);
-        for (const observation of row.observations) addObjectId(ids, "helpfulness", observation.id);
-        for (const decision of row.decisions) addObjectId(ids, "decision", decision.id);
-        for (const gold of row.golds) addObjectId(ids, "gold", gold.goldId);
-        if (row.gold) {
-          for (const alignment of row.alignments) {
-            addObjectId(
-              ids,
-              "alignment",
-              `alignment-${sha256Text(`${row.id}:${row.gold.goldId}:${alignment.candidateId}`).slice(0, 24)}`,
-            );
-          }
-        }
-      }
-      if (contributions.some((row) => row.kind === "message")) {
-        addObjectId(ids, "discussion", portableDiscussionId(caseRow.id));
-      }
-      for (const row of timeline) addObjectId(ids, "timeline", String(row.seq));
+    const wantedIdentityIds = identityMap
+      .map((row) => row.destinationActorId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    // Bundle actor names are probed so the contract can still warn when an
+    // imported display name shadows a destination identity that was not used
+    // as a merge key. Matching a name is never a merge and never a grant.
+    const wantedUsernames = [
+      ...new Set(
+        bundle.actors.flatMap((row) => [row.username, row.displayName].filter((v) => v.length > 0)),
+      ),
+    ];
+    const found = await this.deps.probe.cases.probeParticipants({
+      // Object keys are probed host-wide because a deterministic id occupies
+      // its key whoever owns it. Identities are not: resolving one stays
+      // inside the caller's existing view so a preflight can never become an
+      // oracle for people they cannot already see.
+      scope: { actorId: actor.id, isAdmin },
+      identityIds: wantedIdentityIds,
+      usernames: wantedUsernames,
+    });
+    for (const row of found) {
+      if (identities.has(row.identityId)) continue;
+      identities.set(row.identityId, {
+        actorId: row.identityId,
+        username: row.username,
+        email: null,
+        displayName: row.username,
+      });
     }
-    addObjectId(ids, "actor", actor.id);
+
     const objectIds: DestinationCatalogV1["objectIds"] = {};
     for (const kind of PORTABLE_OBJECT_KINDS) {
-      const values = ids[kind];
-      if (values) objectIds[kind] = [...values];
+      const occupied = probe.occupiedByNamespace[kind];
+      if (occupied && occupied.length > 0) objectIds[kind] = occupied;
     }
+
+    // Only profiles this archive actually references can change the report, so
+    // scoping the known set here keeps the catalog digest archive-scoped
+    // without changing a single `missing_profile` outcome.
+    const referencedProfiles = new Set<string>();
+    for (const job of bundle.triageJobs) {
+      for (const candidate of job.candidates) {
+        if (candidate.profileId) referencedProfiles.add(candidate.profileId);
+      }
+    }
+    for (const run of bundle.importedAiRuns) {
+      if (run.profileId) referencedProfiles.add(run.profileId);
+    }
+    const knownProfileIds = this.deps.triageRuns
+      .listProfiles()
+      .map((row) => row.id)
+      .filter((id) => referencedProfiles.has(id))
+      .sort();
+
     return {
-      identities: [...identities.values()],
+      identities: [...identities.values()].sort((a, b) => (a.actorId < b.actorId ? -1 : a.actorId > b.actorId ? 1 : 0)),
       objectIds,
-      knownProfileIds: this.deps.triageRuns.listProfiles().map((row) => row.id),
+      knownProfileIds,
     };
   }
 }

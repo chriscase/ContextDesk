@@ -911,11 +911,19 @@ describe("portable investigation adversarial lab", () => {
 
   it("handles destination id collisions under fail and deterministic-remap stably and namespace-safely", () => {
     const sealed = syntheticSeal();
+    // A real collision is the deterministic destination UUID this bundle would
+    // mint — not the raw source id, which is never written as a destination key.
+    const mintedInvestigationId = remapCandidate(
+      sealed.sourceInstallationId,
+      "investigation",
+      sealed.investigation.id,
+      0,
+    );
     const colliding = dryRun(sealed, {
       collisionPolicy: "fail",
       destination: {
         identities: [],
-        objectIds: { investigation: [sealed.investigation.id] },
+        objectIds: { investigation: [mintedInvestigationId] },
         knownProfileIds: ["profile-synth-a"],
       },
     });
@@ -932,7 +940,7 @@ describe("portable investigation adversarial lab", () => {
       collisionPolicy: "remap_deterministic",
       destination: {
         identities: [],
-        objectIds: { investigation: [sealed.investigation.id] },
+        objectIds: { investigation: [mintedInvestigationId] },
         knownProfileIds: ["profile-synth-a"],
       },
     });

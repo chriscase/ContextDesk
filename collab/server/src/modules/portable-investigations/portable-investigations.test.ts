@@ -49,6 +49,7 @@ import {
   withPgApplyTransaction,
   type MemoryApplyBoundary,
 } from "./persist.js";
+import { type PortableCollisionProbePorts } from "./collision-probe.js";
 import {
   MAX_PORTABLE_ARCHIVE_BYTES,
   PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
@@ -78,6 +79,7 @@ interface Fixture {
   jobStore: MemoryTriageJobStore;
   experiments: ExperimentService;
   portable: PortableInvestigationService;
+  probe: PortableCollisionProbePorts;
   applyBoundary: MemoryApplyBoundary;
   applyState: MemoryPortableApplyStateStore;
   caseId: string;
@@ -159,6 +161,13 @@ async function fixture(): Promise<Fixture> {
     experiments,
     audit,
     applyState,
+    probe: {
+      cases: caseStore,
+      catalog: catalogStore,
+      experiments: experimentStore,
+      runs: runStore,
+      jobs: jobStore,
+    },
     withTransaction: applyBoundary.withTransaction,
     applyCoordination: "single_instance",
     confirmationRestartDurable: false,
@@ -345,12 +354,44 @@ async function fixture(): Promise<Fixture> {
     jobStore,
     experiments,
     portable,
+    probe: {
+      cases: caseStore,
+      catalog: catalogStore,
+      experiments: experimentStore,
+      runs: runStore,
+      jobs: jobStore,
+    },
     applyBoundary,
     applyState,
     caseId: caseRow.id,
     evidenceId: uploaded.artifact.id,
     evidenceHash: uploaded.artifact.contentHash as string,
   };
+}
+
+/**
+ * A probe that reports a fixed set of destination ids as already occupied.
+ * Every other id probes clean, so a test can name the exact collision it means.
+ */
+function occupyingProbe(
+  occupied: Map<string, string[]>,
+): PortableCollisionProbePorts {
+  const hits = (kind: string, ids: readonly string[]): string[] => {
+    const taken = new Set(occupied.get(kind) ?? []);
+    return ids.filter((id) => taken.has(id)).sort();
+  };
+  return {
+    cases: {
+      probeExistingIds: async (kind: string, ids: readonly string[]) => hits(kind, ids),
+      probeParticipants: async () => [],
+    },
+    catalog: { probeExistingIds: async (ids: readonly string[]) => hits("source", ids) },
+    experiments: {
+      probeExistingIds: async (kind: string, ids: readonly string[]) => hits(kind, ids),
+    },
+    runs: { probeExistingIds: async (ids: readonly string[]) => hits("imported_ai_run", ids) },
+    jobs: { probeExistingIds: async (ids: readonly string[]) => hits("triage_job", ids) },
+  } as unknown as PortableCollisionProbePorts;
 }
 
 function users() {
@@ -733,7 +774,7 @@ describe("portable investigation service", () => {
     expect(response.privacy.inlineByteLength).toBeGreaterThan(LOG_BYTES.byteLength);
     expect(response.privacy.unclassifiedContentObjects).toBeGreaterThan(0);
     expect(response.report.idRemap.length).toBeGreaterThan(0);
-    expect(response.authorization.destinationCatalogSource).toBe("host_visible_catalog");
+    expect(response.authorization.destinationCatalogSource).toBe("host_owned_targeted_probe");
     expect(response.authorization.sourceRolesTrusted).toBe(false);
     expect(response.authorization.destinationMembershipGranted).toBe(false);
     expect(response.apply.available).toBe(true);
@@ -810,6 +851,7 @@ describe("portable investigation service", () => {
       triageRuns: row.triageRuns,
       experiments: row.experiments,
       audit: row.audit,
+      probe: row.probe,
       now: () => "2042-03-04T12:00:00.000Z",
     });
 
@@ -827,29 +869,11 @@ describe("portable investigation service", () => {
       archive.investigation.investigation.id,
       0,
     );
-    const collisionCases = {
-      ...row.cases,
-      listCases: async () => [
-        {
-          ...archive.investigation.investigation,
-          schemaId: "cd-collab.case.v1" as const,
-          id: collisionId,
-          problemStatement: "",
-          affectedParties: "",
-          impact: "",
-          scope: "",
-          openQuestions: [],
-          participants: [{ identityId: ACTOR.id, username: ACTOR.username }],
-        },
-      ],
-      listContributions: async () => [],
-      listArtifacts: async () => [],
-      listSnapshots: async () => [],
-      listTimeline: async () => [],
-    } as unknown as CaseService;
+    // The destination already holds the exact id this archive would mint.
+    const occupiedProbe = occupyingProbe(new Map([["case", [collisionId]]]));
     const collisionService = new PortableInvestigationService({
       installationId: "inst-destinationwest",
-      cases: collisionCases,
+      cases: row.cases,
       catalog: row.catalog,
       imports: {
         listRuns: async () => [],
@@ -862,6 +886,7 @@ describe("portable investigation service", () => {
         list: async () => [],
       } as unknown as ExperimentService,
       audit: row.audit,
+      probe: occupiedProbe,
     });
     const response = await collisionService.preflight(
       archive,
@@ -1422,6 +1447,7 @@ describe("portable investigation apply", () => {
       experiments: row.experiments,
       audit: row.audit,
       applyState: row.applyState,
+      probe: row.probe,
       withTransaction: row.applyBoundary.withTransaction,
       applyCoordination: "single_instance",
       confirmationRestartDurable: false,
@@ -1549,11 +1575,44 @@ describe("portable investigation apply", () => {
       ),
     ).rejects.toMatchObject({ code: "identity_map_mismatch" });
 
+    // Unrelated corpus growth is not destination state this archive depends
+    // on, so it must not burn a confirmation. Only state the archive-scoped
+    // probe actually looked at can make an intent stale.
     await row.cases.createCase(
       ACTOR,
       { title: "Synthetic catalog mutation", severity: "low" },
       "fixture",
     );
+    const unrelatedPreview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(unrelatedPreview.report.destinationCatalogDigest).toBe(
+      preview.report.destinationCatalogDigest,
+    );
+
+    // Destination state the probe *did* look at: someone takes the exact
+    // deterministic id this archive would mint for its investigation.
+    const stolen = portableDestinationUuid(
+      archive.investigation.sourceInstallationId,
+      "investigation",
+      archive.investigation.investigation.id,
+      0,
+    );
+    await row.caseStore.insertCase({
+      id: stolen,
+      title: "Synthetic concurrent claim",
+      severity: "low",
+      status: "open",
+      legalHold: false,
+      retentionClass: "standard",
+      createdAt: "2042-03-04T11:59:00.000Z",
+      createdBy: ACTOR.id,
+      createdByUsername: ACTOR.username,
+      participants: [{ identityId: ACTOR.id, username: ACTOR.username }],
+    });
     await expect(
       row.portable.apply(
         archive,
@@ -1568,7 +1627,7 @@ describe("portable investigation apply", () => {
       ),
     ).rejects.toMatchObject({ code: "stale_destination_catalog" });
 
-    expect((await row.cases.listCases(ACTOR, true)).length).toBe(before + 1);
+    expect((await row.cases.listCases(ACTOR, true)).length).toBe(before + 2);
   });
 
   it("binds confirmation to the minting actor and lead authorization", async () => {
