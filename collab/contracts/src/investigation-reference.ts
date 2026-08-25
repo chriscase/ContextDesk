@@ -73,10 +73,19 @@ export interface InvestigationReferenceV1 {
   /** Canonical in-app deep link, derived — never free-typed. */
   locator: string;
   note: string;
-  /** Immutable: the cited investigation's title when the citation was made. */
+  /**
+   * Immutable: what the citing investigation wrote down as the cited title at
+   * citation time. Present on both sides of a list — on an inbound entry it is
+   * what this investigation was called when someone else cited it.
+   */
   recordedTitle: string;
-  /** Live title, or null when this reader may not open the cited case. */
+  /**
+   * The counterpart investigation's live title — the cited one on an outbound
+   * entry, the citing one on an inbound entry — or null when this reader may
+   * not open it. This is the field authorization gates.
+   */
   currentTitle: string | null;
+  /** Whether this reader may open the counterpart investigation. */
   visibility: ReferenceVisibility;
   state: ReferenceState;
   occurredAt: string | null;

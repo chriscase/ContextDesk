@@ -34,6 +34,9 @@ import {
   MemoryPortableApplyStateStore,
   type PortableApplyStateStore,
 } from "../modules/portable-investigations/index.js";
+import { MemoryEntityStore, type EntityStore } from "../modules/entities/index.js";
+import { MemoryReferenceStore, type ReferenceStore } from "../modules/references/index.js";
+import { MemoryResolutionStore, type ResolutionStore } from "../modules/resolutions/index.js";
 
 const SQLITE_SCHEMA_VERSION = "sqlite-current-v1";
 const TAG = "__cd_collab_state_type";
@@ -42,6 +45,7 @@ const TAG = "__cd_collab_state_type";
 export const CASE_SQLITE_MUTATORS: ReadonlySet<string> = new Set([
   "insertCase",
   "updateCaseMeta",
+  "updateOccurredAt",
   "updateSituationAtomic",
   "addParticipant",
   "appendTimeline",
@@ -274,6 +278,9 @@ export interface SqliteRuntime {
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
+  entities: EntityStore;
+  references: ReferenceStore;
+  resolutions: ResolutionStore;
   runPortableTransaction: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
@@ -353,6 +360,37 @@ export function createSqliteRuntime(
     new MemoryLocalGrantStore(),
     new Set(["grant", "revoke"]),
   );
+  // The investigation record graph persists on the same terms as everything
+  // else here: a restart must not lose who an investigation involved, what it
+  // cited, or why it was resolved.
+  const rawEntities = new MemoryEntityStore();
+  const entities = persistentMemoryStore(
+    state,
+    "investigation_entities",
+    rawEntities,
+    new Set([
+      "insertEntity",
+      "updateEntity",
+      "setEntityLifecycle",
+      "insertInvolvement",
+      "releaseInvolvement",
+      "restore",
+    ]),
+  );
+  const rawReferences = new MemoryReferenceStore();
+  const references = persistentMemoryStore(
+    state,
+    "investigation_references",
+    rawReferences,
+    new Set(["insert", "withdraw", "restore"]),
+  );
+  const rawResolutions = new MemoryResolutionStore();
+  const resolutions = persistentMemoryStore(
+    state,
+    "investigation_resolutions",
+    rawResolutions,
+    new Set(["insert", "supersede", "restore"]),
+  );
   const portableStores = [
     { key: "audit", store: rawAudit },
     { key: "cases", store: rawCases },
@@ -361,6 +399,9 @@ export function createSqliteRuntime(
     { key: "experiments", store: rawExperiments },
     { key: "jobs", store: rawJobs },
     { key: "portable_apply_state", store: rawApplyState },
+    { key: "investigation_entities", store: rawEntities },
+    { key: "investigation_references", store: rawReferences },
+    { key: "investigation_resolutions", store: rawResolutions },
   ];
   return {
     state,
@@ -381,6 +422,9 @@ export function createSqliteRuntime(
     applyState,
     profiles,
     grants,
+    entities,
+    references,
+    resolutions,
     runPortableTransaction: (operation) => state.transaction(portableStores, operation),
   };
 }

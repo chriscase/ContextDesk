@@ -42,6 +42,13 @@ import {
   type LocalGrantStore,
   type UserProfileStore,
 } from "./modules/people/index.js";
+import { EntityService, PgEntityStore, type EntityStore } from "./modules/entities/index.js";
+import { ReferenceService, PgReferenceStore, type ReferenceStore } from "./modules/references/index.js";
+import {
+  ResolutionService,
+  PgResolutionStore,
+  type ResolutionStore,
+} from "./modules/resolutions/index.js";
 import {
   loadPortableInstallationId,
   memoryApplyBoundary,
@@ -65,6 +72,9 @@ interface StorageRuntime {
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
+  entities: EntityStore;
+  references: ReferenceStore;
+  resolutions: ResolutionStore;
   runPortableTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
   presence: PresenceService;
 }
@@ -87,6 +97,9 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       applyState: runtime.applyState,
       profiles: runtime.profiles,
       grants: runtime.grants,
+      entities: runtime.entities,
+      references: runtime.references,
+      resolutions: runtime.resolutions,
       runPortableTransaction: runtime.runPortableTransaction,
       presence: new PresenceService(),
     };
@@ -108,6 +121,9 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     applyState: new PgPortableApplyStateStore(pool),
     profiles: new PgUserProfileStore(pool),
     grants: new PgLocalGrantStore(pool),
+    entities: new PgEntityStore(pool),
+    references: new PgReferenceStore(pool),
+    resolutions: new PgResolutionStore(pool),
     presence: new PresenceService(new PgPresenceBackend(pool)),
   };
 }
@@ -150,7 +166,40 @@ async function main(): Promise<void> {
   const roles = new MutableGroupRoleMap(await storage.roleStore.load());
   const audit = storage.audit;
   const catalog = new CatalogService(storage.catalog, audit);
-  const domain = new CaseService(store, audit, storage.cases, catalog);
+  // The resolution service is constructed first so it can guard status
+  // transitions on the case service, and is then given the case service back
+  // as its investigation gateway. The dependency is genuinely mutual: the
+  // guard needs to read investigations, and the transition needs the guard.
+  const resolutions = new ResolutionService({
+    store: storage.resolutions,
+    audit,
+  });
+  const domain = new CaseService(store, audit, storage.cases, catalog, resolutions);
+  const investigations = {
+    getCase: (id: string, actor: { id: string; username: string }, isAdmin: boolean) =>
+      domain.getCase(id, actor, isAdmin),
+    appendDomainTimeline: (
+      caseId: string,
+      event: {
+        kind: string;
+        actor: { id: string; username: string };
+        targetId: string | null;
+        clientTime: string | null;
+        payload: unknown;
+      },
+    ) => domain.appendDomainTimeline(caseId, event),
+  };
+  resolutions.bindInvestigations(investigations);
+  const entities = new EntityService({
+    store: storage.entities,
+    audit,
+    investigations,
+  });
+  const references = new ReferenceService({
+    store: storage.references,
+    audit,
+    investigations,
+  });
   const imports = new ImportService({
     evidence: store,
     audit,
@@ -246,6 +295,9 @@ async function main(): Promise<void> {
     experiments,
     exporter,
     portable,
+    entities,
+    references,
+    resolutions,
     installationId,
     profiles: storage.profiles,
     grants: storage.grants,

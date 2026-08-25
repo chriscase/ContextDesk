@@ -319,20 +319,33 @@ export function parseInvestigationResolutionList(
       );
     }
   }
-  const head = parsed.resolutions[0];
-  if (head && head.supersededAt !== null) {
+  // At most one resolution is active, and if one is, it is the newest. A
+  // fully superseded history is legitimate: it is what an investigation looks
+  // like after being reopened, and the earlier reasoning stays readable.
+  const activeIndexes = parsed.resolutions
+    .map((row, index) => (row.supersededAt === null ? index : -1))
+    .filter((index) => index >= 0);
+  if (activeIndexes.length > 1) {
     throw new ContractViolation(
-      "$.resolutions[0].supersededAt",
-      "the newest resolution is the active one and is not superseded",
+      "$.resolutions",
+      "an investigation has at most one active resolution",
+    );
+  }
+  if (activeIndexes.length === 1 && activeIndexes[0] !== 0) {
+    throw new ContractViolation(
+      `$.resolutions[${activeIndexes[0]}].supersededAt`,
+      "the active resolution must be the newest revision",
     );
   }
   return parsed;
 }
 
-/** The resolution currently authorising a status, or null when there is none. */
+/**
+ * The resolution currently authorising a status, or null when there is none —
+ * which is also what a reopened investigation looks like, by design.
+ */
 export function activeResolution(
   list: readonly InvestigationResolutionV1[],
 ): InvestigationResolutionV1 | null {
-  const head = list.find((row) => row.supersededAt === null);
-  return head ?? null;
+  return list.find((row) => row.supersededAt === null) ?? null;
 }
