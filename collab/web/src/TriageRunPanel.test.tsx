@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TriageRunPanel } from "./TriageRunPanel.js";
+import { recordNickname } from "./technical-identity.js";
 
 afterEach(() => {
   cleanup();
@@ -461,9 +462,11 @@ describe("TriageRunPanel", () => {
       snapshotId: secondSnapshot.id,
     })));
     expect((snapshotSelect as HTMLSelectElement).value).toBe(secondSnapshot.id);
-    const receipt = await screen.findByRole("status");
+    const receipt = await screen.findByRole("status", { name: "Launch receipt" });
     expect(receipt.textContent).toContain("2 frozen evidence items");
-    expect(receipt.textContent).toContain(secondSnapshot.fingerprint.slice(0, 12));
+    // The receipt names the run in words. A truncated fingerprint identifies
+    // nothing a reader can act on and cannot be matched against another system.
+    expect(receipt.textContent).not.toContain(secondSnapshot.fingerprint.slice(0, 12));
     expect(screen.getByRole("button", { name: "Open the last run" })).toBeTruthy();
   });
 
@@ -812,13 +815,13 @@ describe("TriageRunPanel", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const onExperimentReady = vi.fn();
+    const onOpenComparison = vi.fn();
     render(
       <TriageRunPanel
         caseId="case-1"
         canLead
         readOnly={false}
-        onExperimentReady={onExperimentReady}
+        onOpenComparison={onOpenComparison}
       />,
     );
     expect(await screen.findByRole("button", { name: "Review in Experiment Lab" })).toBeTruthy();
@@ -840,8 +843,10 @@ describe("TriageRunPanel", () => {
         body: JSON.stringify({ externalRunId: "external-chat-1" }),
       }),
     ));
-    expect((await screen.findByRole("status")).textContent).toMatch(/Experiment .* is ready in Experiment Lab/);
-    expect(onExperimentReady).toHaveBeenCalledWith("experiment-handoff-1");
+    expect(
+      (await screen.findByRole("status", { name: "Comparison handoff" })).textContent,
+    ).toMatch(/ready in Compare, opened as the newest comparison/);
+    expect(onOpenComparison).toHaveBeenCalledWith("experiment-handoff-1");
   });
 });
 
@@ -958,8 +963,10 @@ describe("evidence snapshot cockpit", () => {
     expect(screen.getByText(/explicit mismatch recorded/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect snapshot for run job-alpha" }));
-    const fingerprint = screen.getByText("a".repeat(64));
-    expect(fingerprint.className).toContain("snapshot-cockpit__fingerprint");
+    const fingerprint = screen
+      .getAllByText("a".repeat(64))
+      .find((node) => node.className.includes("snapshot-cockpit__fingerprint"));
+    expect(fingerprint).toBeTruthy();
   });
 
   it("reports fairness as unknown when a selected run has no settled snapshot proof", async () => {
@@ -1061,7 +1068,51 @@ describe("evidence snapshot cockpit", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Copy snapshot fingerprint" }));
       await waitFor(() => expect(writeText).toHaveBeenCalledWith(longFingerprint));
-      expect((await screen.findByRole("status")).textContent).toMatch(/Fingerprint copied/);
+      // Addressed by name: the panel carries several live regions, and a bare
+      // role="status" lookup resolves to whichever ones happen to be mounted.
+      expect(
+        (await screen.findByRole("status", { name: "Snapshot fingerprint copy result" }))
+          .textContent,
+      ).toMatch(/Fingerprint copied/);
+    } finally {
+      Reflect.deleteProperty(window.navigator, "clipboard");
+    }
+  });
+
+  it("keeps the cockpit and identifier copy controls tellable apart on one screen", async () => {
+    // The cockpit labels its own control "Copy snapshot fingerprint", and a run
+    // card's technical identifiers offer a copy control per identifier. Before
+    // the identifier controls carried the record they belong to, both answered
+    // to the same accessible name, so every role query around copying resolved
+    // to two nodes and failed.
+    const fingerprint = "e".repeat(64);
+    stubCockpitFetch({
+      snapshots: [{ id: "snapshot-1", fingerprint, evidence: [], createdBy: "lead" }],
+      jobs: [cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy", snapshotFingerprint: fingerprint })],
+    });
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+    try {
+      render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+      await screen.findAllByText(fingerprint);
+
+      // Exactly one control answers to the cockpit's name.
+      expect(screen.getAllByRole("button", { name: "Copy snapshot fingerprint" })).toHaveLength(1);
+      const identifierCopy = screen.getByRole("button", {
+        name: `Copy snapshot fingerprint for ${recordNickname("run", "job-alpha")}`,
+      });
+
+      // No empty live region is parked in the accessibility tree before anything
+      // has been announced.
+      expect(screen.queryByRole("status", { name: /^Identifier copy result/ })).toBeNull();
+
+      fireEvent.click(identifierCopy);
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(fingerprint));
+      expect(
+        (await screen.findByRole("status", {
+          name: `Identifier copy result for ${recordNickname("run", "job-alpha")}`,
+        })).textContent,
+      ).toMatch(/Copied/);
     } finally {
       Reflect.deleteProperty(window.navigator, "clipboard");
     }

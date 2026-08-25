@@ -856,6 +856,27 @@ export function Cases(props: {
     return () => window.removeEventListener("contextdesk:triage-run-changed", onRunChanged);
   }, [showingOverview, refreshActivity]);
 
+  // Situation restates the investigation's own timeline: how much evidence is
+  // registered, whether anything is frozen, whether logs were taken in. That
+  // work happens in other panels, which commit it and announce it, so without
+  // re-reading the timeline Situation kept reporting "no snapshot frozen yet"
+  // after a freeze until the reader reloaded the whole page.
+  useEffect(() => {
+    if (!focusCaseId) return undefined;
+    const caseId = focusCaseId;
+    const reload = () => void loadTimeline(caseId);
+    const events = [
+      "contextdesk:snapshot-frozen",
+      "contextdesk:corpus-intake-committed",
+      "contextdesk:triage-run-changed",
+      "contextdesk:external-run-imported",
+    ] as const;
+    for (const name of events) window.addEventListener(name, reload);
+    return () => {
+      for (const name of events) window.removeEventListener(name, reload);
+    };
+  }, [focusCaseId, loadTimeline]);
+
   useEffect(() => {
     const controller = new AbortController();
     activeCaseRef.current = focusCaseId;
@@ -1155,11 +1176,18 @@ export function Cases(props: {
     .slice(0, 5);
   const overviewActivities = activities.slice(0, 10);
   // Both panels below read the same committed activity window the feed reads.
+  // Restored history records work that already happened somewhere else. It
+  // belongs in the feed, where its provenance is stated, but it is not open
+  // work: a successful exact restore must not raise an alert for every event
+  // it replayed.
+  const openWorkActivities = activities.filter(
+    (item) => item.provenanceClass !== "historical_restored",
+  );
   const attentionGroups = ATTENTION_GROUPS.map((group) => ({
     ...group,
-    items: activities.filter((item) => group.kinds.includes(item.activityKind ?? "")),
+    items: openWorkActivities.filter((item) => group.kinds.includes(item.activityKind ?? "")),
   })).filter((group) => group.items.length > 0);
-  const pendingDecisions = decisionsAwaitingAcceptance(activities);
+  const pendingDecisions = decisionsAwaitingAcceptance(openWorkActivities);
   const attentionCount =
     attentionGroups.reduce((total, group) => total + group.items.length, 0) + pendingDecisions.length;
 
@@ -2335,18 +2363,17 @@ export function Cases(props: {
                   readOnly={readOnly}
                   {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
-                  {...(props.onDeepNavigate
-                    ? {
-                        onExperimentReady: (experimentId: string) =>
-                          props.onDeepNavigate?.("compare", {
-                            section: "scan-heading",
-                            item: null,
-                            itemKind: null,
-                            lane: null,
-                            experiment: experimentId,
-                          }),
-                      }
-                    : {})}
+                  onOpenComparison={(experimentId) => {
+                    const focus: WorkFocus = {
+                      section: "triage-comparison-lab",
+                      item: null,
+                      itemKind: null,
+                      lane: null,
+                      experiment: experimentId,
+                    };
+                    if (props.onDeepNavigate) props.onDeepNavigate("compare", focus);
+                    else selectStage("compare");
+                  }}
                 />
               </div>
             </TriageAnchor>
@@ -2375,6 +2402,9 @@ export function Cases(props: {
                 caseTitle={current.title}
                 caseStatus={current.status}
                 caseSeverity={current.severity}
+                {...(current.openQuestions?.length
+                  ? { caseOpenQuestions: current.openQuestions }
+                  : {})}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
                 {...(props.onDeepNavigate
                   ? { onDeepNavigate: (focus: WorkFocus) => props.onDeepNavigate?.("compare", focus) }
@@ -2419,6 +2449,9 @@ export function Cases(props: {
                 caseTitle={current.title}
                 caseStatus={current.status}
                 caseSeverity={current.severity}
+                {...(current.openQuestions?.length
+                  ? { caseOpenQuestions: current.openQuestions }
+                  : {})}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
                 {...(props.onDeepNavigate
                   ? { onDeepNavigate: (focus: WorkFocus) => props.onDeepNavigate?.("decide", focus) }

@@ -194,7 +194,13 @@ test.describe("complete war-room operator journey", () => {
       timeout: 30_000,
     });
     await expect(page.getByText("Same frozen snapshot").first()).toBeVisible();
-    await expect(page.getByText(`snapshot ${shortFp}`).first()).toBeVisible();
+    // The run row states the same-snapshot proof in words. The exact
+    // fingerprint stays available, in full, behind the row's identifiers
+    // disclosure rather than truncated into the heading.
+    const identifiers = page.locator("details.technical-id").first();
+    await expect(identifiers).toBeVisible();
+    await identifiers.locator("summary").click();
+    await expect(identifiers.getByText(frozenBody.fingerprint, { exact: true })).toBeVisible();
     const analyze = page.locator("#stage-analyze");
     const completedLanes = analyze.locator(".triage-runs__job .triage-runs__candidate");
     await expect(completedLanes).toHaveCount(3);
@@ -219,11 +225,15 @@ test.describe("complete war-room operator journey", () => {
     ).toBeVisible();
 
     await page.getByRole("button", { name: "Review in Experiment Lab" }).first().click();
-    await expect(analyze.locator(".triage-runs__handoff-success")).toContainText("is ready in Experiment Lab", {
-      timeout: 30_000,
-    });
-
-    await gotoStage(page, "Compare");
+    await expect(analyze.locator(".triage-runs__handoff-success")).toContainText(
+      "ready in Compare, opened as the newest comparison",
+      { timeout: 30_000 },
+    );
+    // The handoff takes the reader to the comparison it just created, rather
+    // than announcing it is ready somewhere they still have to find.
+    await expect
+      .poll(() => new URL(page.url()).pathname, { timeout: 15_000 })
+      .toMatch(/\/compare$/);
     await expectFocusedStage(page, "compare");
     const compare = page.locator("#stage-compare");
     await expect(compare.getByText("Simulated qwen-3.6-27b (not executed)").first()).toBeVisible();

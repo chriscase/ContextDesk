@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExportPanel } from "./ExportPanel.js";
 
@@ -366,11 +366,14 @@ describe("export panel", () => {
     const revokeObjectURL = vi.fn();
     vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
     let downloadName = "";
+    let clickedWhileAttached = false;
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
       this: HTMLAnchorElement,
     ) {
       downloadName = this.download;
+      clickedWhileAttached = this.isConnected;
     });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
 
     render(<ExportPanel caseId="case-safe" canWrite canLead />);
     const button = await screen.findByRole("button", {
@@ -382,11 +385,22 @@ describe("export panel", () => {
     expect(await screen.findByText(/Portable investigation archive downloaded/)).toBeTruthy();
     expect(downloadName).toBe("contextdesk-investigation-case-safe.json");
     expect(createObjectURL).toHaveBeenCalledTimes(1);
+    // The anchor must be in the document when it is clicked; a detached one is
+    // ignored by some browsers and never observed by automation.
+    expect(clickedWhileAttached).toBe(true);
+    // Revoking in the click's own tick can invalidate the blob before the
+    // browser has read it, so the URL outlives the click by a bounded delay
+    // and is then revoked — never left addressable.
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive");
     expect(screen.getByText(/Unlike the selected-evidence package above/)).toBeTruthy();
     expect(screen.getByText(/supported only by this single server instance/)).toBeTruthy();
     expect(screen.getByText(/Restore requires an exact reconstruction/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
+    vi.useRealTimers();
   });
 
   it("preflights an archive with attribution-only identities and deterministic remaps", async () => {

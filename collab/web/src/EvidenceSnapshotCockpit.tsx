@@ -376,7 +376,11 @@ export function EvidenceSnapshotCockpit(props: {
             </button>
           </div>
           {copyState !== "idle" ? (
-            <p className="snapshot-cockpit__copy-note" role="status">
+            <p
+              className="snapshot-cockpit__copy-note"
+              role="status"
+              aria-label="Snapshot fingerprint copy result"
+            >
               {copyState === "copied"
                 ? "Fingerprint copied to the clipboard."
                 : "Clipboard copy is unavailable here — the fingerprint text is selectable for manual copy."}

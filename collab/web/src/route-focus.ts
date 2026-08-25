@@ -58,18 +58,43 @@ interface AppliedFocus {
   exact: boolean;
   /** The element this hook focused, used to detect a reader moving away. */
   target: HTMLElement | null;
+  /** The lane highlighted when this focus was applied. */
+  lane: string | null;
 }
 
 /** Focus and reveal an exact canonical route target after its async data exists. */
 export function useRouteFocus(focus: WorkFocus | undefined, ready: boolean): void {
   const applied = useRef<AppliedFocus | null>(null);
+  // The address this hook last saw, applied or not. Lane highlighting rewrites
+  // the URL without being navigation, and the canonical URL deliberately drops
+  // the in-memory "preserve" marker, so the only way to recognise a lane-only
+  // change is to compare it with the previous address.
+  const seen = useRef<{ key: string; lane: string | null } | null>(null);
   useEffect(() => {
     if (!focus || !ready || focus.navigation === "preserve") {
       applied.current = null;
+      if (focus) {
+        seen.current = {
+          key: [focus.section, focus.itemKind ?? "", focus.item ?? ""].join(":"),
+          lane: focus.lane ?? null,
+        };
+      }
       return;
     }
     const key = [focus.section, focus.itemKind ?? "", focus.item ?? ""].join(":");
     const itemTarget = matchingRouteItem(focus);
+    // Highlighting a lane is not navigation, and the UI promises the page will
+    // not jump. Recognise it by comparing with the previous address: same
+    // section, same item, different lane means the reader stays where they are.
+    const laneOnlyChange =
+      seen.current !== null
+      && seen.current.key === key
+      && seen.current.lane !== (focus.lane ?? null);
+    seen.current = { key, lane: focus.lane ?? null };
+    if (laneOnlyChange) {
+      if (applied.current) applied.current = { ...applied.current, lane: focus.lane ?? null };
+      return;
+    }
     if (applied.current?.key === key) {
       if (!itemTarget) return;
       // The exact record still holds focus; nothing to do.
@@ -106,7 +131,13 @@ export function useRouteFocus(focus: WorkFocus | undefined, ready: boolean): voi
       }
     }
     target.focus({ preventScroll: true });
-    target.scrollIntoView?.({ block: "center", inline: "nearest" });
-    applied.current = { key, exact: Boolean(itemTarget), target };
+    // Centring a record taller than the viewport puts its opening lines above
+    // the fold, so a link that promised to open a record lands the reader in
+    // the middle of it. Show the top of anything that cannot fit.
+    const viewportHeight = window.innerHeight || 0;
+    const targetHeight = target.getBoundingClientRect?.().height ?? 0;
+    const block = viewportHeight > 0 && targetHeight > viewportHeight * 0.8 ? "start" : "center";
+    target.scrollIntoView?.({ block, inline: "nearest" });
+    applied.current = { key, exact: Boolean(itemTarget), target, lane: focus.lane ?? null };
   });
 }
