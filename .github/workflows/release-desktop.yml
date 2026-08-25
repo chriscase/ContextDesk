@@ -1,0 +1,178 @@
+# Artifact-only desktop matrix. Must not create or mutate GitHub Releases.
+# Called by `.github/workflows/release.yml` (the single orchestration path).
+name: release-desktop
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      git_sha:
+        required: true
+        type: string
+      git_describe:
+        required: true
+        type: string
+      channel:
+        required: true
+        type: string
+      signed_updater:
+        required: true
+        type: string
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to check out for an isolated desktop artifact build"
+        required: true
+        type: string
+      git_sha:
+        description: "Optional exact SHA; defaults to the checked-out tag"
+        required: false
+        type: string
+      git_describe:
+        description: "Optional git describe; defaults to the checked-out tag"
+        required: false
+        type: string
+      signed_updater:
+        description: "Require signed updater artifacts"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: macos
+            platform: macos-latest
+            args: ""
+          # Keep the packaged Linux host aligned with gui-accept. The shipped
+          # ort-sys prebuilts require glibc >= 2.38 (__isoc23_* symbols), so
+          # Ubuntu 22.04 cannot link the production desktop binary.
+          - id: linux
+            platform: ubuntu-24.04
+            args: ""
+          - id: windows
+            platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout exact identity
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_sha || inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify checkout SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD="$(git rev-parse HEAD)"
+          EXPECTED="${{ inputs.git_sha }}"
+          if [ -n "$EXPECTED" ] && [ "$HEAD" != "$EXPECTED" ]; then
+            echo "desktop builder checkout $HEAD != expected $EXPECTED" >&2
+            exit 1
+          fi
+          test -n "${{ inputs.tag }}"
+          test -n "${{ inputs.git_describe || github.sha }}"
+
+      - name: Install Linux deps (WebKit / appindicator)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
+            libdbus-1-dev pkg-config libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            desktop/src-tauri
+
+      - name: Install frontend deps
+        working-directory: desktop
+        run: npm ci
+
+      - name: Resolve signed-updater flag
+        id: signed
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="${{ inputs.signed_updater }}"
+          if [ "$RAW" = "true" ] || [ "$RAW" = "True" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build frontend + generate tauri conf
+        working-directory: desktop
+        env:
+          CONTEXTDESK_SIGNED_UPDATER: ${{ steps.signed.outputs.enabled }}
+        run: |
+          node scripts/gen-tauri-conf.mjs
+          node -e "const fs=require('node:fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));if(process.env.CONTEXTDESK_SIGNED_UPDATER!=='true'){c.bundle.createUpdaterArtifacts=false;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')}"
+          npm run build
+
+      - name: Bundle desktop (artifacts only — no GitHub Release)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # Intentionally no GitHub Release fields (no tagName/releaseName).
+          CD_GIT_SHA: ${{ inputs.git_sha || github.sha }}
+          CD_GIT_DESCRIBE: ${{ inputs.git_describe || inputs.tag }}
+          CD_CHANNEL: installed
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.signed.outputs.enabled == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.signed.outputs.enabled == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        with:
+          projectPath: desktop
+          args: ${{ matrix.args }}
+
+      - name: Stage bundle assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${{ inputs.git_sha || github.sha }}"
+          test "${{ inputs.channel || 'installed' }}" = "installed"
+          mkdir -p dist/desktop
+          bundle="desktop/src-tauri/target/release/bundle"
+          if [ ! -d "$bundle" ]; then
+            echo "missing $bundle" >&2
+            exit 1
+          fi
+          find "$bundle" -type f \( \
+            -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o \
+            -name '*.AppImage' -o -name '*.deb' -o -name '*.sig' -o \
+            -name '*.tar.gz' -o -name '*.zip' \
+          \) -exec cp -a {} dist/desktop/ \;
+          ls -la dist/desktop
+          test "$(find dist/desktop -type f | wc -l | tr -d ' ')" -gt 0
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.id }}
+          path: dist/desktop/*
+          if-no-files-found: error
