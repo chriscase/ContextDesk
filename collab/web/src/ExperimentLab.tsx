@@ -1274,6 +1274,39 @@ async function responseError(response: Response, fallback: string): Promise<stri
   return fallback;
 }
 
+/**
+ * The notes At a glance adds under its own summary, stated once each.
+ *
+ * `agreement.notes` and `comparison.notes` are independent sources that both
+ * routinely carry the agreement-is-not-correctness boundary, and the section
+ * states that boundary itself, in full, on the "What agrees" card. Joined
+ * as-is the reader met it two or three times in one paragraph, which buries
+ * the findings the section exists to show and reads as hedging rather than as
+ * a boundary worth respecting.
+ *
+ * So: the boundary is kept exactly once, where it is stated in full, and every
+ * other note survives — deduplicated, in order. Nothing truthful is dropped.
+ */
+export function scanSectionNotes(
+  agreementNotes: readonly string[],
+  comparisonNotes: readonly string[],
+): string[] {
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const note of [...agreementNotes, ...comparisonNotes]) {
+    const text = note.trim();
+    if (!text) continue;
+    const normalized = text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (seen.has(normalized)) continue;
+    // Restatements of the boundary the section already prints in full.
+    if (normalized.startsWith("agreement is not proof of correctness")) continue;
+    if (normalized.startsWith("agreement is not correctness")) continue;
+    seen.add(normalized);
+    kept.push(text);
+  }
+  return kept;
+}
+
 export function ExperimentLab(props: {
   caseId: string;
   canWrite: boolean;
@@ -1658,6 +1691,10 @@ export function ExperimentLab(props: {
   // Scan-strip projections: every line restates a fact already present in the
   // response. Nothing here ranks, scores, or infers a winner.
   const runFactsSummary = candidateRunSummary(current?.candidates ?? []);
+  const scanNotes = scanSectionNotes(
+    current?.agreement.notes ?? [],
+    current?.comparison?.notes ?? [],
+  );
   const goldConvergenceCount = (current?.comparison?.convergence ?? []).filter(
     (row) => row.inGold,
   ).length;
@@ -2346,12 +2383,7 @@ export function ExperimentLab(props: {
               {" · runs: "}
               {runFactsSummary || "none recorded"}. Read what agrees, what differs, and what stays
               unknown before the human decision.
-              {current.agreement.notes.length
-                ? ` ${current.agreement.notes.join(" ")}`
-                : ""}
-              {current.comparison?.notes?.length
-                ? ` ${current.comparison.notes.join(" ")}`
-                : ""}
+              {scanNotes.length ? ` ${scanNotes.join(" ")}` : ""}
               {" "}
               Review queue, Evidence, Strategy paths, and Signals stay one workspace away.
             </p>

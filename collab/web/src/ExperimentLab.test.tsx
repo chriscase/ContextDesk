@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkFocus } from "./app-location.js";
-import { ExperimentLab } from "./ExperimentLab.js";
+import { ExperimentLab, scanSectionNotes } from "./ExperimentLab.js";
 
 afterEach(() => {
   cleanup();
@@ -2803,5 +2803,40 @@ describe("focused Compare workspace", () => {
     fireEvent.click(evidence, { metaKey: true });
     expect(screen.getByRole("heading", { name: "At a glance" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Shared and different evidence" })).toBeNull();
+  });
+});
+
+describe("At a glance notes", () => {
+  const CAVEAT = "Agreement is not proof of correctness.";
+
+  it("states the agreement boundary once, where the section prints it in full", () => {
+    // Both note sources routinely carry it, and the "What agrees" card states
+    // it in full, so joining them put the same boundary in front of the reader
+    // two or three times in one paragraph.
+    expect(scanSectionNotes([CAVEAT], [CAVEAT])).toEqual([]);
+    expect(scanSectionNotes([CAVEAT], ["Agreement is not correctness"])).toEqual([]);
+  });
+
+  it("keeps every other note, in order, without repeating one", () => {
+    const notes = scanSectionNotes(
+      [CAVEAT, "Two lanes cite the same deploy log.", "Two lanes cite the same deploy log."],
+      ["One lane recorded no citation.", CAVEAT],
+    );
+    expect(notes).toEqual([
+      "Two lanes cite the same deploy log.",
+      "One lane recorded no citation.",
+    ]);
+  });
+
+  it("is not fooled by spacing, case, or trailing punctuation", () => {
+    expect(scanSectionNotes(["  agreement IS not proof of correctness  "], [])).toEqual([]);
+    expect(
+      scanSectionNotes(["Agreement is not proof of correctness; differences are leads."], []),
+    ).toEqual([]);
+  });
+
+  it("drops nothing when no note restates the boundary", () => {
+    const notes = ["Lane B stopped before citing evidence."];
+    expect(scanSectionNotes(notes, [])).toEqual(notes);
   });
 });

@@ -406,3 +406,72 @@ describe("CaseBoardPanel", () => {
     expect(fetchMock.mock.calls.some((call) => call[1]?.method === "POST")).toBe(false);
   });
 });
+
+describe("evidence card identifiers", () => {
+  const HASH = "a".repeat(64);
+
+  function stub() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) {
+          return {
+            ok: true,
+            json: async () => ({
+              artifacts: [{
+                id: "artifact-1",
+                kind: "log",
+                filename: "checkout.log",
+                contentHash: HASH,
+                verificationStatus: "verified",
+                privacyClass: "share_safe",
+                uploaderId: "alice",
+              }],
+            }),
+          };
+        }
+        if (url.endsWith("/snapshots")) {
+          return {
+            ok: true,
+            json: async () => ({
+              snapshots: [{
+                id: "snapshot-1",
+                fingerprint: "b".repeat(64),
+                parentSnapshotId: null,
+                evidence: [{ evidenceId: "artifact-1", ordinal: 0 }],
+                visibility: "share_safe",
+                createdAt: "2026-08-20T00:00:00.000Z",
+                createdBy: "alice",
+              }],
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ snapshotId: "snapshot-1", notice: "", findings: [] }) };
+      }),
+    );
+  }
+
+  it("does not lead the card with a truncated digest", async () => {
+    stub();
+    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    expect(await screen.findByText("checkout.log")).toBeTruthy();
+    // The privacy class is a decision a reader acts on and stays on the card.
+    expect(screen.getByText("share_safe")).toBeTruthy();
+    // The truncated digest that used to open the card is gone — from the card
+    // and from the snapshot picker, where twelve characters told nothing apart.
+    expect(screen.queryByText(/hash [0-9a-f]{12}…/)).toBeNull();
+    expect(screen.queryByText(`${HASH.slice(0, 12)}…`)).toBeNull();
+    expect(screen.queryByText(`${"b".repeat(12)}…`)).toBeNull();
+  });
+
+  it("keeps the exact digest available, in full, one disclosure away", async () => {
+    stub();
+    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    expect(await screen.findByText("checkout.log")).toBeTruthy();
+    // Complete, never truncated, and addressable by a name that says which
+    // record it belongs to.
+    expect(screen.getByText(HASH)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy content hash for checkout.log" })).toBeTruthy();
+  });
+});

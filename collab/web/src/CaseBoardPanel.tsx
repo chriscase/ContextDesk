@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { protectedApiFetch } from "./protected-api.js";
 import type { WorkFocus } from "./app-location.js";
 import { useRouteFocus } from "./route-focus.js";
+import { TechnicalIdentifiers } from "./technical-identity.js";
 
 const ARTIFACT_KINDS = ["log", "email", "attachment", "file_server_ref"] as const;
 const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
@@ -87,9 +88,6 @@ const BUCKET_DETAILS: Record<
   },
 };
 
-function shortHash(value: string | null): string {
-  return value ? `${value.slice(0, 12)}…` : "not available";
-}
 
 function participantLabel(identityId: string, participants: readonly ParticipantLabel[]): string {
   const username = participants
@@ -500,7 +498,24 @@ export function CaseBoardPanel(props: {
                       <span className="case-memory__meta">
                         {artifact.kind} · {artifact.verificationStatus ?? "verification unknown"} · uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}
                       </span>
-                      <span className="case-memory__meta">hash {shortHash(artifact.contentHash)} · {artifact.privacyClass}</span>
+                      {/* The privacy class is a decision a reader acts on; the
+                          content digest is how the record is addressed. Leading
+                          with a truncated digest spent the first line of every
+                          card on a value nobody can act on — it is too short to
+                          match against another system and means nothing on its
+                          own. It stays available in full, one disclosure away. */}
+                      <span className="case-memory__meta">{artifact.privacyClass}</span>
+                      <TechnicalIdentifiers
+                        record={artifact.filename ?? artifact.kind}
+                        items={[
+                          {
+                            label: "Content hash",
+                            value: artifact.contentHash,
+                            hint: "matches this exact evidence against another system",
+                          },
+                          { label: "Evidence id", value: artifact.id },
+                        ]}
+                      />
                       <button
                         type="button"
                         className="case-memory__inspect"
@@ -616,7 +631,11 @@ export function CaseBoardPanel(props: {
                   >
                     <strong>S{index}</strong>
                     <span>{snapshot.evidence.length} items · frozen by {participantLabel(snapshot.createdBy, props.participants ?? [])}</span>
-                    <small>{shortHash(snapshot.fingerprint)}</small>
+                    {/* No truncated fingerprint: a picker is where snapshots are
+                        told apart, and twelve characters of a digest cannot do
+                        that job — the snapshot's own number, size, and author
+                        can. The exact fingerprint is shown in full, with a copy
+                        control, once a snapshot is inspected. */}
                   </button>
                 ))}
               </div>
