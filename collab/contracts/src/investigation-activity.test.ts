@@ -7,15 +7,19 @@ import {
   INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
   INVESTIGATION_AI_NOT_HUMAN_FINDING,
   INVESTIGATION_LOCATOR_NOT_AUTHORIZATION,
+  INVESTIGATION_RESOURCE_KINDS,
   INVESTIGATION_RESOURCE_LOCATOR_SCHEMA_ID,
   canonicalInvestigationActivityBytes,
   compareInvestigationActivityItems,
   formatCompactInvestigationLocator,
   formatInvestigationActivityCursor,
+  canonicalRouteSection,
   formatInvestigationResourceLocator,
   investigationActivityFilterFingerprint,
   investigationActivityId,
+  isDiscussionSection,
   parseCompactInvestigationLocator,
+  routedInvestigationFocus,
   parseInvestigationActivityCursor,
   parseInvestigationActivityError,
   parseInvestigationActivityItem,
@@ -107,7 +111,7 @@ describe("investigation resource locator", () => {
       resourceId: "run-synthetic-1:reviewer-lane",
     });
     expect(workstream.pathname).toBe(
-      `/investigations/${CASE_A}/analyze?section=workstreams&item=run-synthetic-1%3Areviewer-lane&kind=workstream#workstreams`,
+      `/investigations/${CASE_A}/analyze?section=workstreams&item=run-synthetic-1%3Areviewer-lane&kind=workstream&lane=run-synthetic-1%3Areviewer-lane#workstreams`,
     );
     const comparison = formatInvestigationResourceLocator({
       installationId: INSTALLATION,
@@ -122,7 +126,9 @@ describe("investigation resource locator", () => {
       kind: "discussion_message",
       resourceId: "message-synthetic-1",
     });
-    expect(discussion.pathname).toContain("/situation?section=case-discussion");
+    expect(discussion.pathname).toContain("/situation?section=discussion");
+    expect(discussion.pathname).toContain("kind=comment");
+    expect(discussion.pathname).not.toContain("case-discussion");
   });
 
   it("requires revision for decision locators and binds the decide stage", () => {
@@ -382,5 +388,90 @@ describe("deterministic identity, ordering, and cursors", () => {
       notices: [...INVESTIGATION_ACTIVITY_NOTICES],
     };
     expect(canonicalInvestigationActivityBytes(page)).toBe(canonicalInvestigationActivityBytes(page));
+  });
+});
+
+describe("routed locator focus against shipped War Room sections", () => {
+  it("lands every resource kind on a visible stage/section/item identity", () => {
+    const job = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const attempt = `${job}:reviewer-lane`;
+    const expected: Record<string, { stage: string; section: string | null; itemKind: string | null; hasLane?: boolean }> = {
+      investigation: { stage: "situation", section: "stage-situation", itemKind: null },
+      investigation_stage: { stage: "analyze", section: null, itemKind: null },
+      evidence_item: { stage: "analyze", section: "triage-evidence-board", itemKind: "evidence" },
+      evidence_context: { stage: "analyze", section: "triage-evidence-board", itemKind: null },
+      workstream: { stage: "analyze", section: "triage-lane-runner", itemKind: "triage-run" },
+      workstream_attempt: { stage: "analyze", section: "workstreams", itemKind: "workstream", hasLane: true },
+      workstream_rerun: { stage: "analyze", section: "triage-lane-runner", itemKind: "triage-run" },
+      comparison_finding: { stage: "compare", section: "cross-exam-heading", itemKind: null },
+      comparison_conflict: { stage: "compare", section: "cross-exam-heading", itemKind: null },
+      discussion_message: { stage: "situation", section: "discussion", itemKind: "comment" },
+      timeline_event: { stage: "capture", section: "triage-capture", itemKind: "timeline" },
+      hypothesis: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
+      action: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
+      observation: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
+      decision_revision: { stage: "decide", section: "decision-heading", itemKind: null },
+      export_event: { stage: "decide", section: "export-heading", itemKind: null },
+      portable_archive_event: { stage: "decide", section: "export-heading", itemKind: null },
+    };
+    expect(Object.keys(expected).sort()).toEqual([...INVESTIGATION_RESOURCE_KINDS].sort());
+
+    for (const [kind, want] of Object.entries(expected)) {
+      const resourceId = kind === "investigation"
+        ? CASE_A
+        : kind === "investigation_stage"
+          ? "analyze"
+          : kind === "timeline_event"
+            ? "12"
+            : kind === "workstream_attempt"
+              ? attempt
+              : kind === "discussion_message"
+                ? "message-synthetic-1"
+                : job;
+      const locator = formatInvestigationResourceLocator({
+        installationId: INSTALLATION,
+        investigationId: CASE_A,
+        kind: kind as "evidence_item",
+        resourceId,
+        ...(kind === "decision_revision" ? { revision: 1 } : {}),
+      });
+      const routed = routedInvestigationFocus(kind as "evidence_item", resourceId);
+      expect(routed.stage, kind).toBe(want.stage);
+      expect(routed.section, kind).toBe(want.section);
+      expect(routed.itemKind, kind).toBe(want.itemKind);
+      if (want.section) {
+        expect(locator.pathname).toContain(`/${want.stage}`);
+        expect(locator.pathname).toContain(`section=${want.section}`);
+        expect(locator.pathname).toContain(`#${want.section}`);
+        expect(locator.pathname).not.toContain("case-discussion");
+      } else {
+        expect(locator.pathname).toBe(`/investigations/${CASE_A}/${want.stage}`);
+      }
+      if (want.itemKind) {
+        expect(locator.pathname).toContain(`kind=${want.itemKind}`);
+      }
+      if (want.hasLane) {
+        expect(locator.pathname).toContain("lane=");
+      }
+    }
+  });
+
+  it("deep-links a job-level workstream to the visible run record, not a missing workstream card", () => {
+    const job = formatInvestigationResourceLocator({
+      installationId: INSTALLATION,
+      investigationId: CASE_A,
+      kind: "workstream",
+      resourceId: EVIDENCE,
+    });
+    expect(job.pathname).toBe(
+      `/investigations/${CASE_A}/analyze?section=triage-lane-runner&item=${EVIDENCE}&kind=triage-run#triage-lane-runner`,
+    );
+    expect(job.pathname).not.toContain("section=workstreams");
+  });
+
+  it("treats case-discussion as a legacy alias of the Discussion section", () => {
+    expect(canonicalRouteSection("case-discussion")).toBe("discussion");
+    expect(isDiscussionSection("case-discussion")).toBe(true);
+    expect(isDiscussionSection("discussion")).toBe(true);
   });
 });

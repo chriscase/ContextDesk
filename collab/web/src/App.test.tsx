@@ -1,9 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { USER_PROFILE_SCHEMA_ID } from "@cd-collab/contracts/admin";
+import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID } from "@cd-collab/contracts/admin";
 import { App } from "./App.js";
-import { parsePathname, pathFor, sameLocation, type WorkLocation } from "./app-location.js";
+import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLocation } from "./app-location.js";
 
 afterEach(() => {
   cleanup();
@@ -58,6 +58,35 @@ function stubSignedInFetch(
   });
   vi.stubGlobal("fetch", stub);
   return stub;
+}
+
+function stubAdminFetch(): FetchStub {
+  return stubSignedInFetch({ username: "owner", roles: ["admin"] }, (url) => {
+    if (url === "/api/authz/group-role-map") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schemaId: "cd-collab.admin_role_mapping_list.v1",
+          mappings: [{ group: "local:admins", role: "admin" }],
+          limit: 500,
+          truncated: false,
+        }),
+      } as Response);
+    }
+    if (url === "/api/admin/people/search") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schemaId: ADMIN_PEOPLE_LIST_SCHEMA_ID,
+          people: [],
+          nextCursor: null,
+        }),
+      } as Response);
+    }
+    return null;
+  });
 }
 
 const routedLaneExperiment = {
@@ -289,6 +318,122 @@ describe("authenticated application shell", () => {
     expect(await screen.findByRole("heading", { name: "Administration" })).toBeTruthy();
     expect(window.location.pathname).toBe("/administration");
     expect(document.title).toBe("Administration · ContextDesk War Room");
+  });
+
+  it("treats /admin/people as the canonical People location and keeps /administration as the roles alias", async () => {
+    window.history.replaceState(null, "", "/admin/people");
+    stubAdminFetch();
+    render(<App />);
+    expect((await screen.findByRole("tab", { name: "People" })).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Group role mappings" }).getAttribute("aria-selected")).toBe("false");
+    expect(window.location.pathname).toBe("/admin/people");
+    expect(document.title).toContain("People");
+    cleanup();
+
+    window.history.replaceState(null, "", "/administration");
+    stubAdminFetch();
+    render(<App />);
+    expect(
+      (await screen.findByRole("tab", { name: "Group role mappings" })).getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(window.location.pathname).toBe("/administration");
+  });
+
+  it("restores /admin/people after sign-in instead of collapsing to /administration", async () => {
+    window.history.replaceState(null, "", "/admin/people");
+    let signedIn = false;
+    const stub = vi.fn(async (input: RequestInfo, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/auth/me") {
+        if (!signedIn) return { ok: false, json: async () => ({}) };
+        return {
+          ok: true,
+          json: async () => ({ identity: { username: "owner" }, roles: ["admin"] }),
+        };
+      }
+      if (url === "/api/auth/login") {
+        signedIn = true;
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [] }) };
+      if (url === "/api/catalog/sources") return { ok: true, json: async () => ({ sources: [] }) };
+      if (url === "/api/authz/group-role-map") {
+        return {
+          ok: true,
+          json: async () => ({
+            schemaId: "cd-collab.admin_role_mapping_list.v1",
+            mappings: [{ group: "local:admins", role: "admin" }],
+            limit: 500,
+            truncated: false,
+          }),
+        };
+      }
+      if (url === "/api/admin/people/search") {
+        return {
+          ok: true,
+          json: async () => ({ schemaId: ADMIN_PEOPLE_LIST_SCHEMA_ID, people: [], nextCursor: null }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", stub);
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/signin");
+    fireEvent.change(screen.getByLabelText("Username"), { target: { value: "owner" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect((await screen.findByRole("tab", { name: "People" })).getAttribute("aria-selected")).toBe("true");
+    expect(window.location.pathname).toBe("/admin/people");
+    expect(restoreAfterSignIn(parsePathname("/admin/people"))).toMatchObject({
+      area: "administration",
+      focus: { section: "people" },
+    });
+  });
+
+  it("rewrites a legacy case-discussion locator into a copyable Discussion URL", async () => {
+    const uuid = "55555555-5555-4555-8555-555555555555";
+    window.history.replaceState(
+      null,
+      "",
+      `/investigations/${uuid}/situation?section=case-discussion&item=message-8&kind=comment#case-discussion`,
+    );
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            cases: [{ id: uuid, title: "Synthetic discussion restore", status: "open", severity: "medium" }],
+          }),
+        } as Response);
+      }
+      if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+        return Promise.resolve({ ok: true, json: async () => ({ events: [], runs: [] }) } as Response);
+      }
+      if (url.endsWith("/contributions")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            contributions: [{
+              id: "message-8",
+              kind: "message",
+              body: "Synthetic discussion comment for locator routing.",
+              privacyClass: "share_safe",
+              tombstoned: false,
+            }],
+          }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
+    await waitFor(() => {
+      const href = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      expect(href).toContain("section=discussion");
+      expect(href).not.toContain("case-discussion");
+      expect(href).toContain(`item=message-8`);
+    });
   });
 
   it("routes Start investigation to the inventory and focuses the title field", async () => {
@@ -527,6 +672,40 @@ describe("pathname parsing", () => {
       caseId: null,
       stage: "situation",
     });
+    expect(parsePathname("/admin/people")).toEqual({
+      area: "administration",
+      caseId: null,
+      stage: "situation",
+      focus: {
+        section: "people",
+        item: null,
+        itemKind: null,
+        lane: null,
+        experiment: null,
+      },
+    });
+    expect(pathFor(parsePathname("/admin/people"))).toBe("/admin/people");
+    expect(pathFor({ area: "administration", caseId: null, stage: "situation" })).toBe(
+      "/administration",
+    );
+    const uuid = "11111111-1111-4111-8111-111111111111";
+    const discussionAlias = parsePathname(
+      `/investigations/${uuid}/situation`,
+      "?section=case-discussion&item=message-8&kind=comment",
+      "#case-discussion",
+    );
+    expect(discussionAlias).toMatchObject({
+      area: "investigations",
+      caseId: uuid,
+      stage: "situation",
+      focus: {
+        section: "discussion",
+        item: "message-8",
+        itemKind: "comment",
+      },
+    });
+    expect(pathFor(discussionAlias)).toContain("section=discussion");
+    expect(pathFor(discussionAlias)).not.toContain("case-discussion");
     expect(parsePathname("/profile")).toEqual({
       area: "profile",
       caseId: null,
@@ -535,7 +714,6 @@ describe("pathname parsing", () => {
     expect(pathFor({ area: "profile", caseId: null, stage: "situation" })).toBe("/profile");
     expect(parsePathname("/signin")).toEqual({ kind: "sign-in" });
     expect(parsePathname("/sign-in")).toEqual({ kind: "sign-in" });
-    const uuid = "11111111-1111-4111-8111-111111111111";
     expect(parsePathname(`/investigations/${uuid}/analyze`)).toEqual({
       area: "investigations",
       caseId: uuid,

@@ -411,7 +411,7 @@ describe("war room overview", () => {
                   investigationId: ACTIVITY_CASE_ID,
                   investigationTitle: "Fixture incident",
                   summary: "added a discussion comment",
-                  resolvedRoute: `/investigations/${ACTIVITY_CASE_ID}/situation?section=case-discussion&item=message-8&kind=comment#case-discussion`,
+                  resolvedRoute: `/investigations/${ACTIVITY_CASE_ID}/situation?section=discussion&item=message-8&kind=comment#discussion`,
                   provenanceClass: "human",
                   humanFinding: false,
                 },
@@ -428,7 +428,7 @@ describe("war room overview", () => {
     });
     fireEvent.click(activity);
     expect(onActivityOpen).toHaveBeenCalledWith(ACTIVITY_CASE_ID, "situation", {
-      section: "case-discussion",
+      section: "discussion",
       item: "message-8",
       itemKind: "comment",
       lane: null,
@@ -436,7 +436,7 @@ describe("war room overview", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
     expect(writeText).toHaveBeenCalledWith(
-      `http://localhost:3000/investigations/${ACTIVITY_CASE_ID}/situation?section=case-discussion&item=message-8&kind=comment#case-discussion`,
+      `http://localhost:3000/investigations/${ACTIVITY_CASE_ID}/situation?section=discussion&item=message-8&kind=comment#discussion`,
     );
     expect(await screen.findByText("Copied.")).toBeTruthy();
   });
@@ -455,7 +455,7 @@ describe("war room overview", () => {
               investigationId: ACTIVITY_CASE_ID,
               investigationTitle: "Fixture incident",
               summary: "added a discussion comment",
-              resolvedRoute: `/investigations/${ACTIVITY_CASE_ID}/situation?section=case-discussion&item=message-${index}&kind=comment#case-discussion`,
+              resolvedRoute: `/investigations/${ACTIVITY_CASE_ID}/situation?section=discussion&item=message-${index}&kind=comment#discussion`,
               provenanceClass: "human",
               humanFinding: false,
             })),
@@ -814,6 +814,55 @@ describe("focused investigation view", () => {
 
     expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Situation" })).toBeTruthy();
+    expect(screen.getByText(/Opened Discussion to the comment this activity recorded/)).toBeTruthy();
+  });
+
+  it("explains a job-level run locator instead of treating it as a missing workstream", async () => {
+    stubCaseFetch();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        focusCaseId="c1"
+        stage="analyze"
+        focus={{
+          section: "triage-lane-runner",
+          item: "run-1",
+          itemKind: "triage-run",
+          lane: null,
+          experiment: null,
+        }}
+        onOpenCase={() => {}}
+        onStageChange={() => {}}
+      />,
+    );
+    expect(
+      await screen.findByText(/Opened the workstream run this activity named/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/not part of this investigation/)).toBeNull();
+    expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+  });
+
+  it("opens Discussion from a legacy case-discussion locator alias", async () => {
+    stubCaseFetch();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c1"
+        stage="situation"
+        focus={{
+          section: "case-discussion",
+          item: "message-8",
+          itemKind: "comment",
+          lane: null,
+          experiment: null,
+        }}
+        onOpenCase={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
+    expect(screen.getByText(/Opened Discussion to the comment this activity recorded/)).toBeTruthy();
   });
 
   it("does not render mutation controls in static read-only mode", async () => {

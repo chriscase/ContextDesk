@@ -309,4 +309,51 @@ describe("investigation activity projection", () => {
     expect(evidenceIdx).toBeGreaterThanOrEqual(0);
     expect(commentIdx).toBeGreaterThan(evidenceIdx);
   });
+
+  it("routes comments to Discussion and job-level workstreams to the visible run record", async () => {
+    const { cases, activity } = await harness();
+    const created = await cases.createCase(ALICE, { title: "Synthetic routing" }, "test");
+    const message = await cases.addContribution(created.id, ALICE, {
+      kind: "message",
+      body: "Synthetic discussion note for routing.",
+      privacyClass: "share_safe",
+    }, "test");
+    await cases.appendDomainTimeline(created.id, {
+      kind: "triage_job_created",
+      actor: ALICE,
+      targetId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      clientTime: null,
+      payload: { jobId: "ffffffff-ffff-4fff-8fff-ffffffffffff" },
+    });
+    await cases.appendDomainTimeline(created.id, {
+      kind: "triage_candidate_started",
+      actor: ALICE,
+      targetId: "ffffffff-ffff-4fff-8fff-ffffffffffff:reviewer-lane",
+      clientTime: null,
+      payload: { jobId: "ffffffff-ffff-4fff-8fff-ffffffffffff", candidateId: "reviewer-lane" },
+    });
+    const page = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const comment = page.items.find((item) => item.activityKind === "comment_added");
+    expect(comment?.locator.kind).toBe("discussion_message");
+    expect(comment?.resolvedRoute).toContain("section=discussion");
+    expect(comment?.resolvedRoute).toContain(`item=${message.id}`);
+    expect(comment?.resolvedRoute).not.toContain("case-discussion");
+    const launched = page.items.find((item) => item.activityKind === "workstream_launched" && item.locator.kind === "workstream");
+    expect(launched?.resolvedRoute).toContain("section=triage-lane-runner");
+    expect(launched?.resolvedRoute).toContain("kind=triage-run");
+    expect(launched?.resolvedRoute).not.toContain("section=workstreams");
+    const attempt = page.items.find((item) => item.locator.kind === "workstream_attempt");
+    expect(attempt?.resolvedRoute).toContain("section=workstreams");
+    expect(attempt?.resolvedRoute).toContain("kind=workstream");
+    expect(attempt?.resolvedRoute).toContain("lane=");
+    const resolved = await activity.resolve(
+      ALICE,
+      false,
+      formatCompactInvestigationLocator(comment!.locator),
+    );
+    expect(resolved.resourceLabel).toBe("Discussion message");
+    await expect(
+      activity.resolve(EVE, false, formatCompactInvestigationLocator(comment!.locator)),
+    ).rejects.toMatchObject({ code: "not_found" });
+  });
 });

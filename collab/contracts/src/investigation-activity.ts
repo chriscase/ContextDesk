@@ -295,92 +295,162 @@ function assertResourceId(path: string, kind: InvestigationResourceKindV1, resou
   }
 }
 
+/** Canonical Discussion focus. The panel element id remains `case-discussion`. */
+export const DISCUSSION_SECTION = "discussion" as const;
+export const DISCUSSION_SECTION_LEGACY = "case-discussion" as const;
+export const DISCUSSION_ELEMENT_ID = "case-discussion" as const;
+
+export function isDiscussionSection(section: string): boolean {
+  return section === DISCUSSION_SECTION || section === DISCUSSION_SECTION_LEGACY;
+}
+
+export function canonicalRouteSection(section: string): string {
+  return section === DISCUSSION_SECTION_LEGACY ? DISCUSSION_SECTION : section;
+}
+
+/**
+ * Workstream *attempts* are `${runId}:${candidateId}`. A bare run/job id is
+ * the parent record shown in the Analyze run history, not a workstream card.
+ */
+export function isWorkstreamAttemptResourceId(resourceId: string): boolean {
+  return resourceId.includes(":");
+}
+
+export interface RoutedInvestigationFocusV1 {
+  stage: InvestigationStageV1;
+  section: string | null;
+  item: string | null;
+  itemKind: string | null;
+  lane: string | null;
+}
+
+function workstreamRoute(resourceId: string): RoutedInvestigationFocusV1 {
+  if (isWorkstreamAttemptResourceId(resourceId)) {
+    return {
+      stage: "analyze",
+      section: "workstreams",
+      item: resourceId,
+      itemKind: "workstream",
+      lane: resourceId,
+    };
+  }
+  return {
+    stage: "analyze",
+    section: "triage-lane-runner",
+    item: resourceId,
+    itemKind: "triage-run",
+    lane: null,
+  };
+}
+
+/**
+ * Maps a locator kind to the shipped War Room stage/section/item identity.
+ * Pathnames, Overview links, and in-app focus must use this mapping so a
+ * copied URL lands on a visible record instead of a hidden or missing one.
+ */
+export function routedInvestigationFocus(
+  kind: InvestigationResourceKindV1,
+  resourceId: string,
+): RoutedInvestigationFocusV1 {
+  switch (kind) {
+    case "investigation":
+      return {
+        stage: "situation",
+        section: "stage-situation",
+        item: null,
+        itemKind: null,
+        lane: null,
+      };
+    case "investigation_stage":
+      return {
+        stage: resourceId as InvestigationStageV1,
+        section: null,
+        item: null,
+        itemKind: null,
+        lane: null,
+      };
+    case "evidence_item":
+      return {
+        stage: "analyze",
+        section: "triage-evidence-board",
+        item: resourceId,
+        itemKind: "evidence",
+        lane: null,
+      };
+    case "evidence_context":
+      // Snapshots, corroboration, and imported-run context share this kind.
+      // Omit itemKind so the visible element with this id can match.
+      return {
+        stage: "analyze",
+        section: "triage-evidence-board",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
+    case "workstream":
+    case "workstream_attempt":
+    case "workstream_rerun":
+      return workstreamRoute(resourceId);
+    case "comparison_finding":
+    case "comparison_conflict":
+      return {
+        stage: "compare",
+        section: "cross-exam-heading",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
+    case "discussion_message":
+      return {
+        stage: "situation",
+        section: DISCUSSION_SECTION,
+        item: resourceId,
+        itemKind: "comment",
+        lane: null,
+      };
+    case "timeline_event":
+      return {
+        stage: "capture",
+        section: "triage-capture",
+        item: resourceId,
+        itemKind: "timeline",
+        lane: null,
+      };
+    case "hypothesis":
+    case "action":
+    case "observation":
+      return {
+        stage: "capture",
+        section: "triage-capture",
+        item: resourceId,
+        itemKind: "contribution",
+        lane: null,
+      };
+    case "decision_revision":
+      return {
+        stage: "decide",
+        section: "decision-heading",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
+    case "export_event":
+    case "portable_archive_event":
+      return {
+        stage: "decide",
+        section: "export-heading",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
+  }
+}
+
 export function investigationStageForKind(
   kind: InvestigationResourceKindV1,
   resourceId: string,
 ): InvestigationStageV1 {
-  if (kind === "investigation_stage") {
-    return resourceId as InvestigationStageV1;
-  }
-  if (
-    kind === "evidence_context" ||
-    kind === "workstream" ||
-    kind === "workstream_attempt" ||
-    kind === "workstream_rerun" ||
-    kind === "hypothesis" ||
-    kind === "action"
-  ) {
-    return "analyze";
-  }
-  if (kind === "comparison_finding" || kind === "comparison_conflict") {
-    return "compare";
-  }
-  if (kind === "decision_revision" || kind === "export_event") {
-    return "decide";
-  }
-  if (kind === "evidence_item") {
-    return "analyze";
-  }
-  if (kind === "observation") {
-    return "capture";
-  }
-  return "situation";
-}
-
-function routeItemKind(kind: InvestigationResourceKindV1): string | null {
-  switch (kind) {
-    case "evidence_item":
-    case "evidence_context":
-      return "evidence";
-    case "workstream":
-    case "workstream_rerun":
-      return "workstream";
-    case "workstream_attempt":
-      return "workstream";
-    case "discussion_message":
-      return "comment";
-    case "timeline_event":
-      return "timeline";
-    case "hypothesis":
-    case "action":
-    case "observation":
-      return "contribution";
-    default:
-      return null;
-  }
-}
-
-function routeSection(kind: InvestigationResourceKindV1): string | null {
-  switch (kind) {
-    case "investigation":
-      return "stage-situation";
-    case "evidence_item":
-    case "evidence_context":
-      return "triage-evidence-board";
-    case "workstream":
-    case "workstream_attempt":
-    case "workstream_rerun":
-      return "workstreams";
-    case "comparison_finding":
-    case "comparison_conflict":
-      return "cross-exam-heading";
-    case "discussion_message":
-      return "case-discussion";
-    case "timeline_event":
-      return "triage-capture";
-    case "hypothesis":
-    case "action":
-    case "observation":
-      return "triage-capture";
-    case "decision_revision":
-      return "decision-heading";
-    case "export_event":
-      return "export-heading";
-    case "portable_archive_event":
-      return "export-heading";
-    default:
-      return null;
-  }
+  return routedInvestigationFocus(kind, resourceId).stage;
 }
 
 export function deriveInvestigationResourcePathname(
@@ -392,22 +462,16 @@ export function deriveInvestigationResourcePathname(
     throw new ContractViolation("$.investigationId", "expected an RFC 4122 UUID");
   }
   assertResourceId("$.resourceId", kind, resourceId);
-  const stage = investigationStageForKind(kind, resourceId);
-  const base = `/investigations/${investigationId}/${stage}`;
-  if (kind === "investigation") {
-    return `${base}?section=stage-situation#stage-situation`;
-  }
-  if (kind === "investigation_stage") {
+  const routed = routedInvestigationFocus(kind, resourceId);
+  const base = `/investigations/${investigationId}/${routed.stage}`;
+  if (!routed.section) {
     return base;
   }
-  const section = routeSection(kind);
-  if (!section) {
-    return base;
-  }
-  const params = new URLSearchParams({ section, item: resourceId });
-  const itemKind = routeItemKind(kind);
-  if (itemKind) params.set("kind", itemKind);
-  return `${base}?${params.toString()}#${encodeURIComponent(section)}`;
+  const params = new URLSearchParams({ section: routed.section });
+  if (routed.item) params.set("item", routed.item);
+  if (routed.itemKind) params.set("kind", routed.itemKind);
+  if (routed.lane) params.set("lane", routed.lane);
+  return `${base}?${params.toString()}#${encodeURIComponent(routed.section)}`;
 }
 
 function assertDerivedPathname(locator: InvestigationResourceLocatorV1): void {

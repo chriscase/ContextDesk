@@ -38,7 +38,7 @@ forward-compatible provenance value; no OIDC adapter exists yet).
 | Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | CSRF header check covers only these new routes, not the pre-existing `authz`/`cases`/etc. mutation routes |
 | Self-service profile API (GET/PATCH own profile, directory-owned fields read-only) | Shipped | [`self-routes.ts`](../../../collab/server/src/modules/people/self-routes.ts), [`self-routes.test.ts`](../../../collab/server/src/modules/people/self-routes.test.ts) | None known for the API |
 | Self-service profile UI (`/profile`, account-menu destination) | Shipped | [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx), [`SelfProfilePanel.test.tsx`](../../../collab/web/src/SelfProfilePanel.test.tsx), [`App.test.tsx`](../../../collab/web/src/App.test.tsx), Help article `my-profile` | Live LDAP attribute values still follow §16 (the UI cannot invent directory writes) |
-| Admin People console (`/admin/people` tab inside Administration) | Shipped | [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), [`AdminPeoplePanel.test.tsx`](../../../collab/web/src/AdminPeoplePanel.test.tsx), [`Administration.test.tsx`](../../../collab/web/src/Administration.test.tsx) | Detail view is inline-expand, not its own URL per person |
+| Admin People console (`/admin/people` first-class shell location; `/administration` remains the roles alias) | Shipped | [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), [`AdminPeoplePanel.test.tsx`](../../../collab/web/src/AdminPeoplePanel.test.tsx), [`Administration.test.tsx`](../../../collab/web/src/Administration.test.tsx), [`app-location.ts`](../../../collab/web/src/app-location.ts) | Detail view is inline-expand, not its own URL per person |
 | LDAP-ready claims-to-profile mapping (provider-neutral, pure, admin-previewable) | Shipped as a mapping engine; **not** live-wired | [`directory-mapping.ts`](../../../collab/contracts/src/directory-mapping.ts), preview route in `admin-routes.ts` | Login-time sync never calls this with real directory claims — see §16, this is a named non-claim, not an oversight |
 | Portable-investigation interoperability (never grants access, never auto-maps) | Accepted design / already shipped upstream | [`investigation-portable.ts`](../../../collab/contracts/src/investigation-portable.ts) `historicalParticipantsAreAttributionOnly`, `destinationRoleGranted: false` | This chapter does not modify that subsystem; it only keeps `provenance: "imported_historical"` structurally incapable of authenticating or holding a capability (§5) |
 
@@ -265,9 +265,11 @@ claim beyond what the admin themselves typed into a preview request.
 ## 11. UX and human factors
 
 The People tab lives inside the existing `Administration` component
-(`/admin/people`, reachable by a second tab alongside "Group role
-mappings"), gated by the same admin-role check App.tsx already applies to
-the whole Administration area. It supports search/filter, an inline
+and is a **first-class shell location** at `/admin/people`. `parsePathname`,
+`pathFor`, sign-in restore, and copied links round-trip to that tab.
+`/administration` remains the Group role mappings alias and shares the same
+admin-role gate App.tsx already applies to the Administration area. The console
+supports search/filter, an inline
 "Manage" expand showing effective roles and a full capability table with
 source (role vs. local grant), a confirm-before-destructive-action dialog
 for suspend/reactivate/grant/revoke, and a synthetic-sample directory-
@@ -315,7 +317,7 @@ counts.
 | Slice | Status | What is true now | What is not claimed |
 | --- | --- | --- | --- |
 | Profile/capability contracts, server stores, admin+self routes | Shipped | Full CRUD/CAS/audit path, tested against Memory and real Postgres | Not deployed to any environment by this chapter; that is an operator action |
-| Admin People UI | Shipped | Real, tested React panel reachable at `/admin/people` | Not a full user-detail page with its own URL per person |
+| Admin People UI | Shipped | Real, tested React panel at canonical `/admin/people` (legacy `/administration` alias for role mappings) | Not a full user-detail page with its own URL per person |
 | LDAP claim mapping engine | Shipped | Pure, tested, admin-previewable against synthetic sample claims | **Not** wired to any live directory bind - see §16 |
 | Self-service profile UI | Shipped | Real, tested React page at `/profile` for any authenticated user | Does not write to LDAP/OIDC; live directory attribute sync remains unwired (§16) |
 | Directory-removal auto-disable | Not shipped | `disabled` status and manual admin path exist | No automatic detection of a person's removal from the directory |

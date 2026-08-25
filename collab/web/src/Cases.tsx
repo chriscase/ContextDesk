@@ -14,7 +14,8 @@ import {
   type SourceOption,
   type TimelineEvent,
 } from "./TriageWorkspace.js";
-import { isWorkLocation, parsePathname, type WorkFocus } from "./app-location.js";
+import { isDiscussionSection, isWorkLocation, parsePathname, type WorkFocus } from "./app-location.js";
+import { focusArrivalCopy } from "./route-focus-copy.js";
 import { protectedApiFetch } from "./protected-api.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
@@ -611,10 +612,10 @@ export function Cases(props: {
   }, [focusCaseId, loadTimeline]);
 
   useEffect(() => {
-    if (props.focus?.section === "discussion" && focusCaseId) {
+    if (props.focus && isDiscussionSection(props.focus.section) && focusCaseId) {
       setDiscussionOpen(true);
     }
-  }, [focusCaseId, props.focus?.section]);
+  }, [focusCaseId, props.focus]);
 
   useEffect(() => {
     if (!props.startSignal) return;
@@ -797,7 +798,15 @@ export function Cases(props: {
   const current = cases.find((c) => c.id === focusCaseId);
   // A workstream address focuses Analyze on that one workstream's record.
   const workstreamFocused =
-    props.focus?.section === WORKSTREAMS_SECTION && Boolean(props.focus.lane);
+    props.focus?.section === WORKSTREAMS_SECTION
+    && Boolean(
+      props.focus.lane
+      || (props.focus.itemKind === "workstream" && props.focus.item),
+    );
+  const arrivalCopy =
+    props.focus && props.focus.navigation !== "preserve"
+      ? focusArrivalCopy(props.focus)
+      : null;
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
@@ -1276,6 +1285,11 @@ export function Cases(props: {
       {actionError ? (
         <p className="case-memory__error" role="alert">
           {actionError}
+        </p>
+      ) : null}
+      {arrivalCopy ? (
+        <p className="case-view__focus-arrival" role="status">
+          {arrivalCopy}
         </p>
       ) : null}
       <div

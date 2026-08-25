@@ -596,13 +596,13 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         title: "Administration and setup",
         summary:
           "Administrators can discover directory references and manage persistent group-to-role mappings; deployment setup remains operator work.",
-        keywords: ["admin", "directory", "group", "role", "grant", "revoke", "ldap", "setup", "configuration", "wizard", "operator", "doctor", "static", "read-only", "sample data"],
+        keywords: ["admin", "directory", "group", "role", "grant", "revoke", "ldap", "setup", "configuration", "wizard", "operator", "doctor", "static", "read-only", "sample data", "people"],
         what:
-          "The Administration page is visible only to the workspace admin role. It lists the persistent mappings that grant ContextDesk roles and provides bounded searches for identities and groups in the configured directory. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin.",
+          "The Administration page is visible only to the workspace admin role. Group role mappings live at /administration. People is a first-class page at /admin/people — a copied link, reload, or sign-in restore returns to that tab rather than collapsing to role mappings. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin.",
         when:
-          "Use this when a directory group needs workspace access, a group's role changes, or a stale mapping must be revoked. Use operator tooling instead for first deployment, gateways, database settings, directory connection settings, backups, and health checks.",
+          "Use this when a directory group needs workspace access, a group's role changes, or a stale mapping must be revoked. Open People when you need to search, suspend, or grant a capability to a person already known to this workspace. Use operator tooling instead for first deployment, gateways, database settings, directory connection settings, backups, and health checks.",
         steps: [
-          "Open Administration from the primary navigation. Non-admin users cannot see the destination, and a direct route does not request protected administration data.",
+          "Open Administration from the primary navigation, or go directly to /admin/people for the People tab. Non-admin users cannot see the destination, and a direct route does not request protected administration data.",
           "Search for a group or identity. Results are capped at twenty; refine the term rather than assuming the result is the full directory.",
           "Select or enter the exact group reference, choose one workspace role, and grant it. Existing-role changes, revocation, and every administrator grant require an explicit confirmation.",
           "Refresh Current group permissions to verify the destination state. The server also refreshes its live authorization map from persistent storage on each API request.",

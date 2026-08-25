@@ -1720,6 +1720,17 @@
 
 /* ————— Case discussion panel ————— */
 
+.case-view__focus-arrival {
+  margin: 0 0 0.85rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
 .case-view__work {
   min-width: 0;
 }

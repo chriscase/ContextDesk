@@ -124,7 +124,10 @@ function Confirmation(props: {
   );
 }
 
-export function Administration() {
+export function Administration(props: {
+  tab?: AdminTab;
+  onSelectTab?: (tab: AdminTab) => void;
+} = {}) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const newRoleRef = useRef<HTMLSelectElement>(null);
@@ -143,9 +146,10 @@ export function Administration() {
   const [pending, setPending] = useState<PendingChange | null>(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const [activeTab, setActiveTab] = useState<AdminTab>(() =>
+  const [uncontrolledTab, setUncontrolledTab] = useState<AdminTab>(() =>
     adminTabFromPathname(window.location.pathname),
   );
+  const activeTab = props.tab ?? uncontrolledTab;
 
   useEffect(() => headingRef.current?.focus(), []);
 
@@ -157,15 +161,20 @@ export function Administration() {
   }, [activeTab]);
 
   useEffect(() => {
+    if (props.tab) return undefined;
     function onPopState() {
-      setActiveTab(adminTabFromPathname(window.location.pathname));
+      setUncontrolledTab(adminTabFromPathname(window.location.pathname));
     }
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [props.tab]);
 
   function selectTab(tab: AdminTab) {
-    setActiveTab(tab);
+    if (props.onSelectTab) {
+      props.onSelectTab(tab);
+      return;
+    }
+    setUncontrolledTab(tab);
     if (window.location.pathname !== ADMIN_TAB_PATHS[tab]) {
       window.history.pushState(null, "", ADMIN_TAB_PATHS[tab]);
     }
