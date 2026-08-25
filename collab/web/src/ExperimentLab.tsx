@@ -1282,6 +1282,12 @@ export function ExperimentLab(props: {
   caseTitle?: string;
   caseStatus?: string;
   caseSeverity?: string;
+  /**
+   * Questions the investigation recorded about itself in Situation. Compare
+   * used to read only the unknowns a decision left open, so questions a person
+   * had already written down were reported here as "none recorded".
+   */
+  caseOpenQuestions?: string[];
   participant?: { username: string; roles: string[] };
   /**
    * Which part of the lab to present. "full" (the default, and the behavior
@@ -1658,11 +1664,23 @@ export function ExperimentLab(props: {
   // Keep investigative unknowns separate from run telemetry. Missing cost,
   // token usage, traces, or a benchmark matters for auditability, but none of
   // those facts is an unanswered question about the incident itself.
-  const caseUnknowns = [...new Set(
-    (latestDecision?.remainingUnknowns ?? [])
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0),
-  )];
+  // Both sources are real open questions, and each says where it came from:
+  // one was written down when the investigation was framed, the other was left
+  // open by the latest decision. Neither is inferred from the other.
+  const recordedOpenQuestions = (props.caseOpenQuestions ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .map((item) => ({ text: item, source: "recorded in Situation" }));
+  const decisionUnknowns = (latestDecision?.remainingUnknowns ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .map((item) => ({ text: item, source: "left open by the latest decision" }));
+  const seenUnknowns = new Set<string>();
+  const caseUnknowns = [...recordedOpenQuestions, ...decisionUnknowns].filter((row) => {
+    if (seenUnknowns.has(row.text)) return false;
+    seenUnknowns.add(row.text);
+    return true;
+  });
   const runDetailGaps: string[] = [];
   const candidateCount = current?.candidates.length ?? 0;
   const unknownLatencyCount = (current?.candidates ?? []).filter(
@@ -2429,7 +2447,9 @@ export function ExperimentLab(props: {
                 {caseUnknowns.length ? (
                   <ul className="experiment-lab__scan-list">
                     {caseUnknowns.map((item) => (
-                      <li key={item}>{item}</li>
+                      <li key={item.text}>
+                        {item.text} <small className="experiment-lab__finding-source">{item.source}</small>
+                      </li>
                     ))}
                   </ul>
                 ) : (

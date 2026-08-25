@@ -806,6 +806,27 @@ export function Cases(props: {
     return () => window.removeEventListener("contextdesk:triage-run-changed", onRunChanged);
   }, [showingOverview, refreshActivity]);
 
+  // Situation restates the investigation's own timeline: how much evidence is
+  // registered, whether anything is frozen, whether logs were taken in. That
+  // work happens in other panels, which commit it and announce it, so without
+  // re-reading the timeline Situation kept reporting "no snapshot frozen yet"
+  // after a freeze until the reader reloaded the whole page.
+  useEffect(() => {
+    if (!focusCaseId) return undefined;
+    const caseId = focusCaseId;
+    const reload = () => void loadTimeline(caseId);
+    const events = [
+      "contextdesk:snapshot-frozen",
+      "contextdesk:corpus-intake-committed",
+      "contextdesk:triage-run-changed",
+      "contextdesk:external-run-imported",
+    ] as const;
+    for (const name of events) window.addEventListener(name, reload);
+    return () => {
+      for (const name of events) window.removeEventListener(name, reload);
+    };
+  }, [focusCaseId, loadTimeline]);
+
   useEffect(() => {
     const controller = new AbortController();
     activeCaseRef.current = focusCaseId;
@@ -2228,6 +2249,9 @@ export function Cases(props: {
                 caseTitle={current.title}
                 caseStatus={current.status}
                 caseSeverity={current.severity}
+                {...(current.openQuestions?.length
+                  ? { caseOpenQuestions: current.openQuestions }
+                  : {})}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
                 {...(props.onDeepNavigate
                   ? { onDeepNavigate: (focus: WorkFocus) => props.onDeepNavigate?.("compare", focus) }
@@ -2272,6 +2296,9 @@ export function Cases(props: {
                 caseTitle={current.title}
                 caseStatus={current.status}
                 caseSeverity={current.severity}
+                {...(current.openQuestions?.length
+                  ? { caseOpenQuestions: current.openQuestions }
+                  : {})}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
                 {...(props.onDeepNavigate
                   ? { onDeepNavigate: (focus: WorkFocus) => props.onDeepNavigate?.("decide", focus) }

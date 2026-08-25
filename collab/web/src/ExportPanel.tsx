@@ -111,6 +111,41 @@ const NETWORK_ERROR_MESSAGE =
   "The export request did not complete — the server returned no result. Nothing was exported and " +
   "your variant and evidence selection are unchanged; retry with the same export button.";
 
+/**
+ * How long a download's object URL is allowed to outlive the click.
+ *
+ * Revoking in the same tick as the click can invalidate the blob before the
+ * browser has started reading it, so the download silently fails and nothing
+ * observes it. A few seconds is long enough for the browser to take the bytes
+ * and short enough that the URL is not left addressable.
+ */
+const OBJECT_URL_TTL_MS = 5_000;
+
+/**
+ * Hand a generated file to the browser without leaving a live object URL.
+ *
+ * The anchor is attached to the document before it is clicked — a detached
+ * anchor is ignored by some browsers and by automation — removed immediately
+ * after, and its URL revoked on a short timer that the caller can cancel when
+ * the panel unmounts.
+ */
+function startDownload(blob: Blob, filename: string, timers: Set<number>): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  const timer = window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+    timers.delete(timer);
+  }, OBJECT_URL_TTL_MS);
+  timers.add(timer);
+}
+
 const PORTABLE_NETWORK_ERROR =
   "The archive request did not complete. Nothing was downloaded or changed; check your connection and try again.";
 
@@ -218,6 +253,16 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [applyResult, setApplyResult] = useState<PortableApplyResult | null>(null);
   const inFlight = useRef(false);
+  // Object URLs still waiting to be revoked. Unmounting revokes them at once
+  // rather than leaving them addressable for the rest of the session.
+  const objectUrls = useRef(new Set<number>());
+  useEffect(() => {
+    const timers = objectUrls.current;
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
 
   useEffect(() => {
     let stale = false;
@@ -363,15 +408,12 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
       }
       const archive = await response.json();
       const contents = JSON.stringify(archive, null, 2);
-      const url = URL.createObjectURL(
-        new Blob([contents], { type: "application/json;charset=utf-8" }),
-      );
-      const anchor = document.createElement("a");
       const safeId = props.caseId.replace(/[^a-zA-Z0-9_-]/g, "-");
-      anchor.href = url;
-      anchor.download = `contextdesk-investigation-${safeId}.json`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      startDownload(
+        new Blob([contents], { type: "application/json;charset=utf-8" }),
+        `contextdesk-investigation-${safeId}.json`,
+        objectUrls.current,
+      );
       setPortableMessage(
         "Portable investigation archive downloaded. Store it according to its privacy classification.",
       );

@@ -178,6 +178,79 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     await screenshot(page, "19-email-and-chat-evidence");
   });
 
+  test("Situation reflects a freeze without needing a page reload", async ({ page }) => {
+    const title = uniqueTitle("Live situation");
+    await loginAs(page, FIXTURE_USERS.dave);
+    await createCase(page, title);
+    const caseId = await caseIdForTitle(page, title);
+    await uploadEvidence(page, caseId, {
+      kind: "log",
+      summary: "Synthetic timeout log",
+      filename: "shared-timeout.log",
+      mediaType: "text/plain",
+      bytes: fixtureBytes("evidence", "shared-timeout.log"),
+      privacyClass: "share_safe",
+    });
+    await page.reload();
+    await openCase(page, title);
+
+    await gotoStage(page, "Situation");
+    await expect(page.getByText(/no snapshot frozen yet/)).toBeVisible();
+
+    await gotoStage(page, "Analyze");
+    await page.getByRole("checkbox", { name: /Include shared-timeout\.log in snapshot/ }).check();
+    await page.getByRole("button", { name: /Freeze selected evidence/ }).click();
+    await expect(page.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
+
+    // Freezing happens in another panel. Situation restates the same timeline,
+    // so it has to reflect the freeze without the reader reloading the page.
+    await gotoStage(page, "Situation");
+    await expect(page.getByText(/1 snapshot frozen/)).toBeVisible();
+    await expect(page.getByText(/no snapshot frozen yet/)).toHaveCount(0);
+    await screenshot(page, "19-situation-after-freeze");
+  });
+
+  test("questions recorded in Situation are still open questions in Compare", async ({ page }) => {
+    const title = uniqueTitle("Open questions");
+    await loginAs(page, FIXTURE_USERS.erin);
+    await createCase(page, title);
+    const caseId = await caseIdForTitle(page, title);
+    const questions = [
+      "Did the timeout start with the 09:05 deploy?",
+      "Is the inventory service affected outside checkout?",
+    ];
+    const current = await page.request.get(`/api/cases/${caseId}`);
+    expect(current.ok(), await current.text()).toBeTruthy();
+    const situationVersion = ((await current.json()) as { situationVersion?: number })
+      .situationVersion ?? 0;
+    const updated = await page.request.patch(`/api/cases/${caseId}/situation`, {
+      headers: BROWSER_MUTATION_HEADERS,
+      data: {
+        problemStatement: "Checkout times out at payment for a subset of customers.",
+        affectedParties: "Retail customers completing checkout",
+        impact: "Orders are abandoned at the payment step.",
+        scope: "Checkout and inventory services",
+        openQuestions: questions,
+        expectedVersion: situationVersion,
+      },
+    });
+    expect(updated.ok(), await updated.text()).toBeTruthy();
+    await seedComparison(page, caseId, "experiment-package.two-approach.valid.json", []);
+
+    await page.reload();
+    await openCase(page, title);
+    await gotoStage(page, "Compare");
+
+    // A person wrote these down when framing the investigation. Compare read
+    // only the unknowns a decision left open, so it reported none recorded.
+    const unknowns = page.locator("[aria-labelledby='scan-unknown-heading']");
+    await expect(unknowns).toBeVisible();
+    for (const question of questions) await expect(unknowns).toContainText(question);
+    await expect(unknowns).toContainText("recorded in Situation");
+    await expect(unknowns).not.toContainText("No case-specific open questions have been recorded");
+    await screenshot(page, "19-open-questions-in-compare");
+  });
+
   test("an investigation with no recorded analysis says so without model wording", async ({
     page,
   }) => {
