@@ -184,6 +184,13 @@ describe("SQLite local runtime", () => {
       expect(writes).toBe(0);
 
       await runtime.cases.updateCaseMeta({ id: created.id, status: "monitoring", legalHold: false });
+      expect(writes).toBe(1);
+      runtime.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("persists contribution, intake batch, and evidence mutations across reopen", async () => {
     const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-mutators-"));
     const path = join(root, "collab.sqlite");
