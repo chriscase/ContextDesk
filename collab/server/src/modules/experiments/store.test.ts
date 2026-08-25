@@ -214,3 +214,46 @@ describe("experiment decision revision uniqueness", () => {
     expect(listed[0]?.id).toBe(first.id);
   });
 });
+
+describe("experiment trace annotation sequence uniqueness", () => {
+  it("refuses a forked sequence even when annotation ids differ", async () => {
+    const store = new MemoryExperimentStore();
+    const first = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      experimentId: experimentRow().id,
+      candidateId: "cand-qwen-3.6-27b",
+      event: {
+        eventId: "ann-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        sequence: 7,
+        kind: "human_annotation" as const,
+        actor: "human" as const,
+        role: null,
+        parentEventId: "evt-imported-6",
+        evidenceRefs: [],
+        observedAt: { status: "unknown" as const },
+        excerpt: "Alice: inventory timeout is the useful lead.",
+        excerptHash: null,
+        unknowns: ["timestamp"],
+      },
+      authorId: "alice",
+      authorUsername: "alice",
+      createdAt: "2026-08-24T12:00:00.000Z",
+    };
+    const second = {
+      ...first,
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      event: {
+        ...first.event,
+        eventId: "ann-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        excerpt: "Bob: a concurrent annotation must not reuse sequence 7.",
+      },
+      authorId: "bob",
+      authorUsername: "bob",
+    };
+    await store.insertAnnotation(first);
+    await expect(store.insertAnnotation(second)).rejects.toThrow(/annotation sequence already exists/);
+    const listed = await store.listAnnotations(experimentRow().id);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.id).toBe(first.id);
+  });
+});

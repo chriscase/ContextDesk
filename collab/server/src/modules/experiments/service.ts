@@ -66,6 +66,7 @@ const UNKNOWN_SNAPSHOT_PROOF: ExperimentSnapshotProof = {
 export class ExperimentConflictError extends Error {
   readonly code:
     | "revision_conflict"
+    | "sequence_conflict"
     | "already_accepted"
     | "stale_revision"
     | "stale_gold"
@@ -97,6 +98,11 @@ function isDecisionRevisionConflict(error: unknown): boolean {
   }
   const message = error instanceof Error ? error.message : String(error);
   return /decision revision already exists|duplicate key.*experiment_decisions/i.test(message);
+}
+
+function isAnnotationSequenceConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /annotation sequence already exists/i.test(message);
 }
 
 export interface ExperimentView {
@@ -908,33 +914,45 @@ export class ExperimentService {
       throw new Error("unknown candidateId");
     }
     if (!input.text.trim()) throw new Error("annotation text is required");
-    const traces = await this.store.listTraces(row.id);
-    const current = traces.find((trace) => trace.candidateId === input.candidateId);
-    if (!current) throw new Error("import a trace before annotating");
-    const nextSeq = (current.events.at(-1)?.sequence ?? 0) + 1;
     const annotationId = randomUUID();
     return this.withExperimentAtomic(async () => {
-    await this.store.insertAnnotation({
-      id: annotationId,
-      experimentId: row.id,
-      candidateId: input.candidateId,
-      event: {
-        eventId: `ann-${annotationId}`,
-        sequence: nextSeq,
-        kind: "human_annotation",
-        actor: "human",
-        role: null,
-        parentEventId: input.parentEventId ?? current?.events.at(-1)?.eventId ?? null,
-        evidenceRefs: input.evidenceRefs ?? [],
-        observedAt: { status: "unknown" },
-        excerpt: input.text.trim().slice(0, 240),
-        excerptHash: null,
-        unknowns: ["timestamp"],
-      },
-      authorId: actor.id,
-      authorUsername: actor.username,
-      createdAt: new Date().toISOString(),
-    });
+    await this.store.lockExperiment(row.id);
+    const current = await this.store.findTrace(row.id, input.candidateId);
+    if (!current) throw new Error("import a trace before annotating");
+    const annotations = await this.store.listAnnotations(row.id);
+    const merged = mergeAnnotations(current, annotations);
+    const nextSeq = (merged.events.at(-1)?.sequence ?? 0) + 1;
+    try {
+      await this.store.insertAnnotation({
+        id: annotationId,
+        experimentId: row.id,
+        candidateId: input.candidateId,
+        event: {
+          eventId: `ann-${annotationId}`,
+          sequence: nextSeq,
+          kind: "human_annotation",
+          actor: "human",
+          role: null,
+          parentEventId: input.parentEventId ?? merged.events.at(-1)?.eventId ?? null,
+          evidenceRefs: input.evidenceRefs ?? [],
+          observedAt: { status: "unknown" },
+          excerpt: input.text.trim().slice(0, 240),
+          excerptHash: null,
+          unknowns: ["timestamp"],
+        },
+        authorId: actor.id,
+        authorUsername: actor.username,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (isAnnotationSequenceConflict(error)) {
+        throw new ExperimentConflictError(
+          "sequence_conflict",
+          "annotation sequence already exists",
+        );
+      }
+      throw error;
+    }
     await this.deps.audit.append({
       identity: actor.id,
       action: "experiment_trace_annotate",
@@ -1241,21 +1259,32 @@ export class ExperimentService {
 function mergeAnnotations(
   trace: InteractionTraceV1,
   annotations: {
+    id?: string;
     candidateId: string;
     event: InteractionTraceV1["events"][number];
     authorUsername: string;
   }[],
 ): InteractionTraceV1 {
-  const extra = annotations.filter((row) => row.candidateId === trace.candidateId);
+  const extra = annotations
+    .filter((row) => row.candidateId === trace.candidateId)
+    .slice()
+    .sort((left, right) => {
+      const bySequence = left.event.sequence - right.event.sequence;
+      if (bySequence !== 0) return bySequence;
+      return (left.id ?? "").localeCompare(right.id ?? "");
+    });
   if (extra.length === 0) return trace;
-  let sequence = trace.events.at(-1)?.sequence ?? 0;
   const events = [...trace.events];
+  const seen = new Set(events.map((event) => event.sequence));
   for (const row of extra) {
-    sequence += 1;
+    if (seen.has(row.event.sequence)) {
+      throw new Error("annotation sequence already exists");
+    }
+    seen.add(row.event.sequence);
     const attributedEvent = {
       ...row.event,
       authorUsername: row.authorUsername,
-      sequence,
+      sequence: row.event.sequence,
       parentEventId: row.event.parentEventId ?? events.at(-1)?.eventId ?? null,
     } as InteractionTraceV1["events"][number] & { authorUsername: string };
     events.push(attributedEvent);

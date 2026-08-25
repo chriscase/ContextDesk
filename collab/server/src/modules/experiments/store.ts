@@ -87,6 +87,7 @@ export interface ExperimentStore {
   listTraces(experimentId: string): Promise<InteractionTraceV1[]>;
   findTrace(experimentId: string, candidateId: string): Promise<InteractionTraceV1 | null>;
   insertTrace(experimentId: string, row: InteractionTraceV1, fingerprint: string): Promise<void>;
+  lockExperiment(experimentId: string): Promise<void>;
   listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]>;
   insertAnnotation(row: TraceAnnotationRow): Promise<void>;
 }
@@ -444,6 +445,10 @@ export class MemoryExperimentStore implements ExperimentStore {
     this.traces.set(experimentId, traces);
   }
 
+  async lockExperiment(_experimentId: string): Promise<void> {
+    // Memory transactions are serialized by CaseStore.atomicBoundary.
+  }
+
   async listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]> {
     return [...(this.annotations.get(experimentId) ?? [])].map((row) => ({
       ...row,
@@ -458,6 +463,14 @@ export class MemoryExperimentStore implements ExperimentStore {
 
   async insertAnnotation(row: TraceAnnotationRow): Promise<void> {
     const list = this.annotations.get(row.experimentId) ?? [];
+    if (
+      list.some(
+        (existing) =>
+          existing.candidateId === row.candidateId && existing.event.sequence === row.event.sequence,
+      )
+    ) {
+      throw new Error("annotation sequence already exists");
+    }
     list.push({
       ...row,
       event: {
@@ -648,6 +661,14 @@ export class PgExperimentStore implements ExperimentStore {
     );
   }
 
+  async lockExperiment(experimentId: string): Promise<void> {
+    const res = await this.queryable.query(
+      `SELECT id FROM experiment_packages WHERE id = $1 FOR UPDATE`,
+      [experimentId],
+    );
+    if (res.rowCount !== 1) throw new Error("experiment not found");
+  }
+
   async listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]> {
     const res = await this.queryable.query(
       `SELECT payload FROM experiment_trace_annotations WHERE experiment_id = $1 ORDER BY created_at, id`,
@@ -657,6 +678,15 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async insertAnnotation(row: TraceAnnotationRow): Promise<void> {
+    await this.lockExperiment(row.experimentId);
+    const existing = await this.listAnnotations(row.experimentId);
+    if (
+      existing.some(
+        (item) => item.candidateId === row.candidateId && item.event.sequence === row.event.sequence,
+      )
+    ) {
+      throw new Error("annotation sequence already exists");
+    }
     await this.queryable.query(
       `INSERT INTO experiment_trace_annotations (id, experiment_id, candidate_id, created_at, payload)
        VALUES ($1,$2,$3,$4,$5::jsonb)`,
