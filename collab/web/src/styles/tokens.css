@@ -65,6 +65,16 @@ html[data-theme="grokptah"] {
   --success: #6fcf97; --warning: #fb8043; --danger: #f07178;
 }
 
+/* Shared shell-polish tokens. Derived from the palette above so every skin
+   inherits them without per-theme overrides, and named so the desktop GUI can
+   adopt the same vocabulary. */
+:root {
+  --radius-card: 0.75rem;
+  --radius-panel: 0.85rem;
+  --line-soft: color-mix(in srgb, var(--border) 60%, transparent);
+  --accent-strong: color-mix(in srgb, var(--accent) 80%, var(--border));
+}
+
 * {
   box-sizing: border-box;
 }

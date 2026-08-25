@@ -64,6 +64,9 @@ test.describe("provider-free Rust bridge comparison", () => {
     await gotoStage(page, "Analyze");
     await page.getByRole("combobox", { name: "External chat run to compare" }).selectOption({ index: 1 });
     await page.getByRole("button", { name: "Review in Experiment Lab" }).first().click();
-    await expect(page.getByRole("status")).toContainText("is ready in Experiment Lab", { timeout: 30_000 });
+    await expect(page.locator(".triage-runs__handoff-success")).toContainText(
+      "is ready in Experiment Lab",
+      { timeout: 30_000 },
+    );
   });
 });

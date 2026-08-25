@@ -259,7 +259,10 @@ export class DeterministicMockTriageExecutor implements TriageRunExecutor {
   ): Promise<TriageCandidateRunV1> {
     const startedAt = now();
     await waitFor(5, signal);
-    const evidenceRefs = context.snapshot.evidence.map((item) => item.evidenceId);
+    // This executor proves orchestration only. It deliberately reads no
+    // evidence bytes and contacts no model, so it must never fabricate a
+    // citation merely because an item was present in the frozen snapshot.
+    const evidenceRefs: string[] = [];
     const outputHash = sha256(
       `${context.snapshot.fingerprint}:${context.candidate.candidateId}:${context.candidate.role}:${context.candidate.model}`,
     );
@@ -268,9 +271,14 @@ export class DeterministicMockTriageExecutor implements TriageRunExecutor {
       status: "completed",
       benchmarkRunId: null,
       outputHash,
-      summary: `Synthetic ${context.candidate.role} result: inspect the ${evidenceRefs.length} frozen evidence item(s) before changing the mitigation.`,
+      summary: "Provider-free simulation completed. It did not run the named model or inspect the frozen evidence.",
       evidenceRefs,
-      unknowns: ["provider usage", "cost", "live model output"],
+      unknowns: [
+        "evidence analysis not performed",
+        "live model output not produced",
+        "provider usage",
+        "cost",
+      ],
       usageStatus: "unknown",
       costStatus: "unknown",
       errorCode: null,

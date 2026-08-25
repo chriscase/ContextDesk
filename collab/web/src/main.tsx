@@ -13,6 +13,7 @@ import "./styles/experiment-lab.css";
 import "./styles/administration.css";
 import "./styles/admin-people.css";
 import "./styles/self-profile.css";
+import "./styles/polish.css";
 
 const root = document.getElementById("root");
 if (!root) {

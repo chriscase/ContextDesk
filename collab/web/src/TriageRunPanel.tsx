@@ -107,6 +107,12 @@ interface JobView {
   cancelRequestedAt: string | null;
 }
 
+interface LaunchReceipt {
+  jobId: string;
+  snapshotFingerprint: string;
+  evidenceCount: number;
+}
+
 const DEFAULT_CANDIDATES: CandidateOption[] = [
   { candidateId: "qwen-reviewer", role: "reviewer", provider: "synthetic", profileId: null, model: "qwen-3.6-27b", version: null },
   { candidateId: "gpt-oss-contributor", role: "contributor", provider: "synthetic", profileId: null, model: "gpt-oss-120b", version: null },
@@ -114,6 +120,7 @@ const DEFAULT_CANDIDATES: CandidateOption[] = [
 ];
 const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const GATEWAY_CONCURRENCY_OPTIONS = [1, 2, 3, 4] as const;
+const INITIAL_EVIDENCE_REFS = 8;
 const MAX_ERROR_LENGTH = 240;
 // Synthetic fixture labels; suggestions only — the operator may type any
 // non-DeepSeek model id their configured gateway connection actually serves.
@@ -209,6 +216,7 @@ export function TriageRunPanel(props: {
   caseId: string;
   canLead: boolean;
   readOnly: boolean;
+  participants?: { identityId?: string; username?: string }[];
   routeFocus?: WorkFocus;
 }) {
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
@@ -238,6 +246,7 @@ export function TriageRunPanel(props: {
   const [strategyId, setStrategyId] = useState("contextdesk.standard");
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [launchReceipt, setLaunchReceipt] = useState<LaunchReceipt | null>(null);
   const [selectedExternalRunId, setSelectedExternalRunId] = useState("");
   const [handoffJobId, setHandoffJobId] = useState<string | null>(null);
   const [handoffExperimentId, setHandoffExperimentId] = useState<string | null>(null);
@@ -248,9 +257,10 @@ export function TriageRunPanel(props: {
   const [benchImportExperimentId, setBenchImportExperimentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadRequestToken = useRef(0);
+  const launchFocusApplied = useRef<string | null>(null);
   useRouteFocus(props.routeFocus, !loading);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (preferredSnapshotId?: string | null) => {
     const requestToken = ++loadRequestToken.current;
     setError(null);
     try {
@@ -284,7 +294,13 @@ export function TriageRunPanel(props: {
       if (requestToken !== loadRequestToken.current) return;
       setSnapshots(nextSnapshots);
       setArtifacts(nextArtifacts);
-      setSelectedSnapshotId((current) => current || nextSnapshots.at(-1)?.id || "");
+      setSelectedSnapshotId((current) => {
+        if (preferredSnapshotId && nextSnapshots.some((snapshot) => snapshot.id === preferredSnapshotId)) {
+          return preferredSnapshotId;
+        }
+        if (current && nextSnapshots.some((snapshot) => snapshot.id === current)) return current;
+        return nextSnapshots.at(-1)?.id || "";
+      });
       setJobs(nextJobs);
       setExternalChatRuns(nextExternalChatRuns);
       setGatewayProfiles(profilesBody.profiles ?? []);
@@ -330,8 +346,8 @@ export function TriageRunPanel(props: {
 
   useEffect(() => {
     const refreshSnapshots = (event: Event) => {
-      const detail = (event as CustomEvent<{ caseId?: string }>).detail;
-      if (detail?.caseId === props.caseId) void load();
+      const detail = (event as CustomEvent<{ caseId?: string; snapshotId?: string }>).detail;
+      if (detail?.caseId === props.caseId) void load(detail.snapshotId);
     };
     window.addEventListener("contextdesk:snapshot-frozen", refreshSnapshots);
     return () => window.removeEventListener("contextdesk:snapshot-frozen", refreshSnapshots);
@@ -410,6 +426,21 @@ export function TriageRunPanel(props: {
     return () => window.clearInterval(timer);
   }, [hasActiveJob, load]);
 
+  useEffect(() => {
+    if (!launchReceipt || launchFocusApplied.current === launchReceipt.jobId) return;
+    if (!jobs.some((job) => job.id === launchReceipt.jobId)) return;
+    const frame = window.requestAnimationFrame(() => {
+      const element = document.getElementById(`triage-run-${launchReceipt.jobId}`);
+      if (!element) return;
+      launchFocusApplied.current = launchReceipt.jobId;
+      element.focus({ preventScroll: true });
+      if (typeof element.scrollIntoView === "function") {
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [jobs, launchReceipt]);
+
   function addLane(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -453,8 +484,14 @@ export function TriageRunPanel(props: {
   }
 
   async function launch() {
+    const launchSnapshot = snapshots.find((snapshot) => snapshot.id === selectedSnapshotId);
+    if (!launchSnapshot) {
+      setError("Choose a currently available frozen snapshot before starting a run.");
+      return;
+    }
     setRunning(true);
     setError(null);
+    setLaunchReceipt(null);
     const candidates = candidateOptions.filter((candidate) =>
       selectedCandidates.includes(candidate.candidateId),
     );
@@ -490,9 +527,27 @@ export function TriageRunPanel(props: {
           })),
         }),
       });
-      if (!response.ok) setError(await errorText(response, "Triage run could not be started."));
-      else setParentJobId(null);
-      await load();
+      if (!response.ok) {
+        setError(await errorText(response, "Triage run could not be started."));
+        return;
+      }
+      const created = (await response.json()) as Partial<JobView>;
+      if (
+        typeof created.id !== "string"
+        || created.snapshotId !== launchSnapshot.id
+        || created.snapshotFingerprint !== launchSnapshot.fingerprint
+      ) {
+        setError("The run did not confirm the selected snapshot. Do not rely on this run; refresh and try again.");
+        return;
+      }
+      setParentJobId(null);
+      launchFocusApplied.current = null;
+      setLaunchReceipt({
+        jobId: created.id,
+        snapshotFingerprint: launchSnapshot.fingerprint,
+        evidenceCount: launchSnapshot.evidence.length,
+      });
+      await load(launchSnapshot.id);
       // Workstreams presents the same runs as readable investigative work;
       // tell it the recorded set changed instead of making it poll blindly.
       window.dispatchEvent(new Event("contextdesk:triage-run-changed"));
@@ -619,6 +674,7 @@ export function TriageRunPanel(props: {
       finishedRunCount={completedJobs.length}
       focusSnapshotId={selectedSnapshotId}
       canAct={!props.readOnly && props.canLead}
+      {...(props.participants ? { participants: props.participants } : {})}
     />
   ) : null;
 
@@ -850,6 +906,29 @@ export function TriageRunPanel(props: {
                   >
                     {running ? "Starting…" : mode === "gateway" ? "Run gateway comparison" : "Run synthetic comparison"}
                   </button>
+                  {launchReceipt ? (
+                    <div className="triage-runs__launch-receipt" role="status" aria-live="polite">
+                      <strong>Last run recorded on the selected snapshot.</strong>
+                      <span>
+                        {launchReceipt.evidenceCount} frozen evidence item{launchReceipt.evidenceCount === 1 ? "" : "s"}
+                        {" · snapshot "}{shortHash(launchReceipt.snapshotFingerprint)}
+                        {" · run "}{shortHash(launchReceipt.jobId)}
+                      </span>
+                      <button
+                        className="case-memory__secondary-button"
+                        type="button"
+                        onClick={() => {
+                          const element = document.getElementById(`triage-run-${launchReceipt.jobId}`);
+                          element?.focus({ preventScroll: true });
+                          if (typeof element?.scrollIntoView === "function") {
+                            element.scrollIntoView({ behavior: "smooth", block: "center" });
+                          }
+                        }}
+                      >
+                        Open the last run
+                      </button>
+                    </div>
+                  ) : null}
                 </>
               )}
             </div>
@@ -977,12 +1056,26 @@ export function TriageRunPanel(props: {
                           </article>
                         ))}
                       </div>
-                      <p className="triage-runs__shared-evidence">
+                      <div className="triage-runs__shared-evidence">
                         <strong>Shared evidence:</strong>{" "}
                         {sharedRefs.length > 0
-                          ? sharedRefs.map((ref) => evidenceLabel(ref, artifacts)).join(", ")
+                          ? <>
+                              {sharedRefs.slice(0, INITIAL_EVIDENCE_REFS).map((ref) => evidenceLabel(ref, artifacts)).join(", ")}
+                              {sharedRefs.length > INITIAL_EVIDENCE_REFS ? (
+                                <details>
+                                  <summary>
+                                    Show {sharedRefs.length - INITIAL_EVIDENCE_REFS} more shared evidence items
+                                  </summary>
+                                  <ul>
+                                    {sharedRefs.slice(INITIAL_EVIDENCE_REFS).map((ref) => (
+                                      <li key={ref}>{evidenceLabel(ref, artifacts)}</li>
+                                    ))}
+                                  </ul>
+                                </details>
+                              ) : null}
+                            </>
                           : "none established"}
-                      </p>
+                      </div>
                     </>
                   )}
                 </section>
@@ -991,6 +1084,7 @@ export function TriageRunPanel(props: {
               <div className="triage-runs__history" aria-live="polite">
               {jobs.map((job) => (
                 <article
+                  id={`triage-run-${job.id}`}
                   className="triage-runs__job"
                   key={job.id}
                   data-route-item={job.id}
@@ -1038,11 +1132,23 @@ export function TriageRunPanel(props: {
                                 {candidate.summary ? <p>{candidate.summary}</p> : null}
                         {candidate.benchmarkRunId ? <p className="case-memory__note">Experiment Lab run {shortHash(candidate.benchmarkRunId)}</p> : null}
                         {candidate.evidenceRefs.length > 0 ? (
-                          <ul className="triage-runs__evidence" aria-label={`${candidate.model} evidence`}>
-                            {candidate.evidenceRefs.map((ref) => (
-                              <li key={ref} title={ref}>{evidenceLabel(ref, artifacts)}</li>
-                            ))}
-                          </ul>
+                          <div className="triage-runs__evidence-group">
+                            <ul className="triage-runs__evidence" aria-label={`${candidate.model} evidence`}>
+                              {candidate.evidenceRefs.slice(0, INITIAL_EVIDENCE_REFS).map((ref) => (
+                                <li key={ref} title={ref}>{evidenceLabel(ref, artifacts)}</li>
+                              ))}
+                            </ul>
+                            {candidate.evidenceRefs.length > INITIAL_EVIDENCE_REFS ? (
+                              <details className="triage-runs__evidence-more">
+                                <summary>Show {candidate.evidenceRefs.length - INITIAL_EVIDENCE_REFS} more cited evidence items</summary>
+                                <ul className="triage-runs__evidence" aria-label={`${candidate.model} additional evidence`}>
+                                  {candidate.evidenceRefs.slice(INITIAL_EVIDENCE_REFS).map((ref) => (
+                                    <li key={ref} title={ref}>{evidenceLabel(ref, artifacts)}</li>
+                                  ))}
+                                </ul>
+                              </details>
+                            ) : null}
+                          </div>
                         ) : null}
                         <small>
                           {candidate.evidenceRefs.length} evidence refs · usage unknown · cost unknown

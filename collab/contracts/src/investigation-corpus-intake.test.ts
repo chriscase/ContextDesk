@@ -121,13 +121,13 @@ describe("corpus intake contract", () => {
   it("publishes the bounded limits used by preview and commit", () => {
     expect(CORPUS_INTAKE_LIMITS).toEqual({
       maxArchiveBytes: 8_388_608,
-      maxExpandedBytes: 12_582_912,
-      maxCompressionRatio: 20,
-      maxFileCount: 64,
+      maxExpandedBytes: 67_108_864,
+      maxCompressionRatio: 128,
+      maxFileCount: 1_024,
       maxPathDepth: 8,
       maxPathLength: 240,
-      maxFileBytes: 1_000_000,
-      maxProcessingMs: 5_000,
+      maxFileBytes: 9_000_000,
+      maxProcessingMs: 15_000,
     });
   });
 

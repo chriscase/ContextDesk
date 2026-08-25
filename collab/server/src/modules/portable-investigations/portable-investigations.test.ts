@@ -292,7 +292,7 @@ async function fixture(): Promise<Fixture> {
       candidateId: "candidate-qwen",
       dimension: "evidence_support",
       score: 3,
-      rationale: "The synthetic lane cites the frozen warning.",
+      rationale: "The human review cites the frozen warning while the simulation cites nothing.",
       evidenceRefs: [uploaded.artifact.id],
     },
     "fixture",

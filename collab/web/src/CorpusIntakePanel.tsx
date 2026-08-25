@@ -4,9 +4,10 @@ import { protectedApiFetch } from "./protected-api.js";
 import { useRouteFocus } from "./route-focus.js";
 
 const MAX_ERROR_LENGTH = 240;
-const MAX_FILE_BYTES = 1_000_000;
+const MAX_FILE_BYTES = 9_000_000;
 const MAX_ARCHIVE_BYTES = 8_388_608;
-const MAX_FILE_COUNT = 64;
+const MAX_FILE_COUNT = 1_024;
+const INITIAL_REPORT_ROWS = 12;
 const ALLOWED_EXTENSIONS = [".log", ".txt", ".json", ".csv", ".xml", ".eml", ".md"];
 
 interface PreviewReport {
@@ -151,11 +152,11 @@ export function CorpusIntakePanel(props: {
       };
     }
     if (payloadFiles.length === 0) throw new Error("Choose at least one file.");
-    if (payloadFiles.length > MAX_FILE_COUNT) throw new Error("A batch may include at most 64 files.");
+    if (payloadFiles.length > MAX_FILE_COUNT) throw new Error("A batch may include at most 1,024 files.");
     const encoded = [];
     for (const row of payloadFiles) {
       if (row.file.size > MAX_FILE_BYTES) {
-        throw new Error(`${row.relativePath} is larger than 1 MB.`);
+        throw new Error(`${row.relativePath} is larger than 9 MB.`);
       }
       encoded.push({
         relativePath: row.relativePath,
@@ -260,7 +261,7 @@ export function CorpusIntakePanel(props: {
             {batch.items.length} accepted · {batch.rejected.length} rejected · origin {batch.origin}
           </p>
           <ul>
-            {batch.items.map((item) => (
+            {batch.items.slice(0, INITIAL_REPORT_ROWS).map((item) => (
               <li key={`${item.artifactId}:${item.relativePath}`}>
                 <a
                   href={pathFor({
@@ -282,6 +283,34 @@ export function CorpusIntakePanel(props: {
               </li>
             ))}
           </ul>
+          {batch.items.length > INITIAL_REPORT_ROWS ? (
+            <details>
+              <summary>Show {batch.items.length - INITIAL_REPORT_ROWS} more committed files</summary>
+              <ul>
+                {batch.items.slice(INITIAL_REPORT_ROWS).map((item) => (
+                  <li key={`${item.artifactId}:${item.relativePath}`}>
+                    <a
+                      href={pathFor({
+                        area: "investigations",
+                        caseId: props.caseId,
+                        stage: "analyze",
+                        focus: {
+                          section: "triage-evidence-board",
+                          item: item.artifactId,
+                          itemKind: "evidence",
+                          lane: null,
+                          experiment: null,
+                        },
+                      })}
+                    >
+                      {item.relativePath}
+                    </a>
+                    {item.duplicateDigest ? " · reused stored bytes" : ""}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
           <a
             className="corpus-intake__deeplink"
             href={pathFor({
@@ -318,12 +347,11 @@ export function CorpusIntakePanel(props: {
     <section className="corpus-intake" id="corpus-intake" aria-labelledby="corpus-intake-heading">
       <header className="corpus-intake__head">
         <h4 id="corpus-intake-heading">Logs and files for this investigation</h4>
-        <span className="triage-chip triage-chip--human">investigation-scoped</span>
+        <span className="triage-chip triage-chip--human">stays with this investigation</span>
       </header>
       <p className="corpus-intake__copy">
-        Upload files, a ZIP, or a browser directory. Every accepted file stays on this investigation
-        with its relative path, digest, privacy class, and uploader. Preview before commit. Retry
-        uses the same idempotency key and will not duplicate committed evidence.
+        Add files, a ZIP, or a browser directory. Preview the selection before saving it. Repeating
+        the same upload will not create duplicate evidence.
       </p>
       <fieldset className="corpus-intake__origin" aria-label="Intake origin">
         {(["files", "zip", "directory"] as const).map((value) => (
@@ -343,7 +371,7 @@ export function CorpusIntakePanel(props: {
         ))}
       </fieldset>
       <label className="corpus-intake__field">
-        Source label
+        How should this upload be labeled?
         <input
           className="login__input"
           value={sourceLabel}
@@ -355,7 +383,7 @@ export function CorpusIntakePanel(props: {
         />
       </label>
       <label className="corpus-intake__field">
-        Privacy class
+        Who can use these files?
         <select
           className="login__input"
           value={privacyClass}
@@ -365,8 +393,8 @@ export function CorpusIntakePanel(props: {
           }}
           aria-label="Corpus intake privacy class"
         >
-          <option value="owner_only">owner_only</option>
-          <option value="share_safe">share_safe</option>
+          <option value="owner_only">Only people in this investigation</option>
+          <option value="share_safe">Eligible for approved exports</option>
         </select>
       </label>
       {origin === "zip" ? (
@@ -433,10 +461,10 @@ export function CorpusIntakePanel(props: {
         <button
           className="login__submit"
           type="button"
-          disabled={Boolean(busy) || !preview}
+          disabled={Boolean(busy) || !preview || Boolean(batch)}
           onClick={() => void runCommit()}
         >
-          {busy === "commit" ? "Committing…" : batch ? "Retry commit" : "Commit accepted files"}
+          {busy === "commit" ? "Committing…" : batch ? "Committed" : "Commit accepted files"}
         </button>
       </div>
       {preview ? (
@@ -444,7 +472,7 @@ export function CorpusIntakePanel(props: {
           <h5>Accepted ({preview.accepted.length})</h5>
           {preview.accepted.length === 0 ? <p className="corpus-intake__meta">None.</p> : null}
           <ul>
-            {preview.accepted.map((row) => (
+            {preview.accepted.slice(0, INITIAL_REPORT_ROWS).map((row) => (
               <li key={row.relativePath}>
                 <strong>{row.relativePath}</strong>
                 <span>
@@ -454,10 +482,26 @@ export function CorpusIntakePanel(props: {
               </li>
             ))}
           </ul>
+          {preview.accepted.length > INITIAL_REPORT_ROWS ? (
+            <details>
+              <summary>Show {preview.accepted.length - INITIAL_REPORT_ROWS} more accepted files</summary>
+              <ul>
+                {preview.accepted.slice(INITIAL_REPORT_ROWS).map((row) => (
+                  <li key={row.relativePath}>
+                    <strong>{row.relativePath}</strong>
+                    <span>
+                      {row.mediaType} · {row.byteLength} bytes
+                      {row.duplicateDigest ? " · duplicate digest" : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
           <h5>Rejected ({preview.rejected.length})</h5>
           {preview.rejected.length === 0 ? <p className="corpus-intake__meta">None.</p> : null}
           <ul>
-            {preview.rejected.map((row, index) => (
+            {preview.rejected.slice(0, INITIAL_REPORT_ROWS).map((row, index) => (
               <li key={`${row.relativePath}:${row.reason}:${index}`}>
                 <strong>{row.relativePath || "(archive)"}</strong>
                 <span>
@@ -466,6 +510,21 @@ export function CorpusIntakePanel(props: {
               </li>
             ))}
           </ul>
+          {preview.rejected.length > INITIAL_REPORT_ROWS ? (
+            <details>
+              <summary>Show {preview.rejected.length - INITIAL_REPORT_ROWS} more rejected files</summary>
+              <ul>
+                {preview.rejected.slice(INITIAL_REPORT_ROWS).map((row, index) => (
+                  <li key={`${row.relativePath}:${row.reason}:${index + INITIAL_REPORT_ROWS}`}>
+                    <strong>{row.relativePath || "(archive)"}</strong>
+                    <span>
+                      {row.reason} · {row.detail}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
         </div>
       ) : null}
       {batchCard}

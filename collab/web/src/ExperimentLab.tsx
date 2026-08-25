@@ -352,7 +352,6 @@ interface SupportingArtifact {
   source: string;
   excerpt: string | null;
   context: string;
-  technicalRef: string;
 }
 
 interface HumanFinding {
@@ -400,7 +399,6 @@ function supportingArtifact(
         : traceEvent
           ? `The recorded lane captured this excerpt from ${label}; inspect the evidence board for the complete artifact.`
           : `The evidence record is available as ${label}, but no readable excerpt was loaded.`,
-      technicalRef: evidenceRef,
     };
   }
   for (const trace of view.traces ?? []) {
@@ -415,7 +413,6 @@ function supportingArtifact(
         source: `recorded lane transcript · ${model}`,
         excerpt: event.excerpt,
         context: `Trace step ${event.sequence} · ${event.kind} by ${event.authorUsername ?? event.actor}. Timestamp and component were not captured by this experiment record.`,
-        technicalRef: evidenceRef,
       };
     }
   }
@@ -424,7 +421,6 @@ function supportingArtifact(
     source: "Evidence reference recorded; source label was not captured in this experiment view",
     excerpt: null,
     context: "Supporting excerpt, timestamp, and component were not captured. ContextDesk will not reconstruct them from an identifier.",
-    technicalRef: evidenceRef,
   };
 }
 
@@ -578,10 +574,6 @@ function EvidencePicker(props: {
                   </select>
                 </label>
               ) : null}
-              <details>
-                <summary>Technical details</summary>
-                <code>{choice.ref}</code>
-              </details>
             </div>
           ))}
         </div>
@@ -822,7 +814,7 @@ function buildReviewQueue(view: ExperimentView): ReviewQueueItem[] {
     push({
       facetId: "divergence",
       category: "Recorded conflicts",
-      text: `Role conflict recorded on ${conflictRow.evidenceRef} — ${conflictRow.assignments
+      text: `Models assign different roles to the same evidence — ${conflictRow.assignments
         .map((assignment) => `${label(assignment.candidateId)} as ${assignment.role}`)
         .join("; ")}`,
       href: "#cross-exam-heading",
@@ -846,7 +838,7 @@ function buildReviewQueue(view: ExperimentView): ReviewQueueItem[] {
     push({
       facetId: "divergence",
       category: "Single-lane evidence",
-      text: `Only ${label(specific.candidateId)} cites ${specific.evidenceRefs.join(", ")} — no other lane corroborates it`,
+      text: `Only ${label(specific.candidateId)} cites evidence that no other lane corroborates`,
       href: "#cross-exam-heading",
       hrefLabel: "open cross-examination",
       candidateIds: [specific.candidateId],
@@ -1565,41 +1557,71 @@ export function ExperimentLab(props: {
   const goldConvergenceCount = (current?.comparison?.convergence ?? []).filter(
     (row) => row.inGold,
   ).length;
-  const scanUnknowns: string[] = [];
-  for (const row of current?.candidates ?? []) {
-    const unknownFacts = [
-      row.observedLatency.status === "unknown" ? "latency" : null,
-      row.cost.status === "unknown" ? "cost" : null,
-      row.usage.status === "unknown" ? "usage" : null,
-    ].filter((item): item is string => item !== null);
-    if (unknownFacts.length) {
-      scanUnknowns.push(`${row.modelLabel} — ${unknownFacts.join(" unknown; ")} unknown`);
-    }
-    const trace = (current?.traces ?? []).find((item) => item.candidateId === row.candidateId);
-    if (!trace) {
-      scanUnknowns.push(`${row.modelLabel} — no interaction trace recorded`);
-    } else {
-      if (trace.completeness !== "exact") {
-        scanUnknowns.push(
-          `${row.modelLabel} — ${TRACE_COMPLETENESS_LABELS[trace.completeness] ?? trace.completeness}`,
-        );
-      }
-      if (trace.unknowns.length) {
-        scanUnknowns.push(`${row.modelLabel} — trace cannot establish ${trace.unknowns.join(", ")}`);
-      }
-    }
+  // Keep investigative unknowns separate from run telemetry. Missing cost,
+  // token usage, traces, or a benchmark matters for auditability, but none of
+  // those facts is an unanswered question about the incident itself.
+  const caseUnknowns = [...new Set(
+    (latestDecision?.remainingUnknowns ?? [])
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0),
+  )];
+  const runDetailGaps: string[] = [];
+  const candidateCount = current?.candidates.length ?? 0;
+  const unknownLatencyCount = (current?.candidates ?? []).filter(
+    (row) => row.observedLatency.status === "unknown",
+  ).length;
+  const unknownCostCount = (current?.candidates ?? []).filter(
+    (row) => row.cost.status === "unknown",
+  ).length;
+  const unknownUsageCount = (current?.candidates ?? []).filter(
+    (row) => row.usage.status === "unknown",
+  ).length;
+  const showLatencyColumn = (current?.candidates ?? []).some(
+    (row) => row.observedLatency.status !== "unknown",
+  );
+  const showCostColumn = (current?.candidates ?? []).some(
+    (row) => row.cost.status !== "unknown",
+  );
+  const showUsageColumn = (current?.candidates ?? []).some(
+    (row) => row.usage.status !== "unknown",
+  );
+  const telemetryParts = [
+    unknownLatencyCount ? `latency for ${unknownLatencyCount}` : null,
+    unknownCostCount ? `cost for ${unknownCostCount}` : null,
+    unknownUsageCount ? `usage for ${unknownUsageCount}` : null,
+  ].filter((item): item is string => item !== null);
+  if (telemetryParts.length) {
+    runDetailGaps.push(
+      `Run telemetry was not reported: ${telemetryParts.join("; ")} of ${candidateCount} lane${candidateCount === 1 ? "" : "s"}.`,
+    );
   }
-  for (const row of current?.alignments ?? []) {
-    if (row.status === "unknown") {
-      scanUnknowns.push(`${candidateLabel(row.candidateId)} — not compared against a gold benchmark`);
-    } else if (row.status === "unscored") {
-      scanUnknowns.push(
-        `${candidateLabel(row.candidateId)} — cited no evidence to compare against the gold benchmark`,
-      );
-    }
+  const missingTraceCount = (current?.candidates ?? []).filter(
+    (row) => !(current?.traces ?? []).some((trace) => trace.candidateId === row.candidateId),
+  ).length;
+  const incompleteTraces = (current?.traces ?? []).filter((trace) => trace.completeness !== "exact");
+  const traceUnknownFields = [...new Set(
+    incompleteTraces.flatMap((trace) => trace.unknowns.map((item) => item.trim()).filter(Boolean)),
+  )];
+  if (missingTraceCount || incompleteTraces.length) {
+    const traceParts = [
+      missingTraceCount ? `${missingTraceCount} not recorded` : null,
+      incompleteTraces.length ? `${incompleteTraces.length} incomplete` : null,
+    ].filter((item): item is string => item !== null);
+    runDetailGaps.push(
+      `Interaction traces: ${traceParts.join("; ")}.${traceUnknownFields.length ? ` Unrecorded fields include ${traceUnknownFields.join(", ")}.` : ""}`,
+    );
   }
   if (current && !current.gold) {
-    scanUnknowns.push("Gold benchmark — none recorded for this experiment");
+    runDetailGaps.push("No human benchmark has been recorded for this comparison.");
+  } else {
+    const unscoredAlignmentCount = (current?.alignments ?? []).filter(
+      (row) => row.status === "unknown" || row.status === "unscored",
+    ).length;
+    if (unscoredAlignmentCount) {
+      runDetailGaps.push(
+        `${unscoredAlignmentCount} lane${unscoredAlignmentCount === 1 ? " has" : "s have"} no scored benchmark comparison.`,
+      );
+    }
   }
   // Cockpit projections — pure restatements of the current view (see builders).
   const crossRows = current ? buildEvidenceCrossRows(current) : [];
@@ -1986,6 +2008,7 @@ export function ExperimentLab(props: {
             ) : (
               <span>Presence unavailable</span>
             )}
+            <span>Presence refreshes periodically</span>
           </div>
           {current ? (
             <span className="experiment-lab__status">{current.candidates.length} candidate lanes</span>
@@ -1993,61 +2016,17 @@ export function ExperimentLab(props: {
         </div>
       </header>
       {showComparison ? (
-        <>
-      <p className="experiment-lab__intro">
-        Compare seeded, connected ContextDesk, and pasted-chat triage candidates across model and
-        strategy lanes. Agreement is not proof of correctness. Textual similarity is not a winner.
-        A gold reference is a human benchmark decision, not an infallible truth claim. Gold alignment
-        is scored separately from helpfulness. Gold alignment is not a correctness verdict. Unknown
-        cost, usage, and partial traces stay unknown.
-      </p>
-      <div className="experiment-lab__future-slots" aria-label="Extension slots">
-        <span>Sources: seeded · ContextDesk connector · pasted chat</span>
-        <span>
-          Presence: {presence ? `${presence.members.length} active` : "checking…"} · live
-          refresh by polling
-        </span>
-        <span>Next extensions: semantic search · multi-worker leases</span>
-      </div>
-      <details className="experiment-lab__tools experiment-lab__extensions">
-        <summary>Extension points</summary>
-        <div className="experiment-lab__extension-grid" aria-label="Extension points">
-          <div>
-            <span>Case comments</span>
-            <small>Case timeline and notes</small>
-          </div>
-          <div>
-            <span>Evidence notes</span>
-            <small>Anchored in the evidence map</small>
-          </div>
-          <div>
-            <span>Lane / run notes</span>
-            <small>Candidate and replay context</small>
-          </div>
-          <div>
-            <span>Trace event notes</span>
-            <small>Annotations stay with the path</small>
-          </div>
-          <div>
-            <span>Decision / gold history</span>
-            <small>Revisions and provenance</small>
-          </div>
-          <div>
-            <span>Connected run handoff</span>
-            <small>ContextDesk host bridge to candidate path</small>
-          </div>
-          <div className="experiment-lab__extension-slot--future">
-            <span>Semantic search</span>
-            <small>Future slot · case-wide retrieval</small>
-          </div>
-        </div>
-      </details>
-        </>
+        <p className="experiment-lab__intro">
+          Compare recorded analyses from ContextDesk, imported chat, and other triage methods.
+          Review the evidence, disagreements, and open questions; a person makes the decision.
+        </p>
       ) : null}
-      <p className="experiment-lab__authority">
-        Actions in this room are attributed to <strong>{participantName}</strong> ({participantRole}).
-        The server remains authoritative for permissions, provenance, and accepted state.
-      </p>
+      {surface === "decision" ? (
+        <p className="experiment-lab__authority">
+          Actions in this room are attributed to <strong>{participantName}</strong> ({participantRole}).
+          The server remains authoritative for permissions, provenance, and accepted state.
+        </p>
+      ) : null}
       {readOnly ? (
         <p className="experiment-lab__disclaimer" role="status">
           Static read-only mode: review the seeded comparison or export its share-safe
@@ -2056,44 +2035,43 @@ export function ExperimentLab(props: {
       ) : null}
       {showComparison && canWrite ? (
         <details className="experiment-lab__tools">
-          <summary>Import another experiment package</summary>
-          <form className="composer" onSubmit={(event) => void importPackage(event)}>
-            <textarea
-              className="login__input"
-              rows={6}
-              value={payload}
-              onChange={(event) => setPayload(event.target.value)}
-              placeholder="Paste share-safe experiment, strategy package, or summary JSON"
-              required
-            />
-            <button className="login__submit" type="submit">
-              Import experiment
-            </button>
-          </form>
-        </details>
-      ) : null}
-      {showComparison && canWrite ? (
-        <details className="experiment-lab__tools">
-          <summary>Import bench-compare / recorded artifact</summary>
-          <p className="experiment-lab__section-note">
-            Paste a hermetic multi-strategy bench artifact (share-safe lanes with synthetic model
-            labels). The converter lands candidates and traces on this case without inventing gold,
-            cost, usage, or provider calls. Raw JSON stays here; the primary view remains the
-            candidate table, evidence, and accepted decision.
-          </p>
-          <form className="composer" onSubmit={(event) => void importBenchArtifact(event)}>
-            <textarea
-              className="login__input"
-              rows={6}
-              value={benchPayload}
-              onChange={(event) => setBenchPayload(event.target.value)}
-              placeholder="Paste cd-collab.bench_run_artifact.v1 or bench-compare JSON with lanes"
-              required
-            />
-            <button className="login__submit" type="submit">
-              Convert and import onto case
-            </button>
-          </form>
+          <summary>Add or import analysis</summary>
+          <details className="experiment-lab__tools">
+            <summary>Import another experiment package</summary>
+            <form className="composer" onSubmit={(event) => void importPackage(event)}>
+              <textarea
+                className="login__input"
+                rows={6}
+                value={payload}
+                onChange={(event) => setPayload(event.target.value)}
+                placeholder="Paste share-safe experiment, strategy package, or summary JSON"
+                required
+              />
+              <button className="login__submit" type="submit">
+                Import experiment
+              </button>
+            </form>
+          </details>
+          <details className="experiment-lab__tools">
+            <summary>Import bench-compare / recorded artifact</summary>
+            <p className="experiment-lab__section-note">
+              Paste a share-safe multi-strategy artifact. Imported output remains unverified until a
+              person reviews it.
+            </p>
+            <form className="composer" onSubmit={(event) => void importBenchArtifact(event)}>
+              <textarea
+                className="login__input"
+                rows={6}
+                value={benchPayload}
+                onChange={(event) => setBenchPayload(event.target.value)}
+                placeholder="Paste a recorded multi-strategy comparison"
+                required
+              />
+              <button className="login__submit" type="submit">
+                Convert and import onto case
+              </button>
+            </form>
+          </details>
         </details>
       ) : null}
       {error ? (
@@ -2129,10 +2107,9 @@ export function ExperimentLab(props: {
       {current ? (
         <>
           <details className="experiment-lab__identity">
-            <summary>Technical artifact identity</summary>
+            <summary>Comparison provenance</summary>
             <p>
-              package {current.packageId} · task {current.taskFingerprint.slice(0, 12)} · snapshot{" "}
-              {current.snapshotFingerprint.slice(0, 12)}
+              Recorded package · reproducible task binding · exact frozen evidence binding
             </p>
           </details>
           {showComparison ? (
@@ -2248,8 +2225,8 @@ export function ExperimentLab(props: {
                 <strong>{divergenceCount}</strong>
               </article>
               <article>
-                <span>Explicit unknowns</span>
-                <strong>{scanUnknowns.length}</strong>
+                <span>Open questions</span>
+                <strong>{caseUnknowns.length}</strong>
               </article>
               <article>
                 <span>Human reviews</span>
@@ -2305,7 +2282,6 @@ export function ExperimentLab(props: {
                         <details>
                           <summary>Technical details</summary>
                           <p>{finding.artifact.context}</p>
-                          <code>{finding.artifact.technicalRef}</code>
                         </details>
                       </li>
                     ))}
@@ -2329,20 +2305,30 @@ export function ExperimentLab(props: {
                 <h5 id="scan-unknown-heading" className="experiment-lab__scan-title">
                   What stays unknown
                 </h5>
-                {scanUnknowns.length ? (
+                {caseUnknowns.length ? (
                   <ul className="experiment-lab__scan-list">
-                    {scanUnknowns.map((item) => (
+                    {caseUnknowns.map((item) => (
                       <li key={item}>{item}</li>
                     ))}
                   </ul>
                 ) : (
                   <p className="experiment-lab__empty">
-                    No explicit unknowns are recorded in this view.
+                    No case-specific open questions have been recorded yet. This does not mean the case is resolved.
                   </p>
                 )}
                 <p className="experiment-lab__scan-caveat">
                   Unknown stays unknown until evidence resolves it.
                 </p>
+                {runDetailGaps.length ? (
+                  <details className="experiment-lab__run-details">
+                    <summary>Run details and evaluation coverage ({runDetailGaps.length})</summary>
+                    <ul className="experiment-lab__scan-list">
+                      {runDetailGaps.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
               </article>
               <article className="experiment-lab__scan-card" aria-labelledby="scan-decided-heading">
                 <h5 id="scan-decided-heading" className="experiment-lab__scan-title">
@@ -2528,8 +2514,16 @@ export function ExperimentLab(props: {
                               <summary>Technical details</summary>
                               <p>Recorded kind: {event.kind} · actor: {event.actor}</p>
                               <p>Timestamp and component were not captured by this trace.</p>
-                              <p>Evidence references: {event.evidenceRefs.join(", ") || "none recorded"}</p>
-                              <code>{event.eventId}</code>
+                              <p>
+                                Evidence: {event.evidenceRefs.length
+                                  ? event.evidenceRefs.map((evidenceRef) => supportingArtifact(
+                                      current,
+                                      evidenceRef,
+                                      evidenceArtifacts,
+                                      evidenceExcerpts,
+                                    ).label).join(", ")
+                                  : "none recorded"}
+                              </p>
                             </details>
                           </li>
                         ))}
@@ -2565,21 +2559,30 @@ export function ExperimentLab(props: {
                     {deepLink("open the exact queue context", "review-queue-heading", null, focusedCandidate.candidateId)}
                   </p>
                   <details>
-                    <summary>Technical lane identity and comparison fields</summary>
-                    <code>{focusedCandidate.candidateId}</code>
+                    <summary>Lane evidence details</summary>
                     <p>
                       Evidence only this lane cites:{" "}
                       {current.agreement.candidateSpecific
                         .find((row) => row.candidateId === focusedCandidate.candidateId)
-                        ?.evidenceRefs.join(", ") || "none recorded"}
+                        ?.evidenceRefs.map((evidenceRef) => supportingArtifact(
+                          current,
+                          evidenceRef,
+                          evidenceArtifacts,
+                          evidenceExcerpts,
+                        ).label).join(", ") || "none recorded"}
                     </p>
                     <p>
-                      Role-conflict evidence references:{" "}
+                      Evidence with a recorded role conflict:{" "}
                       {current.agreement.roleConflicts
                         .filter((row) => row.assignments.some(
                           (assignment) => assignment.candidateId === focusedCandidate.candidateId,
                         ))
-                        .map((row) => row.evidenceRef)
+                        .map((row) => supportingArtifact(
+                          current,
+                          row.evidenceRef,
+                          evidenceArtifacts,
+                          evidenceExcerpts,
+                        ).label)
                         .join(", ") || "none recorded"}
                     </p>
                   </details>
@@ -2706,11 +2709,6 @@ export function ExperimentLab(props: {
                             {focusedCandidate && item.candidateIds.includes(focusedCandidate.candidateId) ? (
                               <span className="experiment-lab__focus-flag">involves focused lane</span>
                             ) : null}
-                            <details>
-                              <summary>Technical details</summary>
-                              <p>{item.text}</p>
-                              {item.evidenceRef ? <code>{item.evidenceRef}</code> : null}
-                            </details>
                           </li>
                         );
                       })}
@@ -2743,12 +2741,20 @@ export function ExperimentLab(props: {
                   {current.gold.evidenceAnchors.length === 1 ? "" : "s"}.
                 </p>
                 <details className="experiment-lab__technical-details">
-                  <summary>Technical benchmark identity and evidence references</summary>
-                  <p><code>{current.gold.goldId}</code></p>
-                  <p>Accepted decision: <code>{current.gold.acceptedDecisionId}</code></p>
+                  <summary>Benchmark evidence details</summary>
                   <p>
-                    Evidence references:{" "}
-                    <code>{current.gold.evidenceAnchors.join(", ") || "none recorded"}</code>
+                    Accepted decision: {acceptedDecision && acceptedDecision.id === current.gold.acceptedDecisionId
+                      ? `“${truncateText(acceptedDecision.text)}” (r${current.gold.acceptedDecisionRevision})`
+                      : `record unavailable in this view (r${current.gold.acceptedDecisionRevision})`}
+                  </p>
+                  <p>
+                    Evidence anchors:{" "}
+                    {current.gold.evidenceAnchors.map((evidenceRef) => supportingArtifact(
+                      current,
+                      evidenceRef,
+                      evidenceArtifacts,
+                      evidenceExcerpts,
+                    ).label).join(", ") || "none recorded"}
                   </p>
                 </details>
                 <p className="experiment-lab__disclaimer">
@@ -2774,8 +2780,9 @@ export function ExperimentLab(props: {
               <span className="experiment-lab__section-kicker">Observed + human signals</span>
             </div>
             <p className="experiment-lab__section-note">
-              Run facts are shown beside separate helpfulness and gold signals. Unknown values stay
-              unknown.
+              Recorded run facts are shown beside separate helpfulness and gold signals. Entirely
+              unreported measurements stay in the collapsed run details instead of filling this
+              table with noise.
             </p>
           <div className="experiment-lab__matrix-wrap">
             <table className="experiment-lab__matrix">
@@ -2785,9 +2792,9 @@ export function ExperimentLab(props: {
                   <th scope="col">Candidate</th>
                   <th scope="col">Role</th>
                   <th scope="col">Status</th>
-                  <th scope="col">Latency</th>
-                  <th scope="col">Cost</th>
-                  <th scope="col">Usage</th>
+                  {showLatencyColumn ? <th scope="col">Latency</th> : null}
+                  {showCostColumn ? <th scope="col">Cost</th> : null}
+                  {showUsageColumn ? <th scope="col">Usage</th> : null}
                   <th scope="col">Helpfulness</th>
                   <th scope="col">Gold</th>
                 </tr>
@@ -2808,18 +2815,12 @@ export function ExperimentLab(props: {
                       {focusedCandidate?.candidateId === row.candidateId ? (
                         <span className="experiment-lab__focus-flag">focused</span>
                       ) : null}
-                      {row.candidateId !== row.modelLabel ? (
-                        <details>
-                          <summary>Technical lane identity</summary>
-                          <code>{row.candidateId}</code>
-                        </details>
-                      ) : null}
                     </th>
                     <td>{row.role}</td>
                     <td>{row.runStatus}</td>
-                    <td>{latencyLabel(row.observedLatency)}</td>
-                    <td>{row.cost.status}</td>
-                    <td>{row.usage.status}</td>
+                    {showLatencyColumn ? <td>{latencyLabel(row.observedLatency)}</td> : null}
+                    {showCostColumn ? <td>{row.cost.status}</td> : null}
+                    {showUsageColumn ? <td>{row.usage.status}</td> : null}
                     <td>{row.helpfulnessState}</td>
                     <td>{row.goldState}</td>
                   </tr>
@@ -2847,17 +2848,21 @@ export function ExperimentLab(props: {
                 <h5>Shared evidence</h5>
                 {current.agreement.sharedAnchors.length ? (
                   <ul className="experiment-lab__detail-list">
-                    {current.agreement.sharedAnchors.map((anchor) => (
-                      <li key={`${anchor.evidenceRef}:${anchor.role}`}>
-                        <strong>Shared supporting evidence</strong> — treated as {anchor.role} by {" "}
-                        {anchor.candidateIds.map(candidateLabel).join(", ")}.
-                        {deepLink(" Inspect artifact", "cross-exam-heading", anchor.evidenceRef)}
-                        <details>
-                          <summary>Technical evidence identity</summary>
-                          <code>{anchor.evidenceRef}</code>
-                        </details>
-                      </li>
-                    ))}
+                    {current.agreement.sharedAnchors.map((anchor) => {
+                      const artifact = supportingArtifact(
+                        current,
+                        anchor.evidenceRef,
+                        evidenceArtifacts,
+                        evidenceExcerpts,
+                      );
+                      return (
+                        <li key={`${anchor.evidenceRef}:${anchor.role}`}>
+                          <strong>{artifact.label}</strong> — shared supporting evidence treated as {anchor.role} by {" "}
+                          {anchor.candidateIds.map(candidateLabel).join(", ")}.
+                          {deepLink(" Inspect artifact", "cross-exam-heading", anchor.evidenceRef)}
+                        </li>
+                      );
+                    })}
                   </ul>
                 ) : (
                   <p className="experiment-lab__empty">No shared evidence recorded.</p>
@@ -2870,27 +2875,44 @@ export function ExperimentLab(props: {
                     {current.agreement.candidateSpecific.map((row) => (
                       <li key={row.candidateId}>
                         <strong>{candidateLabel(row.candidateId)} uses evidence no other lane cites.</strong>{" "}
-                        Inspect and corroborate the supporting artifact before relying on it.
-                        {row.evidenceRefs[0]
-                          ? deepLink(" Open artifact", "cross-exam-heading", row.evidenceRefs[0], row.candidateId)
-                          : null}
-                        <details>
-                          <summary>Technical evidence identities</summary>
-                          <code>{row.evidenceRefs.join(", ") || "none recorded"}</code>
-                        </details>
+                        Inspect and corroborate it before relying on the lane.
+                        {row.evidenceRefs.length ? (
+                          <ul className="experiment-lab__detail-list">
+                            {row.evidenceRefs.map((evidenceRef) => {
+                              const artifact = supportingArtifact(
+                                current,
+                                evidenceRef,
+                                evidenceArtifacts,
+                                evidenceExcerpts,
+                              );
+                              return (
+                                <li key={evidenceRef}>
+                                  <strong>{artifact.label}</strong>
+                                  {deepLink(" Inspect artifact", "cross-exam-heading", evidenceRef, row.candidateId)}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        ) : (
+                          <span> No supporting artifact was recorded.</span>
+                        )}
                       </li>
                     ))}
-                    {current.agreement.roleConflicts.map((row) => (
-                      <li key={row.evidenceRef}>
-                        <strong>Models assign different meaning to the same evidence:</strong>{" "}
-                        {row.assignments.map((a) => `${candidateLabel(a.candidateId)} treats it as ${a.role}`).join("; ")}
-                        {deepLink(" Inspect artifact", "cross-exam-heading", row.evidenceRef)}
-                        <details>
-                          <summary>Technical evidence identity</summary>
-                          <code>{row.evidenceRef}</code>
-                        </details>
-                      </li>
-                    ))}
+                    {current.agreement.roleConflicts.map((row) => {
+                      const artifact = supportingArtifact(
+                        current,
+                        row.evidenceRef,
+                        evidenceArtifacts,
+                        evidenceExcerpts,
+                      );
+                      return (
+                        <li key={row.evidenceRef}>
+                          <strong>Models assign different meaning to {artifact.label}:</strong>{" "}
+                          {row.assignments.map((a) => `${candidateLabel(a.candidateId)} treats it as ${a.role}`).join("; ")}
+                          {deepLink(" Inspect artifact", "cross-exam-heading", row.evidenceRef)}
+                        </li>
+                      );
+                    })}
                   </ul>
                 ) : (
                   <p className="experiment-lab__empty">No candidate-specific evidence recorded.</p>
@@ -3003,10 +3025,6 @@ export function ExperimentLab(props: {
                                 anchor no lane cites
                               </span>
                             ) : null}
-                            <details>
-                              <summary>Technical evidence identity</summary>
-                              <code>{row.evidenceRef}</code>
-                            </details>
                           </th>
                           {current.candidates.map((candidate) => {
                             const cell = row.cells[candidate.candidateId];
@@ -3117,12 +3135,6 @@ export function ExperimentLab(props: {
               {" · "}
               Helpfulness {current.candidates.map((row) => `${row.modelLabel}:${row.helpfulnessState}`).join(", ")}
             </p>
-            {current.comparison?.gold.acceptedDecisionId ? (
-              <details className="experiment-lab__technical-details">
-                <summary>Technical benchmark decision identity</summary>
-                <code>{current.comparison.gold.acceptedDecisionId}</code>
-              </details>
-            ) : null}
             <div className="experiment-lab__signal-groups">
               {(current.comparison?.questionPaths ?? []).length ? (
                 <div className="experiment-lab__signal-group">
@@ -3208,12 +3220,6 @@ export function ExperimentLab(props: {
                         <span className="experiment-lab__focus-flag">focused</span>
                       ) : null}
                       <h5 className="experiment-lab__path-title">{candidateLabel(trace.candidateId)}</h5>
-                      {candidateLabel(trace.candidateId) !== trace.candidateId ? (
-                        <details>
-                          <summary>Technical lane identity</summary>
-                          <code>{trace.candidateId}</code>
-                        </details>
-                      ) : null}
                     </div>
                     <span
                       className={
@@ -3251,10 +3257,18 @@ export function ExperimentLab(props: {
                           </p>
                         )}
                         <details>
-                          <summary>Technical trace fields</summary>
-                          <p>Step {event.sequence} · {event.kind} · actor {event.actor}</p>
-                          <code>{event.eventId}</code>
-                          {event.evidenceRefs.length ? <p>Evidence: {event.evidenceRefs.join(", ")}</p> : null}
+                          <summary>Trace details</summary>
+                          <p>Step {event.sequence} · {event.kind} · actor {event.authorUsername ?? event.actor}</p>
+                          {event.evidenceRefs.length ? (
+                            <p>
+                              Evidence: {event.evidenceRefs.map((evidenceRef) => supportingArtifact(
+                                current,
+                                evidenceRef,
+                                evidenceArtifacts,
+                                evidenceExcerpts,
+                              ).label).join(", ")}
+                            </p>
+                          ) : null}
                         </details>
                       </li>
                     ))}
@@ -3408,16 +3422,16 @@ export function ExperimentLab(props: {
                 </span>
                 {row.matchedAnchors.length || row.missingAnchors.length || row.extraAnchors.length || (row.roleMismatches ?? []).length ? (
                   <details className="experiment-lab__technical-details">
-                    <summary>Technical alignment evidence references</summary>
-                    {row.matchedAnchors.length ? <p>Matched: <code>{row.matchedAnchors.join(", ")}</code></p> : null}
-                    {row.missingAnchors.length ? <p>Missing: <code>{row.missingAnchors.join(", ")}</code></p> : null}
-                    {row.extraAnchors.length ? <p>Beyond benchmark: <code>{row.extraAnchors.join(", ")}</code></p> : null}
+                    <summary>Alignment evidence details</summary>
+                    {row.matchedAnchors.length ? <p>Matched: {row.matchedAnchors.map((evidenceRef) => supportingArtifact(current, evidenceRef, evidenceArtifacts, evidenceExcerpts).label).join(", ")}</p> : null}
+                    {row.missingAnchors.length ? <p>Missing: {row.missingAnchors.map((evidenceRef) => supportingArtifact(current, evidenceRef, evidenceArtifacts, evidenceExcerpts).label).join(", ")}</p> : null}
+                    {row.extraAnchors.length ? <p>Beyond benchmark: {row.extraAnchors.map((evidenceRef) => supportingArtifact(current, evidenceRef, evidenceArtifacts, evidenceExcerpts).label).join(", ")}</p> : null}
                     {(row.roleMismatches ?? []).length ? (
                       <p>
                         Role differences:{" "}
-                        <code>{(row.roleMismatches ?? [])
-                          .map((mismatch) => `${mismatch.evidenceRef} (${mismatch.role})`)
-                          .join(", ")}</code>
+                        {(row.roleMismatches ?? [])
+                          .map((mismatch) => `${supportingArtifact(current, mismatch.evidenceRef, evidenceArtifacts, evidenceExcerpts).label} (${mismatch.role})`)
+                          .join(", ")}
                       </p>
                     ) : null}
                   </details>
@@ -3509,12 +3523,6 @@ export function ExperimentLab(props: {
               ) : (
                 <p className="experiment-lab__decision-author">Remaining unknowns: none recorded</p>
               )}
-              <details className="experiment-lab__technical-details">
-                <summary>Technical ownership details</summary>
-                <p>
-                  Owner identity: <code>{current.decisions.at(-1)?.ownerId ?? "unassigned"}</code>
-                </p>
-              </details>
             </div>
           ) : (
             <p className="experiment-lab__empty">

@@ -316,8 +316,8 @@ describe("comparison lab header honesty", () => {
     stubExperiments();
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     await screen.findAllByText("qwen-3.6-27b");
-    // The implementation polls on an interval; the copy must say so.
-    expect(screen.getByText(/live\s+refresh by polling/)).toBeTruthy();
+    // The implementation polls on an interval; the copy must not imply push presence.
+    expect(screen.getByText(/Presence refreshes periodically/)).toBeTruthy();
   });
 
   it("names the investigation readably instead of shouting a bare identifier", async () => {
@@ -370,9 +370,7 @@ describe("experiment lab", () => {
     expect(screen.queryByRole("heading", { name: "Strategy comparison" })).toBeNull();
     openCompareWorkspace("Strategy paths");
     expect(screen.getByRole("heading", { name: "Strategy comparison" })).toBeTruthy();
-    expect(
-      screen.getAllByText(/A gold reference is a human benchmark decision/).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getByText(/a person makes the decision/)).toBeTruthy();
   });
 
   it("renders gold provenance separately from helpfulness and alignment", async () => {
@@ -484,10 +482,13 @@ describe("experiment lab", () => {
       "Expected role for synthetic-checkout-timeout.log",
       "Expected role for synthetic-inventory-timeout.log",
     ]);
-    fireEvent.click(within(benchmarkEvidence).getAllByRole("checkbox")[0]!);
+    const selectedEvidence = within(benchmarkEvidence).getAllByRole("checkbox")[0]!;
+    fireEvent.click(selectedEvidence);
+    await waitFor(() => expect((selectedEvidence as HTMLInputElement).checked).toBe(true));
     fireEvent.change(roleSelectors[0]!, {
       target: { value: "symptom" },
     });
+    await waitFor(() => expect((roleSelectors[0] as HTMLSelectElement).value).toBe("symptom"));
     fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
 
     await waitFor(() =>
@@ -535,20 +536,18 @@ describe("experiment lab", () => {
     expect(goldSummary?.textContent).toContain("2 benchmark anchors");
     expect(goldSummary?.textContent).not.toMatch(/ev-demo-|dec-/);
     const goldDetails = within(gold)
-      .getByText("Technical benchmark identity and evidence references")
+      .getByText("Benchmark evidence details")
       .closest("details");
     expect(goldDetails?.hasAttribute("open")).toBe(false);
-    expect(goldDetails?.textContent).toContain("ev-demo-inventory-timeout");
+    expect(goldDetails?.textContent).toContain("Supporting evidence needs inspection");
+    expect(goldDetails?.textContent).not.toContain("ev-demo-inventory-timeout");
 
     openCompareWorkspace("Strategy paths");
     const strategySummary = document.querySelector(".experiment-lab__strategy-benchmark-summary");
     expect(strategySummary?.textContent).toContain("accepted decision record unavailable");
     expect(strategySummary?.textContent).not.toContain("dec-opaque-missing");
-    const strategyDetails = screen
-      .getByText("Technical benchmark decision identity")
-      .closest("details");
-    expect(strategyDetails?.hasAttribute("open")).toBe(false);
-    expect(strategyDetails?.textContent).toContain("dec-opaque-missing");
+    expect(screen.queryByText("Technical benchmark decision identity")).toBeNull();
+    expect(document.body.textContent).not.toContain("dec-opaque-missing");
   });
 
   it("renders shared evidence and unknown question paths separately from gold", async () => {
@@ -610,7 +609,7 @@ describe("experiment lab", () => {
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
     expect(await screen.findByRole("heading", { name: "At a glance" })).toBeTruthy();
     openCompareWorkspace("Evidence");
-    expect(screen.getAllByText(/Shared supporting evidence/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/shared supporting evidence/i).length).toBeGreaterThan(0);
     openCompareWorkspace("Strategy paths");
     expect(screen.getByText(/Question path: What timed out in checkout/)).toBeTruthy();
     expect(screen.getByText(/Models converge on supporting evidence in the human benchmark/)).toBeTruthy();
@@ -655,14 +654,14 @@ describe("experiment lab", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
-    expect(await screen.findByText(/package pkg-synth-three-model-checkout-v1/)).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /Comparison 1/ })).toBeTruthy();
     window.dispatchEvent(
       new CustomEvent("contextdesk:experiment-created", {
         detail: { experimentId: seededStrategyView.id },
       }),
     );
 
-    await waitFor(() => expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("button", { name: /Comparison 2/ })).toBeTruthy());
     expect(
       fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/experiments")),
     ).toHaveLength(2);
@@ -775,7 +774,6 @@ describe("experiment lab", () => {
     expect(presenterSummary.textContent).not.toMatch(/[{}]/);
     expect(screen.queryByText(/cd-collab\.experiment_lab_export\.v2/)).toBeNull();
     expect(screen.getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Gold alignment is not a correctness verdict/).length).toBeGreaterThan(0);
     expect(screen.getByText(/Not live provider output/)).toBeTruthy();
     openCompareWorkspace("Strategy paths");
     expect(screen.getByRole("region", { name: "Strategy comparison" })).toBeTruthy();
@@ -841,8 +839,7 @@ describe("experiment lab", () => {
     const strategyButton = screen.getByRole("button", { name: /Comparison 2/ });
     fireEvent.click(strategyButton);
     expect(screen.queryByRole("heading", { name: "Share-safe export ready" })).toBeNull();
-    expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy();
-    expect(screen.getByText("Technical artifact identity").closest("details")?.hasAttribute("open")).toBe(false);
+    expect(document.body.textContent).not.toContain("pkg-synth-strategy-paths-v1");
     expect(strategyButton.getAttribute("aria-current")).toBe("page");
   });
 
@@ -942,11 +939,11 @@ describe("experiment lab", () => {
     const alignmentSummary = document.querySelector(".experiment-lab__alignment-summary");
     expect(alignmentSummary?.textContent).not.toContain("ev-demo-");
     const alignmentDetails = screen
-      .getAllByText("Technical alignment evidence references")[0]
+      .getAllByText("Alignment evidence details")[0]
       ?.closest("details");
     expect(alignmentDetails?.hasAttribute("open")).toBe(false);
-    expect(alignmentDetails?.textContent).toContain("ev-demo-inventory-timeout");
-    expect(alignmentDetails?.textContent).toContain("ev-demo-pool-exhaustion");
+    expect(alignmentDetails?.textContent).toContain("Supporting evidence needs inspection");
+    expect(alignmentDetails?.textContent).not.toContain("ev-demo-");
     expect(
       screen.getByText(/chat-operator: unscored — no cited evidence to compare/),
     ).toBeTruthy();
@@ -992,23 +989,22 @@ describe("experiment lab", () => {
     expect(screen.getByRole("region", { name: "Candidate comparison" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Strategy comparison" })).toBeNull();
     expect(screen.getByRole("status").textContent).toMatch(/Static read-only mode/);
-    expect(screen.getByText(/Sources: seeded · ContextDesk connector · pasted chat/)).toBeTruthy();
-    expect(screen.getByText(/Next extensions: semantic search · multi-worker leases/)).toBeTruthy();
+    expect(screen.getByText(/Compare recorded analyses from ContextDesk, imported chat, and other triage methods/)).toBeTruthy();
+    expect(screen.queryByText(/Next extensions:/)).toBeNull();
     expect(screen.getAllByText(/Synthetic three-model comparison fixture|Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(screen.getByText(/Not live provider output/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
-    expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("pkg-synth-strategy-paths-v1");
     expect(screen.getAllByText("programmatic-agent").length).toBeGreaterThan(0);
     expect(screen.getAllByText("chat-operator").length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Textual similarity is not a winner/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Gold alignment is not a correctness verdict/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/a person makes the decision/)).toBeTruthy();
     openCompareWorkspace("Strategy paths");
     expect(screen.getByText(/Question path: Which inventory call is blocking checkout/)).toBeTruthy();
     expect(screen.getByText(/Question path: What timed out in checkout/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /Comparison 1/ }));
-    expect(screen.getByText(/package pkg-synth-three-model-checkout-v1/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("pkg-synth-three-model-checkout-v1");
     for (const model of ["qwen-3.6-27b", "gpt-oss-120b", "ministral-14b"]) {
       expect(screen.getAllByText(model).length).toBeGreaterThan(0);
     }
@@ -1041,7 +1037,7 @@ describe("experiment lab", () => {
     expect(screen.getByText("Import bench-compare / recorded artifact").tagName).toBe("SUMMARY");
     fireEvent.click(screen.getByText("Import bench-compare / recorded artifact"));
     expect(
-      screen.getByText(/Primary view remains the candidate table, evidence, and accepted decision/i),
+      screen.getByText(/Imported output remains unverified until a person reviews it/i),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Convert and import onto case" })).toBeTruthy();
   });
@@ -1067,12 +1063,8 @@ describe("experiment lab", () => {
     expect(within(scan).getAllByText(/Supporting excerpt not captured/).length).toBeGreaterThan(0);
     expect(within(scan).getByText(/programmatic-agent treats it as cause; chat-operator treats it as symptom/)).toBeTruthy();
     expect(within(scan).getByText(/Resolve the role before accepting a causal conclusion/)).toBeTruthy();
-    expect(
-      within(scan).getByText("chat-operator — trace cannot establish tools"),
-    ).toBeTruthy();
-    expect(
-      within(scan).getByText("Gold benchmark — none recorded for this experiment"),
-    ).toBeTruthy();
+    expect(within(scan).getByText("Does the timeout reproduce after the synthetic cache is warmed?")).toBeTruthy();
+    expect(within(scan).getByText(/Run details and evaluation coverage/)).toBeTruthy();
     expect(within(scan).getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(within(scan).getByText(/Agreement is not proof of correctness; differences are leads to investigate/)).toBeTruthy();
 
@@ -1226,7 +1218,7 @@ describe("experiment lab", () => {
     expect(screen.getByText("Facts only · no winner implied")).toBeTruthy();
   });
 
-  it("lists partial traces, missing traces, and a missing gold benchmark as explicit unknowns", async () => {
+  it("keeps run telemetry and benchmark coverage out of case-specific unknowns", async () => {
     const unknownsView = {
       ...cockpitView,
       traces: [{ ...cockpitView.traces[0]!, completeness: "partial", unknowns: ["turns"] }],
@@ -1246,16 +1238,17 @@ describe("experiment lab", () => {
     const unknownCard = within(scan)
       .getByRole("heading", { name: "What stays unknown" })
       .closest("article");
-    expect(unknownCard?.textContent).toContain(
-      "programmatic-agent — partial trace — unproven steps stay unknown",
-    );
-    expect(unknownCard?.textContent).toContain("programmatic-agent — trace cannot establish turns");
-    expect(unknownCard?.textContent).toContain("chat-operator — no interaction trace recorded");
-    expect(unknownCard?.textContent).toContain("Gold benchmark — none recorded for this experiment");
-    expect(unknownCard?.textContent).toContain("cost unknown");
-    expect(unknownCard?.textContent).toContain("usage unknown");
+    expect(unknownCard?.textContent).toContain("Does the timeout reproduce after the synthetic cache is warmed?");
+    expect(unknownCard?.textContent).not.toContain("cost unknown");
+    expect(unknownCard?.textContent).not.toContain("usage unknown");
+    expect(unknownCard?.textContent).toContain("Run telemetry was not reported");
+    expect(unknownCard?.textContent).toContain("Interaction traces: 1 not recorded; 1 incomplete");
+    expect(unknownCard?.textContent).toContain("No human benchmark has been recorded");
+    const matrix = screen.getByRole("table", { name: /Candidate comparison/ });
+    expect(within(matrix).queryByRole("columnheader", { name: "Cost" })).toBeNull();
+    expect(within(matrix).queryByRole("columnheader", { name: "Usage" })).toBeNull();
     const summary = screen.getByLabelText("Experiment summary");
-    expect(summary.textContent).toMatch(/Explicit unknowns/);
+    expect(summary.textContent).toMatch(/Open questions1/);
   });
 
   it("scopes mutation controls to contributor and case-lead roles", async () => {
@@ -1574,7 +1567,7 @@ function stubExperiments(experiments: unknown[]) {
 }
 
 describe("decision readiness cockpit", () => {
-  it("centers a captured synthetic artifact and keeps its opaque identity in technical details", async () => {
+  it("centers a captured synthetic artifact without exposing its opaque identity", async () => {
     const artifactView = {
       ...cockpitView,
       id: "exp-artifact-present",
@@ -1608,7 +1601,7 @@ describe("decision readiness cockpit", () => {
     expect(within(scan).getAllByText(/Next step/).length).toBeGreaterThan(0);
     const technical = within(scan).getAllByText("Technical details")[0]?.closest("details") as HTMLDetailsElement;
     expect(technical.open).toBe(false);
-    expect(technical.textContent).toContain("ev-demo-inventory-timeout");
+    expect(technical.textContent).not.toContain("ev-demo-inventory-timeout");
   });
 
   it("joins recorded evidence metadata and bytes into a readable, bounded artifact view", async () => {
@@ -1697,7 +1690,7 @@ describe("decision readiness cockpit", () => {
     expect(expandable.open).toBe(true);
   });
 
-  it("keeps internal artifact, evidence, and lane identities inside closed technical disclosures", async () => {
+  it("removes internal package, lane, and evidence identities from rendered copy", async () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
@@ -1721,16 +1714,12 @@ describe("decision readiness cockpit", () => {
     for (const internalIdentity of [
       "pkg-synth-cockpit-v1",
       "task-162aec8",
-      "ev-demo-inventory-timeout",
       "cand-programmatic-agent",
     ]) {
       const occurrences = textParentsContaining(internalIdentity);
-      expect(occurrences.length).toBeGreaterThan(0);
-      expect(occurrences.every((element) => {
-        const disclosure = element.closest("details");
-        return disclosure !== null && disclosure.hasAttribute("open") === false;
-      })).toBe(true);
+      expect(occurrences).toHaveLength(0);
     }
+    expect(textParentsContaining("ev-demo-inventory-timeout")).toHaveLength(0);
   });
 
   it("states honestly when a supporting excerpt was not captured and gives an action", async () => {
@@ -1832,9 +1821,9 @@ describe("decision readiness cockpit", () => {
       .getAllByRole("listitem")
       .map((item) => item.textContent ?? "");
     const expectedOrder = [
-      "Role conflict recorded on ev-demo-inventory-timeout — programmatic-agent as cause; chat-operator as symptom",
+      "Models assign different meaning to the same evidence",
       "Recorded question divergence — programmatic-agent and chat-operator asked different questions",
-      "Only programmatic-agent cites ev-demo-pool-exhaustion — no other lane corroborates it",
+      "One model relies on evidence the other lanes do not cite",
       "programmatic-agent has no recorded cost, usage",
       "chat-operator has no recorded latency, cost, usage",
       "chat-operator trace is partial — unproven steps stay unknown",
@@ -1868,6 +1857,9 @@ describe("decision readiness cockpit", () => {
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("region", { name: "Decision readiness" });
+    const matrix = screen.getByRole("table", { name: /Candidate comparison/ });
+    expect(within(matrix).getByRole("columnheader", { name: "Cost" })).toBeTruthy();
+    expect(within(matrix).getByRole("columnheader", { name: "Usage" })).toBeTruthy();
     expect(within(screen.getByRole("region", { name: "Decision readiness" })).getByText("accepted r1")).toBeTruthy();
     expect(within(screen.getByRole("region", { name: "Decision readiness" })).getByText("no unknown measurements recorded")).toBeTruthy();
     expect(within(screen.getByRole("region", { name: "Decision readiness" })).getByText("2 complete")).toBeTruthy();
@@ -1903,6 +1895,8 @@ describe("decision readiness cockpit", () => {
     expect(
       screen.getByText("How to read this table").closest("details")?.hasAttribute("open"),
     ).toBe(false);
+    expect(within(evidenceRegion).queryByText(/Technical evidence identit/)).toBeNull();
+    expect(evidenceRegion.textContent).not.toContain("ev-demo-inventory-timeout");
   });
 
   it("cross-examines missing and extra anchors against the recorded benchmark", async () => {
@@ -1922,16 +1916,13 @@ describe("decision readiness cockpit", () => {
     expect(within(table).getByText("anchor no lane cites")).toBeTruthy();
     openCompareWorkspace("Review queue");
     const queue = screen.getByRole("region", { name: "Human review queue" });
-    expect(
-      within(queue).getByText(
-        /programmatic-agent does not cite benchmark anchor ev-demo-inventory-timeout/,
-      ),
-    ).toBeTruthy();
-    expect(
-      within(queue).getByText(
-        /programmatic-agent cites ev-demo-pool-exhaustion outside the benchmark anchors/,
-      ),
-    ).toBeTruthy();
+    expect(within(queue).getAllByRole("heading", {
+      name: "The human benchmark relies on evidence no lane cited",
+    }).length).toBeGreaterThan(0);
+    expect(within(queue).getAllByRole("heading", {
+      name: "One model relies on evidence the other lanes do not cite",
+    }).length).toBeGreaterThan(0);
+    expect(queue.textContent).not.toContain("ev-demo-");
   });
 
   it("keeps unknown trace coverage explicit in the cross-examination footer", async () => {
@@ -2043,7 +2034,8 @@ describe("decision readiness cockpit", () => {
     expect(within(digest).getByText("Run status")).toBeTruthy();
     expect(within(digest).getByText("completed")).toBeTruthy();
     expect(within(digest).getByText(/Evidence only this lane cites/)).toBeTruthy();
-    expect(within(digest).getByText(/ev-demo-pool-exhaustion/)).toBeTruthy();
+    expect(within(digest).getAllByText(/Supporting evidence needs inspection/).length).toBeGreaterThan(0);
+    expect(digest.textContent).not.toContain("ev-demo-pool-exhaustion");
     expect(
       within(digest).getByText(/4 review queue items mention this lane/),
     ).toBeTruthy();

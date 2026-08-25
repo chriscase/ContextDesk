@@ -141,7 +141,9 @@ test.describe("a returning engineer re-forms the picture", () => {
 
     // Capture opens on the recorded contribution, addressably.
     await expect(page).toHaveURL(/\/capture\?section=triage-capture&item=[^&]+&kind=contribution/);
-    await expect(stagePanel(page, "Capture").getByText(HYPOTHESIS)).toBeVisible();
+    await expect(
+      stagePanel(page, "Capture").getByLabel("Case timeline events").getByText(HYPOTHESIS),
+    ).toBeVisible();
   });
 
   test("keeps a long trace bounded, expandable, and copyable next to a short log", async ({
@@ -152,25 +154,27 @@ test.describe("a returning engineer re-forms the picture", () => {
     await seedInvestigation(page, title);
     await runLanes(page);
 
-    const lane = page.locator("a.workstreams__card-open").first();
-    await lane.click();
-    const detail = page.locator("article.workstreams__detail");
-    await expect(detail).toBeVisible();
+    // The provider-free simulation truthfully cites no evidence. Inspect the
+    // registered artifact itself rather than pretending a simulated lane read it.
+    const evidenceItem = page
+      .locator(".case-memory__item")
+      .filter({ hasText: "checkout-timeout-trace.log" });
+    await evidenceItem.getByRole("button", { name: "Inspect log" }).click();
 
     // The long trace is previewed with its real scale stated, not silently cut.
-    const disclosure = detail
+    const disclosure = evidenceItem
       .locator("details")
       .filter({ hasText: "Expand complete log or stack trace" })
       .first();
     const fullLines = LONG_TRACE.toString("utf8").split(/\r?\n/).length;
     await expect(disclosure).toContainText(`${fullLines} lines`);
     // Collapsed, the complete text is present but not shown to the reader.
-    await expect(detail.locator("pre.experiment-lab__artifact-full")).toBeHidden();
+    await expect(disclosure.locator(".log-viewer__lines")).toBeHidden();
 
     // Reading the whole thing is one keyboard-reachable disclosure away.
     await disclosure.locator("summary").press("Enter");
     await expect(disclosure).toHaveAttribute("open", "");
-    await expect(detail.locator("pre.experiment-lab__artifact-full")).toContainText(
+    await expect(disclosure.locator(".log-viewer__lines")).toContainText(
       "waited 22000ms on inventory-client",
     );
 
@@ -193,8 +197,10 @@ test.describe("a returning engineer re-forms the picture", () => {
 
     await lanes.first().click();
     const detail = page.locator("article.workstreams__detail");
-    // Model output is analysis, always.
-    await expect(detail).toContainText("never a human finding");
+    // The offline workflow exercise never masquerades as model analysis or a
+    // human finding.
+    await expect(detail).toContainText("No written finding was recorded");
+    await expect(detail).toContainText("no investigative finding or evidence citation");
     // What it left unknown is stated rather than implied to be nothing.
     await expect(detail.getByRole("heading", { name: "What it left unknown" })).toBeVisible();
     await expect(detail).toContainText("cost");

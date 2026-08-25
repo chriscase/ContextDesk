@@ -16,8 +16,6 @@ import { FIXTURE_USERS } from "../src/users.js";
  * asserted here is synthetic fixture data created by the test itself.
  */
 
-const TRACE = fixtureBytes("evidence", "checkout-timeout-trace.log").toString("utf8");
-
 async function frozenRunFor(page: Page, title: string): Promise<string> {
   await createCase(page, title);
   const caseId = await caseIdForTitle(page, title);
@@ -66,7 +64,9 @@ test.describe("workstreams read like investigative work", () => {
     await expect(workstreams.getByText(/requested by dave/)).toBeVisible();
     await expect(workstreams.getByText(/Frozen evidence set 1 · 1 evidence item/)).toBeVisible();
 
-    const firstWorkstream = workstreams.getByRole("link", { name: /workstream — / }).first();
+    const firstWorkstream = workstreams
+      .getByRole("link", { name: /(?:workstream|simulation) — / })
+      .first();
     const workstreamName = (await firstWorkstream.textContent())!.trim();
     const href = await firstWorkstream.getAttribute("href");
     expect(href).toContain(`/investigations/${caseId}/analyze`);
@@ -93,6 +93,9 @@ test.describe("workstreams read like investigative work", () => {
     ).toBeVisible();
     await expect(detail.getByRole("heading", { name: "What it reported" })).toBeVisible();
     await expect(detail.getByRole("heading", { name: /^Evidence it cited/ })).toBeVisible();
+    await expect(detail).toContainText("No written finding was recorded");
+    await expect(detail).toContainText("0 items");
+    await expect(detail).toContainText("did not run the named model or analyze evidence");
     await expect(detail.getByRole("heading", { name: "What it left unknown" })).toBeVisible();
     await expect(detail.getByText("Agreement is not proof of correctness.")).toBeVisible();
 
@@ -104,32 +107,10 @@ test.describe("workstreams read like investigative work", () => {
     const stamps = await detail.locator(".workstreams__activity time").allTextContents();
     expect(stamps.length).toBeGreaterThanOrEqual(2);
 
-    // ————— Familiar evidence: filename, context, and a long expandable trace —————
-    const evidence = detail.locator(".workstreams__evidence-item").first();
-    await expect(evidence.getByRole("heading", { name: "checkout-timeout-trace.log" })).toBeVisible();
-    await expect(evidence).toContainText("in the frozen evidence set");
-    await expect(evidence).toContainText(
-      "Synthetic checkout timeout log with the failing stack trace.",
-    );
-    const preview = evidence.locator(".experiment-lab__artifact-preview");
-    await expect(preview).toBeVisible();
-    await expect(preview).not.toContainText("InventoryClient.fetch");
-    const disclosure = evidence.locator("details").first();
-    await expect(disclosure.locator("summary")).toHaveAttribute(
-      "aria-label",
-      /checkout-timeout-trace\.log/,
-    );
-    // Keyboard-reachable: focus the summary and open it with the keyboard.
-    await disclosure.locator("summary").focus();
-    await page.keyboard.press("Enter");
-    const full = evidence.locator(".experiment-lab__artifact-full");
-    await expect(full).toBeVisible();
-    await expect(full).toContainText("TimeoutError: synthetic inventory lookup exceeded 30000ms");
-    await expect(full).toContainText("at InventoryClient.fetch (fixtures/inventory-client.ts:118:15)");
-    expect((await full.innerText()).trim()).toBe(TRACE.trim());
-    await expect(
-      evidence.getByRole("button", { name: "Copy checkout-timeout-trace.log text" }),
-    ).toBeVisible();
+    // A provider-free workflow exercise must never imply that it read the
+    // frozen file. The evidence-board expansion path is covered separately by
+    // the returning-engineer journey.
+    await expect(detail.locator(".workstreams__evidence-item")).toHaveCount(0);
 
     // ————— Identifiers stay behind Technical details —————
     const technical = detail.locator("details.workstreams__technical");
@@ -183,9 +164,11 @@ test.describe("workstreams read like investigative work", () => {
 
     await page.setViewportSize({ width: 390, height: 844 });
     const workstreams = page.locator(".workstreams").first();
-    await workstreams.getByRole("link", { name: /workstream — / }).first().click();
+    const workstreamLink = workstreams.getByRole("heading", { level: 6 }).first().getByRole("link");
+    const workstreamName = (await workstreamLink.innerText()).trim();
+    await workstreamLink.click();
     const detail = page.locator(".workstreams__detail");
-    await expect(detail.getByRole("heading", { name: /workstream — / })).toBeVisible();
+    await expect(detail.getByRole("heading", { name: workstreamName })).toBeVisible();
     await expect(detail.getByRole("heading", { name: "What happened, in order" })).toBeVisible();
     // No horizontal overflow of the page itself on a phone-width viewport.
     const overflow = await page.evaluate(

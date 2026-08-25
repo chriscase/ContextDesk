@@ -76,8 +76,8 @@ function makeProps(overrides?: Partial<Parameters<typeof TriageWorkspace>[0]>) {
 describe("triage workspace capture paths", () => {
   it("renders both first-class capture paths with every existing payload field", () => {
     render(<TriageWorkspace {...makeProps()} />);
-    expect(screen.getByText("Your own findings")).toBeTruthy();
-    expect(screen.getByText("Pasted external output")).toBeTruthy();
+    expect(screen.getByText("Notes, observations, and next steps")).toBeTruthy();
+    expect(screen.getByText("Paste analysis from another tool")).toBeTruthy();
 
     const noteKind = screen.getByRole("combobox", { name: "Timeline entry kind" });
     expect((noteKind as HTMLSelectElement).value).toBe("note");
@@ -102,12 +102,12 @@ describe("triage workspace capture paths", () => {
       'select[name="evidenceVisibility"]',
     ) as HTMLSelectElement;
     expect(visibility.value).toBe("unknown");
-    expect(screen.getByRole("option", { name: "Fixture chat assistant (external-tool)" })).toBeTruthy();
-    expect(screen.getByText(/mask them before saving/i)).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Fixture chat assistant" })).toBeTruthy();
+    expect(screen.getByText(/Remove passwords, tokens/i)).toBeTruthy();
     expect(screen.getByText(/I redacted secrets before save/)).toBeTruthy();
   });
 
-  it("keeps advanced provenance fields behind closed disclosure and required fields outside it", () => {
+  it("keeps optional identity and provenance fields behind closed disclosures", () => {
     render(<TriageWorkspace {...makeProps()} />);
     const advanced = document.querySelectorAll<HTMLDetailsElement>(
       ".triage-capture__paths form .triage-advanced",
@@ -115,11 +115,11 @@ describe("triage workspace capture paths", () => {
     expect(advanced.length).toBe(2);
     for (const details of advanced) expect(details.open).toBe(false);
 
-    for (const name of ["outputText", "sourceId", "operatorUsername", "operatorId"]) {
+    for (const name of ["outputText", "sourceId"]) {
       const field = document.querySelector(`[name="${name}"]`) as HTMLElement;
       expect(field.closest("details")).toBeNull();
     }
-    for (const name of ["evidenceVisibility", "visibilityNote", "snapshotBinding"]) {
+    for (const name of ["operatorUsername", "operatorId", "evidenceVisibility", "visibilityNote", "snapshotBinding"]) {
       const field = document.querySelector(`[name="${name}"]`) as HTMLElement;
       expect(field.closest("details")).toBeTruthy();
     }
@@ -164,10 +164,10 @@ describe("triage workspace capture paths", () => {
     const props = makeProps();
     render(<TriageWorkspace {...props} />);
     expect(screen.getByText("Unverified imported run")).toBeTruthy();
-    fireEvent.change(screen.getByPlaceholderText("Evidence or contribution id"), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Supporting record" }), {
       target: { value: "n1" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Record human judgment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save review" }));
     expect(props.onCorroborate).toHaveBeenCalledWith("r1", "corroborated", "n1");
   });
 });
@@ -189,6 +189,7 @@ describe("triage workspace guidance and provenance", () => {
       })} />);
       const item = screen.getByText("Queue depth spiked at 14:02").closest("li") as HTMLElement;
       await waitFor(() => expect(document.activeElement).toBe(item));
+      expect(item.closest("details")?.open).toBe(true);
       expect(item.dataset.routeItem).toBe("n1");
       expect(item.dataset.routeKind).toBe("contribution");
       expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
@@ -201,7 +202,10 @@ describe("triage workspace guidance and provenance", () => {
     render(<TriageWorkspace {...makeProps()} />);
     expect(screen.getByRole("heading", { name: "The investigation was opened" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "A human note was recorded" })).toBeTruthy();
-    expect(screen.getAllByText(/by alice/).length).toBe(2);
+    expect(screen.getByRole("heading", { name: "The investigation was opened" }).closest("li")?.textContent)
+      .toContain("by alice");
+    expect(screen.getByRole("heading", { name: "A human note was recorded" }).closest("li")?.textContent)
+      .toContain("by alice");
     expect(screen.getByText(/adds human-attributed context to the shared investigation record/)).toBeTruthy();
     const auditDetails = screen.getAllByText("Raw audit details").map((summary) =>
       summary.closest("details") as HTMLDetailsElement,
@@ -211,19 +215,17 @@ describe("triage workspace guidance and provenance", () => {
     expect(auditDetails[1]?.textContent).toContain("contribution_created");
   });
 
-  it("renders the step rail with anchors for all four steps", () => {
+  it("does not repeat the shell's stage navigation inside Capture", () => {
     render(<TriageWorkspace {...makeProps()} />);
-    const rail = screen.getByRole("navigation", { name: "Triage steps" });
-    const hrefs = Array.from(rail.querySelectorAll("a")).map((a) => a.getAttribute("href"));
-    expect(hrefs).toEqual(["#triage-capture", "#triage-analyze", "#triage-compare", "#triage-decide"]);
-    expect(screen.queryByText("start here")).toBeNull();
-    expect(screen.getByText("2 recorded items")).toBeTruthy();
+    expect(screen.queryByRole("navigation", { name: "Triage steps" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Capture evidence and observations" })).toBeTruthy();
   });
 
-  it("suggests starting with capture only when nothing is recorded yet", () => {
+  it("keeps the empty Capture state focused on the three ways to add material", () => {
     render(<TriageWorkspace {...makeProps({ contributions: [], runs: [], events: [] })} />);
-    expect(screen.getByText("start here")).toBeTruthy();
-    expect(screen.getByText("0 recorded items")).toBeTruthy();
+    expect(screen.getByText("Notes, observations, and next steps")).toBeTruthy();
+    expect(screen.getByText("Paste analysis from another tool")).toBeTruthy();
+    expect(screen.queryByText("start here")).toBeNull();
   });
 
   it("labels the three provenance classes and tags human entries on the timeline", () => {
@@ -284,11 +286,23 @@ describe("triage workspace guidance and provenance", () => {
     expect(capture.tabIndex).toBe(-1);
   });
 
+  it("collapses a long audit history by default while keeping a short new-case history open", () => {
+    const longEvents = Array.from({ length: 6 }, (_, index) => ({
+      ...sampleEvents[0]!,
+      seq: index + 1,
+    }));
+    const view = render(<TriageWorkspace {...makeProps({ events: longEvents })} />);
+    expect((screen.getByText("Case timeline · 6 events").closest("details") as HTMLDetailsElement).open).toBe(false);
+    view.rerender(<TriageWorkspace {...makeProps({ events: sampleEvents })} />);
+    expect((screen.getByText("Case timeline · 2 events").closest("details") as HTMLDetailsElement).open).toBe(true);
+  });
+
   it("never claims the AI decides, wins, or verifies", () => {
     render(<TriageWorkspace {...makeProps()} />);
     const text = document.body.textContent ?? "";
-    expect(text).toContain("never rewrite your material or declare a winner");
-    expect(text).toContain("unverified until a person corroborates");
+    expect(text).not.toContain("AI decides");
+    expect(text).not.toContain("AI winner");
+    expect(text).toContain("until a person checks it against the evidence");
   });
 
   it("keeps capture guidance source-neutral with no AI-universal or signature claims", () => {
@@ -296,10 +310,8 @@ describe("triage workspace guidance and provenance", () => {
     const text = document.body.textContent ?? "";
     expect(text).not.toContain("Output from another AI");
     expect(text).not.toContain("signed evidence package");
-    expect(text).toContain(
-      "another AI, a diagnostic tool, an external service, a report someone curated, or material gathered by hand",
-    );
-    expect(text).toContain("content-addressed reference — not a signature");
+    expect(text).toContain("a chat answer, diagnostic report, or other analysis");
+    expect(text).toContain("Remove passwords, tokens, and other secrets before saving");
   });
 });
 
@@ -312,7 +324,7 @@ describe("imported-run source attribution", () => {
     render(<TriageWorkspace {...makeProps()} />);
     const card = importedCard();
     const primary = card.querySelector(":scope > .catalog__meta") as HTMLElement;
-    expect(primary.textContent).toContain("Source: Fixture chat assistant · external-tool");
+    expect(primary.textContent).toContain("From Fixture chat assistant");
     expect(primary.textContent).not.toContain("s1");
     const technical = card.querySelector("details") as HTMLDetailsElement;
     expect(technical.open).toBe(false);
@@ -330,7 +342,7 @@ describe("imported-run source attribution", () => {
     );
     const card = importedCard();
     const primary = card.querySelector(":scope > .catalog__meta") as HTMLElement;
-    expect(primary.textContent).toContain("Source: Unattributed paste · unknown");
+    expect(primary.textContent).toContain("From Unattributed paste");
     expect(primary.textContent).not.toContain("s9");
     expect(card.querySelector("details")?.textContent).toContain("Recorded source ID: s9");
   });
@@ -371,7 +383,7 @@ describe("retired-source-safe manual intake", () => {
   it("offers active sources in the new-intake chooser and excludes retired ones", () => {
     render(<TriageWorkspace {...makeProps({ sources: [activeSource, retiredSource] })} />);
     expect(
-      screen.getByRole("option", { name: "Fixture chat assistant (external-tool)" }),
+      screen.getByRole("option", { name: "Fixture chat assistant" }),
     ).toBeTruthy();
     expect(screen.queryByRole("option", { name: "Legacy scanner (external-tool)" })).toBeNull();
     const chooser = sourceChooser();
@@ -382,7 +394,7 @@ describe("retired-source-safe manual intake", () => {
   it("keeps a source without a recorded lifecycle selectable rather than guessing retired", () => {
     render(<TriageWorkspace {...makeProps()} />);
     expect(
-      screen.getByRole("option", { name: "Fixture chat assistant (external-tool)" }),
+      screen.getByRole("option", { name: "Fixture chat assistant" }),
     ).toBeTruthy();
     expect(screen.queryByText(/All registered sources are retired/)).toBeNull();
   });
@@ -398,29 +410,27 @@ describe("retired-source-safe manual intake", () => {
     );
     const card = document.querySelector(".imported-run") as HTMLElement;
     const primary = card.querySelector(":scope > .catalog__meta") as HTMLElement;
-    expect(primary.textContent).toContain("Source: Legacy scanner · external-tool");
+    expect(primary.textContent).toContain("From Legacy scanner");
     expect(primary.textContent).not.toContain("s2");
     expect(card.querySelector("details")?.textContent).toContain("Recorded source ID: s2");
     expect(card.textContent).not.toContain("Recorded source metadata unavailable");
-    expect(screen.queryByRole("option", { name: "Legacy scanner (external-tool)" })).toBeNull();
+    expect(screen.queryByRole("option", { name: "Legacy scanner" })).toBeNull();
   });
 
   it("gives honest, actionable guidance when every registered source is retired", () => {
     render(<TriageWorkspace {...makeProps({ sources: [retiredSource] })} />);
-    const hint = screen.getByText(/All registered sources are retired/);
-    expect(hint.textContent).toContain(
-      "A case lead can register an active source in the source catalog",
-    );
-    expect(hint.textContent).toContain("keep their retired source’s name and kind");
-    expect(screen.queryByText(/No sources are registered yet/)).toBeNull();
+    const hint = screen.getByText(/All attribution labels are retired/);
+    expect(hint.textContent).toContain("A case lead can add an available label in Attribution");
+    expect(hint.textContent).toContain("older imports keep their original attribution");
+    expect(screen.queryByText(/No attribution labels are available yet/)).toBeNull();
     const selectable = Array.from(sourceChooser().options).filter((option) => !option.disabled);
     expect(selectable.length).toBe(0);
   });
 
   it("keeps the register-a-source guidance when no sources exist at all", () => {
     render(<TriageWorkspace {...makeProps({ sources: [] })} />);
-    expect(screen.getByText(/No sources are registered yet/)).toBeTruthy();
-    expect(screen.queryByText(/All registered sources are retired/)).toBeNull();
+    expect(screen.getByText(/No attribution labels are available yet/)).toBeTruthy();
+    expect(screen.queryByText(/All attribution labels are retired/)).toBeNull();
   });
 });
 

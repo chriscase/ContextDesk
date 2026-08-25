@@ -24,8 +24,8 @@ test.describe("comparison lanes and requested war-room states", () => {
 
     await gotoStage(page, "Compare");
     await expect(page.getByRole("heading", { name: "Experiment lab", exact: true })).toBeVisible();
-    await expect(page.getByText(/Compare seeded, connected ContextDesk, and pasted-chat triage candidates/)).toBeVisible();
-    await expect(page.getByText(/Sources: seeded · ContextDesk connector · pasted chat/)).toBeVisible();
+    await expect(page.getByText(/Compare recorded analyses from ContextDesk, imported chat, and other triage methods/)).toBeVisible();
+    await expect(page.getByText("Add or import analysis")).toBeVisible();
   });
 
   test("surface map records the probed branch honestly", () => {

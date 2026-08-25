@@ -81,14 +81,57 @@ test.describe("investigation-scoped corpus intake", () => {
     await expect(mailerEvidence.getByText(/mailer timeout id=syn-1/)).toBeVisible();
 
     await analyze.getByRole("checkbox", { name: "Include mailer/shared-timeout.log in snapshot" }).check();
-    await analyze.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
+    const [firstFrozenResponse] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes("/snapshots") && res.request().method() === "POST" && res.ok(),
+      ),
+      analyze.getByRole("button", { name: "Freeze selected evidence (1)" }).click(),
+    ]);
+    const firstSnapshot = (await firstFrozenResponse.json()) as {
+      id: string;
+      fingerprint: string;
+      evidence: unknown[];
+    };
+    expect(firstSnapshot.evidence).toHaveLength(1);
+
+    await analyze.getByRole("checkbox", { name: "Include mailer/shared-timeout.log in snapshot" }).check();
+    await analyze.getByRole("checkbox", { name: "Include workers/unique-worker.log in snapshot" }).check();
+    const [secondFrozenResponse] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes("/snapshots") && res.request().method() === "POST" && res.ok(),
+      ),
+      analyze.getByRole("button", { name: "Freeze selected evidence (2)" }).click(),
+    ]);
+    const secondSnapshot = (await secondFrozenResponse.json()) as {
+      id: string;
+      fingerprint: string;
+      parentSnapshotId: string | null;
+      evidence: unknown[];
+    };
+    expect(secondSnapshot.parentSnapshotId).toBe(firstSnapshot.id);
+    expect(secondSnapshot.evidence).toHaveLength(2);
     await expect(analyze.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
+    await expect(analyze.getByRole("combobox", { name: "Snapshot", exact: true })).toHaveValue(secondSnapshot.id);
     await expect(analyze.getByRole("button", { name: "Run synthetic comparison" })).toBeEnabled();
-    await analyze.getByRole("button", { name: "Run synthetic comparison" }).click();
-    await expect(analyze.locator(".triage-runs__status--completed").first()).toBeVisible({
+    const [launchedResponse] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().endsWith(`/api/cases/${caseId}/triage-runs`) && res.request().method() === "POST" && res.ok(),
+      ),
+      analyze.getByRole("button", { name: "Run synthetic comparison" }).click(),
+    ]);
+    const launched = (await launchedResponse.json()) as {
+      id: string;
+      snapshotId: string;
+      snapshotFingerprint: string;
+    };
+    expect(launched.snapshotId).toBe(secondSnapshot.id);
+    expect(launched.snapshotFingerprint).toBe(secondSnapshot.fingerprint);
+    await expect(analyze.getByRole("status")).toContainText("2 frozen evidence items");
+    const launchedCard = analyze.locator(`[id="triage-run-${launched.id}"]`);
+    await expect(launchedCard.locator(".triage-runs__status--completed")).toBeVisible({
       timeout: 30_000,
     });
-    const completedLanes = analyze.locator(".triage-runs__job .triage-runs__candidate");
+    const completedLanes = launchedCard.locator(".triage-runs__candidate");
     await expect(completedLanes.filter({ hasText: "qwen-3.6-27b" })).toContainText("settled");
     await expect(completedLanes.filter({ hasText: "gpt-oss-120b" })).toContainText("settled");
     await expect(completedLanes.filter({ hasText: "ministral-3-14b-instruct-2512" })).toContainText(

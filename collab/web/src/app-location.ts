@@ -398,7 +398,7 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
     return "Page not found · ContextDesk War Room";
   }
   if (location.area === "sources") {
-    return "Sources · ContextDesk War Room";
+    return "Attribution · ContextDesk War Room";
   }
   if (location.area === "help") {
     return "Help · ContextDesk War Room";

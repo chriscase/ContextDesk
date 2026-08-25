@@ -44,7 +44,7 @@ function catalogListener() {
   };
 }
 
-describe("source & provenance library", () => {
+describe("attribution library", () => {
   it("explains all five kinds in plain language, keeping unknown honest", async () => {
     stubList([
       source({ id: "1", name: "Priya", kind: "human" }),
@@ -55,7 +55,7 @@ describe("source & provenance library", () => {
     ]);
     render(<Catalog canLead={true} />);
 
-    const legend = await screen.findByRole("region", { name: "What the five kinds mean" });
+    const legend = await screen.findByRole("region", { name: "What can supply information" });
     for (const label of [
       "Person",
       "External tool",
@@ -65,21 +65,13 @@ describe("source & provenance library", () => {
     ]) {
       expect(within(legend).getByText(label)).toBeTruthy();
     }
-    for (const token of [
-      "human",
-      "external-tool",
-      "internal-system",
-      "contextdesk",
-      "unknown",
-    ]) {
-      expect(within(legend).getByText(token, { selector: "code" })).toBeTruthy();
-    }
+    expect(within(legend).queryByText("external-tool", { selector: "code" })).toBeNull();
     // Unknown is a first-class honest value, never presented as failure.
     expect(
       within(legend).getByText(/never an error, and never upgraded to a guess/),
     ).toBeTruthy();
     // Sources are attribution, not credentials, connections, or correctness.
-    expect(screen.getByText(/not a login or a live connection/)).toBeTruthy();
+    expect(screen.getByText(/not user accounts and do not connect to the named tools/)).toBeTruthy();
     expect(
       within(legend).getByText(/ContextDesk never connects to the tool itself/),
     ).toBeTruthy();
@@ -95,11 +87,11 @@ describe("source & provenance library", () => {
     ]);
     render(<Catalog canLead={false} />);
 
-    const activeGroup = await screen.findByRole("region", { name: "Active sources (2)" });
+    const activeGroup = await screen.findByRole("region", { name: "Available attribution labels (2)" });
     expect(within(activeGroup).getByText("Chat assistant")).toBeTruthy();
     expect(within(activeGroup).getByText("Priya")).toBeTruthy();
 
-    const retiredGroup = screen.getByRole("region", { name: "Retired sources (1)" });
+    const retiredGroup = screen.getByRole("region", { name: "Retired attribution labels (1)" });
     expect(within(retiredGroup).getByText("Legacy scanner")).toBeTruthy();
     expect(within(retiredGroup).getByText("retired")).toBeTruthy();
     // Retirement is presented as non-destructive to history.
@@ -107,12 +99,12 @@ describe("source & provenance library", () => {
       within(retiredGroup).getByText(/retirement hides, it never rewrites/),
     ).toBeTruthy();
 
-    const activeFact = screen.getByText("Active sources", { selector: "dt" }).parentElement!;
+    const activeFact = screen.getByText("Available labels", { selector: "dt" }).parentElement!;
     expect(within(activeFact).getByText("2")).toBeTruthy();
-    const retiredFact = screen.getByText("Retired sources", { selector: "dt" }).parentElement!;
+    const retiredFact = screen.getByText("Retired labels", { selector: "dt" }).parentElement!;
     expect(within(retiredFact).getByText("1")).toBeTruthy();
     // Only active external tools count as ready for manual intake.
-    const intakeFact = screen.getByText("External tools for manual intake", {
+    const intakeFact = screen.getByText("Tools available for pasted output", {
       selector: "dt",
     }).parentElement!;
     expect(within(intakeFact).getByText("1")).toBeTruthy();
@@ -143,7 +135,7 @@ describe("source & provenance library", () => {
       name: "Source description",
     }) as HTMLTextAreaElement;
     fireEvent.change(description, { target: { value: "On-call alert stream" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add source" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add label" }));
 
     // While the POST is in flight nothing is reset.
     expect(name.value).toBe("Grafana alerts");
@@ -185,9 +177,9 @@ describe("source & provenance library", () => {
 
     const name = await screen.findByRole("textbox", { name: "Source name" });
     // Kind-specific guidance for the default kind: manual, no provider access.
-    expect(screen.getByText(/No credentials are stored and no automatic access/)).toBeTruthy();
+    expect(screen.getByText(/No credentials are stored and no automatic connection/)).toBeTruthy();
     fireEvent.change(name, { target: { value: "Claude chat assistant" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add source" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add label" }));
     await waitFor(() => expect(listener).toHaveBeenCalledTimes(1));
     dispose();
 
@@ -218,7 +210,7 @@ describe("source & provenance library", () => {
     })) as HTMLInputElement;
     fireEvent.click(screen.getByRole("radio", { name: /Unknown origin/ }));
     fireEvent.change(name, { target: { value: "Denied source" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add source" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add label" }));
 
     expect((await screen.findByRole("alert")).textContent).toBe(
       "Source could not be added. You may not have permission to manage the catalog.",
@@ -266,7 +258,7 @@ describe("source & provenance library", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retire Chat assistant" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm retire Chat assistant" }));
 
-    expect(await screen.findByRole("region", { name: "Retired sources (1)" })).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "Retired attribution labels (1)" })).toBeTruthy();
     const retireCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/retire"));
     expect(String(retireCall![0])).toBe("/api/catalog/sources/1/retire");
     expect(retireCall![1]).toEqual({
@@ -300,7 +292,7 @@ describe("source & provenance library", () => {
     );
     expect(screen.queryByText("forbidden by policy")).toBeNull();
     expect(screen.getByText("Chat assistant")).toBeTruthy();
-    expect(screen.getByRole("region", { name: "Active sources (1)" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Available attribution labels (1)" })).toBeTruthy();
   });
 
   it("shows no mutation controls to non-leads while staying informative", async () => {
@@ -312,12 +304,12 @@ describe("source & provenance library", () => {
 
     expect(await screen.findByText("Chat assistant")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Retire/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Add source" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add label" })).toBeNull();
     expect(screen.queryByRole("radio")).toBeNull();
     // Provenance stays fully browsable: description, kinds, and groups render.
     expect(screen.getByText("Pasted transcripts")).toBeTruthy();
-    expect(screen.getByRole("region", { name: "What the five kinds mean" })).toBeTruthy();
-    expect(screen.getByRole("region", { name: "Retired sources (1)" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "What can supply information" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Retired attribution labels (1)" })).toBeTruthy();
     expect(screen.getByRole("note").textContent).toContain("read access");
   });
 
@@ -329,7 +321,7 @@ describe("source & provenance library", () => {
     );
     render(<Catalog canLead={false} />);
 
-    expect(screen.getByRole("status").textContent).toContain("Loading the source library");
+    expect(screen.getByRole("status").textContent).toContain("Loading attribution labels");
     resolveFetch({ ok: true, json: async () => ({ sources: [] }) });
     expect(await screen.findByText("No sources are registered yet.")).toBeTruthy();
     expect(screen.queryByRole("status")).toBeNull();
@@ -351,12 +343,12 @@ describe("source & provenance library", () => {
     render(<Catalog canLead={true} />);
 
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "The source library could not be loaded. Try again.",
+      "Attribution labels could not be loaded. Try again.",
     );
     expect(screen.queryByText("database exploded")).toBeNull();
 
     failing = false;
-    fireEvent.click(screen.getByRole("button", { name: "Retry loading sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading attribution" }));
     expect(await screen.findByText("Chat assistant")).toBeTruthy();
   });
 
@@ -365,14 +357,14 @@ describe("source & provenance library", () => {
     render(<Catalog canLead={true} />);
     expect(await screen.findByText("No sources are registered yet.")).toBeTruthy();
     expect(screen.getByText(/Register the first one below/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Add source" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add label" })).toBeTruthy();
     cleanup();
 
     stubList([]);
     render(<Catalog canLead={false} />);
     expect(await screen.findByText("No sources are registered yet.")).toBeTruthy();
     expect(screen.getByText(/A case lead can register the first one/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Add source" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add label" })).toBeNull();
   });
 
   it("renders long unbroken text and unexpected kinds without inventing meaning", async () => {
@@ -388,7 +380,7 @@ describe("source & provenance library", () => {
     expect(screen.getByText(longDescription)).toBeTruthy();
     // An unrecognized kind stays the recorded token instead of a guessed label.
     const card = screen.getByText("Mystery feed").closest("li")!;
-    expect(within(card).getByText("weird-kind", { selector: "code" })).toBeTruthy();
+    expect(within(card).getByText("weird-kind", { selector: ".catalog-chip" })).toBeTruthy();
   });
 
   it("filters purely client-side with an accessible searchbox", async () => {
@@ -406,8 +398,8 @@ describe("source & provenance library", () => {
     expect(screen.getByText("Chat assistant")).toBeTruthy();
     expect(screen.queryByText("Priya")).toBeNull();
     expect(screen.getByText("1 of 3 sources match.")).toBeTruthy();
-    expect(screen.getByRole("region", { name: "Active sources (1 of 2)" })).toBeTruthy();
-    expect(screen.getByText("No retired sources match the filter.")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Available attribution labels (1 of 2)" })).toBeTruthy();
+    expect(screen.getByText("No retired labels match the filter.")).toBeTruthy();
 
     // Kind labels match too, so "person" finds human sources.
     fireEvent.change(box, { target: { value: "person" } });

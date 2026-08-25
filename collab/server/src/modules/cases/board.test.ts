@@ -40,7 +40,7 @@ const hypothesis = (id: string, status: "supported" | "contradicted"): Contribut
 });
 
 describe("deriveCaseBoard", () => {
-  it("separates verified knowledge, unknown evidence, and disputed hypotheses", () => {
+  it("does not mistake the evidence inventory for investigative findings", () => {
     const board = deriveCaseBoard({
       caseId: "case-1",
       snapshotId: "snapshot-1",
@@ -48,11 +48,10 @@ describe("deriveCaseBoard", () => {
       artifacts: [artifact("evidence-1", true), artifact("evidence-2", false)],
       contributions: [hypothesis("hypothesis-1", "contradicted")],
     });
-    expect(board.findings.map((finding) => finding.bucket)).toEqual([
-      "known",
-      "unknown",
-      "disputed",
-    ]);
+    expect(board.findings.map((finding) => finding.bucket)).toEqual(["disputed"]);
+    expect(board.findings.map((finding) => finding.statement)).not.toContain(
+      "Verified evidence available: evidence-1.log.",
+    );
     expect(board.goldStatus).toBe("unknown");
     expect(board.notice).toBe("Agreement is not proof of correctness.");
   });

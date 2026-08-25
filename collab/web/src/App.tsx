@@ -36,6 +36,7 @@ import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
 import { SetupWizard } from "./SetupWizard.js";
 import { SelfProfilePanel } from "./SelfProfilePanel.js";
+import { BrandMark } from "./graphics.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
 
 interface SessionView {
@@ -96,7 +97,7 @@ declare global {
 const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
   { area: "overview", label: "Overview" },
   { area: "investigations", label: "Investigations" },
-  { area: "sources", label: "Sources" },
+  { area: "sources", label: "Attribution" },
   { area: "administration", label: "Administration" },
   { area: "help", label: "Help" },
 ];
@@ -509,6 +510,9 @@ export function App() {
   if (!ready || setupAvailable === null) {
     return (
       <main className="shell shell--gate" aria-busy="true">
+        <div className="shell__brand">
+          <BrandMark size={34} />
+        </div>
         <p className="shell__eyebrow">ContextDesk</p>
         <h1 className="shell__title">ContextDesk War Room</h1>
         <p className="shell__loading" role="status">
@@ -522,6 +526,9 @@ export function App() {
     return (
       <main className="shell shell--gate">
         <section className="login-screen" aria-labelledby="login-screen-title">
+          <div className="shell__brand">
+            <BrandMark size={34} />
+          </div>
           <p className="shell__eyebrow">ContextDesk</p>
           <h1 className="shell__title" id="login-screen-title">
             ContextDesk War Room
@@ -571,7 +578,11 @@ export function App() {
       </a>
       <header className="topbar">
         <div className="topbar__brand">
-          <h1 className="topbar__title">ContextDesk War Room</h1>
+          <BrandMark />
+          <h1 className="topbar__title">
+            <span className="topbar__title-product">ContextDesk</span>{" "}
+            <span className="topbar__title-app">War Room</span>
+          </h1>
         </div>
         <button
           type="button"
@@ -707,7 +718,7 @@ export function App() {
             </section>
             <section
               className="app__area"
-              aria-label="Source library"
+              aria-label="Attribution"
               hidden={work.area !== "sources"}
             >
               <Catalog canLead={canLeadCatalog} />

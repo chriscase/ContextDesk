@@ -1,4 +1,4 @@
-import type { FormEvent, ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ImportedRun } from "./ImportedRun.js";
 import type { WorkFocus } from "./app-location.js";
 import { CorpusIntakePanel } from "./CorpusIntakePanel.js";
@@ -170,13 +170,6 @@ export function TriageAnchor(props: { id: string; label: string; children: React
   );
 }
 
-const RAIL_STEPS = [
-  { anchor: "triage-capture", name: "Capture", hint: "notes & imported output" },
-  { anchor: "triage-analyze", name: "Analyze", hint: "evidence board & AI lanes" },
-  { anchor: "triage-compare", name: "Compare", hint: "lanes side by side" },
-  { anchor: "triage-decide", name: "Decide", hint: "status & share-safe export" },
-] as const;
-
 export function TriageWorkspace(props: {
   caseId?: string;
   canWrite: boolean;
@@ -199,92 +192,59 @@ export function TriageWorkspace(props: {
   const humanEntries = props.contributions.filter(
     (row) => !row.tombstoned && HUMAN_CONTRIBUTION_KINDS.has(row.kind),
   ).length;
-  const captureCount = humanEntries + props.runs.length;
-  const nothingCaptured = captureCount === 0;
+  const reviewLinks = props.contributions
+    .filter((row) => !row.tombstoned && HUMAN_CONTRIBUTION_KINDS.has(row.kind))
+    .map((row) => ({
+      id: row.id,
+      label: `${row.kind === "upload" ? "Evidence" : row.kind === "hypothesis" ? "Possible explanation" : row.kind === "action" ? "Next step" : row.kind === "message" ? "Observation" : "Note"}: ${(row.body ?? "Recorded item").slice(0, 100)}`,
+    }));
+  const exactTimelineRoute = props.routeFocus?.section === "triage-capture"
+    && Boolean(props.routeFocus.item);
+  const exactTimelineRouteSeen = useRef(exactTimelineRoute);
+  const [timelineOpen, setTimelineOpen] = useState(
+    props.events.length <= 5 || exactTimelineRoute,
+  );
+  useEffect(() => {
+    if (exactTimelineRoute) {
+      exactTimelineRouteSeen.current = true;
+      setTimelineOpen(true);
+      return;
+    }
+    // Timeline data arrives after the shell. Collapse a long ordinary history,
+    // but never hide a record that this mounted workspace was asked to reveal.
+    if (!exactTimelineRouteSeen.current) setTimelineOpen(props.events.length <= 5);
+  }, [exactTimelineRoute, props.events.length]);
   useRouteFocus(props.routeFocus, true);
 
   return (
     <>
       <section className="triage-workspace" aria-labelledby="triage-workspace-heading">
         <header className="triage-workspace__header">
-          <p className="case-memory__eyebrow">Guided triage</p>
+          <p className="case-memory__eyebrow">Current stage</p>
           <h3 id="triage-workspace-heading" className="triage-workspace__title">
-            Triage workspace
+            Capture evidence and observations
           </h3>
           <p className="triage-workspace__copy">
-            Work the case in four steps: capture what you know, let analysis organize it, compare
-            strategies side by side, and record a human decision. AI assists at every step —
-            people stay the authors and the judges.
+            Add what people observed, analysis brought in from another tool, and the files that
+            support it. You can organize and compare it in the next stage.
           </p>
         </header>
-        <div className="triage-workspace__paths">
-          <a className="triage-workspace__path" href="#triage-capture">
-            <span className="triage-workspace__path-head">
-              <strong>Capture findings yourself</strong>
-              <span className="triage-chip triage-chip--human">human-authored</span>
-            </span>
-            <span className="triage-workspace__path-body">
-              Write notes and hypotheses, or paste results you gathered anywhere else — terminals,
-              dashboards, another AI chat. Every entry is labeled with who or what produced it.
-            </span>
-            <span className="triage-workspace__path-cta" aria-hidden="true">
-              Go to capture ↓
-            </span>
-          </a>
-          <a className="triage-workspace__path" href="#triage-analyze">
-            <span className="triage-workspace__path-head">
-              <strong>Analyze with ContextDesk</strong>
-              <span className="triage-chip triage-chip--model">model lanes</span>
-            </span>
-            <span className="triage-workspace__path-body">
-              Freeze an evidence snapshot, then run model lanes against exactly that snapshot.
-              Lanes organize and compare recorded evidence; they never rewrite your material or
-              declare a winner.
-            </span>
-            <span className="triage-workspace__path-cta" aria-hidden="true">
-              Go to analysis ↓
-            </span>
-          </a>
-        </div>
-        <nav className="triage-rail" aria-label="Triage steps">
-          <ol className="triage-rail__list">
-            {RAIL_STEPS.map((step, index) => (
-              <li key={step.anchor}>
-                <a className="triage-rail__link" href={`#${step.anchor}`}>
-                  <span className="triage-rail__num" aria-hidden="true">
-                    {index + 1}
-                  </span>
-                  <span className="triage-rail__name">{step.name}</span>
-                  <span className="triage-rail__hint">
-                    {index === 0
-                      ? `${captureCount} recorded ${captureCount === 1 ? "item" : "items"}`
-                      : step.hint}
-                  </span>
-                  {index === 0 && nothingCaptured && props.canWrite ? (
-                    <span className="triage-rail__badge">start here</span>
-                  ) : null}
-                </a>
-              </li>
-            ))}
-          </ol>
-        </nav>
       </section>
       <TriageStepSection
         id="triage-capture"
         step={1}
-        title="Capture"
-        lede="Record investigation material from anywhere. Both paths below are first-class, and both land on the case record with clear provenance."
+        title="Record what you know"
+        lede="Start with a note, paste analysis gathered elsewhere, or add logs and files."
       >
         {props.canWrite ? (
           <div className="triage-capture__paths">
             <article className="triage-capture__card" aria-labelledby="triage-capture-note-title">
               <header className="triage-capture__card-head">
-                <h4 id="triage-capture-note-title">Your own findings</h4>
-                <span className="triage-chip triage-chip--human">human-authored</span>
+                <h4 id="triage-capture-note-title">Notes, observations, and next steps</h4>
+                <span className="triage-chip triage-chip--human">written by you</span>
               </header>
               <p className="triage-capture__card-copy">
-                A note, hypothesis, or action item — attributed to you on the case timeline. Messy
-                is fine; provenance is what matters.
+                Record what you saw, what might explain it, or what someone should try next.
               </p>
               <form className="composer" onSubmit={props.onAddNote}>
                 <label className="triage-field">
@@ -295,10 +255,10 @@ export function TriageWorkspace(props: {
                     aria-label="Timeline entry kind"
                     defaultValue="note"
                   >
-                    <option value="message">message</option>
-                    <option value="note">note</option>
-                    <option value="hypothesis">hypothesis</option>
-                    <option value="action">action</option>
+                    <option value="message">Observation</option>
+                    <option value="note">Note</option>
+                    <option value="hypothesis">Possible explanation</option>
+                    <option value="action">Next step</option>
                   </select>
                 </label>
                 <textarea
@@ -334,19 +294,15 @@ export function TriageWorkspace(props: {
             </article>
             <article className="triage-capture__card" aria-labelledby="triage-capture-import-title">
               <header className="triage-capture__card-head">
-                <h4 id="triage-capture-import-title">Pasted external output</h4>
-                <span className="triage-chip triage-chip--imported">imported · unverified</span>
+                <h4 id="triage-capture-import-title">Paste analysis from another tool</h4>
+                <span className="triage-chip triage-chip--imported">unverified until reviewed</span>
               </header>
               <p className="triage-capture__card-copy">
-                Paste output produced anywhere else — another AI, a diagnostic tool, an external
-                service, a report someone curated, or material gathered by hand. It stays
-                unverified until a person corroborates it against case evidence.
+                Bring in a chat answer, diagnostic report, or other analysis. It stays clearly
+                labeled until a person checks it against the evidence.
               </p>
               <p className="import-warn">
-                Pasted prompts and outputs can contain secrets — mask them before saving. Evidence
-                visibility is whatever the importer describes, or unknown; a package snapshot
-                identity, when recorded, is a content-addressed reference — not a signature or a
-                verification.
+                Remove passwords, tokens, and other secrets before saving.
               </p>
               {props.importError ? (
                 <p className="case-memory__error" role="alert">
@@ -379,11 +335,11 @@ export function TriageWorkspace(props: {
                     defaultValue=""
                   >
                     <option value="" disabled>
-                      Source
+                      Choose a label
                     </option>
                     {activeSources.map((source) => (
                       <option key={source.id} value={source.id}>
-                        {source.name} ({source.kind})
+                        {source.name}
                       </option>
                     ))}
                   </select>
@@ -391,39 +347,39 @@ export function TriageWorkspace(props: {
                 {activeSources.length === 0 ? (
                   <p className="triage-capture__hint">
                     {props.sources.length === 0
-                      ? "No sources are registered yet. A case lead can add one in the source " +
-                        "catalog further down the page."
-                      : "All registered sources are retired, so none can be selected for new " +
-                        "intake. A case lead can register an active source in the source catalog " +
-                        "further down the page; imports already on the record keep their retired " +
-                        "source’s name and kind."}
+                      ? "No attribution labels are available yet. A case lead can add one in Attribution."
+                      : "All attribution labels are retired. A case lead can add an available label in Attribution; older imports keep their original attribution."}
                   </p>
                 ) : null}
-                <div className="triage-capture__operator">
-                  <label className="triage-field">
-                    Operator username
-                    <input
-                      className="login__input"
-                      name="operatorUsername"
-                      aria-label="Operator username"
-                      required
-                    />
-                  </label>
-                  <label className="triage-field">
-                    Operator identity
-                    <input
-                      className="login__input"
-                      name="operatorId"
-                      aria-label="Operator identity"
-                      required
-                    />
-                  </label>
-                </div>
                 <label className="import-warn triage-capture__redaction">
                   <input type="checkbox" name="redacted" /> I redacted secrets before save
                 </label>
                 <details className="triage-advanced">
-                  <summary>Provenance details (visibility, snapshot)</summary>
+                  <summary>Import details</summary>
+                  <p className="triage-capture__hint">
+                    Leave the person fields blank if you ran the analysis yourself. ContextDesk
+                    will credit your signed-in account without displaying its directory identity.
+                  </p>
+                  <div className="triage-capture__operator">
+                    <label className="triage-field">
+                      Run by someone else (optional)
+                      <input
+                        className="login__input"
+                        name="operatorUsername"
+                        aria-label="Operator username"
+                        placeholder="Name or username"
+                      />
+                    </label>
+                    <label className="triage-field">
+                      Recorded directory identity (optional)
+                      <input
+                        className="login__input"
+                        name="operatorId"
+                        aria-label="Operator identity"
+                        placeholder="Only when required for historical attribution"
+                      />
+                    </label>
+                  </div>
                   <label className="triage-field">
                     Evidence visibility
                     <select
@@ -455,8 +411,8 @@ export function TriageWorkspace(props: {
                     />
                   </label>
                   <p className="triage-capture__hint">
-                    Leave these alone unless you know them; unknown visibility stays unknown rather
-                    than being guessed.
+                    Leave these fields alone unless the source provides them. Unknown details stay
+                    unknown rather than being guessed.
                   </p>
                 </details>
                 <button className="login__submit" type="submit">
@@ -516,7 +472,11 @@ export function TriageWorkspace(props: {
               </span>
             </li>
           </ul>
-          <details className="triage-record__timeline" open>
+          <details
+            className="triage-record__timeline"
+            open={timelineOpen}
+            onToggle={(event) => setTimelineOpen(event.currentTarget.open)}
+          >
             <summary>
               Case timeline · {props.events.length} {props.events.length === 1 ? "event" : "events"}
             </summary>
@@ -583,7 +543,7 @@ export function TriageWorkspace(props: {
             )}
           </details>
           <div className="triage-record__imports">
-            <h5 className="triage-record__imports-title">Imported external output</h5>
+            <h5 className="triage-record__imports-title">Analysis imported from elsewhere</h5>
             {props.runs.length === 0 ? (
               <p className="case-memory__empty">No external output has been imported yet.</p>
             ) : (
@@ -594,6 +554,7 @@ export function TriageWorkspace(props: {
                   // Attribution searches the full catalog, retired sources included:
                   // a run recorded against a since-retired source keeps its name/kind.
                   source={props.sources.find((source) => source.id === run.sourceId) ?? null}
+                  linkOptions={reviewLinks}
                   canCorroborate={props.canWrite}
                   onCorroborate={props.onCorroborate}
                 />

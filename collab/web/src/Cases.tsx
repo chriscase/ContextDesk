@@ -15,6 +15,7 @@ import {
   type TimelineEvent,
 } from "./TriageWorkspace.js";
 import { isDiscussionSection, isWorkLocation, parsePathname, type WorkFocus } from "./app-location.js";
+import { EmptyState, StageFlowDiagram, StageIcon } from "./graphics.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
 import { focusArrivalCopy } from "./route-focus-copy.js";
 import { protectedApiFetch } from "./protected-api.js";
@@ -1187,13 +1188,17 @@ export function Cases(props: {
         </label>
       </div>
       {cases.length === 0 && casesLoaded ? (
-        <p className="case-list__empty">
-          No investigations are recorded yet.
-          {canWrite ? " Start the first one below." : ""}
-        </p>
+        <EmptyState art="investigations" className="case-list__empty-state">
+          <p>
+            No investigations are recorded yet.
+            {canWrite ? " Start the first one below." : ""}
+          </p>
+        </EmptyState>
       ) : null}
       {cases.length > 0 && visibleCases.length === 0 ? (
-        <p className="case-list__empty">No investigations match the current search or filter.</p>
+        <EmptyState art="search" className="case-list__empty-state">
+          <p>No investigations match the current search or filter.</p>
+        </EmptyState>
       ) : null}
       <ul className="case-list__items">
         {visibleCases.map((c) => {
@@ -1247,11 +1252,13 @@ export function Cases(props: {
             aria-labelledby="missing-investigation-title"
             role="alert"
           >
-            <h2 id="missing-investigation-title">Investigation unavailable</h2>
-            <p>That investigation is not available to your account.</p>
-            <button type="button" className="crumbs__link" onClick={() => exitFocus("overview")}>
-              Back to the overview
-            </button>
+            <EmptyState art="locked">
+              <h2 id="missing-investigation-title">Investigation unavailable</h2>
+              <p>That investigation is not available to your account.</p>
+              <button type="button" className="crumbs__link" onClick={() => exitFocus("overview")}>
+                Back to the overview
+              </button>
+            </EmptyState>
           </section>
         )}
       </div>
@@ -1278,9 +1285,25 @@ export function Cases(props: {
                   : `${cases.length} investigation${cases.length === 1 ? "" : "s"} recorded. Counts reflect recorded status only.`}
               </p>
             </header>
+            {casesLoaded && cases.length === 0 ? (
+              <section className="overview-hero" aria-labelledby="overview-hero-title">
+                <div>
+                  <p className="overview-hero__eyebrow">How the room works</p>
+                  <h3 className="overview-hero__title" id="overview-hero-title">
+                    Capture. Analyze. Compare. Decide.
+                  </h3>
+                  <p className="overview-hero__copy">
+                    Each investigation opens on Situation — the shared picture of what is
+                    recorded — then moves through four working stages. Analysis informs the
+                    team; a person, never a model, makes the call.
+                  </p>
+                </div>
+                <StageFlowDiagram caption="Evidence is captured with provenance, frozen into snapshots for analysis, compared on the same material, and decided by a person. Nothing here scores progress — the room only restates what is recorded." />
+              </section>
+            ) : null}
             <dl className="overview__counts" aria-label="Investigations by recorded status">
               {statusCounts.map(([status, count]) => (
-                <div key={status} className="overview__count">
+                <div key={status} className="overview__count" data-status={status}>
                   <dt>{status}</dt>
                   <dd>{count}</dd>
                 </div>
@@ -1298,7 +1321,13 @@ export function Cases(props: {
                 {!activitiesLoaded ? (
                   <p className="overview__empty" role="status">Loading recent activity…</p>
                 ) : activities.length === 0 ? (
-                  <p className="overview__empty">No activity has been recorded yet.</p>
+                  <EmptyState art="activity">
+                    <p>No activity has been recorded yet.</p>
+                    <p>
+                      As people record work across investigations, the newest events land
+                      here with a direct path to each record.
+                    </p>
+                  </EmptyState>
                 ) : (
                   <ol className="activity-feed">
                     {overviewActivities.map((item) => {
@@ -1390,10 +1419,12 @@ export function Cases(props: {
                 {!activitiesLoaded ? (
                   <p className="overview__empty" role="status">Loading recent activity…</p>
                 ) : attentionCount === 0 ? (
-                  <p className="overview__empty">
-                    Nothing in recent activity is recorded as stopped, disagreeing, unread, or
-                    waiting on a decision.
-                  </p>
+                  <EmptyState art="clear">
+                    <p>
+                      Nothing in recent activity is recorded as stopped, disagreeing, unread, or
+                      waiting on a decision.
+                    </p>
+                  </EmptyState>
                 ) : (
                   <div className="overview__threads">
                     {pendingDecisions.length ? (
@@ -1519,7 +1550,9 @@ export function Cases(props: {
                     ))}
                   </ul>
                 ) : (
-                  <p className="overview__empty">No high-impact active investigations are recorded.</p>
+                  <EmptyState art="shield">
+                    <p>No high-impact active investigations are recorded.</p>
+                  </EmptyState>
                 )}
                 <button
                   type="button"
@@ -1626,8 +1659,13 @@ export function Cases(props: {
                 aria-current={stage === item.id ? "page" : undefined}
                 onClick={() => selectStage(item.id)}
               >
-                <span className="stage-nav__name">{item.label}</span>
-                <span className="stage-nav__hint">{item.hint}</span>
+                <span className="stage-nav__badge" aria-hidden="true">
+                  <StageIcon stage={item.id} />
+                </span>
+                <span className="stage-nav__text">
+                  <span className="stage-nav__name">{item.label}</span>
+                  <span className="stage-nav__hint">{item.hint}</span>
+                </span>
               </button>
             </li>
           ))}
@@ -1909,10 +1947,7 @@ export function Cases(props: {
                           <span className="triage-chip triage-chip--imported">
                             imported · unverified
                           </span>
-                          <span>
-                            imported by {run.importerUsername} · evidence visibility{" "}
-                            {run.evidenceVisibility}
-                          </span>
+                          <span>Imported by {run.importerUsername}</span>
                         </p>
                         <ArtifactExcerpt text={run.outputText} label="imported output" />
                         <button
@@ -2134,6 +2169,7 @@ export function Cases(props: {
                   canWrite={canWrite}
                   canLead={canLead}
                   readOnly={readOnly}
+                  {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
                 />
               </div>
@@ -2144,6 +2180,7 @@ export function Cases(props: {
                   caseId={current.id}
                   canLead={canLead}
                   readOnly={readOnly}
+                  {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
                 />
               </div>

@@ -144,6 +144,8 @@ describe("SelfProfilePanel", () => {
     expect(screen.queryByRole("textbox", { name: "Work email" })).toBeNull();
     expect(screen.getAllByText("Directory-owned").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/cannot change LDAP/).length).toBeGreaterThan(0);
+    expect(screen.getByText("Linked to the LDAP directory (technical identifier hidden)")).toBeTruthy();
+    expect(screen.queryByText(/uid=dana/)).toBeNull();
     expect(screen.getByLabelText("Other contact")).toBeTruthy();
     expect(screen.getByLabelText("Other contact")).not.toHaveProperty("readOnly", true);
   });

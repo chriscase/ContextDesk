@@ -74,7 +74,8 @@ describe("case snapshots", () => {
       expect(unknownFairness.fairnessClass).toBe("unknown");
       const board = await service.getCaseBoard(created.id, actor, false, first.id);
       expect(board?.snapshotId).toBe(first.id);
-      expect(board?.findings.some((finding) => finding.bucket === "known")).toBe(true);
+      expect(board?.findings.some((finding) => finding.bucket === "known")).toBe(false);
+      expect(board?.findings).toEqual([]);
       await expect(
         service.createSnapshot(
           created.id,

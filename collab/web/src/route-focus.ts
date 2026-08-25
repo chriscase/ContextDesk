@@ -94,6 +94,17 @@ export function useRouteFocus(focus: WorkFocus | undefined, ready: boolean): voi
     // nothing, while the missing exact item remains honestly unresolved.
     const target = itemTarget ?? visibleSectionTarget(focus.section);
     if (!target) return;
+    // Exact records may live in disclosure widgets that are collapsed by
+    // default to keep long investigations readable. A direct link promises to
+    // reveal the named record, so open every containing disclosure before
+    // moving focus to it.
+    if (itemTarget) {
+      let disclosure = itemTarget.closest<HTMLDetailsElement>("details");
+      while (disclosure) {
+        disclosure.open = true;
+        disclosure = disclosure.parentElement?.closest<HTMLDetailsElement>("details") ?? null;
+      }
+    }
     target.focus({ preventScroll: true });
     target.scrollIntoView?.({ block: "center", inline: "nearest" });
     applied.current = { key, exact: Boolean(itemTarget), target };

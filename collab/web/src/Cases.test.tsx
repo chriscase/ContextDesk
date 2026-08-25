@@ -865,11 +865,12 @@ describe("situation briefing", () => {
     const hypotheses = within(briefing).getByRole("region", { name: /Working hypotheses/ });
     // The fixture records this hypothesis as owner_only.
     expect(within(hypotheses).getByText("private to this case")).toBeTruthy();
-    // Imported output states the visibility its importer described.
+    // Imported output stays concise; low-level visibility state is not primary briefing copy.
     const imported = within(briefing).getByRole("region", {
       name: /Imported analysis awaiting a human read/,
     });
-    expect(within(imported).getByText(/evidence visibility importer_described/)).toBeTruthy();
+    expect(within(imported).getByText("Imported by dave")).toBeTruthy();
+    expect(within(imported).queryByText(/importer_described/)).toBeNull();
   });
 
   it("keeps a removed contribution out of the working record", async () => {
@@ -1020,7 +1021,7 @@ describe("focused investigation view", () => {
     expect(screen.getByRole("navigation", { name: "Breadcrumb" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Investigation stages" })).toBeTruthy();
     // Only the situation surface is presented.
-    expect(screen.queryByRole("heading", { name: "Triage workspace" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Capture evidence and observations" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Evidence and snapshots" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
@@ -1195,7 +1196,7 @@ describe("focused investigation view", () => {
 
     const stageNav = screen.getByRole("navigation", { name: "Investigation stages" });
     fireEvent.click(within(stageNav).getByRole("button", { name: /Capture/ }));
-    expect(await screen.findByRole("heading", { name: "Triage workspace" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Capture evidence and observations" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Situation" })).toBeNull();
     expect(
       within(stageNav).getByRole("button", { name: /Capture/ }).getAttribute("aria-current"),
@@ -1204,7 +1205,7 @@ describe("focused investigation view", () => {
     fireEvent.click(within(stageNav).getByRole("button", { name: /Analyze/ }));
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Run history" })).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Triage workspace" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Capture evidence and observations" })).toBeNull();
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Compare/ }));
     expect(
@@ -1473,12 +1474,13 @@ describe("focused investigation view", () => {
     fireEvent.click(within(stageNav).getByRole("button", { name: /Capture/ }));
     expect(await screen.findByText("The investigation was opened")).toBeTruthy();
     expect(
-      await screen.findByRole("option", { name: "Fixture chat assistant (external-tool)" }),
+      await screen.findByRole("option", { name: "Fixture chat assistant" }),
     ).toBeTruthy();
 
     fireEvent.change(screen.getByRole("textbox", { name: "External run output" }), {
       target: { value: "queue depth is the root cause" },
     });
+    fireEvent.click(screen.getByText("Import details"));
     fireEvent.change(screen.getByRole("textbox", { name: "Operator username" }), {
       target: { value: "alice" },
     });
@@ -1533,6 +1535,7 @@ describe("focused investigation view", () => {
       name: "External run output",
     })) as HTMLTextAreaElement;
     fireEvent.change(output, { target: { value: "pasted external analysis" } });
+    fireEvent.click(screen.getByText("Import details"));
     fireEvent.change(screen.getByRole("textbox", { name: "Operator username" }), {
       target: { value: "alice" },
     });
@@ -1577,11 +1580,11 @@ describe("focused investigation view", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
     const stageNav = await screen.findByRole("navigation", { name: "Investigation stages" });
     fireEvent.click(within(stageNav).getByRole("button", { name: /Capture/ }));
-    await screen.findByRole("heading", { name: "Triage workspace" });
+    await screen.findByRole("heading", { name: "Capture evidence and observations" });
     expect(screen.queryByRole("option", { name: /New source/ })).toBeNull();
     window.dispatchEvent(new Event("contextdesk:source-catalog-changed"));
     expect(
-      await screen.findByRole("option", { name: "New source (external-tool)" }),
+      await screen.findByRole("option", { name: "New source" }),
     ).toBeTruthy();
   });
 });

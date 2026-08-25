@@ -27,12 +27,12 @@ test.describe("auth shell pathname routing", () => {
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByRole("heading", { name: "Operating picture" })).toBeVisible();
 
-    await page.getByRole("button", { name: "Sources" }).click();
+    await page.getByRole("button", { name: "Attribution" }).click();
     await expect(page).toHaveURL(/\/sources$/);
-    await expect(page.getByRole("heading", { name: "Source & provenance library" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Who and what supplied the information" })).toBeVisible();
 
     await page.reload();
-    await expect(page.getByRole("heading", { name: "Source & provenance library" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Who and what supplied the information" })).toBeVisible();
     await expect(page).toHaveURL(/\/sources$/);
 
     await page.getByRole("button", { name: "Help" }).click();
@@ -41,7 +41,7 @@ test.describe("auth shell pathname routing", () => {
 
     await page.goBack();
     await expect(page).toHaveURL(/\/sources$/);
-    await expect(page.getByRole("heading", { name: "Source & provenance library" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Who and what supplied the information" })).toBeVisible();
 
     await page.goForward();
     await expect(page).toHaveURL(/\/help$/);

@@ -7,6 +7,7 @@ const ARTIFACT_KINDS = ["log", "email", "attachment", "file_server_ref"] as cons
 const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
 const MAX_UPLOAD_BYTES = 1_000_000;
 const MAX_ERROR_LENGTH = 240;
+const INITIAL_FINDINGS = 12;
 
 interface ArtifactView {
   id: string;
@@ -18,6 +19,11 @@ interface ArtifactView {
   uploaderId: string;
   relativePath?: string | null;
   intakeBatchId?: string | null;
+}
+
+interface ParticipantLabel {
+  identityId?: string;
+  username?: string;
 }
 
 interface SnapshotView {
@@ -83,6 +89,14 @@ const BUCKET_DETAILS: Record<
 
 function shortHash(value: string | null): string {
   return value ? `${value.slice(0, 12)}…` : "not available";
+}
+
+function participantLabel(identityId: string, participants: readonly ParticipantLabel[]): string {
+  const username = participants
+    .find((participant) => participant.identityId === identityId)
+    ?.username
+    ?.trim();
+  return username || "Recorded participant";
 }
 
 function errorText(response: Response, fallback: string): Promise<string> {
@@ -173,6 +187,7 @@ export function CaseBoardPanel(props: {
   canWrite: boolean;
   canLead: boolean;
   readOnly: boolean;
+  participants?: ParticipantLabel[];
   routeFocus?: WorkFocus;
 }) {
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
@@ -180,6 +195,7 @@ export function CaseBoardPanel(props: {
   const [board, setBoard] = useState<{ snapshotId: string | null; findings: BoardFinding[]; notice: string } | null>(null);
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
   const [selectedEvidence, setSelectedEvidence] = useState<string[]>([]);
+  const [evidenceFilter, setEvidenceFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -187,7 +203,27 @@ export function CaseBoardPanel(props: {
   const [inspectText, setInspectText] = useState<string | null>(null);
   const [inspectMetaOnly, setInspectMetaOnly] = useState(false);
   const loadGeneration = useRef(0);
-  useRouteFocus(props.routeFocus, !loading);
+  const evidenceRouteKey = props.routeFocus?.section === "triage-evidence-board"
+    && props.routeFocus.itemKind === "evidence"
+    && props.routeFocus.item
+    ? props.routeFocus.item
+    : null;
+  const handledEvidenceRoute = useRef<string | null>(null);
+  const evidenceRouteNeedsFilterReset = Boolean(
+    evidenceRouteKey
+      && handledEvidenceRoute.current !== evidenceRouteKey
+      && evidenceFilter,
+  );
+  useEffect(() => {
+    if (!evidenceRouteKey) {
+      handledEvidenceRoute.current = null;
+      return;
+    }
+    if (handledEvidenceRoute.current === evidenceRouteKey) return;
+    handledEvidenceRoute.current = evidenceRouteKey;
+    if (evidenceFilter) setEvidenceFilter("");
+  }, [evidenceFilter, evidenceRouteKey]);
+  useRouteFocus(props.routeFocus, !loading && !evidenceRouteNeedsFilterReset);
 
   const load = useCallback(async (snapshotId?: string | null) => {
     const generation = ++loadGeneration.current;
@@ -376,6 +412,19 @@ export function CaseBoardPanel(props: {
 
   const byBucket = (bucket: BoardFinding["bucket"]) =>
     (board?.findings ?? []).filter((finding) => finding.bucket === bucket);
+  const normalizedEvidenceFilter = evidenceFilter.trim().toLocaleLowerCase();
+  const visibleArtifacts = normalizedEvidenceFilter
+    ? artifacts.filter((artifact) =>
+        [artifact.filename, artifact.relativePath, artifact.kind]
+          .filter((value): value is string => Boolean(value))
+          .some((value) => value.toLocaleLowerCase().includes(normalizedEvidenceFilter)),
+      )
+    : artifacts;
+
+  function selectVisibleEvidence() {
+    const visibleIds = visibleArtifacts.map((artifact) => artifact.id);
+    setSelectedEvidence((current) => [...new Set([...current, ...visibleIds])]);
+  }
 
   return (
     <section className="case-memory" aria-labelledby="case-memory-heading">
@@ -395,8 +444,36 @@ export function CaseBoardPanel(props: {
             <section className="case-memory__card" aria-labelledby="case-evidence-heading">
               <h4 id="case-evidence-heading">Evidence board</h4>
               {artifacts.length === 0 ? <p className="case-memory__empty">No evidence has been registered yet.</p> : null}
+              {artifacts.length > 0 ? (
+                <div className="case-memory__evidence-tools">
+                  <label htmlFor="case-evidence-filter">
+                    Filter evidence
+                    <input
+                      className="login__input"
+                      id="case-evidence-filter"
+                      type="search"
+                      value={evidenceFilter}
+                      onChange={(event) => setEvidenceFilter(event.target.value)}
+                      placeholder="Filename, path, or kind"
+                    />
+                  </label>
+                  <p aria-live="polite">
+                    {visibleArtifacts.length} of {artifacts.length} shown · {selectedEvidence.length} selected
+                  </p>
+                  {!props.readOnly && props.canLead ? (
+                    <div className="case-memory__selection-actions">
+                      <button type="button" onClick={selectVisibleEvidence} disabled={visibleArtifacts.length === 0}>
+                        Select all shown
+                      </button>
+                      <button type="button" onClick={() => setSelectedEvidence([])} disabled={selectedEvidence.length === 0}>
+                        Clear selection
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <ul className="case-memory__list">
-                {artifacts.map((artifact) => (
+                {visibleArtifacts.map((artifact) => (
                   <li
                     key={artifact.id}
                     className="case-memory__item"
@@ -421,7 +498,7 @@ export function CaseBoardPanel(props: {
                     <div>
                       <strong>{artifact.filename ?? artifact.kind}</strong>
                       <span className="case-memory__meta">
-                        {artifact.kind} · {artifact.verificationStatus ?? "verification unknown"} · {artifact.uploaderId}
+                        {artifact.kind} · {artifact.verificationStatus ?? "verification unknown"} · uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}
                       </span>
                       <span className="case-memory__meta">hash {shortHash(artifact.contentHash)} · {artifact.privacyClass}</span>
                       <button
@@ -444,6 +521,9 @@ export function CaseBoardPanel(props: {
                   </li>
                 ))}
               </ul>
+              {artifacts.length > 0 && visibleArtifacts.length === 0 ? (
+                <p className="case-memory__empty">No evidence matches this filter.</p>
+              ) : null}
               {!props.readOnly && props.canWrite ? (
                 <form
                   className="case-memory__upload-form"
@@ -535,7 +615,7 @@ export function CaseBoardPanel(props: {
                     }}
                   >
                     <strong>S{index}</strong>
-                    <span>{snapshot.evidence.length} items · {snapshot.createdBy}</span>
+                    <span>{snapshot.evidence.length} items · frozen by {participantLabel(snapshot.createdBy, props.participants ?? [])}</span>
                     <small>{shortHash(snapshot.fingerprint)}</small>
                   </button>
                 ))}
@@ -552,28 +632,36 @@ export function CaseBoardPanel(props: {
               {board?.snapshotId ? <span className="case-memory__badge">bound to selected snapshot</span> : null}
             </div>
             <div className="case-memory__board-grid">
-              {BUCKETS.map((bucket) => (
-                <div key={bucket} className="case-memory__bucket">
+              {BUCKETS.map((bucket) => {
+                const findings = byBucket(bucket);
+                const renderFinding = (finding: BoardFinding) => (
+                  <article key={finding.id} className="case-memory__finding">
+                    {finding.basis === "accepted_decision" ? (
+                      <span className="case-memory__finding-tag">Accepted decision</span>
+                    ) : null}
+                    <p>{finding.statement}</p>
+                    <small>
+                      agreement {finding.agreement} · confidence {finding.confidence} ·{" "}
+                      {finding.evidenceRefs.length} evidence{" "}
+                      {finding.evidenceRefs.length === 1 ? "ref" : "refs"}
+                    </small>
+                  </article>
+                );
+                return <div key={bucket} className="case-memory__bucket">
                   <h5>{BUCKET_DETAILS[bucket].title}</h5>
                   <p className="case-memory__bucket-hint">{BUCKET_DETAILS[bucket].description}</p>
-                  {byBucket(bucket).length === 0 ? (
+                  {findings.length === 0 ? (
                     <p className="case-memory__empty">{BUCKET_DETAILS[bucket].empty}</p>
                   ) : null}
-                  {byBucket(bucket).map((finding) => (
-                    <article key={finding.id} className="case-memory__finding">
-                      {finding.basis === "accepted_decision" ? (
-                        <span className="case-memory__finding-tag">Accepted decision</span>
-                      ) : null}
-                      <p>{finding.statement}</p>
-                      <small>
-                        agreement {finding.agreement} · confidence {finding.confidence} ·{" "}
-                        {finding.evidenceRefs.length} evidence{" "}
-                        {finding.evidenceRefs.length === 1 ? "ref" : "refs"}
-                      </small>
-                    </article>
-                  ))}
-                </div>
-              ))}
+                  {findings.slice(0, INITIAL_FINDINGS).map(renderFinding)}
+                  {findings.length > INITIAL_FINDINGS ? (
+                    <details className="case-memory__findings-more">
+                      <summary>Show {findings.length - INITIAL_FINDINGS} more {BUCKET_DETAILS[bucket].title.toLocaleLowerCase()} items</summary>
+                      {findings.slice(INITIAL_FINDINGS).map(renderFinding)}
+                    </details>
+                  ) : null}
+                </div>;
+              })}
             </div>
           </section>
         </>

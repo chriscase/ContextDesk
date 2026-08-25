@@ -84,7 +84,12 @@ describe("CorpusIntakePanel", () => {
     expect(screen.getByRole("link", { name: "Deep link to this batch" }).getAttribute("href")).toContain(
       "kind=intake-batch",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Retry commit" }));
+    expect((screen.getByRole("button", { name: "Committed" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Preview intake" }));
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Commit accepted files" }) as HTMLButtonElement).disabled).toBe(false);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Commit accepted files" }));
     await waitFor(() => {
       const commits = calls.filter((row) => row.url.endsWith("/corpus-intake"));
       expect(commits).toHaveLength(2);

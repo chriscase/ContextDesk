@@ -1231,6 +1231,58 @@
   list-style: none;
 }
 
+.case-memory__evidence-tools {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0.75rem 0;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.55rem;
+  background: var(--panel);
+}
+
+.case-memory__evidence-tools label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.case-memory__evidence-tools p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.case-memory__selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.case-memory__selection-actions button {
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.case-memory__selection-actions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.case-memory__list {
+  max-height: 42rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
 .case-memory__item {
   display: flex;
   gap: 0.5rem;
@@ -1380,6 +1432,37 @@
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.triage-runs__launch-receipt {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.2rem 0.75rem;
+  align-items: center;
+  padding: 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 65%, var(--border));
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.triage-runs__launch-receipt strong,
+.triage-runs__launch-receipt span {
+  min-width: 0;
+}
+
+.triage-runs__launch-receipt strong {
+  font-size: 0.8rem;
+}
+
+.triage-runs__launch-receipt span {
+  grid-column: 1;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.triage-runs__launch-receipt button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
 }
 
 .triage-runs__field {
@@ -1688,6 +1771,19 @@
   white-space: nowrap;
 }
 
+.triage-runs__evidence-more,
+.case-memory__findings-more {
+  margin-top: 0.55rem;
+}
+
+.triage-runs__evidence-more > summary,
+.case-memory__findings-more > summary {
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 .triage-runs__progress {
   display: flex;
   align-items: center;
@@ -1946,6 +2042,16 @@
 
   .triage-runs__results {
     display: grid;
+  }
+
+  .triage-runs__launch-receipt {
+    grid-template-columns: 1fr;
+  }
+
+  .triage-runs__launch-receipt button,
+  .triage-runs__launch-receipt span {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .triage-runs__comparison-grid {

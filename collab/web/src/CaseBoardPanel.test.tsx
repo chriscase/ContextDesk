@@ -9,6 +9,7 @@ afterEach(() => {
 
 describe("CaseBoardPanel", () => {
   it("renders evidence, immutable snapshot lineage, and separate agreement buckets", async () => {
+    const directoryIdentity = "uid=alice,ou=people,dc=example,dc=test";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo) => {
@@ -25,7 +26,7 @@ describe("CaseBoardPanel", () => {
                   contentHash: "a".repeat(64),
                   verificationStatus: "verified",
                   privacyClass: "owner_only",
-                  uploaderId: "alice",
+                  uploaderId: directoryIdentity,
                 },
               ],
             }),
@@ -43,7 +44,7 @@ describe("CaseBoardPanel", () => {
                   evidence: [{ evidenceId: "artifact-1", ordinal: 0 }],
                   visibility: "owner_only",
                   createdAt: "2026-08-20T00:00:00.000Z",
-                  createdBy: "alice",
+                  createdBy: directoryIdentity,
                 },
               ],
             }),
@@ -95,6 +96,7 @@ describe("CaseBoardPanel", () => {
         canWrite={false}
         canLead={false}
         readOnly
+        participants={[{ identityId: directoryIdentity, username: "alice" }]}
         routeFocus={{
           section: "triage-evidence-board",
           item: "artifact-1",
@@ -106,6 +108,9 @@ describe("CaseBoardPanel", () => {
     );
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
     expect(screen.getByText("checkout.log")).toBeTruthy();
+    expect(screen.getByText(/uploaded by alice/)).toBeTruthy();
+    expect(screen.getByText(/frozen by alice/)).toBeTruthy();
+    expect(screen.queryByText(/uid=alice/)).toBeNull();
     expect(screen.getByText("Snapshot lineage")).toBeTruthy();
     expect(screen.getByText("Multiple supported hypotheses reference the same evidence.")).toBeTruthy();
     expect(screen.getByText(/Agreement is not proof of correctness/)).toBeTruthy();
@@ -142,6 +147,119 @@ describe("CaseBoardPanel", () => {
     expect(screen.queryByText(/Freeze selected evidence/)).toBeNull();
     expect(screen.queryByRole("heading", { name: "Upload evidence" })).toBeNull();
     expect(screen.queryByLabelText("File")).toBeNull();
+  });
+
+  it("filters and bulk-selects a realistic evidence list for one snapshot", async () => {
+    let snapshotBody: unknown;
+    const artifacts = Array.from({ length: 80 }, (_, index) => ({
+      id: `artifact-${index}`,
+      kind: index < 5 ? "log" : "attachment",
+      filename: index < 5 ? `service-${index}.log` : `note-${index}.txt`,
+      relativePath: index < 5 ? `node-a/service-${index}.log` : `notes/note-${index}.txt`,
+      contentHash: "a".repeat(64),
+      verificationStatus: "verified",
+      privacyClass: "owner_only",
+      uploaderId: "lead",
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts }) };
+        if (url.endsWith("/snapshots") && init?.method === "POST") {
+          snapshotBody = JSON.parse(String(init.body));
+          return {
+            ok: true,
+            json: async () => ({
+              id: "snapshot-bulk",
+              fingerprint: "b".repeat(64),
+              parentSnapshotId: null,
+              evidence: [],
+              visibility: "owner_only",
+              createdAt: "2026-08-20T00:00:00.000Z",
+              createdBy: "lead",
+            }),
+          };
+        }
+        if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: [] }) };
+        return { ok: true, json: async () => ({ snapshotId: null, notice: "", findings: [] }) };
+      }),
+    );
+
+    const { rerender } = render(
+      <CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />,
+    );
+    expect(await screen.findByText("80 of 80 shown · 0 selected")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "node-a" } });
+    expect(screen.getByText("5 of 80 shown · 0 selected")).toBeTruthy();
+    expect(screen.queryByText("note-12.txt")).toBeNull();
+    rerender(
+      <CaseBoardPanel
+        caseId="case-1"
+        canWrite
+        canLead
+        readOnly={false}
+        routeFocus={{
+          section: "triage-evidence-board",
+          item: "artifact-12",
+          itemKind: "evidence",
+          lane: null,
+          experiment: null,
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect((screen.getByLabelText("Filter evidence") as HTMLInputElement).value).toBe(""),
+    );
+    const routedEvidence = screen.getByText("note-12.txt").closest("li") as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(routedEvidence));
+    fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "node-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    expect(screen.getByText("5 of 80 shown · 5 selected")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Freeze selected evidence (5)" }));
+
+    await waitFor(() =>
+      expect(snapshotBody).toEqual({
+        evidenceIds: ["artifact-0", "artifact-1", "artifact-2", "artifact-3", "artifact-4"],
+      }),
+    );
+  });
+
+  it("collapses long finding buckets instead of flooding the case board", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: [] }) };
+        if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: [] }) };
+        return {
+          ok: true,
+          json: async () => ({
+            snapshotId: "snapshot-large",
+            notice: "",
+            findings: Array.from({ length: 20 }, (_, index) => ({
+              id: `finding-${index + 1}`,
+              bucket: "known",
+              statement: `Recorded evidence item ${index + 1}`,
+              evidenceRefs: [`artifact-${index + 1}`],
+              contributionRefs: [],
+              agreement: "unknown",
+              confidence: "high",
+            })),
+          }),
+        };
+      }),
+    );
+
+    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    expect(await screen.findByText("Recorded evidence item 12")).toBeTruthy();
+    const more = screen.getByText("Show 8 more known items").closest("details") as HTMLDetailsElement;
+    expect(more.open).toBe(false);
+    expect(more.textContent).toContain("Recorded evidence item 13");
+    fireEvent.click(screen.getByText("Show 8 more known items"));
+    expect(more.open).toBe(true);
+    expect(screen.getByText("Recorded evidence item 20")).toBeTruthy();
   });
 
   it("submits the upload contract and refreshes the evidence board", async () => {
