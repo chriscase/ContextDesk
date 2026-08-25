@@ -5,6 +5,7 @@ import {
   PORTABLE_OBJECT_KINDS,
   PORTABLE_TERMINAL_TRIAGE_STATUSES,
   parseCorpusIntakeBatch,
+  parsePortableTriageAttemptTarget,
   portableDestinationUuid,
   snapshotFairness,
   snapshotFingerprint,
@@ -93,6 +94,20 @@ function remapOf(
   return hit?.destinationId ?? sourceId;
 }
 
+export function remapPortableTimelineTarget(
+  report: ArchivePreflightReportV1,
+  namespace: PortableObjectKind,
+  targetId: string,
+): string {
+  if (namespace === "triage_job") {
+    const attempt = parsePortableTriageAttemptTarget(targetId);
+    if (attempt) {
+      return `${remapOf(report, "triage_job", attempt.jobId)}:${attempt.candidateId}`;
+    }
+  }
+  return remapOf(report, namespace, targetId);
+}
+
 function importedTimelinePayload(
   event: PortableArchiveV1["investigation"]["timeline"][number],
   bundle: PortableArchiveV1["investigation"],
@@ -126,10 +141,14 @@ function importedTimelinePayload(
     if (decision) {
       payload.decisionId = remapOf(report, "decision", decision.id);
       payload.revision = decision.revision;
+      const experiment = bundle.experiments.find((row) => row.id === decision.experimentId);
+      if (experiment) payload.packageId = experiment.packageId;
     }
   }
   if (event.targetNamespace === "triage_job" && event.targetId) {
-    payload.jobId = remapOf(report, "triage_job", event.targetId);
+    const attempt = parsePortableTriageAttemptTarget(event.targetId);
+    payload.jobId = remapOf(report, "triage_job", attempt?.jobId ?? event.targetId);
+    if (attempt) payload.candidateId = attempt.candidateId;
   }
   if (event.targetNamespace === "snapshot" && event.targetId) {
     payload.snapshotId = remapOf(report, "snapshot", event.targetId);
@@ -1073,7 +1092,11 @@ export async function persistPortableArchive(input: {
         event.targetId &&
         event.targetNamespace &&
         (PORTABLE_OBJECT_KINDS as readonly string[]).includes(event.targetNamespace)
-          ? remapOf(report, event.targetNamespace as PortableObjectKind, event.targetId)
+          ? remapPortableTimelineTarget(
+            report,
+            event.targetNamespace as PortableObjectKind,
+            event.targetId,
+          )
           : event.targetId,
       clientTime: null,
       serverTime: event.serverTime,

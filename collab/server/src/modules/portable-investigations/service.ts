@@ -14,6 +14,7 @@ import {
   destinationCatalogDigest,
   identityMapDigest,
   parsePortableArchive,
+  parsePortableTriageAttemptTarget,
   portableApplyDeepLink,
   portableSnapshotFingerprint,
   preflightPortableArchive,
@@ -272,6 +273,41 @@ function objectCount(bundle: PortableInvestigationUnsigned): number {
     bundle.auditRefs.length +
     bundle.attachments.length
   );
+}
+
+function timelinePayload(row: TimelineRow): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(row.payload);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function portableTimelineTarget(
+  row: TimelineRow,
+  namespaces: Map<string, Set<PortableObjectKind>>,
+): { targetId: string; namespace: PortableObjectKind } | null {
+  if (row.targetId === null) return null;
+  const payload = timelinePayload(row);
+  if (/^experiment_decision_/.test(row.kind)) {
+    const decisionId = typeof payload.decisionId === "string" ? payload.decisionId : null;
+    if (decisionId && namespaces.get(decisionId)?.has("decision")) {
+      return { targetId: decisionId, namespace: "decision" };
+    }
+    return null;
+  }
+  if (/^triage_candidate_/.test(row.kind)) {
+    const attempt = parsePortableTriageAttemptTarget(row.targetId);
+    if (attempt && namespaces.get(attempt.jobId)?.has("triage_job")) {
+      return { targetId: row.targetId, namespace: "triage_job" };
+    }
+    return null;
+  }
+  const namespace = targetNamespace(row, namespaces);
+  return namespace ? { targetId: row.targetId, namespace } : null;
 }
 
 function targetNamespace(
@@ -960,13 +996,25 @@ export class PortableInvestigationService {
     registerNamespace("attachment", attachments.map((row) => row.id));
 
     const portableTimeline = historicalTimeline.map((row) => {
-      const namespace = targetNamespace(row, namespaceById);
+      const addressed = portableTimelineTarget(row, namespaceById);
+      if (/^experiment_decision_/.test(row.kind) && addressed?.namespace !== "decision") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment decision timeline is missing a portable decision target",
+        );
+      }
+      if (/^triage_candidate_/.test(row.kind) && addressed?.namespace !== "triage_job") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "workstream attempt timeline is missing a portable job target",
+        );
+      }
       return {
         seq: row.seq,
         kind: row.kind,
         actorId: row.actorId,
-        targetId: namespace ? row.targetId : null,
-        targetNamespace: namespace,
+        targetId: addressed?.targetId ?? null,
+        targetNamespace: addressed?.namespace ?? null,
         serverTime: row.serverTime,
         objectHash: "",
       };

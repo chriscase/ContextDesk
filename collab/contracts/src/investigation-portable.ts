@@ -120,6 +120,18 @@ export const PORTABLE_OBJECT_KINDS = [
 ] as const;
 export type PortableObjectKind = (typeof PORTABLE_OBJECT_KINDS)[number];
 
+/** Workstream attempts are `${jobId}:${candidateId}`; job-level events are a bare job id. */
+export function parsePortableTriageAttemptTarget(
+  targetId: string,
+): { jobId: string; candidateId: string } | null {
+  const separator = targetId.indexOf(":");
+  if (separator <= 0 || separator === targetId.length - 1) return null;
+  return {
+    jobId: targetId.slice(0, separator),
+    candidateId: targetId.slice(separator + 1),
+  };
+}
+
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const INSTALLATION_ID = /^inst-[a-z0-9]{8,64}$/;
 const UNKNOWN_STATUS = "unknown" as const;
@@ -1433,6 +1445,20 @@ function validateContent(
   }
 }
 
+function portableTimelineTargetExists(
+  bundle: PortableInvestigationV1,
+  namespaceIds: Record<PortableObjectKind, Set<string>>,
+  namespace: PortableObjectKind,
+  targetId: string,
+): boolean {
+  if (namespaceIds[namespace].has(targetId)) return true;
+  if (namespace !== "triage_job") return false;
+  const attempt = parsePortableTriageAttemptTarget(targetId);
+  if (!attempt) return false;
+  const job = bundle.triageJobs.find((row) => row.id === attempt.jobId);
+  return Boolean(job?.candidates.some((row) => row.candidateId === attempt.candidateId));
+}
+
 function portableNamespaceIds(
   bundle: PortableInvestigationV1,
 ): Record<PortableObjectKind, Set<string>> {
@@ -2086,7 +2112,7 @@ export function parsePortableInvestigation(
         "unknown timeline target namespace",
       );
     }
-    if (!namespaceIds[row.targetNamespace].has(row.targetId)) {
+    if (!portableTimelineTargetExists(bundle, namespaceIds, row.targetNamespace, row.targetId)) {
       throw new ContractViolation(`$.timeline[${i}].targetId`, "dangling timeline target");
     }
   }

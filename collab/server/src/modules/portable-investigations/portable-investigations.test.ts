@@ -1202,15 +1202,40 @@ describe("portable investigation apply", () => {
     const sourceDiscussion = sourcePage.items.find((item) => item.activityKind === "comment_added");
     const sourceEvidence = sourcePage.items.find((item) => item.activityKind === "evidence_added");
     const sourceFrozen = sourcePage.items.find((item) => item.activityKind === "evidence_frozen");
+    const sourceDecision = sourcePage.items.find((item) => item.activityKind === "decision_proposed");
+    const sourceAttempt = sourcePage.items.find((item) => item.locator.kind === "workstream_attempt");
     expect(sourceObservation?.locator.resourceId).toBeTruthy();
     expect(sourceDiscussion?.locator.resourceId).toBeTruthy();
     expect(sourceEvidence?.locator.resourceId).toBe(row.evidenceId);
     expect(sourceFrozen?.locator.resourceId).toBeTruthy();
+    expect(sourceDecision?.locator.kind).toBe("decision_revision");
+    expect(sourceDecision?.locator.resourceId).toBeTruthy();
+    expect(sourceAttempt?.locator.resourceId).toContain(":");
     await expect(
       activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceObservation!.locator)),
     ).resolves.toMatchObject({ authorized: true, resourceLabel: "Observation" });
 
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const decisionIds = archive.investigation.decisions.map((decision) => decision.id);
+    const jobIds = archive.investigation.triageJobs.map((job) => job.id);
+    const exportedDecisions = archive.investigation.timeline.filter((event) =>
+      event.kind.startsWith("experiment_decision_"),
+    );
+    expect(exportedDecisions.length).toBeGreaterThan(0);
+    for (const event of exportedDecisions) {
+      expect(event.targetNamespace).toBe("decision");
+      expect(decisionIds).toContain(event.targetId);
+    }
+    const exportedAttempts = archive.investigation.timeline.filter((event) =>
+      event.kind.startsWith("triage_candidate_"),
+    );
+    expect(exportedAttempts.length).toBeGreaterThan(0);
+    for (const event of exportedAttempts) {
+      expect(event.targetNamespace).toBe("triage_job");
+      expect(event.targetId).toMatch(/:/);
+      expect(jobIds).toContain(event.targetId?.slice(0, event.targetId.indexOf(":")));
+    }
+
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1242,20 +1267,40 @@ describe("portable investigation apply", () => {
     const destDiscussion = destPage.items.find((item) => item.activityKind === "comment_added");
     const destEvidence = destPage.items.find((item) => item.activityKind === "evidence_added");
     const destFrozen = destPage.items.find((item) => item.activityKind === "evidence_frozen");
+    const destDecision = destPage.items.find((item) => item.activityKind === "decision_proposed");
+    const destAttempt = destPage.items.find((item) => item.locator.kind === "workstream_attempt");
     expect(destObservation?.locator.investigationId).toBe(applied.investigationId);
     expect(destDiscussion?.locator.investigationId).toBe(applied.investigationId);
     expect(destEvidence?.locator.investigationId).toBe(applied.investigationId);
     expect(destFrozen?.locator.investigationId).toBe(applied.investigationId);
     expect(destObservation?.humanFinding).toBe(false);
     expect(destDiscussion?.humanFinding).toBe(false);
+    expect(destDecision?.humanFinding).toBe(false);
+    expect(destAttempt?.humanFinding).toBe(false);
     expect(destObservation?.provenanceClass).toBe("historical_restored");
     expect(destDiscussion?.provenanceClass).toBe("historical_restored");
     expect(destObservation?.locator.resourceId).not.toBe(sourceObservation?.locator.resourceId);
     expect(destDiscussion?.locator.resourceId).not.toBe(sourceDiscussion?.locator.resourceId);
     expect(destEvidence?.locator.resourceId).not.toBe(sourceEvidence?.locator.resourceId);
     expect(destFrozen?.locator.resourceId).not.toBe(sourceFrozen?.locator.resourceId);
+    expect(destDecision?.locator.kind).toBe("decision_revision");
+    expect(destDecision?.locator.resourceId).not.toBe(sourceDecision?.locator.resourceId);
+    expect(destAttempt?.locator.resourceId).not.toBe(sourceAttempt?.locator.resourceId);
+    expect(destAttempt?.locator.resourceId).toContain(":");
+    expect(destAttempt?.locator.resourceId).not.toBe(applied.investigationId);
 
-    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen]) {
+    const destExperiments = await row.experiments.list(applied.investigationId, ACTOR, false);
+    const destDecisionIds = destExperiments.flatMap((experiment) =>
+      experiment.decisions.map((decision) => decision.id),
+    );
+    expect(destDecisionIds).toContain(destDecision?.locator.resourceId);
+    expect(destExperiments.map((experiment) => experiment.id)).not.toContain(destDecision?.locator.resourceId);
+    const destJobs = await row.triageRuns.list(applied.investigationId, ACTOR, false);
+    const destJobPrefix = destAttempt?.locator.resourceId.split(":")[0];
+    expect(destJobs.map((job) => job.id)).toContain(destJobPrefix);
+    expect(destJobs.map((job) => job.id)).not.toContain(sourceAttempt?.locator.resourceId.split(":")[0]);
+
+    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destAttempt]) {
       await expect(
         activity.resolve(ACTOR, false, formatCompactInvestigationLocator(item!.locator)),
       ).resolves.toMatchObject({ authorized: true, locator: item!.locator });
@@ -1286,6 +1331,19 @@ describe("portable investigation apply", () => {
     await expect(
       activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceEvidence!.locator)),
     ).resolves.toMatchObject({ authorized: true });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: applied.investigationId,
+          kind: "decision_revision",
+          resourceId: destExperiments[0]!.id,
+          revision: destDecision!.locator.revision ?? 0,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
   });
 
   it("rejects resealed nonterminal history and blocks legacy incomplete candidate state", async () => {
