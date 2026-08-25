@@ -19,6 +19,7 @@ import {
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
 import type { OverviewJobQuery, OverviewListedJob, TriageJobStore } from "./store.js";
+import { triageRunningLeaseExpired, triageWorkerHoldsLiveLease } from "./store.js";
 import type { TriageProfileOption } from "./profiles.js";
 
 const MAX_CANDIDATES = 16;
@@ -304,12 +305,12 @@ export class TriageRunService {
     const staleRunning = await this.deps.jobs.listStaleRunning(now());
     for (const job of queued) {
       const actor = { id: job.requestedBy, username: job.requestedByUsername };
-      // This is an internal continuation of an already-authorized durable
-      // job. Reconstructing the original actor's current membership here
-      // would incorrectly strand jobs created by an administrator whose
-      // case access is not represented as a participant row.
+      if (!(await this.deps.cases.isMemberOf(job.caseId, job.requestedBy))) {
+        await this.refuseUnauthorizedPendingJob(job);
+        continue;
+      }
       queueMicrotask(() => {
-        void this.execute(job.id, actor, true);
+        void this.execute(job.id, actor, false);
       });
     }
     for (const job of staleRunning) {
@@ -347,6 +348,44 @@ export class TriageRunService {
           outcome: "success",
         });
     }
+  }
+
+  private async refuseUnauthorizedPendingJob(job: TriageJobV1): Promise<void> {
+    const finishedAt = now();
+    const refusedCandidates = job.candidates.map((candidate) =>
+      candidate.status === "queued" || candidate.status === "running"
+        ? {
+            ...candidate,
+            status: "failed" as const,
+            outputHash: null,
+            summary: null,
+            evidenceRefs: [],
+            unknowns: ["requester is no longer a case member"],
+            errorCode: "requester_not_member",
+            finishedAt,
+          }
+        : candidate,
+    );
+    try {
+      await this.deps.jobs.update({
+        ...job,
+        status: "failed",
+        candidates: refusedCandidates,
+        finishedAt,
+        updatedAt: finishedAt,
+        stoppedReason: "requester_not_member",
+        leaseExpiresAt: null,
+      });
+    } catch {
+      return;
+    }
+    await this.deps.audit.append({
+      identity: job.requestedBy,
+      action: "triage_job_recovered",
+      target: `${job.id}:requester_not_member`,
+      origin: "triage-runner",
+      outcome: "failure",
+    });
   }
 
   async create(
@@ -485,6 +524,10 @@ export class TriageRunService {
     const job = await this.get(caseId, jobId, actor, isAdmin);
     if (!job) throw new TriageRunNotFoundError();
     if (isTerminal(job.status)) return job;
+    this.controllers.get(jobId)?.abort();
+    if (triageRunningLeaseExpired(job, Date.now())) {
+      throw new TriageRunConflictError("worker lease expired");
+    }
     const requestedAt = now();
     const cancelledCandidates = job.candidates.map((candidate) =>
       candidate.status === "queued" || candidate.status === "running"
@@ -541,6 +584,10 @@ export class TriageRunService {
         leaseExpiresAt,
       );
       if (!job) return;
+      if (!isAdmin && !(await this.deps.cases.isMemberOf(job.caseId, job.requestedBy))) {
+        await this.refuseUnauthorizedPendingJob(job);
+        return;
+      }
       let currentJob = job;
       leaseTimer = setInterval(() => {
         const nextLeaseExpiresAt = new Date(Date.now() + this.workerLeaseMs).toISOString();
@@ -610,6 +657,7 @@ export class TriageRunService {
         // job; it must never resurrect a terminal job or overwrite a lane
         // that has already settled.
         if (isTerminal(currentJob.status) || currentJob.workerId !== this.workerId) return;
+        if (!triageWorkerHoldsLiveLease(currentJob, this.workerId, Date.now())) return;
         const index = currentJob.request.candidates.findIndex((candidate) => candidate.candidateId === result.candidateId);
         if (index < 0) throw new Error("gateway returned an unknown candidate id");
         const existing = currentJob.candidates[index];
@@ -638,6 +686,7 @@ export class TriageRunService {
         const latest = await this.deps.jobs.get(currentJob.id);
         if (latest) currentJob = latest;
         if (isTerminal(currentJob.status) || currentJob.workerId !== this.workerId) return;
+        if (!triageWorkerHoldsLiveLease(currentJob, this.workerId, Date.now())) return;
         const index = currentJob.request.candidates.findIndex((candidate) => candidate.candidateId === candidateId);
         if (index < 0) throw new Error("gateway returned an unknown started candidate id");
         const existing = currentJob.candidates[index];
@@ -805,6 +854,7 @@ export class TriageRunService {
       }
       if (leaseLost) return;
       currentJob = (await this.deps.jobs.get(jobId)) ?? currentJob;
+      if (!triageWorkerHoldsLiveLease(currentJob, this.workerId, Date.now())) return;
       if (!isTerminal(currentJob.status)) {
         const finishedAt = now();
         const finalStatus = terminalStatus(currentJob.candidates, currentJob.cancelRequestedAt !== null);

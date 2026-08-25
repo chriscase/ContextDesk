@@ -39,6 +39,25 @@ export interface TriageJobStore {
   update(job: TriageJobV1): Promise<void>;
 }
 
+/** True when this worker still owns an unexpired running lease. */
+export function triageWorkerHoldsLiveLease(
+  job: TriageJobV1,
+  workerId: string,
+  nowMs: number,
+): boolean {
+  const leaseExpiresAt = job.leaseExpiresAt;
+  return job.status === "running"
+    && (job.workerId ?? null) === workerId
+    && typeof leaseExpiresAt === "string"
+    && Date.parse(leaseExpiresAt) > nowMs;
+}
+
+/** True when a running job's lease is absent or already expired. */
+export function triageRunningLeaseExpired(job: TriageJobV1, nowMs: number): boolean {
+  return job.status === "running"
+    && (!job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) <= nowMs);
+}
+
 function cloneJob(job: TriageJobV1): TriageJobV1 {
   return {
     ...job,
@@ -188,9 +207,7 @@ function leaseAllowsTriageUpdate(
 ): boolean {
   if ((existing.workerId ?? null) !== (next.workerId ?? null)) return false;
   if (existing.status === "queued") return true;
-  if (existing.status !== "running") return false;
-  if (!existing.leaseExpiresAt) return false;
-  return Date.parse(existing.leaseExpiresAt) > nowMs;
+  return triageWorkerHoldsLiveLease(existing, existing.workerId ?? "", nowMs);
 }
 
 export type Queryable = Pick<Pool, "query">;
