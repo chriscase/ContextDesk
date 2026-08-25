@@ -42,6 +42,7 @@ describe("login form", () => {
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("/api/auth/login");
     expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["x-cd-collab-csrf"]).toBeUndefined();
     expect(JSON.parse(String(init.body))).toEqual({
       username: "alice",
       password: "fixture-alice-secret",

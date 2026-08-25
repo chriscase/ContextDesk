@@ -120,8 +120,10 @@ decision.
   return the same `invalid_credentials` body whether the account exists.
 - Hosted CI creates `collab_app` before migrations so least-privilege GRANTs
   are applied and exercised as that role, not only as `postgres`.
-- CSRF: same-origin SPA + `SameSite=Lax`. TLS terminates at ingress;
-  set `COLLAB_COOKIE_SECURE=1` behind HTTPS.
+- CSRF: same-origin SPA + `SameSite=Lax` plus a required custom header
+  (`x-cd-collab-csrf: 1`) on cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE`
+  `/api` requests. Login, logout, and `/api/setup/*` are the documented
+  exemptions. TLS terminates at ingress; set `COLLAB_COOKIE_SECURE=1` behind HTTPS.
 - MFA and SSO/OIDC are out of v1 (adapter seam only). MFA is a directory/VPN
   responsibility.
 

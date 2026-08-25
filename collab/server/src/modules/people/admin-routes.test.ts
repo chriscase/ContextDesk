@@ -14,6 +14,7 @@ import {
   createAuthLog,
   createRateLimiter,
   defaultSessionPolicy,
+  injectWithoutBrowserCsrf,
 } from "../auth/index.js";
 import { MemoryGroupRoleStore, MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from "./csrf.js";
@@ -171,7 +172,7 @@ describe("admin people routes", () => {
       const adminCookie = await login(app, "admin");
       await login(app, "viewer");
 
-      const noCsrf = await app.inject({
+      const noCsrf = await injectWithoutBrowserCsrf(app, {
         method: "POST",
         url: "/api/admin/people/local:viewer/status",
         headers: { cookie: adminCookie },

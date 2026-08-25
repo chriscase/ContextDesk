@@ -136,6 +136,20 @@ export {
 export type { DirectoryAttributeMapV1, DirectoryMappedField } from "./directory-mapping.js";
 
 export {
+  BROWSER_MUTATION_METHODS,
+  COLLAB_CSRF_HEADER,
+  COLLAB_CSRF_HEADER_VALUE,
+  CSRF_ERROR_SCHEMA_ID,
+  apiPathname,
+  isBrowserMutationMethod,
+  isCollabApiPath,
+  isCsrfExemptApiPath,
+  parseCsrfError,
+  requiresBrowserMutationCsrf,
+} from "./csrf.js";
+export type { BrowserMutationMethod, CsrfErrorCode, CsrfErrorV1 } from "./csrf.js";
+
+export {
   ADMIN_DIRECTORY_MAPPING_PREVIEW_REQUEST_SCHEMA_ID,
   ADMIN_DIRECTORY_MAPPING_PREVIEW_RESPONSE_SCHEMA_ID,
   ADMIN_PEOPLE_CSRF_HEADER,

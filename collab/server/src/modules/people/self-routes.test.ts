@@ -14,6 +14,7 @@ import {
   createRateLimiter,
   defaultSessionPolicy,
   SESSION_COOKIE,
+  injectWithoutBrowserCsrf,
 } from "../auth/index.js";
 import { MemoryGroupRoleStore, MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from "./csrf.js";
@@ -146,7 +147,7 @@ describe("self profile routes", () => {
   it("rejects a mutation without the CSRF header", async () => {
     await withApp(async ({ app }) => {
       const cookie = await login(app);
-      const patch = await app.inject({
+      const patch = await injectWithoutBrowserCsrf(app, {
         method: "PATCH",
         url: "/api/profile/me",
         headers: { cookie },

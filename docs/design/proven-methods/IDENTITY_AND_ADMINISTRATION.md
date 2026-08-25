@@ -22,11 +22,12 @@ followed:
   left "does an imported name accidentally become a real, permission-
   bearing account" an open question instead of a closed one.
 
-Out of scope for this chapter: password handling of any kind (the existing
-`local-adapter.ts`/`ldap-adapter.ts` own that entirely and are untouched
-here), contacting a live directory server for anything beyond what already
+Out of scope for this chapter: changing password storage or directory-backed
+password verification (the existing `local-adapter.ts`/`ldap-adapter.ts` own
+those), contacting a live directory server for anything beyond what already
 shipped, and OIDC as a live provider (the contracts model it as a
-forward-compatible provenance value; no OIDC adapter exists yet).
+forward-compatible provenance value; no OIDC adapter exists yet). Local demo
+password verification does use fixed-length timing-safe comparison.
 
 ## 2. Status and evidence
 
@@ -35,8 +36,8 @@ forward-compatible provenance value; no OIDC adapter exists yet).
 | Canonical profile contract (mutable display profile split from immutable attribution identity) | Shipped | [`user-profile.ts`](../../../collab/contracts/src/user-profile.ts), [`user-profile.test.ts`](../../../collab/contracts/src/user-profile.test.ts) | Real Unicode confusable-skeleton/homoglyph detection is not attempted — only C0/DEL/zero-width/bidi-control/BOM code points are blocked |
 | Capability model (10 fine-grained capabilities, role-default matrix, additive local grants) | Shipped | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts) | None known |
 | Memory + PostgreSQL profile/grant stores with CAS, login-time sync, fail-closed identity collision | Shipped | [`store.ts`](../../../collab/server/src/modules/people/store.ts), [`store.contract-tests.ts`](../../../collab/server/src/modules/people/store.contract-tests.ts) run against both backends by [`store.test.ts`](../../../collab/server/src/modules/people/store.test.ts) and [`pg-store.test.ts`](../../../collab/server/src/modules/people/pg-store.test.ts) | None known |
-| Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | CSRF header check covers only People/self-profile mutation routes, not the pre-existing `authz`/`cases`/etc. mutation routes |
-| Domain-wide session authorization and suspension fail-closed | Shipped | [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`authorization.adversarial.test.ts`](../../../collab/server/src/modules/authz/authorization.adversarial.test.ts), War Room domain/admin `routes.ts` files | CSRF retrofit of older mutation routes remains residual (named, not a silent gap) |
+| Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | Live LDAP attribute sync and directory-removal auto-disable remain named residuals in §16; browser mutation CSRF is now system-wide (see §10) |
+| Domain-wide session authorization and suspension fail-closed | Shipped | [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`authorization.adversarial.test.ts`](../../../collab/server/src/modules/authz/authorization.adversarial.test.ts), War Room domain/admin `routes.ts` files | None known |
 | Self-service profile API (GET/PATCH own profile, directory-owned fields read-only) | Shipped | [`self-routes.ts`](../../../collab/server/src/modules/people/self-routes.ts), [`self-routes.test.ts`](../../../collab/server/src/modules/people/self-routes.test.ts) | None known for the API |
 | Self-service profile UI (`/profile`, account-menu destination) | Shipped | [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx), [`SelfProfilePanel.test.tsx`](../../../collab/web/src/SelfProfilePanel.test.tsx), [`App.test.tsx`](../../../collab/web/src/App.test.tsx), Help article `my-profile` | Live LDAP attribute values still follow §16 (the UI cannot invent directory writes) |
 | Admin People console (`/admin/people` first-class shell location; `/administration` remains the roles alias) | Shipped | [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), [`AdminPeoplePanel.test.tsx`](../../../collab/web/src/AdminPeoplePanel.test.tsx), [`Administration.test.tsx`](../../../collab/web/src/Administration.test.tsx), [`app-location.ts`](../../../collab/web/src/app-location.ts) | Detail view is inline-expand, not its own URL per person |
@@ -261,11 +262,15 @@ claim beyond what the admin themselves typed into a preview request.
   itself (`updateFields` refuses a non-active profile even if a caller
   bypassed the route-level check).
 - **CSRF:** a custom header (`x-cd-collab-csrf`, shared as a contract
-  constant so client and server never drift) is required on every mutating
-  route this chapter adds, defense-in-depth on top of the existing
-  `SameSite=Lax` session cookie. This does **not** retrofit the
-  pre-existing `authz`/`cases`/etc. mutation routes - that is named
-  residual work, not a silent gap (see §16).
+  constant so client and server never drift) is required on every
+  cookie-authenticated state-changing `/api` request (`POST`/`PUT`/`PATCH`/
+  `DELETE`), defense-in-depth on top of the existing `SameSite=Lax` session
+  cookie. The canonical predicate and header live in
+  [`csrf.ts`](../../../collab/contracts/src/csrf.ts); the server enforces
+  them in an `onRequest` hook before domain writes. Narrow exemptions are
+  login, logout, and `/api/setup/*` (pre-auth / first-run). Safe GET/HEAD
+  are unaffected. The shipped web mutation client
+  (`protectedApiFetch`) sends the header.
 - **Directory details for non-admins:** the admin-people surface itself is
   gated on `admin:users`; nothing in this chapter exposes another person's
   `directorySubject` (a full LDAP DN) to a non-admin. Self-service GET
@@ -302,7 +307,7 @@ recovery, and states that historical attribution is never rewritten.
 | --- | --- | --- | --- |
 | Contract/unit | round-trip parse, capability resolution, directory mapping | dangerous Unicode, duplicate custom-attribute keys, oversized pages, unknown capability, identity-collision table | `capability.test.ts`, `user-profile.test.ts`, `directory-mapping.test.ts`, `admin-people.test.ts` (58 tests) |
 | Server/store | create/update/list, CAS success | stale revision, suspended-write refusal, collision refusal, not_found | `store.test.ts` + `store.contract-tests.ts` run against **both** Memory and Postgres (`pg-store.test.ts`), plus `grants.test.ts`/`pg-grants.test.ts`, `capabilities.test.ts` |
-| Server/routes | search, effective, status, grant/revoke, preview; domain-wide capability gates | missing CSRF header, idempotent retry after CAS staleness, enumeration-safe 403, historical-stub grant refusal, self-suspend fail-closed (`401`), suspended/historical login refusal, local-grant write then revoke, owner_only bytes require `evidence:private:read` | `admin-routes.test.ts`, `self-routes.test.ts`, `authorization.adversarial.test.ts` (full `buildApp` + real login flow) |
+| Server/routes | search, effective, status, grant/revoke, preview; domain-wide capability gates | missing CSRF header, idempotent retry after CAS staleness, enumeration-safe 403, historical-stub grant refusal, self-suspend fail-closed (`401`), suspended/historical login refusal, local-grant write then revoke, owner_only bytes require `evidence:private:read` | `admin-routes.test.ts`, `self-routes.test.ts`, `authorization.adversarial.test.ts` (full `buildApp` + real login flow). System-wide cookie-authenticated mutation CSRF is proven in `csrf.adversarial.test.ts` |
 | Database constraints | migration up/down in order | case-insensitive duplicate username, directory-subject-required check, JSONB custom-attribute round-trip | `pg-store.test.ts`, `migrate.test.ts` (updated for the new migration), `grants.test.ts` least-privilege pin |
 | Web/UI | list/search, manage/expand, suspend/grant/revoke confirm flow, preview; self-service `/profile` load/edit/LDAP-readonly/409 draft recovery | imported_historical never offered an action, tab switch preserves hidden-panel state, direct-load and browser-back on `/admin/people` and `/profile` | `AdminPeoplePanel.test.tsx`, `Administration.test.tsx`, `SelfProfilePanel.test.tsx`, `App.test.tsx`, `HelpCenter.test.tsx` |
 
@@ -390,13 +395,6 @@ counts.
   `resolveActiveSession`'s existing `catch { groups = [] }` fallback, which
   already conflates those two cases for group resolution. Closing this
   gap needs a stronger not-found signal from the LDAP adapter.
-- **CSRF coverage is scoped to People and self-profile mutation routes.** The
-  pre-existing `authz` group-role-map routes and other older mutation
-  routes do not carry the new header check. Retrofitting them is
-  straightforward (the same `hasCsrfHeader` guard) but remains named
-  residual work. Domain routes now honor the 10-capability model and
-  profile status through `authorizeSession`; that does not silently add
-  CSRF to those older routes.
 
 ## Acceptance checklist
 
