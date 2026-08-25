@@ -770,7 +770,7 @@ describe("TriageRunPanel", () => {
           runs: [
             {
               id: "external-chat-1",
-              promptText: null,
+              promptText: "What should we inspect next?",
               promptCompleteness: "unknown",
               importerUsername: "reviewer",
               operatorUsername: "operator",
@@ -812,10 +812,23 @@ describe("TriageRunPanel", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    const onExperimentReady = vi.fn();
+    render(
+      <TriageRunPanel
+        caseId="case-1"
+        canLead
+        readOnly={false}
+        onExperimentReady={onExperimentReady}
+      />,
+    );
     expect(await screen.findByRole("button", { name: "Review in Experiment Lab" })).toBeTruthy();
     const selector = screen.getByRole("combobox", { name: "External chat run to compare" });
-    expect(screen.getByRole("option", { name: /operator · unknown prompt/ })).toBeTruthy();
+    expect(
+      screen.getByRole("option", {
+        name: "Pasted chat 1 · operator · “What should we inspect next?”",
+      }),
+    ).toBeTruthy();
+    expect(selector.textContent).not.toContain("external-chat-1");
 
     fireEvent.change(selector, { target: { value: "external-chat-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Review in Experiment Lab" }));
@@ -828,6 +841,7 @@ describe("TriageRunPanel", () => {
       }),
     ));
     expect((await screen.findByRole("status")).textContent).toMatch(/Experiment .* is ready in Experiment Lab/);
+    expect(onExperimentReady).toHaveBeenCalledWith("experiment-handoff-1");
   });
 });
 

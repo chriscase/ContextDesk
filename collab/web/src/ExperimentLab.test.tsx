@@ -2065,6 +2065,56 @@ describe("decision readiness cockpit", () => {
     );
   });
 
+  it("treats an unstructured assistant response as the lane conclusion", async () => {
+    const importedChatView = {
+      ...cockpitView,
+      traces: cockpitView.traces.map((trace) => trace.candidateId === "cand-chat-operator"
+        ? {
+            ...trace,
+            events: [
+              {
+                eventId: "evt-chat-question",
+                sequence: 1,
+                kind: "question",
+                actor: "human",
+                excerpt: "What caused the synthetic delay?",
+                evidenceRefs: [],
+                unknowns: ["timestamp"],
+              },
+              {
+                eventId: "evt-chat-answer",
+                sequence: 2,
+                kind: "assistant_response",
+                actor: "unknown",
+                excerpt: "The synthetic outbox delay is plausible, but the timezone is still unknown.",
+                evidenceRefs: [],
+                unknowns: ["actor", "timestamp"],
+              },
+            ],
+          }
+        : trace),
+    };
+    stubExperiments([importedChatView]);
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    await screen.findByRole("region", { name: "Decision readiness" });
+    fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
+
+    const digest = await screen.findByRole("article", { name: "chat-operator" });
+    const conclusionCard = within(digest)
+      .getByRole("heading", { name: "Latest recorded conclusion" })
+      .closest("article");
+    expect(conclusionCard).not.toBeNull();
+    expect(
+      within(conclusionCard!).getByText(/The synthetic outbox delay is plausible/),
+    ).toBeTruthy();
+    expect(within(digest).queryByText(/No model conclusion was captured/)).toBeNull();
+    fireEvent.click(within(digest).getByText("View full chronological lane history"));
+    expect(
+      within(digest).getByText(/Analysis result or decision contribution/),
+    ).toBeTruthy();
+  });
+
   it("clears focus when the operator switches historical artifacts", async () => {
     stubExperiments([cockpitView, seededThreeModelView]);
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);

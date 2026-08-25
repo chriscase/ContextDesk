@@ -137,6 +137,15 @@ function shortHash(value: string | null): string {
   return value ? `${value.slice(0, 12)}…` : "not available";
 }
 
+function externalChatRunLabel(run: ExternalChatRunView, index: number): string {
+  const operator = run.operatorUsername || run.importerUsername || "unknown participant";
+  const normalizedPrompt = run.promptText?.trim().replace(/\s+/g, " ") ?? "";
+  const prompt = normalizedPrompt
+    ? `“${normalizedPrompt.length > 72 ? `${normalizedPrompt.slice(0, 71)}…` : normalizedPrompt}”`
+    : "prompt not recorded";
+  return `Pasted chat ${index + 1} · ${operator} · ${prompt}`;
+}
+
 function boundedError(message: string, fallback: string): string {
   const trimmed = message.trim();
   if (!trimmed) return fallback;
@@ -218,6 +227,7 @@ export function TriageRunPanel(props: {
   readOnly: boolean;
   participants?: { identityId?: string; username?: string }[];
   routeFocus?: WorkFocus;
+  onExperimentReady?: (experimentId: string) => void;
 }) {
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
@@ -594,6 +604,7 @@ export function TriageRunPanel(props: {
           detail: { experimentId: experiment.id },
         }),
       );
+      props.onExperimentReady?.(experiment.id);
     } catch (cause) {
       setHandoffError(cause instanceof Error ? boundedError(cause.message, "Experiment review could not be created.") : "Experiment review could not be created.");
     } finally {
@@ -992,9 +1003,9 @@ export function TriageRunPanel(props: {
                       onChange={(event) => setSelectedExternalRunId(event.target.value)}
                     >
                       <option value="">No external chat — review connected lanes only</option>
-                      {externalChatRuns.map((run) => (
+                      {externalChatRuns.map((run, index) => (
                         <option key={run.id} value={run.id}>
-                          {run.operatorUsername || run.importerUsername} · {run.promptCompleteness} prompt · {run.id.slice(0, 12)}
+                          {externalChatRunLabel(run, index)}
                         </option>
                       ))}
                     </select>

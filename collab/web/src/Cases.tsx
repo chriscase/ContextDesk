@@ -2182,6 +2182,18 @@ export function Cases(props: {
                   readOnly={readOnly}
                   {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                  {...(props.onDeepNavigate
+                    ? {
+                        onExperimentReady: (experimentId: string) =>
+                          props.onDeepNavigate?.("compare", {
+                            section: "scan-heading",
+                            item: null,
+                            itemKind: null,
+                            lane: null,
+                            experiment: experimentId,
+                          }),
+                      }
+                    : {})}
                 />
               </div>
             </TriageAnchor>

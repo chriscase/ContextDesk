@@ -317,7 +317,7 @@ function traceEventMeaning(kind: string): string {
     return "Input or evidence considered";
   }
   if (/review|critic|feedback|challenge/.test(normalized)) return "Review feedback";
-  if (/decision|recommend|synth|answer|result|conclusion/.test(normalized)) {
+  if (/decision|recommend|synth|answer|response|result|conclusion/.test(normalized)) {
     return "Analysis result or decision contribution";
   }
   if (/analysis|reason|hypothesis|diagnos/.test(normalized)) return "Analysis step";
@@ -1654,7 +1654,10 @@ export function ExperimentLab(props: {
     (event) => event.actor === "tool" && Boolean(event.excerpt?.trim()),
   );
   const focusedConclusion = [...focusedEvents].reverse().find(
-    (event) => event.actor === "assistant" && Boolean(event.excerpt?.trim()),
+    (event) => (
+      event.actor === "assistant"
+      || /assistant_response|answer|result|conclusion|recommendation/i.test(event.kind)
+    ) && Boolean(event.excerpt?.trim()),
   ) ?? null;
   const focusedUnknowns = [...new Set([
     ...(focusedTrace?.unknowns ?? []),
