@@ -37,6 +37,12 @@ import {
   registerPortableInvestigationRoutes,
   type PortableInvestigationService,
 } from "./modules/portable-investigations/index.js";
+import {
+  registerAdminPeopleRoutes,
+  registerSelfProfileRoutes,
+  type LocalGrantStore,
+  type UserProfileStore,
+} from "./modules/people/index.js";
 import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js";
 
 export interface SecurityDeps {
@@ -61,6 +67,9 @@ export interface AppDeps {
   exporter?: ExportService;
   portable?: PortableInvestigationService;
   setup?: SetupService;
+  /** Canonical user profile store. Also wires login-time profile sync onto security.auth. */
+  profiles?: UserProfileStore;
+  grants?: LocalGrantStore;
   serveStatic?: boolean;
 }
 
@@ -127,7 +136,26 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       if (request.url.startsWith("/api/setup/")) return;
       security.roles.replace(await roleStore.load());
     });
-    await registerAuthRoutes(app, security.auth);
+    await registerAuthRoutes(app, {
+      ...security.auth,
+      ...(deps.profiles ? { profiles: deps.profiles } : {}),
+    });
+    if (deps.profiles) {
+      await registerSelfProfileRoutes(app, {
+        auth: security.auth,
+        audit: security.audit,
+        profiles: deps.profiles,
+      });
+      if (deps.grants) {
+        await registerAdminPeopleRoutes(app, {
+          auth: security.auth,
+          roles: security.roles,
+          audit: security.audit,
+          profiles: deps.profiles,
+          grants: deps.grants,
+        });
+      }
+    }
     await registerAuthzRoutes(app, {
       auth: security.auth,
       roles: security.roles,

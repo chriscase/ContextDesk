@@ -22,6 +22,12 @@ import {
 import { MemoryCatalogStore, type CatalogStore } from "../modules/catalog/index.js";
 import { MemoryCaseStore, type CaseStore } from "../modules/cases/index.js";
 import { MemoryRunStore, type RunStore } from "../modules/import/index.js";
+import {
+  MemoryLocalGrantStore,
+  MemoryUserProfileStore,
+  type LocalGrantStore,
+  type UserProfileStore,
+} from "../modules/people/index.js";
 import { MemoryExperimentStore, type ExperimentStore } from "../modules/experiments/index.js";
 import { MemoryTriageJobStore, type TriageJobStore } from "../modules/triage-runs/index.js";
 import {
@@ -247,6 +253,8 @@ export interface SqliteRuntime {
   experiments: ExperimentStore;
   jobs: TriageJobStore;
   applyState: PortableApplyStateStore;
+  profiles: UserProfileStore;
+  grants: LocalGrantStore;
   runPortableTransaction: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
@@ -328,6 +336,18 @@ export function createSqliteRuntime(
     rawApplyState,
     new Set(["putIntent", "markApplied", "restore"]),
   );
+  const profiles = persistentMemoryStore(
+    state,
+    "user_profiles",
+    new MemoryUserProfileStore(),
+    new Set(["touchOnLogin", "updateFields", "setStatus"]),
+  );
+  const grants = persistentMemoryStore(
+    state,
+    "user_capability_grants",
+    new MemoryLocalGrantStore(),
+    new Set(["grant", "revoke"]),
+  );
   const portableStores = [
     { key: "audit", store: rawAudit },
     { key: "cases", store: rawCases },
@@ -354,6 +374,8 @@ export function createSqliteRuntime(
     experiments,
     jobs,
     applyState,
+    profiles,
+    grants,
     runPortableTransaction: (operation) => state.transaction(portableStores, operation),
   };
 }

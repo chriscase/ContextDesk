@@ -19,6 +19,22 @@ import {
 
 export const SESSION_COOKIE = "cd_collab_session";
 
+/**
+ * Narrow structural port onto people/store.js's UserProfileStore, so this
+ * module never imports the people module directly. touchOnLogin is the
+ * canonical profile store's only writer for identity/provenance/timestamp
+ * fields - see people/store.ts for the create-vs-touch-vs-collision rules.
+ */
+export interface LoginProfileSync {
+  touchOnLogin(input: {
+    id: string;
+    username: string;
+    displayName: string;
+    provenance: "local" | "ldap";
+    directorySubject: string | null;
+  }): Promise<{ outcome: "ok" | "collision" }>;
+}
+
 export interface AuthRouteDeps {
   adapter: AuthAdapter;
   sessions: SessionStore;
@@ -28,6 +44,8 @@ export interface AuthRouteDeps {
   log: AuthLog;
   limiter: RateLimiter;
   cookieSecure: boolean;
+  /** Optional: keeps the canonical profile store in sync on every successful login. */
+  profiles?: LoginProfileSync;
 }
 
 export type ActiveSessionDeps = Pick<AuthRouteDeps, "sessions" | "policy" | "adapter">;
@@ -142,6 +160,30 @@ export async function registerAuthRoutes(
       ttlMs: deps.policy.ttlMs,
     });
     setSessionCookie(reply, token, deps);
+    if (deps.profiles) {
+      try {
+        const sync = await deps.profiles.touchOnLogin({
+          id: result.identity.id,
+          username: result.identity.username,
+          displayName: result.identity.displayName,
+          provenance: deps.adapter.provenance,
+          directorySubject: deps.adapter.provenance === "local" ? null : result.identity.id,
+        });
+        if (sync.outcome === "collision") {
+          await deps.audit.append({
+            identity: result.identity.id,
+            action: "profile_sync",
+            target: "collision",
+            origin: originOf(request),
+            outcome: "failure",
+          });
+        }
+      } catch {
+        // Profile sync is a secondary durable record; a transient failure
+        // here (e.g. the database is briefly unavailable) must never block
+        // an authentication the adapter already approved.
+      }
+    }
     await deps.audit.append({
       identity: record.identity.id,
       action: "login",

@@ -599,3 +599,8 @@ export type {
 export * from "./investigation-portable.js";
 export * from "./investigation-portable-archive.js";
 export * from "./investigation-portable-apply.js";
+
+export * from "./capability.js";
+export * from "./user-profile.js";
+export * from "./directory-mapping.js";
+export * from "./admin-people.js";

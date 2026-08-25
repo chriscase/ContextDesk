@@ -1,0 +1,115 @@
+.admin-people-tabs {
+  display: flex;
+  gap: 0.4rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.1rem;
+}
+
+.admin-people-tabs button {
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 0.45rem 0.45rem 0 0;
+  padding: 0.5rem 0.9rem;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.admin-people-tabs button:hover {
+  color: var(--fg);
+}
+
+.admin-people-tabs button[aria-selected="true"] {
+  color: var(--fg);
+  border-color: var(--border);
+  background: var(--surface);
+  font-weight: 600;
+}
+
+.admin-people__intro p {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.admin-people__search {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.6rem;
+  align-items: end;
+  margin: 0.75rem 0 1rem;
+}
+
+.admin-people__search label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+
+.admin-people__search input,
+.admin-people__search select {
+  width: 100%;
+}
+
+.admin-people__detail {
+  padding: 0.75rem;
+  border: 1px dashed var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.admin-people__detail-actions {
+  margin-bottom: 0.6rem;
+}
+
+.admin-people__capability-table {
+  margin-top: 0.5rem;
+}
+
+.admin-people__capability-table code {
+  font-size: 0.85em;
+}
+
+.admin-people__preview-form {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 32rem;
+}
+
+.admin-people__preview-form label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.admin-people__preview-form textarea {
+  font: inherit;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface);
+  color: var(--fg);
+  resize: vertical;
+}
+
+.admin-people__preview-form button {
+  justify-self: start;
+}
+
+.admin-people__preview-result {
+  margin-top: 0.75rem;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+}
+
+.admin-people__preview-result dt {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.admin-people__preview-result dd {
+  margin: 0;
+}

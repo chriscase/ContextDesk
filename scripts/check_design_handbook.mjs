@@ -19,6 +19,7 @@ const CHAPTERS = [
   "docs/design/proven-methods/DEMO_EVALUATION_LAB.md",
   "docs/design/proven-methods/INCIDENT_EVIDENCE_BUNDLE.md",
   "docs/design/proven-methods/HELP_TRUTH_AND_DELIVERY.md",
+  "docs/design/proven-methods/IDENTITY_AND_ADMINISTRATION.md",
 ];
 const TEMPLATE = "docs/design/proven-methods/METHOD_TEMPLATE.md";
 const INDEX = "docs/design/PROVEN_METHODS.md";
