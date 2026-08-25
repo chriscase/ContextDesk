@@ -38,18 +38,32 @@ describe("opt-in signed updater (#173)", () => {
     expect(cap).not.toMatch(/shell:/);
   });
 
-  it("release workflow signs with secrets, not committed keys", () => {
-    const yml = readFileSync(join(repo, ".github/workflows/release.yml"), "utf8");
-    expect(yml).toMatch(/TAURI_SIGNING_PRIVATE_KEY/);
-    expect(yml).toMatch(/includeUpdaterJson/);
-    expect(yml).toMatch(/signed_updater:/);
-    expect(yml).toMatch(/CONTEXTDESK_SIGNED_UPDATER/);
-    expect(yml).toMatch(/createUpdaterArtifacts=false/);
-    expect(yml).not.toMatch(/BEGIN.*PRIVATE/);
-    expect(yml).toMatch(/libayatana-appindicator3-dev/);
-    expect(yml).not.toMatch(/\blibappindicator3-dev\b/);
-    expect(yml).toMatch(/platform: ubuntu-24\.04/);
-    expect(yml).not.toMatch(/platform: ubuntu-22\.04/);
+  it("unified release delegates signed builds and assembles exact updater metadata", () => {
+    const orchestrator = readFileSync(
+      join(repo, ".github/workflows/release.yml"),
+      "utf8",
+    );
+    const desktopBuilder = readFileSync(
+      join(repo, ".github/workflows/release-desktop.yml"),
+      "utf8",
+    );
+    expect(orchestrator).toMatch(/uses: \.\/\.github\/workflows\/release-desktop\.yml/);
+    expect(orchestrator).toMatch(/TAURI_SIGNING_PRIVATE_KEY/);
+    expect(orchestrator).toMatch(/signed_updater:/);
+    expect(orchestrator).toMatch(/release_contract\.py assemble/);
+    expect(orchestrator).toMatch(/--require-signed-updater/);
+    expect(orchestrator).toMatch(/latest\.json/);
+    expect(desktopBuilder).toMatch(/CONTEXTDESK_SIGNED_UPDATER/);
+    expect(desktopBuilder).toMatch(/createUpdaterArtifacts=false/);
+    // The unified assembler owns latest.json. Tauri action must not create a
+    // second release/update object through its legacy mutation option.
+    expect(orchestrator).not.toMatch(/includeUpdaterJson/);
+    expect(desktopBuilder).not.toMatch(/includeUpdaterJson/);
+    expect(`${orchestrator}\n${desktopBuilder}`).not.toMatch(/BEGIN.*PRIVATE/);
+    expect(desktopBuilder).toMatch(/libayatana-appindicator3-dev/);
+    expect(desktopBuilder).not.toMatch(/\blibappindicator3-dev\b/);
+    expect(desktopBuilder).toMatch(/platform: ubuntu-24\.04/);
+    expect(desktopBuilder).not.toMatch(/platform: ubuntu-22\.04/);
   });
 
   it("host check/install helpers exist and docs cover trust boundary", () => {
