@@ -1,10 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CORPUS_INTAKE_COMMIT_SCHEMA_ID } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
+import { corpusIntakeRequestDigest } from "../corpus-intake/index.js";
 import { ContributionConflictError, CaseService, MemoryCaseStore } from "./index.js";
 
 const actor = { id: "alice", username: "alice" };
@@ -186,6 +188,77 @@ describe("case write integrity", () => {
       expect(timeline.some((event) => event.kind === "evidence_registered")).toBe(false);
       expect(timeline.some((event) => event.kind === "contribution_created")).toBe(false);
       expect(await evidence.head(sha256Hex(bytes))).toBeNull();
+    }, boom);
+  });
+
+  it("abandons an unpaired file-server reference when artifact metadata rolls back", async () => {
+    const boom = new BoomArtifactStore();
+    boom.boom = true;
+    await withService(async ({ service, evidence }) => {
+      const created = await service.createCase(actor, { title: "File-server ref atomic fixture" }, "test");
+      await expect(
+        service.addEvidence(
+          created.id,
+          actor,
+          {
+            kind: "file_server_ref",
+            uri: "https://files.example.test/incident/core.bin",
+            expectedHash: sha256Hex(new TextEncoder().encode("remote-synthetic")),
+            summary: "Synthetic core dump stays on the file server.",
+          },
+          "test",
+        ),
+      ).rejects.toThrow(/artifact store failed/);
+      expect(await service.listContributions(created.id, actor, false)).toEqual([]);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(
+        false,
+      );
+      const refs = await readdir(join(evidence.rootDir, "refs")).catch(() => [] as string[]);
+      expect(refs).toEqual([]);
+    }, boom);
+  });
+
+  it("rolls back promoted corpus blobs when the post-promote timeline write fails", async () => {
+    const boom = new InjectedFailureStore();
+    boom.failTimelineKind = "corpus_intake_committed";
+    await withService(async ({ service, evidence, audit }) => {
+      const created = await service.createCase(actor, { title: "Corpus promote atomic fixture" }, "test");
+      const bytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic mailer timeout\n");
+      const files = [{ relativePath: "mailer/promote-rollback.log", mediaType: "text/plain", bytes }];
+      const request = {
+        schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+        origin: "files" as const,
+        sourceLabel: "synthetic promote rollback source",
+        privacyClass: "owner_only" as const,
+        idempotencyKey: "batch-syn-promote-rollback-1",
+        files: [{
+          relativePath: files[0]!.relativePath,
+          mediaType: files[0]!.mediaType,
+          contentBase64: Buffer.from(bytes).toString("base64"),
+        }],
+        archiveBase64: null,
+        previewToken: corpusIntakeRequestDigest({
+          caseId: created.id,
+          actorId: actor.id,
+          origin: "files",
+          sourceLabel: "synthetic promote rollback source",
+          privacyClass: "owner_only",
+          idempotencyKey: "batch-syn-promote-rollback-1",
+          files,
+          archive: null,
+        }),
+      };
+      await expect(service.commitCorpusIntake(created.id, actor, request, "test"))
+        .rejects.toThrow(/injected timeline failure:corpus_intake_committed/);
+      expect(await service.listArtifacts(created.id, actor, false)).toEqual([]);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(
+        false,
+      );
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "corpus_intake_committed")).toBe(
+        false,
+      );
+      expect(await evidence.head(sha256Hex(bytes))).toBeNull();
+      expect(await audit.list({ action: "corpus_intake_commit" })).toEqual([]);
     }, boom);
   });
 

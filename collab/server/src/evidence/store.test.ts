@@ -107,6 +107,18 @@ describe("FilesystemEvidenceStore", () => {
     });
   });
 
+  it("abandons a file-server reference and refuses path-crafted ids", async () => {
+    await withStore(async (store) => {
+      const created = await store.putFileServerReference({
+        uri: "https://files.example.test/incident/core.bin",
+        expectedHash: sha256Hex(new TextEncoder().encode("remote-synthetic")),
+      });
+      await store.abandonFileServerReference(created.id);
+      expect(await store.getFileServerReference(created.id)).toBeNull();
+      await expect(store.abandonFileServerReference("../secret")).rejects.toThrow(/invalid file-server reference id/);
+    });
+  });
+
   it("represents a never-hashed reference as visibly unverifiable", async () => {
     await withStore(async (store) => {
       await expect(

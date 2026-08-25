@@ -376,6 +376,72 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
     });
   });
 
+  it("classifies concurrent distinct-key corpus commits sharing a digest after the digest lock", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 4 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-corpus-digest-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(pool), catalog);
+      const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      try {
+        const created = await cases.createCase(actor, { title: "Concurrent digest fixture" }, "test");
+        const bytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic digest race\n");
+        const makeRequest = (key: string, relativePath: string) => {
+          const files = [{ relativePath, mediaType: "text/plain", bytes }];
+          return {
+            schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+            origin: "files" as const,
+            sourceLabel: "synthetic concurrent digest source",
+            privacyClass: "owner_only" as const,
+            idempotencyKey: key,
+            files: [{
+              relativePath,
+              mediaType: "text/plain",
+              contentBase64: Buffer.from(bytes).toString("base64"),
+            }],
+            archiveBase64: null,
+            previewToken: corpusIntakeRequestDigest({
+              caseId: created.id,
+              actorId: actor.id,
+              origin: "files",
+              sourceLabel: "synthetic concurrent digest source",
+              privacyClass: "owner_only",
+              idempotencyKey: key,
+              files,
+              archive: null,
+            }),
+          };
+        };
+        const batches = await Promise.all([
+          cases.commitCorpusIntake(
+            created.id,
+            actor,
+            makeRequest("batch-synthetic-digest-alice", "mailer/alice.log"),
+            "test",
+          ),
+          cases.commitCorpusIntake(
+            created.id,
+            actor,
+            makeRequest("batch-synthetic-digest-bob", "mailer/bob.log"),
+            "test",
+          ),
+        ]);
+        expect(
+          batches.map((batch) => parseCorpusIntakeBatch(batch).items[0]?.duplicateDigest).sort(),
+        ).toEqual([false, true]);
+        expect((await pool.query("SELECT id FROM evidence_intake_batches")).rows).toHaveLength(2);
+        expect((await pool.query("SELECT id FROM evidence_artifacts")).rows).toHaveLength(2);
+        expect((await pool.query("SELECT DISTINCT content_hash FROM evidence_artifacts")).rows).toHaveLength(1);
+      } finally {
+        await pool.end();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("survives a new CaseService on the same database", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);

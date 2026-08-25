@@ -36,6 +36,7 @@ import { assertFilenameAllowed, assertUploadAllowed } from "../evidence/index.js
 import {
   decodeBase64,
   corpusIntakeRequestDigest,
+  duplicateDigestFlags,
   previewCorpusBytes,
 } from "../corpus-intake/index.js";
 import {
@@ -1122,26 +1123,35 @@ export class CaseService {
 
     if (input.kind === "file_server_ref") {
       if (!input.uri) throw new Error("file-server reference requires a URI");
-      const ref = await this.evidence.putFileServerReference({
-        uri: input.uri,
-        expectedHash,
-        verificationStatus: "unverified",
-      });
-      return this.persistEvidenceMetadata(caseId, actor, origin, clientTime, {
-        id,
-        kind: input.kind,
-        filename: input.filename ?? null,
-        uri,
-        mediaType,
-        byteLength: null,
-        contentHash: null,
-        expectedHash: ref.expectedHash,
-        verificationStatus: ref.verificationStatus,
-        refId: ref.id,
-        privacyClass: privacy,
-        sourceId,
-        summary: input.summary,
-      });
+      let refId: string | null = null;
+      try {
+        const ref = await this.evidence.putFileServerReference({
+          uri: input.uri,
+          expectedHash,
+          verificationStatus: "unverified",
+        });
+        refId = ref.id;
+        return await this.persistEvidenceMetadata(caseId, actor, origin, clientTime, {
+          id,
+          kind: input.kind,
+          filename: input.filename ?? null,
+          uri,
+          mediaType,
+          byteLength: null,
+          contentHash: null,
+          expectedHash: ref.expectedHash,
+          verificationStatus: ref.verificationStatus,
+          refId: ref.id,
+          privacyClass: privacy,
+          sourceId,
+          summary: input.summary,
+        });
+      } catch (error) {
+        if (refId) {
+          await this.evidence.abandonFileServerReference(refId);
+        }
+        throw error;
+      }
     }
 
     if (!input.bytes) throw new Error("held artifact requires bytes");
@@ -1344,6 +1354,16 @@ export class CaseService {
             stages.push(stage);
           }
         }
+        const liveArtifacts = await this.store.listArtifactsByCase(caseId);
+        const liveKnown = new Set(
+          liveArtifacts
+            .map((row) => row.contentHash)
+            .filter((hash): hash is string => Boolean(hash)),
+        );
+        const duplicateFlags = duplicateDigestFlags(
+          preview.classified.map((file) => file.digest),
+          liveKnown,
+        );
         const items: CorpusIntakeBatchV1["items"] = preview.classified.map((file, index) => ({
           artifactId: randomUUID(),
           relativePath: file.relativePath,
@@ -1352,7 +1372,7 @@ export class CaseService {
           mediaType: file.mediaType,
           privacyClass: request.privacyClass,
           sourceId,
-          duplicateDigest: preview.report.accepted[index]?.duplicateDigest ?? false,
+          duplicateDigest: duplicateFlags[index] ?? false,
         }));
         const batch: CorpusIntakeBatchV1 = {
           schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,

@@ -52,6 +52,12 @@ export interface EvidenceStore {
     actualBytes?: Uint8Array,
   ): Promise<FileServerReferenceV1>;
 
+  /**
+   * Remove a file-server reference that was never paired with durable artifact
+   * metadata. This is compensating rollback, not general evidence deletion.
+   */
+  abandonFileServerReference(id: string): Promise<void>;
+
   /** Readiness probe for the byte backend. */
   ping(): Promise<void>;
 
@@ -385,6 +391,13 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     return ref;
   }
 
+  async abandonFileServerReference(id: string): Promise<void> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+      throw new Error("invalid file-server reference id");
+    }
+    await rm(refPath(this.rootDir, id), { force: true });
+  }
+
   async getFileServerReference(
     id: string,
   ): Promise<FileServerReferenceV1 | null> {
@@ -485,6 +498,10 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
 
   async getFileServerReference(id: string): Promise<FileServerReferenceV1 | null> {
     return this.owner.getFileServerReference(id);
+  }
+
+  async abandonFileServerReference(): Promise<void> {
+    throw new Error("file-server references are unsupported in an evidence write batch");
   }
 
   async verifyFileServerReference(): Promise<FileServerReferenceV1> {

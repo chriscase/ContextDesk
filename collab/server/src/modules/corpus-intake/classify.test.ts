@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyBytes } from "./classify.js";
-import { decodeBase64, previewCorpusBytes } from "./preview.js";
+import { decodeBase64, duplicateDigestFlags, previewCorpusBytes } from "./preview.js";
 
 const LOG = new TextEncoder().encode("2026-08-15T00:00:00Z mailer timeout id=syn-1\n");
 
@@ -171,5 +171,15 @@ describe("previewCorpusBytes", () => {
       ],
     });
     expect(preview.report.accepted.every((row) => row.duplicateDigest)).toBe(true);
+  });
+});
+
+describe("duplicateDigestFlags", () => {
+  it("marks live known digests and within-batch repeats without weakening uniqueness", () => {
+    const original = "ab".repeat(32);
+    const other = "cd".repeat(32);
+    expect(duplicateDigestFlags([original, other], new Set())).toEqual([false, false]);
+    expect(duplicateDigestFlags([original, original], new Set())).toEqual([true, true]);
+    expect(duplicateDigestFlags([original, other], new Set([original]))).toEqual([true, false]);
   });
 });

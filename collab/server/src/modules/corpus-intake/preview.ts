@@ -38,6 +38,21 @@ function framed(hash: ReturnType<typeof createHash>, value: string | Uint8Array)
   hash.update(";");
 }
 
+/**
+ * Honest duplicate classification against a live known-digest set.
+ * A digest already present in the investigation, or present more than once in
+ * this batch, is a duplicate. Callers must supply `known` observed after the
+ * per-digest lock so concurrent distinct-key commits cannot both claim original.
+ */
+export function duplicateDigestFlags(
+  digests: readonly string[],
+  known: ReadonlySet<string>,
+): boolean[] {
+  const counts = new Map<string, number>();
+  for (const digest of digests) counts.set(digest, (counts.get(digest) ?? 0) + 1);
+  return digests.map((digest) => known.has(digest) || (counts.get(digest) ?? 0) > 1);
+}
+
 export function corpusIntakeRequestDigest(input: PreviewInput): string {
   const hash = createHash("sha256");
   for (const value of [
@@ -179,15 +194,16 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
       artifactKind: result.artifactKind,
       byteLength: result.bytes.byteLength,
       digest: result.digest,
-      duplicateDigest: known.has(result.digest) || classified.filter((row) => row.digest === result.digest).length > 1,
+      duplicateDigest: false,
     });
   }
 
-  // Recompute duplicateDigest against the batch itself after all classified.
-  const counts = new Map<string, number>();
-  for (const row of classified) counts.set(row.digest, (counts.get(row.digest) ?? 0) + 1);
-  for (const row of accepted) {
-    row.duplicateDigest = known.has(row.digest) || (counts.get(row.digest) ?? 0) > 1;
+  const flags = duplicateDigestFlags(
+    classified.map((row) => row.digest),
+    known,
+  );
+  for (const [index, row] of accepted.entries()) {
+    row.duplicateDigest = flags[index] ?? false;
   }
 
   return {
