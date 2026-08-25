@@ -173,6 +173,13 @@
   margin: 0;
 }
 
+.experiment-lab__case-name {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
 .experiment-lab__case-state,
 .experiment-lab__identity,
 .experiment-lab__authority,

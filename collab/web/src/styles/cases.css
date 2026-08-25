@@ -39,9 +39,17 @@
 
 .overview__grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(17rem, 0.8fr);
+  grid-template-columns: minmax(0, 1.7fr) minmax(17rem, 0.9fr);
   gap: 1rem;
   align-items: start;
+}
+
+/* Wide rooms show the feed beside both attention panels; narrower ones stack
+   the panels under the feed rather than squeezing three columns. */
+@media (min-width: 1180px) {
+  .overview__grid {
+    grid-template-columns: minmax(0, 1.6fr) minmax(16rem, 0.9fr) minmax(15rem, 0.75fr);
+  }
 }
 
 .overview__activity,
@@ -143,6 +151,101 @@
   gap: 0.45rem;
   color: var(--muted);
   font-size: 0.76rem;
+}
+
+.activity-feed__stage,
+.activity-feed__restricted {
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+}
+
+.activity-feed__restricted {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--fg);
+}
+
+.activity-feed__open .triage-chip {
+  justify-self: start;
+}
+
+/* ---- Open threads ------------------------------------------------------
+   A filter over the same committed activity window the feed reads. */
+
+.overview__threads {
+  display: grid;
+  gap: 0.85rem;
+  padding: 0.85rem 1rem 1rem;
+}
+
+.overview__thread-group h4 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.overview__thread-count {
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.overview__thread-meaning {
+  margin: 0.25rem 0 0.5rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.overview__thread-list {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.overview__thread-list a {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  background: var(--panel);
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.overview__thread-list a:hover {
+  border-color: var(--accent);
+}
+
+.overview__thread-list a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.overview__thread-list strong {
+  color: var(--accent);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.overview__thread-list span {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.overview__thread-more {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
 }
 
 .activity-feed__limit {
@@ -755,6 +858,142 @@
   margin: 0.2rem 0 0;
   font-size: 0.92rem;
   overflow-wrap: anywhere;
+}
+
+/* ---- Situation briefing -------------------------------------------------
+   Leads with the recorded working record (hypotheses, actions, observations,
+   unreviewed imported output) so a returning engineer reads content before
+   counts. Human groups and imported output are visually separated so model or
+   tool output never reads as a human finding. */
+
+.situation__briefing {
+  margin: 0 0 1.2rem;
+}
+
+.situation__briefing-head h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.situation__briefing-head p {
+  margin: 0.2rem 0 0.8rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  max-width: 62ch;
+}
+
+.situation__briefing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 0.7rem;
+  align-items: start;
+}
+
+.situation__briefing-group {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface);
+}
+
+.situation__briefing-group h5 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.situation__briefing-count {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.situation__briefing-meaning {
+  margin: 0.3rem 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.situation__briefing-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.situation__briefing-list {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.situation__briefing-list > li {
+  min-width: 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+
+.situation__briefing-list > li:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.situation__briefing-attribution {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.situation__briefing-open {
+  margin-top: 0.35rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.situation__briefing-open:hover,
+.situation__briefing-open:focus-visible {
+  text-decoration-thickness: 2px;
+}
+
+.situation__briefing-more {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.situation__briefing-evidence {
+  margin: 0.8rem 0 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
+.situation__briefing-evidence strong {
+  color: var(--fg);
 }
 
 .situation__activity,

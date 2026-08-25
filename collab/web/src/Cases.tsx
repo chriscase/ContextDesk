@@ -15,6 +15,7 @@ import {
   type TimelineEvent,
 } from "./TriageWorkspace.js";
 import { isDiscussionSection, isWorkLocation, parsePathname, type WorkFocus } from "./app-location.js";
+import { ArtifactExcerpt } from "./evidence-excerpt.js";
 import { focusArrivalCopy } from "./route-focus-copy.js";
 import { protectedApiFetch } from "./protected-api.js";
 
@@ -86,6 +87,14 @@ interface ActivityItem {
   resolvedRoute: string;
   provenanceClass: "human" | "imported" | "system" | "ai_generated" | "historical_restored";
   humanFinding: boolean;
+  /**
+   * Also published by the committed activity projection. Older payloads and
+   * embedded consumers may omit them, so every reader treats them as optional
+   * and says nothing rather than guessing.
+   */
+  activityKind?: string;
+  privacyVisibility?: string;
+  secondaryContext?: { label: string; value: string };
 }
 
 interface LegacyActivityItem {
@@ -141,6 +150,186 @@ function openedLine(row: CaseRow): string | null {
   if (when) return `Opened ${when}`;
   if (who) return `Opened by ${who}`;
   return null;
+}
+
+/**
+ * The Situation briefing groups. Each group reads only records this
+ * investigation already fetched for Capture — the briefing is a re-presentation
+ * of the working record, never a second source of truth and never a verdict.
+ */
+const BRIEFING_GROUPS: readonly {
+  id: string;
+  title: string;
+  /** Contribution kinds that belong to this group. */
+  kinds: readonly string[];
+  /** What the reader should take the entries to mean. Never a claim of truth. */
+  meaning: string;
+  empty: string;
+}[] = [
+  {
+    id: "hypotheses",
+    title: "Working hypotheses",
+    kinds: ["hypothesis"],
+    meaning: "Possibilities someone recorded to test. A hypothesis is not an established cause.",
+    empty: "No working hypothesis has been recorded yet.",
+  },
+  {
+    id: "actions",
+    title: "Next actions",
+    kinds: ["action"],
+    meaning: "Work someone recorded for a person to perform and report back on.",
+    empty: "No next action has been recorded yet.",
+  },
+  {
+    id: "observations",
+    title: "Latest observations",
+    kinds: ["note", "message"],
+    meaning: "What people reported seeing. Recorded observations, not conclusions.",
+    empty: "No observation has been recorded yet.",
+  },
+];
+
+/** Newest-first, tombstoned entries excluded from the working record. */
+function briefingEntries(
+  contributions: readonly ContributionView[],
+  kinds: readonly string[],
+): ContributionView[] {
+  return contributions
+    .filter((row) => !row.tombstoned && kinds.includes(row.kind) && (row.body ?? "").trim().length > 0)
+    .slice()
+    .sort((left, right) => {
+      const byCreated = (right.createdAt ?? "").localeCompare(left.createdAt ?? "");
+      return byCreated !== 0 ? byCreated : right.id.localeCompare(left.id);
+    });
+}
+
+function contributionTime(value: string | undefined): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? null : parsed.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+/**
+ * Imported analysis nobody has read yet. Kept separate from the human groups
+ * above so model or tool output is never folded in among human findings.
+ */
+function unreviewedRuns(runs: readonly RunRow[]): RunRow[] {
+  return runs.filter(
+    (run) => run.corroborationState !== "corroborated" && run.corroborationState !== "contradicted",
+  );
+}
+
+/** Evidence signals restated from timeline events already loaded for this case. */
+function evidenceSignals(events: readonly TimelineEvent[]): {
+  registered: number;
+  snapshots: number;
+  intakeBatches: number;
+} {
+  let registered = 0;
+  let snapshots = 0;
+  let intakeBatches = 0;
+  for (const event of events) {
+    if (event.kind === "evidence_registered") registered += 1;
+    else if (event.kind === "snapshot_frozen") snapshots += 1;
+    else if (event.kind === "corpus_intake_committed") intakeBatches += 1;
+  }
+  return { registered, snapshots, intakeBatches };
+}
+
+/**
+ * Provenance shown on every feed row, not only the non-human ones. A reader
+ * scanning the room should never have to infer that an unlabeled row was
+ * written by a person. Model and imported output are always named as analysis.
+ */
+function activityProvenance(item: ActivityItem): { className: string; label: string } {
+  if (item.provenanceClass === "ai_generated") {
+    return { className: "triage-chip triage-chip--model", label: "AI-assisted \u00b7 not a human finding" };
+  }
+  if (item.provenanceClass === "imported") {
+    return { className: "triage-chip triage-chip--imported", label: "imported \u00b7 not a human finding" };
+  }
+  if (item.provenanceClass === "historical_restored") {
+    return { className: "triage-chip triage-chip--imported", label: "restored history \u00b7 attribution only" };
+  }
+  if (item.provenanceClass === "system") {
+    return { className: "triage-chip", label: "recorded by the system" };
+  }
+  return { className: "triage-chip triage-chip--human", label: "human-authored" };
+}
+
+/**
+ * Names a restricted record so a reader knows it is not broadly readable, and
+ * so nobody pastes it somewhere wider by accident. Nothing about the
+ * restricted content itself is added or withheld by this label.
+ */
+function restrictionLabel(privacy: string | undefined): string | null {
+  if (privacy === "owner_only") return "private to this case";
+  if (privacy === "redacted") return "redacted";
+  if (privacy === "omitted") return "content omitted";
+  return null;
+}
+
+function activityRestriction(item: ActivityItem): string | null {
+  return restrictionLabel(item.privacyVisibility);
+}
+
+/**
+ * Recorded events that name work nobody has carried further. These are read
+ * from the same committed activity projection the feed uses \u2014 a filter over
+ * recorded events, never a second source of truth and never a judgment that
+ * the work is wrong.
+ */
+const ATTENTION_GROUPS: readonly {
+  id: string;
+  title: string;
+  kinds: readonly string[];
+  meaning: string;
+}[] = [
+  {
+    id: "stalled",
+    title: "Analysis that stopped short",
+    kinds: ["workstream_failed", "workstream_partially_completed", "workstream_canceled"],
+    meaning:
+      "A workstream was recorded as failed, partial, or canceled. Its own record says what it did reach.",
+  },
+  {
+    id: "disagreed",
+    title: "Lanes that disagreed",
+    kinds: ["comparison_disagreement"],
+    meaning:
+      "A recorded comparison contradicted itself across lanes. Disagreement is for a person to adjudicate.",
+  },
+  {
+    id: "unread",
+    title: "Imported or AI output not yet read",
+    kinds: ["import_recorded"],
+    meaning:
+      "Output pasted or generated elsewhere. It stays unverified until a person corroborates it.",
+  },
+];
+
+const DECISION_PENDING_KINDS = new Set(["decision_proposed", "decision_revised"]);
+const DECISION_SETTLED_KINDS = new Set(["decision_accepted", "decision_superseded"]);
+
+/**
+ * Investigations whose most recent recorded decision event is still a
+ * proposal. Read strictly from the loaded window of activity, so callers must
+ * state that bound rather than implying the whole history was examined.
+ */
+function decisionsAwaitingAcceptance(items: readonly ActivityItem[]): ActivityItem[] {
+  const latest = new Map<string, ActivityItem>();
+  // Items arrive newest-first, so the first decision event seen for an
+  // investigation is the most recent one recorded in this window.
+  for (const item of items) {
+    const kind = item.activityKind ?? "";
+    if (!DECISION_PENDING_KINDS.has(kind) && !DECISION_SETTLED_KINDS.has(kind)) continue;
+    if (latest.has(item.investigationId)) continue;
+    latest.set(item.investigationId, item);
+  }
+  return [...latest.values()].filter((item) => DECISION_PENDING_KINDS.has(item.activityKind ?? ""));
 }
 
 function activityLabel(item: ActivityItem | LegacyActivityItem): string {
@@ -596,12 +785,25 @@ export function Cases(props: {
 
   useEffect(() => {
     void refresh();
-    void refreshActivity();
     void refreshSources();
     const refreshCatalog = () => void refreshSources();
     window.addEventListener("contextdesk:source-catalog-changed", refreshCatalog);
     return () => window.removeEventListener("contextdesk:source-catalog-changed", refreshCatalog);
-  }, [refresh, refreshActivity, refreshSources]);
+  }, [refresh, refreshSources]);
+
+  // Work recorded elsewhere in the room — a workstream that finished, failed,
+  // or was canceled in Analyze — never passed through this component, so the
+  // operating picture could show a room state that had already moved on.
+  // Re-read the committed projection whenever the overview is put on screen,
+  // and whenever a run reports that it changed.
+  const showingOverview = view === "overview" && !focusCaseId;
+  useEffect(() => {
+    if (!showingOverview) return undefined;
+    void refreshActivity();
+    const onRunChanged = () => void refreshActivity();
+    window.addEventListener("contextdesk:triage-run-changed", onRunChanged);
+    return () => window.removeEventListener("contextdesk:triage-run-changed", onRunChanged);
+  }, [showingOverview, refreshActivity]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -816,6 +1018,10 @@ export function Cases(props: {
     props.focus && props.focus.navigation !== "preserve"
       ? focusArrivalCopy(props.focus)
       : null;
+  // Situation briefing inputs. Derived from the same records Capture renders,
+  // so the briefing restates the working record instead of forking it.
+  const pendingRuns = unreviewedRuns(runs);
+  const evidence = evidenceSignals(events);
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
@@ -852,6 +1058,14 @@ export function Cases(props: {
     )
     .slice(0, 5);
   const overviewActivities = activities.slice(0, 10);
+  // Both panels below read the same committed activity window the feed reads.
+  const attentionGroups = ATTENTION_GROUPS.map((group) => ({
+    ...group,
+    items: activities.filter((item) => group.kinds.includes(item.activityKind ?? "")),
+  })).filter((group) => group.items.length > 0);
+  const pendingDecisions = decisionsAwaitingAcceptance(activities);
+  const attentionCount =
+    attentionGroups.reduce((total, group) => total + group.items.length, 0) + pendingDecisions.length;
 
   const createForm = canWrite ? (
     <form className="case-form" aria-label="Start a new investigation" onSubmit={(e) => void createCase(e)}>
@@ -1115,14 +1329,27 @@ export function Cases(props: {
                             <span className="activity-feed__case">{item.investigationTitle}</span>
                             <span className="activity-feed__meta">
                               <time dateTime={item.occurredAt}>{activityTime(item.occurredAt)}</time>
+                              {/* The committed projection names the stage this
+                                  event belongs to; showing it saves opening the
+                                  investigation to find out where work happened. */}
+                              {item.secondaryContext ? (
+                                <span className="activity-feed__stage">
+                                  {item.secondaryContext.label}: {item.secondaryContext.value}
+                                </span>
+                              ) : null}
                               {investigation ? (
                                 <span className={`status-pill status-pill--${investigation.status}`}>
                                   {investigation.status}
                                 </span>
                               ) : null}
-                              {item.provenanceClass !== "human" ? (
-                                <span>{item.provenanceClass.replaceAll("_", " ")} · not a human finding</span>
+                              {activityRestriction(item) ? (
+                                <span className="activity-feed__restricted">
+                                  {activityRestriction(item)}
+                                </span>
                               ) : null}
+                            </span>
+                            <span className={activityProvenance(item).className}>
+                              {activityProvenance(item).label}
                             </span>
                           </a>
                           <div className="activity-feed__share">
@@ -1148,10 +1375,125 @@ export function Cases(props: {
                   </p>
                 ) : null}
               </section>
+              <aside className="overview__attention" aria-labelledby="overview-open-title">
+                <header className="overview__section-head">
+                  <div>
+                    <p className="overview__eyebrow">Nothing has carried this further</p>
+                    <h3 id="overview-open-title">Open threads</h3>
+                    <p>
+                      Recorded work that stopped, disagreed, or is still waiting on a person. Read
+                      from the {activities.length} most recent recorded events, so older open work
+                      may not appear here.
+                    </p>
+                  </div>
+                </header>
+                {!activitiesLoaded ? (
+                  <p className="overview__empty" role="status">Loading recent activity…</p>
+                ) : attentionCount === 0 ? (
+                  <p className="overview__empty">
+                    Nothing in recent activity is recorded as stopped, disagreeing, unread, or
+                    waiting on a decision.
+                  </p>
+                ) : (
+                  <div className="overview__threads">
+                    {pendingDecisions.length ? (
+                      <section
+                        className="overview__thread-group"
+                        aria-labelledby="overview-thread-decisions"
+                      >
+                        <h4 id="overview-thread-decisions">
+                          Waiting on a human decision
+                          <span className="overview__thread-count">{pendingDecisions.length}</span>
+                        </h4>
+                        <p className="overview__thread-meaning">
+                          The most recent decision recorded for these investigations is a proposal.
+                          Only a person accepts a decision.
+                        </p>
+                        <ul className="overview__thread-list">
+                          {pendingDecisions.map((item) => (
+                            <li key={item.activityId}>
+                              <a
+                                href={item.resolvedRoute}
+                                onClick={(event) => {
+                                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                  event.preventDefault();
+                                  const destination = activityDestination(item);
+                                  if (props.onActivityOpen) {
+                                    props.onActivityOpen(
+                                      item.investigationId,
+                                      destination.stage,
+                                      destination.focus,
+                                    );
+                                  } else {
+                                    setLocalNav({ caseId: item.investigationId, stage: destination.stage });
+                                  }
+                                }}
+                              >
+                                <strong>{item.investigationTitle}</strong>
+                                <span>
+                                  {item.actorLabel} {activityLabel(item)} ·{" "}
+                                  {activityTime(item.occurredAt)}
+                                </span>
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    ) : null}
+                    {attentionGroups.map((group) => (
+                      <section
+                        key={group.id}
+                        className="overview__thread-group"
+                        aria-labelledby={`overview-thread-${group.id}`}
+                      >
+                        <h4 id={`overview-thread-${group.id}`}>
+                          {group.title}
+                          <span className="overview__thread-count">{group.items.length}</span>
+                        </h4>
+                        <p className="overview__thread-meaning">{group.meaning}</p>
+                        <ul className="overview__thread-list">
+                          {group.items.slice(0, 4).map((item) => (
+                            <li key={item.activityId}>
+                              <a
+                                href={item.resolvedRoute}
+                                onClick={(event) => {
+                                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                  event.preventDefault();
+                                  const destination = activityDestination(item);
+                                  if (props.onActivityOpen) {
+                                    props.onActivityOpen(
+                                      item.investigationId,
+                                      destination.stage,
+                                      destination.focus,
+                                    );
+                                  } else {
+                                    setLocalNav({ caseId: item.investigationId, stage: destination.stage });
+                                  }
+                                }}
+                              >
+                                <strong>{item.investigationTitle}</strong>
+                                <span>
+                                  {item.actorLabel} {activityLabel(item)} ·{" "}
+                                  {activityTime(item.occurredAt)}
+                                </span>
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                        {group.items.length > 4 ? (
+                          <p className="overview__thread-more">
+                            {group.items.length - 4} more in recent activity.
+                          </p>
+                        ) : null}
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </aside>
               <aside className="overview__attention" aria-labelledby="overview-attention-title">
                 <header className="overview__section-head">
                   <div>
-                    <p className="overview__eyebrow">Needs attention</p>
+                    <p className="overview__eyebrow">Recorded severity</p>
                     <h3 id="overview-attention-title">High-impact investigations</h3>
                     <p>Open or monitored work recorded as high or critical severity.</p>
                   </div>
@@ -1460,6 +1802,172 @@ export function Cases(props: {
                 </section>
               </div>
             )}
+          </section>
+          <section className="situation__briefing" aria-labelledby="situation-briefing-title">
+            <div className="situation__briefing-head">
+              <h4 id="situation-briefing-title">Where the investigation stands</h4>
+              <p>
+                The working record as people wrote it — what is suspected, what is outstanding, and
+                what was seen. Open any entry to read it in full where it was recorded.
+              </p>
+            </div>
+            <div className="situation__briefing-grid">
+              {BRIEFING_GROUPS.map((group) => {
+                const entries = briefingEntries(contributions, group.kinds);
+                const shown = entries.slice(0, 3);
+                return (
+                  <section
+                    key={group.id}
+                    className="situation__briefing-group"
+                    aria-labelledby={`situation-briefing-${group.id}`}
+                  >
+                    <h5 id={`situation-briefing-${group.id}`}>
+                      {group.title}
+                      <span className="situation__briefing-count">
+                        {entries.length === 0 ? "none recorded" : `${entries.length} recorded`}
+                      </span>
+                    </h5>
+                    <p className="situation__briefing-meaning">{group.meaning}</p>
+                    {shown.length === 0 ? (
+                      <p className="situation__briefing-empty">{group.empty}</p>
+                    ) : (
+                      <ul className="situation__briefing-list">
+                        {shown.map((row) => {
+                          const when = contributionTime(row.createdAt);
+                          return (
+                            <li key={row.id}>
+                              <p className="situation__briefing-attribution">
+                                <span className="triage-chip triage-chip--human">human-authored</span>
+                                <span>
+                                  {row.authorUsername ?? "author not recorded"}
+                                  {when ? ` · ${when}` : ""}
+                                </span>
+                                {restrictionLabel(row.privacyClass) ? (
+                                  <span className="activity-feed__restricted">
+                                    {restrictionLabel(row.privacyClass)}
+                                  </span>
+                                ) : null}
+                              </p>
+                              <ArtifactExcerpt text={row.body ?? ""} label={group.title.toLowerCase()} />
+                              <button
+                                type="button"
+                                className="situation__briefing-open"
+                                onClick={() => {
+                                  const focus: WorkFocus = {
+                                    section: "triage-capture",
+                                    item: row.id,
+                                    itemKind: "contribution",
+                                    lane: null,
+                                    experiment: null,
+                                  };
+                                  if (props.onDeepNavigate) props.onDeepNavigate("capture", focus);
+                                  else selectStage("capture");
+                                }}
+                              >
+                                Open where this was recorded
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {entries.length > shown.length ? (
+                      <p className="situation__briefing-more">
+                        {entries.length - shown.length} more recorded in Capture.
+                      </p>
+                    ) : null}
+                  </section>
+                );
+              })}
+              <section
+                className="situation__briefing-group"
+                aria-labelledby="situation-briefing-imported"
+              >
+                <h5 id="situation-briefing-imported">
+                  Imported analysis awaiting a human read
+                  <span className="situation__briefing-count">
+                    {pendingRuns.length === 0
+                      ? "none pending"
+                      : `${pendingRuns.length} pending`}
+                  </span>
+                </h5>
+                <p className="situation__briefing-meaning">
+                  Output pasted from an AI, a tool, or a report. It stays unverified until a person
+                  corroborates or contradicts it, and is never a human finding.
+                </p>
+                {pendingRuns.length === 0 ? (
+                  <p className="situation__briefing-empty">
+                    {runs.length === 0
+                      ? "No external analysis has been imported."
+                      : "Every imported run has a recorded human judgment."}
+                  </p>
+                ) : (
+                  <ul className="situation__briefing-list">
+                    {pendingRuns.slice(0, 3).map((run) => (
+                      <li key={run.id}>
+                        <p className="situation__briefing-attribution">
+                          <span className="triage-chip triage-chip--imported">
+                            imported · unverified
+                          </span>
+                          <span>
+                            imported by {run.importerUsername} · evidence visibility{" "}
+                            {run.evidenceVisibility}
+                          </span>
+                        </p>
+                        <ArtifactExcerpt text={run.outputText} label="imported output" />
+                        <button
+                          type="button"
+                          className="situation__briefing-open"
+                          onClick={() => {
+                            const focus: WorkFocus = {
+                              section: "triage-capture",
+                              item: run.id,
+                              itemKind: "imported-run",
+                              lane: null,
+                              experiment: null,
+                            };
+                            if (props.onDeepNavigate) props.onDeepNavigate("capture", focus);
+                            else selectStage("capture");
+                          }}
+                        >
+                          Open to record a human judgment
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </div>
+            <p className="situation__briefing-evidence">
+              <strong>Evidence recorded:</strong>{" "}
+              {evidence.registered === 0
+                ? "no evidence has been registered on this investigation yet"
+                : `${evidence.registered} item${evidence.registered === 1 ? "" : "s"} registered`}
+              {evidence.snapshots > 0
+                ? ` · ${evidence.snapshots} snapshot${evidence.snapshots === 1 ? "" : "s"} frozen`
+                : " · no snapshot frozen yet"}
+              {evidence.intakeBatches > 0
+                ? ` · ${evidence.intakeBatches} log intake batch${evidence.intakeBatches === 1 ? "" : "es"} committed`
+                : ""}
+              {". "}
+              <button
+                type="button"
+                className="situation__briefing-open"
+                onClick={() => {
+                  const focus: WorkFocus = {
+                    section: "triage-evidence-board",
+                    item: null,
+                    itemKind: null,
+                    lane: null,
+                    experiment: null,
+                  };
+                  if (props.onDeepNavigate) props.onDeepNavigate("analyze", focus);
+                  else selectStage("analyze");
+                }}
+              >
+                Open the evidence board
+              </button>
+            </p>
           </section>
           <dl className="situation__facts">
             <div>

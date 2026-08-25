@@ -1954,12 +1954,20 @@ export function ExperimentLab(props: {
       <header className="experiment-lab__header">
         <div>
           <p className="experiment-lab__eyebrow">
-            Case {props.caseTitle ?? props.caseId} ·{" "}
-            {surface === "decision" ? "human adjudication" : "comparison lab"}
+            {surface === "decision" ? "Human adjudication" : "Comparison lab"}
           </p>
           <h3 className="case-view__title">
             {surface === "decision" ? "Decision journal" : "Experiment lab"}
           </h3>
+          {/* The investigation is named in readable case. A bare identifier is
+              never presented as if it were a title. */}
+          <p className="experiment-lab__case-name">
+            {props.caseTitle ? (
+              <>Investigation: {props.caseTitle}</>
+            ) : (
+              <>Investigation title not recorded</>
+            )}
+          </p>
           <p className="experiment-lab__case-state">
             <span>{props.caseStatus ?? "status unavailable"}</span>
             <span>{props.caseSeverity ?? "severity unavailable"} severity</span>
@@ -1995,7 +2003,10 @@ export function ExperimentLab(props: {
       </p>
       <div className="experiment-lab__future-slots" aria-label="Extension slots">
         <span>Sources: seeded · ContextDesk connector · pasted chat</span>
-        <span>Presence: {presence ? `${presence.members.length} active` : "checking…"} · live refresh</span>
+        <span>
+          Presence: {presence ? `${presence.members.length} active` : "checking…"} · live
+          refresh by polling
+        </span>
         <span>Next extensions: semantic search · multi-worker leases</span>
       </div>
       <details className="experiment-lab__tools experiment-lab__extensions">

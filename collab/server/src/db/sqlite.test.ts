@@ -287,4 +287,100 @@ describe("SQLite local runtime", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("persists contribution, intake batch, and evidence mutations across reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-mutators-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const first = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(first.catalog, first.audit);
+      const cases = new CaseService(evidence, first.audit, first.cases, catalog);
+      const created = await cases.createCase(actor, { title: "SQLite mutator fixture" }, "test");
+      const bytes = new TextEncoder().encode("sqlite held evidence\n");
+      const uploaded = await cases.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "held.log",
+          mediaType: "text/plain",
+          bytes,
+          expectedHash: sha256Hex(bytes),
+          summary: "Held evidence must survive reopen.",
+        },
+        "test",
+      );
+      await first.cases.insertIntakeBatch({
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        caseId: created.id,
+        idempotencyKey: "intake-syn-0001",
+        requestDigest: "c".repeat(64),
+        origin: "test",
+        sourceLabel: "synthetic-fixture",
+        privacyClass: "owner_only",
+        createdAt: new Date().toISOString(),
+        createdBy: actor.id,
+        payloadJson: JSON.stringify({ schemaId: "cd-collab.corpus_intake_batch.v1", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+      });
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      expect((await second.cases.getArtifact(uploaded.artifact.id))?.contentHash).toBe(sha256Hex(bytes));
+      expect(await second.cases.getIntakeBatch(created.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).toMatchObject({
+        idempotencyKey: "intake-syn-0001",
+        requestDigest: "c".repeat(64),
+      });
+      expect((await second.cases.listLatestRevisions(created.id)).some((row) => row.kind === "upload")).toBe(true);
+      second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls held evidence, timeline, and audit back on SQLite reopen after withAtomic failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-evidence-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const created = await cases.createCase(actor, { title: "SQLite evidence rollback" }, "test");
+      const originalAppend = runtime.audit.append.bind(runtime.audit);
+      runtime.audit.append = async (record) => {
+        if (record.action === "evidence_register") {
+          throw new Error("synthetic SQLite evidence audit failure");
+        }
+        return originalAppend(record);
+      };
+      const bytes = new TextEncoder().encode("must not persist after audit failure\n");
+      await expect(cases.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "held.log",
+          mediaType: "text/plain",
+          bytes,
+          summary: "Rollback this register.",
+        },
+        "test",
+      )).rejects.toThrow("synthetic SQLite evidence audit failure");
+      expect(await runtime.cases.listArtifactsByCase(created.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
+      expect(await runtime.audit.list({ action: "evidence_register" })).toEqual([]);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.cases.listArtifactsByCase(created.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
+      expect(await reopened.audit.list({ action: "evidence_register" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

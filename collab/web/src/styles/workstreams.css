@@ -481,3 +481,39 @@
     animation-duration: 0.01ms !important;
   }
 }
+
+/* ---- Sharing one workstream address ------------------------------------ */
+
+.workstreams__crumbs-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+
+.workstreams__share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.workstreams__share-button {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.workstreams__share-button:hover,
+.workstreams__share-button:focus-visible {
+  border-color: var(--accent);
+}

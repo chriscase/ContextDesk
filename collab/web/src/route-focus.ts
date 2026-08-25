@@ -51,17 +51,44 @@ export function visibleSectionTarget(section: string): HTMLElement | null {
   return null;
 }
 
+/** What a route address settled on, so a provisional landing can be upgraded. */
+interface AppliedFocus {
+  key: string;
+  /** True once the exact routed item — not just its section — took focus. */
+  exact: boolean;
+  /** The element this hook focused, used to detect a reader moving away. */
+  target: HTMLElement | null;
+}
+
 /** Focus and reveal an exact canonical route target after its async data exists. */
 export function useRouteFocus(focus: WorkFocus | undefined, ready: boolean): void {
-  const applied = useRef<string | null>(null);
+  const applied = useRef<AppliedFocus | null>(null);
   useEffect(() => {
     if (!focus || !ready || focus.navigation === "preserve") {
       applied.current = null;
       return;
     }
     const key = [focus.section, focus.itemKind ?? "", focus.item ?? ""].join(":");
-    if (applied.current === key) return;
     const itemTarget = matchingRouteItem(focus);
+    if (applied.current?.key === key) {
+      if (!itemTarget) return;
+      // The exact record still holds focus; nothing to do.
+      if (document.activeElement === itemTarget) return;
+      const active = document.activeElement;
+      if (applied.current.exact) {
+        // The record had focus and lost it. Reclaim it only from the section
+        // that wraps the record — the one place the browser puts focus when it
+        // replaces a focused node during a background refresh. Focus a reader
+        // moved anywhere else is theirs, and is never taken back.
+        if (active !== visibleSectionTarget(focus.section)) return;
+      } else if (active !== applied.current.target) {
+        // A section landing is provisional: records named by a copied link
+        // often arrive after the first paint. Upgrade to the exact record, but
+        // only while focus is still where this hook put it, so a reader who has
+        // already started working is never interrupted.
+        return;
+      }
+    }
     // A stale or unresolved item still lands on the visible section that owns
     // it. This is more useful than focusing a hidden duplicate or doing
     // nothing, while the missing exact item remains honestly unresolved.
@@ -69,6 +96,6 @@ export function useRouteFocus(focus: WorkFocus | undefined, ready: boolean): voi
     if (!target) return;
     target.focus({ preventScroll: true });
     target.scrollIntoView?.({ block: "center", inline: "nearest" });
-    applied.current = key;
+    applied.current = { key, exact: Boolean(itemTarget), target };
   });
 }

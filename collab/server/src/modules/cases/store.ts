@@ -583,7 +583,10 @@ export class MemoryCaseStore implements CaseStore {
         });
       }
     }
-    return latest.sort((a, b) => a.contributionId.localeCompare(b.contributionId));
+    return latest.sort((a, b) => {
+      const byCreated = b.createdAt.localeCompare(a.createdAt);
+      return byCreated !== 0 ? byCreated : b.contributionId.localeCompare(a.contributionId);
+    });
   }
 
   async insertRevision(rev: RevisionRow): Promise<void> {
@@ -1004,7 +1007,7 @@ export class PgCaseStore implements CaseStore {
          ON latest.contribution_id = r.contribution_id
         AND latest.revision = r.revision
        WHERE c.case_id = $1
-       ORDER BY r.contribution_id ASC`,
+       ORDER BY r.created_at DESC, r.contribution_id DESC`,
       [caseId],
     );
     return result.rows.map((row) => asRevision(row as Record<string, unknown>));

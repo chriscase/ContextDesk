@@ -284,3 +284,28 @@ describe("honest limitation copy", () => {
     expect(onOpenArea).toHaveBeenCalledWith("profile");
   });
 });
+
+describe("help for behavior this build ships", () => {
+  it("explains the Situation briefing without promising more than it shows", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "Pick an investigation back up" }));
+    expect(screen.getAllByText(/Where the investigation stands/).length).toBeGreaterThan(0);
+    // The honest boundaries the surface itself keeps.
+    expect(screen.getByText(/never an established cause/)).toBeTruthy();
+    expect(screen.getByText(/never labeled human-authored/)).toBeTruthy();
+  });
+
+  it("describes Open threads and the bound it is read from", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "What the War Room is" }));
+    expect(screen.getAllByText(/Open threads/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/older open work can sit outside that window/)).toBeTruthy();
+  });
+
+  it("says a copied workstream address is not an access grant", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "Read a workstream" }));
+    expect(screen.getByText(/Copy link to this workstream/)).toBeTruthy();
+    expect(screen.getByText(/not an access grant/)).toBeTruthy();
+  });
+});

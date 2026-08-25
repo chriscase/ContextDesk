@@ -47,6 +47,16 @@ async function revealTopbar(page: Page): Promise<() => Promise<void>> {
   return async () => {};
 }
 
+/**
+ * The panel for one work stage. Several stages legitimately restate the same
+ * record — Situation summarises what Capture holds in full — so assertions
+ * about "what is on screen here" must name the stage they mean rather than
+ * matching the whole document.
+ */
+export function stagePanel(page: Page, stage: StageName): Locator {
+  return page.locator(`#stage-${stage.toLowerCase()}`);
+}
+
 /** Switch the focused investigation to one of its work stages. */
 export async function gotoStage(page: Page, stage: StageName): Promise<void> {
   const nav = page.getByRole("navigation", { name: "Investigation stages" });
@@ -62,6 +72,19 @@ export async function loginAs(page: Page, user: FixtureUser): Promise<void> {
   ).toBeVisible();
 
   const signIn = page.getByRole("button", { name: "Sign in" });
+  // The shell paints its heading before the session probe resolves, so both
+  // the sign-in form and the authenticated top bar are briefly absent. Wait
+  // for one of them before deciding which branch this is, otherwise a slow
+  // probe is misread as "already signed in".
+  await expect
+    .poll(
+      async () =>
+        (await signIn.isVisible())
+        || (await page.getByRole("button", { name: /^Signed in as / }).isVisible())
+        || (await page.getByRole("button", { name: "Menu" }).isVisible()),
+      { timeout: 15_000 },
+    )
+    .toBe(true);
   if (!(await signIn.isVisible())) {
     // Already inside the authenticated shell — reuse or replace the session.
     const closeTopbar = await revealTopbar(page);
