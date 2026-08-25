@@ -27,6 +27,12 @@ export function listMigrations(dir: string = defaultMigrationsDir()): MigrationF
   return files;
 }
 
+export function latestMigrationVersion(dir: string = defaultMigrationsDir()): string {
+  const latest = listMigrations(dir).at(-1);
+  if (!latest) throw new Error("no database migrations are available");
+  return latest.version;
+}
+
 async function appliedVersions(client: Client): Promise<Set<string>> {
   const exists = await client.query<{ to_regclass: string | null }>(
     `SELECT to_regclass('public.schema_migrations') AS to_regclass`,

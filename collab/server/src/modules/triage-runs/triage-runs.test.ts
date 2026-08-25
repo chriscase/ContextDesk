@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import { migrateUp } from "../../db/migrate.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
 import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
-import { MemoryAuditStore } from "../audit/index.js";
+import { MemoryAuditStore, PgAuditStore } from "../audit/index.js";
 import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
 import { CatalogService, PgCatalogStore } from "../catalog/index.js";
 import {
@@ -727,7 +727,7 @@ describe.skipIf(!adminUrl())("pg-backed triage lease integrity", () => {
       await migrateUp(client);
       const root = await mkdtemp(join(tmpdir(), "contextdesk-pg-triage-lease-"));
       const evidence = new FilesystemEvidenceStore({ rootDir: root });
-      const audit = new MemoryAuditStore();
+      const audit = new PgAuditStore(client);
       const catalog = new CatalogService(new PgCatalogStore(client), audit);
       const cases = new CaseService(evidence, audit, new PgCaseStore(client), catalog);
       const jobs = new PgTriageJobStore(client);

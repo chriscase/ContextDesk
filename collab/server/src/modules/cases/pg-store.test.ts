@@ -381,7 +381,7 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
       await migrateUp(client);
       const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-cases-"));
       const store = new FilesystemEvidenceStore({ rootDir: root });
-      const audit = new MemoryAuditStore();
+      const audit = new PgAuditStore(client);
       const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
       const catalog = new CatalogService(new PgCatalogStore(client), audit);
       try {
