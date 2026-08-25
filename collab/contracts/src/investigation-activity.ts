@@ -46,6 +46,7 @@ export const INVESTIGATION_RESOURCE_KINDS = [
   "workstream_rerun",
   "comparison_finding",
   "comparison_conflict",
+  "helpfulness",
   "discussion_message",
   "timeline_event",
   "hypothesis",
@@ -403,6 +404,7 @@ export function routedInvestigationFocus(
       return workstreamRoute(resourceId);
     case "comparison_finding":
     case "comparison_conflict":
+    case "helpfulness":
       return {
         stage: "compare",
         section: "cross-exam-heading",
@@ -603,6 +605,7 @@ const RESOURCE_KIND_FALLBACK: Record<InvestigationResourceKindV1, string> = {
   workstream_rerun: "Workstream rerun",
   comparison_finding: "Comparison finding",
   comparison_conflict: "Comparison conflict",
+  helpfulness: "Comparison observation",
   discussion_message: "Discussion message",
   timeline_event: "Timeline event",
   hypothesis: "Hypothesis",

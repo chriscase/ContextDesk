@@ -218,9 +218,19 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
     case "experiment_imported":
       return { activityKind: "comparison_unknown", resourceKind: "comparison_finding", resourceId: target, provenance: "imported", summary: "recorded a strategy comparison", humanFinding: false, revision: null, workstreamId: null };
     case "comparison_disagreement":
+      return { activityKind: "comparison_disagreement", resourceKind: "comparison_conflict", resourceId: target, provenance: "human", summary: "recorded a comparison disagreement", humanFinding: false, revision: null, workstreamId: null };
     case "experiment_helpfulness_recorded": {
-      const disagreement = event.kind === "comparison_disagreement" || payload.agreement === "disagree" || payload.disagreement === true;
-      return { activityKind: disagreement ? "comparison_disagreement" : "comparison_unknown", resourceKind: disagreement ? "comparison_conflict" : "comparison_finding", resourceId: target, provenance: "human", summary: disagreement ? "recorded a comparison disagreement" : "recorded a comparison observation", humanFinding: false, revision: null, workstreamId: null };
+      const observationId = str(payload, "observationId") ?? target;
+      return {
+        activityKind: "comparison_unknown",
+        resourceKind: "helpfulness",
+        resourceId: observationId,
+        provenance: "human",
+        summary: "recorded a comparison observation",
+        humanFinding: false,
+        revision: null,
+        workstreamId: null,
+      };
     }
     case "comparison_unknown":
       return { activityKind: "comparison_unknown", resourceKind: "comparison_finding", resourceId: target, provenance: "human", summary: "recorded a comparison unknown", humanFinding: false, revision: null, workstreamId: null };

@@ -696,7 +696,7 @@ export class ExperimentService {
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_helpfulness_recorded",
       actor,
-      targetId: experimentId,
+      targetId: observation.id,
       clientTime: null,
       payload: {
         observationId: observation.id,

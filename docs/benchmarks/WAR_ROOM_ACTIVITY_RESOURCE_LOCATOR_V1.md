@@ -69,7 +69,8 @@ Resolution reauthorizes at request time. Cross-investigation substitution,
 dangling resources, **kind-confused locators** (for example a note id presented
 as `evidence_item`, a snapshot id presented as `evidence_item`, an intake
 batch id presented as `evidence_item`, an experiment or gold id presented as
-`decision_revision`, or a gold snapshot presented as `decision_revision`), wrong
+`decision_revision`, a gold snapshot presented as `decision_revision`, or a
+helpfulness observation presented as `comparison_finding`), wrong
 revisions, and unauthorized private evidence all fail closed as `not_found` so
 existence is not leaked. Timeline fallback matches the same projected
 `locator.kind` + `resourceId` (+ revision when supplied) as the activity feed;
@@ -78,12 +79,16 @@ contribution provenance also requires the durable kind (`message`, `note` /
 `corpus_intake_committed` projects `intake_batch` at the batch id and Capture
 `corpus-intake` / `kind=intake-batch`, not Analyze evidence.
 Portable restore remaps investigation and resource ids, including intake-batch
-ids from `targetNamespace=intake_batch` and gold snapshot ids from
-`targetNamespace=gold` (`experiment_gold_promoted`); resolve is re-run
+ids from `targetNamespace=intake_batch`, gold snapshot ids from
+`targetNamespace=gold` (`experiment_gold_promoted`), and helpfulness
+observation ids from `targetNamespace=helpfulness`
+(`experiment_helpfulness_recorded`); resolve is re-run
 against the destination identities after apply and remains `not_found` for
 kind-confused or unauthorized locators. `experiment_gold_promoted` projects
 `gold` at the gold snapshot id and Decide `decision-heading`, not the
-experiment or accepted decision id.
+experiment or accepted decision id. `experiment_helpfulness_recorded` projects
+`helpfulness` at the observation id and Compare `cross-exam-heading`, not the
+experiment id.
 
 ## Privacy and authorization
 

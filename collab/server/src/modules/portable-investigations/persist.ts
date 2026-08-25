@@ -157,6 +157,14 @@ function importedTimelinePayload(
         : null;
     }
   }
+  if (event.targetNamespace === "helpfulness" && event.targetId) {
+    const observation = bundle.helpfulnessObservations.find((row) => row.id === event.targetId);
+    payload.observationId = remapOf(report, "helpfulness", event.targetId);
+    if (observation) {
+      payload.candidateId = observation.candidateId;
+      payload.dimension = observation.dimension;
+    }
+  }
   if (event.targetNamespace === "triage_job" && event.targetId) {
     const attempt = parsePortableTriageAttemptTarget(event.targetId);
     payload.jobId = remapOf(report, "triage_job", attempt?.jobId ?? event.targetId);
@@ -674,6 +682,12 @@ export async function persistPortableArchive(input: {
     }
     if (event.kind === "experiment_gold_promoted" && (event.targetNamespace !== "gold" || !event.targetId)) {
       throw new Error("experiment gold timeline is missing a portable gold target");
+    }
+    if (
+      event.kind === "experiment_helpfulness_recorded"
+      && (event.targetNamespace !== "helpfulness" || !event.targetId)
+    ) {
+      throw new Error("experiment helpfulness timeline is missing a portable helpfulness target");
     }
   }
   const remapCandidateId = (candidateId: string): string => {

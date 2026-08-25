@@ -210,6 +210,7 @@ describe("human-readable presentation boundary", () => {
     expect(safeResourceLabel("evidence_item", null)).toBe("Evidence item");
     expect(safeResourceLabel("intake_batch", null)).toBe("Intake batch");
     expect(safeResourceLabel("gold", null)).toBe("Outcome benchmark");
+    expect(safeResourceLabel("helpfulness", null)).toBe("Comparison observation");
     expect(safeResourceLabel("workstream_attempt", CASE_A)).toBe("Workstream attempt");
     expect(safeResourceLabel("evidence_item", "ab".repeat(32))).toBe("Evidence item");
     expect(safeResourceLabel("evidence_item", "case_created")).toBe("Evidence item");
@@ -408,6 +409,7 @@ describe("routed locator focus against shipped War Room sections", () => {
       workstream_rerun: { stage: "analyze", section: "triage-lane-runner", itemKind: "triage-run" },
       comparison_finding: { stage: "compare", section: "cross-exam-heading", itemKind: null },
       comparison_conflict: { stage: "compare", section: "cross-exam-heading", itemKind: null },
+      helpfulness: { stage: "compare", section: "cross-exam-heading", itemKind: null },
       discussion_message: { stage: "situation", section: "discussion", itemKind: "comment" },
       timeline_event: { stage: "capture", section: "triage-capture", itemKind: "timeline" },
       hypothesis: { stage: "capture", section: "triage-capture", itemKind: "contribution" },

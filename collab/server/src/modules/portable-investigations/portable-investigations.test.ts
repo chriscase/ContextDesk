@@ -844,6 +844,45 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable gold target/);
   });
 
+  it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "experiment_helpfulness_recorded");
+      if (!event) throw new Error("experiment helpfulness timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable helpfulness target/);
+  });
+
   it("returns host-owned identity/collision/privacy facts and mints apply only for exact reconstruction", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1329,6 +1368,7 @@ describe("portable investigation apply", () => {
     const sourceFrozen = sourcePage.items.find((item) => item.activityKind === "evidence_frozen");
     const sourceDecision = sourcePage.items.find((item) => item.activityKind === "decision_proposed");
     const sourceGold = sourcePage.items.find((item) => item.summary === "recorded an accepted outcome benchmark");
+    const sourceHelpfulness = sourcePage.items.find((item) => item.summary === "recorded a comparison observation");
     const sourceAttempt = sourcePage.items.find((item) => item.locator.kind === "workstream_attempt");
     const intakeBytes = new TextEncoder().encode(
       "2042-03-04T11:31:00Z synthetic-router ERROR request timed out\n",
@@ -1386,6 +1426,10 @@ describe("portable investigation apply", () => {
     expect(sourceGold?.locator.resourceId).toBeTruthy();
     expect(sourceGold?.locator.resourceId).not.toBe(row.caseId);
     expect(sourceGold?.humanFinding).toBe(true);
+    expect(sourceHelpfulness?.locator.kind).toBe("helpfulness");
+    expect(sourceHelpfulness?.locator.resourceId).toBeTruthy();
+    expect(sourceHelpfulness?.locator.resourceId).not.toBe(row.caseId);
+    expect(sourceHelpfulness?.humanFinding).toBe(false);
     expect(sourceAttempt?.locator.resourceId).toContain(":");
     await expect(
       activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceObservation!.locator)),
@@ -1393,6 +1437,21 @@ describe("portable investigation apply", () => {
     await expect(
       activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceGold!.locator)),
     ).resolves.toMatchObject({ authorized: true, resourceLabel: "Outcome benchmark" });
+    await expect(
+      activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceHelpfulness!.locator)),
+    ).resolves.toMatchObject({ authorized: true, resourceLabel: "Comparison observation" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: row.caseId,
+          kind: "comparison_finding",
+          resourceId: sourceHelpfulness!.locator.resourceId,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
     await expect(
       activity.resolve(
         ACTOR,
@@ -1410,6 +1469,7 @@ describe("portable investigation apply", () => {
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const decisionIds = archive.investigation.decisions.map((decision) => decision.id);
     const goldIds = archive.investigation.gold.map((gold) => gold.goldId);
+    const helpfulnessIds = archive.investigation.helpfulnessObservations.map((row) => row.id);
     const jobIds = archive.investigation.triageJobs.map((job) => job.id);
     const exportedDecisions = archive.investigation.timeline.filter((event) =>
       event.kind.startsWith("experiment_decision_"),
@@ -1427,6 +1487,16 @@ describe("portable investigation apply", () => {
       expect(event.targetNamespace).toBe("gold");
       expect(goldIds).toContain(event.targetId);
       expect(decisionIds).not.toContain(event.targetId);
+    }
+    const exportedHelpfulness = archive.investigation.timeline.filter(
+      (event) => event.kind === "experiment_helpfulness_recorded",
+    );
+    expect(exportedHelpfulness.length).toBeGreaterThan(0);
+    for (const event of exportedHelpfulness) {
+      expect(event.targetNamespace).toBe("helpfulness");
+      expect(helpfulnessIds).toContain(event.targetId);
+      expect(decisionIds).not.toContain(event.targetId);
+      expect(goldIds).not.toContain(event.targetId);
     }
     const exportedAttempts = archive.investigation.timeline.filter((event) =>
       event.kind.startsWith("triage_candidate_"),
@@ -1479,6 +1549,7 @@ describe("portable investigation apply", () => {
     const destFrozen = destPage.items.find((item) => item.activityKind === "evidence_frozen");
     const destDecision = destPage.items.find((item) => item.activityKind === "decision_proposed");
     const destGold = destPage.items.find((item) => item.summary === "recorded an accepted outcome benchmark");
+    const destHelpfulness = destPage.items.find((item) => item.summary === "recorded a comparison observation");
     const destAttempt = destPage.items.find((item) => item.locator.kind === "workstream_attempt");
     const destIntake = destPage.items.find((item) => item.locator.kind === "intake_batch");
     expect(destObservation?.locator.investigationId).toBe(applied.investigationId);
@@ -1505,6 +1576,14 @@ describe("portable investigation apply", () => {
     expect(destGold?.provenanceClass).toBe("historical_restored");
     expect(destGold?.resolvedRoute).toContain("section=decision-heading");
     expect(destGold?.resolvedRoute).toContain(`item=${destGold?.locator.resourceId}`);
+    expect(destHelpfulness?.locator.kind).toBe("helpfulness");
+    expect(destHelpfulness?.locator.resourceId).toBeTruthy();
+    expect(destHelpfulness?.locator.resourceId).not.toBe(sourceHelpfulness?.locator.resourceId);
+    expect(destHelpfulness?.locator.resourceId).not.toBe(applied.investigationId);
+    expect(destHelpfulness?.humanFinding).toBe(false);
+    expect(destHelpfulness?.provenanceClass).toBe("historical_restored");
+    expect(destHelpfulness?.resolvedRoute).toContain("section=cross-exam-heading");
+    expect(destHelpfulness?.resolvedRoute).toContain(`item=${destHelpfulness?.locator.resourceId}`);
     expect(destAttempt?.locator.resourceId).not.toBe(sourceAttempt?.locator.resourceId);
     expect(destAttempt?.locator.resourceId).toContain(":");
     expect(destAttempt?.locator.resourceId).not.toBe(applied.investigationId);
@@ -1537,6 +1616,13 @@ describe("portable investigation apply", () => {
     expect(destGoldIds).toContain(destGold?.locator.resourceId);
     expect(destExperiments.map((experiment) => experiment.id)).not.toContain(destGold?.locator.resourceId);
     expect(destDecisionIds).not.toContain(destGold?.locator.resourceId);
+    const destHelpfulnessIds = destExperiments.flatMap((experiment) =>
+      experiment.observations.map((observation) => observation.id),
+    );
+    expect(destHelpfulnessIds).toContain(destHelpfulness?.locator.resourceId);
+    expect(destExperiments.map((experiment) => experiment.id)).not.toContain(destHelpfulness?.locator.resourceId);
+    expect(destDecisionIds).not.toContain(destHelpfulness?.locator.resourceId);
+    expect(destGoldIds).not.toContain(destHelpfulness?.locator.resourceId);
     const destJobs = await row.triageRuns.list(applied.investigationId, ACTOR, false);
     const destJobPrefix = destAttempt?.locator.resourceId.split(":")[0];
     expect(destJobs.map((job) => job.id)).toContain(destJobPrefix);
@@ -1545,7 +1631,7 @@ describe("portable investigation apply", () => {
     const destIntakeEvidence = destArtifacts.find((item) => item.relativePath === "router/locator.log");
     expect(destIntakeEvidence?.intakeBatchId).toBe(destIntake?.locator.resourceId);
 
-    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destGold, destAttempt, destIntake]) {
+    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destGold, destHelpfulness, destAttempt, destIntake]) {
       await expect(
         activity.resolve(ACTOR, false, formatCompactInvestigationLocator(item!.locator)),
       ).resolves.toMatchObject({ authorized: true, locator: item!.locator });
@@ -1611,6 +1697,30 @@ describe("portable investigation apply", () => {
           kind: "decision_revision",
           resourceId: destGold!.locator.resourceId,
           revision: destGold!.locator.revision ?? 0,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: applied.investigationId,
+          kind: "helpfulness",
+          resourceId: destExperiments[0]!.id,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: applied.investigationId,
+          kind: "comparison_finding",
+          resourceId: destHelpfulness!.locator.resourceId,
         })),
       ),
     ).rejects.toMatchObject({ code: "not_found" });
@@ -2388,6 +2498,29 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
         revision: gold!.locator.revision ?? 0,
       }));
       await expect(activity.resolve(ACTOR, false, confusedGold)).rejects.toMatchObject({ code: "not_found" });
+      const helpfulness = page.items.find((item) => item.locator.kind === "helpfulness");
+      expect(helpfulness?.locator.resourceId).toBeTruthy();
+      expect(helpfulness?.humanFinding).toBe(false);
+      expect(helpfulness?.locator.resourceId).not.toBe(investigationId);
+      await expect(
+        activity.resolve(ACTOR, false, formatCompactInvestigationLocator(helpfulness!.locator)),
+      ).resolves.toMatchObject({ authorized: true, resourceLabel: "Comparison observation" });
+      await expect(
+        activity.resolve(
+          { id: "eve", username: "eve" },
+          false,
+          formatCompactInvestigationLocator(helpfulness!.locator),
+        ),
+      ).rejects.toMatchObject({ code: "not_found" });
+      const confusedHelpfulness = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+        installationId: "inst-syntheticnorth",
+        investigationId,
+        kind: "comparison_finding",
+        resourceId: helpfulness!.locator.resourceId,
+      }));
+      await expect(activity.resolve(ACTOR, false, confusedHelpfulness)).rejects.toMatchObject({
+        code: "not_found",
+      });
     });
   });
 });
