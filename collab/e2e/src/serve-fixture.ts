@@ -186,6 +186,7 @@ async function main(): Promise<void> {
     experiments,
     audit,
     applyState,
+    publicIdentities,
     probe: {
       cases: caseStore,
       catalog: catalogStore,
