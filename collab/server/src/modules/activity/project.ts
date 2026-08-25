@@ -247,6 +247,69 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
   }
 }
 
+/**
+ * Collapse projected activity rows that describe the very same recorded work.
+ *
+ * One committed action can reach the timeline as more than one event — an
+ * import writes its own event and a generic one alongside it. Projected
+ * separately they become separate rows in Latest activity, so a single import
+ * reads as two pieces of work.
+ *
+ * Telling that apart from a genuinely repeated action needs two facts, because
+ * the visible ones are not enough on their own: four identical situation
+ * updates look the same to a reader too, and they really did happen four
+ * times. So a group is collapsed only when everything a reader could tell the
+ * rows apart by is identical — investigation, kind, wording, route, time,
+ * actor, provenance, revision — *and* the rows came from different timeline
+ * event kinds, which is what "one action written down twice" looks like.
+ * Rows that repeat under a single event kind are repeated work and are all
+ * kept.
+ *
+ * The trade-off is deliberate and narrow: an action both repeated and recorded
+ * under several kinds within the same timestamp collapses to one row. Those
+ * rows are indistinguishable on screen anyway, and the alternative — showing
+ * every import twice — misreports how much work is outstanding.
+ *
+ * The first row of a collapsed group survives, so ordering and any cursor
+ * built from the list stay stable.
+ */
+export function dedupeProjectedActivity(
+  rows: ProjectedInvestigationActivity[],
+): ProjectedInvestigationActivity[] {
+  const visibleIdentity = (row: ProjectedInvestigationActivity): string =>
+    JSON.stringify([
+      row.item.investigationId,
+      row.item.activityKind,
+      row.item.summary,
+      row.item.resolvedRoute,
+      row.item.occurredAt,
+      row.item.actorId,
+      row.item.provenanceClass,
+      row.item.revision,
+    ]);
+  const timelineKinds = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const key = visibleIdentity(row);
+    const kinds = timelineKinds.get(key) ?? new Set<string>();
+    kinds.add(row.timelineKind);
+    timelineKinds.set(key, kinds);
+  }
+  const collapsed = new Set<string>();
+  const kept: ProjectedInvestigationActivity[] = [];
+  for (const row of rows) {
+    const key = visibleIdentity(row);
+    // A single event kind repeated means the work happened more than once.
+    if ((timelineKinds.get(key)?.size ?? 1) < 2) {
+      kept.push(row);
+      continue;
+    }
+    if (collapsed.has(key)) continue;
+    collapsed.add(key);
+    kept.push(row);
+  }
+  return kept;
+}
+
 export function projectTimelineSource(input: {
   installationId: string;
   source: TimelineActivitySource;

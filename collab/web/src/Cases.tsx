@@ -1060,11 +1060,18 @@ export function Cases(props: {
     .slice(0, 5);
   const overviewActivities = activities.slice(0, 10);
   // Both panels below read the same committed activity window the feed reads.
+  // Restored history records work that already happened somewhere else. It
+  // belongs in the feed, where its provenance is stated, but it is not open
+  // work: a successful exact restore must not raise an alert for every event
+  // it replayed.
+  const openWorkActivities = activities.filter(
+    (item) => item.provenanceClass !== "historical_restored",
+  );
   const attentionGroups = ATTENTION_GROUPS.map((group) => ({
     ...group,
-    items: activities.filter((item) => group.kinds.includes(item.activityKind ?? "")),
+    items: openWorkActivities.filter((item) => group.kinds.includes(item.activityKind ?? "")),
   })).filter((group) => group.items.length > 0);
-  const pendingDecisions = decisionsAwaitingAcceptance(activities);
+  const pendingDecisions = decisionsAwaitingAcceptance(openWorkActivities);
   const attentionCount =
     attentionGroups.reduce((total, group) => total + group.items.length, 0) + pendingDecisions.length;
 

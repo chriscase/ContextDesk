@@ -533,6 +533,43 @@ describe("operational overview", () => {
     expect(within(panel).getByText("private to this case")).toBeTruthy();
   });
 
+  it("keeps restored history in the feed without raising it as open work", async () => {
+    stubActivities([
+      activity({
+        activityId: "7".repeat(64),
+        activityKind: "import_recorded",
+        summary: "imported analysis was recorded",
+        provenanceClass: "historical_restored",
+        humanFinding: false,
+      }),
+      activity({
+        activityId: "8".repeat(64),
+        activityKind: "workstream_failed",
+        summary: "failed a workstream",
+        provenanceClass: "historical_restored",
+        humanFinding: false,
+      }),
+    ]);
+    render(<Cases roles={["case-lead"]} />);
+
+    // An exact restore replays work that already happened elsewhere. It stays
+    // in the feed, where its provenance is stated, but a successful restore
+    // must not open a thread for every event it replayed.
+    const feed = await screen.findByRole("heading", { name: "Latest activity" });
+    const panel = feed.closest("section") as HTMLElement;
+    expect(within(panel).getAllByText(/restored history/i).length).toBeGreaterThan(0);
+    const threads = await screen.findByRole("complementary", { name: "Open threads" });
+    expect(
+      within(threads).getByText(
+        /Nothing in recent activity is recorded as stopped, disagreeing, unread, or waiting/,
+      ),
+    ).toBeTruthy();
+    expect(within(threads).queryByRole("heading", { name: /Analysis that stopped short/ })).toBeNull();
+    expect(
+      within(threads).queryByRole("heading", { name: /Imported or AI output not yet read/ }),
+    ).toBeNull();
+  });
+
   it("collects stalled, disagreeing, and unread work with a direct path to each", async () => {
     stubActivities([
       activity({
