@@ -31,6 +31,22 @@ test.describe("routing, activity locators, and operator UX", () => {
     );
   });
 
+  test("keeps /admin/ldap canonical for Directory without exposing a bind password", async ({
+    page,
+  }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    await page.goto("/admin/ldap");
+    await expect(page.getByRole("tab", { name: "Directory" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page).toHaveURL(/\/admin\/ldap$/);
+    await expect(
+      page.getByRole("heading", { name: "Current directory configuration" }),
+    ).toBeVisible();
+    await expect(page.getByText(/never shows a bind password/)).toBeVisible();
+  });
+
   test("restores /admin/people after signed-out sign-in", async ({ page }) => {
     await page.goto("/admin/people");
     await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();

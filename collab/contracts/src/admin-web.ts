@@ -136,6 +136,35 @@ export {
 export type { DirectoryAttributeMapV1, DirectoryMappedField } from "./directory-mapping.js";
 
 export {
+  LDAP_ADMIN_ERROR_CODES,
+  LDAP_ADMIN_ERROR_SCHEMA_ID,
+  LDAP_MAX_GROUPS,
+  LDAP_PROBE_REPORT_SCHEMA_ID,
+  LDAP_PROBE_REQUEST_SCHEMA_ID,
+  LDAP_PROBE_STAGES,
+  LDAP_PROBE_STAGE_STATUSES,
+  LDAP_PUBLIC_CONFIG_SCHEMA_ID,
+  LDAP_USER_RESOLUTION_MODES,
+  parseLdapAdminError,
+  parseLdapProbeReport,
+  parseLdapProbeRequest,
+  parseLdapPublicConfig,
+  parseLdapUserResolutionModes,
+  projectLdapProbeReady,
+} from "./ldap-admin.js";
+export type {
+  LdapAdminErrorCode,
+  LdapAdminErrorV1,
+  LdapProbeReportV1,
+  LdapProbeRequestV1,
+  LdapProbeStageId,
+  LdapProbeStageStatus,
+  LdapProbeStageV1,
+  LdapPublicConfigV1,
+  LdapUserResolutionMode,
+} from "./ldap-admin.js";
+
+export {
   BROWSER_MUTATION_METHODS,
   COLLAB_CSRF_HEADER,
   COLLAB_CSRF_HEADER_VALUE,

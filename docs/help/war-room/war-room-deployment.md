@@ -14,6 +14,7 @@ order: 30
 related:
   - war-room-workflow
   - war-room-evidence-review
+  - war-room-ldap-directory
   - security-boundaries
 ---
 
@@ -65,7 +66,9 @@ surfaces.
 
 - SQLite mode is single-node and has no PostgreSQL-to-SQLite migration tool.
 - Directory-backed identity is deployment-specific and requires encrypted,
-  qualified LDAP configuration.
+  qualified LDAP configuration. See help://war-room-ldap-directory for the
+  operator translation table. Live company-directory compatibility is not a
+  shipped claim until an owner runs that directory.
 - Discussion uses bounded polling, not WebSocket presence or typing signals.
 - Portable investigation export, fail-closed dry-run preflight, and exact
   restore of supported fields ship. Restore refuses archives with required

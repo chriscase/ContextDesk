@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 250" role="img" aria-labelledby="title desc">
+  <title id="title">LDAP directory setup and sign-in checks</title>
+  <desc id="desc">Operators configure encrypted LDAP transport, prove a service bind, resolve a unique user, look up groups, then apply an exact group-to-role map. Secrets stay on the host.</desc>
+  <rect width="980" height="250" fill="#0f172a"/>
+  <defs>
+    <marker id="ldap-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="16" y="48" width="172" height="148" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <circle cx="48" cy="78" r="16" fill="#082f49" stroke="#38bdf8"/>
+  <text x="48" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">1</text>
+  <text x="102" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Transport</text>
+  <text x="102" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">LDAPS or StartTLS</text>
+  <text x="102" y="140" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Verified TLS default</text>
+  <text x="102" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">No plaintext LDAP</text>
+  <path d="M188 122H214" stroke="#38bdf8" stroke-width="4" marker-end="url(#ldap-arrow)"/>
+  <rect x="214" y="48" width="172" height="148" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <circle cx="246" cy="78" r="16" fill="#082f49" stroke="#38bdf8"/>
+  <text x="246" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">2</text>
+  <text x="300" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Service bind</text>
+  <text x="300" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Host secret reference</text>
+  <text x="300" y="140" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Never shown in UI</text>
+  <text x="300" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Optional skip if unset</text>
+  <path d="M386 122H412" stroke="#38bdf8" stroke-width="4" marker-end="url(#ldap-arrow)"/>
+  <rect x="412" y="48" width="172" height="148" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <circle cx="444" cy="78" r="16" fill="#082f49" stroke="#38bdf8"/>
+  <text x="444" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">3</text>
+  <text x="498" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">User search</text>
+  <text x="498" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Search, DN, UPN,</text>
+  <text x="498" y="140" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">or DOMAIN\user</text>
+  <text x="498" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Refuse mixed forms</text>
+  <path d="M584 122H610" stroke="#38bdf8" stroke-width="4" marker-end="url(#ldap-arrow)"/>
+  <rect x="610" y="48" width="172" height="148" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <circle cx="642" cy="78" r="16" fill="#082f49" stroke="#38bdf8"/>
+  <text x="642" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">4</text>
+  <text x="696" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Groups</text>
+  <text x="696" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">memberOf and search</text>
+  <text x="696" y="140" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Normalize and bound</text>
+  <text x="696" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Inaccessible stays fail</text>
+  <path d="M782 122H808" stroke="#34d399" stroke-width="4" marker-end="url(#ldap-arrow)"/>
+  <rect x="808" y="48" width="156" height="148" rx="16" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+  <circle cx="840" cy="78" r="16" fill="#022c22" stroke="#34d399"/>
+  <text x="840" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">5</text>
+  <text x="886" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Roles</text>
+  <text x="886" y="122" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Exact group map</text>
+  <text x="886" y="144" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Default deny</text>
+  <text x="886" y="166" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">No silent guess</text>
+  <text x="490" y="226" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Directory tests never return stored secrets. Live company directories stay owner-run.</text>
+</svg>

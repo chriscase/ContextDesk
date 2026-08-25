@@ -264,8 +264,8 @@ describe("honest limitation copy", () => {
     fireEvent.click(screen.getByRole("button", { name: "Administration and setup" }));
     expect(screen.getByText(/visible only with the admin:users capability/)).toBeTruthy();
     expect(screen.getByText(/finding an identity or group grants nothing/)).toBeTruthy();
-    expect(screen.getByText(/never displays or accepts directory credentials/)).toBeTruthy();
-    expect(screen.getByText(/no graphical first-run setup wizard/)).toBeTruthy();
+    expect(screen.getByText(/never displays stored bind secrets/)).toBeTruthy();
+    expect(screen.getByText(/does not complete installation or restart the service/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Lane qualification and host profiles" }));
     expect(screen.getAllByText(/passed, failed, skipped, or partial/).length).toBeGreaterThan(0);
     expect(

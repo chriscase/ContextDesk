@@ -52,6 +52,24 @@ describe("mapDirectoryClaimsToProfileFields", () => {
     expect(result.skipped.sort()).toEqual(["roleTitle", "team"]);
   });
 
+  it("matches claim names case-insensitively when the value is unambiguous", () => {
+    const result = mapDirectoryClaimsToProfileFields(
+      { CN: "Alice Analyst", Mail: "alice@example.test" },
+      DEFAULT_DIRECTORY_ATTRIBUTE_MAP,
+    );
+    expect(result.fields.displayName).toBe("Alice Analyst");
+    expect(result.fields.contactEmail).toBe("alice@example.test");
+  });
+
+  it("fails closed when the same attribute appears with conflicting values under different casings", () => {
+    expect(() =>
+      mapDirectoryClaimsToProfileFields(
+        { cn: "Alice", CN: "Alicia" },
+        DEFAULT_DIRECTORY_ATTRIBUTE_MAP,
+      ),
+    ).toThrow(/ambiguous/);
+  });
+
   it("throws on an oversized directory value instead of truncating", () => {
     expect(() =>
       mapDirectoryClaimsToProfileFields(
