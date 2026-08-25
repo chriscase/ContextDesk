@@ -126,7 +126,7 @@ export async function registerLdapAdminRoutes(
       probePassword,
       resolveRoles: (groups) => deps.sessionAuth.roles.resolve(groups),
       roleMapConfigured: mapping.entries.size > 0,
-      sessions: deps.sessions,
+      ...(deps.sessions ? { sessions: deps.sessions } : {}),
     });
     await recordAudit(deps.audit, {
       identity: null,

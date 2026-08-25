@@ -70,6 +70,7 @@ export class SyntheticLdapSession implements LdapSession {
   }
 
   async handshake(): Promise<void> {
+    await this.maybeTimeout();
     if (this.config.starttls) {
       await this.startTLS();
       return;

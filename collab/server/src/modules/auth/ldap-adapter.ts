@@ -56,6 +56,7 @@ function claimAttributes(config: LdapConfig): string[] {
     "cn",
     "sAMAccountName",
     "userPrincipalName",
+    "memberOf",
     ...Object.values(config.attributeMap.attributes),
   ]);
   if (config.memberAttribute) attrs.add(config.memberAttribute);
@@ -106,7 +107,7 @@ export class LdapAuthAdapter implements AuthAdapter {
           displayName: directoryFields?.displayName ?? resolved.username,
         },
         groups,
-        directoryFields,
+        ...(directoryFields === undefined ? {} : { directoryFields }),
       };
     } catch (err) {
       if (err instanceof DirectoryClaimsUnsafeError) throw err;

@@ -162,7 +162,7 @@ describe("LDAP DN vs filter escaping", () => {
     );
     expect(templateBranch).toMatch(/username: escapeDn\(username\)/);
     expect(templateBranch).not.toMatch(/username: escapeFilter\(username\)/);
-    expect(resolveFn).toMatch(/username: escapeFilter\(username\)/);
+    expect(src).toMatch(/function userFilter[\s\S]*username: escapeFilter\(username\)/);
   });
 });
 

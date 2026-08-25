@@ -18,15 +18,15 @@
   <rect x="214" y="48" width="172" height="148" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
   <circle cx="246" cy="78" r="16" fill="#082f49" stroke="#38bdf8"/>
   <text x="246" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">2</text>
-  <text x="300" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Service bind</text>
-  <text x="300" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Host secret reference</text>
+  <text x="300" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Bind</text>
+  <text x="300" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Host secret ref</text>
   <text x="300" y="140" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Never shown in UI</text>
-  <text x="300" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Optional skip if unset</text>
+  <text x="300" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Skip if unset</text>
   <path d="M386 122H412" stroke="#38bdf8" stroke-width="4" marker-end="url(#ldap-arrow)"/>
   <rect x="412" y="48" width="172" height="148" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
   <circle cx="444" cy="78" r="16" fill="#082f49" stroke="#38bdf8"/>
   <text x="444" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">3</text>
-  <text x="498" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">User search</text>
+  <text x="498" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Search</text>
   <text x="498" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Search, DN, UPN,</text>
   <text x="498" y="140" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">or DOMAIN\user</text>
   <text x="498" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Refuse mixed forms</text>
@@ -35,9 +35,9 @@
   <circle cx="642" cy="78" r="16" fill="#082f49" stroke="#38bdf8"/>
   <text x="642" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">4</text>
   <text x="696" y="84" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Groups</text>
-  <text x="696" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">memberOf and search</text>
+  <text x="696" y="118" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">memberOf + search</text>
   <text x="696" y="140" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Normalize and bound</text>
-  <text x="696" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Inaccessible stays fail</text>
+  <text x="696" y="162" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">memberOf fallback</text>
   <path d="M782 122H808" stroke="#34d399" stroke-width="4" marker-end="url(#ldap-arrow)"/>
   <rect x="808" y="48" width="156" height="148" rx="16" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
   <circle cx="840" cy="78" r="16" fill="#022c22" stroke="#34d399"/>
