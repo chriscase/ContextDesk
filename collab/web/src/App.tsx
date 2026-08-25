@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   HOME,
+  PROFILE,
   SIGN_IN,
   historyUrl,
+  isProfileLocation,
   isShellLocation,
   isSignInLocation,
   isUnknownLocation,
@@ -22,6 +24,7 @@ import { Administration } from "./Administration.js";
 import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
 import { SetupWizard } from "./SetupWizard.js";
+import { SelfProfilePanel } from "./SelfProfilePanel.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
 
 interface SessionView {
@@ -80,6 +83,8 @@ function AccountMenu(props: {
   displayName: string;
   roles: string[];
   theme: ThemeName;
+  profileActive: boolean;
+  onOpenProfile: () => void;
   onThemeChange: (theme: ThemeName) => void;
   onSignOut: (() => void) | null;
 }) {
@@ -133,6 +138,21 @@ function AccountMenu(props: {
           <p className="account__roles">
             Access: {props.roles.map((role) => role === "case-lead" ? "Case lead" : role[0]?.toUpperCase() + role.slice(1)).join(", ") || "None"}
           </p>
+          <a
+            className="account__profile"
+            href="/profile"
+            aria-current={props.profileActive ? "page" : undefined}
+            onClick={(event) => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+                return;
+              }
+              event.preventDefault();
+              setOpen(false);
+              props.onOpenProfile();
+            }}
+          >
+            My profile
+          </a>
           <label className="account__theme">
             Theme
             <select
@@ -193,8 +213,17 @@ export function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [startSignal, setStartSignal] = useState(0);
   const [focusedCaseTitle, setFocusedCaseTitle] = useState<string | null>(null);
+  const [profileDirty, setProfileDirty] = useState(false);
+  const [leaveRequest, setLeaveRequest] = useState(false);
   const locationRef = useRef(location);
   locationRef.current = location;
+  const profileDirtyRef = useRef(false);
+  profileDirtyRef.current = profileDirty;
+  const pendingLeaveRef = useRef<
+    | { kind: "navigate"; next: ShellLocation; mode: "push" | "replace" }
+    | { kind: "logout" }
+    | null
+  >(null);
   const restoreRef = useRef<WorkLocation | null>(
     isWorkLocation(parsePathname(window.location.pathname, window.location.search, window.location.hash))
       ? (parsePathname(window.location.pathname, window.location.search, window.location.hash) as WorkLocation)
@@ -290,6 +319,25 @@ export function App() {
     writeHistory(next, mode);
   }, []);
 
+  const requestLeave = useCallback((
+    action: { kind: "navigate"; next: ShellLocation; mode: "push" | "replace" } | { kind: "logout" },
+  ) => {
+    pendingLeaveRef.current = action;
+    setLeaveRequest(true);
+  }, []);
+
+  const guardedNavigate = useCallback((next: ShellLocation, mode: "push" | "replace" = "push") => {
+    if (
+      profileDirtyRef.current
+      && isProfileLocation(locationRef.current)
+      && !isProfileLocation(next)
+    ) {
+      requestLeave({ kind: "navigate", next, mode });
+      return;
+    }
+    navigate(next, mode);
+  }, [navigate, requestLeave]);
+
   useEffect(() => {
     if (!ready) {
       return;
@@ -328,12 +376,21 @@ export function App() {
       const next = isShellLocation(event.state)
         ? event.state
         : parsePathname(window.location.pathname, window.location.search, window.location.hash);
+      if (
+        profileDirtyRef.current
+        && isProfileLocation(locationRef.current)
+        && !isProfileLocation(next)
+      ) {
+        writeHistory(PROFILE, "push");
+        requestLeave({ kind: "navigate", next, mode: "push" });
+        return;
+      }
       setLocation(next);
       setNavOpen(false);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [requestLeave]);
 
   // Legacy in-page anchors (triage rail, review queue) route to the stage that
   // now presents their target, then hand scrolling back to the browser.
@@ -365,13 +422,41 @@ export function App() {
     void fetch("/api/auth/logout", { method: "POST" });
   }
 
+  function confirmLeave() {
+    const pending = pendingLeaveRef.current;
+    pendingLeaveRef.current = null;
+    setLeaveRequest(false);
+    setProfileDirty(false);
+    profileDirtyRef.current = false;
+    if (pending?.kind === "logout") {
+      logout();
+      return;
+    }
+    if (pending?.kind === "navigate") {
+      navigate(pending.next, pending.mode);
+    }
+  }
+
+  function cancelLeave() {
+    pendingLeaveRef.current = null;
+    setLeaveRequest(false);
+  }
+
+  function guardedLogout() {
+    if (profileDirtyRef.current && isProfileLocation(locationRef.current)) {
+      requestLeave({ kind: "logout" });
+      return;
+    }
+    logout();
+  }
+
   function goToArea(area: AreaId) {
     const current = locationRef.current;
     const caseId =
       area === "help" && isWorkLocation(current) ? current.caseId : null;
     const stage =
       area === "help" && isWorkLocation(current) ? current.stage : "situation";
-    navigate({ area, caseId, stage });
+    guardedNavigate({ area, caseId, stage });
   }
 
   if (setupAvailable === true) {
@@ -439,7 +524,7 @@ export function App() {
   const currentArea = unknown ? null : work.area;
 
   function startInvestigation() {
-    navigate({ area: "investigations", caseId: null, stage: "situation" });
+    guardedNavigate({ area: "investigations", caseId: null, stage: "situation" });
     setStartSignal((value) => value + 1);
   }
 
@@ -503,8 +588,10 @@ export function App() {
               displayName={session.displayName}
               roles={roles}
               theme={theme}
+              profileActive={work.area === "profile"}
+              onOpenProfile={() => guardedNavigate(PROFILE)}
               onThemeChange={setTheme}
-              onSignOut={staticReadOnly ? null : () => logout()}
+              onSignOut={staticReadOnly ? null : () => guardedLogout()}
             />
           </div>
         </div>
@@ -533,7 +620,7 @@ export function App() {
             <button
               type="button"
               className="not-found__home"
-              onClick={() => navigate(HOME)}
+              onClick={() => guardedNavigate(HOME)}
             >
               Back to overview
             </button>
@@ -590,7 +677,7 @@ export function App() {
             </section>
             <section className="app__area" aria-label="Help" hidden={work.area !== "help"}>
               <HelpCenter
-                onOpenArea={(area) => navigate({ area, caseId: null, stage: "situation" })}
+                onOpenArea={(area) => guardedNavigate({ area, caseId: null, stage: "situation" })}
                 onOpenStage={
                   work.caseId
                     ? (stage) =>
@@ -605,6 +692,24 @@ export function App() {
                 }
               />
             </section>
+            {work.area === "profile" ? (
+              <section className="app__area" aria-label="My profile">
+                <SelfProfilePanel
+                  readOnly={staticReadOnly}
+                  leaveRequest={leaveRequest}
+                  onLeaveConfirm={confirmLeave}
+                  onLeaveCancel={cancelLeave}
+                  onDirtyChange={setProfileDirty}
+                  onSaved={(profile) => {
+                    setSession((current) =>
+                      current
+                        ? { ...current, displayName: profile.displayName.trim() || current.username }
+                        : current,
+                    );
+                  }}
+                />
+              </section>
+            ) : null}
             {work.area === "administration" ? (
               canAdmin ? (
                 <section className="app__area" aria-label="Administration">
@@ -619,7 +724,7 @@ export function App() {
                     Your current workspace role does not allow administration. No directory or
                     permission data was requested.
                   </p>
-                  <button type="button" className="not-found__home" onClick={() => navigate(HOME)}>
+                  <button type="button" className="not-found__home" onClick={() => guardedNavigate(HOME)}>
                     Back to overview
                   </button>
                 </section>

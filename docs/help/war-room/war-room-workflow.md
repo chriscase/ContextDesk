@@ -14,6 +14,7 @@ related:
   - war-room-workstreams
   - war-room-evidence-review
   - war-room-deployment
+  - war-room-my-profile
 ---
 
 # War Room investigation workflow

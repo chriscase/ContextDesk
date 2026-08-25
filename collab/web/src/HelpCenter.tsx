@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { StageId } from "./Cases.js";
 
 /** Areas the shell can genuinely navigate to from a help article. */
-export type HelpAreaTarget = "overview" | "investigations" | "sources";
+export type HelpAreaTarget = "overview" | "investigations" | "sources" | "profile";
 
 type HelpActionTarget = { area: HelpAreaTarget } | { stage: StageId };
 
@@ -85,12 +85,13 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Enter your username and password and select Sign in.",
           "If sign-in fails, read the message: wrong credentials, a missing role mapping, or rate limiting each say so explicitly.",
           "If your credentials are accepted but no role is mapped, an administrator has to grant a role before the workspace opens.",
-          "Check your roles any time from the account menu in the top bar.",
+          "Check your roles any time from the account menu in the top bar. Open My profile from that menu to see your current display name, directory ownership, and local contact details.",
         ],
         recorded:
           "The server audits sign-ins and sign-outs. The browser keeps only an HttpOnly session cookie — this form never stores your password.",
         limits:
           "In sample-data and demo builds, sign-in uses a built-in fixture account (demo/demo) — that is not your organization's directory. Production deployments authenticate against the server's configured identity source (an LDAP directory by default, or a local user file for private setups); this web app cannot tell you which one is configured.",
+        actions: [{ label: "Go to My profile", go: { area: "profile" } }],
       },
       {
         id: "start-investigation",
@@ -611,7 +612,42 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "A mapping list is returned only after its successful read is audited. Updates and revocations submit success, failure, or denial audit records, and their server response separately records whether that audit write succeeded. Directory searches record only the search category and outcome — not the search term or returned directory data. The console refreshes from the persistent mapping store after a confirmed change.",
         limits:
-          "There is still no graphical first-run setup wizard, directory-user editor, group-membership editor, gateway configuration screen, or backup and retention control in this build. Deployment-state and secret-reference foundations are not exposed here because the end-to-end setup flow is not yet shipped. The console never displays or accepts directory credentials and never trusts imported roles.",
+          "There is still no graphical first-run setup wizard, directory-user editor, group-membership editor, gateway configuration screen, or backup and retention control in this build. Deployment-state and secret-reference foundations are not exposed here because the end-to-end setup flow is not yet shipped. The console never displays or accepts directory credentials and never trusts imported roles. Administrators manage other people; each signed-in person edits their own profile from My profile, not from this console.",
+      },
+      {
+        id: "my-profile",
+        title: "My profile, directory ownership, and attribution",
+        summary:
+          "See your current display details, edit what this workspace owns, and leave historical records unchanged.",
+        keywords: [
+          "my profile",
+          "profile",
+          "display name",
+          "ldap",
+          "oidc",
+          "directory",
+          "role",
+          "capability",
+          "attribution",
+          "contact",
+          "avatar",
+          "self-service",
+        ],
+        what:
+          "My profile is a first-class page at /profile, opened from the account menu. It shows your current display name, username, role title, team, contact fields, avatar metadata, account status, profile source (local, LDAP, or OIDC), directory sync state, and the revision used when saving. A workspace role (viewer, contributor, case-lead, admin) is a bundle of capabilities such as reading investigations or administering people. Capabilities decide what you can do; the profile page only changes how you appear, not those permissions. Historical comments, timeline events, and decisions keep the author name recorded when they were written — saving a new display name never rewrites those records.",
+        when:
+          "Use it when you need to correct a local display name or contact note, check whether a field is owned by the directory, or understand why a past comment still shows an older name.",
+        steps: [
+          "Open the account menu in the top bar and choose My profile, or go directly to /profile.",
+          "Read the profile source and directory-owned labels. LDAP and OIDC accounts cannot change name, role title, team, or work email here — those stay with the directory.",
+          "Edit local-only fields (other contact, avatar, custom fields) and, for a local account, the server-allowed identity fields. Save sends the change with a revision check so overlapping edits cannot silently overwrite each other.",
+          "If someone else saved first, keep your draft, review the saved values, then reload or save again.",
+        ],
+        recorded:
+          "Successful saves update the current profile row only. The server audits the attempt. Past authored records are not rewritten.",
+        limits:
+          "This page never contacts LDAP and never implies that it can. Suspended accounts can read the profile but cannot save. A static read-only snapshot cannot edit. Host provider profiles used by AI lanes are a different kind of profile — see lane help.",
+        actions: [{ label: "Go to My profile", go: { area: "profile" } }],
       },
     ],
   },
@@ -665,6 +701,11 @@ const GLOSSARY: readonly GlossaryEntry[] = [
       "A credential-free identifier (ID, label, provider) for a provider configuration the host owns. Lanes reference a profile ID; credentials and endpoints never enter the browser.",
   },
   {
+    term: "user profile",
+    definition:
+      "The current display record for a signed-in person: name, contact, avatar, status, and directory provenance. It is separate from historical attribution and from host provider profiles used by AI lanes.",
+  },
+  {
     term: "qualification",
     definition:
       "An operator-run, command-line harness that proves lane execution on a host, recording each step as passed, failed, skipped, or partial. Its reports are not displayed in this web app.",
@@ -709,6 +750,7 @@ const QUICK_TASKS: readonly { task: string; articleId: string }[] = [
   { task: "Compare models on the same evidence", articleId: "compare-lanes" },
   { task: "Make the call and share it safely", articleId: "share-safe-export" },
   { task: "See who else is active right now", articleId: "presence" },
+  { task: "Update my display name or contact details", articleId: "my-profile" },
 ];
 
 interface ArticleHit {

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { USER_PROFILE_SCHEMA_ID } from "@cd-collab/contracts/admin";
 import { App } from "./App.js";
 import { parsePathname, pathFor, sameLocation, type WorkLocation } from "./app-location.js";
 
@@ -526,6 +527,12 @@ describe("pathname parsing", () => {
       caseId: null,
       stage: "situation",
     });
+    expect(parsePathname("/profile")).toEqual({
+      area: "profile",
+      caseId: null,
+      stage: "situation",
+    });
+    expect(pathFor({ area: "profile", caseId: null, stage: "situation" })).toBe("/profile");
     expect(parsePathname("/signin")).toEqual({ kind: "sign-in" });
     expect(parsePathname("/sign-in")).toEqual({ kind: "sign-in" });
     const uuid = "11111111-1111-4111-8111-111111111111";
@@ -1124,5 +1131,110 @@ describe("pathname shell routing", () => {
     );
     expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Primary" })).toBeTruthy();
+  });
+
+  it("opens My profile from the account menu for a viewer and restores /profile on reload, Back, and Forward", async () => {
+    const me = {
+      schemaId: USER_PROFILE_SCHEMA_ID,
+      id: "local:viewer",
+      username: "viewer",
+      displayName: "Pat Viewer",
+      roleTitle: null,
+      team: null,
+      contactEmail: null,
+      contactOther: null,
+      avatar: null,
+      status: "active",
+      provenance: "local",
+      directorySubject: null,
+      directorySyncStatus: "not_synced",
+      directorySyncedAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      lastSeenAt: null,
+      customAttributes: [],
+      revision: 1,
+    };
+    stubSignedInFetch({ username: "viewer", displayName: "Pat Viewer", roles: ["viewer"] }, (url) => {
+      if (url === "/api/profile/me") {
+        return Promise.resolve({ ok: true, status: 200, json: async () => me } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Signed in as Pat Viewer" }));
+    fireEvent.click(screen.getByRole("link", { name: "My profile" }));
+    expect(await screen.findByRole("heading", { name: "My profile" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/profile");
+    expect(document.title).toBe("My profile · ContextDesk War Room");
+    expect(screen.queryByRole("button", { name: "My profile" })).toBeNull();
+    expect(
+      screen.getByRole("navigation", { name: "Primary" }).querySelector('[aria-current="page"]'),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    window.history.back();
+    await waitFor(() => expect(window.location.pathname).toBe("/profile"));
+    expect(await screen.findByRole("heading", { name: "My profile" })).toBeTruthy();
+    window.history.forward();
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    cleanup();
+
+    window.history.replaceState(null, "", "/profile");
+    stubSignedInFetch({ username: "viewer", displayName: "Pat Viewer", roles: ["viewer"] }, (url) => {
+      if (url === "/api/profile/me") {
+        return Promise.resolve({ ok: true, status: 200, json: async () => me } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "My profile" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/profile");
+  });
+
+  it("asks before leaving My profile with unsaved edits", async () => {
+    const me = {
+      schemaId: USER_PROFILE_SCHEMA_ID,
+      id: "local:viewer",
+      username: "viewer",
+      displayName: "Pat Viewer",
+      roleTitle: null,
+      team: null,
+      contactEmail: null,
+      contactOther: null,
+      avatar: null,
+      status: "active",
+      provenance: "local",
+      directorySubject: null,
+      directorySyncStatus: "not_synced",
+      directorySyncedAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      lastSeenAt: null,
+      customAttributes: [],
+      revision: 1,
+    };
+    stubSignedInFetch({ username: "viewer", displayName: "Pat Viewer", roles: ["viewer"] }, (url) => {
+      if (url === "/api/profile/me") {
+        return Promise.resolve({ ok: true, status: 200, json: async () => me } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Signed in as Pat Viewer" }));
+    fireEvent.click(screen.getByRole("link", { name: "My profile" }));
+    const name = await screen.findByLabelText("Display name");
+    fireEvent.change(name, { target: { value: "Pat Edited" } });
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    expect(screen.getByRole("heading", { name: "Leave without saving?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stay on this page" }));
+    expect(window.location.pathname).toBe("/profile");
+    expect((screen.getByLabelText("Display name") as HTMLInputElement).value).toBe("Pat Edited");
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/");
   });
 });
