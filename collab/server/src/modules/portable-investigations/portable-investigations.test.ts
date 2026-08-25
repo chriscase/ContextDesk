@@ -26,7 +26,7 @@ import {
   sha256Hex,
   type EvidenceWriteBatch,
 } from "../../evidence/store.js";
-import { MemoryAuditStore } from "../audit/index.js";
+import { MemoryAuditStore, PgAuditStore } from "../audit/index.js";
 import {
   MapAuthAdapter,
   MemorySessionStore,
@@ -35,15 +35,16 @@ import {
   defaultSessionPolicy,
 } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
-import { CatalogService, MemoryCatalogStore } from "../catalog/index.js";
+import { CatalogService, MemoryCatalogStore, PgCatalogStore } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
-import { ExperimentService, MemoryExperimentStore } from "../experiments/index.js";
-import { ImportService, MemoryRunStore } from "../import/index.js";
-import { MemoryTriageJobStore, TriageRunService } from "../triage-runs/index.js";
+import { ExperimentService, MemoryExperimentStore, PgExperimentStore } from "../experiments/index.js";
+import { ImportService, MemoryRunStore, PgRunStore } from "../import/index.js";
+import { MemoryTriageJobStore, PgTriageJobStore, TriageRunService } from "../triage-runs/index.js";
 import { loadPortableInstallationId } from "./installation.js";
 import {
   memoryApplyBoundary,
   MemoryPortableApplyStateStore,
+  PgPortableApplyStateStore,
   persistPortableArchive,
   PortableCommitOutcomeUnknownError,
   withPgApplyTransaction,
@@ -451,6 +452,23 @@ function resealArchive(
     investigation: attachPortableIntegrity(unsigned as PortableInvestigationUnsigned),
     exportedAt: archive.exportedAt,
   });
+}
+
+function archiveWithContentTimelineTarget(
+  archive: PortableArchiveV1,
+  digest: string,
+): { archive: PortableArchiveV1; sourceSeq: number } {
+  const sourceSeq = archive.investigation.timeline[0]?.seq;
+  if (sourceSeq === undefined) throw new Error("synthetic timeline is missing");
+  return {
+    sourceSeq,
+    archive: resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.seq === sourceSeq);
+      if (!event) throw new Error("synthetic timeline event is missing");
+      event.targetNamespace = "content";
+      event.targetId = digest;
+    }),
+  };
 }
 
 function detachedArchiveFor(
@@ -1213,6 +1231,95 @@ describe("portable investigation apply", () => {
     expect(listed).toHaveLength(2);
   });
 
+  it("preserves a content-addressed timeline target through preflight, apply, and export", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const targeted = archiveWithContentTimelineTarget(original, row.evidenceHash);
+    const identityMap = identityMapFor(targeted.archive);
+    const preview = await row.portable.preflight(
+      targeted.archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+
+    expect(preview.report.exactReconstruction).toBe(true);
+    expect(preview.report.idRemap).toContainEqual({
+      namespace: "content",
+      sourceId: row.evidenceHash,
+      destinationId: row.evidenceHash,
+    });
+
+    const applied = await row.portable.apply(
+      targeted.archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const persisted = (await row.caseStore.listTimeline(applied.investigationId)).find((event) => {
+      const payload = JSON.parse(event.payload) as { sourceSeq?: number };
+      return payload.sourceSeq === targeted.sourceSeq;
+    });
+    expect(persisted?.targetId).toBe(row.evidenceHash);
+
+    const reopened = parsePortableArchive(
+      await row.portable.exportArchive(applied.investigationId, ACTOR, false, true),
+    );
+    expect(
+      reopened.investigation.timeline.find((event) => event.seq === targeted.sourceSeq),
+    ).toMatchObject({
+      targetNamespace: "content",
+      targetId: row.evidenceHash,
+    });
+  });
+
+  it("fails closed and rolls back if a forged report remaps a content digest", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const targeted = archiveWithContentTimelineTarget(original, row.evidenceHash);
+    const identityMap = identityMapFor(targeted.archive);
+    const preview = await row.portable.preflight(
+      targeted.archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const forged = structuredClone(preview.report);
+    const content = forged.idRemap.find(
+      (entry) => entry.namespace === "content" && entry.sourceId === row.evidenceHash,
+    );
+    if (!content) throw new Error("synthetic content remap is missing");
+    content.destinationId = portableDestinationUuid(
+      targeted.archive.investigation.sourceInstallationId,
+      "content",
+      row.evidenceHash,
+      0,
+    );
+    const before = await row.caseStore.listCases();
+
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: targeted.archive,
+          report: forged,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            targeted.archive.investigation.contentObjects.flatMap((item) =>
+              item.payloadBase64 === null
+                ? []
+                : [[item.digest, new Uint8Array(Buffer.from(item.payloadBase64, "base64"))] as const],
+            ),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/content-addressed destination identity must equal its digest/);
+    expect(await row.caseStore.listCases()).toEqual(before);
+  });
+
   it("rejects resealed nonterminal history and blocks legacy incomplete candidate state", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1806,6 +1913,117 @@ describe("portable investigation apply", () => {
 });
 
 describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", () => {
+  it("matches memory content-target reconstruction through PostgreSQL apply and reopen", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const targeted = archiveWithContentTimelineTarget(original, row.evidenceHash);
+    const identityMap = identityMapFor(targeted.archive);
+
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const audit = new PgAuditStore(client);
+      const caseStore = new PgCaseStore(client);
+      const catalogStore = new PgCatalogStore(client);
+      const runStore = new PgRunStore(client);
+      const experimentStore = new PgExperimentStore(client);
+      const jobStore = new PgTriageJobStore(client);
+      const applyState = new PgPortableApplyStateStore(client);
+      const evidence = new FilesystemEvidenceStore({
+        rootDir: row.root,
+        acquireWriteLease: async () => () => undefined,
+      });
+      const catalog = new CatalogService(catalogStore, audit);
+      const cases = new CaseService(evidence, audit, caseStore, catalog);
+      const imports = new ImportService({ evidence, audit, cases, catalog, runs: runStore });
+      const triageRuns = new TriageRunService({
+        cases,
+        audit,
+        jobs: jobStore,
+        profiles: [
+          { id: "profile-qwen", label: "Synthetic Qwen", provider: "openai-compatible" },
+          { id: "profile-oss", label: "Synthetic OSS", provider: "openai-compatible" },
+        ],
+      });
+      const experiments = new ExperimentService({ cases, audit, experiments: experimentStore });
+
+      await caseStore.insertCase({
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title: "Synthetic identity anchor",
+        problemStatement: "",
+        affectedParties: "",
+        impact: "",
+        scope: "",
+        openQuestions: [],
+        situationVersion: 0,
+        severity: "low",
+        status: "open",
+        legalHold: false,
+        retentionClass: "standard",
+        createdAt: "2042-03-04T11:00:00.000Z",
+        createdBy: ACTOR.id,
+        createdByUsername: ACTOR.username,
+        participants: [{ identityId: ACTOR.id, username: ACTOR.username }],
+      });
+
+      const portable = new PortableInvestigationService({
+        installationId: "inst-syntheticpg0001",
+        cases,
+        catalog,
+        imports,
+        triageRuns,
+        experiments,
+        audit,
+        applyState,
+        probe: {
+          cases: caseStore,
+          catalog: catalogStore,
+          experiments: experimentStore,
+          runs: runStore,
+          jobs: jobStore,
+        },
+        withTransaction: (operation) => withPgApplyTransaction(client, evidence, operation),
+        applyCoordination: "postgres_transactional",
+        confirmationRestartDurable: true,
+        now: () => "2042-03-04T12:00:00.000Z",
+      });
+
+      const preview = await portable.preflight(
+        targeted.archive,
+        { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+        ACTOR,
+        false,
+      );
+      expect(preview.report.exactReconstruction).toBe(true);
+      expect(preview.report.idRemap).toContainEqual({
+        namespace: "content",
+        sourceId: row.evidenceHash,
+        destinationId: row.evidenceHash,
+      });
+
+      const applied = await portable.apply(
+        targeted.archive,
+        applyInput(preview.apply.confirmationToken as string, identityMap),
+        ACTOR,
+        false,
+      );
+      const persisted = (await caseStore.listTimeline(applied.investigationId)).find((event) => {
+        const payload = JSON.parse(event.payload) as { sourceSeq?: number };
+        return payload.sourceSeq === targeted.sourceSeq;
+      });
+      expect(persisted?.targetId).toBe(row.evidenceHash);
+
+      const reopened = parsePortableArchive(
+        await portable.exportArchive(applied.investigationId, ACTOR, false, true),
+      );
+      expect(
+        reopened.investigation.timeline.find((event) => event.seq === targeted.sourceSeq),
+      ).toMatchObject({
+        targetNamespace: "content",
+        targetId: row.evidenceHash,
+      });
+    });
+  });
+
   it("rolls back a partial PostgreSQL apply", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);

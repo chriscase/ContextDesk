@@ -90,6 +90,12 @@ function remapOf(
   sourceId: string,
 ): string {
   const hit = report.idRemap.find((row) => row.namespace === kind && row.sourceId === sourceId);
+  if (kind === "content") {
+    if (hit && hit.destinationId !== sourceId) {
+      throw new Error("content-addressed destination identity must equal its digest");
+    }
+    return sourceId;
+  }
   return hit?.destinationId ?? sourceId;
 }
 

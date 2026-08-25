@@ -173,12 +173,17 @@ describe("audit blockers vs parent #1032", () => {
     );
   });
 
-  it("blocker 4: V1 dry-run remaps are RFC 4122 UUIDs, never sourceInstallationId::namespace::sourceId or remap-*", () => {
+  it("blocker 4: V1 dry-run keeps content digests and UUID-remaps minted namespaces", () => {
     const sealed = reseal(loadValid());
     const report = portable.preflightPortableInvestigation(sealed, dryRun(sealed));
     expect(report.idRemap.length).toBeGreaterThan(10);
     for (const row of report.idRemap) {
-      expect(row.destinationId).toMatch(RFC4122_UUID_RE);
+      if (row.namespace === "content") {
+        expect(row.destinationId).toBe(row.sourceId);
+        expect(row.destinationId).toMatch(/^[a-f0-9]{64}$/);
+      } else {
+        expect(row.destinationId).toMatch(RFC4122_UUID_RE);
+      }
       expect(row.destinationId.includes("::")).toBe(false);
       expect(row.destinationId.startsWith("remap-")).toBe(false);
       expect(row.destinationId).not.toBe(
@@ -280,7 +285,11 @@ describe("audit blockers vs parent #1032", () => {
       destination: { identities: [], objectIds: {}, knownProfileIds: ["profile-synth"] },
     });
     for (const row of report.idRemap) {
-      expect(row.destinationId).toMatch(RFC4122_UUID_RE);
+      if (row.namespace === "content") {
+        expect(row.destinationId).toBe(row.sourceId);
+      } else {
+        expect(row.destinationId).toMatch(RFC4122_UUID_RE);
+      }
     }
     expect(report.applyAuthorized).toBe(false);
   });

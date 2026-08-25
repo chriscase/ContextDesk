@@ -947,6 +947,7 @@ export class PortableInvestigationService {
     registerNamespace("investigation", [caseId]);
     registerNamespace("contribution", contributions.map((row) => row.id));
     registerNamespace("evidence", evidence.map((row) => row.id));
+    registerNamespace("content", [...contents.keys()]);
     registerNamespace("source", sources.map((row) => row.id));
     registerNamespace("imported_ai_run", importedRuns.map((row) => row.id));
     registerNamespace("snapshot", portableSnapshots.map((row) => row.id));

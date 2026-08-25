@@ -18,6 +18,7 @@ import {
   isRfc4122Uuid,
   parsePortableInvestigation,
   portableDestinationUuid,
+  portableIdMintingMode,
   portableMintsDestinationId,
   portableSemanticFingerprint,
   preflightPortableInvestigation,
@@ -488,11 +489,15 @@ function uuidIdRemap(
       (destination.objectIds[kind] ?? []).filter((id) => isRfc4122Uuid(id)),
     );
     for (const sourceId of sourceIds) {
-      const first = portableDestinationUuid(investigation.sourceInstallationId, kind, sourceId, 0);
+      const first =
+        portableIdMintingMode(kind) === "content_addressed"
+          ? sourceId
+          : portableDestinationUuid(investigation.sourceInstallationId, kind, sourceId, 0);
       if (!portableMintsDestinationId(kind)) {
         // Content digests deduplicate and timeline sequences are reassigned by
         // the destination; neither keys a destination row, so neither can
-        // collide and neither consumes deterministic ladder space.
+        // collide and neither consumes deterministic ladder space. Content
+        // keeps its digest as the destination identity.
         idRemap.push({ namespace: kind, sourceId, destinationId: first });
         create += 1;
         continue;

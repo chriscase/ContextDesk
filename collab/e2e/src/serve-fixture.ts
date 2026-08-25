@@ -151,6 +151,13 @@ async function main(): Promise<void> {
     experiments,
     audit,
     applyState,
+    probe: {
+      cases: caseStore,
+      catalog: catalogStore,
+      experiments: experimentStore,
+      runs: runStore,
+      jobs: jobStore,
+    },
     withTransaction: applyBoundary.withTransaction,
     applyCoordination: "single_instance",
     confirmationRestartDurable: false,
