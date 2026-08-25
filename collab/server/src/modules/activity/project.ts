@@ -100,7 +100,7 @@ interface Mapped {
   workstreamId: string | null;
 }
 
-function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string, unknown>): Mapped {
+function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string, unknown>): Mapped | null {
   const target = event.targetId ?? caseId;
   const contribution = str(payload, "kind");
   const revision = num(payload, "revision");
@@ -149,9 +149,7 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
     case "snapshot_frozen":
       return { activityKind: "evidence_frozen", resourceKind: "evidence_context", resourceId: target, provenance: "system", summary: "froze an evidence snapshot", humanFinding: false, revision: null, workstreamId: null };
     case "contribution_tombstoned":
-      if (contribution === "upload") {
-        return { activityKind: "evidence_omitted", resourceKind: "evidence_item", resourceId: target, provenance: "human", summary: "omitted evidence", humanFinding: false, revision, workstreamId: null };
-      }
+      if (contribution === "upload") return null;
       if (contribution === "message") {
         return { activityKind: "comment_added", resourceKind: "discussion_message", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
       }
@@ -179,9 +177,7 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
       if (contribution === "action") {
         return { activityKind: assigned ? "assignment_recorded" : "action_recorded", resourceKind: "action", resourceId: target, provenance: "human", summary: assigned ? "recorded an assignment" : "recorded a next action", humanFinding: true, revision, workstreamId: null };
       }
-      if (contribution === "upload") {
-        return { activityKind: "evidence_added", resourceKind: "evidence_item", resourceId: target, provenance: "human", summary: "recorded an evidence upload", humanFinding: false, revision, workstreamId: null };
-      }
+      if (contribution === "upload") return null;
       if (payload.mentions !== undefined || payload.mention === true) {
         return { activityKind: "mention_recorded", resourceKind: "discussion_message", resourceId: target, provenance: "human", summary: "recorded a mention", humanFinding: true, revision, workstreamId: null };
       }
@@ -302,6 +298,7 @@ export function projectTimelineSource(input: {
 }): ProjectedInvestigationActivity | null {
   const payload = payloadOf(input.source.event.payload);
   const mapped = mapEvent(input.source.caseId, input.source.event, payload);
+  if (!mapped) return null;
   const restoredImport = payload.imported === true;
   if (restoredImport) {
     mapped.provenance = "historical_restored";

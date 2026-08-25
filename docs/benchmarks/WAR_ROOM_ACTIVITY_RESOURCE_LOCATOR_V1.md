@@ -76,6 +76,9 @@ existence is not leaked. Timeline fallback matches the same projected
 `locator.kind` + `resourceId` (+ revision when supplied) as the activity feed;
 contribution provenance also requires the durable kind (`message`, `note` /
 `handoff`, `hypothesis`, `action`) rather than any row with that id.
+Upload summary contributions are omitted from the activity projection;
+`evidence_registered` is the only `evidence_item` locator and it addresses the
+artifact id, so `evidence_item/{summaryContributionId}` stays `not_found`.
 `corpus_intake_committed` projects `intake_batch` at the batch id and Capture
 `corpus-intake` / `kind=intake-batch`, not Analyze evidence.
 Portable restore remaps investigation and resource ids, including intake-batch
