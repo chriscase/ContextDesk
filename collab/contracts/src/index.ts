@@ -28,6 +28,33 @@ export type {
 } from "./health.js";
 
 export {
+  COMPONENT_HEALTH_COMPONENT_IDS,
+  COMPONENT_HEALTH_NOTICES,
+  COMPONENT_HEALTH_SCHEMA_ID,
+  parseComponentHealthResponse,
+  projectComponentHealth,
+} from "./component-health.js";
+export type {
+  ComponentHealthCompatibilityScope,
+  ComponentHealthCompatibilityStatus,
+  ComponentHealthCompatibilityV1,
+  ComponentHealthComponentId,
+  ComponentHealthComponentV1,
+  ComponentHealthDataMode,
+  ComponentHealthNotice,
+  ComponentHealthObservationV1,
+  ComponentHealthProjectorInputV1,
+  ComponentHealthProtocolV1,
+  ComponentHealthReportStatus,
+  ComponentHealthResponseV1,
+  ComponentHealthSource,
+  ComponentHealthStorageMigrationState,
+  ComponentHealthStorageMigrationV1,
+  ComponentHealthUpdateState,
+  ComponentHealthUpdateV1,
+} from "./component-health.js";
+
+export {
   APP_ROLES,
   AUTH_ERROR_SCHEMA_ID,
   SESSION_SCHEMA_ID,
@@ -41,6 +68,20 @@ export type {
   IdentityV1,
   SessionResponseV1,
 } from "./auth.js";
+
+export {
+  BROWSER_MUTATION_METHODS,
+  COLLAB_CSRF_HEADER,
+  COLLAB_CSRF_HEADER_VALUE,
+  CSRF_ERROR_SCHEMA_ID,
+  apiPathname,
+  isBrowserMutationMethod,
+  isCollabApiPath,
+  isCsrfExemptApiPath,
+  parseCsrfError,
+  requiresBrowserMutationCsrf,
+} from "./csrf.js";
+export type { BrowserMutationMethod, CsrfErrorCode, CsrfErrorV1 } from "./csrf.js";
 
 export {
   ADMIN_DIRECTORY_ERROR_SCHEMA_ID,
@@ -183,6 +224,7 @@ export {
   CONTRIBUTION_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
   PROVENANCE_SCHEMA_ID,
+  isContributionIdempotencyKey,
   parseContributionList,
   parseContribution,
   parseProvenance,
@@ -236,6 +278,8 @@ export {
   parseSnapshotList,
   snapshotFairness,
   snapshotFingerprint,
+  snapshotFingerprintDigest,
+  snapshotItemContentHash,
 } from "./snapshot.js";
 export type {
   SnapshotEvidenceV1,
@@ -294,6 +338,36 @@ export type {
   TriageJobStatus,
   TriageJobV1,
 } from "./triage-job.js";
+
+export {
+  WORKSTREAM_AGREEMENT_NOTICE,
+  WORKSTREAM_LIFECYCLES,
+  WORKSTREAM_LIST_SCHEMA_ID,
+  WORKSTREAM_OPERATOR_KINDS,
+  WORKSTREAM_VIEW_SCHEMA_ID,
+  operatorKindFor,
+  parseWorkstreamList,
+  parseWorkstreamView,
+  projectWorkstreams,
+  readableUnknown,
+  strategyLabelFor,
+  workstreamKey,
+} from "./workstream.js";
+export type {
+  WorkstreamActivityEntryV1,
+  WorkstreamEvidenceCitationV1,
+  WorkstreamEvidenceInput,
+  WorkstreamInputsV1,
+  WorkstreamLifecycle,
+  WorkstreamListV1,
+  WorkstreamOperatorKind,
+  WorkstreamProjectionInput,
+  WorkstreamRerunV1,
+  WorkstreamSnapshotInput,
+  WorkstreamTechnicalV1,
+  WorkstreamTimelineInput,
+  WorkstreamViewV1,
+} from "./workstream.js";
 
 export {
   PERMANENT_UNKNOWN_SOURCE_ID,
@@ -599,3 +673,10 @@ export type {
 export * from "./investigation-portable.js";
 export * from "./investigation-portable-archive.js";
 export * from "./investigation-portable-apply.js";
+export * from "./investigation-strategy-connector.js";
+export * from "./investigation-activity.js";
+export * from "./capability.js";
+export * from "./user-profile.js";
+export * from "./directory-mapping.js";
+export * from "./admin-people.js";
+export * from "./admin-audit.js";

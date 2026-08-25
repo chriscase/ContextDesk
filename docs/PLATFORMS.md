@@ -35,7 +35,7 @@ Workspace roots are user-chosen paths in Settings; path allowlisting is in `cd_c
 | `rust tests` (`cargo test --workspace`) | yes — eight deterministic shards + fail-closed `rust tests (ubuntu aggregate)` (#874) | yes — four deterministic shards + fail-closed `rust tests (macos-latest aggregate)` | yes — four deterministic shards + fail-closed `rust tests (windows-latest aggregate)` |
 | `tauri-host` (desktop host compile) | yes | yes | no (see residual) |
 | `desktop` UI (npm) | yes | — | — |
-| `release` bundles | tag-only | tag-only | tag-only (#172) |
+| `release` bundles | tag-only orchestrator | tag-only orchestrator | tag-only orchestrator (#172; builders are artifacts-only) |
 
 ## Known caveats
 

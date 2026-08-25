@@ -1,6 +1,8 @@
 /**
  * Authentication module. Passwords exist only inside this module, in memory,
- * for the duration of a directory bind. No hashing, caching, or logging.
+ * for the duration of a directory bind or local compare. No caching, logging,
+ * or retained derived secrets. MapAuthAdapter may hash ephemerally to feed
+ * timingSafeEqual a fixed-length buffer.
  */
 export const MODULE_ID = "auth" as const;
 
@@ -38,5 +40,13 @@ export {
   resolveActiveSession,
 } from "./routes.js";
 export type { ActiveSessionDeps, AuthRouteDeps } from "./routes.js";
+export {
+  CSRF_HEADER,
+  CSRF_HEADER_VALUE,
+  hasCsrfHeader,
+  hasSessionCookieHeader,
+  injectWithoutBrowserCsrf,
+  registerBrowserMutationCsrfGuard,
+} from "./csrf.js";
 export { escapeDn, escapeFilter } from "./ldap-escape.js";
 export { liveLdapConfigured } from "./ldap-coverage.js";

@@ -4,6 +4,7 @@ export const AREA_IDS = [
   "sources",
   "administration",
   "help",
+  "profile",
 ] as const;
 export type AreaId = (typeof AREA_IDS)[number];
 
@@ -26,6 +27,7 @@ export const ROUTE_ITEM_KINDS = [
   "triage-run",
   "triage-candidate",
   "intake-batch",
+  "workstream",
 ] as const;
 export type RouteItemKind = (typeof ROUTE_ITEM_KINDS)[number];
 
@@ -58,7 +60,58 @@ export const HOME: WorkLocation = {
   stage: "situation",
 };
 
+export const PROFILE: WorkLocation = {
+  area: "profile",
+  caseId: null,
+  stage: "situation",
+};
+
+export const ADMINISTRATION: WorkLocation = {
+  area: "administration",
+  caseId: null,
+  stage: "situation",
+};
+
+/** Canonical People tab. `/administration` remains the roles alias. */
+export const PEOPLE_SECTION = "people";
+export const PEOPLE: WorkLocation = {
+  area: "administration",
+  caseId: null,
+  stage: "situation",
+  focus: {
+    section: PEOPLE_SECTION,
+    item: null,
+    itemKind: null,
+    lane: null,
+    experiment: null,
+  },
+};
+
 export const SIGN_IN: SignInLocation = { kind: "sign-in" };
+
+export const DISCUSSION_SECTION = "discussion";
+export const DISCUSSION_SECTION_LEGACY = "case-discussion";
+export const DISCUSSION_ELEMENT_ID = "case-discussion";
+
+export function isDiscussionSection(section: string): boolean {
+  return section === DISCUSSION_SECTION || section === DISCUSSION_SECTION_LEGACY;
+}
+
+export function canonicalRouteSection(section: string): string {
+  return section === DISCUSSION_SECTION_LEGACY ? DISCUSSION_SECTION : section;
+}
+
+export function isProfileLocation(value: unknown): value is WorkLocation {
+  return isWorkLocation(value) && value.area === "profile";
+}
+
+export function isPeopleLocation(value: unknown): value is WorkLocation {
+  return (
+    isWorkLocation(value)
+    && value.area === "administration"
+    && value.focus?.section === PEOPLE_SECTION
+  );
+}
 
 /**
  * Fragment ids that pre-shell surfaces still emit as plain `#anchor` links
@@ -70,6 +123,7 @@ export const LEGACY_ANCHOR_STAGES: Record<string, StageId> = {
   "triage-analyze": "analyze",
   "triage-evidence-board": "analyze",
   "triage-lane-runner": "analyze",
+  workstreams: "analyze",
   "triage-compare": "compare",
   "triage-comparison-lab": "compare",
   "triage-decide": "decide",
@@ -218,7 +272,9 @@ function boundedFocusValue(value: string | null): string | null {
 function parseFocus(search: string, hash: string): WorkFocus | undefined {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const hashSection = boundedFocusValue(hash.replace(/^#/, ""));
-  const section = boundedFocusValue(params.get("section")) ?? hashSection;
+  const section = canonicalRouteSection(
+    boundedFocusValue(params.get("section")) ?? hashSection ?? "",
+  );
   if (!section) return undefined;
   return {
     section,
@@ -251,8 +307,14 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/help") {
     return { area: "help", caseId: null, stage: "situation" };
   }
+  if (path === "/profile") {
+    return { ...PROFILE };
+  }
+  if (path === "/admin/people") {
+    return { ...PEOPLE };
+  }
   if (path === "/administration") {
-    return { area: "administration", caseId: null, stage: "situation" };
+    return { ...ADMINISTRATION };
   }
   const investigation = /^\/investigations\/([^/]+)(?:\/([^/]+))?$/.exec(path);
   if (investigation) {
@@ -285,8 +347,11 @@ export function areaPathFor(location: WorkLocation): string {
   if (location.area === "help") {
     return "/help";
   }
+  if (location.area === "profile") {
+    return "/profile";
+  }
   if (location.area === "administration") {
-    return "/administration";
+    return isPeopleLocation(location) ? "/admin/people" : "/administration";
   }
   return "/investigations";
 }
@@ -338,8 +403,13 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
   if (location.area === "help") {
     return "Help · ContextDesk War Room";
   }
+  if (location.area === "profile") {
+    return "My profile · ContextDesk War Room";
+  }
   if (location.area === "administration") {
-    return "Administration · ContextDesk War Room";
+    return isPeopleLocation(location)
+      ? "People · Administration · ContextDesk War Room"
+      : "Administration · ContextDesk War Room";
   }
   if (location.area === "investigations" && location.caseId) {
     const stage = location.stage.slice(0, 1).toUpperCase() + location.stage.slice(1);

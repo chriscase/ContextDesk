@@ -11,6 +11,7 @@ import {
   parseSnapshotList,
   snapshotFairness,
   snapshotFingerprint,
+  snapshotFingerprintDigest,
   snapshotItemContentHash,
   type SnapshotEvidenceV1,
   type SnapshotFingerprintInput,
@@ -130,6 +131,33 @@ describe("snapshot contract", () => {
       fairnessClass: "unknown",
     });
     expect(parseSnapshot(unknownDoc).fairnessClass).toBe("unknown");
+    const claimedSame = withFingerprint({
+      ...validRecord(),
+      evidence: [
+        {
+          evidenceId: "ev-missing",
+          ordinal: 0,
+          contentHash: null,
+          expectedHash: null,
+          verificationStatus: null,
+          privacyClass: "owner_only",
+        },
+      ],
+      fairnessClass: "same_snapshot",
+    });
+    expect(parseSnapshot(claimedSame).fairnessClass).toBe("same_snapshot");
+    expect(snapshotFairness(parseSnapshot(claimedSame).evidence)).toBe("unknown");
+  });
+
+  it("canonicalizes snap-prefixed fingerprints and refuses unverifiable identity", () => {
+    const digest = "a".repeat(64);
+    expect(snapshotFingerprintDigest(digest)).toBe(digest);
+    expect(snapshotFingerprintDigest(`snap-${digest}`)).toBe(digest);
+    expect(snapshotFingerprintDigest(`SNAP-${digest.toUpperCase()}`)).toBe(digest);
+    expect(snapshotFingerprintDigest(null)).toBeNull();
+    expect(snapshotFingerprintDigest("")).toBeNull();
+    expect(snapshotFingerprintDigest("not-a-hash")).toBeNull();
+    expect(snapshotFingerprintDigest("snap-short")).toBeNull();
   });
 
   it("maps an honest content hash or expectedHash without inventing bytes", () => {

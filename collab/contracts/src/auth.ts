@@ -1,3 +1,4 @@
+import type { Capability } from "./capability.js";
 import { checkObject, f, type ObjectShape } from "./parse.js";
 
 export const APP_ROLES = ["viewer", "contributor", "case-lead", "admin"] as const;
@@ -15,6 +16,8 @@ export interface SessionResponseV1 {
   schemaId: typeof SESSION_SCHEMA_ID;
   identity: IdentityV1;
   roles: AppRole[];
+  /** Usable capabilities for this session, resolved fresh (never cached). */
+  capabilities: Capability[];
 }
 
 const identityShape: ObjectShape = {
@@ -27,6 +30,22 @@ const sessionShape: ObjectShape = {
   schemaId: f.req(f.en(SESSION_SCHEMA_ID)),
   identity: f.req(f.obj(identityShape)),
   roles: f.req(f.arr(f.en(...APP_ROLES))),
+  capabilities: f.req(
+    f.arr(
+      f.en(
+        "investigation:read",
+        "investigation:write",
+        "evidence:private:read",
+        "run:strategies",
+        "decision:accept",
+        "export:create",
+        "portable:restore",
+        "admin:users",
+        "admin:system_config",
+        "audit:view",
+      ),
+    ),
+  ),
 };
 
 export function parseSessionResponse(raw: unknown): SessionResponseV1 {

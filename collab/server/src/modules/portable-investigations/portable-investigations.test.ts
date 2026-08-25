@@ -14,6 +14,7 @@ import {
   sealPortableArchive,
   type PortableArchiveV1,
   type PortableInvestigationUnsigned,
+  type TriageJobV1,
 } from "@cd-collab/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { migrateUp } from "../../db/migrate.js";
@@ -74,6 +75,7 @@ interface Fixture {
   caseStore: MemoryCaseStore;
   imports: ImportService;
   triageRuns: TriageRunService;
+  jobStore: MemoryTriageJobStore;
   experiments: ExperimentService;
   portable: PortableInvestigationService;
   applyBoundary: MemoryApplyBoundary;
@@ -271,6 +273,7 @@ async function fixture(): Promise<Fixture> {
     },
     "fixture",
     false,
+    true,
   );
   const job = await waitForCompleted(triageRuns, caseRow.id, queued.id);
   const experiment = await experiments.importTriageJob(
@@ -339,6 +342,7 @@ async function fixture(): Promise<Fixture> {
     caseStore,
     imports,
     triageRuns,
+    jobStore,
     experiments,
     portable,
     applyBoundary,
@@ -392,6 +396,20 @@ function identityMapFor(archive: PortableArchiveV1) {
           destinationActorId: null,
         },
   );
+}
+
+function resealArchive(
+  archive: PortableArchiveV1,
+  mutate: (investigation: PortableInvestigationUnsigned) => void,
+): PortableArchiveV1 {
+  const { bundleFingerprint: _bundle, objectHashes: _hashes, ...unsigned } = structuredClone(
+    archive.investigation,
+  );
+  mutate(unsigned as PortableInvestigationUnsigned);
+  return sealPortableArchive({
+    investigation: attachPortableIntegrity(unsigned as PortableInvestigationUnsigned),
+    exportedAt: archive.exportedAt,
+  });
 }
 
 function detachedArchiveFor(
@@ -499,7 +517,7 @@ describe("portable installation identity", () => {
 describe("portable investigation service", () => {
   it("exports a parseable supported archive and omits unsupported destination state", async () => {
     const row = await fixture();
-    const archive = parsePortableArchive(await row.portable.exportArchive(row.caseId, ACTOR, false));
+    const archive = parsePortableArchive(await row.portable.exportArchive(row.caseId, ACTOR, false, true));
     expect(archive.investigation.investigation.title).toBe("Synthetic queue stall");
     expect(archive.investigation.investigation).toMatchObject({
       problemStatement: "Synthetic workers stop draining a bounded queue.",
@@ -514,6 +532,19 @@ describe("portable investigation service", () => {
       .toBe(Buffer.from(LOG_BYTES).toString("base64"));
     expect(archive.investigation.importedAiRuns).toHaveLength(1);
     expect(archive.investigation.triageJobs[0]?.candidates).toHaveLength(2);
+    expect(archive.investigation.triageJobs[0]).toMatchObject({
+      status: "completed",
+      requestMode: "deterministic_mock",
+      question: "What should the fictional operator inspect next?",
+      policyFingerprint: null,
+      taskFingerprint: "ab".repeat(32),
+      concurrency: null,
+      sameSnapshot: true,
+      agreementNotice: "Agreement is not proof of correctness.",
+    });
+    expect(archive.investigation.triageJobs[0]?.candidates.every(
+      (candidate) => candidate.status === "completed" && candidate.summary !== undefined,
+    )).toBe(true);
     expect(archive.investigation.experiments).toHaveLength(1);
     expect(archive.investigation.helpfulnessObservations).toHaveLength(1);
     expect(archive.investigation.decisions.at(-1)?.status).toBe("accepted");
@@ -528,6 +559,76 @@ describe("portable investigation service", () => {
     );
     expect(archive.investigation.actors.every((actor) => actor.roleNote === "Historical attribution only"))
       .toBe(true);
+  });
+
+  it("refuses export while any triage job or candidate remains nonterminal", async () => {
+    const row = await fixture();
+    const snapshot = (await row.cases.listSnapshots(row.caseId, ACTOR, false))[0];
+    if (!snapshot) throw new Error("synthetic snapshot is missing");
+    const queuedJob: TriageJobV1 = {
+      schemaId: "cd-collab.triage_job.v1",
+      id: "job-portable-nonterminal",
+      caseId: row.caseId,
+      snapshotId: snapshot.id,
+      snapshotFingerprint: snapshot.fingerprint,
+      requestFingerprint: "cd".repeat(32),
+      cancellationId: "cancel-portable-nonterminal",
+      parentJobId: null,
+      request: {
+        schemaId: TRIAGE_JOB_REQUEST_SCHEMA_ID,
+        snapshotId: snapshot.id,
+        mode: "deterministic_mock",
+        strategyId: "synthetic-nonterminal",
+        question: "Should this synthetic queued run be portable?",
+        policyFingerprint: null,
+        taskFingerprint: "de".repeat(32),
+        candidates: [{
+          candidateId: "candidate-nonterminal",
+          role: "reviewer",
+          provider: "openai-compatible",
+          profileId: "profile-qwen",
+          model: "qwen-3.6-27b",
+          version: null,
+        }],
+      },
+      status: "queued",
+      candidates: [{
+        candidateId: "candidate-nonterminal",
+        role: "reviewer",
+        provider: "openai-compatible",
+        profileId: "profile-qwen",
+        model: "qwen-3.6-27b",
+        version: null,
+        status: "queued",
+        benchmarkRunId: null,
+        outputHash: null,
+        summary: null,
+        evidenceRefs: [],
+        unknowns: [],
+        usageStatus: "unknown",
+        costStatus: "unknown",
+        errorCode: null,
+        startedAt: null,
+        finishedAt: null,
+        privacyClass: "owner_only",
+      }],
+      sameSnapshot: null,
+      agreementNotice: "Agreement is not proof of correctness.",
+      requestedBy: ACTOR.id,
+      requestedByUsername: ACTOR.username,
+      createdAt: "2042-03-04T11:59:00.000Z",
+      updatedAt: "2042-03-04T11:59:00.000Z",
+      startedAt: null,
+      finishedAt: null,
+      cancelRequestedAt: null,
+      stoppedReason: null,
+      workerId: null,
+      leaseExpiresAt: null,
+    };
+    await row.jobStore.insert(queuedJob);
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
+      code: "unsupported_state",
+    });
   });
 
   it("round-trips corpus intake batches, paths, provenance, and evidence bytes", async () => {
@@ -562,7 +663,7 @@ describe("portable investigation service", () => {
       "fixture",
     );
 
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const exportedBatch = archive.investigation.intakeBatches?.[0];
     const exportedEvidence = archive.investigation.evidence.find(
       (item) => item.id === committed.items[0]?.artifactId,
@@ -617,7 +718,7 @@ describe("portable investigation service", () => {
 
   it("returns host-owned identity/collision/privacy facts and mints apply only for exact reconstruction", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const response = await row.portable.preflight(
       archive,
       {
@@ -652,7 +753,7 @@ describe("portable investigation service", () => {
 
   it("blocks exact apply when an incoming archive represents unsupported source membership", async () => {
     const row = await fixture();
-    const original = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const { bundleFingerprint: _bundle, objectHashes: _hashes, ...unsigned } = structuredClone(
       original.investigation,
     );
@@ -712,14 +813,14 @@ describe("portable investigation service", () => {
       now: () => "2042-03-04T12:00:00.000Z",
     });
 
-    await expect(portable.exportArchive(row.caseId, ACTOR, false)).rejects.toMatchObject({
+    await expect(portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
       code: "integrity_failure",
     } satisfies Partial<PortableServerError>);
   });
 
   it("reports a host-owned deterministic destination collision as blocked", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const collisionId = portableDestinationUuid(
       archive.investigation.sourceInstallationId,
       "investigation",
@@ -787,7 +888,7 @@ describe("portable investigation service", () => {
     const row = await fixture();
     const path = join(row.root, "blobs", row.evidenceHash.slice(0, 2), row.evidenceHash);
     await rm(path);
-    await expect(row.portable.exportArchive(row.caseId, ACTOR, false)).rejects.toMatchObject({
+    await expect(row.portable.exportArchive(row.caseId, ACTOR, false, true)).rejects.toMatchObject({
       code: "integrity_failure",
     } satisfies Partial<PortableServerError>);
   });
@@ -795,7 +896,7 @@ describe("portable investigation service", () => {
   it("rejects a tampered archive without reflecting planted content", async () => {
     const row = await fixture();
     const archive = JSON.parse(
-      JSON.stringify(await row.portable.exportArchive(row.caseId, ACTOR, false)),
+      JSON.stringify(await row.portable.exportArchive(row.caseId, ACTOR, false, true)),
     ) as PortableArchiveV1;
     archive.investigation.investigation.title = "PLANTED-ARCHIVE-CONTENT";
     await expect(
@@ -845,7 +946,7 @@ describe("portable investigation routes", () => {
     const app = await appFor(row);
     try {
       const lead = await login(app, "operator-north", "fixture-operator-secret");
-      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
       const identityMap = identityMapFor(archive);
       const response = await app.inject({
         method: "POST",
@@ -942,7 +1043,7 @@ describe("portable investigation routes", () => {
     try {
       const lead = await login(app, "operator-north", "fixture-operator-secret");
       const archive = JSON.parse(
-        JSON.stringify(await row.portable.exportArchive(row.caseId, ACTOR, false)),
+        JSON.stringify(await row.portable.exportArchive(row.caseId, ACTOR, false, true)),
       ) as PortableArchiveV1;
       archive.investigation.investigation.title = "PLANTED-ARCHIVE-CONTENT";
       const response = await app.inject({
@@ -990,7 +1091,7 @@ describe("portable investigation routes", () => {
 describe("portable investigation apply", () => {
   it("applies an exact reconstruction once, preserves attribution-only people, and replays", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1023,6 +1124,50 @@ describe("portable investigation apply", () => {
     expect(imported?.participants.some((item) => item.identityId === "actor-historical-reviewer")).toBe(
       false,
     );
+    const archivedJob = archive.investigation.triageJobs[0];
+    const restoredJob = (await row.triageRuns.list(applied.investigationId, ACTOR, false))[0];
+    if (!archivedJob || !restoredJob) throw new Error("portable triage history is missing");
+    expect(restoredJob).toMatchObject({
+      status: archivedJob.status,
+      sameSnapshot: archivedJob.sameSnapshot,
+      agreementNotice: archivedJob.agreementNotice,
+      createdAt: archivedJob.createdAt,
+      updatedAt: archivedJob.updatedAt,
+      startedAt: archivedJob.startedAt,
+      finishedAt: archivedJob.finishedAt,
+      cancelRequestedAt: archivedJob.cancelRequestedAt,
+      stoppedReason: archivedJob.stoppedReason,
+      request: {
+        mode: archivedJob.requestMode,
+        strategyId: archivedJob.strategyId,
+        question: archivedJob.question,
+        policyFingerprint: archivedJob.policyFingerprint,
+        taskFingerprint: archivedJob.taskFingerprint,
+      },
+    });
+    expect(restoredJob.candidates.map((candidate) => ({
+      candidateId: candidate.candidateId,
+      status: candidate.status,
+      benchmarkRunId: candidate.benchmarkRunId,
+      outputHash: candidate.outputHash,
+      summary: candidate.summary,
+      unknowns: candidate.unknowns,
+      errorCode: candidate.errorCode,
+      startedAt: candidate.startedAt,
+      finishedAt: candidate.finishedAt,
+      privacyClass: candidate.privacyClass,
+    }))).toEqual(archivedJob.candidates.map((candidate) => ({
+      candidateId: candidate.candidateId,
+      status: candidate.status,
+      benchmarkRunId: candidate.benchmarkRunId,
+      outputHash: candidate.outputHash,
+      summary: candidate.summary,
+      unknowns: candidate.unknowns,
+      errorCode: candidate.errorCode,
+      startedAt: candidate.startedAt,
+      finishedAt: candidate.finishedAt,
+      privacyClass: candidate.privacyClass,
+    })));
 
     const replay = await row.portable.apply(
       archive,
@@ -1043,9 +1188,60 @@ describe("portable investigation apply", () => {
     expect(listed).toHaveLength(2);
   });
 
+  it("rejects resealed nonterminal history and blocks legacy incomplete candidate state", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const validPreview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+
+    for (const status of ["queued", "running"] as const) {
+      const nonterminal = structuredClone(archive);
+      const job = nonterminal.investigation.triageJobs[0];
+      if (!job) throw new Error("portable triage job is missing");
+      (job as unknown as { status: string }).status = status;
+      await expect(row.portable.preflight(
+        nonterminal,
+        { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+        ACTOR,
+        false,
+      )).rejects.toMatchObject({ code: "archive_invalid" });
+      await expect(row.portable.apply(
+        nonterminal,
+        applyInput(validPreview.apply.confirmationToken as string, identityMap),
+        ACTOR,
+        false,
+      )).rejects.toMatchObject({ code: "archive_invalid" });
+    }
+
+    const legacyIncomplete = resealArchive(archive, (investigation) => {
+      const candidate = investigation.triageJobs[0]?.candidates[0];
+      if (!candidate) throw new Error("portable triage candidate is missing");
+      delete candidate.status;
+    });
+    const legacyPreview = await row.portable.preflight(
+      legacyIncomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(legacyPreview.report.exactReconstruction).toBe(false);
+    expect(legacyPreview.apply.confirmationToken).toBeNull();
+    expect(legacyPreview.report.reconstructionReasons).toContainEqual(
+      expect.objectContaining({
+        path: "$.investigation.triageJobs[0].candidates[0]",
+        detail: "legacy triage candidate state cannot round-trip exactly",
+      }),
+    );
+  });
+
   it("materializes detached supplied bytes and round-trips supported archive fields honestly", async () => {
     const row = await fixture();
-    const original = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const detached = detachedArchiveFor(original, row.evidenceHash);
     const blob = join(row.root, "blobs", row.evidenceHash.slice(0, 2), row.evidenceHash);
     const meta = `${blob}.meta.json`;
@@ -1075,7 +1271,7 @@ describe("portable investigation apply", () => {
     expect(await row.store.verify(row.evidenceHash)).toBe(true);
     expect(await row.store.get(row.evidenceHash)).toEqual(LOG_BYTES);
 
-    const restored = await row.portable.exportArchive(applied.investigationId, ACTOR, false);
+    const restored = await row.portable.exportArchive(applied.investigationId, ACTOR, false, true);
     expect(restored.investigation.investigation).toMatchObject({
       title: original.investigation.investigation.title,
       problemStatement: original.investigation.investigation.problemStatement,
@@ -1113,7 +1309,7 @@ describe("portable investigation apply", () => {
 
   it("rolls back promoted evidence bytes when a later promotion boundary fails", async () => {
     const row = await fixture();
-    const original = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const detached = detachedArchiveFor(original, row.evidenceHash);
     const blob = join(row.root, "blobs", row.evidenceHash.slice(0, 2), row.evidenceHash);
     await rm(blob, { force: true });
@@ -1165,7 +1361,7 @@ describe("portable investigation apply", () => {
 
   it("rejects duplicate, unrequested, and non-canonical supplied blobs", async () => {
     const row = await fixture();
-    const original = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const detached = detachedArchiveFor(original, row.evidenceHash);
     const identityMap = identityMapFor(detached.archive);
     const preflight = (suppliedBlobs: typeof detached.suppliedBlobs) =>
@@ -1203,7 +1399,7 @@ describe("portable investigation apply", () => {
 
   it("replays after service restart and scopes same-archive replay to the applying actor", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1270,23 +1466,28 @@ describe("portable investigation apply", () => {
     );
     expect(otherApplied.status).toBe("applied");
     expect(otherApplied.investigationId).not.toBe(first.investigationId);
+    const historicalMappedUsername = "historical-canonical-west";
     const importedCase = await row.caseStore.getCase(otherApplied.investigationId);
     expect(importedCase?.createdBy).toBe(other.id);
-    expect(importedCase?.createdByUsername).toBe(other.username);
+    expect(importedCase?.createdByUsername).toBe(historicalMappedUsername);
     const revisions = await row.caseStore.listLatestRevisions(otherApplied.investigationId);
     expect(revisions.filter((item) => item.authorId === other.id).length).toBeGreaterThan(0);
     expect(revisions.filter((item) => item.authorId === other.id).every(
-      (item) => item.authorUsername === other.username,
+      (item) => item.authorUsername === historicalMappedUsername,
     )).toBe(true);
     const jobs = await row.triageRuns.list(otherApplied.investigationId, other, true);
     expect(jobs.every(
-      (job) => job.requestedBy === other.id && job.requestedByUsername === other.username,
+      (job) => job.requestedBy === other.id && job.requestedByUsername === historicalMappedUsername,
+    )).toBe(true);
+    const restoredExperiments = await row.experiments.list(otherApplied.investigationId, other, true);
+    expect(restoredExperiments.flatMap((experiment) => experiment.decisions).every(
+      (decision) => decision.authorUsername === historicalMappedUsername,
     )).toBe(true);
   });
 
   it("refuses metadata-only, unresolved identities, tamper, stale catalogs, and substituted maps before mutation", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const before = (await row.cases.listCases(ACTOR, true)).length;
 
@@ -1377,7 +1578,7 @@ describe("portable investigation apply", () => {
       const lead = await login(app, "operator-north", "fixture-operator-secret");
       const otherLead = await login(app, "reviewer-west", "fixture-reviewer-secret");
       const viewer = await login(app, "viewer-west", "fixture-viewer-secret");
-      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
       const identityMap = identityMapFor(archive);
       const preview = await app.inject({
         method: "POST",
@@ -1417,7 +1618,7 @@ describe("portable investigation apply", () => {
 
   it("rolls back memory stores when a later write fails and isolates snapshots", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1506,7 +1707,7 @@ describe("portable investigation apply", () => {
 
   it("applies concurrently as one write plus an idempotent replay", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,
@@ -1548,7 +1749,7 @@ describe("portable investigation apply", () => {
 describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", () => {
   it("rolls back a partial PostgreSQL apply", async () => {
     const row = await fixture();
-    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
     const identityMap = identityMapFor(archive);
     const preview = await row.portable.preflight(
       archive,

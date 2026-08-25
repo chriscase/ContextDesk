@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  BROWSER_MUTATION_HEADERS,
   FIXTURE_ROOT,
   caseIdForTitle,
   createCase,
@@ -62,6 +63,7 @@ test.describe("responsive layout and basic accessibility", () => {
     await createCase(page, title);
     const caseId = await caseIdForTitle(page, title);
     const imported = await page.request.post(`/api/cases/${caseId}/experiments`, {
+      headers: BROWSER_MUTATION_HEADERS,
       data: TWO_APPROACH_PACKAGE,
     });
     expect(imported.ok(), await imported.text()).toBeTruthy();

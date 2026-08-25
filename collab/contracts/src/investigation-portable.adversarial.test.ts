@@ -1151,6 +1151,18 @@ describe("portable investigation adversarial lab", () => {
     );
   });
 
+  it("rejects queued or running triage history even when the archive is resealed", () => {
+    for (const status of ["queued", "running"] as const) {
+      const nonterminal = syntheticSeal();
+      const job = nonterminal.triageJobs[0];
+      if (!job) throw new Error("synthetic triage job is missing");
+      (job as unknown as { status: string }).status = status;
+      expect(() => parsePortableInvestigation(reseal(nonterminal)), status).toThrow(
+        /expected one of \[completed, partial, failed, timed_out, cancelled\]/,
+      );
+    }
+  });
+
   it("binds every Situation field into investigation integrity and semantic fingerprints", () => {
     const before = syntheticSeal();
     const mutations: Array<[string, (row: PortableInvestigationV1) => void]> = [

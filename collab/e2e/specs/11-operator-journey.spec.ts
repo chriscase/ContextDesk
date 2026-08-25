@@ -201,8 +201,15 @@ test.describe("complete war-room operator journey", () => {
       completedLanes.filter({ hasText: "ministral-3-14b-instruct-2512" }),
     ).toContainText("settled");
     await expect(page.getByText(/usage unknown · cost unknown/).first()).toBeVisible();
+    // Analyze now presents the same recorded lane twice: once as a readable
+    // workstream and once in the technical run history. Assert each surface.
     await expect(
-      page.getByText(/Synthetic reviewer result: inspect the 1 frozen evidence item/),
+      completedLanes.getByText(/Synthetic reviewer result: inspect the 1 frozen evidence item/),
+    ).toBeVisible();
+    await expect(
+      analyze
+        .locator(".workstreams__card")
+        .getByText(/Synthetic reviewer result: inspect the 1 frozen evidence item/),
     ).toBeVisible();
 
     await page.getByRole("button", { name: "Review in Experiment Lab" }).first().click();

@@ -61,6 +61,8 @@ export function directoryGroupFilter(term: string): string {
 }
 
 export class LdapAuthAdapter implements AuthAdapter {
+  readonly provenance = "ldap" as const;
+
   constructor(
     private readonly config: LdapConfig,
     private readonly log: AuthLog,

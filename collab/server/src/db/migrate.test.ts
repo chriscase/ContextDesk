@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { adminUrl, withDisposableDb } from "../test/disposable-db.js";
-import { migrateDown, migrateUp } from "./migrate.js";
+import { latestMigrationVersion, listMigrations, migrateDown, migrateUp } from "./migrate.js";
+
+describe("migration versions", () => {
+  it("pins the canonical PostgreSQL head after user profiles", () => {
+    const versions = listMigrations().map((file) => file.version);
+    expect(versions).toContain("015_user_profiles");
+    expect(versions).toContain("016_contribution_write_intents");
+    expect(latestMigrationVersion()).toBe("016_contribution_write_intents");
+  });
+});
 
 describe.skipIf(!adminUrl())("migrations", () => {
   it("applies and rolls back all migrations in order", async () => {
@@ -21,6 +30,8 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("012_case_situation");
       expect(up.applied).toContain("013_corpus_intake");
       expect(up.applied).toContain("014_portable_apply_intents");
+      expect(up.applied).toContain("015_user_profiles");
+      expect(up.applied).toContain("016_contribution_write_intents");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -74,6 +85,8 @@ describe.skipIf(!adminUrl())("migrations", () => {
           '33333333-3333-4333-8333-333333333333'
         )
       `)).rejects.toThrow(/evidence_artifacts_intake_batch_fk/);
+      expect((await migrateDown(client)).rolledBack).toBe("016_contribution_write_intents");
+      expect((await migrateDown(client)).rolledBack).toBe("015_user_profiles");
       expect((await migrateDown(client)).rolledBack).toBe("014_portable_apply_intents");
       expect((await migrateDown(client)).rolledBack).toBe("013_corpus_intake");
       const intakeTable = await client.query<{ to_regclass: string | null }>(
@@ -125,6 +138,8 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("012_case_situation");
       expect(dry.pending).toContain("013_corpus_intake");
       expect(dry.pending).toContain("014_portable_apply_intents");
+      expect(dry.pending).toContain("015_user_profiles");
+      expect(dry.pending).toContain("016_contribution_write_intents");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

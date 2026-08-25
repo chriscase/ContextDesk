@@ -19,6 +19,7 @@ import {
   MutableGroupRoleMap,
   parseGroupRoleMap,
   PgGroupRoleStore,
+  bindRecoveryAuthorization,
   type GroupRoleStore,
 } from "./modules/authz/index.js";
 import { CatalogService, PgCatalogStore, type CatalogStore } from "./modules/catalog/index.js";
@@ -35,6 +36,12 @@ import {
   type TriageJobStore,
 } from "./modules/triage-runs/index.js";
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
+import {
+  PgLocalGrantStore,
+  PgUserProfileStore,
+  type LocalGrantStore,
+  type UserProfileStore,
+} from "./modules/people/index.js";
 import {
   loadPortableInstallationId,
   memoryApplyBoundary,
@@ -56,6 +63,8 @@ interface StorageRuntime {
   experiments: ExperimentStore;
   jobs: TriageJobStore;
   applyState: PortableApplyStateStore;
+  profiles: UserProfileStore;
+  grants: LocalGrantStore;
   runPortableTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
   presence: PresenceService;
 }
@@ -76,6 +85,8 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       experiments: runtime.experiments,
       jobs: runtime.jobs,
       applyState: runtime.applyState,
+      profiles: runtime.profiles,
+      grants: runtime.grants,
       runPortableTransaction: runtime.runPortableTransaction,
       presence: new PresenceService(),
     };
@@ -95,6 +106,8 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     experiments: new PgExperimentStore(pool),
     jobs: new PgTriageJobStore(pool),
     applyState: new PgPortableApplyStateStore(pool),
+    profiles: new PgUserProfileStore(pool),
+    grants: new PgLocalGrantStore(pool),
     presence: new PresenceService(new PgPresenceBackend(pool)),
   };
 }
@@ -155,6 +168,12 @@ async function main(): Promise<void> {
     cases: domain,
     audit,
     jobs: storage.jobs,
+    recoveryAuthorization: bindRecoveryAuthorization({
+      lookupGroups: (identity) => adapter.lookupGroups(identity),
+      roles,
+      profiles: storage.profiles,
+      grants: storage.grants,
+    }),
     ...(process.env.COLLAB_TRIAGE_WORKER_ID?.trim()
       ? { workerId: process.env.COLLAB_TRIAGE_WORKER_ID.trim() }
       : {}),
@@ -192,11 +211,12 @@ async function main(): Promise<void> {
             : {}),
         })
       : null;
+  const installationId = await loadPortableInstallationId(
+    config.evidenceRoot,
+    process.env.COLLAB_INSTALLATION_ID,
+  );
   const portable = new PortableInvestigationService({
-    installationId: await loadPortableInstallationId(
-      config.evidenceRoot,
-      process.env.COLLAB_INSTALLATION_ID,
-    ),
+    installationId,
     cases: domain,
     catalog,
     imports,
@@ -226,6 +246,9 @@ async function main(): Promise<void> {
     experiments,
     exporter,
     portable,
+    installationId,
+    profiles: storage.profiles,
+    grants: storage.grants,
     security: {
       auth: {
         adapter,

@@ -1,3 +1,4 @@
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type {
   AdminDirectoryGroupV1,
   AdminDirectoryIdentityV1,
@@ -20,10 +21,14 @@ const LOCAL_DIRECTORY_SCAN_LIMIT = 1_000;
 
 /**
  * Directory/SSO seam. The password argument exists only for the duration of
- * this call. Implementations must not store, cache, hash, or log it.
+ * this call. Implementations must not store, cache, persist a derived secret,
+ * or log it. An ephemeral digest used only to feed a timing-safe compare,
+ * then discarded, is allowed.
  * No module outside `auth` may call this with a password — login routes live here.
  */
 export interface AuthAdapter {
+  /** Which profile provenance a successful authenticate() through this adapter represents. */
+  readonly provenance: "local" | "ldap";
   authenticate(username: string, password: string): Promise<AuthSuccess | null>;
   /**
    * Live directory groups for an already-authenticated identity.
@@ -44,19 +49,31 @@ export interface AuthAdapter {
 }
 
 export class MapAuthAdapter implements AuthAdapter {
+  readonly provenance = "local" as const;
+  /**
+   * Synthetic probe used so unknown-user authenticate() still runs the same
+   * compare work as a known user. Generated per adapter instance, never logged,
+   * never returned, and never a configured user password.
+   */
+  private readonly unknownUserProbe: string;
+
   constructor(
     private readonly users: ReadonlyMap<
       string,
       { password: string; identity: AuthIdentity; groups: string[] }
     >,
-  ) {}
+  ) {
+    this.unknownUserProbe = randomBytes(32).toString("base64");
+  }
 
   async authenticate(
     username: string,
     password: string,
   ): Promise<AuthSuccess | null> {
     const row = this.users.get(username);
-    if (!row || row.password !== password) return null;
+    const expected = row?.password ?? this.unknownUserProbe;
+    const matches = passwordsMatch(password, expected);
+    if (!row || !matches) return null;
     return { identity: row.identity, groups: [...row.groups] };
   }
 
@@ -120,6 +137,17 @@ export class MapAuthAdapter implements AuthAdapter {
       .sort((a, b) => a.name.localeCompare(b.name) || a.dn.localeCompare(b.dn))
       .slice(0, options.limit);
   }
+}
+
+/**
+ * Timing-safe compare of UTF-8 password bytes. SHA-256 is used only to feed
+ * `timingSafeEqual` a fixed-length buffer so a length mismatch cannot throw or
+ * early-return. Digests are ephemeral: never stored, logged, or returned.
+ */
+function passwordsMatch(provided: string, expected: string): boolean {
+  const actual = createHash("sha256").update(provided, "utf8").digest();
+  const candidate = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(actual, candidate);
 }
 
 function localGroupName(group: string): string {

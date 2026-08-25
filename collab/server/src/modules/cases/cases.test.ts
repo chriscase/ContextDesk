@@ -496,7 +496,7 @@ describe("cases timeline evidence provenance", () => {
               method: "POST",
               url: `/api/cases/${caseId}/contributions/${logSummary.id}/revisions`,
               headers: { cookie: alice },
-              payload: { body: "Updated summary; original bytes must stay." },
+              payload: { body: "Updated summary; original bytes must stay.", expectedRevision: 1 },
             })
           ).body,
         ),
@@ -584,7 +584,7 @@ describe("cases timeline evidence provenance", () => {
               method: "POST",
               url: `/api/cases/${caseId}/contributions/${note.id}/revisions`,
               headers: { cookie: alice },
-              payload: { body: "Revised observation after the log upload." },
+              payload: { body: "Revised observation after the log upload.", expectedRevision: 1 },
             })
           ).body,
         ),
@@ -636,10 +636,17 @@ describe("cases timeline evidence provenance", () => {
       );
       expect(statusRes.status).toBe("monitoring");
 
-      const bytesOk = await app.inject({
+      const bytesDeniedMember = await app.inject({
         method: "GET",
         url: `/api/cases/${caseId}/evidence/${logArt.id}/bytes`,
         headers: { cookie: alice },
+      });
+      expect(bytesDeniedMember.statusCode).toBe(403);
+
+      const bytesOk = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/evidence/${logArt.id}/bytes`,
+        headers: { cookie: dave },
       });
       expect(bytesOk.statusCode).toBe(200);
       expect(
@@ -900,6 +907,77 @@ describe("cases timeline evidence provenance", () => {
       expect(response.body).not.toContain(privateBody);
       expect(response.body).not.toContain(eveCase.id);
       expect(response.body).not.toContain(eveCase.title);
+    });
+  });
+
+  it("replays identical contribution writes and requires expectedRevision on revise", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Contribution integrity fixture" },
+      })).body));
+      const first = parseContribution(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/contributions`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "note",
+          body: "Authorized retry body.",
+          idempotencyKey: "msg-syn-http1",
+        },
+      })).body));
+      const replay = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/contributions`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "note",
+          body: "Authorized retry body.",
+          idempotencyKey: "msg-syn-http1",
+        },
+      });
+      expect(replay.statusCode).toBe(200);
+      expect(parseContribution(JSON.parse(replay.body)).id).toBe(first.id);
+      const mismatch = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/contributions`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "note",
+          body: "Different authorized body.",
+          idempotencyKey: "msg-syn-http1",
+        },
+      });
+      expect(mismatch.statusCode).toBe(409);
+      expect(JSON.parse(mismatch.body)).toEqual({ error: "contribution_conflict" });
+
+      const missingRev = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/contributions/${first.id}/revisions`,
+        headers: { cookie: alice },
+        payload: { body: "Missing expected revision." },
+      });
+      expect(missingRev.statusCode).toBe(400);
+      expect(JSON.parse(missingRev.body)).toEqual({ error: "expectedRevision is required" });
+
+      const revised = parseContribution(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/contributions/${first.id}/revisions`,
+        headers: { cookie: alice },
+        payload: { body: "Second revision.", expectedRevision: 1 },
+      })).body));
+      expect(revised.revision).toBe(2);
+      const stale = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/contributions/${first.id}/revisions`,
+        headers: { cookie: alice },
+        payload: { body: "Stale write.", expectedRevision: 1 },
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(JSON.parse(stale.body)).toEqual({ error: "contribution_conflict", currentRevision: 2 });
     });
   });
 });

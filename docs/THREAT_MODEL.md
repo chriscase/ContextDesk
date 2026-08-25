@@ -77,7 +77,7 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 
 | Asset | Trust |
 |-------|--------|
-| Update payloads | Fetched over HTTPS from GitHub Releases `latest.json` only |
+| Update payloads | Fetched over HTTPS from GitHub Releases `latest.json` only. GA assemble and promotion require that file's URLs bind to `/releases/download/<exact-tag>/` artifacts (never `/latest/` or another tag), cryptographically verify each Tauri-wrapped minisign signature against the pinned updater key, and re-hash the re-downloaded draft asset set before publish |
 | Integrity | Minisign / Ed25519 signature verified against **pinned** `plugins.updater.pubkey` in the app binary |
 | Private key | CI secret only; never in repo, never over IPC, never in webview |
 | Install decision | Explicit user confirmation in Settings (HardWrite-style); no silent auto-install |

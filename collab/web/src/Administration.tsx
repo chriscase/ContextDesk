@@ -15,7 +15,20 @@ import {
   type AppRole,
 } from "@cd-collab/contracts/admin";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { AdminPeoplePanel } from "./AdminPeoplePanel.js";
+import { ComponentHealthPanel } from "./ComponentHealthPanel.js";
 import { protectedApiFetch } from "./protected-api.js";
+
+type AdminTab = "roles" | "people";
+
+const ADMIN_TAB_PATHS: Record<AdminTab, string> = {
+  roles: "/administration",
+  people: "/admin/people",
+};
+
+function adminTabFromPathname(pathname: string): AdminTab {
+  return pathname === "/admin/people" ? "people" : "roles";
+}
 
 const ROLE_LABELS: Record<AppRole, string> = {
   viewer: "Viewer",
@@ -111,7 +124,10 @@ function Confirmation(props: {
   );
 }
 
-export function Administration() {
+export function Administration(props: {
+  tab?: AdminTab;
+  onSelectTab?: (tab: AdminTab) => void;
+} = {}) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const newRoleRef = useRef<HTMLSelectElement>(null);
@@ -130,8 +146,39 @@ export function Administration() {
   const [pending, setPending] = useState<PendingChange | null>(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [uncontrolledTab, setUncontrolledTab] = useState<AdminTab>(() =>
+    adminTabFromPathname(window.location.pathname),
+  );
+  const activeTab = props.tab ?? uncontrolledTab;
 
   useEffect(() => headingRef.current?.focus(), []);
+
+  useEffect(() => {
+    document.title =
+      activeTab === "people"
+        ? "People · Administration · ContextDesk War Room"
+        : "Administration · ContextDesk War Room";
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (props.tab) return undefined;
+    function onPopState() {
+      setUncontrolledTab(adminTabFromPathname(window.location.pathname));
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [props.tab]);
+
+  function selectTab(tab: AdminTab) {
+    if (props.onSelectTab) {
+      props.onSelectTab(tab);
+      return;
+    }
+    setUncontrolledTab(tab);
+    if (window.location.pathname !== ADMIN_TAB_PATHS[tab]) {
+      window.history.pushState(null, "", ADMIN_TAB_PATHS[tab]);
+    }
+  }
 
   const refreshMappings = useCallback(async () => {
     setLoadingMappings(true);
@@ -308,8 +355,48 @@ export function Administration() {
         </p>
       </header>
 
+      <div className="admin-people-tabs" role="tablist" aria-label="Administration sections">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "roles"}
+          aria-controls="administration-roles-panel"
+          id="administration-tab-roles"
+          onClick={() => selectTab("roles")}
+        >
+          Group role mappings
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "people"}
+          aria-controls="administration-people-panel"
+          id="administration-tab-people"
+          onClick={() => selectTab("people")}
+        >
+          People
+        </button>
+      </div>
+
+      <div
+        id="administration-people-panel"
+        role="tabpanel"
+        aria-labelledby="administration-tab-people"
+        hidden={activeTab !== "people"}
+      >
+        {activeTab === "people" ? <AdminPeoplePanel /> : null}
+      </div>
+
+      <div
+        id="administration-roles-panel"
+        role="tabpanel"
+        aria-labelledby="administration-tab-roles"
+        hidden={activeTab !== "roles"}
+      >
       {error ? <p ref={errorRef} tabIndex={-1} className="administration__message administration__message--error" role="alert">{error}</p> : null}
       {status ? <p ref={statusRef} tabIndex={-1} className="administration__message" role="status">{status}</p> : null}
+
+      <ComponentHealthPanel />
 
       <section className="administration__panel" aria-labelledby="role-mappings-title">
         <div className="administration__panel-heading">
@@ -457,6 +544,7 @@ export function Administration() {
           Permissions come only from the persistent mappings shown above.
         </p>
       </aside>
+      </div>
 
       {pending ? <Confirmation change={pending} onCancel={closeConfirmation} onConfirm={() => void applyChange(pending)} /> : null}
     </section>

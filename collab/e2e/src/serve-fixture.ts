@@ -28,6 +28,10 @@ import { ImportService, MemoryRunStore } from "../../server/src/modules/import/i
 import { ExperimentService, MemoryExperimentStore } from "../../server/src/modules/experiments/index.js";
 import { PresenceService } from "../../server/src/modules/presence/index.js";
 import {
+  MemoryLocalGrantStore,
+  MemoryUserProfileStore,
+} from "../../server/src/modules/people/index.js";
+import {
   loadPortableInstallationId,
   memoryApplyBoundary,
   MemoryPortableApplyStateStore,
@@ -70,6 +74,8 @@ async function main(): Promise<void> {
   const experimentStore = new MemoryExperimentStore();
   const jobStore = new MemoryTriageJobStore();
   const applyState = new MemoryPortableApplyStateStore();
+  const profiles = new MemoryUserProfileStore();
+  const grants = new MemoryLocalGrantStore();
   const catalog = new CatalogService(catalogStore, audit);
   const domain = new CaseService(store, audit, caseStore, catalog);
   const imports = new ImportService({
@@ -178,6 +184,8 @@ async function main(): Promise<void> {
     experiments,
     exporter,
     portable,
+    profiles,
+    grants,
     security: {
       auth: {
         adapter: new MapAuthAdapter(adapterUsers()),

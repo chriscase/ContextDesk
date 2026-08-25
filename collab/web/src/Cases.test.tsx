@@ -35,6 +35,8 @@ const fixtureCases = [
   },
 ];
 
+const ACTIVITY_CASE_ID = "11111111-1111-4111-8111-111111111111";
+
 function stubCaseFetch(options?: {
   cases?: unknown[];
   onRequest?: (url: string, init?: RequestInit) => Promise<unknown> | null;
@@ -49,8 +51,8 @@ function stubCaseFetch(options?: {
     if (url === "/api/catalog/sources") {
       return { ok: true, json: async () => ({ sources: [] }) };
     }
-    if (url === "/api/activity?limit=30") {
-      return { ok: true, json: async () => ({ activities: [] }) };
+    if (url === "/api/investigation-activity?limit=30") {
+      return { ok: true, json: async () => ({ items: [] }) };
     }
     if (url.endsWith("/timeline")) {
       return { ok: true, json: async () => ({ events: [] }) };
@@ -393,24 +395,25 @@ describe("war room overview", () => {
 
   it("shows cross-investigation activity with a direct work-item route", async () => {
     const onActivityOpen = vi.fn();
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
     stubCaseFetch({
       onRequest: (url) => {
-        if (url === "/api/activity?limit=30") {
+        if (url === "/api/investigation-activity?limit=30") {
           return Promise.resolve({
             ok: true,
             json: async () => ({
-              activities: [
+              items: [
                 {
-                  caseId: "c1",
-                  caseTitle: "Fixture incident",
-                  caseStatus: "open",
-                  caseSeverity: "high",
-                  seq: 8,
-                  kind: "contribution_created",
-                  actorUsername: "alice",
-                  targetId: "message-8",
+                  activityId: "a".repeat(64),
                   occurredAt: "2026-08-24T12:00:00.000Z",
-                  details: { kind: "message" },
+                  actorLabel: "alice",
+                  investigationId: ACTIVITY_CASE_ID,
+                  investigationTitle: "Fixture incident",
+                  summary: "added a discussion comment",
+                  resolvedRoute: `/investigations/${ACTIVITY_CASE_ID}/situation?section=discussion&item=message-8&kind=comment#discussion`,
+                  provenanceClass: "human",
+                  humanFinding: false,
                 },
               ],
             }),
@@ -420,37 +423,41 @@ describe("war room overview", () => {
       },
     });
     render(<Cases roles={["case-lead"]} onActivityOpen={onActivityOpen} />);
-    const activity = await screen.findByRole("button", {
+    const activity = await screen.findByRole("link", {
       name: /alice added a discussion comment Fixture incident/,
     });
     fireEvent.click(activity);
-    expect(onActivityOpen).toHaveBeenCalledWith("c1", "situation", {
+    expect(onActivityOpen).toHaveBeenCalledWith(ACTIVITY_CASE_ID, "situation", {
       section: "discussion",
       item: "message-8",
       itemKind: "comment",
       lane: null,
       experiment: null,
     });
+    fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(writeText).toHaveBeenCalledWith(
+      `http://localhost:3000/investigations/${ACTIVITY_CASE_ID}/situation?section=discussion&item=message-8&kind=comment#discussion`,
+    );
+    expect(await screen.findByText("Copied.")).toBeTruthy();
   });
 
   it("keeps the overview bounded when many activities are recorded", async () => {
     stubCaseFetch({
       onRequest: (url) => {
-        if (url !== "/api/activity?limit=30") return null;
+        if (url !== "/api/investigation-activity?limit=30") return null;
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            activities: Array.from({ length: 12 }, (_, index) => ({
-              caseId: "c1",
-              caseTitle: "Fixture incident",
-              caseStatus: "open",
-              caseSeverity: "high",
-              seq: 12 - index,
-              kind: "contribution_created",
-              actorUsername: "alice",
-              targetId: `message-${index}`,
+            items: Array.from({ length: 12 }, (_, index) => ({
+              activityId: String(index).padStart(64, "a"),
               occurredAt: `2026-08-24T12:${String(index).padStart(2, "0")}:00.000Z`,
-              details: { kind: "message" },
+              actorLabel: "alice",
+              investigationId: ACTIVITY_CASE_ID,
+              investigationTitle: "Fixture incident",
+              summary: "added a discussion comment",
+              resolvedRoute: `/investigations/${ACTIVITY_CASE_ID}/situation?section=discussion&item=message-${index}&kind=comment#discussion`,
+              provenanceClass: "human",
+              humanFinding: false,
             })),
           }),
         });
@@ -807,6 +814,55 @@ describe("focused investigation view", () => {
 
     expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Situation" })).toBeTruthy();
+    expect(screen.getByText(/Opened Discussion to the comment this activity recorded/)).toBeTruthy();
+  });
+
+  it("explains a job-level run locator instead of treating it as a missing workstream", async () => {
+    stubCaseFetch();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        focusCaseId="c1"
+        stage="analyze"
+        focus={{
+          section: "triage-lane-runner",
+          item: "run-1",
+          itemKind: "triage-run",
+          lane: null,
+          experiment: null,
+        }}
+        onOpenCase={() => {}}
+        onStageChange={() => {}}
+      />,
+    );
+    expect(
+      await screen.findByText(/Opened the workstream run this activity named/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/not part of this investigation/)).toBeNull();
+    expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+  });
+
+  it("opens Discussion from a legacy case-discussion locator alias", async () => {
+    stubCaseFetch();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c1"
+        stage="situation"
+        focus={{
+          section: "case-discussion",
+          item: "message-8",
+          itemKind: "comment",
+          lane: null,
+          experiment: null,
+        }}
+        onOpenCase={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
+    expect(screen.getByText(/Opened Discussion to the comment this activity recorded/)).toBeTruthy();
   });
 
   it("does not render mutation controls in static read-only mode", async () => {
@@ -1733,5 +1789,154 @@ describe("case discussion panel", () => {
     await within(panel).findByText("Message saved to the case record.");
     fireEvent.keyDown(panel, { key: "Escape" });
     expect(screen.queryByRole("complementary", { name: "Discussion" })).toBeNull();
+  });
+});
+
+describe("workstreams in the Analyze stage", () => {
+  const workstreamRow = {
+    key: "run-1:reviewer-lane",
+    caseId: "c1",
+    label: "Reviewer workstream — fixture-reviewer-a",
+    purpose: "What paused the fixture worker?",
+    operatorKind: "ai_assisted",
+    operatorLabel: "AI-assisted workstream — output is analysis, never a human finding",
+    assignedTo: "alice",
+    strategyLabel: "Standard synthetic strategy",
+    role: "reviewer",
+    inputs: {
+      question: "What paused the fixture worker?",
+      snapshotLabel: "Frozen evidence set 1",
+      snapshotEvidenceCount: 1,
+      snapshotFrozenAt: "2026-08-24T06:13:00.000Z",
+      sameSnapshot: true,
+      snapshotProofLabel: "Ran against the exact frozen evidence set, proven by the host.",
+    },
+    statusCode: "completed",
+    lifecycle: "settled",
+    statusLabel: "Completed",
+    statusDetail: "Finished and recorded its findings.",
+    startedAt: "2026-08-24T06:14:10.000Z",
+    finishedAt: "2026-08-24T06:14:25.000Z",
+    findings: "The fixture worker restarted while the queue was draining.",
+    outcome: "Recorded a written finding; it cited 0 evidence items.",
+    evidenceCited: [],
+    unknowns: [],
+    activity: [
+      { at: "2026-08-24T06:14:00.000Z", label: "Run queued", actor: "alice", detail: null },
+    ],
+    rerun: { isRerun: false, parentKey: null, note: "Not a rerun." },
+    agreementNotice: "Agreement is not proof of correctness.",
+    technical: {
+      workstreamKey: "run-1:reviewer-lane",
+      runId: "run-1",
+      candidateId: "reviewer-lane",
+      snapshotId: "snapshot-1",
+      snapshotFingerprint: "f".repeat(64),
+      requestFingerprint: "a".repeat(64),
+      taskFingerprint: "task-fingerprint",
+      strategyId: "contextdesk.standard.synthetic",
+      modelId: "fixture-reviewer-a",
+      modelVersion: null,
+      provider: "synthetic",
+      profileId: null,
+      outputHash: null,
+      benchmarkRunId: null,
+      parentRunId: null,
+      errorCode: null,
+      privacyClass: "share_safe",
+    },
+  };
+
+  function stubWithWorkstreams() {
+    return stubCaseFetch({
+      onRequest: (url) => {
+        if (url.endsWith("/workstreams")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ caseId: "c1", workstreams: [workstreamRow] }),
+          });
+        }
+        if (url.endsWith("/evidence") || url.endsWith("/snapshots")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ artifacts: [], snapshots: [] }),
+          });
+        }
+        if (url.endsWith("/triage-runs") || url === "/api/triage-profiles" || url === "/api/triage-capabilities") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ jobs: [], profiles: [], syntheticAvailable: true }),
+          });
+        }
+        return null;
+      },
+    });
+  }
+
+  it("lists workstreams beside the evidence board when none is opened", async () => {
+    stubWithWorkstreams();
+    render(<Cases roles={["case-lead"]} focusCaseId="c1" stage="analyze" onOpenCase={() => {}} onStageChange={() => {}} />);
+    expect(await screen.findByRole("heading", { name: "Workstreams" })).toBeTruthy();
+    expect(
+      await screen.findByRole("link", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    // The evidence board and the launcher are part of the same stage.
+    expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+  });
+
+  it("makes an opened workstream the stage, not a highlight beside everything else", async () => {
+    stubWithWorkstreams();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        focusCaseId="c1"
+        stage="analyze"
+        focus={{
+          section: "workstreams",
+          item: "run-1:reviewer-lane",
+          itemKind: "workstream",
+          lane: "run-1:reviewer-lane",
+          experiment: null,
+        }}
+        onOpenCase={() => {}}
+        onStageChange={() => {}}
+      />,
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    expect(screen.getByText("The fixture worker restarted while the queue was draining.")).toBeTruthy();
+    await waitFor(() => {
+      const board = screen.queryByRole("heading", { name: "Evidence and snapshots" });
+      expect(board).toBeNull();
+    });
+    expect(screen.getByRole("link", { name: "All workstreams" })).toBeTruthy();
+  });
+
+  it("gives keyboard focus to the opened workstream, not to a hidden panel", async () => {
+    stubWithWorkstreams();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        focusCaseId="c1"
+        stage="analyze"
+        focus={{
+          section: "workstreams",
+          item: "run-1:reviewer-lane",
+          itemKind: "workstream",
+          lane: "run-1:reviewer-lane",
+          experiment: null,
+        }}
+        onOpenCase={() => {}}
+        onStageChange={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" });
+    await waitFor(() => {
+      const record = document.querySelector(
+        "[data-route-item='run-1:reviewer-lane'][data-route-kind='workstream']",
+      );
+      expect(document.activeElement).toBe(record);
+    });
   });
 });

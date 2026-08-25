@@ -10,6 +10,7 @@ import {
   PROVENANCE_SCHEMA_ID,
   SNAPSHOT_LIST_SCHEMA_ID,
   TIMELINE_SCHEMA_ID,
+  isContributionIdempotencyKey,
   type ArtifactKind,
   type AuthErrorV1,
   type CaseSeverity,
@@ -20,11 +21,12 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import {
-  resolveActiveSession,
-  type ActiveSessionDeps,
-} from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+  requireSessionCapability,
+  type AuthorizedSession,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 import {
+  ContributionConflictError,
   LegalHoldError,
   SituationConflictError,
   type Actor,
@@ -90,7 +92,7 @@ function situationInput(body: Record<string, unknown>):
 function domainError(
   reply: { code: (status: number) => unknown },
   err: unknown,
-): { error: string; currentVersion?: number } {
+): { error: string; currentVersion?: number; currentRevision?: number } {
   if (err instanceof LegalHoldError) {
     void reply.code(409);
     return { error: "legal_hold" };
@@ -98,6 +100,12 @@ function domainError(
   if (err instanceof SituationConflictError) {
     void reply.code(409);
     return { error: "situation_conflict", currentVersion: err.currentVersion };
+  }
+  if (err instanceof ContributionConflictError) {
+    void reply.code(409);
+    return err.currentRevision === undefined
+      ? { error: "contribution_conflict" }
+      : { error: "contribution_conflict", currentRevision: err.currentRevision };
   }
   const message = err instanceof Error ? err.message : "invalid";
   if (
@@ -112,19 +120,13 @@ function domainError(
   return { error: message };
 }
 
-interface CaseSessionContext {
-  actor: Actor;
-  isAdmin: boolean;
-  canRead: boolean;
-}
-
 async function requireCaseAccess(
   domain: CaseService,
-  ctx: CaseSessionContext,
+  ctx: AuthorizedSession,
   caseId: string,
   reply: { code: (status: number) => unknown },
 ): Promise<boolean> {
-  if (!ctx.canRead) {
+  if (!ctx.has("investigation:read")) {
     void reply.code(403);
     return false;
   }
@@ -147,13 +149,13 @@ export interface AcceptedDecisionSource {
   ): Promise<
     {
       decisions: { id: string; status: string; text: string; evidenceRefs: string[] }[];
+      snapshotFingerprint?: string | null;
     }[]
   >;
 }
 
 export interface CaseRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   domain: CaseService;
   experiments?: AcceptedDecisionSource;
@@ -163,27 +165,15 @@ export async function registerCaseRoutes(
   app: FastifyInstance,
   deps: CaseRouteDeps,
 ): Promise<void> {
-  async function sessionOf(request: FastifyRequest) {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) return null;
-    const roles = deps.roles.resolve(session.groups);
-    return {
-      actor: { id: session.identity.id, username: session.identity.username },
-      roles,
-      isAdmin: canPerform(roles, "admin"),
-      canRead: canPerform(roles, "read"),
-      canWrite: canPerform(roles, "mutate"),
-      canLead: canPerform(roles, "lead"),
-    };
+  async function sessionOf(request: FastifyRequest, reply: { code: (status: number) => unknown }) {
+    return requireSessionCapability(request, reply, deps.sessionAuth);
   }
 
   app.get("/api/activity", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -196,12 +186,10 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -212,12 +200,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       await deps.audit.append({
         identity: ctx.actor.id,
         action: "case_create",
@@ -263,11 +249,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const id = (request.params as { id: string }).id;
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
@@ -278,12 +262,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/status", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -316,12 +298,10 @@ export async function registerCaseRoutes(
   });
 
   app.patch("/api/cases/:id/situation", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -358,12 +338,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/participants", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -391,12 +369,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/legal-hold", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.isAdmin) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("admin:system_config")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -413,11 +389,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id/timeline", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const id = (request.params as { id: string }).id;
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
@@ -430,11 +404,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id/snapshots", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const id = (request.params as { id: string }).id;
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
@@ -447,12 +419,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/snapshots", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -494,11 +464,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id/board", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const id = (request.params as { id: string }).id;
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
@@ -513,7 +481,14 @@ export async function registerCaseRoutes(
             .reverse()
             .find((decision) => decision.status === "accepted");
           return accepted
-            ? [{ id: accepted.id, statement: accepted.text, evidenceRefs: accepted.evidenceRefs }]
+            ? [{
+              id: accepted.id,
+              statement: accepted.text,
+              evidenceRefs: accepted.evidenceRefs,
+              ...(typeof experiment.snapshotFingerprint === "string"
+                ? { snapshotFingerprint: experiment.snapshotFingerprint }
+                : {}),
+            }]
             : [];
         });
       }
@@ -531,12 +506,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/contributions", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       await deps.audit.append({
         identity: ctx.actor.id,
         action: "contribution_create",
@@ -566,6 +539,7 @@ export async function registerCaseRoutes(
       hypothesisStatus?: HypothesisStatus;
       hypothesisLinks?: { kind: "artifact" | "contribution"; id: string }[];
       sourceId?: string;
+      idempotencyKey?: string;
     } = { kind, body: text };
     const privacy = str(body.privacyClass);
     if (privacy && (PRIVACY_CLASSES as readonly string[]).includes(privacy)) {
@@ -592,6 +566,14 @@ export async function registerCaseRoutes(
     }
     const sourceId = str(body.sourceId);
     if (sourceId) input.sourceId = sourceId;
+    if (Object.prototype.hasOwnProperty.call(body, "idempotencyKey")) {
+      const idempotencyKey = str(body.idempotencyKey);
+      if (idempotencyKey === undefined || !isContributionIdempotencyKey(idempotencyKey)) {
+        void reply.code(400);
+        return { error: "invalid contribution idempotency key" };
+      }
+      input.idempotencyKey = idempotencyKey;
+    }
     try {
       return await deps.domain.addContribution(id, ctx.actor, input, request.ip);
     } catch (err) {
@@ -600,11 +582,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id/contributions", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const id = (request.params as { id: string }).id;
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
@@ -617,12 +597,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/contributions/:cid/revisions", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -641,6 +619,11 @@ export async function registerCaseRoutes(
       void reply.code(400);
       return { error: "clientTime must be a string" };
     }
+    const expectedRevision = body.expectedRevision;
+    if (typeof expectedRevision !== "number" || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
+      void reply.code(400);
+      return { error: "expectedRevision is required" };
+    }
     try {
       return await deps.domain.reviseContribution(
         params.id,
@@ -648,6 +631,7 @@ export async function registerCaseRoutes(
         ctx.actor,
         text,
         request.ip,
+        expectedRevision,
         suppliedClientTime.value,
       );
     } catch (err) {
@@ -656,12 +640,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/contributions/:cid/tombstone", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -682,11 +664,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id/contributions/:cid/provenance", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const params = request.params as { id: string; cid: string };
     if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
       return { error: "not_found" };
@@ -703,12 +683,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/hypotheses/:cid/status", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -746,12 +724,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/evidence", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -815,11 +791,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id/evidence", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const id = (request.params as { id: string }).id;
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
@@ -828,11 +802,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id/evidence/:eid", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const params = request.params as { id: string; eid: string };
     if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
       return { error: "not_found" };
@@ -846,11 +818,9 @@ export async function registerCaseRoutes(
   });
 
   app.get("/api/cases/:id/evidence/:eid/bytes", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const params = request.params as { id: string; eid: string };
     if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
       return { error: "not_found" };
@@ -860,6 +830,7 @@ export async function registerCaseRoutes(
       params.eid,
       ctx.actor,
       ctx.isAdmin,
+      ctx.has("evidence:private:read"),
     );
     if (!bytes) {
       void reply.code(403);
@@ -869,12 +840,10 @@ export async function registerCaseRoutes(
   });
 
   app.post("/api/cases/:id/evidence/:eid/recheck", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       void reply.code(403);
       return authError("forbidden");
     }

@@ -108,7 +108,7 @@ JSONL — offline, with no provider or keychain reads.
 | **[Normalized events specification](docs/specs/NORMALIZED_LOG_EVENTS_V1.md)** | Normative contract (not the human guide) |
 | **[JSON Schema](docs/specs/normalized-log-events/schemas/normalized-log-events.v1.json)** | Machine schema for the JSONL events |
 | **[Language integration](docs/LANGUAGE_INTEGRATION.md)** | Subprocess protocol; thin clients for Python, Node, Java, C#, Go, C, C++, Rust |
-| **[CLI packaging / releases](docs/CLI_PACKAGING.md)** | Multi-platform archives, draft GitHub Releases, unsigned RC notes |
+| **[CLI packaging / releases](docs/CLI_PACKAGING.md)** | Multi-platform archives; attached only by the authoritative `release.yml` draft |
 | **[CLI client protocol](docs/CLI_CLIENT_PROTOCOL.md)** | Compact protocol reference (same contracts as language integration) |
 
 ### Status labels (honest)
@@ -120,7 +120,7 @@ JSONL — offline, with no provider or keychain reads.
 | Offline exception-episode / duplicate-rendering correlation (`exception-episodes`, alias `episodes`) | **Shipped** — raw events preserved; exact citations and uncertainty/completeness disclosed in the [CLI guide](docs/CLI.md#exception-episodes-and-duplicate-renderings) |
 | `contextdesk.normalized_log_events.v1` contract + JSON Schema + producer examples | **Shipped** (portable handoff; ordinary raw import still applies) |
 | Offline `contextdesk normalize` (raw file/folder/ZIP → JSONL + manifest + report) | **Shipped** — grammar and output layout documented in [NORMALIZATION.md](docs/NORMALIZATION.md) |
-| Multi-platform CLI release workflow (draft archives) | **Shipped in repo** (`.github/workflows/cli-release.yml`); published signed downloads are **not** claimed until a real draft/publish run exists |
+| Multi-platform CLI release workflow (draft archives) | **Shipped in repo** as an artifact builder (`.github/workflows/cli-release.yml`); the authoritative draft is assembled by `.github/workflows/release.yml`. Published signed downloads are **not** claimed until a real promote run exists |
 | Language SDKs that re-parse logs / Parquet export | **Not shipped** — adapters spawn the binary only; Parquet is not claimed |
 | macOS notarization / Windows Authenticode for CLI | **Not shipped** (unsigned RC only — see [CLI_PACKAGING.md](docs/CLI_PACKAGING.md)) |
 
@@ -180,8 +180,10 @@ valid samples under
 | **Windows** | Run `.\scripts\cli-release\build_cli_release.ps1` for a tested `contextdesk.exe` and ZIP. Draft GitHub ZIPs are also produced by CI. |
 | **All** | Prefer absolute path or `CONTEXTDESK_BIN`; isolate automation with `--data-dir`. |
 
-Release downloads: draft GitHub Releases from workflow **`cli-release`** (never
-auto-published). Do not assume notarized or Authenticode-signed CLI builds.
+Release downloads: draft GitHub Releases from the authoritative **`release`**
+workflow (never auto-published; promote is `release-promote` only). Isolated
+`cli-release` runs produce Actions artifacts only. Do not assume notarized or
+Authenticode-signed CLI builds (those jobs are not_configured).
 
 ### Automation / CI path
 
@@ -536,8 +538,11 @@ unsigned local application or installer has already been written; inspect the
 bundle directory before treating that local build as failed. Never create,
 request, or commit a release key merely to run a local package.
 
-See [Packaging & release](docs/PACKAGING.md) for exact bundle behavior,
-operator-owned signing/notarization, and the draft release workflow.
+See [Packaging & release](docs/PACKAGING.md) for exact bundle behavior, the
+authoritative draft orchestration path, and signing honesty (updater secret
+**names** only; Apple notarization and Authenticode are not_configured).
+War Room remains source-run / separately deployed and is not a desktop
+release asset.
 
 ### Install a published binary
 

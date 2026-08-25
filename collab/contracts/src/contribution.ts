@@ -66,6 +66,13 @@ const contributionShape: ObjectShape = {
   sourceId: f.req(f.str),
 };
 
+const IDEMPOTENCY_KEY = /^[a-z0-9][a-z0-9._:-]{7,127}$/i;
+
+/** Bounded retry token for an authorized contribution create. */
+export function isContributionIdempotencyKey(value: string): boolean {
+  return IDEMPOTENCY_KEY.test(value);
+}
+
 export function parseContribution(raw: unknown): ContributionV1 {
   checkObject("$", contributionShape, raw);
   return raw as ContributionV1;

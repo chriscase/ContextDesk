@@ -4,6 +4,7 @@ import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
 import { TriageRunPanel } from "./TriageRunPanel.js";
+import { WORKSTREAMS_SECTION, Workstreams } from "./Workstreams.js";
 import {
   TriageAnchor,
   TriageStepSection,
@@ -13,7 +14,8 @@ import {
   type SourceOption,
   type TimelineEvent,
 } from "./TriageWorkspace.js";
-import type { WorkFocus } from "./app-location.js";
+import { isDiscussionSection, isWorkLocation, parsePathname, type WorkFocus } from "./app-location.js";
+import { focusArrivalCopy } from "./route-focus-copy.js";
 import { protectedApiFetch } from "./protected-api.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
@@ -75,6 +77,18 @@ function openQuestionsFrom(value: string): string[] {
 }
 
 interface ActivityItem {
+  activityId: string;
+  occurredAt: string;
+  actorLabel: string;
+  investigationId: string;
+  investigationTitle: string;
+  summary: string;
+  resolvedRoute: string;
+  provenanceClass: "human" | "imported" | "system" | "ai_generated" | "historical_restored";
+  humanFinding: boolean;
+}
+
+interface LegacyActivityItem {
   caseId: string;
   caseTitle: string;
   caseStatus: string;
@@ -83,7 +97,6 @@ interface ActivityItem {
   kind: string;
   actorUsername: string;
   targetId: string | null;
-  occurredAt: string;
   details: Record<string, string | number | boolean | null>;
 }
 
@@ -130,7 +143,8 @@ function openedLine(row: CaseRow): string | null {
   return null;
 }
 
-function activityLabel(item: ActivityItem): string {
+function activityLabel(item: ActivityItem | LegacyActivityItem): string {
+  if ("summary" in item) return item.summary;
   const contributionKind = typeof item.details.kind === "string" ? item.details.kind : null;
   const labels: Record<string, string> = {
     case_created: "opened the investigation",
@@ -172,7 +186,35 @@ function activityLabel(item: ActivityItem): string {
   return labels[item.kind] ?? "updated the investigation";
 }
 
-function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkFocus } {
+function activityDestination(item: ActivityItem | LegacyActivityItem): { stage: StageId; focus: WorkFocus } {
+  if ("resolvedRoute" in item && item.resolvedRoute) {
+    try {
+      const url = new URL(item.resolvedRoute, window.location.origin);
+      const location = parsePathname(url.pathname, url.search, url.hash);
+      if (
+        isWorkLocation(location)
+        && location.caseId === item.investigationId
+        && location.focus
+      ) {
+        return { stage: location.stage, focus: location.focus };
+      }
+    } catch {
+      // A malformed or stale route falls through to the legacy projection;
+      // the trusted server contract normally makes this unreachable.
+    }
+  }
+  if (!("kind" in item) || !item.kind) {
+    return {
+      stage: "situation",
+      focus: {
+        section: "stage-situation",
+        item: null,
+        itemKind: null,
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
   if (item.kind === "contribution_created" && item.details.kind === "message") {
     return {
       stage: "situation",
@@ -203,13 +245,27 @@ function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkF
       },
     };
   }
+  if (item.kind.startsWith("triage_candidate")) {
+    // The recorded target is already `${runId}:${candidateId}` — the exact
+    // workstream address — so the link lands on that workstream's own record.
+    return {
+      stage: "analyze",
+      focus: {
+        section: WORKSTREAMS_SECTION,
+        item: item.targetId,
+        itemKind: "workstream",
+        lane: item.targetId,
+        experiment: null,
+      },
+    };
+  }
   if (item.kind.startsWith("triage_")) {
     return {
       stage: "analyze",
       focus: {
         section: "triage-lane-runner",
         item: item.targetId,
-        itemKind: item.kind.startsWith("triage_candidate") ? "triage-candidate" : "triage-run",
+        itemKind: "triage-run",
         lane: null,
         experiment: null,
       },
@@ -309,13 +365,25 @@ function investigationEventDestination(
       },
     };
   }
+  if (event.kind.startsWith("triage_candidate")) {
+    return {
+      stage: "analyze",
+      focus: {
+        section: WORKSTREAMS_SECTION,
+        item: event.targetId ?? null,
+        itemKind: "workstream",
+        lane: event.targetId ?? null,
+        experiment: null,
+      },
+    };
+  }
   if (event.kind.startsWith("triage_")) {
     return {
       stage: "analyze",
       focus: {
         section: "triage-lane-runner",
         item: event.targetId ?? null,
-        itemKind: event.kind.startsWith("triage_candidate") ? "triage-candidate" : "triage-run",
+        itemKind: "triage-run",
         lane: null,
         experiment: null,
       },
@@ -359,6 +427,7 @@ function investigationEventDestination(
 
 export function Cases(props: {
   roles?: string[];
+  capabilities?: readonly string[];
   readOnly?: boolean;
   participant?: { username: string; roles: string[] };
   view?: "overview" | "investigations";
@@ -375,12 +444,25 @@ export function Cases(props: {
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
-  const canLead = !readOnly && (roles.includes("case-lead") || roles.includes("admin"));
-  const canWrite = !readOnly && (canLead || roles.includes("contributor"));
+  const capabilitySet = props.capabilities ? new Set(props.capabilities) : null;
+  const canLead = !readOnly && (capabilitySet
+    ? capabilitySet.has("run:strategies") ||
+      capabilitySet.has("decision:accept") ||
+      capabilitySet.has("export:create") ||
+      capabilitySet.has("portable:restore")
+    : roles.includes("case-lead") || roles.includes("admin"));
+  const canWrite = !readOnly && (capabilitySet
+    ? capabilitySet.has("investigation:write")
+    : canLead || roles.includes("contributor"));
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [casesLoaded, setCasesLoaded] = useState(false);
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [activitiesLoaded, setActivitiesLoaded] = useState(false);
+  const [activityCopy, setActivityCopy] = useState<{
+    id: string;
+    status: "copied" | "unavailable";
+  } | null>(null);
+  const activityCopyTimer = useRef<number | null>(null);
   // Uncontrolled fallback so the component still navigates when no parent
   // shell wires the callbacks (tests, embedding). The app shell controls it.
   const [localNav, setLocalNav] = useState<{ caseId: string | null; stage: StageId }>({
@@ -411,6 +493,13 @@ export function Cases(props: {
   const titleInputRef = useRef<HTMLInputElement>(null);
   const discussionToggleRef = useRef<HTMLButtonElement>(null);
   const previousStage = useRef<StageId | null>(null);
+
+  useEffect(
+    () => () => {
+      if (activityCopyTimer.current !== null) window.clearTimeout(activityCopyTimer.current);
+    },
+    [],
+  );
 
   function openCase(id: string) {
     if (props.onOpenCase) props.onOpenCase(id);
@@ -453,15 +542,27 @@ export function Cases(props: {
   }, []);
 
   const refreshActivity = useCallback(async () => {
-    const res = await protectedApiFetch("/api/activity?limit=30");
+    const res = await protectedApiFetch("/api/investigation-activity?limit=30");
     if (!res.ok) {
       setActivitiesLoaded(true);
       return;
     }
-    const body = (await res.json()) as { activities?: ActivityItem[] };
-    setActivities(body.activities ?? []);
+    const body = (await res.json()) as { items?: ActivityItem[] };
+    setActivities(body.items ?? []);
     setActivitiesLoaded(true);
   }, []);
+
+  async function copyActivityLink(item: ActivityItem) {
+    if (activityCopyTimer.current !== null) window.clearTimeout(activityCopyTimer.current);
+    try {
+      const href = new URL(item.resolvedRoute, window.location.origin).href;
+      await navigator.clipboard.writeText(href);
+      setActivityCopy({ id: item.activityId, status: "copied" });
+    } catch {
+      setActivityCopy({ id: item.activityId, status: "unavailable" });
+    }
+    activityCopyTimer.current = window.setTimeout(() => setActivityCopy(null), 4000);
+  }
 
   const refreshSources = useCallback(async () => {
     const res = await protectedApiFetch("/api/catalog/sources");
@@ -520,10 +621,10 @@ export function Cases(props: {
   }, [focusCaseId, loadTimeline]);
 
   useEffect(() => {
-    if (props.focus?.section === "discussion" && focusCaseId) {
+    if (props.focus && isDiscussionSection(props.focus.section) && focusCaseId) {
       setDiscussionOpen(true);
     }
-  }, [focusCaseId, props.focus?.section]);
+  }, [focusCaseId, props.focus]);
 
   useEffect(() => {
     if (!props.startSignal) return;
@@ -704,6 +805,17 @@ export function Cases(props: {
   }
 
   const current = cases.find((c) => c.id === focusCaseId);
+  // A workstream address focuses Analyze on that one workstream's record.
+  const workstreamFocused =
+    props.focus?.section === WORKSTREAMS_SECTION
+    && Boolean(
+      props.focus.lane
+      || (props.focus.itemKind === "workstream" && props.focus.item),
+    );
+  const arrivalCopy =
+    props.focus && props.focus.navigation !== "preserve"
+      ? focusArrivalCopy(props.focus)
+      : null;
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
@@ -977,30 +1089,54 @@ export function Cases(props: {
                   <ol className="activity-feed">
                     {overviewActivities.map((item) => {
                       const destination = activityDestination(item);
+                      const investigation = cases.find((row) => row.id === item.investigationId);
                       return (
-                        <li key={`${item.caseId}:${item.seq}`} className="activity-feed__item">
-                          <button
-                            type="button"
+                        <li key={item.activityId} className="activity-feed__item">
+                          <a
+                            href={item.resolvedRoute}
                             className="activity-feed__open"
-                            onClick={() => {
+                            onClick={(event) => {
+                              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                              event.preventDefault();
                               if (props.onActivityOpen) {
-                                props.onActivityOpen(item.caseId, destination.stage, destination.focus);
+                                props.onActivityOpen(
+                                  item.investigationId,
+                                  destination.stage,
+                                  destination.focus,
+                                );
                               } else {
-                                setLocalNav({ caseId: item.caseId, stage: destination.stage });
+                                setLocalNav({ caseId: item.investigationId, stage: destination.stage });
                               }
                             }}
                           >
                             <span className="activity-feed__verb">
-                              <strong>{item.actorUsername}</strong> {activityLabel(item)}
+                              <strong>{item.actorLabel}</strong> {activityLabel(item)}
                             </span>
-                            <span className="activity-feed__case">{item.caseTitle}</span>
+                            <span className="activity-feed__case">{item.investigationTitle}</span>
                             <span className="activity-feed__meta">
                               <time dateTime={item.occurredAt}>{activityTime(item.occurredAt)}</time>
-                              <span className={`status-pill status-pill--${item.caseStatus}`}>
-                                {item.caseStatus}
-                              </span>
+                              {investigation ? (
+                                <span className={`status-pill status-pill--${investigation.status}`}>
+                                  {investigation.status}
+                                </span>
+                              ) : null}
+                              {item.provenanceClass !== "human" ? (
+                                <span>{item.provenanceClass.replaceAll("_", " ")} · not a human finding</span>
+                              ) : null}
                             </span>
-                          </button>
+                          </a>
+                          <div className="activity-feed__share">
+                            <button type="button" onClick={() => void copyActivityLink(item)}>
+                              Copy link
+                            </button>
+                            <span role="status">
+                              {activityCopy?.id === item.activityId
+                                ? activityCopy.status === "copied"
+                                  ? "Copied."
+                                  : "Clipboard unavailable — use the linked activity address."
+                                : ""}
+                            </span>
+                          </div>
                         </li>
                       );
                     })}
@@ -1158,6 +1294,11 @@ export function Cases(props: {
       {actionError ? (
         <p className="case-memory__error" role="alert">
           {actionError}
+        </p>
+      ) : null}
+      {arrivalCopy ? (
+        <p className="case-view__focus-arrival" role="status">
+          {arrivalCopy}
         </p>
       ) : null}
       <div
@@ -1455,24 +1596,49 @@ export function Cases(props: {
             id="triage-analyze"
             step={2}
             title="Analyze"
-            lede="Curate the evidence the case may rely on, freeze a snapshot, then run ContextDesk model lanes against exactly that snapshot."
+            lede={
+              workstreamFocused
+                ? "One workstream, in full: what it was asked, what it examined, what it found, and what it left unknown."
+                : "Curate the evidence the investigation may rely on, freeze it, then read each workstream that examined exactly that evidence."
+            }
           >
-            <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
-              <CaseBoardPanel
+            <TriageAnchor id={WORKSTREAMS_SECTION} label="Workstreams">
+              <Workstreams
                 caseId={current.id}
-                canWrite={canWrite}
-                canLead={canLead}
-                readOnly={readOnly}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
+                {...(props.onDeepNavigate
+                  ? {
+                      onDeepNavigate: (focus: WorkFocus) =>
+                        props.onDeepNavigate?.("analyze", focus),
+                    }
+                  : {})}
               />
             </TriageAnchor>
-            <TriageAnchor id="triage-lane-runner" label="AI lane runner">
-              <TriageRunPanel
-                caseId={current.id}
-                canLead={canLead}
-                readOnly={readOnly}
-                {...(props.focus ? { routeFocus: props.focus } : {})}
-              />
+            {/* Opening one workstream is a real focus change, not a highlight:
+                the evidence board and the run launcher step aside so the
+                workstream's own record is the page. They also stop receiving
+                the route focus while hidden, so only the workstream record
+                claims keyboard focus for that address. */}
+            <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
+              <div hidden={workstreamFocused}>
+                <CaseBoardPanel
+                  caseId={current.id}
+                  canWrite={canWrite}
+                  canLead={canLead}
+                  readOnly={readOnly}
+                  {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                />
+              </div>
+            </TriageAnchor>
+            <TriageAnchor id="triage-lane-runner" label="Run history and launcher">
+              <div hidden={workstreamFocused}>
+                <TriageRunPanel
+                  caseId={current.id}
+                  canLead={canLead}
+                  readOnly={readOnly}
+                  {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                />
+              </div>
             </TriageAnchor>
           </TriageStepSection>
         </section>

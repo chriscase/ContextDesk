@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { StageId } from "./Cases.js";
 
 /** Areas the shell can genuinely navigate to from a help article. */
-export type HelpAreaTarget = "overview" | "investigations" | "sources";
+export type HelpAreaTarget = "overview" | "investigations" | "sources" | "profile";
 
 type HelpActionTarget = { area: HelpAreaTarget } | { stage: StageId };
 
@@ -78,19 +78,20 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Sessions come from the workspace server; a directory group must map to a workspace role before the workspace opens.",
         keywords: ["login", "password", "roles", "permissions", "viewer", "contributor", "case-lead", "admin", "ldap", "fixture", "demo"],
         what:
-          "Signing in sends your username and password to the workspace server, which checks them against its configured identity source and maps your directory groups to one of four roles: viewer, contributor, case-lead, or admin. Viewers can read everything visible to their account. Contributors can also add notes, upload evidence, and import external runs. Case leads can additionally freeze snapshots, launch AI lanes, accept decisions, manage sources, change case status, and make share-safe exports. Admin also unlocks the Administration page for persistent group-to-role mapping.",
+          "Signing in sends your username and password to the workspace server, which checks them against its configured identity source and maps your directory groups to one of four roles: viewer, contributor, case-lead, or admin. Each role is a default bundle of capabilities; a local grant can add a capability without changing the role. Viewers can read investigations they can access. Contributors can also add notes, upload evidence, and import external runs. Case leads can additionally freeze snapshots, launch AI lanes, accept decisions, manage sources, change case status, and create exports. The Administration page is visible only with the admin:users capability (the admin role includes it; a local grant can add it to another role). Suspended, disabled, and historical/imported identities cannot sign in, and an existing session for those accounts is treated as signed out.",
         when:
           "Use this when sign-in fails, or when a button you expected is missing — most missing controls are role-gated, and the page usually says which role is required.",
         steps: [
           "Enter your username and password and select Sign in.",
-          "If sign-in fails, read the message: wrong credentials, a missing role mapping, or rate limiting each say so explicitly.",
+          "If sign-in fails, read the message: wrong credentials, a missing role mapping, a suspended or historical identity, or rate limiting each say so explicitly.",
           "If your credentials are accepted but no role is mapped, an administrator has to grant a role before the workspace opens.",
-          "Check your roles any time from the account menu in the top bar.",
+          "Check your roles any time from the account menu in the top bar. Open My profile from that menu to see your current display name, directory ownership, and local contact details.",
         ],
         recorded:
           "The server audits sign-ins and sign-outs. The browser keeps only an HttpOnly session cookie — this form never stores your password.",
         limits:
           "In sample-data and demo builds, sign-in uses a built-in fixture account (demo/demo) — that is not your organization's directory. Production deployments authenticate against the server's configured identity source (an LDAP directory by default, or a local user file for private setups); this web app cannot tell you which one is configured.",
+        actions: [{ label: "Go to My profile", go: { area: "profile" } }],
       },
       {
         id: "start-investigation",
@@ -111,7 +112,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Creation records who opened the case and when. Situation edits and status changes are recorded. Contributors, case leads, and admins can edit Situation on a case they can access; only a case lead can change status.",
         limits:
-          "Creating requires the contributor or case-lead role. Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses.",
+          "Creating requires the investigation:write capability (the contributor, case-lead, and admin roles include it; a local grant can add it to a viewer). Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses.",
         actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
       },
     ],
@@ -246,6 +247,39 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Each snapshot records who froze it, when, its parent, each item's content hash and verification status, and the derived fingerprint. Loading a snapshot re-derives the fingerprint and rejects a mismatch.",
         limits:
           "Runs bound to a snapshot never silently widen to newer evidence — new evidence means freezing a new snapshot. The fingerprint is a content hash, not a cryptographic signature.",
+        actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
+      },
+      {
+        id: "read-workstreams",
+        title: "Read a workstream",
+        summary:
+          "Each recorded workstream has its own address: purpose, owner, frozen inputs, findings, cited evidence, unknowns, and a timestamped history.",
+        keywords: [
+          "workstream",
+          "workstreams",
+          "lane",
+          "share",
+          "link",
+          "deep link",
+          "history",
+          "evidence",
+          "unknowns",
+          "technical details",
+        ],
+        what:
+          "A workstream is one line of investigation against a frozen set of evidence — not a model button. Its record states the exact question it was asked, whether it was AI-assisted, human, programmatic, imported, or host-run, who requested it, which frozen evidence set it saw and whether the host proved that binding, what it reported, which evidence it cited, what it left unknown, and what happened in what order. Run, lane, snapshot, request, and task identifiers, fingerprints, and hashes sit under Technical details.",
+        when:
+          "Open a workstream when you need to judge one attempt on its own terms, or when you want to hand another engineer a link to exactly that record.",
+        steps: [
+          "On the Analyze stage, find the workstream under the strategy and question it belongs to.",
+          "Select it — the evidence board and run launcher step aside so the workstream is the page.",
+          "Read the cited evidence in place; expand a long log or stack trace for the complete text, and copy it if you need it elsewhere.",
+          "Copy the address from the browser to share that exact workstream; reload, Back, and Forward all return to it.",
+        ],
+        recorded:
+          "The record restates what the run already stored: timestamps, the authenticated requester, per-lane status, cited evidence with its registered summary and integrity state, recorded unknowns, and rerun lineage. Identifiers are collapsed for reading, never dropped — machine exports carry them unchanged.",
+        limits:
+          "An empty unknown list means nothing was recorded as unknown, not that nothing is unknown. AI-assisted output is analysis, never a human finding, and agreement between workstreams is not proof of correctness. A citation that no longer resolves is marked unresolved rather than reconstructed, and an address naming a workstream this investigation does not have fails closed.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
@@ -446,7 +480,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Cases record participants; workspace-wide permissions come from directory-mapped roles. This build has no separate team entity.",
         keywords: ["participants", "team", "members", "people", "who", "case membership"],
         what:
-          "Each investigation records its participants, shown on the case card and the Situation page. Permissions do not come from case membership: they come from your workspace role (viewer, contributor, case-lead, admin), which the server derives from your directory groups at sign-in.",
+          "Each investigation records its participants, shown on the case card and the Situation page. Case membership decides which investigations you can open; it does not grant capabilities. Workspace permissions come from your mapped role plus any local capability grants, resolved on every request from the current profile status.",
         when:
           "Check the Situation page when you need to know who is recorded on a case, and the account menu for your own roles.",
         steps: [
@@ -562,13 +596,13 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         title: "Administration and setup",
         summary:
           "Administrators can discover directory references and manage persistent group-to-role mappings; deployment setup remains operator work.",
-        keywords: ["admin", "directory", "group", "role", "grant", "revoke", "ldap", "setup", "configuration", "wizard", "operator", "doctor", "static", "read-only", "sample data"],
+        keywords: ["admin", "directory", "group", "role", "grant", "revoke", "ldap", "setup", "configuration", "wizard", "operator", "doctor", "static", "read-only", "sample data", "people"],
         what:
-          "The Administration page is visible only to the workspace admin role. It lists the persistent mappings that grant ContextDesk roles and provides bounded searches for identities and groups in the configured directory. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin.",
+          "The Administration page is visible only with the admin:users capability, not merely because a person holds the admin role title. Group role mappings live at /administration. People is a first-class page at /admin/people — a copied link, reload, or sign-in restore returns to that tab rather than collapsing to role mappings. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin, or from a local capability grant.",
         when:
-          "Use this when a directory group needs workspace access, a group's role changes, or a stale mapping must be revoked. Use operator tooling instead for first deployment, gateways, database settings, directory connection settings, backups, and health checks.",
+          "Use this when a directory group needs workspace access, a group's role changes, or a stale mapping must be revoked. Open People when you need to search, suspend, or grant a capability to a person already known to this workspace. Use operator tooling instead for first deployment, gateways, database settings, directory connection settings, backups, and health checks.",
         steps: [
-          "Open Administration from the primary navigation. Non-admin users cannot see the destination, and a direct route does not request protected administration data.",
+          "Open Administration from the primary navigation, or go directly to /admin/people for the People tab. Accounts without admin:users cannot see the destination, and a direct route does not request protected administration data.",
           "Search for a group or identity. Results are capped at twenty; refine the term rather than assuming the result is the full directory.",
           "Select or enter the exact group reference, choose one workspace role, and grant it. Existing-role changes, revocation, and every administrator grant require an explicit confirmation.",
           "Refresh Current group permissions to verify the destination state. The server also refreshes its live authorization map from persistent storage on each API request.",
@@ -578,7 +612,42 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "A mapping list is returned only after its successful read is audited. Updates and revocations submit success, failure, or denial audit records, and their server response separately records whether that audit write succeeded. Directory searches record only the search category and outcome — not the search term or returned directory data. The console refreshes from the persistent mapping store after a confirmed change.",
         limits:
-          "There is still no graphical first-run setup wizard, directory-user editor, group-membership editor, gateway configuration screen, or backup and retention control in this build. Deployment-state and secret-reference foundations are not exposed here because the end-to-end setup flow is not yet shipped. The console never displays or accepts directory credentials and never trusts imported roles.",
+          "There is still no graphical first-run setup wizard, directory-user editor, group-membership editor, gateway configuration screen, or backup and retention control in this build. Deployment-state and secret-reference foundations are not exposed here because the end-to-end setup flow is not yet shipped. The console never displays or accepts directory credentials and never trusts imported roles. Administrators manage other people; each signed-in person edits their own profile from My profile, not from this console.",
+      },
+      {
+        id: "my-profile",
+        title: "My profile, directory ownership, and attribution",
+        summary:
+          "See your current display details, edit what this workspace owns, and leave historical records unchanged.",
+        keywords: [
+          "my profile",
+          "profile",
+          "display name",
+          "ldap",
+          "oidc",
+          "directory",
+          "role",
+          "capability",
+          "attribution",
+          "contact",
+          "avatar",
+          "self-service",
+        ],
+        what:
+          "My profile is a first-class page at /profile, opened from the account menu. It shows your current display name, username, role title, team, contact fields, avatar metadata, account status, profile source (local, LDAP, or OIDC), directory sync state, and the revision used when saving. A workspace role (viewer, contributor, case-lead, admin) is a bundle of capabilities such as reading investigations or administering people. Capabilities decide what you can do; the profile page only changes how you appear, not those permissions. Historical comments, timeline events, and decisions keep the author name recorded when they were written — saving a new display name never rewrites those records.",
+        when:
+          "Use it when you need to correct a local display name or contact note, check whether a field is owned by the directory, or understand why a past comment still shows an older name.",
+        steps: [
+          "Open the account menu in the top bar and choose My profile, or go directly to /profile.",
+          "Read the profile source and directory-owned labels. LDAP and OIDC accounts cannot change name, role title, team, or work email here — those stay with the directory.",
+          "Edit local-only fields (other contact, avatar, custom fields) and, for a local account, the server-allowed identity fields. Save sends the change with a revision check so overlapping edits cannot silently overwrite each other.",
+          "If someone else saved first, keep your draft, review the saved values, then reload or save again.",
+        ],
+        recorded:
+          "Successful saves update the current profile row only. The server audits the attempt. Past authored records are not rewritten.",
+        limits:
+          "This page never contacts LDAP and never implies that it can. A suspended, disabled, or historical account cannot stay signed in, so My profile is not available in that state. A static read-only snapshot cannot edit. Host provider profiles used by AI lanes are a different kind of profile — see lane help.",
+        actions: [{ label: "Go to My profile", go: { area: "profile" } }],
       },
     ],
   },
@@ -632,6 +701,11 @@ const GLOSSARY: readonly GlossaryEntry[] = [
       "A credential-free identifier (ID, label, provider) for a provider configuration the host owns. Lanes reference a profile ID; credentials and endpoints never enter the browser.",
   },
   {
+    term: "user profile",
+    definition:
+      "The current display record for a signed-in person: name, contact, avatar, status, and directory provenance. It is separate from historical attribution and from host provider profiles used by AI lanes.",
+  },
+  {
     term: "qualification",
     definition:
       "An operator-run, command-line harness that proves lane execution on a host, recording each step as passed, failed, skipped, or partial. Its reports are not displayed in this web app.",
@@ -676,6 +750,7 @@ const QUICK_TASKS: readonly { task: string; articleId: string }[] = [
   { task: "Compare models on the same evidence", articleId: "compare-lanes" },
   { task: "Make the call and share it safely", articleId: "share-safe-export" },
   { task: "See who else is active right now", articleId: "presence" },
+  { task: "Update my display name or contact details", articleId: "my-profile" },
 ];
 
 interface ArticleHit {

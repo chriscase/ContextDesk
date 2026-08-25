@@ -25,9 +25,10 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 PLAN="$ROOT/scripts/ci_shard_plan.sh"
+CONFIG="$ROOT/scripts/ci_shard_config.sh"
 
 SHARD=""
-SHARDS=${CD_SHARD_COUNT:-4}
+SHARDS=${CD_SHARD_COUNT:-}
 OUT="$ROOT/ci-shards"
 HEARTBEAT=${CD_SHARD_HEARTBEAT_SECONDS:-60}
 UNIT_TIMEOUT=${CD_SHARD_UNIT_TIMEOUT_SECONDS:-1800}
@@ -44,7 +45,8 @@ Usage:
   sh scripts/ci_run_shard.sh --summary DIR
 
   --shard K          shard index to run (1-based)
-  --shards N         total shards (default: $CD_SHARD_COUNT, else 4)
+  --shards N         total shards (default: $CD_SHARD_COUNT, else the canonical
+                     count for --os, or Ubuntu when --os is omitted)
   --out DIR          artifact root (default: ./ci-shards)
   --heartbeat SECS   progress line interval while a unit runs (default 60, 0 disables)
   --unit-timeout S   per-unit wall-clock limit in seconds (default 1800, 0 disables)
@@ -163,10 +165,16 @@ fi
   usage >&2
   exit 2
 }
+[ -n "$SHARDS" ] || {
+  case $PLATFORM_OS in
+    macos | windows) SHARDS=$(sh "$CONFIG" count "$PLATFORM_OS") ;;
+    *) SHARDS=$(sh "$CONFIG" count ubuntu) ;;
+  esac
+}
 case $SHARD in '' | *[!0-9]*) die "--shard must be a positive integer" ;; esac
 case $SHARDS in '' | *[!0-9]*) die "--shards must be a positive integer" ;; esac
 [ "$SHARD" -ge 1 ] && [ "$SHARD" -le "$SHARDS" ] ||
-  die "shard $SHARD is outside 1..$SHARDS (matrix and CD_SHARD_COUNT disagree)"
+  die "shard $SHARD is outside 1..$SHARDS (matrix and configured count disagree)"
 
 case $CACHE_STATE in
   cold | warm | unknown) ;;

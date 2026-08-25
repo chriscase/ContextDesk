@@ -1,8 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID } from "@cd-collab/contracts/admin";
 import { App } from "./App.js";
-import { parsePathname, pathFor, sameLocation, type WorkLocation } from "./app-location.js";
+import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLocation } from "./app-location.js";
 
 afterEach(() => {
   cleanup();
@@ -25,7 +26,7 @@ function stubSignedOutFetch(): FetchStub {
 }
 
 function stubSignedInFetch(
-  identity: { username: string; displayName?: string; roles: string[] },
+  identity: { username: string; displayName?: string; roles: string[]; capabilities?: string[] },
   extra?: (url: string, init?: RequestInit) => Promise<Response> | null,
 ): FetchStub {
   const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
@@ -41,6 +42,7 @@ function stubSignedInFetch(
             displayName: identity.displayName ?? identity.username,
           },
           roles: identity.roles,
+          ...(identity.capabilities ? { capabilities: identity.capabilities } : {}),
         }),
       };
     }
@@ -57,6 +59,35 @@ function stubSignedInFetch(
   });
   vi.stubGlobal("fetch", stub);
   return stub;
+}
+
+function stubAdminFetch(): FetchStub {
+  return stubSignedInFetch({ username: "owner", roles: ["admin"] }, (url) => {
+    if (url === "/api/authz/group-role-map") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schemaId: "cd-collab.admin_role_mapping_list.v1",
+          mappings: [{ group: "local:admins", role: "admin" }],
+          limit: 500,
+          truncated: false,
+        }),
+      } as Response);
+    }
+    if (url === "/api/admin/people/search") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schemaId: ADMIN_PEOPLE_LIST_SCHEMA_ID,
+          people: [],
+          nextCursor: null,
+        }),
+      } as Response);
+    }
+    return null;
+  });
 }
 
 const routedLaneExperiment = {
@@ -189,7 +220,7 @@ describe("auth boundary", () => {
           }),
         } as Response);
       }
-      if (url === "/api/activity?limit=30") return activity;
+      if (url === "/api/investigation-activity?limit=30") return activity;
       return null;
     });
     render(<App />);
@@ -256,11 +287,12 @@ describe("authenticated application shell", () => {
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
   });
 
-  it("shows Administration only to admins and does not fetch protected admin data for direct non-admin routes", async () => {
+  it("shows Administration only with admin:users and does not fetch protected admin data for direct routes without it", async () => {
     window.history.replaceState(null, "", "/administration");
     const nonAdminFetch = stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Administration is unavailable" })).toBeTruthy();
+    expect(screen.getByText(/admin:users capability/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
     expect(nonAdminFetch.mock.calls.map((call) => String(call[0]))).not.toContain(
       "/api/authz/group-role-map",
@@ -288,6 +320,147 @@ describe("authenticated application shell", () => {
     expect(await screen.findByRole("heading", { name: "Administration" })).toBeTruthy();
     expect(window.location.pathname).toBe("/administration");
     expect(document.title).toBe("Administration · ContextDesk War Room");
+    cleanup();
+
+    window.history.replaceState(null, "", "/");
+    stubSignedInFetch({
+      username: "viewer",
+      roles: ["viewer"],
+      capabilities: ["investigation:read", "admin:users"],
+    }, (url) => {
+      if (url === "/api/authz/group-role-map") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.admin_role_mapping_list.v1",
+            mappings: [],
+            limit: 500,
+            truncated: false,
+          }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Administration" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Start investigation" })).toBeNull();
+  });
+
+  it("treats /admin/people as the canonical People location and keeps /administration as the roles alias", async () => {
+    window.history.replaceState(null, "", "/admin/people");
+    stubAdminFetch();
+    render(<App />);
+    expect((await screen.findByRole("tab", { name: "People" })).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Group role mappings" }).getAttribute("aria-selected")).toBe("false");
+    expect(window.location.pathname).toBe("/admin/people");
+    expect(document.title).toContain("People");
+    cleanup();
+
+    window.history.replaceState(null, "", "/administration");
+    stubAdminFetch();
+    render(<App />);
+    expect(
+      (await screen.findByRole("tab", { name: "Group role mappings" })).getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(window.location.pathname).toBe("/administration");
+  });
+
+  it("restores /admin/people after sign-in instead of collapsing to /administration", async () => {
+    window.history.replaceState(null, "", "/admin/people");
+    let signedIn = false;
+    const stub = vi.fn(async (input: RequestInfo, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/auth/me") {
+        if (!signedIn) return { ok: false, json: async () => ({}) };
+        return {
+          ok: true,
+          json: async () => ({ identity: { username: "owner" }, roles: ["admin"] }),
+        };
+      }
+      if (url === "/api/auth/login") {
+        signedIn = true;
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [] }) };
+      if (url === "/api/catalog/sources") return { ok: true, json: async () => ({ sources: [] }) };
+      if (url === "/api/authz/group-role-map") {
+        return {
+          ok: true,
+          json: async () => ({
+            schemaId: "cd-collab.admin_role_mapping_list.v1",
+            mappings: [{ group: "local:admins", role: "admin" }],
+            limit: 500,
+            truncated: false,
+          }),
+        };
+      }
+      if (url === "/api/admin/people/search") {
+        return {
+          ok: true,
+          json: async () => ({ schemaId: ADMIN_PEOPLE_LIST_SCHEMA_ID, people: [], nextCursor: null }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", stub);
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/signin");
+    fireEvent.change(screen.getByLabelText("Username"), { target: { value: "owner" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect((await screen.findByRole("tab", { name: "People" })).getAttribute("aria-selected")).toBe("true");
+    expect(window.location.pathname).toBe("/admin/people");
+    expect(restoreAfterSignIn(parsePathname("/admin/people"))).toMatchObject({
+      area: "administration",
+      focus: { section: "people" },
+    });
+  });
+
+  it("rewrites a legacy case-discussion locator into a copyable Discussion URL", async () => {
+    const uuid = "55555555-5555-4555-8555-555555555555";
+    window.history.replaceState(
+      null,
+      "",
+      `/investigations/${uuid}/situation?section=case-discussion&item=message-8&kind=comment#case-discussion`,
+    );
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            cases: [{ id: uuid, title: "Synthetic discussion restore", status: "open", severity: "medium" }],
+          }),
+        } as Response);
+      }
+      if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+        return Promise.resolve({ ok: true, json: async () => ({ events: [], runs: [] }) } as Response);
+      }
+      if (url.endsWith("/contributions")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            contributions: [{
+              id: "message-8",
+              kind: "message",
+              body: "Synthetic discussion comment for locator routing.",
+              privacyClass: "share_safe",
+              tombstoned: false,
+            }],
+          }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
+    await waitFor(() => {
+      const href = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      expect(href).toContain("section=discussion");
+      expect(href).not.toContain("case-discussion");
+      expect(href).toContain(`item=message-8`);
+    });
   });
 
   it("routes Start investigation to the inventory and focuses the title field", async () => {
@@ -526,9 +699,48 @@ describe("pathname parsing", () => {
       caseId: null,
       stage: "situation",
     });
+    expect(parsePathname("/admin/people")).toEqual({
+      area: "administration",
+      caseId: null,
+      stage: "situation",
+      focus: {
+        section: "people",
+        item: null,
+        itemKind: null,
+        lane: null,
+        experiment: null,
+      },
+    });
+    expect(pathFor(parsePathname("/admin/people"))).toBe("/admin/people");
+    expect(pathFor({ area: "administration", caseId: null, stage: "situation" })).toBe(
+      "/administration",
+    );
+    const uuid = "11111111-1111-4111-8111-111111111111";
+    const discussionAlias = parsePathname(
+      `/investigations/${uuid}/situation`,
+      "?section=case-discussion&item=message-8&kind=comment",
+      "#case-discussion",
+    );
+    expect(discussionAlias).toMatchObject({
+      area: "investigations",
+      caseId: uuid,
+      stage: "situation",
+      focus: {
+        section: "discussion",
+        item: "message-8",
+        itemKind: "comment",
+      },
+    });
+    expect(pathFor(discussionAlias)).toContain("section=discussion");
+    expect(pathFor(discussionAlias)).not.toContain("case-discussion");
+    expect(parsePathname("/profile")).toEqual({
+      area: "profile",
+      caseId: null,
+      stage: "situation",
+    });
+    expect(pathFor({ area: "profile", caseId: null, stage: "situation" })).toBe("/profile");
     expect(parsePathname("/signin")).toEqual({ kind: "sign-in" });
     expect(parsePathname("/sign-in")).toEqual({ kind: "sign-in" });
-    const uuid = "11111111-1111-4111-8111-111111111111";
     expect(parsePathname(`/investigations/${uuid}/analyze`)).toEqual({
       area: "investigations",
       caseId: uuid,
@@ -663,6 +875,138 @@ describe("pathname shell routing", () => {
     } finally {
       HTMLElement.prototype.scrollIntoView = originalScroll;
     }
+  });
+
+  it("restores a shared workstream address on load, then survives Back and Forward", async () => {
+    const uuid = "22222222-2222-4222-8222-222222222222";
+    const workstreamKey = "run-1:reviewer-lane";
+    window.history.replaceState(
+      null,
+      "",
+      `/investigations/${uuid}/analyze?section=workstreams&item=${encodeURIComponent(workstreamKey)}&kind=workstream&lane=${encodeURIComponent(workstreamKey)}#workstreams`,
+    );
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            cases: [
+              { id: uuid, title: "Synthetic checkout timeouts", status: "open", severity: "high" },
+            ],
+          }),
+        } as Response);
+      }
+      if (url === `/api/cases/${uuid}/workstreams`) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.workstream_list.v1",
+            caseId: uuid,
+            workstreams: [
+              {
+                key: workstreamKey,
+                caseId: uuid,
+                label: "Reviewer workstream — fixture-reviewer-a",
+                purpose: "What caused the checkout timeout?",
+                operatorKind: "ai_assisted",
+                operatorLabel: "AI-assisted workstream — output is analysis, never a human finding",
+                assignedTo: "dave",
+                strategyLabel: "Standard synthetic strategy",
+                role: "reviewer",
+                inputs: {
+                  question: "What caused the checkout timeout?",
+                  snapshotLabel: "Frozen evidence set 1",
+                  snapshotEvidenceCount: 1,
+                  snapshotFrozenAt: "2026-08-24T06:13:00.000Z",
+                  sameSnapshot: true,
+                  snapshotProofLabel:
+                    "Ran against the exact frozen evidence set, proven by the host.",
+                },
+                statusCode: "completed",
+                lifecycle: "settled",
+                statusLabel: "Completed",
+                statusDetail: "Finished and recorded its findings.",
+                startedAt: "2026-08-24T06:14:10.000Z",
+                finishedAt: "2026-08-24T06:14:25.000Z",
+                findings: "Checkout waited on the inventory call before failing.",
+                outcome: "Recorded a written finding; it cited 0 evidence items.",
+                evidenceCited: [],
+                unknowns: [],
+                activity: [
+                  {
+                    at: "2026-08-24T06:14:00.000Z",
+                    label: "Run queued",
+                    actor: "dave",
+                    detail: null,
+                  },
+                ],
+                rerun: { isRerun: false, parentKey: null, note: "Not a rerun." },
+                agreementNotice: "Agreement is not proof of correctness.",
+                technical: {
+                  workstreamKey,
+                  runId: "run-1",
+                  candidateId: "reviewer-lane",
+                  snapshotId: "snapshot-1",
+                  snapshotFingerprint: "f".repeat(64),
+                  requestFingerprint: "a".repeat(64),
+                  taskFingerprint: "task-fingerprint",
+                  strategyId: "contextdesk.standard.synthetic",
+                  modelId: "fixture-reviewer-a",
+                  modelVersion: null,
+                  provider: "synthetic",
+                  profileId: null,
+                  outputHash: null,
+                  benchmarkRunId: null,
+                  parentRunId: null,
+                  errorCode: null,
+                  privacyClass: "share_safe",
+                },
+              },
+            ],
+          }),
+        } as Response);
+      }
+      if (url.startsWith(`/api/cases/${uuid}/`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ events: [], contributions: [], runs: [], artifacts: [], snapshots: [] }),
+        } as Response);
+      }
+      return null;
+    });
+
+    render(<App />);
+
+    // The shared address opens that exact workstream, not the investigations list.
+    expect(
+      await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    expect(window.location.pathname).toBe(`/investigations/${uuid}/analyze`);
+    expect(window.location.search).toContain(`lane=${encodeURIComponent(workstreamKey)}`);
+
+    // Returning to the list is a real navigation…
+    fireEvent.click(screen.getByRole("link", { name: "All workstreams" }));
+    await waitFor(() =>
+      expect(window.location.search).not.toContain(`lane=${encodeURIComponent(workstreamKey)}`),
+    );
+    expect(screen.getByRole("heading", { name: "Workstreams" })).toBeTruthy();
+
+    // …so Back restores the workstream and Forward returns to the list.
+    window.history.back();
+    await waitFor(() =>
+      expect(window.location.search).toContain(`lane=${encodeURIComponent(workstreamKey)}`),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+    window.history.forward();
+    await waitFor(() =>
+      expect(window.location.search).not.toContain(`lane=${encodeURIComponent(workstreamKey)}`),
+    );
+    expect(screen.getByRole("heading", { name: "Workstreams" })).toBeTruthy();
   });
 
   it("restores a direct area pathname after a signed-in load", async () => {
@@ -992,5 +1336,110 @@ describe("pathname shell routing", () => {
     );
     expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Primary" })).toBeTruthy();
+  });
+
+  it("opens My profile from the account menu for a viewer and restores /profile on reload, Back, and Forward", async () => {
+    const me = {
+      schemaId: USER_PROFILE_SCHEMA_ID,
+      id: "local:viewer",
+      username: "viewer",
+      displayName: "Pat Viewer",
+      roleTitle: null,
+      team: null,
+      contactEmail: null,
+      contactOther: null,
+      avatar: null,
+      status: "active",
+      provenance: "local",
+      directorySubject: null,
+      directorySyncStatus: "not_synced",
+      directorySyncedAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      lastSeenAt: null,
+      customAttributes: [],
+      revision: 1,
+    };
+    stubSignedInFetch({ username: "viewer", displayName: "Pat Viewer", roles: ["viewer"] }, (url) => {
+      if (url === "/api/profile/me") {
+        return Promise.resolve({ ok: true, status: 200, json: async () => me } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Signed in as Pat Viewer" }));
+    fireEvent.click(screen.getByRole("link", { name: "My profile" }));
+    expect(await screen.findByRole("heading", { name: "My profile" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/profile");
+    expect(document.title).toBe("My profile · ContextDesk War Room");
+    expect(screen.queryByRole("button", { name: "My profile" })).toBeNull();
+    expect(
+      screen.getByRole("navigation", { name: "Primary" }).querySelector('[aria-current="page"]'),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    window.history.back();
+    await waitFor(() => expect(window.location.pathname).toBe("/profile"));
+    expect(await screen.findByRole("heading", { name: "My profile" })).toBeTruthy();
+    window.history.forward();
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    cleanup();
+
+    window.history.replaceState(null, "", "/profile");
+    stubSignedInFetch({ username: "viewer", displayName: "Pat Viewer", roles: ["viewer"] }, (url) => {
+      if (url === "/api/profile/me") {
+        return Promise.resolve({ ok: true, status: 200, json: async () => me } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "My profile" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/profile");
+  });
+
+  it("asks before leaving My profile with unsaved edits", async () => {
+    const me = {
+      schemaId: USER_PROFILE_SCHEMA_ID,
+      id: "local:viewer",
+      username: "viewer",
+      displayName: "Pat Viewer",
+      roleTitle: null,
+      team: null,
+      contactEmail: null,
+      contactOther: null,
+      avatar: null,
+      status: "active",
+      provenance: "local",
+      directorySubject: null,
+      directorySyncStatus: "not_synced",
+      directorySyncedAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      lastSeenAt: null,
+      customAttributes: [],
+      revision: 1,
+    };
+    stubSignedInFetch({ username: "viewer", displayName: "Pat Viewer", roles: ["viewer"] }, (url) => {
+      if (url === "/api/profile/me") {
+        return Promise.resolve({ ok: true, status: 200, json: async () => me } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Signed in as Pat Viewer" }));
+    fireEvent.click(screen.getByRole("link", { name: "My profile" }));
+    const name = await screen.findByLabelText("Display name");
+    fireEvent.change(name, { target: { value: "Pat Edited" } });
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    expect(screen.getByRole("heading", { name: "Leave without saving?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stay on this page" }));
+    expect(window.location.pathname).toBe("/profile");
+    expect((screen.getByLabelText("Display name") as HTMLInputElement).value).toBe("Pat Edited");
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/");
   });
 });

@@ -81,8 +81,9 @@ export class ExportService {
     variant: PrivacyClass,
     origin: string,
     isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<ExportEnvelopeV1> {
-    const snapshot = await this.loadSnapshot(caseId, actor, isAdmin);
+    const snapshot = await this.loadSnapshot(caseId, actor, isAdmin, canReadPrivate);
     const payload = projectBrief({
       variant,
       caseRow: snapshot.caseRow,
@@ -115,8 +116,9 @@ export class ExportService {
     promptScaffold: string | null,
     origin: string,
     isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<ExportEnvelopeV1> {
-    const snapshot = await this.loadSnapshot(caseId, actor, isAdmin);
+    const snapshot = await this.loadSnapshot(caseId, actor, isAdmin, canReadPrivate);
     const payload = projectPackage({
       variant,
       caseId,
@@ -170,7 +172,7 @@ export class ExportService {
     };
   }
 
-  private async loadSnapshot(caseId: string, actor: Actor, isAdmin: boolean) {
+  private async loadSnapshot(caseId: string, actor: Actor, isAdmin: boolean, canReadPrivate: boolean) {
     const caseRow = await this.deps.cases.getCase(caseId, actor, isAdmin);
     if (!caseRow) throw new Error("case not found");
     const [timeline, contributions, artifacts, runs, sourceList, snapshots] = await Promise.all([
@@ -182,7 +184,7 @@ export class ExportService {
       this.deps.cases.listSnapshots(caseId, actor, isAdmin),
     ]);
     const sources = new Map<string, SourceV1>(sourceList.map((s) => [s.id, s]));
-    const artifactContent = await this.loadArtifactContent(caseId, actor, isAdmin, artifacts);
+    const artifactContent = await this.loadArtifactContent(caseId, actor, isAdmin, canReadPrivate, artifacts);
     const latest = snapshots.at(-1) ?? null;
     const latestIndex = latest ? snapshots.length - 1 : -1;
     const board = await this.deps.cases.getCaseBoard(caseId, actor, isAdmin);
@@ -216,6 +218,7 @@ export class ExportService {
     caseId: string,
     actor: Actor,
     isAdmin: boolean,
+    canReadPrivate: boolean,
     artifacts: ArtifactV1[],
   ): Promise<Map<string, string | null>> {
     const out = new Map<string, string | null>();
@@ -224,7 +227,13 @@ export class ExportService {
         out.set(artifact.id, null);
         continue;
       }
-      const bytes = await this.deps.cases.getArtifactBytes(caseId, artifact.id, actor, isAdmin);
+      const bytes = await this.deps.cases.getArtifactBytes(
+        caseId,
+        artifact.id,
+        actor,
+        isAdmin,
+        canReadPrivate,
+      );
       out.set(artifact.id, bytes ? new TextDecoder().decode(bytes) : null);
     }
     return out;

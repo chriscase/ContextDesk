@@ -1,8 +1,11 @@
 import {
   AUTH_ERROR_SCHEMA_ID,
   SESSION_SCHEMA_ID,
+  profileCanUseCapabilities,
+  usableCapabilities,
   type AppRole,
   type AuthErrorV1,
+  type Capability,
   type SessionResponseV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -19,6 +22,27 @@ import {
 
 export const SESSION_COOKIE = "cd_collab_session";
 
+/**
+ * Narrow structural port onto people/store.js's UserProfileStore, so this
+ * module never imports the people module directly. touchOnLogin is the
+ * canonical profile store's only writer for identity/provenance/timestamp
+ * fields - see people/store.ts for the create-vs-touch-vs-collision rules.
+ */
+export interface LoginProfileSync {
+  touchOnLogin(input: {
+    id: string;
+    username: string;
+    displayName: string;
+    provenance: "local" | "ldap";
+    directorySubject: string | null;
+  }): Promise<{ outcome: "ok" | "collision" }>;
+  getById(id: string): Promise<{ status: string; provenance: string } | null>;
+}
+
+export interface LoginGrantLookup {
+  list(userId: string): Promise<readonly { capability: Capability }[]>;
+}
+
 export interface AuthRouteDeps {
   adapter: AuthAdapter;
   sessions: SessionStore;
@@ -28,6 +52,10 @@ export interface AuthRouteDeps {
   log: AuthLog;
   limiter: RateLimiter;
   cookieSecure: boolean;
+  /** Optional: keeps the canonical profile store in sync on every successful login. */
+  profiles?: LoginProfileSync;
+  /** Optional: additive local grants used to populate the session capability list. */
+  grants?: LoginGrantLookup;
 }
 
 export type ActiveSessionDeps = Pick<AuthRouteDeps, "sessions" | "policy" | "adapter">;
@@ -135,6 +163,31 @@ export async function registerAuthRoutes(
       return authError("access_denied");
     }
 
+    if (deps.profiles) {
+      let existing: { status: string; provenance: string } | null;
+      try {
+        existing = await deps.profiles.getById(result.identity.id);
+      } catch {
+        void reply.code(403);
+        return authError("access_denied");
+      }
+      if (existing && !profileCanUseCapabilities(existing)) {
+        await deps.audit.append({
+          identity: result.identity.id,
+          action: "login",
+          target: existing.provenance === "imported_historical" ? "historical" : existing.status,
+          origin: originOf(request),
+          outcome: "denied",
+        });
+        deps.log.event({
+          event: "login_denied_inactive",
+          username: result.identity.username,
+        });
+        void reply.code(403);
+        return authError("access_denied");
+      }
+    }
+
     deps.limiter.reset(key);
     const { token, record } = await deps.sessions.create({
       identity: result.identity,
@@ -142,6 +195,50 @@ export async function registerAuthRoutes(
       ttlMs: deps.policy.ttlMs,
     });
     setSessionCookie(reply, token, deps);
+    if (deps.profiles) {
+      try {
+        const sync = await deps.profiles.touchOnLogin({
+          id: result.identity.id,
+          username: result.identity.username,
+          displayName: result.identity.displayName,
+          provenance: deps.adapter.provenance,
+          directorySubject: deps.adapter.provenance === "local" ? null : result.identity.id,
+        });
+        if (sync.outcome === "collision") {
+          await deps.audit.append({
+            identity: result.identity.id,
+            action: "profile_sync",
+            target: "collision",
+            origin: originOf(request),
+            outcome: "failure",
+          });
+        }
+      } catch {
+        await deps.sessions.revoke(record.id);
+        clearSessionCookie(reply, deps);
+        void reply.code(403);
+        return authError("access_denied");
+      }
+      let after: { status: string; provenance: string } | null;
+      try {
+        after = await deps.profiles.getById(result.identity.id);
+      } catch {
+        after = null;
+      }
+      if (!after || !profileCanUseCapabilities(after)) {
+        await deps.sessions.revoke(record.id);
+        clearSessionCookie(reply, deps);
+        await deps.audit.append({
+          identity: result.identity.id,
+          action: "login",
+          target: "inactive",
+          origin: originOf(request),
+          outcome: "denied",
+        });
+        void reply.code(403);
+        return authError("access_denied");
+      }
+    }
     await deps.audit.append({
       identity: record.identity.id,
       action: "login",
@@ -157,6 +254,7 @@ export async function registerAuthRoutes(
       schemaId: SESSION_SCHEMA_ID,
       identity: record.identity,
       roles,
+      capabilities: await sessionCapabilities(deps, record.identity.id, roles),
     };
     return bodyOut;
   });
@@ -185,13 +283,51 @@ export async function registerAuthRoutes(
       return authError("unauthenticated");
     }
     const roles = deps.roles.resolve(session.groups);
+    if (deps.profiles) {
+      let profile: { status: string; provenance: string } | null;
+      try {
+        profile = await deps.profiles.getById(session.identity.id);
+      } catch {
+        void reply.code(401);
+        return authError("unauthenticated");
+      }
+      if (!profile || !profileCanUseCapabilities(profile)) {
+        void reply.code(401);
+        return authError("unauthenticated");
+      }
+    }
     const bodyOut: SessionResponseV1 = {
       schemaId: SESSION_SCHEMA_ID,
       identity: session.identity,
       roles,
+      capabilities: await sessionCapabilities(deps, session.identity.id, roles),
     };
     return bodyOut;
   });
+}
+
+async function sessionCapabilities(
+  deps: AuthRouteDeps,
+  identityId: string,
+  roles: readonly AppRole[],
+): Promise<Capability[]> {
+  if (!deps.profiles) return usableCapabilities({ status: "active", provenance: "local" }, roles, []);
+  let profile: { status: string; provenance: string } | null;
+  try {
+    profile = await deps.profiles.getById(identityId);
+  } catch {
+    return [];
+  }
+  if (!profile) return [];
+  let grants: Capability[] = [];
+  if (deps.grants) {
+    try {
+      grants = (await deps.grants.list(identityId)).map((row) => row.capability);
+    } catch {
+      return [];
+    }
+  }
+  return usableCapabilities(profile, roles, grants);
 }
 
 function setSessionCookie(

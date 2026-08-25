@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,10 +10,19 @@ import {
   type TriageJobV1,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
+import { migrateUp } from "../../db/migrate.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
-import { MemoryAuditStore } from "../audit/index.js";
-import { CatalogService } from "../catalog/index.js";
-import { CaseService, MemoryCaseStore } from "../cases/index.js";
+import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
+import { MemoryAuditStore, PgAuditStore } from "../audit/index.js";
+import {
+  bindRecoveryAuthorization,
+  MutableGroupRoleMap,
+  parseGroupRoleMap,
+} from "../authz/index.js";
+import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
+import { CatalogService, PgCatalogStore } from "../catalog/index.js";
+import { MapAuthAdapter } from "../auth/index.js";
+import { MemoryLocalGrantStore, MemoryUserProfileStore } from "../people/index.js";
 import {
   DeterministicMockTriageExecutor,
   TriageRunService,
@@ -22,7 +32,7 @@ import {
   type TriageExecutionContext,
   type TriageRunExecutor,
 } from "./index.js";
-import { MemoryTriageJobStore } from "./store.js";
+import { MemoryTriageJobStore, PgTriageJobStore } from "./store.js";
 
 const actor = { id: "lead", username: "lead" };
 
@@ -144,6 +154,11 @@ describe("snapshot-bound triage runs", () => {
       leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
     });
     expect(await store.listStaleRunning(new Date().toISOString())).toHaveLength(1);
+    await expect(store.update({
+      ...expired,
+      status: "completed",
+      updatedAt: new Date().toISOString(),
+    })).rejects.toThrow("triage job not found");
     const recovery = {
       ...(await store.get(job.id))!,
       status: "failed" as const,
@@ -152,18 +167,170 @@ describe("snapshot-bound triage runs", () => {
     };
     expect(await store.recoverStale(recovery, new Date().toISOString())).toBe(true);
     expect(await store.recoverStale(recovery, new Date().toISOString())).toBe(false);
+    await expect(store.update({
+      ...expired,
+      status: "completed",
+      updatedAt: new Date().toISOString(),
+    })).rejects.toThrow("triage job not found");
+    expect((await store.get(job.id))?.status).toBe("failed");
+  });
+
+  it("fails closed on cancel after lease expiry and refuses requester-less recovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "contextdesk-triage-lease-membership-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const audit = new MemoryAuditStore();
+    const caseStore = new MemoryCaseStore();
+    const cases = new CaseService(evidence, audit, caseStore, new CatalogService());
+    const jobs = new MemoryTriageJobStore();
+    const profiles = new MemoryUserProfileStore();
+    const grants = new MemoryLocalGrantStore();
+    await profiles.touchOnLogin({
+      id: actor.id,
+      username: actor.username,
+      displayName: actor.username,
+      provenance: "local",
+      directorySubject: null,
+    });
+    const recoveryAuthorization = bindRecoveryAuthorization({
+      lookupGroups: (identity) =>
+        new MapAuthAdapter(
+          new Map([
+            [
+              actor.username,
+              {
+                password: "unused",
+                identity: { id: actor.id, username: actor.username, displayName: actor.username },
+                groups: ["local:case-leads"],
+              },
+            ],
+          ]),
+        ).lookupGroups(identity),
+      roles: new MutableGroupRoleMap(parseGroupRoleMap("local:case-leads=case-lead")),
+      profiles,
+      grants,
+    });
+    const service = new TriageRunService({
+      cases,
+      audit,
+      jobs,
+      workerId: "worker-a",
+      recoveryAuthorization,
+    });
+    try {
+      const created = await cases.createCase(actor, { title: "Lease membership fixture" }, "test");
+      const artifact = await cases.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "checkout.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("checkout timeout"),
+          summary: "Synthetic checkout timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const snapshot = await cases.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      const spec = request(snapshot.id);
+      const queued: TriageJobV1 = {
+        schemaId: "cd-collab.triage_job.v1",
+        id: "job-recover-membership",
+        caseId: created.id,
+        snapshotId: snapshot.id,
+        snapshotFingerprint: snapshot.fingerprint,
+        requestFingerprint: "d".repeat(64),
+        cancellationId: "cancel-recover",
+        request: spec,
+        status: "queued",
+        candidates: [
+          {
+            ...spec.candidates[0]!,
+            status: "queued",
+            benchmarkRunId: null,
+            outputHash: null,
+            summary: null,
+            evidenceRefs: [],
+            unknowns: [],
+            usageStatus: "unknown",
+            costStatus: "unknown",
+            errorCode: null,
+            startedAt: null,
+            finishedAt: null,
+            privacyClass: "owner_only",
+          },
+        ],
+        sameSnapshot: null,
+        agreementNotice: "Agreement is not proof of correctness.",
+        requestedBy: actor.id,
+        requestedByUsername: actor.username,
+        createdAt: "2026-08-20T00:00:00.000Z",
+        updatedAt: "2026-08-20T00:00:00.000Z",
+        startedAt: null,
+        finishedAt: null,
+        cancelRequestedAt: null,
+        stoppedReason: null,
+      };
+      await jobs.insert(queued);
+      const liveUntil = new Date(Date.now() + 60_000).toISOString();
+      const claimed = await jobs.claimQueued(queued.id, new Date().toISOString(), "worker-a", liveUntil);
+      expect(claimed?.status).toBe("running");
+      await jobs.update({
+        ...claimed!,
+        leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
+      });
+      await expect(service.cancel(created.id, queued.id, actor, "test", false)).rejects.toMatchObject({
+        name: "TriageRunConflictError",
+        message: "worker lease expired",
+      });
+      await expect(jobs.update({
+        ...((await jobs.get(queued.id))!),
+        status: "completed",
+        updatedAt: new Date().toISOString(),
+      })).rejects.toThrow("triage job not found");
+      expect((await jobs.get(queued.id))?.status).toBe("running");
+
+      await jobs.insert({
+        ...queued,
+        id: "job-recover-queued",
+        cancellationId: "cancel-queued-recover",
+        status: "queued",
+        workerId: null,
+        leaseExpiresAt: null,
+      });
+      const captured = caseStore.capture() as { cases: [string, { id: string; participants: unknown[] }][] };
+      for (const [, row] of captured.cases) {
+        if (row.id === created.id) row.participants = [];
+      }
+      caseStore.restore(captured);
+      await service.recoverPending();
+      expect((await jobs.get(queued.id))?.status).toBe("failed");
+      expect((await jobs.get(queued.id))?.stoppedReason).toBe("worker_lease_expired");
+      expect((await jobs.get("job-recover-queued"))?.status).toBe("failed");
+      expect((await jobs.get("job-recover-queued"))?.stoppedReason).toBe("requester_not_member");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect((await jobs.get("job-recover-queued"))?.status).toBe("failed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("runs a deterministic candidate and projects a share-safe lifecycle record", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {
-      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false, true);
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(parseTriageJob(completed).snapshotFingerprint).toBe(fx.snapshot.fingerprint);
       expect(completed.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
       expect(completed.candidates[0]?.status).toBe("completed");
       expect(completed.candidates[0]?.evidenceRefs).toEqual([fx.snapshot.evidence[0]?.evidenceId]);
       expect(completed.candidates[0]?.usageStatus).toBe("unknown");
+      expect(completed.sameSnapshot).toBe(true);
 
       const shareSafe = parseTriageJobShareSafe(projectTriageJobShareSafe(completed));
       expect(shareSafe.candidates[0]?.evidenceCount).toBe(1);
@@ -184,7 +351,7 @@ describe("snapshot-bound triage runs", () => {
       ]) {
         const req = request(fx.snapshot.id);
         req.candidates[0] = { ...req.candidates[0]!, ...overlay };
-        await expect(fx.service.create(fx.caseId, actor, req, "test", false)).rejects.toThrow(
+        await expect(fx.service.create(fx.caseId, actor, req, "test", false, true)).rejects.toThrow(
           /DeepSeek lanes are not permitted/,
         );
       }
@@ -202,7 +369,7 @@ describe("snapshot-bound triage runs", () => {
     };
     const fx = await fixture(executor);
     try {
-      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false, true);
       await new Promise((resolve) => setTimeout(resolve, 0));
       const requested = await fx.service.cancel(fx.caseId, created.id, actor, "test", false);
       expect(requested.cancelRequestedAt).not.toBeNull();
@@ -279,6 +446,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
       await fx.service.cancel(fx.caseId, created.id, actor, "test", false);
@@ -331,6 +499,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       const partial = await waitFor(fx.service, fx.caseId, created.id, "partial");
       expect(partial.candidates.map((candidate) => candidate.status)).toEqual([
@@ -385,6 +554,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(calls).toBe(1);
@@ -439,6 +609,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       let runningJob: Awaited<ReturnType<TriageRunService["get"]>> = null;
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -500,6 +671,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(observed?.request.candidates.map((candidate) => candidate.profileId)).toEqual([
@@ -521,6 +693,7 @@ describe("snapshot-bound triage runs", () => {
           },
           "test",
           false,
+          true,
         ),
       ).rejects.toThrow("unknown gateway profile for candidate lane-unknown");
     } finally {
@@ -563,6 +736,7 @@ describe("snapshot-bound triage runs", () => {
         },
         "test",
         false,
+        true,
       );
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(completed.request.concurrency).toBe(3);
@@ -582,6 +756,7 @@ describe("snapshot-bound triage runs", () => {
           },
           "test",
           false,
+          true,
         ),
       ).rejects.toThrow("gateway concurrency must be between 1 and 4");
     } finally {
@@ -612,6 +787,7 @@ describe("snapshot-bound triage runs", () => {
           },
           "test",
           false,
+          true,
         ),
       ).rejects.toThrow("gateway comparisons require at least 2 candidate lanes");
     } finally {
@@ -622,13 +798,14 @@ describe("snapshot-bound triage runs", () => {
   it("persists same-case rerun lineage and rejects a cross-case parent", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {
-      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false, true);
       const child = await fx.service.create(
         fx.caseId,
         actor,
         { ...request(fx.snapshot.id), parentJobId: parent.id },
         "test",
         false,
+        true,
       );
       expect(child.parentJobId).toBe(parent.id);
       expect(child.request.parentJobId).toBe(parent.id);
@@ -648,6 +825,7 @@ describe("snapshot-bound triage runs", () => {
           { ...request(otherSnapshot.id), parentJobId: parent.id },
           "test",
           false,
+          true,
         ),
       ).rejects.toThrow("parent triage job not found for case");
     } finally {
@@ -658,7 +836,7 @@ describe("snapshot-bound triage runs", () => {
   it("parses and projects legacy jobs without rerun lineage", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {
-      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const created = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false, true);
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       const legacy = JSON.parse(JSON.stringify(completed)) as Record<string, unknown>;
       delete legacy.parentJobId;
@@ -673,6 +851,141 @@ describe("snapshot-bound triage runs", () => {
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }
+  });
+
+  it("never records sameSnapshot=true for unverifiable or unhashed snapshot identity", async () => {
+    const fx = await fixture(new DeterministicMockTriageExecutor());
+    try {
+      const unhashed = await fx.cases.addEvidence(
+        fx.caseId,
+        actor,
+        {
+          kind: "file_server_ref",
+          uri: "s3://example.invalid/unhashed.log",
+          summary: "Reference has no recorded content or expected hash.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const snapshot = await fx.cases.createSnapshot(
+        fx.caseId,
+        actor,
+        { evidenceIds: [unhashed.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      expect(snapshot.fairnessClass).toBe("unknown");
+      const created = await fx.service.create(fx.caseId, actor, request(snapshot.id), "test", false, true);
+      const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
+      expect(completed.sameSnapshot).not.toBe(true);
+      expect(completed.sameSnapshot).toBeNull();
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(!adminUrl())("pg-backed triage lease integrity", () => {
+  it("refuses an expired or recovered worker from updating the job", async () => {
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const root = await mkdtemp(join(tmpdir(), "contextdesk-pg-triage-lease-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(client);
+      const catalog = new CatalogService(new PgCatalogStore(client), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(client), catalog);
+      const jobs = new PgTriageJobStore(client);
+      const pgActor = { id: "alice", username: "alice" };
+      try {
+        const created = await cases.createCase(pgActor, { title: "PG lease fixture" }, "test");
+        const artifact = await cases.addEvidence(
+          created.id,
+          pgActor,
+          {
+            kind: "log",
+            filename: "checkout.log",
+            mediaType: "text/plain",
+            bytes: new TextEncoder().encode("checkout timeout"),
+            summary: "Synthetic checkout timeout.",
+            privacyClass: "share_safe",
+          },
+          "test",
+        );
+        const snapshot = await cases.createSnapshot(
+          created.id,
+          pgActor,
+          { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+          "test",
+        );
+        const spec = request(snapshot.id);
+        const job: TriageJobV1 = {
+          schemaId: "cd-collab.triage_job.v1",
+          id: randomUUID(),
+          caseId: created.id,
+          snapshotId: snapshot.id,
+          snapshotFingerprint: snapshot.fingerprint,
+          requestFingerprint: "a".repeat(64),
+          cancellationId: randomUUID(),
+          request: spec,
+          status: "queued",
+          candidates: [
+            {
+              ...spec.candidates[0]!,
+              status: "queued",
+              benchmarkRunId: null,
+              outputHash: null,
+              summary: null,
+              evidenceRefs: [],
+              unknowns: [],
+              usageStatus: "unknown",
+              costStatus: "unknown",
+              errorCode: null,
+              startedAt: null,
+              finishedAt: null,
+              privacyClass: "owner_only",
+            },
+          ],
+          sameSnapshot: null,
+          agreementNotice: "Agreement is not proof of correctness.",
+          requestedBy: pgActor.id,
+          requestedByUsername: pgActor.username,
+          createdAt: "2026-08-20T00:00:00.000Z",
+          updatedAt: "2026-08-20T00:00:00.000Z",
+          startedAt: null,
+          finishedAt: null,
+          cancelRequestedAt: null,
+          stoppedReason: null,
+        };
+        await jobs.insert(job);
+        const liveUntil = new Date(Date.now() + 60_000).toISOString();
+        const claimed = await jobs.claimQueued(job.id, new Date().toISOString(), "worker-a", liveUntil);
+        expect(claimed?.workerId).toBe("worker-a");
+        const live = (await jobs.get(job.id))!;
+        await jobs.update({
+          ...live,
+          leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
+        });
+        await expect(jobs.update({
+          ...live,
+          status: "completed",
+          updatedAt: new Date().toISOString(),
+        })).rejects.toThrow("triage job not found");
+        const recovery = {
+          ...(await jobs.get(job.id))!,
+          status: "failed" as const,
+          stoppedReason: "worker_lease_expired",
+          leaseExpiresAt: null,
+        };
+        expect(await jobs.recoverStale(recovery, new Date().toISOString())).toBe(true);
+        await expect(jobs.update({
+          ...live,
+          status: "completed",
+          updatedAt: new Date().toISOString(),
+        })).rejects.toThrow("triage job not found");
+        expect((await jobs.get(job.id))?.status).toBe("failed");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 

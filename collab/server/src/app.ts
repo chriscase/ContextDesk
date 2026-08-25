@@ -11,16 +11,28 @@ import {
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import type { Config } from "./config.js";
+import { latestMigrationVersion } from "./db/migrate.js";
 import type { EvidenceStore } from "./evidence/store.js";
-import { registerAuthRoutes, type AuthRouteDeps } from "./modules/auth/index.js";
-import { registerAuthzRoutes } from "./modules/authz/index.js";
+import {
+  registerAuthRoutes,
+  registerBrowserMutationCsrfGuard,
+  type AuthRouteDeps,
+} from "./modules/auth/index.js";
 import {
   MemoryGroupRoleStore,
+  registerAuthzRoutes,
   type GroupRoleStore,
   type MutableGroupRoleMap,
+  type SessionAuthorizationDeps,
 } from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
+import { registerAdminAuditRoutes } from "./modules/audit/index.js";
 import { registerAdminDirectoryRoutes } from "./modules/admin/index.js";
+import {
+  registerComponentHealthRoutes,
+  runtimeComponentHealth,
+  type ComponentHealthProvider,
+} from "./modules/component-health/index.js";
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerCorpusIntakeRoutes } from "./modules/corpus-intake/index.js";
@@ -33,10 +45,19 @@ import {
   type ExperimentService,
 } from "./modules/experiments/index.js";
 import { registerOverviewRoutes } from "./modules/overview/index.js";
+import { registerInvestigationActivityRoutes } from "./modules/activity/index.js";
 import {
   registerPortableInvestigationRoutes,
   type PortableInvestigationService,
 } from "./modules/portable-investigations/index.js";
+import {
+  registerAdminPeopleRoutes,
+  registerSelfProfileRoutes,
+  MemoryLocalGrantStore,
+  MemoryUserProfileStore,
+  type LocalGrantStore,
+  type UserProfileStore,
+} from "./modules/people/index.js";
 import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js";
 
 export interface SecurityDeps {
@@ -61,11 +82,18 @@ export interface AppDeps {
   exporter?: ExportService;
   portable?: PortableInvestigationService;
   setup?: SetupService;
+  /** Canonical user profile store. Also wires login-time profile sync onto security.auth. */
+  profiles?: UserProfileStore;
+  grants?: LocalGrantStore;
+  componentHealth?: ComponentHealthProvider;
   serveStatic?: boolean;
+  installationId?: string;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
+  registerBrowserMutationCsrfGuard(app);
+  const requiredMigrationVersion = latestMigrationVersion();
 
   app.get("/health", async (): Promise<HealthResponseV1> => {
     return {
@@ -81,7 +109,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (deps.pool) {
       try {
         const migrated = await deps.pool.query(
-          "SELECT 1 FROM schema_migrations WHERE version = '013_corpus_intake'",
+          "SELECT 1 FROM schema_migrations WHERE version = $1",
+          [requiredMigrationVersion],
         );
         if (migrated.rowCount !== 1) throw new Error("required migration is not applied");
         database = "up";
@@ -122,74 +151,103 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   if (deps.security) {
     const security = deps.security;
     const roleStore = security.roleStore ?? new MemoryGroupRoleStore(security.roles);
+    const profiles = deps.profiles ?? new MemoryUserProfileStore();
+    const grants = deps.grants ?? new MemoryLocalGrantStore();
+    const sessionAuth: SessionAuthorizationDeps = {
+      auth: security.auth,
+      roles: security.roles,
+      profiles,
+      grants,
+    };
     app.addHook("onRequest", async (request) => {
       if (!request.url.startsWith("/api/")) return;
       if (request.url.startsWith("/api/setup/")) return;
       security.roles.replace(await roleStore.load());
     });
-    await registerAuthRoutes(app, security.auth);
+    await registerAuthRoutes(app, {
+      ...security.auth,
+      profiles,
+      grants,
+    });
+    await registerSelfProfileRoutes(app, {
+      sessionAuth,
+      audit: security.audit,
+      profiles,
+    });
+    await registerAdminPeopleRoutes(app, {
+      sessionAuth,
+      audit: security.audit,
+      profiles,
+      grants,
+    });
     await registerAuthzRoutes(app, {
-      auth: security.auth,
+      sessionAuth,
       roles: security.roles,
       roleStore,
       audit: security.audit,
     });
     await registerAdminDirectoryRoutes(app, {
-      auth: security.auth,
-      roles: security.roles,
+      sessionAuth,
+      audit: security.audit,
+    });
+    await registerComponentHealthRoutes(app, {
+      sessionAuth,
+      provider: deps.componentHealth ?? (() => runtimeComponentHealth(deps.config)),
+    });
+    await registerAdminAuditRoutes(app, {
+      sessionAuth,
       audit: security.audit,
     });
     if (deps.domain) {
       await registerCaseRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         audit: security.audit,
         domain: deps.domain,
         ...(deps.experiments ? { experiments: deps.experiments } : {}),
       });
+      await registerInvestigationActivityRoutes(app, {
+        sessionAuth,
+        domain: deps.domain,
+        installationId: deps.installationId ?? "inst-unconfigured000000",
+      });
       await registerCorpusIntakeRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         audit: security.audit,
         domain: deps.domain,
       });
     }
     if (deps.catalog) {
       await registerCatalogRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         audit: security.audit,
         catalog: deps.catalog,
       });
     }
     if (deps.imports) {
       await registerImportRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         audit: security.audit,
         imports: deps.imports,
       });
     }
     if (deps.triageRuns) {
       await registerTriageRunRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         audit: security.audit,
         runs: deps.triageRuns,
+        ...(deps.domain ? { cases: deps.domain } : {}),
       });
     }
     if (deps.domain && deps.presence) {
       await registerPresenceRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         cases: deps.domain,
         presence: deps.presence,
       });
     }
     if (deps.experiments) {
       await registerExperimentRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         audit: security.audit,
         experiments: deps.experiments,
         ...(deps.imports ? { imports: deps.imports } : {}),
@@ -198,8 +256,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     }
     if (deps.domain && deps.experiments && deps.triageRuns && deps.presence) {
       await registerOverviewRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         cases: deps.domain,
         experiments: deps.experiments,
         triageRuns: deps.triageRuns,
@@ -208,16 +265,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     }
     if (deps.exporter) {
       await registerExportRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         audit: security.audit,
         exporter: deps.exporter,
       });
     }
     if (deps.portable) {
       await registerPortableInvestigationRoutes(app, {
-        auth: security.auth,
-        roles: security.roles,
+        sessionAuth,
         audit: security.audit,
         portable: deps.portable,
       });

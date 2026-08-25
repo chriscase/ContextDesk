@@ -1,11 +1,13 @@
 ---
 id: context-selection-model-boundary
-title: How ContextDesk builds a grounded answer
-summary: Follow deterministic context selection, governed retrieval, model synthesis, provenance, and the boundary around what a provider receives.
+title: What ContextDesk sends to models for a grounded answer
+summary: See what is sent to models, what stays host-only, and how deterministic context selection, governed retrieval, provenance, and failure boundaries work.
 section: chat-context
 tags:
   - chat
   - context
+  - models
+  - sent
   - retrieval
   - provenance
   - privacy
@@ -21,7 +23,7 @@ related:
   - permission-tiers
   - security-boundaries
 ---
-# How ContextDesk builds a grounded answer
+# What ContextDesk sends to models for a grounded answer
 
 ContextDesk combines deterministic host controls with model reasoning. The
 host decides which sources and tools are eligible, enforces permissions and

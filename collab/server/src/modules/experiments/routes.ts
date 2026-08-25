@@ -1,14 +1,15 @@
 import {
-  AUTH_ERROR_SCHEMA_ID,
   HELPFULNESS_DIMENSIONS,
-  type AuthErrorV1,
   type ExpectedRelationshipV1,
   type HelpfulnessDimension,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import {
+  capabilityForbidden,
+  requireSessionCapability,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 import type { ImportService } from "../import/index.js";
 import type { TriageRunService } from "../triage-runs/index.js";
 import {
@@ -16,10 +17,6 @@ import {
   ExperimentNotFoundError,
   ExperimentService,
 } from "./service.js";
-
-function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
-  return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
-}
 
 function asRecord(body: unknown): Record<string, unknown> {
   return typeof body === "object" && body !== null && !Array.isArray(body)
@@ -36,8 +33,7 @@ function isDimension(value: string): value is HelpfulnessDimension {
 }
 
 export interface ExperimentRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   experiments: ExperimentService;
   imports?: ImportService;
@@ -48,17 +44,8 @@ export async function registerExperimentRoutes(
   app: FastifyInstance,
   deps: ExperimentRouteDeps,
 ): Promise<void> {
-  async function sessionOf(request: FastifyRequest) {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) return null;
-    const roles = deps.roles.resolve(session.groups);
-    return {
-      actor: { id: session.identity.id, username: session.identity.username },
-      isAdmin: canPerform(roles, "admin"),
-      canRead: canPerform(roles, "read"),
-      canWrite: canPerform(roles, "mutate"),
-      canLead: canPerform(roles, "lead"),
-    };
+  async function sessionOf(request: FastifyRequest, reply: { code: (status: number) => unknown }) {
+    return requireSessionCapability(request, reply, deps.sessionAuth);
   }
 
   function fail(
@@ -78,14 +65,11 @@ export async function registerExperimentRoutes(
   }
 
   app.get("/api/cases/:id/experiments", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+      return capabilityForbidden(reply);
     }
     const id = (request.params as { id: string }).id;
     return {
@@ -95,12 +79,10 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       await deps.audit.append({
         identity: ctx.actor.id,
         action: "experiment_import",
@@ -108,8 +90,7 @@ export async function registerExperimentRoutes(
         origin: request.ip,
         outcome: "denied",
       });
-      void reply.code(403);
-      return authError("forbidden");
+      return capabilityForbidden(reply);
     }
     const id = (request.params as { id: string }).id;
     try {
@@ -126,14 +107,11 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments/from-triage/:jid", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
+      return capabilityForbidden(reply);
     }
     if (!deps.triageRuns || !deps.imports) {
       void reply.code(503);
@@ -169,14 +147,11 @@ export async function registerExperimentRoutes(
   });
 
   app.get("/api/cases/:id/experiments/:eid", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+      return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; eid: string };
     const found = await deps.experiments.get(params.id, params.eid, ctx.actor, ctx.isAdmin);
@@ -188,14 +163,11 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments/:eid/helpfulness", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
+      return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; eid: string };
     const body = asRecord(request.body);
@@ -230,14 +202,11 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments/:eid/decisions", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
+      return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; eid: string };
     const body = asRecord(request.body);
@@ -292,14 +261,11 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments/:eid/decisions/:did/accept", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("decision:accept")) {
+      return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; eid: string };
     const body = asRecord(request.body);
@@ -322,14 +288,11 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments/:eid/gold", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("decision:accept")) {
+      return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; eid: string };
     const body = asRecord(request.body);
@@ -384,14 +347,11 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments/:eid/traces", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
+      return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; eid: string };
     try {
@@ -409,14 +369,11 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments/:eid/traces/:cid/annotations", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
+      return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; eid: string; cid: string };
     const body = asRecord(request.body);
@@ -448,14 +405,11 @@ export async function registerExperimentRoutes(
   });
 
   app.post("/api/cases/:id/experiments/:eid/export", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("export:create")) {
+      return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; eid: string };
     try {

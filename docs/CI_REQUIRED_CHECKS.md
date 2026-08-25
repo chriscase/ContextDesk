@@ -68,6 +68,12 @@ Workspace tests are sharded, then fail-closed:
 | macOS | `rust (macos-latest)` restore-only preflight | 4 | `rust tests (macos-latest aggregate)` | no |
 | Windows | `rust (windows-latest)` restore-only preflight | 4 | `rust tests (windows-latest aggregate)` | no |
 
+The counts are intentionally different by platform capacity, but their
+definition is not duplicated: `scripts/ci_shard_config.sh` is the canonical
+topology. CI generates all three matrices from it, and each planner and
+aggregate invocation identifies its OS and fails closed if a supplied count
+drifts from that definition.
+
 The planner (`scripts/ci_shard_plan.sh`) enumerates every `cargo test --workspace`
 unit from `cargo metadata`. The aggregate recomputes that list and fails if any
 unit is missing, duplicated, or left on a cancelled/timed-out shard.

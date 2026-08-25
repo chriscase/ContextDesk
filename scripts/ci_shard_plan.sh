@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Deterministic shard plan for the Ubuntu workspace test gate (#874).
+# Deterministic shard plan for the cross-OS workspace test gates (#874).
 #
 # The Linux gate used to be a single `cargo test --workspace` step that ran for
 # 70-80 minutes; when the hosted runner lost its connection GitHub marked the
@@ -26,22 +26,27 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-DEFAULT_SHARDS=4
+CONFIG="$ROOT/scripts/ci_shard_config.sh"
 
 usage() {
   cat <<'EOF'
 Usage:
   sh scripts/ci_shard_plan.sh units                    # shard units, canonical order
   sh scripts/ci_shard_plan.sh base-units               # unsplitted cargo test targets
-  sh scripts/ci_shard_plan.sh plan   [--shards N]      # "<shard>\t<unit>" for every unit
-  sh scripts/ci_shard_plan.sh shard  K [--shards N]    # units assigned to shard K
+  sh scripts/ci_shard_plan.sh plan   [--os OS] [--shards N]
+  sh scripts/ci_shard_plan.sh shard  K [--os OS] [--shards N]
   sh scripts/ci_shard_plan.sh args   UNIT              # cargo selector args for one unit
   sh scripts/ci_shard_plan.sh compile-args UNIT        # selector with run-filters stripped
-  sh scripts/ci_shard_plan.sh verify [--shards N]      # fail closed if the partition is not
+  sh scripts/ci_shard_plan.sh verify [--os OS] [--shards N]
+                                                       # fail closed if the partition is not
                                                        # exhaustive, disjoint, and balanced
 
 Options:
-  --shards N   number of shards (default: $CD_SHARD_COUNT, else 4)
+  --os OS       validate against the canonical ubuntu, macos, or windows count
+  --shards N   explicit number of shards; with --os, it must match that OS
+
+With neither option, the canonical Ubuntu count is used. CD_SHARD_COUNT remains
+supported for local compatibility, but is verified when --os is present.
 
 The partition is round-robin over the canonically sorted unit list, so it is a
 pure function of the commit: the same tree always produces the same plan on
@@ -159,7 +164,17 @@ units() {
 
 shard_count() {
   count=${1:-}
-  [ -n "$count" ] || count=${CD_SHARD_COUNT:-$DEFAULT_SHARDS}
+  os=${2:-}
+  [ -n "$count" ] || count=${CD_SHARD_COUNT:-}
+  if [ -n "$os" ]; then
+    if [ -n "$count" ]; then
+      sh "$CONFIG" verify "$os" "$count" >/dev/null
+    else
+      count=$(sh "$CONFIG" count "$os")
+    fi
+  elif [ -z "$count" ]; then
+    count=$(sh "$CONFIG" count ubuntu)
+  fi
   case $count in
     '' | *[!0-9]*) die "shard count must be a positive integer, got '$count'" ;;
   esac
@@ -350,6 +365,7 @@ cmd=$1
 shift
 
 shards_opt=""
+os_opt=""
 positional=""
 while [ $# -gt 0 ]; do
   case $1 in
@@ -360,6 +376,15 @@ while [ $# -gt 0 ]; do
       ;;
     --shards=*)
       shards_opt=${1#--shards=}
+      shift
+      ;;
+    --os)
+      [ $# -ge 2 ] || die "--os needs a value"
+      os_opt=$2
+      shift 2
+      ;;
+    --os=*)
+      os_opt=${1#--os=}
       shift
       ;;
     -h | --help)
@@ -377,10 +402,10 @@ done
 case $cmd in
   units) units ;;
   base-units) base_units ;;
-  plan) plan "$(shard_count "$shards_opt")" ;;
+  plan) plan "$(shard_count "$shards_opt" "$os_opt")" ;;
   shard)
     [ -n "$positional" ] || die "shard needs an index, e.g. 'shard 2 --shards 4'"
-    shard "$positional" "$(shard_count "$shards_opt")"
+    shard "$positional" "$(shard_count "$shards_opt" "$os_opt")"
     ;;
   args)
     [ -n "$positional" ] || die "args needs a unit id, e.g. 'args cd-core/test/golden_retrieval'"
@@ -390,7 +415,7 @@ case $cmd in
     [ -n "$positional" ] || die "compile-args needs a unit id"
     compile_args_for "$positional"
     ;;
-  verify) verify "$(shard_count "$shards_opt")" ;;
+  verify) verify "$(shard_count "$shards_opt" "$os_opt")" ;;
   -h | --help | help)
     usage
     ;;

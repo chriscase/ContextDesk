@@ -77,10 +77,11 @@ if guard.get("name") != "require valid CI routing":
     raise SystemExit("aggregate must validate routing before any scoped validation")
 guard_script = guard.get("run") or ""
 
-def guard_result(result, surface, run_ubuntu):
+def guard_result(result, surface, run_ubuntu, shard_config_result="success"):
     env = os.environ.copy()
     env.update({
         "PATH_FILTER_RESULT": result,
+        "SHARD_CONFIG_RESULT": shard_config_result,
         "SURFACE": surface,
         "RUN_UBUNTU": run_ubuntu,
     })
@@ -114,6 +115,9 @@ for result_name, surface, run_ubuntu in (
         raise SystemExit(
             f"invalid route {result_name}/{surface}:{run_ubuntu} passed the required aggregate"
         )
+failed_topology = guard_result("success", "full", "true", "failure")
+if failed_topology.returncode == 0:
+    raise SystemExit("failed shard topology passed the required aggregate")
 aggregate_runs = "\n".join(s.get("run") or "" for s in aggregate["steps"])
 if "cargo test -p cd-triage-bench" in aggregate_runs:
     raise SystemExit(

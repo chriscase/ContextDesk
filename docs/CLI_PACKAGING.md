@@ -1,19 +1,22 @@
 # CLI multi-platform packaging & release
 
-This document covers the **headless `contextdesk` binary** release path.
-Desktop installers remain under [PACKAGING.md](./PACKAGING.md) and
-`.github/workflows/release.yml`. The two workflows coexist; neither auto-publishes.
+This document covers the **headless `contextdesk` binary** build path.
+Desktop installers remain under [PACKAGING.md](./PACKAGING.md). The
+**authoritative** GitHub Release object is created only by
+`.github/workflows/release.yml` after both desktop and CLI matrices complete.
+`.github/workflows/cli-release.yml` is a reusable artifact builder; it must
+not create or mutate title, body, or prerelease state.
 
 ## Workflow
 
 | Item | Value |
 |------|--------|
-| Workflow file | `.github/workflows/cli-release.yml` |
-| Triggers | tag `v*`, `workflow_dispatch` (tag input required) |
+| Builder workflow | `.github/workflows/cli-release.yml` |
+| Triggers | `workflow_call` from `release.yml`; isolated `workflow_dispatch` |
 | Platforms | **macos-arm64**, **macos-x64**, **linux-x64**, **windows-x64** |
 | Build | `cargo build -p cd-cli --release --locked` with target triple |
-| Identity env | `CD_GIT_SHA`, `CD_GIT_DESCRIBE`, `CD_CHANNEL` |
-| Release attach | **draft only** (`draft: true`); operators publish manually |
+| Identity env | `CD_GIT_SHA` (exact 40-char), `CD_GIT_DESCRIBE`, `CD_CHANNEL=installed` |
+| GitHub Release | **none** from this workflow — orchestrator attaches the unified draft |
 
 ## Embedded binary identity
 
@@ -22,7 +25,7 @@ At build time the workflow sets:
 ```text
 CD_GIT_SHA=<full git rev-parse HEAD>
 CD_GIT_DESCRIBE=<git describe --always --dirty --tags>
-CD_CHANNEL=installed   # or workflow_dispatch input
+CD_CHANNEL=installed   # official orchestration always uses installed
 ```
 
 Surfaces:
@@ -96,12 +99,17 @@ GitHub Actions secrets when a future signing job is added.
 
 ## Draft-only policy
 
-- `softprops/action-gh-release` is configured with `draft: true`.
-- `release-manifest.json` records `published: false` / `auto_publish: false`.
-- `package_cli_release.py assert-draft-only` fails if a manifest claims published.
-- Mutation tests fail if the workflow YAML sets `draft: false` or drops draft.
+- This builder never calls `gh release` or `softprops/action-gh-release`.
+- Isolated CLI `release-manifest.json` still records `published: false` /
+  `auto_publish: false`.
+- `package_cli_release.py assert-draft-only` fails if a CLI-only manifest
+  claims published.
+- The unified draft is created by `.github/workflows/release.yml` and
+  published only by `.github/workflows/release-promote.yml` after exact-SHA
+  validation. A failed promote leaves the draft unpublished.
 
-Publishing is always a **manual** operator step in the GitHub UI.
+Do not publish from the GitHub UI without running **release-promote**. Never
+reuse `v0.1.0-rc5` assets or another SHA.
 
 ## One-command local build
 
@@ -152,9 +160,21 @@ python3 scripts/cli-release/check_cli_release_contract.py
 ```
 
 These fail closed on: missing platform, empty identity, skipped smoke,
-missing checksums, or claiming a published release pass from draft-only CI.
+missing checksums, or claiming a published release pass from a CLI-only
+artifact job.
+
+Unified desktop+CLI contract (partial matrix, version mismatch, wrong SHA,
+missing signatures, duplicate assets, release-object clobber, safe rollback):
+
+```bash
+python3 scripts/release-contract/check_release_contract.py
+```
 
 ## Remaining release work
 
-1. Optional later: macOS notarization and Windows Authenticode jobs.
-2. Desktop `release.yml` remains independent; do not merge draft semantics into auto-publish.
+1. Apple notarization and Windows Authenticode remain **not_configured**.
+   Do not claim them until a future workflow wires real jobs and named secrets.
+2. War Room stays source-run / separately deployed; it is not a CLI or
+   desktop GitHub Release asset today.
+3. A real green orchestrated tag run is still required before claiming
+   published multi-OS installers.

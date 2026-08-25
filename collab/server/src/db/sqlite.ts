@@ -22,6 +22,12 @@ import {
 import { MemoryCatalogStore, type CatalogStore } from "../modules/catalog/index.js";
 import { MemoryCaseStore, type CaseStore } from "../modules/cases/index.js";
 import { MemoryRunStore, type RunStore } from "../modules/import/index.js";
+import {
+  MemoryLocalGrantStore,
+  MemoryUserProfileStore,
+  type LocalGrantStore,
+  type UserProfileStore,
+} from "../modules/people/index.js";
 import { MemoryExperimentStore, type ExperimentStore } from "../modules/experiments/index.js";
 import { MemoryTriageJobStore, type TriageJobStore } from "../modules/triage-runs/index.js";
 import {
@@ -31,6 +37,25 @@ import {
 
 const SQLITE_SCHEMA_VERSION = "sqlite-current-v1";
 const TAG = "__cd_collab_state_type";
+
+/** Every CaseStore method that mutates durable state, including composite transactions. */
+export const CASE_SQLITE_MUTATORS: ReadonlySet<string> = new Set([
+  "insertCase",
+  "updateCaseMeta",
+  "updateSituationAtomic",
+  "addParticipant",
+  "appendTimeline",
+  "insertRevision",
+  "insertArtifact",
+  "insertIntakeBatch",
+  "insertContributionIdempotency",
+  "insertSnapshot",
+  "lockIntakeIdempotency",
+  "lockEvidenceDigest",
+  "lockContributionIdempotency",
+  "withAtomic",
+  "restore",
+]);
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -247,6 +272,8 @@ export interface SqliteRuntime {
   experiments: ExperimentStore;
   jobs: TriageJobStore;
   applyState: PortableApplyStateStore;
+  profiles: UserProfileStore;
+  grants: LocalGrantStore;
   runPortableTransaction: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
@@ -264,26 +291,12 @@ export function createSqliteRuntime(
         { key: "cases", store: rawCases },
       ],
       operation,
-      (result) =>
-        typeof result === "object"
-        && result !== null
-        && "status" in result
-        && result.status === "updated",
     ));
   const cases = persistentMemoryStore(
     state,
     "cases",
     rawCases,
-    new Set([
-      "insertCase",
-      "updateCaseMeta",
-      "addParticipant",
-      "appendTimeline",
-      "insertRevision",
-      "insertArtifact",
-      "insertSnapshot",
-      "restore",
-    ]),
+    CASE_SQLITE_MUTATORS,
   );
   const rawCatalog = new MemoryCatalogStore();
   const catalog = persistentMemoryStore(
@@ -328,6 +341,18 @@ export function createSqliteRuntime(
     rawApplyState,
     new Set(["putIntent", "markApplied", "restore"]),
   );
+  const profiles = persistentMemoryStore(
+    state,
+    "user_profiles",
+    new MemoryUserProfileStore(),
+    new Set(["touchOnLogin", "updateFields", "setStatus"]),
+  );
+  const grants = persistentMemoryStore(
+    state,
+    "user_capability_grants",
+    new MemoryLocalGrantStore(),
+    new Set(["grant", "revoke"]),
+  );
   const portableStores = [
     { key: "audit", store: rawAudit },
     { key: "cases", store: rawCases },
@@ -354,6 +379,8 @@ export function createSqliteRuntime(
     experiments,
     jobs,
     applyState,
+    profiles,
+    grants,
     runPortableTransaction: (operation) => state.transaction(portableStores, operation),
   };
 }

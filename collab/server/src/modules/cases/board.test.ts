@@ -58,9 +58,11 @@ describe("deriveCaseBoard", () => {
   });
 
   it("projects accepted decisions into the newly-concluded bucket", () => {
+    const selected = "a".repeat(64);
     const board = deriveCaseBoard({
       caseId: "case-1",
-      snapshotId: null,
+      snapshotId: "snapshot-1",
+      selectedSnapshotFingerprint: selected,
       generatedAt: "2026-08-20T00:00:00.000Z",
       artifacts: [],
       contributions: [],
@@ -69,11 +71,13 @@ describe("deriveCaseBoard", () => {
           id: "decision-1",
           statement: "Treat inventory timeout as the benchmark investigation path.",
           evidenceRefs: ["evidence-2", "evidence-1"],
+          snapshotFingerprint: selected,
         },
         {
           id: "decision-2",
           statement: "Both strategies converge on inventory timeout.",
           evidenceRefs: [],
+          snapshotFingerprint: `snap-${selected}`,
         },
       ],
     });
@@ -86,6 +90,62 @@ describe("deriveCaseBoard", () => {
     expect(concluded[0]?.evidenceRefs).toEqual(["evidence-1", "evidence-2"]);
     expect(concluded[0]?.agreement).toBe("unknown");
     expect(concluded[0]?.confidence).toBe("unknown");
+  });
+
+  it("fails closed when the selected snapshot fingerprint is missing or unverifiable", () => {
+    const decision = {
+      id: "decision-bound",
+      statement: "A bound conclusion must not appear without a verifiable selected freeze.",
+      evidenceRefs: [] as string[],
+      snapshotFingerprint: "a".repeat(64),
+    };
+    for (const selectedSnapshotFingerprint of [undefined, null, "not-a-hash"]) {
+      const board = deriveCaseBoard({
+        caseId: "case-1",
+        snapshotId: "snapshot-unknown",
+        selectedSnapshotFingerprint,
+        generatedAt: "2026-08-20T00:00:00.000Z",
+        artifacts: [],
+        contributions: [],
+        acceptedDecisions: [decision],
+      });
+      expect(board.findings.filter((finding) => finding.bucket === "newly_concluded")).toEqual([]);
+    }
+  });
+
+  it("excludes accepted decisions bound to another snapshot fingerprint", () => {
+    const selected = "a".repeat(64);
+    const other = "b".repeat(64);
+    const board = deriveCaseBoard({
+      caseId: "case-1",
+      snapshotId: "snapshot-a",
+      selectedSnapshotFingerprint: selected,
+      generatedAt: "2026-08-20T00:00:00.000Z",
+      artifacts: [],
+      contributions: [],
+      acceptedDecisions: [
+        {
+          id: "decision-selected",
+          statement: "Selected freeze conclusion.",
+          evidenceRefs: ["evidence-1"],
+          snapshotFingerprint: `snap-${selected}`,
+        },
+        {
+          id: "decision-other",
+          statement: "Other freeze conclusion must not bleed.",
+          evidenceRefs: ["evidence-2"],
+          snapshotFingerprint: other,
+        },
+        {
+          id: "decision-unknown",
+          statement: "Unverifiable identity must not claim the selected freeze.",
+          evidenceRefs: [],
+          snapshotFingerprint: "not-a-hash",
+        },
+      ],
+    });
+    const concluded = board.findings.filter((finding) => finding.bucket === "newly_concluded");
+    expect(concluded.map((finding) => finding.statement)).toEqual(["Selected freeze conclusion."]);
   });
 
   it("marks shared evidence as agreement without treating it as correctness", () => {

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  snapshotFingerprintDigest,
   type ArtifactV1,
   type CaseBoardGoldStatus,
   type CaseBoardV1,
@@ -11,11 +12,13 @@ export interface AcceptedDecisionBoardInput {
   statement: string;
   evidenceRefs: string[];
   contributionRefs?: string[];
+  snapshotFingerprint?: string | null;
 }
 
 export interface CaseBoardInput {
   caseId: string;
   snapshotId: string | null;
+  selectedSnapshotFingerprint?: string | null;
   generatedAt: string;
   artifacts: ArtifactV1[];
   contributions: ContributionV1[];
@@ -126,7 +129,10 @@ export function deriveCaseBoard(input: CaseBoardInput): CaseBoardV1 {
     });
   }
 
+  const selectedDigest = snapshotFingerprintDigest(input.selectedSnapshotFingerprint);
   for (const decision of input.acceptedDecisions ?? []) {
+    const decisionDigest = snapshotFingerprintDigest(decision.snapshotFingerprint);
+    if (!selectedDigest || decisionDigest !== selectedDigest) continue;
     findings.push({
       id: findingId("concluded", decision.id),
       bucket: "newly_concluded",

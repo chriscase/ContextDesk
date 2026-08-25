@@ -1,41 +1,37 @@
 import {
-  AUTH_ERROR_SCHEMA_ID,
   TRIAGE_JOB_LIST_SCHEMA_ID,
   parseTriageJobRequest,
   projectTriageJobShareSafe,
-  type AuthErrorV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import {
+  capabilityForbidden,
+  requireSessionCapability,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
+import type { CaseService } from "../cases/index.js";
 import { TriageRunConflictError, TriageRunNotFoundError, TriageRunService } from "./service.js";
-
-function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
-  return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
-}
+import { listCaseWorkstreams } from "./workstreams.js";
 
 export interface TriageRunRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   runs: TriageRunService;
+  /**
+   * Supplied wherever the case domain is available. The readable workstream
+   * route needs evidence, snapshots, and the timeline to resolve identifiers
+   * into human labels; without it the route is simply not registered.
+   */
+  cases?: CaseService;
 }
 
 export async function registerTriageRunRoutes(
   app: FastifyInstance,
   deps: TriageRunRouteDeps,
 ): Promise<void> {
-  async function sessionOf(request: FastifyRequest) {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) return null;
-    const roles = deps.roles.resolve(session.groups);
-    return {
-      actor: { id: session.identity.id, username: session.identity.username },
-      isAdmin: canPerform(roles, "admin"),
-      canRead: canPerform(roles, "read"),
-      canLead: canPerform(roles, "lead"),
-    };
+  async function sessionOf(request: FastifyRequest, reply: { code: (status: number) => unknown }) {
+    return requireSessionCapability(request, reply, deps.sessionAuth);
   }
 
   function fail(reply: { code: (status: number) => unknown }, error: unknown): { error: string } {
@@ -52,14 +48,11 @@ export async function registerTriageRunRoutes(
   }
 
   app.get("/api/triage-profiles", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+        return capabilityForbidden(reply);
     }
     return {
       schemaId: "cd-collab.triage_profile_list.v1",
@@ -68,27 +61,21 @@ export async function registerTriageRunRoutes(
   });
 
   app.get("/api/triage-capabilities", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+        return capabilityForbidden(reply);
     }
     return deps.runs.capabilities();
   });
 
   app.get("/api/cases/:id/triage-runs", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+        return capabilityForbidden(reply);
     }
     const caseId = (request.params as { id: string }).id;
     return {
@@ -98,15 +85,32 @@ export async function registerTriageRunRoutes(
     };
   });
 
+  if (deps.cases) {
+    const cases = deps.cases;
+    app.get("/api/cases/:id/workstreams", async (request, reply) => {
+      const loaded = await sessionOf(request, reply);
+      if ("denied" in loaded) return loaded.denied;
+      const ctx = loaded.ctx;
+      if (!ctx.has("investigation:read")) {
+        return capabilityForbidden(reply);
+      }
+      const caseId = (request.params as { id: string }).id;
+      return listCaseWorkstreams({
+        cases,
+        runs: deps.runs,
+        caseId,
+        actor: ctx.actor,
+        isAdmin: ctx.isAdmin,
+      });
+    });
+  }
+
   app.get("/api/cases/:id/triage-runs/:jid", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+        return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; jid: string };
     const job = await deps.runs.get(params.id, params.jid, ctx.actor, ctx.isAdmin);
@@ -118,14 +122,11 @@ export async function registerTriageRunRoutes(
   });
 
   app.get("/api/cases/:id/triage-runs/:jid/share-safe", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+        return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; jid: string };
     const job = await deps.runs.get(params.id, params.jid, ctx.actor, ctx.isAdmin);
@@ -137,33 +138,34 @@ export async function registerTriageRunRoutes(
   });
 
   app.post("/api/cases/:id/triage-runs", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
+        return capabilityForbidden(reply);
     }
     const caseId = (request.params as { id: string }).id;
     try {
       const parsed = parseTriageJobRequest(request.body);
-      return await deps.runs.create(caseId, ctx.actor, parsed, request.ip, ctx.isAdmin);
+      return await deps.runs.create(
+        caseId,
+        ctx.actor,
+        parsed,
+        request.ip,
+        ctx.isAdmin,
+        ctx.has("evidence:private:read"),
+      );
     } catch (error) {
       return fail(reply, error);
     }
   });
 
   app.post("/api/cases/:id/triage-runs/:jid/cancel", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canLead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
+        return capabilityForbidden(reply);
     }
     const params = request.params as { id: string; jid: string };
     try {

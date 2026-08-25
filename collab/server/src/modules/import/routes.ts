@@ -4,8 +4,10 @@ import {
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import {
+  requireSessionCapability,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 import type { ImportService } from "./service.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
@@ -23,8 +25,7 @@ function str(v: unknown): string | undefined {
 }
 
 export interface ImportRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   imports: ImportService;
 }
@@ -33,25 +34,15 @@ export async function registerImportRoutes(
   app: FastifyInstance,
   deps: ImportRouteDeps,
 ): Promise<void> {
-  async function sessionOf(request: FastifyRequest) {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) return null;
-    const roles = deps.roles.resolve(session.groups);
-    return {
-      actor: { id: session.identity.id, username: session.identity.username },
-      isAdmin: canPerform(roles, "admin"),
-      canRead: canPerform(roles, "read"),
-      canWrite: canPerform(roles, "mutate"),
-    };
+  async function sessionOf(request: FastifyRequest, reply: { code: (status: number) => unknown }) {
+    return requireSessionCapability(request, reply, deps.sessionAuth);
   }
 
   app.get("/api/cases/:id/imports", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -63,12 +54,10 @@ export async function registerImportRoutes(
   });
 
   app.post("/api/cases/:id/imports", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       await deps.audit.append({
         identity: ctx.actor.id,
         action: "external_run_import",
@@ -137,12 +126,10 @@ export async function registerImportRoutes(
   });
 
   app.get("/api/cases/:id/imports/:rid", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
       void reply.code(403);
       return authError("forbidden");
     }
@@ -156,12 +143,10 @@ export async function registerImportRoutes(
   });
 
   app.post("/api/cases/:id/imports/:rid/corroborate", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canWrite) {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
       void reply.code(403);
       return authError("forbidden");
     }

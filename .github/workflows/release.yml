@@ -1,4 +1,6 @@
-# Tag-driven desktop installers (#172). Not run on PR/main — only v* tags + workflow_dispatch.
+# Authoritative desktop+CLI release orchestration.
+# Builders upload Actions artifacts only. This workflow is the only tag-triggered
+# path that may create a draft GitHub Release, and it never publishes.
 name: release
 
 on:
@@ -8,97 +10,283 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag name for the draft release (e.g. v0.1.0-rc1)"
+        description: "Tag name for the draft release (e.g. v0.1.0-rc6)"
         required: true
         type: string
       signed_updater:
-        description: "Require signed updater artifacts (needs a valid TAURI_SIGNING_PRIVATE_KEY)"
+        description: "Force signed updater artifacts on a prerelease tag"
         required: false
         default: false
         type: boolean
 
+concurrency:
+  group: contextdesk-release-${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
+  id-token: write
 
 jobs:
-  desktop-bundle:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            args: ""
-          # Keep the packaged Linux host aligned with gui-accept. The shipped
-          # ort-sys prebuilts require glibc >= 2.38 (__isoc23_* symbols), so
-          # Ubuntu 22.04 cannot link the production desktop binary.
-          - platform: ubuntu-24.04
-            args: ""
-          - platform: windows-latest
-            args: ""
-    runs-on: ${{ matrix.platform }}
+  preflight:
+    name: preflight-identity
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+      git_sha: ${{ steps.identity.outputs.git_sha }}
+      git_describe: ${{ steps.identity.outputs.git_describe }}
+      channel: ${{ steps.identity.outputs.channel }}
+      kind: ${{ steps.identity.outputs.kind }}
+      require_signed_updater: ${{ steps.identity.outputs.require_signed_updater }}
     steps:
-      - name: Checkout
+      - name: Checkout tag
         uses: actions/checkout@v4
-
-      - name: Install Linux deps (WebKit / appindicator)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
-            libdbus-1-dev pkg-config libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+          fetch-depth: 0
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            desktop/src-tauri
-
-      - name: Install frontend deps
-        working-directory: desktop
-        run: npm ci
-
-      - name: Build frontend + generate tauri conf
-        working-directory: desktop
+      - name: Resolve and verify identity
+        id: identity
         env:
-          CONTEXTDESK_SIGNED_UPDATER: ${{ (github.ref_type == 'tag' || inputs.signed_updater) && 'true' || 'false' }}
+          HAS_TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          FORCE_SIGNED: ${{ inputs.signed_updater }}
         run: |
-          node scripts/gen-tauri-conf.mjs
-          node -e "const fs=require('node:fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));if(process.env.CONTEXTDESK_SIGNED_UPDATER!=='true'){c.bundle.createUpdaterArtifacts=false;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')}"
-          npm run build
+          set -euo pipefail
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            echo "tag is required" >&2
+            exit 1
+          fi
+          SHA="$(git rev-parse HEAD)"
+          DESCRIBE="$(git describe --always --dirty --tags 2>/dev/null || echo "$SHA")"
+          python3 scripts/release-contract/release_contract.py identity \
+            --repo-root . \
+            --tag "$TAG" \
+            --git-sha "$SHA" \
+            --git-describe "$DESCRIBE" \
+            --channel installed | tee /tmp/cd-identity.json
+          KIND="$(python3 -c 'import json; print(json.load(open("/tmp/cd-identity.json"))["kind"])')"
+          REQUIRE_SIGNED=false
+          if [ "$KIND" = "ga" ] || [ "${FORCE_SIGNED}" = "true" ]; then
+            REQUIRE_SIGNED=true
+          fi
+          python3 scripts/release-contract/release_contract.py preflight-signing \
+            --kind "$KIND" \
+            --has-tauri-key "$HAS_TAURI_KEY"
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "git_sha=$SHA"
+            echo "git_describe=$DESCRIBE"
+            echo "channel=installed"
+            echo "kind=$KIND"
+            echo "require_signed_updater=$REQUIRE_SIGNED"
+          } >> "$GITHUB_OUTPUT"
+          echo "CD_GIT_SHA=$SHA"
+          echo "CD_GIT_DESCRIBE=$DESCRIBE"
+          echo "CD_CHANNEL=installed"
 
-      - name: Bundle desktop (tauri-action)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Ed25519 minisign private key for updater artifacts (#173).
-          # Set repo secrets TAURI_SIGNING_PRIVATE_KEY (+ optional PASSWORD).
-          # Public key is committed in desktop/src-tauri/tauri.conf.json plugins.updater.pubkey.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ (github.ref_type == 'tag' || inputs.signed_updater) && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ (github.ref_type == 'tag' || inputs.signed_updater) && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+  desktop:
+    needs: preflight
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      tag: ${{ needs.preflight.outputs.tag }}
+      git_sha: ${{ needs.preflight.outputs.git_sha }}
+      git_describe: ${{ needs.preflight.outputs.git_describe }}
+      channel: installed
+      signed_updater: ${{ needs.preflight.outputs.require_signed_updater }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+  cli:
+    needs: preflight
+    uses: ./.github/workflows/cli-release.yml
+    with:
+      tag: ${{ needs.preflight.outputs.tag }}
+      git_sha: ${{ needs.preflight.outputs.git_sha }}
+      git_describe: ${{ needs.preflight.outputs.git_describe }}
+      channel: installed
+
+  assemble-draft:
+    name: assemble-draft
+    needs: [preflight, desktop, cli]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout exact SHA
+        uses: actions/checkout@v4
         with:
-          projectPath: desktop
-          # Draft so operators can smoke-test before publishing.
-          releaseDraft: true
-          # Attach latest.json + signatures when createUpdaterArtifacts is true (#173).
-          includeUpdaterJson: ${{ github.ref_type == 'tag' || inputs.signed_updater }}
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
-          releaseName: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
-          releaseBody: |
-            Desktop installers for ContextDesk (draft).
+          ref: ${{ needs.preflight.outputs.git_sha }}
+          fetch-depth: 0
 
-            Built by `.github/workflows/release.yml` (#172 + #173 updater artifacts).
-            Code signing / notarization is operator-owned (see docs/PACKAGING.md).
-            Signed updater metadata is attached only when explicitly enabled with a valid operator key.
-          args: ${{ matrix.args }}
+      - name: Resolve exact remote tag
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          EXPECTED: ${{ needs.preflight.outputs.git_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          RESOLVED="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          if [ "$RESOLVED" != "$EXPECTED" ]; then
+            echo "tag $TAG resolves to $RESOLVED, expected $EXPECTED" >&2
+            exit 1
+          fi
+
+      - name: Verify pinned updater verifier
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/openssl
+          /usr/bin/openssl version | grep -E '^OpenSSL 3\.'
+
+      - name: Download desktop and CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/download
+
+      - name: Flatten assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          def digest(path: Path) -> str:
+              h = hashlib.sha256()
+              h.update(path.read_bytes())
+              return h.hexdigest()
+
+          src = Path("dist/download")
+          dst = Path("dist/release")
+          dst.mkdir(parents=True, exist_ok=True)
+          seen = {}
+          for path in sorted(src.rglob("*")):
+              if not path.is_file():
+                  continue
+              hashed = digest(path)
+              if path.name in seen:
+                  if seen[path.name] == hashed:
+                      continue
+                  raise SystemExit(
+                      f"duplicate basename {path.name} with different digest"
+                  )
+              seen[path.name] = hashed
+              (dst / path.name).write_bytes(path.read_bytes())
+          print(f"flattened {len(seen)} files")
+          PY
+          ls -la dist/release
+
+      - name: Assemble unified inventory
+        env:
+          CD_GIT_SHA: ${{ needs.preflight.outputs.git_sha }}
+          CD_GIT_DESCRIBE: ${{ needs.preflight.outputs.git_describe }}
+          CD_CHANNEL: installed
+          CONTEXTDESK_RELEASE_OPENSSL: /usr/bin/openssl
+        run: |
+          set -euo pipefail
+          python3 scripts/release-contract/release_contract.py assemble \
+            --dir dist/release \
+            --tag "${{ needs.preflight.outputs.tag }}" \
+            --git-sha "${{ needs.preflight.outputs.git_sha }}" \
+            --git-describe "${{ needs.preflight.outputs.git_describe }}" \
+            --channel installed \
+            --repo-root . \
+            --check-repo \
+            --require-signed-updater "${{ needs.preflight.outputs.require_signed_updater }}" \
+            --allow-test-sig false
+          python3 scripts/release-contract/release_contract.py assert-draft-only \
+            --manifest dist/release/release-manifest.json
+          test -f dist/release/SHA256SUMS
+          test -f dist/release/inventory.txt
+          test -f dist/release/sbom.cdx.json
+
+      - name: Attest assembled artifacts (when supported)
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            dist/release/*
+
+      - name: Create-or-verify draft (no clobber)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          GIT_SHA: ${{ needs.preflight.outputs.git_sha }}
+          GIT_DESCRIBE: ${{ needs.preflight.outputs.git_describe }}
+          KIND: ${{ needs.preflight.outputs.kind }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release-contract/release_contract.py emit-notes \
+            --tag "$TAG" \
+            --git-sha "$GIT_SHA" \
+            --git-describe "$GIT_DESCRIBE" \
+            --channel installed \
+            --output /tmp/cd-release-notes.md | tee /tmp/cd-release-name.txt
+          NAME="$(cat /tmp/cd-release-name.txt)"
+          PRE_ARGS=()
+          if [ "$KIND" = "prerelease" ]; then
+            PRE_ARGS+=(--prerelease)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release view "$TAG" --json name,body,isDraft,isPrerelease,tagName,targetCommitish \
+              > /tmp/cd-existing-release.json
+            python3 scripts/release-contract/release_contract.py validate-release-state \
+              --metadata /tmp/cd-existing-release.json \
+              --tag "$TAG" \
+              --expected-git-sha "$GIT_SHA" \
+              --git-describe "$GIT_DESCRIBE" \
+              --allow-published false \
+              --output-state /tmp/cd-release-state
+          else
+            gh release create "$TAG" \
+              --draft \
+              --verify-tag \
+              --title "$NAME" \
+              --notes-file /tmp/cd-release-notes.md \
+              --target "$GIT_SHA" \
+              "${PRE_ARGS[@]}"
+          fi
+          # Resume only across exact bytes. Existing same-name assets are
+          # downloaded and hashed; identical bytes are skipped, differences
+          # and remote-only assets fail closed. Never use --clobber.
+          rm -rf /tmp/cd-existing-assets /tmp/cd-upload-plan.json
+          mkdir -p /tmp/cd-existing-assets
+          ASSET_COUNT="$(gh release view "$TAG" --json assets --jq '.assets | length')"
+          if [ "$ASSET_COUNT" -gt 0 ]; then
+            gh release download "$TAG" --dir /tmp/cd-existing-assets
+          fi
+          python3 scripts/release-contract/release_contract.py plan-upload \
+            --dir dist/release \
+            --existing-dir /tmp/cd-existing-assets \
+            --output /tmp/cd-upload-plan.json
+          while IFS= read -r name; do
+            test -n "$name"
+            gh release upload "$TAG" "dist/release/$name"
+          done < <(python3 -c 'import json; [print(name) for name in json.load(open("/tmp/cd-upload-plan.json"))["upload"]]')
+
+          # Verify the bytes actually attached to the draft, not merely the
+          # local assembly directory used before upload.
+          rm -rf /tmp/cd-attached-assets
+          mkdir -p /tmp/cd-attached-assets
+          gh release download "$TAG" --dir /tmp/cd-attached-assets
+          CONTEXTDESK_RELEASE_OPENSSL=/usr/bin/openssl \
+            python3 scripts/release-contract/release_contract.py validate-promote \
+              --dir /tmp/cd-attached-assets \
+              --tag "$TAG" \
+              --expected-git-sha "$GIT_SHA" \
+              --git-describe "$GIT_DESCRIBE" \
+              --repo-root . \
+              --allow-test-sig false
+
+      - name: Upload assembled inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-inventory
+          path: |
+            dist/release/SHA256SUMS
+            dist/release/inventory.txt
+            dist/release/sbom.cdx.json
+            dist/release/release-manifest.json
+            dist/release/latest.json
+          if-no-files-found: error

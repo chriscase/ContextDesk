@@ -29,32 +29,84 @@ npx @tauri-apps/cli icon src-tauri/icons/app-icon-source.png
 
 That writes `icon.icns`, `icon.ico`, `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.png`, plus store sizes. Commit the outputs.
 
-### Tag-driven GitHub Release (CI)
+### Authoritative release orchestration (CI)
 
-Workflow: `.github/workflows/release.yml` (#172).
+**One path owns the GitHub Release object:** `.github/workflows/release.yml`.
+Desktop and CLI builders (`release-desktop.yml`, `cli-release.yml`) upload
+Actions artifacts only. They must not create, retitle, rewrite, or publish a
+GitHub Release. That is the fail-closed answer to two workflows racing on the
+same `v*` tag and clobbering title, body, or prerelease state.
 
-| Trigger | Behavior |
-|---------|----------|
-| Push tag `v*` (e.g. `v0.1.0`) | Matrix build macOS / Ubuntu 24.04 / Windows → **draft** GitHub Release with installers |
-| `workflow_dispatch` | Same, using the provided tag name input. Draft smoke builds default to unsigned installers; set `signed_updater: true` only when the updater signing secret is valid. |
+| Workflow | Trigger | GitHub Release |
+|----------|---------|----------------|
+| `release.yml` (authoritative) | tag `v*`, `workflow_dispatch` | Creates **one** locked draft after both matrices complete. Never publishes. |
+| `release-desktop.yml` | `workflow_call` / isolated dispatch | Artifacts only |
+| `cli-release.yml` | `workflow_call` / isolated dispatch | Artifacts only |
+| `release-promote.yml` | `workflow_dispatch` only | Publishes only after exact-SHA validation |
 
-**Not** run on every PR or push to `main` (saves runner minutes). Day-to-day CI is `.github/workflows/ci.yml` (fmt/clippy/tests/frontend/Tauri host compile).
+**Not** run on every PR or push to `main`. Day-to-day CI is `.github/workflows/ci.yml`.
+Offline contract tests: `python3 scripts/release-contract/check_release_contract.py`.
+
+Release builds embed `CD_CHANNEL=installed` plus the exact `CD_GIT_SHA` (40-char)
+and `CD_GIT_DESCRIBE`. Tag, Cargo workspace, desktop Cargo, `tauri.conf.json`,
+and `desktop/package.json` versions must agree (prerelease tags keep the
+`MAJOR.MINOR.PATCH` package core). CLI archive names use the tag without `v`.
+
+The assemble step refuses a partial Windows/macOS/Linux desktop or CLI matrix,
+duplicate basenames, a foreign git SHA, and reuse of `v0.1.0-rc5` (or any other)
+assets on a different tag. It writes one `SHA256SUMS`, `inventory.txt`,
+`sbom.cdx.json`, and `release-manifest.json`. The manifest binds every payload
+asset by SHA-256 and binds the generated checksum, inventory, and SBOM bytes;
+promotion downloads the draft again and requires that exact flat asset set and
+every recorded digest before publishing.
+
+GA (`vX.Y.Z` with no prerelease suffix) requires a signed `latest.json` whose
+URLs bind to the exact tag and whose Tauri Base64-wrapped minisign signatures
+cryptographically verify the exact updater bytes against the public key pinned
+in `tauri.conf.json`. Missing updater signing prerequisites or a mismatched key,
+signature, or payload fail before the draft is accepted for promotion.
+Prerelease tags may draft without updater signatures; they still cannot be
+promoted to GA rules.
+
+Apple notarization and Windows Authenticode are **not_configured** in this
+repository. Do not claim notarized or Authenticode-signed installers unless a
+future workflow actually wires those jobs and named secrets.
+
+**War Room** (the `collab/` collaboration surface) is **source-run / separately
+deployed today**. It is not an asset of the desktop installer or CLI archive
+release. Do not describe a GitHub Release as shipping War Room.
 
 #### Operator release checklist
 
-1. Bump `version` in `desktop/src-tauri/tauri.conf.json` (keep `cd-core` / package versions aligned when shipping).
-2. Ensure main is green under the full gate (`cargo test --workspace`, desktop tsc/build, CI).
-3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`  
-   **Or** Actions → **release** → **Run workflow** (`workflow_dispatch`) with a tag name (e.g. `v0.1.0-rc1`).  
-   **Honesty:** `tauri-action` with `tagName`/`releaseName` **creates or uses a GitHub Release for that tag** — this is **not** a no-tag dry run. Prefer an `rc` / pre-release tag for experiments; do not claim “without a permanent tag.”
-4. Wait for the **release** workflow; open the **draft** GitHub Release; smoke-test one installer per OS.
-5. Publish the release when ready.
-6. **Signing / notarization** (Apple, Windows Authenticode) remains operator-owned — no secrets in the repo. Wire secrets only via GitHub Actions settings if you add signing later.
-7. Auto-updater / `latest.json` is **#173**. Requires repo secret `TAURI_SIGNING_PRIVATE_KEY` for updater signing. **Local** `tauri build`: unsigned installers may already exist under `bundle/` even when the final updater-signing step fails without the private key — see “Unsigned local bundle” above. Manual CI runs default to unsigned draft installers and omit updater metadata; set `signed_updater: true` only to require signed updater artifacts. Tag-triggered builds require signing. Do not claim multi-OS or updater artifacts until a green run lists the exact assets.
+1. Align versions: Cargo workspace, `desktop/src-tauri/Cargo.toml`,
+   `desktop/src-tauri/tauri.conf.json`, and `desktop/package.json`.
+2. Ensure the intended SHA is green under the full gate.
+3. Tag that exact SHA: `git tag v0.1.0 && git push origin v0.1.0`
+   **or** Actions → **release** → **Run workflow** with that tag.
+   This is **not** a no-tag dry run.
+4. Wait for **release** to finish. Confirm the draft title/body/prerelease
+   match the locked contract and that `SHA256SUMS` lists every desktop, CLI,
+   and updater asset. A retry resumes only when every existing same-name draft
+   asset has the exact local digest; it never clobbers a mismatch.
+5. Smoke-test installers and CLI archives from that draft only. Never copy
+   `v0.1.0-rc5` (or any other SHA/tag) assets onto a new cut.
+6. Promote **only** via Actions → **release-promote** with the exact 40-char
+   SHA and `confirm_publish=publish`. Any other confirm value, or any
+   validation failure, leaves the draft unpublished. Retrying an already
+   published release is a successful no-op only when its tag, target SHA,
+   locked metadata, and downloaded assets still match exactly.
+7. Updater signing secret **names** (values stay in GitHub Actions; never
+   commit them): `TAURI_SIGNING_PRIVATE_KEY`, optional
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. GA preflight fails closed if the
+   private key is absent.
 
 #### Honesty: CLAIMS “Proven multi-OS installers”
 
-Do **not** mark multi-OS installers **Shipped** in `docs/CLAIMS.md` until a **real green matrix run** has produced downloadable artifacts (release assets or Actions artifacts). Until then keep the Roadmap residual (#172 / #55).
+Do **not** mark multi-OS installers **Shipped** in `docs/CLAIMS.md` until a
+**real green orchestrated run** has produced downloadable artifacts for the
+complete desktop and CLI matrices. Until then keep the Roadmap residual
+(#172 / #55). The in-repo contract is testable offline; it is not itself a
+published installer.
 
 Expected artifacts (via `tauri-apps/tauri-action`, `targets: all`):
 
@@ -92,7 +144,11 @@ Non-loopback requires `--allow-lan` **and** at least one API key (startup refuse
   - `TAURI_SIGNING_PRIVATE_KEY` — minisign private key string (from `npx tauri signer generate`)
   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — optional password if the key has one
 - **Endpoint:** HTTPS only — `https://github.com/chriscase/ContextDesk/releases/latest/download/latest.json`
-- **Artifacts:** `bundle.createUpdaterArtifacts: true` + release workflow `includeUpdaterJson: true`.
+- **Artifacts:** `bundle.createUpdaterArtifacts: true` on GA/signed runs. The
+  orchestrator assembles one `latest.json` after the desktop matrix finishes
+  and verifies URL binding plus both minisign Ed25519 signatures against the
+  exact pinned updater public key. Builders do not attach updater JSON
+  themselves. Release verification requires OpenSSL 3.x's Ed25519 verifier.
 - **UX:** Settings → General → **Check for updates**. No background auto-install; confirm dialog before download+install.
 - **CSP:** Update fetch runs in Rust, not the webview; `connect-src` does not need the GitHub host.
 
@@ -106,7 +162,17 @@ npx @tauri-apps/cli signer generate -w ./cd.key
 
 If you lose the private key, generate a new pair, update the committed pubkey, and cut a fresh release — prior installers cannot verify new signatures until they ship with the new pubkey (or users reinstall).
 
+GA assemble and promote verify that `latest.json` URLs use
+`/releases/download/<exact-tag>/` (never `/latest/` or another tag such as
+`v0.1.0-rc5`) and that each signature binds to the exact updater artifact
+bytes in the inventory under the public key embedded in the desktop app.
+
 ## CLI multi-platform archives
 
-See [CLI_PACKAGING.md](./CLI_PACKAGING.md) and `.github/workflows/cli-release.yml`.
-Desktop installers above remain separate; CLI draft releases never auto-publish.
+See [CLI_PACKAGING.md](./CLI_PACKAGING.md). CLI archives are built by
+`.github/workflows/cli-release.yml` as **artifacts only**. The authoritative
+draft GitHub Release that attaches those archives next to desktop installers
+is assembled by `.github/workflows/release.yml`. Isolated CLI dispatch never
+publishes and never mutates title/body/prerelease.
+
+Acceptance instructions: [RELEASE_CONTRACT_ACCEPTANCE_V1.md](./testing/RELEASE_CONTRACT_ACCEPTANCE_V1.md).

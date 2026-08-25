@@ -7,10 +7,11 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+CONFIG="$ROOT/scripts/ci_shard_config.sh"
 
 OS=""
 SHARD=""
-SHARDS=4
+SHARDS=""
 OUT="$ROOT/ci-platform-shards"
 HEARTBEAT=${CD_SHARD_HEARTBEAT_SECONDS:-60}
 UNIT_TIMEOUT=${CD_SHARD_UNIT_TIMEOUT_SECONDS:-1800}
@@ -73,6 +74,7 @@ case $OS in
   macos | windows) ;;
   *) die "--os must be macos or windows" ;;
 esac
+[ -n "$SHARDS" ] || SHARDS=$(sh "$CONFIG" count "$OS")
 case $SHARD in '' | *[!0-9]*) die "--shard must be a positive integer" ;; esac
 case $SHARDS in '' | *[!0-9]*) die "--shards must be a positive integer" ;; esac
 [ "$SHARD" -ge 1 ] && [ "$SHARD" -le "$SHARDS" ] ||

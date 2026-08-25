@@ -210,6 +210,7 @@
 .topbar__start:focus-visible,
 .topbar__menu-toggle:focus-visible,
 .account__trigger:focus-visible,
+.account__profile:focus-visible,
 .account__signout:focus-visible,
 .account__theme select:focus-visible {
   outline: 2px solid var(--accent);
@@ -287,6 +288,30 @@
   font-size: 0.82rem;
 }
 
+.account__profile,
+.account__signout {
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.75rem;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+}
+
+.account__profile[aria-current="page"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.account__signout:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
 .account__theme {
   display: grid;
   gap: 0.3rem;
@@ -301,23 +326,6 @@
   background: var(--surface-input);
   color: var(--fg);
   font: inherit;
-}
-
-.account__signout {
-  border: 1px solid var(--border);
-  border-radius: 0.4rem;
-  padding: 0.4rem 0.75rem;
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  font-size: 0.85rem;
-  cursor: pointer;
-  text-align: center;
-}
-
-.account__signout:hover {
-  border-color: var(--danger);
-  color: var(--danger);
 }
 
 .account__static-note {

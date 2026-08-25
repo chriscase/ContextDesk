@@ -67,8 +67,10 @@ surfaces.
 - Directory-backed identity is deployment-specific and requires encrypted,
   qualified LDAP configuration.
 - Discussion uses bounded polling, not WebSocket presence or typing signals.
-- Complete investigation archive export and dry-run preflight ship, but
-  restore/apply does not.
+- Portable investigation export, fail-closed dry-run preflight, and exact
+  restore of supported fields ship. Restore refuses archives with required
+  private, omitted, blocked, redacted, or metadata-only content; archive
+  signatures are recorded as metadata but are not verified.
 - Automatic desktop embedding and automatic desktop/CLI synchronization are
   not shipped.
 

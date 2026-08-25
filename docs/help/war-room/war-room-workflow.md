@@ -11,8 +11,10 @@ tags:
   - process
 order: 10
 related:
+  - war-room-workstreams
   - war-room-evidence-review
   - war-room-deployment
+  - war-room-my-profile
 ---
 
 # War Room investigation workflow
@@ -60,6 +62,12 @@ model or profile becomes a separate lane attempt. Timeline reconstruction,
 failure-boundary testing, and challenge review require separate jobs when they
 use distinct strategies or questions. A rerun creates history instead of
 replacing the earlier attempt.
+
+Each recorded attempt appears as a **workstream** with its own address: the
+question it was asked, who requested it, the frozen evidence set it saw, what
+it reported, what it cited, what it left unknown, and a timestamped history.
+Opening one focuses Analyze on that record. To read or share a single
+workstream, open help://war-room-workstreams.
 
 Synthetic offline lanes are available in the demonstration path. Configured
 gateway lanes require the optional host-owned bridge. Provider credentials do

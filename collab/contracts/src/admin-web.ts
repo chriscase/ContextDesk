@@ -3,6 +3,30 @@ export { APP_ROLES } from "./auth.js";
 export type { AppRole } from "./auth.js";
 
 export {
+  COMPONENT_HEALTH_COMPONENT_IDS,
+  COMPONENT_HEALTH_NOTICES,
+  COMPONENT_HEALTH_SCHEMA_ID,
+  parseComponentHealthResponse,
+} from "./component-health.js";
+export type {
+  ComponentHealthCompatibilityScope,
+  ComponentHealthCompatibilityStatus,
+  ComponentHealthCompatibilityV1,
+  ComponentHealthComponentId,
+  ComponentHealthComponentV1,
+  ComponentHealthDataMode,
+  ComponentHealthNotice,
+  ComponentHealthProtocolV1,
+  ComponentHealthReportStatus,
+  ComponentHealthResponseV1,
+  ComponentHealthSource,
+  ComponentHealthStorageMigrationState,
+  ComponentHealthStorageMigrationV1,
+  ComponentHealthUpdateState,
+  ComponentHealthUpdateV1,
+} from "./component-health.js";
+
+export {
   ADMIN_DIRECTORY_ERROR_SCHEMA_ID,
   ADMIN_DIRECTORY_GROUPS_SCHEMA_ID,
   ADMIN_DIRECTORY_IDENTITIES_SCHEMA_ID,
@@ -46,3 +70,123 @@ export type {
   AdminRoleMappingUpdateRequestV1,
   AdminRoleMappingV1,
 } from "./admin-role-map.js";
+
+export {
+  CAPABILITIES,
+  CAPABILITY_MODEL_VERSION,
+  ROLE_CAPABILITIES,
+  hasCapability,
+  isCapability,
+  resolveCapabilities,
+  roleCapabilities,
+} from "./capability.js";
+export type { Capability } from "./capability.js";
+
+export {
+  AVATAR_KINDS,
+  DIRECTORY_SYNCED_FIELDS,
+  DIRECTORY_SYNC_STATUSES,
+  LOCAL_ONLY_FIELDS,
+  PROFILE_CONTACT_EMAIL_MAX,
+  PROFILE_CONTACT_OTHER_MAX,
+  PROFILE_CUSTOM_ATTR_KEY_MAX,
+  PROFILE_CUSTOM_ATTR_KEY_PATTERN,
+  PROFILE_CUSTOM_ATTR_MAX_COUNT,
+  PROFILE_CUSTOM_ATTR_VALUE_MAX,
+  PROFILE_DISPLAY_NAME_MAX,
+  PROFILE_PROVENANCE,
+  PROFILE_ROLE_TITLE_MAX,
+  PROFILE_STATUS,
+  PROFILE_TEAM_MAX,
+  USER_PROFILE_ERROR_SCHEMA_ID,
+  USER_PROFILE_SCHEMA_ID,
+  USER_PROFILE_UPDATE_REQUEST_SCHEMA_ID,
+  assertProfileUpdateAllowed,
+  hasDangerousUnicode,
+  isProfileFieldSelfEditable,
+  normalizeCustomAttributes,
+  normalizeDisplayName,
+  parseUserProfile,
+  parseUserProfileError,
+  parseUserProfileUpdateRequest,
+} from "./user-profile.js";
+export type {
+  AvatarKind,
+  AvatarMetaV1,
+  CustomAttributeV1,
+  DirectorySyncStatus,
+  DirectorySyncedField,
+  LocalOnlyField,
+  ProfileProvenance,
+  ProfileStatus,
+  SelfEditableField,
+  UserProfileErrorCode,
+  UserProfileErrorV1,
+  UserProfileUpdateRequestV1,
+  UserProfileV1,
+} from "./user-profile.js";
+
+export {
+  DEFAULT_DIRECTORY_ATTRIBUTE_MAP,
+  DIRECTORY_ATTRIBUTE_MAP_SCHEMA_ID,
+  DIRECTORY_ATTRIBUTE_NAME_MAX,
+  DIRECTORY_MAPPED_FIELDS,
+  parseDirectoryAttributeMap,
+} from "./directory-mapping.js";
+export type { DirectoryAttributeMapV1, DirectoryMappedField } from "./directory-mapping.js";
+
+export {
+  BROWSER_MUTATION_METHODS,
+  COLLAB_CSRF_HEADER,
+  COLLAB_CSRF_HEADER_VALUE,
+  CSRF_ERROR_SCHEMA_ID,
+  apiPathname,
+  isBrowserMutationMethod,
+  isCollabApiPath,
+  isCsrfExemptApiPath,
+  parseCsrfError,
+  requiresBrowserMutationCsrf,
+} from "./csrf.js";
+export type { BrowserMutationMethod, CsrfErrorCode, CsrfErrorV1 } from "./csrf.js";
+
+export {
+  ADMIN_DIRECTORY_MAPPING_PREVIEW_REQUEST_SCHEMA_ID,
+  ADMIN_DIRECTORY_MAPPING_PREVIEW_RESPONSE_SCHEMA_ID,
+  ADMIN_PEOPLE_CSRF_HEADER,
+  ADMIN_PEOPLE_CSRF_HEADER_VALUE,
+  ADMIN_PEOPLE_EFFECTIVE_SCHEMA_ID,
+  ADMIN_PEOPLE_ERROR_SCHEMA_ID,
+  ADMIN_PEOPLE_GRANT_REQUEST_SCHEMA_ID,
+  ADMIN_PEOPLE_LIST_REQUEST_SCHEMA_ID,
+  ADMIN_PEOPLE_LIST_SCHEMA_ID,
+  ADMIN_PEOPLE_MAX_PAGE_SIZE,
+  ADMIN_PEOPLE_REVOKE_REQUEST_SCHEMA_ID,
+  ADMIN_PEOPLE_SEARCH_MAX_LENGTH,
+  ADMIN_PEOPLE_STATUS_REQUEST_SCHEMA_ID,
+  IDEMPOTENCY_KEY_MAX_LENGTH,
+  IDEMPOTENCY_KEY_MIN_LENGTH,
+  buildEffectiveCapabilityRows,
+  computeDirectoryMappingPreview,
+  parseAdminDirectoryMappingPreviewRequest,
+  parseAdminPeopleEffective,
+  parseAdminPeopleError,
+  parseAdminPeopleGrantRequest,
+  parseAdminPeopleListRequest,
+  parseAdminPeopleListResponse,
+  parseAdminPeopleRevokeRequest,
+  parseAdminPeopleStatusRequest,
+} from "./admin-people.js";
+export type {
+  AdminDirectoryMappingPreviewRequestV1,
+  AdminDirectoryMappingPreviewResponseV1,
+  AdminPeopleEffectiveV1,
+  AdminPeopleErrorCode,
+  AdminPeopleErrorV1,
+  AdminPeopleGrantRequestV1,
+  AdminPeopleListRequestV1,
+  AdminPeopleListResponseV1,
+  AdminPeopleRevokeRequestV1,
+  AdminPeopleStatusRequestV1,
+  EffectiveCapabilityV1,
+  LocalCapabilityGrantV1,
+} from "./admin-people.js";

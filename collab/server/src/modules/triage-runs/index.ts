@@ -12,14 +12,17 @@ export type {
   TriageBatchRunExecutor,
   TriageExecutionContext,
   TriageExecutionEvidence,
+  TriageRecoveryAuthorization,
   TriageRunExecutor,
+  RecoveryRefusalReason,
 } from "./service.js";
-export { MemoryTriageJobStore, PgTriageJobStore } from "./store.js";
+export { MemoryTriageJobStore, PgTriageJobStore, triageRunningLeaseExpired, triageWorkerHoldsLiveLease } from "./store.js";
 export type { OverviewJobQuery, OverviewListedJob, TriageJobStore } from "./store.js";
 export { loadConfiguredTriageProfileCatalog, parseTriageProfileCatalog } from "./profiles.js";
 export type { TriageProfileOption } from "./profiles.js";
 export { RustBridgeTriageExecutor } from "./runner.js";
 export type { RustBridgeTriageExecutorOptions } from "./runner.js";
 export { triageBridgeOptions } from "./runtime-config.js";
+export { listCaseWorkstreams } from "./workstreams.js";
 export { registerTriageRunRoutes } from "./routes.js";
 export type { TriageRunRouteDeps } from "./routes.js";

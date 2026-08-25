@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   TRIAGE_JOB_SCHEMA_ID,
   TRIAGE_JOB_CAPABILITIES_SCHEMA_ID,
+  snapshotFairness,
+  snapshotFingerprint,
+  snapshotFingerprintDigest,
+  snapshotItemContentHash,
   type CaseV1,
   type TriageJobMode,
   type TriageJobCapabilitiesV1,
@@ -12,10 +16,27 @@ import {
   type TriageJobStatus,
   type TriageJobV1,
 } from "@cd-collab/contracts";
+import type { RecoveryAuthResult, RecoveryInactiveReason } from "../authz/index.js";
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
 import type { OverviewJobQuery, OverviewListedJob, TriageJobStore } from "./store.js";
+import { triageRunningLeaseExpired, triageWorkerHoldsLiveLease } from "./store.js";
 import type { TriageProfileOption } from "./profiles.js";
+
+export type TriageRecoveryAuthorization = (
+  requester: { id: string; username: string },
+) => Promise<RecoveryAuthResult>;
+
+export type RecoveryRefusalReason =
+  | "requester_not_member"
+  | "requester_suspended"
+  | "requester_disabled"
+  | "requester_historical"
+  | "requester_inactive"
+  | "requester_run_revoked"
+  | "requester_private_read_revoked"
+  | "requester_unauthorized"
+  | "recovery_authorization_unavailable";
 
 const MAX_CANDIDATES = 16;
 const MIN_GATEWAY_CANDIDATES = 2;
@@ -26,6 +47,24 @@ const MAX_GATEWAY_EVIDENCE_AGGREGATE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_WORKER_LEASE_MS = 60_000;
 const WORKER_HEARTBEAT_MS = 20_000;
 const AGREEMENT_NOTICE = "Agreement is not proof of correctness." as const;
+
+function evaluateSameSnapshot(snapshot: SnapshotV1): boolean | null {
+  const claimed = snapshotFingerprintDigest(snapshot.fingerprint);
+  if (!claimed) return null;
+  if (snapshot.fairnessClass !== "same_snapshot") return null;
+  if (snapshotFairness(snapshot.evidence) !== "same_snapshot") return null;
+  if (!snapshot.evidence.every((item) => snapshotItemContentHash(item) !== null)) return null;
+  const actual = snapshotFingerprintDigest(
+    snapshotFingerprint({
+      parentSnapshotId: snapshot.parentSnapshotId,
+      evidence: snapshot.evidence,
+      visibility: snapshot.visibility,
+      protocolVersion: snapshot.protocolVersion,
+    }),
+  );
+  if (!actual) return null;
+  return actual === claimed;
+}
 
 export class TriageRunNotFoundError extends Error {
   constructor() {
@@ -139,6 +178,47 @@ function isTerminal(status: TriageJobStatus): boolean {
   return status === "completed" || status === "partial" || status === "failed" || status === "timed_out" || status === "cancelled";
 }
 
+function snapshotRequiresPrivateRead(snapshot: SnapshotV1): boolean {
+  return snapshot.visibility === "owner_only"
+    || snapshot.evidence.some((item) => item.privacyClass === "owner_only");
+}
+
+function inactiveRecoveryReason(reason: RecoveryInactiveReason): RecoveryRefusalReason {
+  switch (reason) {
+    case "suspended":
+      return "requester_suspended";
+    case "disabled":
+      return "requester_disabled";
+    case "imported_historical":
+      return "requester_historical";
+    case "missing_profile":
+      return "requester_inactive";
+  }
+}
+
+function recoveryRefusalCopy(reason: RecoveryRefusalReason): { unknown: string } {
+  switch (reason) {
+    case "requester_not_member":
+      return { unknown: "requester is no longer a case member" };
+    case "requester_suspended":
+      return { unknown: "requester is suspended" };
+    case "requester_disabled":
+      return { unknown: "requester is disabled" };
+    case "requester_historical":
+      return { unknown: "requester is an imported historical identity" };
+    case "requester_inactive":
+      return { unknown: "requester is not an active authorized profile" };
+    case "requester_run_revoked":
+      return { unknown: "requester is no longer permitted to run strategies" };
+    case "requester_private_read_revoked":
+      return { unknown: "requester is no longer permitted to read private evidence" };
+    case "requester_unauthorized":
+      return { unknown: "requester is no longer authorized to recover this job" };
+    case "recovery_authorization_unavailable":
+      return { unknown: "recovery authorization store is unavailable" };
+  }
+}
+
 function terminalStatus(candidates: TriageCandidateRunV1[], cancelled: boolean): TriageJobStatus {
   const statuses = candidates.map((candidate) => candidate.status);
   const completed = statuses.filter((status) => status === "completed").length;
@@ -216,6 +296,8 @@ export class TriageRunService {
       profiles?: TriageProfileOption[];
       workerId?: string;
       workerLeaseMs?: number;
+      /** Live requester re-resolution. Never a cached session role list. */
+      recoveryAuthorization?: TriageRecoveryAuthorization;
     },
   ) {
     this.workerId = deps.workerId?.trim() || `triage-worker:${randomUUID()}`;
@@ -281,13 +363,13 @@ export class TriageRunService {
     const queued = await this.deps.jobs.listByStatuses(["queued"]);
     const staleRunning = await this.deps.jobs.listStaleRunning(now());
     for (const job of queued) {
-      const actor = { id: job.requestedBy, username: job.requestedByUsername };
-      // This is an internal continuation of an already-authorized durable
-      // job. Reconstructing the original actor's current membership here
-      // would incorrectly strand jobs created by an administrator whose
-      // case access is not represented as a participant row.
+      const decision = await this.authorizeRecoveredQueuedJob(job);
+      if (decision.kind === "denied") {
+        await this.refuseUnauthorizedPendingJob(job, decision.reason);
+        continue;
+      }
       queueMicrotask(() => {
-        void this.execute(job.id, actor, true);
+        void this.resumeRecoveredQueuedJob(job.id);
       });
     }
     for (const job of staleRunning) {
@@ -327,12 +409,126 @@ export class TriageRunService {
     }
   }
 
+  private async resumeRecoveredQueuedJob(jobId: string): Promise<void> {
+    const latest = await this.deps.jobs.get(jobId);
+    if (!latest || latest.status !== "queued") return;
+    const decision = await this.authorizeRecoveredQueuedJob(latest);
+    if (decision.kind === "denied") {
+      await this.refuseUnauthorizedPendingJob(latest, decision.reason);
+      return;
+    }
+    await this.execute(jobId, decision.actor, decision.isAdmin, decision.canReadPrivate);
+  }
+
+  private async authorizeRecoveredQueuedJob(
+    job: TriageJobV1,
+  ): Promise<
+    | { kind: "ok"; actor: Actor; isAdmin: boolean; canReadPrivate: boolean }
+    | { kind: "denied"; reason: RecoveryRefusalReason }
+  > {
+    const authorizer = this.deps.recoveryAuthorization;
+    if (!authorizer) {
+      return { kind: "denied", reason: "recovery_authorization_unavailable" };
+    }
+    let resolved: RecoveryAuthResult;
+    try {
+      resolved = await authorizer({
+        id: job.requestedBy,
+        username: job.requestedByUsername,
+      });
+    } catch {
+      return { kind: "denied", reason: "recovery_authorization_unavailable" };
+    }
+    if (resolved.kind === "unavailable") {
+      return { kind: "denied", reason: "recovery_authorization_unavailable" };
+    }
+    if (resolved.kind === "inactive") {
+      return { kind: "denied", reason: inactiveRecoveryReason(resolved.reason) };
+    }
+
+    try {
+      const caseRow = await this.deps.cases.getCase(job.caseId, resolved.actor, resolved.isAdmin);
+      if (!caseRow) {
+        return {
+          kind: "denied",
+          reason: resolved.isAdmin ? "requester_unauthorized" : "requester_not_member",
+        };
+      }
+      if (!resolved.has("run:strategies")) {
+        return { kind: "denied", reason: "requester_run_revoked" };
+      }
+      const snapshot = (await this.deps.cases.listSnapshots(
+        job.caseId,
+        resolved.actor,
+        resolved.isAdmin,
+      )).find((item) => item.id === job.snapshotId);
+      if (!snapshot) {
+        return { kind: "denied", reason: "requester_unauthorized" };
+      }
+      const canReadPrivate = resolved.has("evidence:private:read");
+      if (snapshotRequiresPrivateRead(snapshot) && !canReadPrivate) {
+        return { kind: "denied", reason: "requester_private_read_revoked" };
+      }
+      return {
+        kind: "ok",
+        actor: resolved.actor,
+        isAdmin: resolved.isAdmin,
+        canReadPrivate,
+      };
+    } catch {
+      return { kind: "denied", reason: "recovery_authorization_unavailable" };
+    }
+  }
+
+  private async refuseUnauthorizedPendingJob(
+    job: TriageJobV1,
+    reason: RecoveryRefusalReason = "requester_not_member",
+  ): Promise<void> {
+    const finishedAt = now();
+    const copy = recoveryRefusalCopy(reason);
+    const refusedCandidates = job.candidates.map((candidate) =>
+      candidate.status === "queued" || candidate.status === "running"
+        ? {
+            ...candidate,
+            status: "failed" as const,
+            outputHash: null,
+            summary: null,
+            evidenceRefs: [],
+            unknowns: [copy.unknown],
+            errorCode: reason,
+            finishedAt,
+          }
+        : candidate,
+    );
+    try {
+      await this.deps.jobs.update({
+        ...job,
+        status: "failed",
+        candidates: refusedCandidates,
+        finishedAt,
+        updatedAt: finishedAt,
+        stoppedReason: reason,
+        leaseExpiresAt: null,
+      });
+    } catch {
+      return;
+    }
+    await this.deps.audit.append({
+      identity: job.requestedBy,
+      action: "triage_job_recovered",
+      target: `${job.id}:${reason}`,
+      origin: "triage-runner",
+      outcome: "failure",
+    });
+  }
+
   async create(
     caseId: string,
     actor: Actor,
     request: TriageJobRequestV1,
     origin: string,
     isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<TriageJobV1> {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) {
       throw new TriageRunNotFoundError();
@@ -448,7 +644,7 @@ export class TriageRunService {
       outcome: "success",
     });
     queueMicrotask(() => {
-      void this.execute(job.id, actor, isAdmin);
+      void this.execute(job.id, actor, isAdmin, canReadPrivate);
     });
     return job;
   }
@@ -463,6 +659,10 @@ export class TriageRunService {
     const job = await this.get(caseId, jobId, actor, isAdmin);
     if (!job) throw new TriageRunNotFoundError();
     if (isTerminal(job.status)) return job;
+    this.controllers.get(jobId)?.abort();
+    if (triageRunningLeaseExpired(job, Date.now())) {
+      throw new TriageRunConflictError("worker lease expired");
+    }
     const requestedAt = now();
     const cancelledCandidates = job.candidates.map((candidate) =>
       candidate.status === "queued" || candidate.status === "running"
@@ -504,7 +704,12 @@ export class TriageRunService {
     return cancelled;
   }
 
-  private async execute(jobId: string, actor: Actor, isAdmin: boolean): Promise<void> {
+  private async execute(
+    jobId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<void> {
     const controller = new AbortController();
     this.controllers.set(jobId, controller);
     let leaseTimer: ReturnType<typeof setInterval> | undefined;
@@ -519,6 +724,10 @@ export class TriageRunService {
         leaseExpiresAt,
       );
       if (!job) return;
+      if (!isAdmin && !(await this.deps.cases.isMemberOf(job.caseId, job.requestedBy))) {
+        await this.refuseUnauthorizedPendingJob(job);
+        return;
+      }
       let currentJob = job;
       leaseTimer = setInterval(() => {
         const nextLeaseExpiresAt = new Date(Date.now() + this.workerLeaseMs).toISOString();
@@ -577,8 +786,8 @@ export class TriageRunService {
       const caseRow = await this.deps.cases.getCase(job.caseId, actor, isAdmin);
       if (!caseRow) throw new Error("case disappeared before execution");
       const evidence = job.request.mode === "gateway"
-        ? await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, true)
-        : await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, false);
+        ? await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, canReadPrivate, true)
+        : await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, canReadPrivate, false);
       const persistCandidate = async (result: TriageCandidateRunV1): Promise<void> => {
         if (leaseLost) return;
         const latest = await this.deps.jobs.get(currentJob.id);
@@ -588,6 +797,7 @@ export class TriageRunService {
         // job; it must never resurrect a terminal job or overwrite a lane
         // that has already settled.
         if (isTerminal(currentJob.status) || currentJob.workerId !== this.workerId) return;
+        if (!triageWorkerHoldsLiveLease(currentJob, this.workerId, Date.now())) return;
         const index = currentJob.request.candidates.findIndex((candidate) => candidate.candidateId === result.candidateId);
         if (index < 0) throw new Error("gateway returned an unknown candidate id");
         const existing = currentJob.candidates[index];
@@ -616,6 +826,7 @@ export class TriageRunService {
         const latest = await this.deps.jobs.get(currentJob.id);
         if (latest) currentJob = latest;
         if (isTerminal(currentJob.status) || currentJob.workerId !== this.workerId) return;
+        if (!triageWorkerHoldsLiveLease(currentJob, this.workerId, Date.now())) return;
         const index = currentJob.request.candidates.findIndex((candidate) => candidate.candidateId === candidateId);
         if (index < 0) throw new Error("gateway returned an unknown started candidate id");
         const existing = currentJob.candidates[index];
@@ -679,7 +890,7 @@ export class TriageRunService {
             },
           }, controller.signal);
           if (results.length !== currentJob.candidates.length) throw new Error("gateway returned an incomplete candidate set");
-          currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
+          currentJob = { ...currentJob, updatedAt: now() };
           await this.deps.jobs.update(currentJob);
           for (const result of results) {
             if (!progressCandidates.has(result.candidateId)) await recordCandidate(result);
@@ -712,7 +923,7 @@ export class TriageRunService {
         }
       } else {
         const executor = this.deps.executor ?? new DeterministicMockTriageExecutor();
-        currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
+        currentJob = { ...currentJob, updatedAt: now() };
         await this.deps.jobs.update(currentJob);
         for (let index = 0; index < job.candidates.length; index += 1) {
           if (leaseLost) return;
@@ -783,12 +994,14 @@ export class TriageRunService {
       }
       if (leaseLost) return;
       currentJob = (await this.deps.jobs.get(jobId)) ?? currentJob;
+      if (!triageWorkerHoldsLiveLease(currentJob, this.workerId, Date.now())) return;
       if (!isTerminal(currentJob.status)) {
         const finishedAt = now();
         const finalStatus = terminalStatus(currentJob.candidates, currentJob.cancelRequestedAt !== null);
         currentJob = {
           ...currentJob,
           status: finalStatus,
+          sameSnapshot: evaluateSameSnapshot(snapshot),
           finishedAt,
           updatedAt: finishedAt,
           stoppedReason: currentJob.cancelRequestedAt !== null ? "cancel_requested" : null,
@@ -849,6 +1062,7 @@ export class TriageRunService {
     snapshot: SnapshotV1,
     actor: Actor,
     isAdmin: boolean,
+    canReadPrivate: boolean,
     requireContent: boolean,
   ): Promise<TriageExecutionEvidence[]> {
     const evidence: TriageExecutionEvidence[] = [];
@@ -856,7 +1070,13 @@ export class TriageRunService {
     for (const item of snapshot.evidence) {
       const artifact = await this.deps.cases.getArtifact(caseId, item.evidenceId);
       if (!artifact) throw new Error("snapshot evidence disappeared before execution");
-      const bytes = await this.deps.cases.getArtifactBytes(caseId, item.evidenceId, actor, isAdmin);
+      const bytes = await this.deps.cases.getArtifactBytes(
+        caseId,
+        item.evidenceId,
+        actor,
+        isAdmin,
+        canReadPrivate,
+      );
       if (requireContent && item.contentHash && !bytes) {
         throw new Error("snapshot evidence content is unavailable to the gateway runner");
       }

@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/investigation-sync.v1.json",
+  "title": "ContextDesk investigation sync batch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "sourceInstallationId",
+    "investigationId",
+    "fromCursor",
+    "toCursor",
+    "operations",
+    "exclusions",
+    "automaticSync",
+    "networkingIncluded",
+    "batchFingerprint"
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "installationId": { "type": "string", "pattern": "^inst-[a-z0-9]{8,64}$" },
+    "operationId": { "type": "string", "pattern": "^syncop-[a-z0-9]{12,96}$" },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceInstallationId",
+        "throughSequence",
+        "lastOperationId",
+        "lastOperationFingerprint"
+      ],
+      "properties": {
+        "sourceInstallationId": { "$ref": "#/$defs/installationId" },
+        "throughSequence": { "type": "integer", "minimum": 0 },
+        "lastOperationId": {
+          "oneOf": [{ "$ref": "#/$defs/operationId" }, { "type": "null" }]
+        },
+        "lastOperationFingerprint": {
+          "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }]
+        }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceActorId", "displayName", "kind"],
+      "properties": {
+        "sourceActorId": { "type": "string", "minLength": 1 },
+        "displayName": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": ["human", "service", "imported_external"]
+        }
+      }
+    },
+    "objectMutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "objectId",
+        "baseRevision",
+        "resultRevision",
+        "baseHash",
+        "resultHash",
+        "privacyClass"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "investigation",
+            "contribution",
+            "evidence",
+            "content",
+            "source",
+            "imported_ai_run",
+            "snapshot",
+            "triage_job",
+            "experiment",
+            "helpfulness",
+            "decision",
+            "gold",
+            "alignment",
+            "discussion",
+            "timeline",
+            "audit",
+            "attachment"
+          ]
+        },
+        "objectId": { "type": "string", "minLength": 1 },
+        "baseRevision": { "type": "integer", "minimum": 0 },
+        "resultRevision": { "type": "integer", "minimum": 1 },
+        "baseHash": {
+          "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }]
+        },
+        "resultHash": { "$ref": "#/$defs/sha256" },
+        "privacyClass": {
+          "type": "string",
+          "enum": ["owner_only", "share_safe"]
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "sourceInstallationId",
+        "sourceSequence",
+        "previousOperationFingerprint",
+        "emittedAt",
+        "investigationId",
+        "actor",
+        "mutation",
+        "object",
+        "payloadJson",
+        "tombstoneReason",
+        "operationFingerprint"
+      ],
+      "properties": {
+        "operationId": { "$ref": "#/$defs/operationId" },
+        "sourceInstallationId": { "$ref": "#/$defs/installationId" },
+        "sourceSequence": { "type": "integer", "minimum": 1 },
+        "previousOperationFingerprint": {
+          "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }]
+        },
+        "emittedAt": { "type": "string", "format": "date-time" },
+        "investigationId": { "type": "string", "minLength": 1 },
+        "actor": { "$ref": "#/$defs/actor" },
+        "mutation": { "type": "string", "enum": ["upsert", "tombstone"] },
+        "object": { "$ref": "#/$defs/objectMutation" },
+        "payloadJson": { "type": ["string", "null"] },
+        "tombstoneReason": { "type": ["string", "null"] },
+        "operationFingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "properties": {
+    "schemaId": {
+      "type": "string",
+      "const": "cd-collab.investigation_sync_batch.v1"
+    },
+    "sourceInstallationId": { "$ref": "#/$defs/installationId" },
+    "investigationId": { "type": "string", "minLength": 1 },
+    "fromCursor": { "$ref": "#/$defs/cursor" },
+    "toCursor": { "$ref": "#/$defs/cursor" },
+    "operations": { "type": "array", "items": { "$ref": "#/$defs/operation" } },
+    "exclusions": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "authentication_credentials" },
+        { "const": "membership" },
+        { "const": "roles" },
+        { "const": "capabilities" }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "automaticSync": { "const": false },
+    "networkingIncluded": { "const": false },
+    "batchFingerprint": { "$ref": "#/$defs/sha256" }
+  }
+}

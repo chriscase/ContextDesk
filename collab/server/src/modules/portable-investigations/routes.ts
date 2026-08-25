@@ -1,16 +1,17 @@
 import {
-  AUTH_ERROR_SCHEMA_ID,
   COLLISION_POLICIES,
   parsePortableApplyRequest,
   type ArchiveBlobInventoryEntryV1,
-  type AuthErrorV1,
   type CollisionPolicy,
   type IdentityMapEntryV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
-import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import {
+  capabilityForbidden,
+  requireSessionCapability,
+  type SessionAuthorizationDeps,
+} from "../authz/index.js";
 import {
   MAX_PORTABLE_ARCHIVE_BYTES,
   PortableInvestigationService,
@@ -18,9 +19,6 @@ import {
   type PortablePreflightInput,
 } from "./service.js";
 
-function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
-  return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
-}
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -55,8 +53,7 @@ function parsePreflightBody(raw: unknown):
 }
 
 export interface PortableInvestigationRouteDeps {
-  auth: ActiveSessionDeps;
-  roles: MutableGroupRoleMap;
+  sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   portable: PortableInvestigationService;
 }
@@ -65,39 +62,26 @@ export async function registerPortableInvestigationRoutes(
   app: FastifyInstance,
   deps: PortableInvestigationRouteDeps,
 ): Promise<void> {
-  async function sessionOf(request: FastifyRequest) {
-    const session = await resolveActiveSession(request, deps.auth);
-    if (!session) return null;
-    const roles = deps.roles.resolve(session.groups);
-    return {
-      actor: { id: session.identity.id, username: session.identity.username },
-      isAdmin: canPerform(roles, "admin"),
-      canRead: canPerform(roles, "read"),
-      canLead: canPerform(roles, "lead"),
-    };
+  async function sessionOf(request: FastifyRequest, reply: { code: (status: number) => unknown }) {
+    return requireSessionCapability(request, reply, deps.sessionAuth);
   }
 
   app.get("/api/portable-investigations/capabilities", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
-    if (!ctx.canRead) {
-      void reply.code(403);
-      return authError("forbidden");
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:read")) {
+      return capabilityForbidden(reply);
     }
     return deps.portable.capabilities();
   });
 
   app.get("/api/cases/:id/portable-archive", async (request, reply) => {
-    const ctx = await sessionOf(request);
-    if (!ctx) {
-      void reply.code(401);
-      return authError("unauthenticated");
-    }
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
     const id = (request.params as { id: string }).id;
-    if (!ctx.canLead) {
+    if (!ctx.has("export:create") || !ctx.has("evidence:private:read")) {
       await deps.audit.append({
         identity: ctx.actor.id,
         action: "portable_archive_export",
@@ -105,11 +89,15 @@ export async function registerPortableInvestigationRoutes(
         origin: request.ip,
         outcome: "denied",
       });
-      void reply.code(403);
-      return authError("forbidden");
+      return capabilityForbidden(reply);
     }
     try {
-      const archive = await deps.portable.exportArchive(id, ctx.actor, ctx.isAdmin);
+      const archive = await deps.portable.exportArchive(
+        id,
+        ctx.actor,
+        ctx.isAdmin,
+        true,
+      );
       await deps.audit.append({
         identity: ctx.actor.id,
         action: "portable_archive_export",
@@ -140,12 +128,10 @@ export async function registerPortableInvestigationRoutes(
     "/api/portable-investigations/preflight",
     { bodyLimit: MAX_PORTABLE_ARCHIVE_BYTES },
     async (request, reply) => {
-      const ctx = await sessionOf(request);
-      if (!ctx) {
-        void reply.code(401);
-        return authError("unauthenticated");
-      }
-      if (!ctx.canLead) {
+      const loaded = await sessionOf(request, reply);
+      if ("denied" in loaded) return loaded.denied;
+      const ctx = loaded.ctx;
+      if (!ctx.has("portable:restore")) {
         await deps.audit.append({
           identity: ctx.actor.id,
           action: "portable_archive_preflight",
@@ -153,8 +139,7 @@ export async function registerPortableInvestigationRoutes(
           origin: request.ip,
           outcome: "denied",
         });
-        void reply.code(403);
-        return authError("forbidden");
+        return capabilityForbidden(reply);
       }
       const parsed = parsePreflightBody(request.body);
       if (!parsed) {
@@ -198,12 +183,10 @@ export async function registerPortableInvestigationRoutes(
     "/api/portable-investigations/apply",
     { bodyLimit: MAX_PORTABLE_ARCHIVE_BYTES },
     async (request, reply) => {
-      const ctx = await sessionOf(request);
-      if (!ctx) {
-        void reply.code(401);
-        return authError("unauthenticated");
-      }
-      if (!ctx.canLead) {
+      const loaded = await sessionOf(request, reply);
+      if ("denied" in loaded) return loaded.denied;
+      const ctx = loaded.ctx;
+      if (!ctx.has("portable:restore")) {
         await deps.audit.append({
           identity: ctx.actor.id,
           action: "portable_archive_apply",
@@ -211,8 +194,7 @@ export async function registerPortableInvestigationRoutes(
           origin: request.ip,
           outcome: "denied",
         });
-        void reply.code(403);
-        return authError("forbidden");
+        return capabilityForbidden(reply);
       }
       if (Buffer.byteLength(JSON.stringify(request.body ?? {}), "utf8") > MAX_PORTABLE_ARCHIVE_BYTES) {
         void reply.code(413);

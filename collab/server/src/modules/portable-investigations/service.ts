@@ -8,6 +8,7 @@ import {
   PORTABLE_PERMISSION_CAVEAT,
   PORTABLE_PROTOCOL_VERSION,
   PORTABLE_SCHEMA_ID,
+  PORTABLE_TERMINAL_TRIAGE_STATUSES,
   attachPortableIntegrity,
   canonicalJson,
   destinationCatalogDigest,
@@ -29,6 +30,7 @@ import {
   type PortableContentObjectV1,
   type PortableInvestigationUnsigned,
   type PortableObjectKind,
+  type PortableTerminalTriageStatus,
   type PrivacyClass,
   type ProviderKind,
 } from "@cd-collab/contracts";
@@ -54,7 +56,7 @@ const APPLY_TOKEN_TTL_MS = 10 * 60 * 1000;
 export const PORTABLE_CONTRACT_UNSUPPORTED = [
   "hypothesis_links",
   "file_reference_location_and_verification",
-  "triage_candidate_summaries_and_runtime_details",
+  "triage_worker_leases_and_cancellation_capabilities",
   "experiment_agreement_and_interaction_traces",
   "source_membership_and_source_identity_ownership",
   "imported_prompt_and_opaque_run_details",
@@ -65,6 +67,12 @@ export const PORTABLE_CONTRACT_UNSUPPORTED = [
 ] as const;
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
+
+function isPortableTerminalTriageStatus(
+  status: string,
+): status is PortableTerminalTriageStatus {
+  return (PORTABLE_TERMINAL_TRIAGE_STATUSES as readonly string[]).includes(status);
+}
 
 export type PortableServerErrorCode =
   | "not_found"
@@ -486,6 +494,44 @@ function applySupportReasons(
       );
     }
   }
+  for (const [jobIndex, job] of bundle.triageJobs.entries()) {
+    const missingJobState = [
+      job.requestMode,
+      job.question,
+      job.taskFingerprint,
+      job.sameSnapshot,
+      job.agreementNotice,
+      job.updatedAt,
+      job.startedAt,
+      job.finishedAt,
+      job.cancelRequestedAt,
+      job.stoppedReason,
+    ].some((value) => value === undefined);
+    if (missingJobState || job.policyFingerprint === undefined || job.concurrency === undefined) {
+      block(
+        `$.investigation.triageJobs[${jobIndex}]`,
+        "legacy triage job state cannot round-trip exactly",
+      );
+    }
+    for (const [candidateIndex, candidate] of job.candidates.entries()) {
+      const missingCandidateState = [
+        candidate.status,
+        candidate.benchmarkRunId,
+        candidate.summary,
+        candidate.unknowns,
+        candidate.errorCode,
+        candidate.startedAt,
+        candidate.finishedAt,
+        candidate.privacyClass,
+      ].some((value) => value === undefined);
+      if (missingCandidateState) {
+        block(
+          `$.investigation.triageJobs[${jobIndex}].candidates[${candidateIndex}]`,
+          "legacy triage candidate state cannot round-trip exactly",
+        );
+      }
+    }
+  }
   if (bundle.alignments.length > 0) {
     block("$.investigation.alignments", "derived alignment details are unsupported");
   }
@@ -532,7 +578,12 @@ export class PortableInvestigationService {
     };
   }
 
-  async exportArchive(caseId: string, actor: Actor, isAdmin: boolean): Promise<PortableArchiveV1> {
+  async exportArchive(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<PortableArchiveV1> {
     const caseRow = await this.deps.cases.getCase(caseId, actor, isAdmin);
     if (!caseRow) throw new PortableServerError("not_found", "investigation not found");
 
@@ -655,7 +706,7 @@ export class PortableInvestigationService {
         );
       }
       const bytes = artifact.contentHash
-        ? await this.deps.cases.getArtifactBytes(caseId, artifact.id, actor, isAdmin)
+        ? await this.deps.cases.getArtifactBytes(caseId, artifact.id, actor, isAdmin, canReadPrivate)
         : null;
       if (artifact.contentHash && !bytes) {
         throw new PortableServerError("integrity_failure", "held evidence bytes are missing");
@@ -737,19 +788,24 @@ export class PortableInvestigationService {
     });
 
     const portableJobs = jobs.map((job) => {
+      if (!isPortableTerminalTriageStatus(job.status)) {
+        throw new PortableServerError(
+          "unsupported_state",
+          "nonterminal triage jobs cannot be exported",
+        );
+      }
       const snapshotFingerprint = snapshotFingerprintMap.get(job.snapshotFingerprint);
       if (!snapshotFingerprint) {
         throw new PortableServerError("integrity_failure", "triage job snapshot is not portable");
       }
-      return {
-        id: job.id,
-        snapshotId: job.snapshotId,
-        snapshotFingerprint,
-        strategyId: job.request.strategyId,
-        status: job.status,
-        parentJobId: job.parentJobId ?? null,
-        requestFingerprint: job.requestFingerprint,
-        candidates: job.candidates.map((candidate) => ({
+      const portableCandidates = job.candidates.map((candidate) => {
+        if (!isPortableTerminalTriageStatus(candidate.status)) {
+          throw new PortableServerError(
+            "unsupported_state",
+            "nonterminal triage candidates cannot be exported",
+          );
+        }
+        return {
           candidateId: candidate.candidateId,
           role: candidate.role,
           providerKind: providerKind(candidate.provider),
@@ -760,9 +816,39 @@ export class PortableInvestigationService {
           costStatus: "unknown" as const,
           outputHash: candidate.outputHash,
           evidenceRefs: [...candidate.evidenceRefs],
-        })),
+          status: candidate.status,
+          benchmarkRunId: candidate.benchmarkRunId,
+          summary: candidate.summary,
+          unknowns: [...candidate.unknowns],
+          errorCode: candidate.errorCode,
+          startedAt: candidate.startedAt,
+          finishedAt: candidate.finishedAt,
+          privacyClass: candidate.privacyClass,
+        };
+      });
+      return {
+        id: job.id,
+        snapshotId: job.snapshotId,
+        snapshotFingerprint,
+        strategyId: job.request.strategyId,
+        status: job.status,
+        parentJobId: job.parentJobId ?? null,
+        requestFingerprint: job.requestFingerprint,
+        candidates: portableCandidates,
         requestedBy: job.requestedBy,
         createdAt: job.createdAt,
+        requestMode: job.request.mode,
+        question: job.request.question,
+        policyFingerprint: job.request.policyFingerprint,
+        taskFingerprint: job.request.taskFingerprint,
+        concurrency: job.request.concurrency ?? null,
+        sameSnapshot: job.sameSnapshot,
+        agreementNotice: job.agreementNotice,
+        updatedAt: job.updatedAt,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        cancelRequestedAt: job.cancelRequestedAt,
+        stoppedReason: job.stoppedReason,
         objectHash: "",
       };
     });

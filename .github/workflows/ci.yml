@@ -9,10 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  # Number of shards the Ubuntu workspace test suite is split into (#874).
-  # `strategy.matrix` cannot read the env context, so the shard list below is
-  # spelled out literally; the aggregate job fails closed if the two ever
-  # disagree. Cache key `ubuntu-workspace-tests` is shared by rust-ubuntu
+  # Cross-OS shard capacity is defined once in scripts/ci_shard_config.sh.
+  # The rust-shard-config job emits each dynamic matrix and count; planner and
+  # aggregate calls verify those values against that same canonical source.
+  # Counts stay intentionally per OS (Ubuntu 8; macOS/Windows 4).
+  # Cache key `ubuntu-workspace-tests` is shared by rust-ubuntu
   # (the only writer) and every shard (`save-if: false` so they restore but
   # do not save). Do not set Swatinem `lookup-only: true` on shards: that
   # checks the key without downloading files. Probes also set `save-if: false`;
@@ -38,7 +39,6 @@ env:
   # again, the next lever is a `lib_splits` entry for `cd-core/lib/other` in
   # scripts/ci_shard_plan.sh — the same mechanism that already split
   # `cd-core/lib` into `log_analysis` and `other` — not a further count bump.
-  CD_SHARD_COUNT: "8"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR
 # revision once a newer commit for the same PR has started CI.
@@ -94,6 +94,16 @@ jobs:
           # issue's closing body. See docs/CLOSE_PROOF.md.
           CLOSE_PROOF_CUTOFF: "2026-07-18"
         run: sh scripts/check_close_proof.sh
+
+  release-contract:
+    name: release contract (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: unified + CLI release contracts
+        run: |
+          python3 scripts/release-contract/check_release_contract.py
+          python3 scripts/cli-release/check_cli_release_contract.py
 
   gui-accept-contracts:
     name: GUI integration contracts (no WebDriver)
@@ -162,6 +172,24 @@ jobs:
               echo "- Ubuntu workspace shards: not required for this isolated surface"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  rust-shard-config:
+    name: Rust shard topology
+    runs-on: ubuntu-latest
+    outputs:
+      ubuntu_count: ${{ steps.topology.outputs.ubuntu_count }}
+      ubuntu_matrix: ${{ steps.topology.outputs.ubuntu_matrix }}
+      macos_count: ${{ steps.topology.outputs.macos_count }}
+      macos_matrix: ${{ steps.topology.outputs.macos_matrix }}
+      windows_count: ${{ steps.topology.outputs.windows_count }}
+      windows_matrix: ${{ steps.topology.outputs.windows_matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: publish canonical shard topology
+        id: topology
+        run: sh scripts/ci_shard_config.sh github-output >> "$GITHUB_OUTPUT"
+      - name: topology contract self-test
+        run: sh scripts/tests/ci_shard_config_test.sh
 
   # macOS / Windows take a quick exact-key probe first. A miss starts one
   # cache-writer warmup; a hit skips that writer and lets the restore-only
@@ -574,12 +602,14 @@ jobs:
 
   rust-ubuntu-shard:
     name: rust tests (ubuntu shard ${{ matrix.shard }})
-    needs: [ci-path-filter, rust-ubuntu]
+    needs: [ci-path-filter, rust-shard-config, rust-ubuntu]
     # The Ubuntu warmup is diagnostic/cache preparation, not the suite gate.
     # Always admit the test matrix when routing succeeded so a warmup failure
     # cannot suppress the required aggregate check.
-    if: always() && needs.ci-path-filter.result == 'success' && needs.ci-path-filter.outputs.run_ubuntu == 'true'
+    if: always() && needs.ci-path-filter.result == 'success' && needs.rust-shard-config.result == 'success' && needs.ci-path-filter.outputs.run_ubuntu == 'true'
     runs-on: ubuntu-latest
+    env:
+      CD_SHARD_COUNT: ${{ needs.rust-shard-config.outputs.ubuntu_count }}
     # Tests only, after the warmup job has compiled. 50 minutes is enough for
     # the known 525s integration target plus `cd-core/lib` splits, and is
     # below the ~86-96 minute hosted-runner-loss window from runs
@@ -589,8 +619,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Keep in sync with CD_SHARD_COUNT (see the workflow `env` block).
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ${{ fromJSON(needs.rust-shard-config.outputs.ubuntu_matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -634,7 +663,7 @@ jobs:
             --fingerprint "$fp"
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-shards/cache-status.json)" >> "$GITHUB_ENV"
       - name: shard plan (deterministic, exhaustive)
-        run: sh scripts/ci_shard_plan.sh verify --shards "$CD_SHARD_COUNT"
+        run: sh scripts/ci_shard_plan.sh verify --os ubuntu --shards "$CD_SHARD_COUNT"
       - name: run shard ${{ matrix.shard }}
         # Keep an explicit deadline below the step timeout. GNU timeout sends
         # TERM to ci_run_shard.sh, which writes its in-flight snapshot, then
@@ -683,20 +712,27 @@ jobs:
 
   rust-ubuntu-tests:
     name: rust tests (ubuntu aggregate)
-    needs: [ci-path-filter, rust-ubuntu-shard]
+    needs: [ci-path-filter, rust-shard-config, rust-ubuntu-shard]
     if: always()
     runs-on: ubuntu-latest
+    env:
+      CD_SHARD_COUNT: ${{ needs.rust-shard-config.outputs.ubuntu_count }}
     timeout-minutes: 10
     steps:
       - name: require valid CI routing
         env:
           PATH_FILTER_RESULT: ${{ needs.ci-path-filter.result }}
+          SHARD_CONFIG_RESULT: ${{ needs.rust-shard-config.result }}
           SURFACE: ${{ needs.ci-path-filter.outputs.surface }}
           RUN_UBUNTU: ${{ needs.ci-path-filter.outputs.run_ubuntu }}
         run: |
           set -eu
           if [ "$PATH_FILTER_RESULT" != success ]; then
             echo "::error title=CI path routing::ci-path-filter reported '$PATH_FILTER_RESULT'"
+            exit 1
+          fi
+          if [ "$SHARD_CONFIG_RESULT" != success ]; then
+            echo "::error title=CI shard topology::rust-shard-config reported '$SHARD_CONFIG_RESULT'"
             exit 1
           fi
           case "$SURFACE:$RUN_UBUNTU" in
@@ -732,7 +768,7 @@ jobs:
         run: sh scripts/ci_run_shard.sh --summary shard-results || true
       - name: aggregate shard results (fail closed)
         if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
-        run: sh scripts/ci_aggregate_shards.sh --dir shard-results --shards "$CD_SHARD_COUNT"
+        run: sh scripts/ci_aggregate_shards.sh --dir shard-results --os ubuntu --shards "$CD_SHARD_COUNT"
       - name: every shard job must have succeeded
         if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
         run: |
@@ -753,13 +789,16 @@ jobs:
     needs:
       - rust-macos-cache-probe
       - rust-macos-cache-warmup
-    if: always()
+      - rust-shard-config
+    if: always() && needs.rust-shard-config.result == 'success'
     runs-on: macos-latest
+    env:
+      CD_SHARD_COUNT: ${{ needs.rust-shard-config.outputs.macos_count }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: ${{ fromJSON(needs.rust-shard-config.outputs.macos_matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -787,7 +826,7 @@ jobs:
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-platform-shards/cache-status.json)" >> "$GITHUB_ENV"
       - name: shard plan (deterministic, exhaustive)
         shell: bash
-        run: sh scripts/ci_shard_plan.sh verify --shards 4
+        run: sh scripts/ci_shard_plan.sh verify --os macos --shards "$CD_SHARD_COUNT"
       - name: require warm cache
         shell: bash
         run: |
@@ -806,7 +845,7 @@ jobs:
           sh scripts/ci_run_platform_shard.sh \
             --os macos \
             --shard "${{ matrix.shard }}" \
-            --shards 4 \
+            --shards "$CD_SHARD_COUNT" \
             --out ci-platform-shards
       - name: shard diagnostic summary
         if: always()
@@ -831,13 +870,16 @@ jobs:
     needs:
       - rust-windows-cache-probe
       - rust-windows-cache-warmup
-    if: always()
+      - rust-shard-config
+    if: always() && needs.rust-shard-config.result == 'success'
     runs-on: windows-latest
+    env:
+      CD_SHARD_COUNT: ${{ needs.rust-shard-config.outputs.windows_count }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: ${{ fromJSON(needs.rust-shard-config.outputs.windows_matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -865,7 +907,7 @@ jobs:
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-platform-shards/cache-status.json)" >> "$GITHUB_ENV"
       - name: shard plan (deterministic, exhaustive)
         shell: bash
-        run: sh scripts/ci_shard_plan.sh verify --shards 4
+        run: sh scripts/ci_shard_plan.sh verify --os windows --shards "$CD_SHARD_COUNT"
       - name: require warm cache
         shell: bash
         run: |
@@ -884,7 +926,7 @@ jobs:
           sh scripts/ci_run_platform_shard.sh \
             --os windows \
             --shard "${{ matrix.shard }}" \
-            --shards 4 \
+            --shards "$CD_SHARD_COUNT" \
             --out ci-platform-shards
       - name: shard diagnostic summary
         if: always()
@@ -906,11 +948,21 @@ jobs:
 
   rust-macos-tests:
     name: rust tests (macos-latest aggregate)
-    needs: [rust-macos-shard]
+    needs: [rust-shard-config, rust-macos-shard]
     if: always()
     runs-on: ubuntu-latest
+    env:
+      CD_SHARD_COUNT: ${{ needs.rust-shard-config.outputs.macos_count }}
     timeout-minutes: 10
     steps:
+      - name: require valid shard topology
+        env:
+          SHARD_CONFIG_RESULT: ${{ needs.rust-shard-config.result }}
+        run: |
+          if [ "$SHARD_CONFIG_RESULT" != success ]; then
+            echo "::error title=CI shard topology::rust-shard-config reported '$SHARD_CONFIG_RESULT'"
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: download macos-latest shard results
@@ -927,7 +979,8 @@ jobs:
         run: |
           sh scripts/ci_aggregate_shards.sh \
             --dir platform-results \
-            --shards 4 \
+            --os macos \
+            --shards "$CD_SHARD_COUNT" \
             --label "macos-latest workspace test shards"
       - name: every macos-latest shard job must have succeeded
         run: |
@@ -940,11 +993,21 @@ jobs:
 
   rust-windows-tests:
     name: rust tests (windows-latest aggregate)
-    needs: [rust-windows-shard]
+    needs: [rust-shard-config, rust-windows-shard]
     if: always()
     runs-on: ubuntu-latest
+    env:
+      CD_SHARD_COUNT: ${{ needs.rust-shard-config.outputs.windows_count }}
     timeout-minutes: 10
     steps:
+      - name: require valid shard topology
+        env:
+          SHARD_CONFIG_RESULT: ${{ needs.rust-shard-config.result }}
+        run: |
+          if [ "$SHARD_CONFIG_RESULT" != success ]; then
+            echo "::error title=CI shard topology::rust-shard-config reported '$SHARD_CONFIG_RESULT'"
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: download windows-latest shard results
@@ -961,7 +1024,8 @@ jobs:
         run: |
           sh scripts/ci_aggregate_shards.sh \
             --dir platform-results \
-            --shards 4 \
+            --os windows \
+            --shards "$CD_SHARD_COUNT" \
             --label "windows-latest workspace test shards"
       - name: every windows-latest shard job must have succeeded
         run: |
