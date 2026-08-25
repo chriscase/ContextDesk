@@ -1085,6 +1085,44 @@ describe("experiment lab", () => {
     expect(within(decisionRegion).getByText(/Recorded by erin/)).toBeTruthy();
   });
 
+  it("labels restored decisions as historical instead of attributing them to the mapped user", async () => {
+    const restoredView = {
+      ...cockpitView,
+      id: "exp-restored-history",
+      decisions: cockpitView.decisions.map((decision) => ({
+        ...decision,
+        authorUsername: "historical-canonical-west",
+        ownerUsername: "historical-canonical-owner",
+      })),
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        if (String(input).endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [restoredView] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    const scan = await screen.findByRole("region", { name: "At a glance" });
+    expect(within(scan).getByText("restored history")).toBeTruthy();
+    expect(within(scan).getByText(/Recorded by Historical participant \(restored\)/)).toBeTruthy();
+    expect(within(scan).queryByText(/canonical-west/)).toBeNull();
+
+    const decisionRegion = screen.getByRole("region", { name: "Accepted decision" });
+    expect(within(decisionRegion).getByText(
+      /This decision was restored as historical record/,
+    )).toBeTruthy();
+    expect(within(decisionRegion).getByText(
+      /Recorded by Historical participant \(restored\)/,
+    )).toBeTruthy();
+    expect(within(decisionRegion).getByText(
+      "Decision owner: Historical participant (restored)",
+    )).toBeTruthy();
+  });
+
   it("keeps observed run facts, helpfulness, and gold alignment in separate labeled regions", async () => {
     vi.stubGlobal(
       "fetch",

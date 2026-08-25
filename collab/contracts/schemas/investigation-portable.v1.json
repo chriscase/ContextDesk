@@ -443,7 +443,7 @@
           "strategyId": { "type": "string", "minLength": 1 },
           "status": {
             "type": "string",
-            "enum": ["queued", "running", "completed", "partial", "failed", "timed_out", "cancelled"]
+            "enum": ["completed", "partial", "failed", "timed_out", "cancelled"]
           },
           "parentJobId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
           "requestFingerprint": { "$ref": "#/$defs/fingerprint" },
@@ -474,12 +474,35 @@
                 "usageStatus": { "$ref": "#/$defs/unknownStatus" },
                 "costStatus": { "$ref": "#/$defs/unknownStatus" },
                 "outputHash": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
-                "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "status": {
+                  "type": "string",
+                  "enum": ["completed", "partial", "failed", "timed_out", "cancelled"]
+                },
+                "benchmarkRunId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "summary": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "unknowns": { "type": "array", "items": { "type": "string" } },
+                "errorCode": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "startedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+                "finishedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+                "privacyClass": { "$ref": "#/$defs/privacy" }
               }
             }
           },
           "requestedBy": { "type": "string", "minLength": 1 },
           "createdAt": { "$ref": "#/$defs/timestamp" },
+          "requestMode": { "type": "string", "enum": ["deterministic_mock", "gateway"] },
+          "question": { "type": "string" },
+          "policyFingerprint": { "anyOf": [{ "$ref": "#/$defs/fingerprint" }, { "type": "null" }] },
+          "taskFingerprint": { "$ref": "#/$defs/fingerprint" },
+          "concurrency": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+          "sameSnapshot": { "anyOf": [{ "type": "boolean" }, { "type": "null" }] },
+          "agreementNotice": { "type": "string", "const": "Agreement is not proof of correctness." },
+          "updatedAt": { "$ref": "#/$defs/timestamp" },
+          "startedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+          "finishedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+          "cancelRequestedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+          "stoppedReason": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
           "objectHash": { "$ref": "#/$defs/objectHash" }
         }
       }

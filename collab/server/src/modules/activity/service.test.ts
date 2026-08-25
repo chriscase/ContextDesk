@@ -99,6 +99,30 @@ describe("investigation activity projection", () => {
     expect(JSON.stringify(page)).not.toContain("pkg-should-not-leak");
   });
 
+  it("keeps a restored decision historical after its actor is mapped to a current identity", async () => {
+    const { cases, activity } = await harness();
+    const created = await cases.createCase(ALICE, { title: "Restored synthetic decision" }, "test");
+    await cases.appendDomainTimeline(created.id, {
+      kind: "experiment_decision_accepted",
+      actor: { id: ALICE.id, username: ALICE.username },
+      targetId: "22222222-2222-4222-8222-222222222222",
+      clientTime: null,
+      payload: {
+        imported: true,
+        sourceSeq: 9,
+        sourceInstallationId: "inst-synthetic-source",
+      },
+    });
+    const page = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const decision = page.items.find((item) => item.activityKind === "decision_accepted");
+    expect(decision).toMatchObject({
+      actorId: ALICE.id,
+      actorLabel: "Historical participant",
+      provenanceClass: "historical_restored",
+      humanFinding: false,
+    });
+  });
+
   it("labels archive-restored historical users without exposing remapped identity", async () => {
     const { cases, activity } = await harness();
     const created = await cases.createCase(ALICE, { title: "Restored synthetic investigation" }, "test");

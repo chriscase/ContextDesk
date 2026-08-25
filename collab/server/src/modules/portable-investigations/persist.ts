@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import {
   PERMANENT_UNKNOWN_SOURCE_ID,
   PORTABLE_OBJECT_KINDS,
+  PORTABLE_TERMINAL_TRIAGE_STATUSES,
   parseCorpusIntakeBatch,
   portableDestinationUuid,
   snapshotFairness,
@@ -14,6 +15,8 @@ import {
   type NormalizedExperimentDecisionV1,
   type PortableArchiveV1,
   type PortableObjectKind,
+  type PortableTriageCandidateV1,
+  type PortableTriageJobV1,
   type TriageJobV1,
 } from "@cd-collab/contracts";
 import type { EvidenceStore, EvidenceWriteBatch } from "../../evidence/store.js";
@@ -103,9 +106,91 @@ function actorAttribution(
   if (mapped?.action === "map_existing" && mapped.destinationActorId) {
     const canonical = destinationUsernames.get(mapped.destinationActorId);
     if (!canonical) throw new Error("mapped destination identity is absent from the host catalog");
-    return { id: mapped.destinationActorId, username: canonical };
+    return { id: mapped.destinationActorId, username: historicalUsername(canonical) };
   }
-  return { id: remapOf(report, "actor", sourceActorId), username };
+  return { id: remapOf(report, "actor", sourceActorId), username: historicalUsername(username) };
+}
+
+function historicalUsername(username: string): string {
+  const value = username.trim() || "operator";
+  return value.startsWith("historical-") ? value : `historical-${value}`;
+}
+
+type ExactPortableTriageCandidateFields =
+  | "status"
+  | "benchmarkRunId"
+  | "summary"
+  | "unknowns"
+  | "errorCode"
+  | "startedAt"
+  | "finishedAt"
+  | "privacyClass";
+
+type ExactPortableTriageCandidate = Omit<
+  PortableTriageCandidateV1,
+  ExactPortableTriageCandidateFields
+> & Required<Pick<PortableTriageCandidateV1, ExactPortableTriageCandidateFields>>;
+
+type ExactPortableTriageJobFields =
+  | "requestMode"
+  | "question"
+  | "policyFingerprint"
+  | "taskFingerprint"
+  | "concurrency"
+  | "sameSnapshot"
+  | "agreementNotice"
+  | "updatedAt"
+  | "startedAt"
+  | "finishedAt"
+  | "cancelRequestedAt"
+  | "stoppedReason";
+
+type ExactPortableTriageJob = Omit<
+  PortableTriageJobV1,
+  "candidates" | ExactPortableTriageJobFields
+> & Required<Pick<
+  PortableTriageJobV1,
+  ExactPortableTriageJobFields
+>> & { candidates: ExactPortableTriageCandidate[] };
+
+function requireExactPortableJobState(
+  job: PortableTriageJobV1,
+): ExactPortableTriageJob {
+  if (!(PORTABLE_TERMINAL_TRIAGE_STATUSES as readonly string[]).includes(job.status)) {
+    throw new Error("nonterminal portable triage job cannot be persisted");
+  }
+  if (
+    job.requestMode === undefined ||
+    job.question === undefined ||
+    job.policyFingerprint === undefined ||
+    job.taskFingerprint === undefined ||
+    job.concurrency === undefined ||
+    job.sameSnapshot === undefined ||
+    job.agreementNotice === undefined ||
+    job.updatedAt === undefined ||
+    job.startedAt === undefined ||
+    job.finishedAt === undefined ||
+    job.cancelRequestedAt === undefined ||
+    job.stoppedReason === undefined
+  ) {
+    throw new Error("portable triage job is missing exact terminal history");
+  }
+  for (const candidate of job.candidates) {
+    if (
+      candidate.status === undefined ||
+      !(PORTABLE_TERMINAL_TRIAGE_STATUSES as readonly string[]).includes(candidate.status) ||
+      candidate.benchmarkRunId === undefined ||
+      candidate.summary === undefined ||
+      candidate.unknowns === undefined ||
+      candidate.errorCode === undefined ||
+      candidate.startedAt === undefined ||
+      candidate.finishedAt === undefined ||
+      candidate.privacyClass === undefined
+    ) {
+      throw new Error("portable triage candidate is missing exact terminal history");
+    }
+  }
+  return job as unknown as ExactPortableTriageJob;
 }
 
 function asCapturable(store: object): Capturable {
@@ -743,7 +828,8 @@ export async function persistPortableArchive(input: {
     await ports.runs.insert(row);
   }
 
-  for (const job of bundle.triageJobs) {
+  for (const portableJob of bundle.triageJobs) {
+    const job = requireExactPortableJobState(portableJob);
     const requester = attribution(job.requestedBy);
     const snapshotFingerprintValue =
       destSnapshotFingerprints.get(job.snapshotId) ?? job.snapshotFingerprint;
@@ -766,11 +852,13 @@ export async function persistPortableArchive(input: {
       request: {
         schemaId: "cd-collab.triage_job_request.v1",
         snapshotId: remapOf(report, "snapshot", job.snapshotId),
-        mode: "deterministic_mock",
+        mode: job.requestMode,
         strategyId: job.strategyId,
-        question: "Imported portable comparison",
-        policyFingerprint: null,
-        taskFingerprint: job.requestFingerprint,
+        question: job.question,
+        policyFingerprint: job.policyFingerprint,
+        taskFingerprint: job.taskFingerprint,
+        ...(job.concurrency !== null ? { concurrency: job.concurrency } : {}),
+        ...(job.parentJobId ? { parentJobId: remapOf(report, "triage_job", job.parentJobId) } : {}),
         candidates: job.candidates.map((candidate) => ({
           candidateId: candidate.candidateId,
           role: candidate.role,
@@ -788,29 +876,31 @@ export async function persistPortableArchive(input: {
         profileId: candidate.profileId,
         model: candidate.model,
         version: candidate.version,
-        status: job.status,
-        benchmarkRunId: null,
+        status: candidate.status,
+        benchmarkRunId: candidate.benchmarkRunId,
         outputHash: candidate.outputHash,
-        summary: null,
+        summary: candidate.summary,
         evidenceRefs: candidate.evidenceRefs.map((id) => remapOf(report, "evidence", id)),
-        unknowns: [],
+        unknowns: [...candidate.unknowns],
         usageStatus: "unknown",
         costStatus: "unknown",
-        errorCode: null,
-        startedAt: null,
-        finishedAt: null,
-        privacyClass: "owner_only",
+        errorCode: candidate.errorCode,
+        startedAt: candidate.startedAt,
+        finishedAt: candidate.finishedAt,
+        privacyClass: candidate.privacyClass,
       })),
-      sameSnapshot: null,
-      agreementNotice: "Agreement is not proof of correctness.",
+      sameSnapshot: job.sameSnapshot,
+      agreementNotice: job.agreementNotice,
       requestedBy: requester.id,
       requestedByUsername: requester.username,
       createdAt: job.createdAt,
-      updatedAt: job.createdAt,
-      startedAt: null,
-      finishedAt: null,
-      cancelRequestedAt: null,
-      stoppedReason: null,
+      updatedAt: job.updatedAt,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      cancelRequestedAt: job.cancelRequestedAt,
+      stoppedReason: job.stoppedReason,
+      workerId: null,
+      leaseExpiresAt: null,
     };
     await ports.jobs.insert(row);
   }

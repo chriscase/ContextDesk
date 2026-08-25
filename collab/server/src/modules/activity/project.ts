@@ -253,9 +253,15 @@ export function projectTimelineSource(input: {
 }): ProjectedInvestigationActivity | null {
   const payload = payloadOf(input.source.event.payload);
   const mapped = mapEvent(input.source.caseId, input.source.event, payload);
+  const restoredImport = payload.imported === true;
+  if (restoredImport) {
+    mapped.provenance = "historical_restored";
+    mapped.humanFinding = false;
+  }
   const visibility = privacyOf(payload);
   if (visibility === "omitted" || visibility === "redacted") mapped.humanFinding = false;
-  const historical = input.source.event.actorUsername.startsWith("historical-")
+  const historical = restoredImport
+    || input.source.event.actorUsername.startsWith("historical-")
     || input.source.event.actorUsername.startsWith("imported-")
     || mapped.provenance === "historical_restored";
   if (mapped.provenance === "ai_generated" || mapped.provenance === "imported") mapped.humanFinding = false;

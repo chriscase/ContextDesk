@@ -21,7 +21,7 @@ import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js"
 import { assertShareSafeFingerprint, assertShareSafeTimestamp } from "./privacy.js";
 import { SNAPSHOT_FAIRNESS_CLASSES } from "./snapshot.js";
 import { SOURCE_KINDS, SOURCE_LIFECYCLES } from "./source.js";
-import { TRIAGE_JOB_STATUSES } from "./triage-job.js";
+import { TRIAGE_JOB_MODES } from "./triage-job.js";
 
 export const PORTABLE_SCHEMA_ID = "cd-collab.investigation_portable.v1" as const;
 export const PORTABLE_PREFLIGHT_SCHEMA_ID =
@@ -32,6 +32,16 @@ export const PORTABLE_PERMISSION_CAVEAT =
   "Imported membership and roles are historical snapshots only. Destination permissions must be newly authorized and audited." as const;
 export const PORTABLE_HISTORY_CAVEAT =
   "Imported history is immutable. Destination identity is never inferred from display name or email." as const;
+
+export const PORTABLE_TERMINAL_TRIAGE_STATUSES = [
+  "completed",
+  "partial",
+  "failed",
+  "timed_out",
+  "cancelled",
+] as const;
+export type PortableTerminalTriageStatus =
+  (typeof PORTABLE_TERMINAL_TRIAGE_STATUSES)[number];
 
 export const IDENTITY_ACTIONS = [
   "map_existing",
@@ -551,6 +561,14 @@ const triageCandidateShape: ObjectShape = {
   costStatus: f.req(f.en(UNKNOWN_STATUS)),
   outputHash: f.nul(f.str),
   evidenceRefs: f.req(f.arr(f.str)),
+  status: f.opt(f.en(...PORTABLE_TERMINAL_TRIAGE_STATUSES)),
+  benchmarkRunId: f.optNul(f.str),
+  summary: f.optNul(f.str),
+  unknowns: f.opt(f.arr(f.str)),
+  errorCode: f.optNul(f.str),
+  startedAt: f.optNul(f.str),
+  finishedAt: f.optNul(f.str),
+  privacyClass: f.opt(f.en(...PRIVACY_CLASSES)),
 };
 
 const triageJobShape: ObjectShape = {
@@ -558,12 +576,24 @@ const triageJobShape: ObjectShape = {
   snapshotId: f.req(f.str),
   snapshotFingerprint: f.req(f.str),
   strategyId: f.req(f.str),
-  status: f.req(f.en(...TRIAGE_JOB_STATUSES)),
+  status: f.req(f.en(...PORTABLE_TERMINAL_TRIAGE_STATUSES)),
   parentJobId: f.nul(f.str),
   requestFingerprint: f.req(f.str),
   candidates: f.req(f.arr(f.obj(triageCandidateShape))),
   requestedBy: f.req(f.str),
   createdAt: f.req(f.str),
+  requestMode: f.opt(f.en(...TRIAGE_JOB_MODES)),
+  question: f.opt(f.str),
+  policyFingerprint: f.optNul(f.str),
+  taskFingerprint: f.opt(f.str),
+  concurrency: f.optNul(f.u64),
+  sameSnapshot: f.optNul(f.bool),
+  agreementNotice: f.opt(f.en("Agreement is not proof of correctness.")),
+  updatedAt: f.opt(f.str),
+  startedAt: f.optNul(f.str),
+  finishedAt: f.optNul(f.str),
+  cancelRequestedAt: f.optNul(f.str),
+  stoppedReason: f.optNul(f.str),
   objectHash: f.req(f.str),
 };
 
@@ -853,6 +883,15 @@ export interface PortableTriageCandidateV1 {
   costStatus: "unknown";
   outputHash: string | null;
   evidenceRefs: string[];
+  /** Optional only so older V1 archives can be inspected; exact apply requires every field below. */
+  status?: PortableTerminalTriageStatus;
+  benchmarkRunId?: string | null;
+  summary?: string | null;
+  unknowns?: string[];
+  errorCode?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  privacyClass?: (typeof PRIVACY_CLASSES)[number];
 }
 
 export interface PortableTriageJobV1 {
@@ -860,12 +899,25 @@ export interface PortableTriageJobV1 {
   snapshotId: string;
   snapshotFingerprint: string;
   strategyId: string;
-  status: (typeof TRIAGE_JOB_STATUSES)[number];
+  status: PortableTerminalTriageStatus;
   parentJobId: string | null;
   requestFingerprint: string;
   candidates: PortableTriageCandidateV1[];
   requestedBy: string;
   createdAt: string;
+  /** Optional only so older V1 archives can be inspected; exact apply requires every field below. */
+  requestMode?: (typeof TRIAGE_JOB_MODES)[number];
+  question?: string;
+  policyFingerprint?: string | null;
+  taskFingerprint?: string;
+  concurrency?: number | null;
+  sameSnapshot?: boolean | null;
+  agreementNotice?: "Agreement is not proof of correctness.";
+  updatedAt?: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  cancelRequestedAt?: string | null;
+  stoppedReason?: string | null;
   objectHash: string;
 }
 

@@ -118,6 +118,16 @@ interface EvidenceArtifactView {
   verificationStatus: string | null;
 }
 
+function isRestoredAttribution(username: string | null | undefined): boolean {
+  const value = username?.trim().toLowerCase() ?? "";
+  return value.startsWith("historical-") || value.startsWith("imported-");
+}
+
+function attributionLabel(username: string | null | undefined): string {
+  if (!username?.trim()) return "identity unavailable in this view";
+  return isRestoredAttribution(username) ? "Historical participant (restored)" : username;
+}
+
 interface ShareSafeExport {
   schemaId?: string;
   privacyClass?: string;
@@ -2336,14 +2346,19 @@ export function ExperimentLab(props: {
                         {latestDecision.status}
                       </span>
                       <span>r{latestDecision.revision}</span>
+                      {isRestoredAttribution(latestDecision.authorUsername) ? (
+                        <span>restored history</span>
+                      ) : null}
                     </p>
                     <p className="experiment-lab__scan-decision-text">“{latestDecision.text}”</p>
                     <p className="experiment-lab__scan-decision-rationale">
                       Why: {latestDecision.rationale}
                     </p>
                     <p className="experiment-lab__scan-decision-author">
-                      Recorded by {latestDecision.authorUsername ?? "identity unavailable in this view"}
-                      {" · owner "}{latestDecision.ownerUsername?.trim() || "Unassigned"}
+                      Recorded by {attributionLabel(latestDecision.authorUsername)}
+                      {" · owner "}{latestDecision.ownerUsername?.trim()
+                        ? attributionLabel(latestDecision.ownerUsername)
+                        : "Unassigned"}
                       {" · remaining unknowns "}{(latestDecision.remainingUnknowns ?? []).length}
                     </p>
                   </div>
@@ -3417,7 +3432,9 @@ export function ExperimentLab(props: {
               </span>
             </div>
             <p className="experiment-lab__section-note">
-              Decision revisions and gold promotion remain server-recorded and attributable to the signed-in participant.
+              {isRestoredAttribution(latestDecision?.authorUsername)
+                ? "This decision was restored as historical record. It is not attributed as a new action by the mapped destination user."
+                : "Decision revisions and gold promotion remain server-recorded and attributable to the signed-in participant."}
             </p>
           {canWrite ? (
             <details className="experiment-lab__tools">
@@ -3462,10 +3479,12 @@ export function ExperimentLab(props: {
                 Rationale: {current.decisions.at(-1)?.rationale}
               </p>
               <p className="experiment-lab__decision-author">
-                Recorded by {current.decisions.at(-1)?.authorUsername ?? "identity unavailable in this view"}
+                Recorded by {attributionLabel(latestDecision?.authorUsername)}
               </p>
               <p className="experiment-lab__decision-author">
-                Decision owner: {current.decisions.at(-1)?.ownerUsername?.trim() || "Unassigned"}
+                Decision owner: {latestDecision?.ownerUsername?.trim()
+                  ? attributionLabel(latestDecision.ownerUsername)
+                  : "Unassigned"}
               </p>
               {(current.decisions.at(-1)?.remainingUnknowns ?? []).length ? (
                 <div className="experiment-lab__decision-unknowns">
