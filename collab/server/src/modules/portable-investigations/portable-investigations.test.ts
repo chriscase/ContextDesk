@@ -958,6 +958,45 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/experiment\+trace target/);
   });
 
+  it("refuses apply when experiment import timeline lacks an experiment target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "experiment_imported");
+      if (!event) throw new Error("experiment import timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable experiment target/);
+  });
+
   it("returns host-owned identity/collision/privacy facts and mints apply only for exact reconstruction", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1456,6 +1495,7 @@ describe("portable investigation apply", () => {
     const sourceDecision = sourcePage.items.find((item) => item.activityKind === "decision_proposed");
     const sourceGold = sourcePage.items.find((item) => item.summary === "recorded an accepted outcome benchmark");
     const sourceHelpfulness = sourcePage.items.find((item) => item.summary === "recorded a comparison observation");
+    const sourceExperiment = sourcePage.items.find((item) => item.summary === "recorded a strategy comparison");
     const sourceTraces = sourcePage.items.filter((item) => item.summary === "imported a comparison trace");
     const sourceTrace = sourceTraces[0];
     const sourceAttempt = sourcePage.items.find((item) => item.locator.kind === "workstream_attempt");
@@ -1519,6 +1559,10 @@ describe("portable investigation apply", () => {
     expect(sourceHelpfulness?.locator.resourceId).toBeTruthy();
     expect(sourceHelpfulness?.locator.resourceId).not.toBe(row.caseId);
     expect(sourceHelpfulness?.humanFinding).toBe(false);
+    expect(sourceExperiment?.locator.kind).toBe("experiment");
+    expect(sourceExperiment?.locator.resourceId).toBeTruthy();
+    expect(sourceExperiment?.locator.resourceId).not.toBe(row.caseId);
+    expect(sourceExperiment?.humanFinding).toBe(false);
     expect(sourceTraces.length).toBeGreaterThan(1);
     expect(sourceTrace?.locator.kind).toBe("interaction_trace");
     expect(sourceTrace?.locator.resourceId).toContain(":");
@@ -1538,6 +1582,9 @@ describe("portable investigation apply", () => {
     await expect(
       activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceTrace!.locator)),
     ).resolves.toMatchObject({ authorized: true, resourceLabel: "Imported comparison trace" });
+    await expect(
+      activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceExperiment!.locator)),
+    ).resolves.toMatchObject({ authorized: true, resourceLabel: "Strategy comparison" });
     await expect(
       activity.resolve(
         ACTOR,
@@ -1663,6 +1710,7 @@ describe("portable investigation apply", () => {
     const destDecision = destPage.items.find((item) => item.activityKind === "decision_proposed");
     const destGold = destPage.items.find((item) => item.summary === "recorded an accepted outcome benchmark");
     const destHelpfulness = destPage.items.find((item) => item.summary === "recorded a comparison observation");
+    const destExperiment = destPage.items.find((item) => item.summary === "recorded a strategy comparison");
     const destTraces = destPage.items.filter((item) => item.summary === "imported a comparison trace");
     const destTrace = destTraces[0];
     const destAttempt = destPage.items.find((item) => item.locator.kind === "workstream_attempt");
@@ -1699,6 +1747,14 @@ describe("portable investigation apply", () => {
     expect(destHelpfulness?.provenanceClass).toBe("historical_restored");
     expect(destHelpfulness?.resolvedRoute).toContain("section=cross-exam-heading");
     expect(destHelpfulness?.resolvedRoute).toContain(`item=${destHelpfulness?.locator.resourceId}`);
+    expect(destExperiment?.locator.kind).toBe("experiment");
+    expect(destExperiment?.locator.resourceId).toBeTruthy();
+    expect(destExperiment?.locator.resourceId).not.toBe(sourceExperiment?.locator.resourceId);
+    expect(destExperiment?.locator.resourceId).not.toBe(applied.investigationId);
+    expect(destExperiment?.humanFinding).toBe(false);
+    expect(destExperiment?.provenanceClass).toBe("historical_restored");
+    expect(destExperiment?.resolvedRoute).toContain("section=candidate-comparison-heading");
+    expect(destExperiment?.resolvedRoute).toContain(`item=${destExperiment?.locator.resourceId}`);
     expect(destTraces.length).toBe(sourceTraces.length);
     expect(destTrace?.locator.kind).toBe("interaction_trace");
     expect(destTrace?.locator.resourceId).toBeTruthy();
@@ -1749,6 +1805,8 @@ describe("portable investigation apply", () => {
     expect(destExperiments.map((experiment) => experiment.id)).not.toContain(destHelpfulness?.locator.resourceId);
     expect(destDecisionIds).not.toContain(destHelpfulness?.locator.resourceId);
     expect(destGoldIds).not.toContain(destHelpfulness?.locator.resourceId);
+    expect(destExperiments.map((experiment) => experiment.id)).toContain(destExperiment?.locator.resourceId);
+    expect(destExperiment?.locator.resourceId).not.toBe(sourceExperiment?.locator.resourceId);
     expect(destExperiments.map((experiment) => experiment.id)).toContain(
       destTrace?.locator.resourceId.split(":")[0],
     );
@@ -1766,7 +1824,7 @@ describe("portable investigation apply", () => {
     const destIntakeEvidence = destArtifacts.find((item) => item.relativePath === "router/locator.log");
     expect(destIntakeEvidence?.intakeBatchId).toBe(destIntake?.locator.resourceId);
 
-    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destGold, destHelpfulness, destTrace, destAttempt, destIntake]) {
+    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destGold, destHelpfulness, destExperiment, destTrace, destAttempt, destIntake]) {
       await expect(
         activity.resolve(ACTOR, false, formatCompactInvestigationLocator(item!.locator)),
       ).resolves.toMatchObject({ authorized: true, locator: item!.locator });
@@ -1880,6 +1938,18 @@ describe("portable investigation apply", () => {
           investigationId: applied.investigationId,
           kind: "interaction_trace",
           resourceId: destExperiments[0]!.id,
+        })),
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      activity.resolve(
+        ACTOR,
+        false,
+        formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+          installationId: "inst-syntheticnorth",
+          investigationId: applied.investigationId,
+          kind: "comparison_finding",
+          resourceId: destExperiment!.locator.resourceId,
         })),
       ),
     ).rejects.toMatchObject({ code: "not_found" });
@@ -2706,6 +2776,29 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
         resourceId: traces[0]!.locator.resourceId,
       }));
       await expect(activity.resolve(ACTOR, false, confusedTrace)).rejects.toMatchObject({
+        code: "not_found",
+      });
+      const experiment = page.items.find((item) => item.locator.kind === "experiment");
+      expect(experiment?.locator.resourceId).toBeTruthy();
+      expect(experiment?.humanFinding).toBe(false);
+      expect(experiment?.locator.resourceId).not.toBe(investigationId);
+      await expect(
+        activity.resolve(ACTOR, false, formatCompactInvestigationLocator(experiment!.locator)),
+      ).resolves.toMatchObject({ authorized: true, resourceLabel: "Strategy comparison" });
+      await expect(
+        activity.resolve(
+          { id: "eve", username: "eve" },
+          false,
+          formatCompactInvestigationLocator(experiment!.locator),
+        ),
+      ).rejects.toMatchObject({ code: "not_found" });
+      const confusedExperiment = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+        installationId: "inst-syntheticnorth",
+        investigationId,
+        kind: "comparison_finding",
+        resourceId: experiment!.locator.resourceId,
+      }));
+      await expect(activity.resolve(ACTOR, false, confusedExperiment)).rejects.toMatchObject({
         code: "not_found",
       });
     });

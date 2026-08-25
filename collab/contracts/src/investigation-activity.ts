@@ -48,6 +48,7 @@ export const INVESTIGATION_RESOURCE_KINDS = [
   "comparison_conflict",
   "helpfulness",
   "interaction_trace",
+  "experiment",
   "discussion_message",
   "timeline_event",
   "hypothesis",
@@ -421,6 +422,14 @@ export function routedInvestigationFocus(
         itemKind: null,
         lane: null,
       };
+    case "experiment":
+      return {
+        stage: "compare",
+        section: "candidate-comparison-heading",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
     case "discussion_message":
       return {
         stage: "situation",
@@ -616,6 +625,7 @@ const RESOURCE_KIND_FALLBACK: Record<InvestigationResourceKindV1, string> = {
   comparison_conflict: "Comparison conflict",
   helpfulness: "Comparison observation",
   interaction_trace: "Imported comparison trace",
+  experiment: "Strategy comparison",
   discussion_message: "Discussion message",
   timeline_event: "Timeline event",
   hypothesis: "Hypothesis",

@@ -1047,6 +1047,12 @@ export class PortableInvestigationService {
           "experiment helpfulness timeline is missing a portable helpfulness target",
         );
       }
+      if (row.kind === "experiment_imported" && addressed?.namespace !== "experiment") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment import timeline is missing a portable experiment target",
+        );
+      }
       if (row.kind === "experiment_trace_imported") {
         const parsed = addressed?.targetId
           ? parsePortableExperimentTraceTarget(addressed.targetId)

@@ -703,6 +703,9 @@ export async function persistPortableArchive(input: {
     ) {
       throw new Error("experiment helpfulness timeline is missing a portable helpfulness target");
     }
+    if (event.kind === "experiment_imported" && (event.targetNamespace !== "experiment" || !event.targetId)) {
+      throw new Error("experiment import timeline is missing a portable experiment target");
+    }
     if (event.kind === "experiment_trace_imported") {
       const parsed = event.targetId ? parsePortableExperimentTraceTarget(event.targetId) : null;
       if (event.targetNamespace !== "experiment" || !parsed) {

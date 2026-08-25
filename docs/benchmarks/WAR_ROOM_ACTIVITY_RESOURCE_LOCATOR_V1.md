@@ -92,7 +92,9 @@ experiment or accepted decision id. `experiment_helpfulness_recorded` projects
 `helpfulness` at the observation id and Compare `cross-exam-heading`, not the
 experiment id. `experiment_trace_imported` projects `interaction_trace` at
 `${experimentId}:${traceId}` and Compare `candidate-comparison-heading`, not
-the experiment id or `evidence_context`.
+the experiment id or `evidence_context`. `experiment_imported` projects
+`experiment` at the experiment id and Compare `candidate-comparison-heading`,
+not `comparison_finding`.
 
 ## Privacy and authorization
 

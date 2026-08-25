@@ -217,7 +217,7 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
         workstreamId: jobId,
       };
     case "experiment_imported":
-      return { activityKind: "comparison_unknown", resourceKind: "comparison_finding", resourceId: target, provenance: "imported", summary: "recorded a strategy comparison", humanFinding: false, revision: null, workstreamId: null };
+      return { activityKind: "comparison_unknown", resourceKind: "experiment", resourceId: target, provenance: "imported", summary: "recorded a strategy comparison", humanFinding: false, revision: null, workstreamId: null };
     case "comparison_disagreement":
       return { activityKind: "comparison_disagreement", resourceKind: "comparison_conflict", resourceId: target, provenance: "human", summary: "recorded a comparison disagreement", humanFinding: false, revision: null, workstreamId: null };
     case "experiment_helpfulness_recorded": {
