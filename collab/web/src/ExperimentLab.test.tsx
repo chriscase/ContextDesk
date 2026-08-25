@@ -1596,7 +1596,10 @@ describe("decision readiness cockpit", () => {
 
     const scan = await screen.findByRole("region", { name: "At a glance" });
     expect(await within(scan).findByText("synthetic-inventory-timeout.log")).toBeTruthy();
-    expect(within(scan).getByText(/inventory lookup exceeded 30000ms/)).toBeTruthy();
+    // Artifact metadata and artifact bytes are loaded by separate effects. Wait
+    // for the byte-backed excerpt instead of coupling this assertion to their
+    // relative scheduling speed on the current runner.
+    expect(await within(scan).findByText(/inventory lookup exceeded 30000ms/)).toBeTruthy();
     const inspect = within(scan).getAllByRole("link", { name: "Inspect supporting artifact" })[0]!;
     expect(inspect.getAttribute("href")).toContain("kind=evidence");
     expect(within(scan).getAllByRole("button", { name: /Copy synthetic-inventory-timeout\.log text/ }).length)
