@@ -105,6 +105,23 @@ function isAnnotationSequenceConflict(error: unknown): boolean {
   return /annotation sequence already exists/i.test(message);
 }
 
+function isGoldVersionConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    error
+    && typeof error === "object"
+    && "code" in error
+    && (error as { code: unknown }).code === "23505"
+  ) {
+    const constraint =
+      "constraint" in error && typeof (error as { constraint?: unknown }).constraint === "string"
+        ? (error as { constraint: string }).constraint
+        : "";
+    return /gold_references/i.test(`${constraint} ${message}`);
+  }
+  return /gold_references is insert-only|duplicate key.*gold_references/i.test(message);
+}
+
 export interface ExperimentView {
   id: string;
   caseId: string;
@@ -1049,6 +1066,7 @@ export class ExperimentService {
     }
 
     return this.withExperimentAtomic(async () => {
+    await this.store.lockExperiment(row.id);
     const golds = await this.store.listGolds(experimentId);
     const fingerprint = goldPromotionFingerprint({
       acceptedDecisionId: accepted.id,
@@ -1123,7 +1141,14 @@ export class ExperimentService {
       promotedByUsername: actor.username,
       createdAt: new Date().toISOString(),
     });
-    await this.store.insertGold(gold);
+    try {
+      await this.store.insertGold(gold);
+    } catch (error) {
+      if (isGoldVersionConflict(error)) {
+        throw new ExperimentConflictError("stale_gold", "gold version already exists");
+      }
+      throw error;
+    }
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_gold_promoted",
       actor,
