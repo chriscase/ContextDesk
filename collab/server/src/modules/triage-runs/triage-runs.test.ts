@@ -32,7 +32,7 @@ import {
   type TriageExecutionContext,
   type TriageRunExecutor,
 } from "./index.js";
-import { MemoryTriageJobStore, PgTriageJobStore } from "./store.js";
+import { laterLeaseExpiresAt, MemoryTriageJobStore, PgTriageJobStore } from "./store.js";
 
 const actor = { id: "lead", username: "lead" };
 
@@ -98,6 +98,20 @@ function request(snapshotId: string) {
   };
 }
 
+describe("laterLeaseExpiresAt", () => {
+  it("keeps the later timestamp and never lets a missing lease shorten a live one", () => {
+    expect(laterLeaseExpiresAt("2026-08-25T00:02:00.000Z", "2026-08-25T00:01:00.000Z")).toBe(
+      "2026-08-25T00:02:00.000Z",
+    );
+    expect(laterLeaseExpiresAt("2026-08-25T00:01:00.000Z", "2026-08-25T00:02:00.000Z")).toBe(
+      "2026-08-25T00:02:00.000Z",
+    );
+    expect(laterLeaseExpiresAt("2026-08-25T00:02:00.000Z", null)).toBe("2026-08-25T00:02:00.000Z");
+    expect(laterLeaseExpiresAt(null, "2026-08-25T00:02:00.000Z")).toBe("2026-08-25T00:02:00.000Z");
+    expect(laterLeaseExpiresAt(null, null)).toBeNull();
+  });
+});
+
 describe("snapshot-bound triage runs", () => {
   it("uses an exclusive durable worker lease and only exposes expired work for recovery", async () => {
     const store = new MemoryTriageJobStore();
@@ -148,19 +162,29 @@ describe("snapshot-bound triage runs", () => {
     expect(await store.renewLease(job.id, "worker-a", new Date(Date.now() + 120_000).toISOString())).toBe(true);
     expect(await store.listStaleRunning(new Date().toISOString())).toHaveLength(0);
 
-    const expired = (await store.get(job.id))!;
-    await store.update({
-      ...expired,
-      leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
-    });
-    expect(await store.listStaleRunning(new Date().toISOString())).toHaveLength(1);
+    const staleJob: TriageJobV1 = {
+      ...job,
+      id: "job-lease-stale",
+      cancellationId: "cancel-lease-stale",
+    };
+    await store.insert(staleJob);
+    const staleClaimed = await store.claimQueued(
+      staleJob.id,
+      new Date().toISOString(),
+      "worker-a",
+      new Date(Date.now() - 1).toISOString(),
+    );
+    expect(staleClaimed?.status).toBe("running");
+    expect(await store.listStaleRunning(new Date().toISOString())).toEqual([
+      expect.objectContaining({ id: staleJob.id, workerId: "worker-a" }),
+    ]);
     await expect(store.update({
-      ...expired,
+      ...staleClaimed!,
       status: "completed",
       updatedAt: new Date().toISOString(),
     })).rejects.toThrow("triage job not found");
     const recovery = {
-      ...(await store.get(job.id))!,
+      ...(await store.get(staleJob.id))!,
       status: "failed" as const,
       stoppedReason: "worker_lease_expired",
       leaseExpiresAt: null,
@@ -168,11 +192,74 @@ describe("snapshot-bound triage runs", () => {
     expect(await store.recoverStale(recovery, new Date().toISOString())).toBe(true);
     expect(await store.recoverStale(recovery, new Date().toISOString())).toBe(false);
     await expect(store.update({
-      ...expired,
+      ...staleClaimed!,
       status: "completed",
       updatedAt: new Date().toISOString(),
     })).rejects.toThrow("triage job not found");
-    expect((await store.get(job.id))?.status).toBe("failed");
+    expect((await store.get(staleJob.id))?.status).toBe("failed");
+    expect((await store.get(job.id))?.status).toBe("running");
+  });
+
+  it("does not let a stale progress update shorten a renewed worker lease", async () => {
+    const store = new MemoryTriageJobStore();
+    const spec = request("snapshot-lease");
+    const job: TriageJobV1 = {
+      schemaId: "cd-collab.triage_job.v1",
+      id: "job-lease-progress",
+      caseId: "case-lease-progress",
+      snapshotId: "snapshot-lease",
+      snapshotFingerprint: "snapshot-fingerprint",
+      requestFingerprint: "request-fingerprint",
+      cancellationId: "cancel-lease-progress",
+      request: spec,
+      status: "queued",
+      candidates: [
+        {
+          ...spec.candidates[0]!,
+          status: "queued",
+          benchmarkRunId: null,
+          outputHash: null,
+          summary: null,
+          evidenceRefs: [],
+          unknowns: [],
+          usageStatus: "unknown",
+          costStatus: "unknown",
+          errorCode: null,
+          startedAt: null,
+          finishedAt: null,
+          privacyClass: "owner_only",
+        },
+      ],
+      sameSnapshot: null,
+      agreementNotice: "Agreement is not proof of correctness.",
+      requestedBy: "lead",
+      requestedByUsername: "lead",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      updatedAt: "2026-08-20T00:00:00.000Z",
+      startedAt: null,
+      finishedAt: null,
+      cancelRequestedAt: null,
+      stoppedReason: null,
+    };
+    await store.insert(job);
+    const liveUntil = new Date(Date.now() + 60_000).toISOString();
+    await store.claimQueued(job.id, new Date().toISOString(), "worker-a", liveUntil);
+    const stale = (await store.get(job.id))!;
+    const extended = new Date(Date.now() + 120_000).toISOString();
+    expect(await store.renewLease(job.id, "worker-a", extended)).toBe(true);
+    await store.update({
+      ...stale,
+      candidates: stale.candidates.map((candidate, index) =>
+        index === 0
+          ? { ...candidate, status: "running", startedAt: "2026-08-20T00:00:01.000Z" }
+          : candidate,
+      ),
+      updatedAt: new Date().toISOString(),
+    });
+    const latest = (await store.get(job.id))!;
+    expect(latest.leaseExpiresAt).toBe(extended);
+    expect(latest.candidates[0]?.status).toBe("running");
+    expect(await store.listStaleRunning(new Date().toISOString())).toHaveLength(0);
   });
 
   it("fails closed on cancel after lease expiry and refuses requester-less recovery", async () => {
@@ -277,13 +364,13 @@ describe("snapshot-bound triage runs", () => {
         stoppedReason: null,
       };
       await jobs.insert(queued);
-      const liveUntil = new Date(Date.now() + 60_000).toISOString();
-      const claimed = await jobs.claimQueued(queued.id, new Date().toISOString(), "worker-a", liveUntil);
+      const claimed = await jobs.claimQueued(
+        queued.id,
+        new Date().toISOString(),
+        "worker-a",
+        new Date(Date.now() - 1).toISOString(),
+      );
       expect(claimed?.status).toBe("running");
-      await jobs.update({
-        ...claimed!,
-        leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
-      });
       await expect(service.cancel(created.id, queued.id, actor, "test", false)).rejects.toMatchObject({
         name: "TriageRunConflictError",
         message: "worker lease expired",
@@ -956,32 +1043,127 @@ describe.skipIf(!adminUrl())("pg-backed triage lease integrity", () => {
           stoppedReason: null,
         };
         await jobs.insert(job);
-        const liveUntil = new Date(Date.now() + 60_000).toISOString();
-        const claimed = await jobs.claimQueued(job.id, new Date().toISOString(), "worker-a", liveUntil);
+        const claimed = await jobs.claimQueued(
+          job.id,
+          new Date().toISOString(),
+          "worker-a",
+          new Date(Date.now() - 1).toISOString(),
+        );
         expect(claimed?.workerId).toBe("worker-a");
-        const live = (await jobs.get(job.id))!;
-        await jobs.update({
-          ...live,
-          leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
-        });
+        const expired = (await jobs.get(job.id))!;
         await expect(jobs.update({
-          ...live,
+          ...expired,
           status: "completed",
           updatedAt: new Date().toISOString(),
         })).rejects.toThrow("triage job not found");
         const recovery = {
-          ...(await jobs.get(job.id))!,
+          ...expired,
           status: "failed" as const,
           stoppedReason: "worker_lease_expired",
           leaseExpiresAt: null,
         };
         expect(await jobs.recoverStale(recovery, new Date().toISOString())).toBe(true);
         await expect(jobs.update({
-          ...live,
+          ...expired,
           status: "completed",
           updatedAt: new Date().toISOString(),
         })).rejects.toThrow("triage job not found");
         expect((await jobs.get(job.id))?.status).toBe("failed");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("does not let a stale progress update shorten a renewed worker lease", async () => {
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const root = await mkdtemp(join(tmpdir(), "contextdesk-pg-triage-lease-progress-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(client);
+      const catalog = new CatalogService(new PgCatalogStore(client), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(client), catalog);
+      const jobs = new PgTriageJobStore(client);
+      const pgActor = { id: "alice", username: "alice" };
+      try {
+        const created = await cases.createCase(pgActor, { title: "PG lease progress fixture" }, "test");
+        const artifact = await cases.addEvidence(
+          created.id,
+          pgActor,
+          {
+            kind: "log",
+            filename: "checkout.log",
+            mediaType: "text/plain",
+            bytes: new TextEncoder().encode("checkout timeout"),
+            summary: "Synthetic checkout timeout.",
+            privacyClass: "share_safe",
+          },
+          "test",
+        );
+        const snapshot = await cases.createSnapshot(
+          created.id,
+          pgActor,
+          { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+          "test",
+        );
+        const spec = request(snapshot.id);
+        const job: TriageJobV1 = {
+          schemaId: "cd-collab.triage_job.v1",
+          id: randomUUID(),
+          caseId: created.id,
+          snapshotId: snapshot.id,
+          snapshotFingerprint: snapshot.fingerprint,
+          requestFingerprint: "b".repeat(64),
+          cancellationId: randomUUID(),
+          request: spec,
+          status: "queued",
+          candidates: [
+            {
+              ...spec.candidates[0]!,
+              status: "queued",
+              benchmarkRunId: null,
+              outputHash: null,
+              summary: null,
+              evidenceRefs: [],
+              unknowns: [],
+              usageStatus: "unknown",
+              costStatus: "unknown",
+              errorCode: null,
+              startedAt: null,
+              finishedAt: null,
+              privacyClass: "owner_only",
+            },
+          ],
+          sameSnapshot: null,
+          agreementNotice: "Agreement is not proof of correctness.",
+          requestedBy: pgActor.id,
+          requestedByUsername: pgActor.username,
+          createdAt: "2026-08-20T00:00:00.000Z",
+          updatedAt: "2026-08-20T00:00:00.000Z",
+          startedAt: null,
+          finishedAt: null,
+          cancelRequestedAt: null,
+          stoppedReason: null,
+        };
+        await jobs.insert(job);
+        const liveUntil = new Date(Date.now() + 60_000).toISOString();
+        await jobs.claimQueued(job.id, new Date().toISOString(), "worker-a", liveUntil);
+        const stale = (await jobs.get(job.id))!;
+        const extended = new Date(Date.now() + 120_000).toISOString();
+        expect(await jobs.renewLease(job.id, "worker-a", extended)).toBe(true);
+        await jobs.update({
+          ...stale,
+          candidates: stale.candidates.map((candidate, index) =>
+            index === 0
+              ? { ...candidate, status: "running", startedAt: "2026-08-20T00:00:01.000Z" }
+              : candidate,
+          ),
+          updatedAt: new Date().toISOString(),
+        });
+        const latest = (await jobs.get(job.id))!;
+        expect(latest.leaseExpiresAt).toBe(extended);
+        expect(latest.candidates[0]?.status).toBe("running");
+        expect(await jobs.listStaleRunning(new Date().toISOString())).toHaveLength(0);
       } finally {
         await rm(root, { recursive: true, force: true });
       }

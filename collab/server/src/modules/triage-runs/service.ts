@@ -21,6 +21,7 @@ import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
 import type { OverviewJobQuery, OverviewListedJob, TriageJobStore } from "./store.js";
 import {
+  laterLeaseExpiresAt,
   MemoryTriageJobStore,
   triageRunningLeaseExpired,
   triageWorkerHoldsLiveLease,
@@ -919,7 +920,10 @@ export class TriageRunService {
             },
           });
         });
-        currentJob = nextJob;
+        currentJob = {
+          ...nextJob,
+          leaseExpiresAt: laterLeaseExpiresAt(currentJob.leaseExpiresAt, nextJob.leaseExpiresAt),
+        };
       };
       const persistCandidateStarted = async (candidateId: string): Promise<void> => {
         if (leaseLost) return;
@@ -950,7 +954,10 @@ export class TriageRunService {
             payload: { startedAt },
           });
         });
-        currentJob = nextJob;
+        currentJob = {
+          ...nextJob,
+          leaseExpiresAt: laterLeaseExpiresAt(currentJob.leaseExpiresAt, nextJob.leaseExpiresAt),
+        };
       };
       // Progress lines can arrive close together. Serialize their durable
       // updates so a slower database read cannot reorder or lose a lane.

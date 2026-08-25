@@ -74,6 +74,16 @@ function cloneJob(job: TriageJobV1): TriageJobV1 {
   };
 }
 
+/** Later ISO timestamp wins; a missing lease never shortens a live one. */
+export function laterLeaseExpiresAt(
+  existing: string | null | undefined,
+  incoming: string | null | undefined,
+): string | null {
+  if (!existing) return incoming ?? null;
+  if (!incoming) return existing;
+  return Date.parse(existing) >= Date.parse(incoming) ? existing : incoming;
+}
+
 export class MemoryTriageJobStore implements TriageJobStore {
   private readonly jobs = new Map<string, TriageJobV1>();
 
@@ -197,7 +207,11 @@ export class MemoryTriageJobStore implements TriageJobStore {
     if (!leaseAllowsTriageUpdate(existing, job, Date.now())) {
       throw new Error("triage job not found");
     }
-    this.jobs.set(job.id, cloneJob(job));
+    const next = cloneJob(job);
+    if (existing.status === "running" && job.status === "running") {
+      next.leaseExpiresAt = laterLeaseExpiresAt(existing.leaseExpiresAt, job.leaseExpiresAt);
+    }
+    this.jobs.set(job.id, next);
   }
 }
 
@@ -398,7 +412,17 @@ export class PgTriageJobStore implements TriageJobStore {
     const result = await this.queryable.query(
       `UPDATE triage_jobs
        SET status = $2, payload = $3::jsonb, updated_at = $4::timestamptz,
-           lease_owner = $6, lease_expires_at = $7::timestamptz
+           lease_owner = $6,
+           lease_expires_at = CASE
+             WHEN status = 'running' AND $2::text = 'running' THEN
+               CASE
+                 WHEN lease_expires_at IS NULL THEN $7::timestamptz
+                 WHEN $7::timestamptz IS NULL THEN lease_expires_at
+                 WHEN lease_expires_at >= $7::timestamptz THEN lease_expires_at
+                 ELSE $7::timestamptz
+               END
+             ELSE $7::timestamptz
+           END
        WHERE id = $1 AND case_id = $5
          AND lease_owner IS NOT DISTINCT FROM $6
          AND (

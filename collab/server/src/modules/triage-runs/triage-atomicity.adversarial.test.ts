@@ -339,12 +339,9 @@ describe("triage mutation atomicity", () => {
       job.id,
       "2026-08-25T00:00:01.000Z",
       "worker-stale",
-      new Date(Date.now() + 60_000).toISOString(),
+      new Date(Date.now() - 1).toISOString(),
     );
-    await jobs.update({
-      ...claimed!,
-      leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
-    });
+    expect(claimed?.status).toBe("running");
     await service.recoverPending();
     const recovered = await jobs.get(job.id);
     expect(recovered?.status).toBe("failed");
