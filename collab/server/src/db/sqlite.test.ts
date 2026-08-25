@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../evidence/store.js";
 import { CatalogService } from "../modules/catalog/index.js";
 import { CaseService } from "../modules/cases/index.js";
+import { TriageRunService } from "../modules/triage-runs/index.js";
 import { createSqliteRuntime } from "./sqlite.js";
 
 describe("SQLite local runtime", () => {
@@ -331,6 +332,88 @@ describe("SQLite local runtime", () => {
       expect((await second.cases.listTimeline(created.id)).filter((event) => event.kind === "evidence_registered"))
         .toHaveLength(1);
       second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls a triage job insert back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-triage-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "triage_job_created") {
+          throw new Error("injected timeline failure:triage_job_created");
+        }
+        return originalAppend(caseId, event);
+      };
+      const service = new TriageRunService({
+        cases,
+        audit: runtime.audit,
+        jobs: runtime.jobs,
+      });
+      const created = await cases.createCase(actor, { title: "SQLite triage rollback" }, "test");
+      const artifact = await cases.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "checkout.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("checkout timeout"),
+          summary: "Synthetic checkout timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const snapshot = await cases.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      await expect(
+        service.create(
+          created.id,
+          actor,
+          {
+            schemaId: "cd-collab.triage_job_request.v1",
+            snapshotId: snapshot.id,
+            mode: "deterministic_mock",
+            strategyId: "contextdesk.standard",
+            question: "What happened and what should we inspect next?",
+            policyFingerprint: null,
+            taskFingerprint: "task-fingerprint",
+            candidates: [{
+              candidateId: "candidate-1",
+              role: "reviewer",
+              provider: "synthetic",
+              profileId: null,
+              model: "qwen-3.6-27b",
+              version: null,
+            }],
+          },
+          "test",
+          false,
+          true,
+        ),
+      ).rejects.toThrow(/injected timeline failure:triage_job_created/);
+      expect(await runtime.jobs.listByCase(created.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "triage_job_created")).toBe(false);
+      expect(await runtime.audit.list({ action: "triage_job_create" })).toEqual([]);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.jobs.listByCase(created.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "triage_job_created")).toBe(false);
+      expect(await reopened.audit.list({ action: "triage_job_create" })).toEqual([]);
+      reopened.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
