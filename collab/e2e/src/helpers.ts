@@ -8,6 +8,9 @@ import type { FixtureUser } from "./users.js";
 const here = dirname(fileURLToPath(import.meta.url));
 export const FIXTURE_ROOT = join(here, "..", "fixtures");
 
+/** Canonical header required by cookie-authenticated War Room API mutations. */
+export const BROWSER_MUTATION_HEADERS = { "x-cd-collab-csrf": "1" } as const;
+
 export function uniqueTitle(prefix: string): string {
   return `${prefix} ${randomUUID()}`;
 }
@@ -274,6 +277,7 @@ export async function uploadEvidence(
   },
 ): Promise<{ id: string; contentHash: string | null }> {
   const res = await page.request.post(`/api/cases/${caseId}/evidence`, {
+    headers: BROWSER_MUTATION_HEADERS,
     data: {
       kind: opts.kind,
       summary: opts.summary,

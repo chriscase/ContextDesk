@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  BROWSER_MUTATION_HEADERS,
   caseIdForTitle,
   createCase,
   exportPanel,
@@ -47,6 +48,7 @@ test.describe("share-safe export", () => {
     // The composer has no privacy-class control; share_safe scan only sees
     // share_safe-classed bodies, so the planted action is posted to the existing API.
     const planted = await page.request.post(`/api/cases/${caseId}/contributions`, {
+      headers: BROWSER_MUTATION_HEADERS,
       data: {
         kind: "action",
         body: "Rotate AKIAIOSFODNN7EXAMPLE before sharing.",

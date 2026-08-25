@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  BROWSER_MUTATION_HEADERS,
   caseIdForTitle,
   createCase,
   fixtureBytes,
@@ -89,7 +90,10 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
 
   test("unscoped snapshot routes remain absent", async ({ request }) => {
     for (const path of INVENTED_ROUTES.filter((row) => row === "/api/snapshots" || row.includes("/freeze"))) {
-      const res = await request.post(path, { data: {} });
+      const res = await request.post(path, {
+        headers: BROWSER_MUTATION_HEADERS,
+        data: {},
+      });
       expect(res.status(), path).toBe(404);
     }
   });
