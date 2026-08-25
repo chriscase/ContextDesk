@@ -116,6 +116,9 @@ export function isReferenceResourceKind(value: unknown): value is InvestigationR
   );
 }
 
+// Matching control characters is the point: this class is what keeps them
+// out of stored text, so the lint rule that suspects them is inverted here.
+// eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]/;
 
 export function normalizeReferenceNote(raw: unknown, path = "$.note"): string {

@@ -1,5 +1,27 @@
-import { checkObject, f, type ObjectShape } from "./parse.js";
+import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import { CASE_SEVERITIES, CASE_STATUSES, PRIVACY_CLASSES } from "./case.js";
+import {
+  ENTITY_KINDS,
+  INVOLVEMENT_RELATIONSHIPS,
+  INVOLVEMENT_STATES,
+  type EntityKind,
+  type InvolvementRelationship,
+  type InvolvementState,
+} from "./investigation-entity.js";
+import {
+  INVESTIGATION_RESOURCE_KINDS,
+  INVESTIGATION_PROVENANCE_CLASSES,
+  type InvestigationProvenanceClassV1,
+  type InvestigationResourceKindV1,
+} from "./investigation-activity.js";
+import { REFERENCE_STATES, type ReferenceState } from "./investigation-reference.js";
+import { RESOLUTION_BASES, type ResolutionBasis } from "./investigation-resolution.js";
+import {
+  OCCURRED_AT_PRECISIONS,
+  OCCURRED_AT_ZONES,
+  type OccurredAtPrecision,
+  type OccurredAtZone,
+} from "./temporal.js";
 import { HYPOTHESIS_STATUSES } from "./contribution.js";
 import { CORROBORATION_STATES } from "./run.js";
 
@@ -65,6 +87,61 @@ export interface BriefAttributionV1 {
   targetId: string | null;
 }
 
+/**
+ * An entity an investigation involves, as it leaves the tool.
+ *
+ * `entityRef` is the label only when the registry marked that label
+ * share-safe. Otherwise it is a stable pseudonymous handle derived from the
+ * entity id: a share-safe export can still show that two investigations
+ * concern the same party without disclosing who that party is.
+ */
+export interface BriefInvolvementV1 {
+  entityRef: string;
+  labelDisclosed: boolean;
+  kind: EntityKind;
+  relationship: InvolvementRelationship;
+  state: InvolvementState;
+  occurredAt: string | null;
+  occurredAtPrecision: OccurredAtPrecision;
+  occurredAtZone: OccurredAtZone;
+}
+
+/**
+ * A citation this investigation makes. The pointer travels; the cited
+ * investigation's title does not leave the tool in a share-safe export,
+ * because it is another investigation's content rather than this one's.
+ */
+export interface BriefReferenceV1 {
+  toInvestigationId: string;
+  resourceKind: InvestigationResourceKindV1;
+  locator: string;
+  citedTitle: string | null;
+  note: string;
+  state: ReferenceState;
+}
+
+/**
+ * The record behind a resolved status. Basis and provenance always travel so a
+ * downstream reader can tell human reasoning from a model decision; the
+ * reasoning itself is owner-only content and is withheld from a share-safe
+ * export, with the count of open unknowns kept so the conclusion is not made
+ * to look more complete than it was.
+ */
+export interface BriefResolutionV1 {
+  basis: ResolutionBasis;
+  provenance: InvestigationProvenanceClassV1;
+  revision: number;
+  actorLabel: string;
+  rationale: string | null;
+  rationaleIncluded: boolean;
+  unknownCount: number;
+  unknowns: string[] | null;
+  occurredAt: string | null;
+  occurredAtPrecision: OccurredAtPrecision;
+  occurredAtZone: OccurredAtZone;
+  recordedAt: string;
+}
+
 export interface BriefImportedRunV1 {
   id: string;
   sourceLabel: string;
@@ -101,6 +178,14 @@ export interface BriefV1 {
   evidence: BriefEvidenceV1[];
   attributions: BriefAttributionV1[];
   importedRuns: BriefImportedRunV1[];
+  /**
+   * Optional so a brief written before the investigation record graph existed
+   * still parses. A server that has the graph always emits them, and an empty
+   * array means "nothing recorded", not "not supported".
+   */
+  involvement?: BriefInvolvementV1[];
+  references?: BriefReferenceV1[];
+  resolution?: BriefResolutionV1 | null;
   memory?: BriefMemorySummaryV1;
 }
 
@@ -191,6 +276,41 @@ const memoryShape: ObjectShape = {
   agreementNotice: f.req(f.en("Agreement is not proof of correctness.")),
 };
 
+const briefInvolvementShape: ObjectShape = {
+  entityRef: f.req(f.nstr),
+  labelDisclosed: f.req(f.bool),
+  kind: f.req(f.en(...ENTITY_KINDS)),
+  relationship: f.req(f.en(...INVOLVEMENT_RELATIONSHIPS)),
+  state: f.req(f.en(...INVOLVEMENT_STATES)),
+  occurredAt: f.nul(f.str),
+  occurredAtPrecision: f.req(f.en(...OCCURRED_AT_PRECISIONS)),
+  occurredAtZone: f.req(f.en(...OCCURRED_AT_ZONES)),
+};
+
+const briefReferenceShape: ObjectShape = {
+  toInvestigationId: f.req(f.nstr),
+  resourceKind: f.req(f.en(...INVESTIGATION_RESOURCE_KINDS)),
+  locator: f.req(f.nstr),
+  citedTitle: f.nul(f.str),
+  note: f.req(f.str),
+  state: f.req(f.en(...REFERENCE_STATES)),
+};
+
+const briefResolutionShape: ObjectShape = {
+  basis: f.req(f.en(...RESOLUTION_BASES)),
+  provenance: f.req(f.en(...INVESTIGATION_PROVENANCE_CLASSES)),
+  revision: f.req(f.u64),
+  actorLabel: f.req(f.str),
+  rationale: f.nul(f.str),
+  rationaleIncluded: f.req(f.bool),
+  unknownCount: f.req(f.u64),
+  unknowns: f.nul(f.arr(f.str)),
+  occurredAt: f.nul(f.str),
+  occurredAtPrecision: f.req(f.en(...OCCURRED_AT_PRECISIONS)),
+  occurredAtZone: f.req(f.en(...OCCURRED_AT_ZONES)),
+  recordedAt: f.req(f.nstr),
+};
+
 export const briefShape: ObjectShape = {
   schemaId: f.req(f.en(BRIEF_SCHEMA_ID)),
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
@@ -201,10 +321,60 @@ export const briefShape: ObjectShape = {
   evidence: f.req(f.arr(f.obj(evidenceShape))),
   attributions: f.req(f.arr(f.obj(attributionShape))),
   importedRuns: f.req(f.arr(f.obj(importedRunShape))),
+  involvement: f.opt(f.arr(f.obj(briefInvolvementShape))),
+  references: f.opt(f.arr(f.obj(briefReferenceShape))),
+  resolution: f.optNul(f.obj(briefResolutionShape)),
   memory: f.opt(f.obj(memoryShape)),
 };
 
 export function parseBrief(raw: unknown): BriefV1 {
   checkObject("$", briefShape, raw);
-  return raw as BriefV1;
+  const parsed = raw as BriefV1;
+  // Default-deny, checked rather than assumed: a share-safe brief must not
+  // carry an undisclosed entity label, another investigation's title, or the
+  // reasoning behind a conclusion.
+  if (parsed.privacyClass === "share_safe") {
+    (parsed.involvement ?? []).forEach((row, index) => {
+      if (!row.labelDisclosed && row.entityRef.startsWith(SHARE_SAFE_ENTITY_HANDLE_PREFIX)) return;
+      if (!row.labelDisclosed) {
+        throw new ContractViolation(
+          `$.involvement[${index}].entityRef`,
+          "an undisclosed entity must travel as a pseudonymous handle",
+        );
+      }
+    });
+    (parsed.references ?? []).forEach((row, index) => {
+      if (row.citedTitle !== null) {
+        throw new ContractViolation(
+          `$.references[${index}].citedTitle`,
+          "a share-safe brief must not disclose another investigation's title",
+        );
+      }
+    });
+    if (parsed.resolution && parsed.resolution.rationaleIncluded) {
+      throw new ContractViolation(
+        "$.resolution.rationale",
+        "resolution reasoning is owner-only content",
+      );
+    }
+  }
+  if (parsed.resolution) {
+    const withheld = !parsed.resolution.rationaleIncluded;
+    if (withheld && parsed.resolution.rationale !== null) {
+      throw new ContractViolation(
+        "$.resolution.rationale",
+        "a withheld rationale must be absent, not partially included",
+      );
+    }
+    if (!withheld && parsed.resolution.rationale === null) {
+      throw new ContractViolation(
+        "$.resolution.rationale",
+        "an included rationale must carry the reasoning",
+      );
+    }
+  }
+  return parsed;
 }
+
+/** Marks a pseudonymous entity reference in a share-safe brief. */
+export const SHARE_SAFE_ENTITY_HANDLE_PREFIX = "entity:" as const;

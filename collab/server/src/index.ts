@@ -240,6 +240,12 @@ async function main(): Promise<void> {
     imports,
     audit,
     privacy: loadExportPrivacyConfig(),
+    record: {
+      involvementFor: (caseId) => entities.involvementsForExport(caseId),
+      entityPrivacy: () => entities.entityPrivacyMap(),
+      referencesFor: (caseId) => references.exportProjection(caseId),
+      activeResolutionFor: (caseId) => resolutions.active(caseId),
+    },
   });
   const persistPorts = {
     cases: storage.cases,

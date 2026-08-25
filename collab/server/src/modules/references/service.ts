@@ -12,7 +12,6 @@ import {
 } from "@cd-collab/contracts";
 import type { AuditStore } from "../audit/index.js";
 import {
-  DuplicateReferenceError,
   MemoryReferenceStore,
   newReferenceId,
   type ReferenceRow,
@@ -257,6 +256,18 @@ export class ReferenceService {
   /** Outbound rows for a case with no authorization check, for export projection. */
   async outboundForExport(caseId: string): Promise<ReferenceRow[]> {
     return this.store.listOutbound(caseId);
+  }
+
+  /**
+   * Outbound citations shaped for the export projection. Deliberately
+   * projected as `restricted` with no live title: an export leaves the tool,
+   * and the counterpart's current state is not this investigation's to
+   * disclose. What travels is this investigation's own record — the pointer,
+   * the note, and the title it wrote down at citation time.
+   */
+  async exportProjection(caseId: string): Promise<InvestigationReferenceV1[]> {
+    const rows = await this.store.listOutbound(caseId);
+    return rows.map((row) => this.project(row, "to", null));
   }
 
   private async requireCiting(

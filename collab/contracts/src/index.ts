@@ -408,6 +408,7 @@ export type {
 export {
   BRIEF_SCHEMA_ID,
   IMPORTED_RESPONSE_PRESENTATION,
+  SHARE_SAFE_ENTITY_HANDLE_PREFIX,
   parseBrief,
 } from "./brief.js";
 export type {
@@ -417,8 +418,11 @@ export type {
   BriefHeaderV1,
   BriefHypothesisV1,
   BriefImportedRunV1,
+  BriefInvolvementV1,
   BriefLinkV1,
   BriefMemorySummaryV1,
+  BriefReferenceV1,
+  BriefResolutionV1,
   BriefTimelineEventV1,
   BriefV1,
 } from "./brief.js";

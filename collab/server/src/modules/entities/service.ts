@@ -21,7 +21,6 @@ import {
 import type { AuditStore } from "../audit/index.js";
 import {
   DuplicateEntityError,
-  DuplicateInvolvementError,
   MemoryEntityStore,
   newEntityId,
   toEntityV1,
@@ -419,6 +418,16 @@ export class EntityService {
   /** Involvement rows for a case with no authorization check, for export projection. */
   async involvementsForExport(caseId: string): Promise<InvestigationInvolvementV1[]> {
     return this.projectAll(await this.store.listInvolvements(caseId));
+  }
+
+  /**
+   * Which entity labels the registry has marked safe to leave the tool. The
+   * export projection reads this rather than deciding for itself, so one
+   * registry decision governs every export.
+   */
+  async entityPrivacyMap(): Promise<ReadonlyMap<string, PrivacyClass>> {
+    const rows = await this.store.listEntities();
+    return new Map(rows.map((row) => [row.id, row.privacyClass]));
   }
 
   private async projectAll(rows: InvolvementRow[]): Promise<InvestigationInvolvementV1[]> {
