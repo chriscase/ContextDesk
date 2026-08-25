@@ -1243,6 +1243,10 @@ export function ExperimentLab(props: {
   const lastNavigationKey = useRef<string | null>(
     props.routeFocus ? navigationKey(props.routeFocus) : null,
   );
+  // A routed click updates local state before its parent can echo the new URL
+  // focus back through props. While that echo is pending, effects caused by a
+  // different local state update must not re-apply the now-stale old route.
+  const pendingRouteEchoKey = useRef<string | null>(null);
   const experimentsRef = useRef<ExperimentView[]>(experiments);
   experimentsRef.current = experiments;
   const loadedCaseId = useRef(props.caseId);
@@ -1329,6 +1333,11 @@ export function ExperimentLab(props: {
     // Only a parent-routed consumer should re-project focus from props; otherwise
     // a late experiment refresh can race a click and clear the just-selected lane.
     if (!props.routeFocus) return;
+    const incomingRouteKey = navigationKey(props.routeFocus);
+    if (pendingRouteEchoKey.current) {
+      if (incomingRouteKey !== pendingRouteEchoKey.current) return;
+      pendingRouteEchoKey.current = null;
+    }
     const requestedExperiment = props.routeFocus?.experiment;
     if (requestedExperiment && experiments.some((row) => row.id === requestedExperiment)) {
       setActive(requestedExperiment);
@@ -1487,9 +1496,11 @@ export function ExperimentLab(props: {
       : { ...focus, navigation: "preserve" };
     applyFocus(routedFocus, navigateDestination);
     if (props.onDeepNavigate) {
+      pendingRouteEchoKey.current = navigationKey(routedFocus);
       props.onDeepNavigate(routedFocus);
       return;
     }
+    pendingRouteEchoKey.current = null;
     window.history.pushState(routedFocus, "", hrefFor(routedFocus));
   };
   const deepLink = (
