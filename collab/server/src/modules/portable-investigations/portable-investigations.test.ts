@@ -49,10 +49,7 @@ import {
   withPgApplyTransaction,
   type MemoryApplyBoundary,
 } from "./persist.js";
-import {
-  probePortableCollisions,
-  type PortableCollisionProbePorts,
-} from "./collision-probe.js";
+import { type PortableCollisionProbePorts } from "./collision-probe.js";
 import {
   MAX_PORTABLE_ARCHIVE_BYTES,
   PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
@@ -395,32 +392,6 @@ function occupyingProbe(
     runs: { probeExistingIds: async (ids: readonly string[]) => hits("imported_ai_run", ids) },
     jobs: { probeExistingIds: async (ids: readonly string[]) => hits("triage_job", ids) },
   } as unknown as PortableCollisionProbePorts;
-}
-
-/** Counts every store round trip a probe makes, for call-count bounds. */
-function countingProbe(inner: PortableCollisionProbePorts): {
-  ports: PortableCollisionProbePorts;
-  calls: () => number;
-} {
-  let calls = 0;
-  const tally = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) =>
-    async (...args: A): Promise<R> => {
-      calls += 1;
-      return fn(...args);
-    };
-  const ports = {
-    cases: {
-      probeExistingIds: tally(inner.cases.probeExistingIds.bind(inner.cases)),
-      probeParticipants: tally(inner.cases.probeParticipants.bind(inner.cases)),
-    },
-    catalog: { probeExistingIds: tally(inner.catalog.probeExistingIds.bind(inner.catalog)) },
-    experiments: {
-      probeExistingIds: tally(inner.experiments.probeExistingIds.bind(inner.experiments)),
-    },
-    runs: { probeExistingIds: tally(inner.runs.probeExistingIds.bind(inner.runs)) },
-    jobs: { probeExistingIds: tally(inner.jobs.probeExistingIds.bind(inner.jobs)) },
-  } as unknown as PortableCollisionProbePorts;
-  return { ports, calls: () => calls };
 }
 
 function users() {

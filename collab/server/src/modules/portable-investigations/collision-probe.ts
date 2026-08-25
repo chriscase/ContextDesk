@@ -13,7 +13,11 @@
  *
  * - **Host-owned.** Every occupied id in the resulting catalog came from a
  *   store this server owns. A client-supplied catalog is never an input, and
- *   an occupied key is never authorization.
+ *   an occupied key is never authorization. Object-key probes are deliberately
+ *   not actor-filtered: an object the caller cannot see still occupies its key,
+ *   and the answer discloses only that this archive's own deterministic id is
+ *   taken. Identity lookups are the opposite case and stay inside the caller's
+ *   existing view — see `probeParticipants`.
  * - **Bounded.** One batched round trip per probe kind per ladder rung, and the
  *   ladder is capped by `MAX_DETERMINISTIC_REMAP_ATTEMPTS`. Rung 0 is probed
  *   for every minted source id; a rung above 0 is probed only for the ids whose

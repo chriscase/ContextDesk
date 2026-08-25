@@ -232,11 +232,6 @@ function addActor(actors: Map<string, string>, seed: ActorSeed): void {
   }
 }
 
-
-function portableDiscussionId(caseId: string): string {
-  return `discussion-${sha256Text(caseId).slice(0, 24)}`;
-}
-
 function ensureSha256(value: string, label: string): void {
   if (!SHA256_RE.test(value)) {
     throw new PortableServerError("unsupported_state", `${label} has no portable SHA-256 identity`);
@@ -1168,7 +1163,12 @@ export class PortableInvestigationService {
     // Validate every supplied entry even when another missing blob makes the
     // overall archive ineligible for exact apply.
     validateSuppliedBlobs(archive, input.suppliedBlobs ?? []);
-    const catalog = await this.probedDestinationCatalog(archive, input.identityMap, actor);
+    const catalog = await this.probedDestinationCatalog(
+      archive,
+      input.identityMap,
+      actor,
+      isAdmin,
+    );
     const catalogDigest = destinationCatalogDigest(catalog);
     let report: ArchivePreflightReportV1;
     try {
@@ -1491,6 +1491,7 @@ export class PortableInvestigationService {
     archive: PortableArchiveV1,
     identityMap: IdentityMapEntryV1[],
     actor: Actor,
+    isAdmin: boolean,
   ): Promise<DestinationCatalogV1> {
     const bundle = archive.investigation;
     const probe = await probePortableCollisions(bundle, this.deps.probe);
@@ -1514,6 +1515,11 @@ export class PortableInvestigationService {
       ),
     ];
     const found = await this.deps.probe.cases.probeParticipants({
+      // Object keys are probed host-wide because a deterministic id occupies
+      // its key whoever owns it. Identities are not: resolving one stays
+      // inside the caller's existing view so a preflight can never become an
+      // oracle for people they cannot already see.
+      scope: { actorId: actor.id, isAdmin },
       identityIds: wantedIdentityIds,
       usernames: wantedUsernames,
     });
@@ -1557,5 +1563,4 @@ export class PortableInvestigationService {
       knownProfileIds,
     };
   }
-
 }

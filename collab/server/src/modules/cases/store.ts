@@ -287,6 +287,12 @@ export interface ParticipantIdentityRow {
   username: string;
 }
 
+/** Whose view a participant probe is answered from. */
+export interface ParticipantVisibilityScope {
+  actorId: string;
+  isAdmin: boolean;
+}
+
 export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
@@ -339,10 +345,14 @@ export interface CaseStore {
    */
   probeExistingIds(kind: CaseProbeKind, ids: readonly string[]): Promise<string[]>;
   /**
-   * Distinct participant identities matching any supplied id or username.
-   * Targeted lookup for identity mapping; never an enumeration of people.
+   * Distinct participant identities matching any supplied id or username,
+   * restricted to what `scope` may already see: every case for an admin, and
+   * otherwise only cases the scoped actor participates in. Targeted lookup for
+   * identity mapping; never an enumeration of people, and never wider than the
+   * caller's existing view.
    */
   probeParticipants(input: {
+    scope: ParticipantVisibilityScope;
     identityIds?: readonly string[];
     usernames?: readonly string[];
   }): Promise<ParticipantIdentityRow[]>;
@@ -739,6 +749,7 @@ export class MemoryCaseStore implements CaseStore {
   }
 
   async probeParticipants(input: {
+    scope: ParticipantVisibilityScope;
     identityIds?: readonly string[];
     usernames?: readonly string[];
   }): Promise<ParticipantIdentityRow[]> {
@@ -747,6 +758,10 @@ export class MemoryCaseStore implements CaseStore {
     if (identityIds.size === 0 && usernames.size === 0) return [];
     const found = new Map<string, ParticipantIdentityRow>();
     for (const row of this.cases.values()) {
+      const visible =
+        input.scope.isAdmin ||
+        row.participants.some((item) => item.identityId === input.scope.actorId);
+      if (!visible) continue;
       for (const participant of row.participants) {
         if (
           identityIds.has(participant.identityId) ||
@@ -1305,6 +1320,7 @@ export class PgCaseStore implements CaseStore {
   }
 
   async probeParticipants(input: {
+    scope: ParticipantVisibilityScope;
     identityIds?: readonly string[];
     usernames?: readonly string[];
   }): Promise<ParticipantIdentityRow[]> {
@@ -1312,11 +1328,14 @@ export class PgCaseStore implements CaseStore {
     const usernames = [...new Set(input.usernames ?? [])];
     if (identityIds.length === 0 && usernames.length === 0) return [];
     const result = await this.db.query(
-      `SELECT DISTINCT identity_id, username
-         FROM case_participants
-        WHERE identity_id = ANY($1::text[]) OR username = ANY($2::text[])
-        ORDER BY identity_id ASC`,
-      [identityIds, usernames],
+      `SELECT DISTINCT p.identity_id, p.username
+         FROM case_participants p
+        WHERE (p.identity_id = ANY($1::text[]) OR p.username = ANY($2::text[]))
+          AND ($3::boolean OR EXISTS (
+                SELECT 1 FROM case_participants viewer
+                 WHERE viewer.case_id = p.case_id AND viewer.identity_id = $4))
+        ORDER BY p.identity_id ASC`,
+      [identityIds, usernames, input.scope.isAdmin, input.scope.actorId],
     );
     return result.rows.map((row) => {
       const value = row as Record<string, unknown>;
