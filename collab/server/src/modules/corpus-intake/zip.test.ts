@@ -48,6 +48,29 @@ describe("extractZip adversarial matrix", () => {
     expect(extracted.rejected).toEqual([]);
   });
 
+  it("ignores macOS transport metadata instead of presenting it as evidence noise", () => {
+    const result = extractZip(buildTestZip([
+      { name: "incident/service.log", data: LOG },
+      { name: "incident/.DS_Store", data: LOG },
+      { name: "__MACOSX/incident/._service.log", data: LOG },
+    ]));
+    expect(result.members.map((member) => member.relativePath)).toEqual(["incident/service.log"]);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it("does not count bounded macOS transport metadata against the evidence-file cap", () => {
+    const metadata = Array.from({ length: CORPUS_INTAKE_LIMITS.maxFileCount }, (_, index) => ({
+      name: `__MACOSX/incident/._metadata-${index}`,
+      data: LOG,
+    }));
+    const result = extractZip(buildTestZip([
+      ...metadata,
+      { name: "incident/service.log", data: LOG },
+    ]));
+    expect(result.members.map((member) => member.relativePath)).toEqual(["incident/service.log"]);
+    expect(result.rejected).toEqual([]);
+  });
+
   it("rejects zip-slip variants without writing outside the archive", () => {
     const archive = buildTestZip([
       { name: "../../../etc/passwd", data: LOG },
@@ -124,6 +147,7 @@ describe("extractZip adversarial matrix", () => {
         {
           name: "mailer/huge.log",
           data: new Uint8Array(CORPUS_INTAKE_LIMITS.maxFileBytes + 1),
+          method: 8,
         },
       ]),
     );

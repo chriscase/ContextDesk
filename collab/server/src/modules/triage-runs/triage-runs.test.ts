@@ -328,12 +328,13 @@ describe("snapshot-bound triage runs", () => {
       expect(parseTriageJob(completed).snapshotFingerprint).toBe(fx.snapshot.fingerprint);
       expect(completed.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
       expect(completed.candidates[0]?.status).toBe("completed");
-      expect(completed.candidates[0]?.evidenceRefs).toEqual([fx.snapshot.evidence[0]?.evidenceId]);
+      expect(completed.candidates[0]?.evidenceRefs).toEqual([]);
+      expect(completed.candidates[0]?.summary).toContain("did not run the named model");
       expect(completed.candidates[0]?.usageStatus).toBe("unknown");
       expect(completed.sameSnapshot).toBe(true);
 
       const shareSafe = parseTriageJobShareSafe(projectTriageJobShareSafe(completed));
-      expect(shareSafe.candidates[0]?.evidenceCount).toBe(1);
+      expect(shareSafe.candidates[0]?.evidenceCount).toBe(0);
       expect(JSON.stringify(shareSafe)).not.toContain("qwen-3.6-27b");
       expect(JSON.stringify(shareSafe)).not.toContain(fx.snapshot.evidence[0]?.evidenceId ?? "");
     } finally {

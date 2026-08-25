@@ -40,7 +40,7 @@ const ROLE_LABELS: Record<AppRole, string> = {
 const ROLE_DESCRIPTIONS: Record<AppRole, string> = {
   viewer: "Read investigations available to the signed-in identity.",
   contributor: "Add notes, evidence, imports, and discussion.",
-  "case-lead": "Run and lead investigations, decide, export, and manage sources.",
+  "case-lead": "Run and lead investigations, decide, export, and manage attribution labels.",
   admin: "Manage workspace group-role mappings in addition to case-lead capabilities.",
 };
 

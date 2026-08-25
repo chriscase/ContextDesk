@@ -76,6 +76,22 @@ function job(overrides: Partial<TriageJobV1> = {}): TriageJobV1 {
   };
 }
 
+function simulationJob(): TriageJobV1 {
+  const base = job();
+  return {
+    ...base,
+    candidates: [
+      {
+        ...base.candidates[0]!,
+        summary:
+          "Provider-free simulation completed. It did not run the named model or inspect the frozen evidence.",
+        evidenceRefs: [],
+        unknowns: ["evidence analysis not performed", "live model output not produced", "usage", "cost"],
+      },
+    ],
+  };
+}
+
 function input(overrides: Partial<WorkstreamProjectionInput> = {}): WorkstreamProjectionInput {
   return {
     caseId: "case-1",
@@ -149,23 +165,13 @@ describe("workstream projection", () => {
     });
   });
 
-  it("resolves cited evidence to human labels and marks unresolved references", () => {
-    const [view] = projectWorkstreams(input()).workstreams;
-    expect(view?.evidenceCited).toHaveLength(2);
-    expect(view?.evidenceCited[0]).toMatchObject({
-      evidenceId: "ev-checkout",
-      label: "checkout.log",
-      inFrozenSnapshot: true,
-      verification: "verified",
-      resolved: true,
-    });
-    expect(view?.evidenceCited[1]).toMatchObject({
-      evidenceId: "ev-missing",
-      label: "Evidence no longer registered",
-      inFrozenSnapshot: false,
-      verification: "not recorded",
-      resolved: false,
-    });
+  it("never projects built-in simulation inputs as evidence citations", () => {
+    const [view] = projectWorkstreams(input({ jobs: [simulationJob()] })).workstreams;
+    expect(view?.evidenceCited).toEqual([]);
+    expect(view?.findings).toBeNull();
+    expect(view?.operatorKind).toBe("programmatic");
+    expect(view?.operatorLabel).toContain("did not run the named model");
+    expect(view?.outcome).toContain("no investigative finding or evidence citation");
   });
 
   it("orders activity chronologically and names the requester", () => {
@@ -206,8 +212,7 @@ describe("workstream projection", () => {
 
   it("states an outcome without claiming correctness", () => {
     const [view] = projectWorkstreams(input()).workstreams;
-    expect(view?.outcome).toContain("cited 2 evidence items");
-    expect(view?.outcome).toContain("left 1 thing unknown");
+    expect(view?.outcome).toContain("Read it against the evidence before relying on it");
     expect(view?.agreementNotice).toBe("Agreement is not proof of correctness.");
   });
 

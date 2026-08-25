@@ -22,6 +22,11 @@ export interface CockpitRun {
   request: { strategyId: string };
 }
 
+export interface CockpitParticipant {
+  identityId?: string;
+  username?: string;
+}
+
 type FairnessVerdict =
   | { kind: "none" }
   | { kind: "single" }
@@ -40,6 +45,15 @@ function shortToken(value: string | null | undefined): string {
 
 function statusText(status: string): string {
   return status.replaceAll("_", " ");
+}
+
+function creatorLabel(identityId: string | undefined, participants: readonly CockpitParticipant[]): string {
+  if (!identityId) return "unknown";
+  const username = participants
+    .find((participant) => participant.identityId === identityId)
+    ?.username
+    ?.trim();
+  return username || "Recorded participant";
 }
 
 /**
@@ -151,6 +165,7 @@ export function EvidenceSnapshotCockpit(props: {
   finishedRunCount: number;
   focusSnapshotId: string;
   canAct: boolean;
+  participants?: CockpitParticipant[];
 }) {
   const { snapshots, selectedRuns } = props;
   const [inspectedId, setInspectedId] = useState("");
@@ -393,7 +408,7 @@ export function EvidenceSnapshotCockpit(props: {
             </div>
             <div>
               <dt>Created by</dt>
-              <dd>{inspected.createdBy || "unknown"}</dd>
+              <dd>{creatorLabel(inspected.createdBy, props.participants ?? [])}</dd>
             </div>
             <div>
               <dt>Frozen at</dt>

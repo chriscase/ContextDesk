@@ -252,7 +252,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each accepted file gets its own evidence identity and records relative path, media type, digest, byte length, privacy class, uploader identity, import time, source attribution, and intake batch id. Equal digests reuse the same content-addressed bytes without collapsing those distinct evidence records. Deep links exist for the batch on Capture and each evidence item on Analyze.",
         limits:
-          "Archives are capped at 8 MiB, expanded bytes at 12 MiB, 64 files, path depth 8, path length 240, 1 MB per file, compression ratio 20, and 5 seconds of processing. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .csv, .xml, .eml, and .md; declared media must match and JSON must parse. Binary, unknown, and invalid UTF-8 content is rejected. share_safe accepts plain text, logs, CSV, Markdown, and valid JSON only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.",
+          "Archives are capped at 8 MiB, expanded bytes at 64 MiB, 1,024 files, path depth 8, path length 240, 9 MB per file, compression ratio 128, and 15 seconds of processing. These are hard resource bounds, not a promise that every member is accepted. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .csv, .xml, .eml, and .md; declared media must match and JSON must parse. Binary, unknown, and invalid UTF-8 content is rejected. share_safe accepts plain text, logs, CSV, Markdown, and valid JSON only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.",
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
     ],
@@ -549,28 +549,28 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
   },
   {
     id: "sources",
-    title: "Sources",
+    title: "Attribution",
     articles: [
       {
         id: "source-library",
-        title: "The source & provenance library",
+        title: "Who and what supplied the information",
         summary:
-          "Every note, upload, and imported answer is credited to a source. A source is attribution only — never a login, connection, or endorsement.",
+          "Reusable labels show which person or tool supplied material. The material itself stays inside its investigation.",
         keywords: ["source", "catalog", "library", "register", "retire", "attribution", "external tool", "unknown"],
         what:
-          "The Sources area is the catalog cases credit material to. Five kinds exist: human (a person), external-tool (a tool whose output gets pasted in — ContextDesk never connects to it), internal-system (a system whose records are copied in by hand), contextdesk (ContextDesk output re-entering by hand), and unknown — a permanent, valid answer that is never upgraded to a guess. Each source stores a name, kind, optional description, and lifecycle (active or retired).",
+          "The Attribution area stores reusable labels for the people and tools that supplied information. It does not store the logs, files, email, chat, or notes themselves; those stay in the investigation where they were captured. Labels can identify a person, an external tool, an internal system, ContextDesk, or an honestly unknown origin.",
         when:
-          "Register a source before importing output from a tool the catalog does not know yet. Browse it to understand where a case's material came from.",
+          "Add a label when an investigation needs to credit a person or tool that is not listed yet. Browse the library to understand where recorded material came from.",
         steps: [
-          "Open Sources from the primary navigation.",
-          "Search or browse by kind; each card shows the name, kind, lifecycle, and registration date.",
-          "Case leads can register a new source (name and description only) or retire one in a two-step confirm.",
+          "Open Attribution from the primary navigation.",
+          "Search or browse the people and tools that can be credited.",
+          "Case leads can add a label or retire one. Retired labels remain attached to older investigations.",
         ],
         recorded:
           "A source records who registered it and when. Retiring hides it from new intake — every past attribution keeps it.",
         limits:
           "Registering and retiring require the case-lead role. A source stores no credentials, creates no connection or automatic access, and naming one never makes material correct.",
-        actions: [{ label: "Go to Sources", go: { area: "sources" } }],
+        actions: [{ label: "Go to Attribution", go: { area: "sources" } }],
       },
     ],
   },

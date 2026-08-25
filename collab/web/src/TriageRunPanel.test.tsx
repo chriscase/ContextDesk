@@ -213,6 +213,96 @@ describe("TriageRunPanel", () => {
     await waitFor(() => expect(document.activeElement).toBe(candidate));
   });
 
+  it("keeps large citation sets collapsed until the engineer asks for them", async () => {
+    const evidenceRefs = Array.from({ length: 20 }, (_, index) => `artifact-${index + 1}`);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) {
+          return response({
+            snapshots: [{
+              id: "snapshot-1",
+              fingerprint: "a".repeat(64),
+              evidence: evidenceRefs.map((evidenceId) => ({ evidenceId })),
+              createdBy: "lead",
+            }],
+          });
+        }
+        if (url.endsWith("/evidence")) {
+          return response({
+            artifacts: evidenceRefs.map((id, index) => ({
+              id,
+              kind: "log",
+              filename: `service-${index + 1}.log`,
+              verificationStatus: "verified",
+            })),
+          });
+        }
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: false });
+        return response({
+          jobs: [1, 2].map((jobIndex) => ({
+            id: `job-large-${jobIndex}`,
+            snapshotId: "snapshot-1",
+            snapshotFingerprint: "a".repeat(64),
+            requestFingerprint: String(jobIndex).repeat(64),
+            request: {
+              strategyId: `contextdesk.standard-${jobIndex}`,
+              question: "What happened?",
+              taskFingerprint: `task-large-${jobIndex}`,
+              mode: "deterministic_mock",
+              candidates: [],
+            },
+            status: "completed",
+            candidates: [{
+              candidateId: `reviewer-${jobIndex}`,
+              role: "reviewer",
+              provider: "synthetic",
+              profileId: null,
+              model: `model-${jobIndex}`,
+              version: null,
+              status: "completed",
+              benchmarkRunId: null,
+              outputHash: "c".repeat(64),
+              summary: "Review the cited evidence.",
+              evidenceRefs,
+              unknowns: [],
+              errorCode: null,
+              privacyClass: "owner_only",
+            }],
+            sameSnapshot: true,
+            agreementNotice: "Agreement is not proof of correctness.",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            startedAt: "2026-08-20T00:00:00.000Z",
+            finishedAt: "2026-08-20T00:00:00.010Z",
+            cancelRequestedAt: null,
+          })),
+        });
+      }),
+    );
+
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    expect((await screen.findAllByText("service-1.log")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("service-8.log").length).toBeGreaterThan(0);
+    const more = screen.getAllByText("Show 12 more cited evidence items")[0]?.closest("details") as HTMLDetailsElement;
+    expect(more.open).toBe(false);
+    expect(more.textContent).toContain("service-9.log");
+    fireEvent.click(screen.getAllByText("Show 12 more cited evidence items")[0]!);
+    expect(more.open).toBe(true);
+    expect(screen.getAllByText("service-20.log").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /contextdesk\.standard-1/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /contextdesk\.standard-2/ }));
+    const sharedSummary = await screen.findByText("Show 12 more shared evidence items");
+    const sharedMore = sharedSummary.closest("details") as HTMLDetailsElement;
+    expect(sharedMore.open).toBe(false);
+    expect(sharedMore.textContent).toContain("service-20.log");
+    fireEvent.click(sharedSummary);
+    expect(sharedMore.open).toBe(true);
+  });
+
   it("adds an operator-picked lane by identifiers only and rejects DeepSeek", async () => {
     vi.stubGlobal(
       "fetch",
@@ -301,6 +391,82 @@ describe("TriageRunPanel", () => {
     expect(screen.queryByText(/ai-gateway\.vercel\.sh/)).toBeNull();
   });
 
+  it("selects a newly frozen snapshot and records the run against that exact evidence", async () => {
+    const firstSnapshot = {
+      id: "snapshot-1",
+      fingerprint: "a".repeat(64),
+      evidence: [{ evidenceId: "artifact-1" }],
+      createdBy: "lead",
+    };
+    const secondSnapshot = {
+      id: "snapshot-2",
+      fingerprint: "d".repeat(64),
+      evidence: [{ evidenceId: "artifact-1" }, { evidenceId: "artifact-2" }],
+      createdBy: "lead",
+    };
+    const createdJob = {
+      id: "job-new",
+      snapshotId: secondSnapshot.id,
+      snapshotFingerprint: secondSnapshot.fingerprint,
+      requestFingerprint: "b".repeat(64),
+      request: {
+        strategyId: "contextdesk.standard",
+        question: "What happened?",
+        taskFingerprint: "task-1",
+        mode: "deterministic_mock" as const,
+        candidates: [],
+      },
+      status: "completed",
+      candidates: [],
+      sameSnapshot: true,
+      agreementNotice: "Agreement is not proof of correctness.",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      startedAt: "2026-08-20T00:00:00.000Z",
+      finishedAt: "2026-08-20T00:00:00.010Z",
+      cancelRequestedAt: null,
+    };
+    let snapshots = [firstSnapshot];
+    let jobs: typeof createdJob[] = [];
+    let postedBody: { snapshotId?: string } | null = null;
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/triage-runs") && init?.method === "POST") {
+        postedBody = JSON.parse(String(init.body)) as { snapshotId?: string };
+        jobs = [createdJob];
+        return response(createdJob);
+      }
+      if (url.endsWith("/snapshots")) return response({ snapshots });
+      if (url.endsWith("/evidence")) return response({ artifacts: [] });
+      if (url.endsWith("/imports")) return response({ runs: [] });
+      if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+      if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: false });
+      return response({ jobs });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    const snapshotSelect = await screen.findByRole("combobox", { name: "Snapshot" });
+    expect((snapshotSelect as HTMLSelectElement).value).toBe(firstSnapshot.id);
+
+    snapshots = [firstSnapshot, secondSnapshot];
+    act(() => {
+      window.dispatchEvent(new CustomEvent("contextdesk:snapshot-frozen", {
+        detail: { caseId: "case-1", snapshotId: secondSnapshot.id },
+      }));
+    });
+    await waitFor(() => expect((snapshotSelect as HTMLSelectElement).value).toBe(secondSnapshot.id));
+
+    fireEvent.click(screen.getByRole("button", { name: "Run synthetic comparison" }));
+    await waitFor(() => expect(postedBody).toEqual(expect.objectContaining({
+      snapshotId: secondSnapshot.id,
+    })));
+    expect((snapshotSelect as HTMLSelectElement).value).toBe(secondSnapshot.id);
+    const receipt = await screen.findByRole("status");
+    expect(receipt.textContent).toContain("2 frozen evidence items");
+    expect(receipt.textContent).toContain(secondSnapshot.fingerprint.slice(0, 12));
+    expect(screen.getByRole("button", { name: "Open the last run" })).toBeTruthy();
+  });
+
   it("configures each gateway lane with its own gateway model", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
@@ -319,7 +485,13 @@ describe("TriageRunPanel", () => {
           ],
         });
       }
-      if (init?.method === "POST") return response({ id: "job-1" });
+      if (init?.method === "POST") {
+        return response({
+          id: "job-1",
+          snapshotId: "snapshot-1",
+          snapshotFingerprint: "a".repeat(64),
+        });
+      }
       return response({ jobs: [] });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -379,7 +551,13 @@ describe("TriageRunPanel", () => {
         });
       }
       if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
-      if (init?.method === "POST") return response({ id: "job-1" });
+      if (init?.method === "POST") {
+        return response({
+          id: "job-1",
+          snapshotId: "snapshot-1",
+          snapshotFingerprint: "a".repeat(64),
+        });
+      }
       return response({ jobs: [] });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -890,6 +1068,6 @@ describe("evidence snapshot cockpit", () => {
     // from the payload, so each must read "unknown" — never a fabricated value.
     expect(screen.getAllByText("unknown")).toHaveLength(5);
     expect(screen.getByText("unknown — content equivalence not established")).toBeTruthy();
-    expect(screen.getByText("lead")).toBeTruthy();
+    expect(screen.getByText("Recorded participant")).toBeTruthy();
   });
 });

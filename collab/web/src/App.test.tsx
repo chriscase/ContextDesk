@@ -196,7 +196,7 @@ describe("auth boundary", () => {
     expect(screen.queryByRole("navigation")).toBeNull();
     expect(screen.queryByRole("button", { name: "Start investigation" })).toBeNull();
     expect(screen.queryByRole("tablist")).toBeNull();
-    expect(screen.queryByText(/Source & provenance library/)).toBeNull();
+    expect(screen.queryByText(/Who and what supplied the information/)).toBeNull();
     const requested = stub.mock.calls.map((call) => String(call[0]));
     expect(requested).not.toContain("/api/cases");
     expect(requested).not.toContain("/api/catalog/sources");
@@ -273,7 +273,7 @@ describe("authenticated application shell", () => {
       await screen.findByRole("heading", { level: 1, name: "ContextDesk War Room" }),
     ).toBeTruthy();
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    for (const label of ["Overview", "Investigations", "Sources", "Help"]) {
+    for (const label of ["Overview", "Investigations", "Attribution", "Help"]) {
       expect(within_nav(nav, label)).toBeTruthy();
     }
     expect(within_nav(nav, "How it works")).toBeNull();
@@ -497,18 +497,18 @@ describe("authenticated application shell", () => {
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
   });
 
-  it("routes Sources and Help to real destinations and back", async () => {
+  it("routes Attribution and Help to real destinations and back", async () => {
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Attribution" }));
     expect(
-      screen.getByRole("heading", { name: "Source & provenance library" }),
+      screen.getByRole("heading", { name: "Who and what supplied the information" }),
     ).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Operating picture" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Help" }));
     expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
     expect(screen.getByLabelText("Search help")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Source & provenance library" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Who and what supplied the information" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
   });
@@ -624,7 +624,7 @@ describe("help center in the shell", () => {
     const search = screen.getByLabelText("Search help") as HTMLInputElement;
     fireEvent.change(search, { target: { value: "snapshot" } });
     expect(screen.getByRole("status").textContent).toMatch(/result/);
-    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "Attribution" }));
     expect(screen.queryByRole("heading", { name: "Help Center" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Help" }));
     expect((screen.getByLabelText("Search help") as HTMLInputElement).value).toBe("snapshot");
@@ -876,8 +876,8 @@ describe("pathname shell routing", () => {
       });
       expect(window.location.pathname).toBe(`/investigations/${uuid}/capture`);
       expect(window.location.search).toContain("kind=contribution");
-      fireEvent.click(screen.getByRole("button", { name: "Sources" }));
-      await waitFor(() => expect(document.title).toBe("Sources · ContextDesk War Room"));
+      fireEvent.click(screen.getByRole("button", { name: "Attribution" }));
+      await waitFor(() => expect(document.title).toBe("Attribution · ContextDesk War Room"));
     } finally {
       HTMLElement.prototype.scrollIntoView = originalScroll;
     }
@@ -1019,25 +1019,25 @@ describe("pathname shell routing", () => {
     window.history.replaceState(null, "", "/sources");
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "Source & provenance library" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Who and what supplied the information" })).toBeTruthy();
     expect(window.location.pathname).toBe("/sources");
     expect(
       screen.getByRole("navigation", { name: "Primary" }).querySelector('[aria-current="page"]')
         ?.textContent,
-    ).toBe("Sources");
+    ).toBe("Attribution");
   });
 
   it("keeps browser Back and Forward in sync with area pathnames", async () => {
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Attribution" }));
     expect(window.location.pathname).toBe("/sources");
     fireEvent.click(screen.getByRole("button", { name: "Help" }));
     expect(window.location.pathname).toBe("/help");
     expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
     window.history.back();
     await waitFor(() => expect(window.location.pathname).toBe("/sources"));
-    expect(screen.getByRole("heading", { name: "Source & provenance library" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Who and what supplied the information" })).toBeTruthy();
     window.history.forward();
     await waitFor(() => expect(window.location.pathname).toBe("/help"));
     expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
@@ -1166,9 +1166,9 @@ describe("pathname shell routing", () => {
     render(<App />);
     expect(screen.getByText(/Checking your session/)).toBeTruthy();
     expect(screen.queryByRole("navigation")).toBeNull();
-    expect(screen.queryByRole("heading", { name: "Source & provenance library" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Who and what supplied the information" })).toBeNull();
     release(undefined);
-    expect(await screen.findByRole("heading", { name: "Source & provenance library" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Who and what supplied the information" })).toBeTruthy();
     expect(window.location.pathname).toBe("/sources");
   });
 

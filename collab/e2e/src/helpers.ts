@@ -259,18 +259,18 @@ export async function importChat(
     await form.getByRole("textbox", { name: "External run prompt (optional)" }).fill(opts.prompt);
   }
   await form.locator('select[name="sourceId"]').selectOption({
-    label: `${opts.sourceLabel} (external-tool)`,
+    label: opts.sourceLabel,
   });
+  const importDetails = form.locator("details").filter({
+    has: page.locator("summary", { hasText: "Import details" }),
+  });
+  if ((await importDetails.getAttribute("open")) === null) {
+    await importDetails.locator("summary").click();
+  }
   await form.getByRole("textbox", { name: "Operator username" }).fill(opts.operatorUsername);
   await form.getByRole("textbox", { name: "Operator identity" }).fill(opts.operatorId);
   if (opts.visibility) {
-    const provenance = form.locator("details").filter({
-      has: page.locator("summary", { hasText: "Provenance details (visibility, snapshot)" }),
-    });
-    if ((await provenance.getAttribute("open")) === null) {
-      await provenance.locator("summary").click();
-    }
-    await expect(provenance).toHaveAttribute("open", "");
+    await expect(importDetails).toHaveAttribute("open", "");
     await form
       .getByRole("combobox", { name: "External run evidence visibility" })
       .selectOption(opts.visibility);

@@ -120,6 +120,21 @@ function formatTimestamp(value: string | null): string {
   return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+function directoryLinkLabel(profile: UserProfileV1): string {
+  if (profile.provenance === "ldap") {
+    return profile.directorySubject
+      ? "Linked to the LDAP directory (technical identifier hidden)"
+      : "LDAP directory linkage unavailable";
+  }
+  if (profile.provenance === "oidc") {
+    return profile.directorySubject
+      ? "Linked to the sign-in provider (technical identifier hidden)"
+      : "Sign-in provider linkage unavailable";
+  }
+  if (profile.provenance === "imported_historical") return "Historical attribution only";
+  return "Not linked to a directory";
+}
+
 function avatarPreview(profile: UserProfileV1, draft: Draft): string {
   if (draft.avatarKind === "initials" && draft.avatarValue.trim()) {
     return draft.avatarValue.trim().slice(0, 4).toUpperCase();
@@ -598,8 +613,8 @@ export function SelfProfilePanel(props: {
           <dd>{PROVENANCE_LABELS[saved.provenance]}</dd>
         </div>
         <div>
-          <dt>Directory identity</dt>
-          <dd>{saved.directorySubject ?? "Not a directory account"}</dd>
+          <dt>Directory account</dt>
+          <dd>{directoryLinkLabel(saved)}</dd>
         </div>
         <div>
           <dt>Directory sync</dt>

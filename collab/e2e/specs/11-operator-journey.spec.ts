@@ -103,8 +103,8 @@ test.describe("complete war-room operator journey", () => {
       .filter({ hasText: "queue depth is the root cause" });
     await expect(imported.locator(".imported-run__banner")).toHaveText("Unverified imported run");
     await expect(imported).toContainText("Fixture chat assistant");
-    await expect(imported).toContainText("Source: Fixture chat assistant · external-tool");
-    await expect(imported).toContainText("visibility importer_described");
+    await expect(imported).toContainText("From Fixture chat assistant");
+    await expect(imported.getByText("Prompt and import details")).toBeVisible();
     await expect(imported).not.toContainText("human-authored");
     await expect(capture.getByText("imported output").first()).toBeVisible();
     await expect(capture.getByText("imported · unverified").first()).toBeVisible();
@@ -207,32 +207,38 @@ test.describe("complete war-room operator journey", () => {
     // Analyze now presents the same recorded lane twice: once as a readable
     // workstream and once in the technical run history. Assert each surface.
     await expect(
-      completedLanes.getByText(/Synthetic reviewer result: inspect the 1 frozen evidence item/),
+      completedLanes
+        .getByText(/Provider-free simulation completed.*did not run the named model/)
+        .first(),
     ).toBeVisible();
     await expect(
       analyze
         .locator(".workstreams__card")
-        .getByText(/Synthetic reviewer result: inspect the 1 frozen evidence item/),
+        .getByText("No written finding recorded.")
+        .first(),
     ).toBeVisible();
 
     await page.getByRole("button", { name: "Review in Experiment Lab" }).first().click();
-    await expect(analyze.getByRole("status")).toContainText("is ready in Experiment Lab", {
+    await expect(analyze.locator(".triage-runs__handoff-success")).toContainText("is ready in Experiment Lab", {
       timeout: 30_000,
     });
 
     await gotoStage(page, "Compare");
     await expectFocusedStage(page, "compare");
     const compare = page.locator("#stage-compare");
-    const experimentSnapshot = `snap-${frozenBody.fingerprint}`.slice(0, 12);
+    await expect(compare.getByText("Simulated qwen-3.6-27b (not executed)").first()).toBeVisible();
+    await expect(compare.getByText("Shared evidence").first().locator("..")).toContainText("0");
     await expect(
       compare.locator(".experiment-lab__identity"),
-    ).toContainText(`snapshot ${experimentSnapshot}`);
+    ).toContainText("exact frozen evidence binding");
     await expect(compare.getByText("Agreement is not proof of correctness.").first()).toBeVisible();
     await expect(compare.getByRole("heading", { name: "Investigative findings" })).toBeVisible();
     await expect(compare.getByRole("heading", { name: "What stays unknown" })).toBeVisible();
     await expect(compare.getByText("Unknown stays unknown until evidence resolves it.")).toBeVisible();
-    await expect(compare.getByText("usage unknown").first()).toBeVisible();
-    await expect(compare.getByText("cost unknown").first()).toBeVisible();
+    const runDetails = compare.getByText(/Run details and evaluation coverage/).first();
+    await expect(runDetails).toBeVisible();
+    await runDetails.click();
+    await expect(compare.getByText(/Run telemetry was not reported/)).toBeVisible();
 
     await gotoStage(page, "Decide");
     await expectFocusedStage(page, "decide");
@@ -295,7 +301,10 @@ test.describe("complete war-room operator journey", () => {
 
     await gotoStage(page, "Capture");
     const captureAgain = stagePanel(page, "Capture");
-    await expect(captureAgain.getByText(humanNote)).toBeVisible();
+    await captureAgain.locator("details.triage-record__timeline > summary").click();
+    await expect(
+      captureAgain.getByLabel("Case timeline events").getByText(humanNote),
+    ).toBeVisible();
     await expect(captureAgain.getByText("human-authored").first()).toBeVisible();
     await expect(imported.locator(".imported-run__banner")).toHaveText("Unverified imported run");
     await expect(page.getByText("imported output").first()).toBeVisible();

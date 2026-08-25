@@ -96,7 +96,10 @@ describe("readable case workstreams", () => {
       expect(list.caseId).toBe(f.caseId);
       expect(list.workstreams).toHaveLength(1);
       const [view] = list.workstreams;
-      expect(view?.label).toBe("Reviewer workstream — fixture-reviewer-a");
+      expect(view?.label).toBe("Reviewer simulation — fixture-reviewer-a");
+      expect(view?.operatorLabel).toContain("did not run the named model");
+      expect(view?.findings).toBeNull();
+      expect(view?.outcome).toContain("no investigative finding or evidence citation");
       expect(view?.purpose).toContain("checkout timeout");
       expect(view?.assignedTo).toBe("lead");
       expect(view?.strategyLabel).toBe("Standard synthetic strategy");
@@ -106,7 +109,7 @@ describe("readable case workstreams", () => {
     }
   });
 
-  it("resolves cited evidence to filenames and registered summaries", async () => {
+  it("never turns frozen inputs into citations for a provider-free simulation", async () => {
     const f = await fixture();
     try {
       const list = await listCaseWorkstreams({
@@ -117,15 +120,8 @@ describe("readable case workstreams", () => {
         isAdmin: false,
       });
       const cited = list.workstreams[0]?.evidenceCited ?? [];
-      expect(cited.length).toBeGreaterThan(0);
-      const checkout = cited.find((row) => row.evidenceId === f.evidenceId);
-      expect(checkout).toMatchObject({
-        label: "checkout.log",
-        kind: "log",
-        inFrozenSnapshot: true,
-        resolved: true,
-      });
-      expect(checkout?.summary).toBe("Synthetic checkout timeout excerpt.");
+      expect(cited).toEqual([]);
+      expect(list.workstreams[0]?.inputs.snapshotEvidenceCount).toBe(1);
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }

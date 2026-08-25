@@ -37,6 +37,25 @@ function Surface(props: { ready: boolean; recordPresent: boolean; recordKey?: st
   );
 }
 
+function CollapsedSurface() {
+  useRouteFocus(LANE_FOCUS, true);
+  return (
+    <section id="workstreams" aria-label="Workstreams" tabIndex={-1}>
+      <details data-testid="disclosure">
+        <summary>Recorded history</summary>
+        <article
+          data-testid="record"
+          data-route-item="run-1:lane-a"
+          data-route-kind="workstream"
+          tabIndex={-1}
+        >
+          Reviewer workstream
+        </article>
+      </details>
+    </section>
+  );
+}
+
 describe("route focus restoration", () => {
   it("upgrades a provisional section landing once the routed record arrives", () => {
     const view = render(<Surface ready recordPresent={false} />);
@@ -80,6 +99,12 @@ describe("route focus restoration", () => {
     const view = render(<Surface ready={false} recordPresent />);
     expect(document.activeElement).toBe(document.body);
     view.rerender(<Surface ready recordPresent />);
+    expect(document.activeElement).toBe(view.getByTestId("record"));
+  });
+
+  it("opens a collapsed disclosure that contains the exact routed record", () => {
+    const view = render(<CollapsedSurface />);
+    expect(view.getByTestId("disclosure")).toHaveProperty("open", true);
     expect(document.activeElement).toBe(view.getByTestId("record"));
   });
 });

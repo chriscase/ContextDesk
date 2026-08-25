@@ -81,13 +81,13 @@ describe("imported run rendering", () => {
     const primaryMeta = Array.from(container.querySelectorAll(":scope > article > p"))
       .map((node) => node.textContent ?? "")
       .join(" ");
-    expect(primaryMeta).toContain("bound to a frozen evidence snapshot");
-    expect(primaryMeta).toContain("Source: Synthetic diagnostic export · external-tool");
+    expect(primaryMeta).toContain("From Synthetic diagnostic export");
     expect(primaryMeta).not.toContain("9d063475-e154-44f1-84ef-acde6ebbbac2");
     expect(primaryMeta).not.toContain("snap-0123456789abcdef");
 
-    const technical = screen.getByText("Technical details").closest("details") as HTMLDetailsElement;
+    const technical = container.querySelector("details.imported-run__technical") as HTMLDetailsElement;
     expect(technical.open).toBe(false);
+    expect(technical.textContent).toContain("tied to a frozen evidence set");
     expect(technical.textContent).toContain("9d063475-e154-44f1-84ef-acde6ebbbac2");
     expect(technical.textContent).toContain("snap-0123456789abcdef");
   });

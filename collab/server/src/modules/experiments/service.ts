@@ -538,25 +538,41 @@ export class ExperimentService {
           }
         : UNKNOWN_SNAPSHOT_PROOF;
 
+    const simulation = job.request.mode === "deterministic_mock"
+      && job.candidates.every((candidate) =>
+        candidate.evidenceRefs.length === 0
+        && candidate.summary?.startsWith("Provider-free simulation completed.") === true
+      );
     const connectedCandidates = job.candidates.map((candidate) => ({
       candidateId: candidate.candidateId,
-      modelLabel: candidate.model,
+      modelLabel: simulation
+        ? `Simulated ${candidate.model} (not executed)`
+        : candidate.model,
       role: experimentRole(candidate.role),
       runStatus: experimentRunStatus(candidate.status),
-      observedLatency: observedLatency(candidate.startedAt, candidate.finishedAt),
+      observedLatency: simulation
+        ? { status: "unknown" as const }
+        : observedLatency(candidate.startedAt, candidate.finishedAt),
       cost: { status: "unknown" } as const,
       usage: { status: "unknown" } as const,
       helpfulnessState: "unreviewed" as const,
       goldState: "unknown" as const,
     }));
-    const connectedTraces = successfulCandidates.map((candidate) =>
-      connectedTrace(job, candidate, candidate.candidateId),
-    );
+    const connectedTraces = simulation
+      ? []
+      : successfulCandidates.map((candidate) =>
+          connectedTrace(job, candidate, candidate.candidateId),
+        );
     const candidates = [...connectedCandidates];
     const traces = [...connectedTraces];
     const notes = [
       "Connected ContextDesk lanes and pasted chat are compared as candidates, not as proof of correctness.",
     ];
+    if (simulation) {
+      notes.push(
+        "Provider-free simulation: the named models were not executed, no evidence was inspected, and no model agreement can be inferred.",
+      );
+    }
     if (job.candidates.some((candidate) => candidate.status !== "completed" && candidate.status !== "partial")) {
       notes.push("Failed, timed-out, or cancelled lanes remain visible without an invented trace or answer.");
     }
@@ -639,7 +655,7 @@ export class ExperimentService {
     if (!row.candidates.some((c) => c.candidateId === input.candidateId)) {
       throw new Error("unknown candidateId");
     }
-    await this.assertExportableEvidenceRefs(row, input.evidenceRefs);
+    await this.assertExportableEvidenceRefs(row, input.evidenceRefs, actor, isAdmin);
     const observation = parseHelpfulnessObservation({
       schemaId: HELPFULNESS_OBSERVATION_SCHEMA_ID,
       id: randomUUID(),
@@ -697,7 +713,7 @@ export class ExperimentService {
       throw new ExperimentConflictError("already_accepted", "accepted decision is immutable");
     }
     this.assertExpectedRevision(latest, input.expectedRevision, history.length === 0);
-    await this.assertExportableEvidenceRefs(row, input.evidenceRefs);
+    await this.assertExportableEvidenceRefs(row, input.evidenceRefs, actor, isAdmin);
     const revision = latest ? latest.revision + 1 : 1;
     const decision = parseExperimentDecision({
       schemaId: EXPERIMENT_DECISION_SCHEMA_ID,
@@ -965,7 +981,7 @@ export class ExperimentService {
     if (input.evidenceAnchors.length === 0) {
       throw new Error("at least one evidence anchor is required");
     }
-    await this.assertExportableEvidenceRefs(row, input.evidenceAnchors);
+    await this.assertExportableEvidenceRefs(row, input.evidenceAnchors, actor, isAdmin);
     if (input.helpfulnessDimensions) {
       for (const dimension of input.helpfulnessDimensions) {
         if (!(HELPFULNESS_DIMENSIONS as readonly string[]).includes(dimension)) {
@@ -1090,13 +1106,22 @@ export class ExperimentService {
   }
 
   private async exportableEvidenceRefs(
-    row: Pick<ExperimentRow, "id" | "agreement">,
+    row: Pick<ExperimentRow, "id" | "caseId" | "agreement" | "snapshotFingerprint" | "snapshotProof">,
+    actor: Actor,
+    isAdmin: boolean,
   ): Promise<Set<string>> {
     const known = knownAgreementEvidence(row.agreement);
-    const [traces, annotations] = await Promise.all([
+    const [traces, annotations, snapshots] = await Promise.all([
       this.store.listTraces(row.id),
       this.store.listAnnotations(row.id),
+      row.snapshotProof.basis === "host_frozen_snapshot"
+        ? this.deps.cases.listSnapshots(row.caseId, actor, isAdmin)
+        : Promise.resolve([]),
     ]);
+    const frozen = snapshots.find(
+      (snapshot) => canonicalFingerprint(snapshot.fingerprint, "snap") === row.snapshotFingerprint,
+    );
+    for (const item of frozen?.evidence ?? []) known.add(item.evidenceId);
     for (const trace of traces) {
       for (const event of trace.events) {
         for (const ref of event.evidenceRefs) known.add(ref);
@@ -1109,11 +1134,13 @@ export class ExperimentService {
   }
 
   private async assertExportableEvidenceRefs(
-    row: Pick<ExperimentRow, "id" | "agreement">,
+    row: Pick<ExperimentRow, "id" | "caseId" | "agreement" | "snapshotFingerprint" | "snapshotProof">,
     refs: readonly string[],
+    actor: Actor,
+    isAdmin: boolean,
   ): Promise<void> {
     if (refs.length === 0) return;
-    const known = await this.exportableEvidenceRefs(row);
+    const known = await this.exportableEvidenceRefs(row, actor, isAdmin);
     for (const ref of refs) {
       if (!known.has(ref)) throw new Error(`unknown experiment evidence ${ref}`);
     }

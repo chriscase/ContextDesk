@@ -96,7 +96,7 @@ declare global {
 const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
   { area: "overview", label: "Overview" },
   { area: "investigations", label: "Investigations" },
-  { area: "sources", label: "Sources" },
+  { area: "sources", label: "Attribution" },
   { area: "administration", label: "Administration" },
   { area: "help", label: "Help" },
 ];
@@ -707,7 +707,7 @@ export function App() {
             </section>
             <section
               className="app__area"
-              aria-label="Source library"
+              aria-label="Attribution"
               hidden={work.area !== "sources"}
             >
               <Catalog canLead={canLeadCatalog} />

@@ -113,6 +113,10 @@ interface CdEntry {
   externalAttr: number;
 }
 
+// Central-directory parsing needs its own finite cap, but transport metadata
+// must not consume the smaller evidence-file allowance enforced below.
+const MAX_CENTRAL_DIRECTORY_ENTRIES = CORPUS_INTAKE_LIMITS.maxFileCount * 4;
+
 function parseCentralDirectory(buf: Uint8Array): CdEntry[] {
   const eocd = findEocd(buf);
   if (u32(buf, eocd) === SIG_ZIP64_EOCD || (eocd >= 20 && u32(buf, eocd - 20) === SIG_ZIP64_LOCATOR)) {
@@ -129,8 +133,8 @@ function parseCentralDirectory(buf: Uint8Array): CdEntry[] {
   if (diskEntries !== totalEntries) {
     throw new ZipError("malformed_zip", "split archives are not accepted");
   }
-  if (totalEntries > CORPUS_INTAKE_LIMITS.maxFileCount) {
-    throw new ZipError("too_many_files", "file count exceeds cap");
+  if (totalEntries > MAX_CENTRAL_DIRECTORY_ENTRIES) {
+    throw new ZipError("too_many_files", "archive entry count exceeds parsing cap");
   }
   if (cdOffset + cdSize > eocd) {
     throw new ZipError("malformed_zip", "central directory overruns EOCD");
@@ -241,6 +245,7 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
   const seen = new Set<string>();
   const seenOffsets = new Set<number>();
   let expanded = 0;
+  let evidenceEntryCount = 0;
   const entries = parseCentralDirectory(archive);
   for (const entry of entries) {
     if (Date.now() - startedAt > CORPUS_INTAKE_LIMITS.maxProcessingMs) {
@@ -260,6 +265,21 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
       continue;
     }
     if ((dosAttr & 0x10) !== 0 || entry.name.endsWith("/")) continue;
+    const portableName = entry.name.replace(/\\/g, "/");
+    const portableParts = portableName.split("/");
+    const portableBase = portableParts.at(-1) ?? "";
+    // Finder adds transport metadata that is not investigation evidence. Skip
+    // it before extraction/classification so a normal diagnostic archive does
+    // not bury useful logs under hundreds of meaningless rejection rows.
+    if (
+      portableParts[0] === "__MACOSX"
+      || portableBase === ".DS_Store"
+      || portableBase.startsWith("._")
+    ) continue;
+    evidenceEntryCount += 1;
+    if (evidenceEntryCount > CORPUS_INTAKE_LIMITS.maxFileCount) {
+      throw new ZipError("too_many_files", "file count exceeds cap");
+    }
     const mode = unixMode(entry);
     if (mode !== null) {
       const type = mode & S_IFMT;

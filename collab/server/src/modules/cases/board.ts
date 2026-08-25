@@ -30,10 +30,6 @@ function findingId(prefix: string, value: string): string {
   return `${prefix}-${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16)}`;
 }
 
-function artifactLabel(artifact: ArtifactV1): string {
-  return artifact.filename ?? `${artifact.kind} evidence`;
-}
-
 function contributionStatement(contribution: ContributionV1): string {
   if (contribution.privacyClass === "share_safe" && contribution.body) {
     return contribution.body;
@@ -49,23 +45,6 @@ function contributionStatement(contribution: ContributionV1): string {
 export function deriveCaseBoard(input: CaseBoardInput): CaseBoardV1 {
   const findings: CaseBoardV1["findings"] = [];
   const supportedByEvidence = new Map<string, string[]>();
-
-  for (const artifact of [...input.artifacts].sort((a, b) => a.id.localeCompare(b.id))) {
-    const label = artifactLabel(artifact);
-    const verified = artifact.contentHash !== null && artifact.verificationStatus === "verified";
-    findings.push({
-      id: findingId(verified ? "known" : "unknown", artifact.id),
-      bucket: verified ? "known" : "unknown",
-      statement: verified
-        ? `Verified evidence available: ${label}.`
-        : `Evidence verification is unknown: ${label}.`,
-      evidenceRefs: [artifact.id],
-      contributionRefs: artifact.summaryContributionId ? [artifact.summaryContributionId] : [],
-      agreement: "unknown",
-      confidence: verified ? "high" : "unknown",
-      basis: "evidence",
-    });
-  }
 
   for (const contribution of [...input.contributions].sort((a, b) => a.id.localeCompare(b.id))) {
     if (contribution.kind !== "hypothesis" || contribution.tombstoned) continue;
@@ -142,19 +121,6 @@ export function deriveCaseBoard(input: CaseBoardInput): CaseBoardV1 {
       agreement: "unknown",
       confidence: "unknown",
       basis: "accepted_decision",
-    });
-  }
-
-  if (findings.length === 0) {
-    findings.push({
-      id: "unknown-no-findings",
-      bucket: "unknown",
-      statement: "No supported finding has been established yet.",
-      evidenceRefs: [],
-      contributionRefs: [],
-      agreement: "unknown",
-      confidence: "unknown",
-      basis: "unknown",
     });
   }
 

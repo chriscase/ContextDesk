@@ -41,7 +41,7 @@ const KIND_META: Record<KnownKind, KindMeta> = {
     meaning:
       "A product or AI assistant used outside ContextDesk — a chat assistant, a vendor analyzer. Registering one lets people credit it when pasting its output into a case; ContextDesk never connects to the tool itself.",
     registerHint:
-      "This adds the tool to the source picker in a case's manual intake form (“Pasted external output”). No credentials are stored and no automatic access is created — bringing in output stays copy-and-paste.",
+      "This adds the tool to the attribution picker when someone pastes analysis into an investigation. No credentials are stored and no automatic connection is created.",
     namePlaceholder: "e.g. Claude chat assistant",
   },
   "internal-system": {
@@ -122,8 +122,7 @@ function SourceCard(props: {
         <p className="catalog__desc catalog__desc--none">No description recorded.</p>
       )}
       <p className="catalog__meta">
-        <code>{source.kind}</code>
-        {source.createdAt ? ` · registered ${source.createdAt.slice(0, 10)}` : null}
+        {source.createdAt ? `Added ${source.createdAt.slice(0, 10)}` : "Date added not recorded"}
       </p>
       {props.canLead && active ? (
         <div className="catalog__actions">
@@ -273,27 +272,27 @@ export function Catalog(props: { canLead: boolean }) {
       aria-busy={loadState === "loading"}
     >
       <header>
-        <p className="case-memory__eyebrow">Provenance</p>
+        <p className="case-memory__eyebrow">Attribution</p>
         <h2 id="catalog-title" className="catalog__title">
-          Source &amp; provenance library
+          Who and what supplied the information
         </h2>
         <p className="catalog__copy">
-          Cases credit every note, upload, and imported answer to a source — who or
-          what produced it. This library holds those labels. A source is attribution
-          only: it is not a login or a live connection, and naming one never makes
-          material correct.
+          Reusable labels identify the people and tools behind notes, files, and imported
+          answers. The actual logs, email, chat, and other evidence stay inside each
+          investigation. Add or review that material from the investigation’s Capture stage.
+          These labels are not user accounts and do not connect to the named tools.
         </p>
       </header>
 
       {loadState === "loading" ? (
         <p className="catalog__loading" role="status">
-          Loading the source library…
+          Loading attribution labels…
         </p>
       ) : null}
 
       {loadState === "error" ? (
         <div className="catalog__load-error">
-          <p role="alert">The source library could not be loaded. Try again.</p>
+          <p role="alert">Attribution labels could not be loaded. Try again.</p>
           <button
             type="button"
             className="catalog__button"
@@ -302,7 +301,7 @@ export function Catalog(props: { canLead: boolean }) {
               void refresh();
             }}
           >
-            Retry loading sources
+            Retry loading attribution
           </button>
         </div>
       ) : null}
@@ -311,21 +310,21 @@ export function Catalog(props: { canLead: boolean }) {
         <>
           <dl className="catalog__facts">
             <div className="catalog__fact">
-              <dt>Active sources</dt>
+              <dt>Available labels</dt>
               <dd>
                 <strong>{active.length}</strong>
                 <span>selectable when new material is recorded</span>
               </dd>
             </div>
             <div className="catalog__fact">
-              <dt>Retired sources</dt>
+              <dt>Retired labels</dt>
               <dd>
                 <strong>{retired.length}</strong>
                 <span>hidden from new intake; past attributions keep them</span>
               </dd>
             </div>
             <div className="catalog__fact">
-              <dt>External tools for manual intake</dt>
+              <dt>Tools available for pasted output</dt>
               <dd>
                 <strong>{intakeReady}</strong>
                 <span>
@@ -337,7 +336,7 @@ export function Catalog(props: { canLead: boolean }) {
           </dl>
 
           <section className="catalog__kinds" aria-labelledby="catalog-kinds-title">
-            <h3 id="catalog-kinds-title">What the five kinds mean</h3>
+            <h3 id="catalog-kinds-title">What can supply information</h3>
             <ul className="catalog__kind-cards">
               {KIND_ORDER.map((kind) => {
                 const meta = KIND_META[kind];
@@ -346,7 +345,6 @@ export function Catalog(props: { canLead: boolean }) {
                   <li key={kind} className="catalog__kind-card">
                     <div className="catalog__kind-card-head">
                       <span className={kindChipClass(kind)}>{meta.label}</span>
-                      <code>{kind}</code>
                     </div>
                     <p>{meta.meaning}</p>
                     <span className="catalog__kind-count">
@@ -401,18 +399,18 @@ export function Catalog(props: { canLead: boolean }) {
                 aria-labelledby="catalog-active-title"
               >
                 <h3 id="catalog-active-title">
-                  Active sources ({groupCount(shownActive.length, active.length)})
+                  Available attribution labels ({groupCount(shownActive.length, active.length)})
                 </h3>
                 <p className="catalog__group-copy">
                   These can be credited when new material is recorded on a case.
                 </p>
                 {active.length === 0 ? (
                   <p className="case-memory__empty">
-                    No active sources. Retired entries below keep their history.
+                    No labels are available for new material. Retired labels below keep their history.
                   </p>
                 ) : shownActive.length === 0 ? (
                   <p className="case-memory__empty">
-                    No active sources match the filter.
+                    No available labels match the filter.
                   </p>
                 ) : (
                   <ul className="catalog__cards">
@@ -437,16 +435,16 @@ export function Catalog(props: { canLead: boolean }) {
                   aria-labelledby="catalog-retired-title"
                 >
                   <h3 id="catalog-retired-title">
-                    Retired sources ({groupCount(shownRetired.length, retired.length)})
+                    Retired attribution labels ({groupCount(shownRetired.length, retired.length)})
                   </h3>
                   <p className="catalog__group-copy">
-                    Retired sources no longer appear for new intake. Every past
+                    Retired labels no longer appear for new intake. Every past
                     contribution keeps its attribution — retirement hides, it never
                     rewrites.
                   </p>
                   {shownRetired.length === 0 ? (
                     <p className="case-memory__empty">
-                      No retired sources match the filter.
+                      No retired labels match the filter.
                     </p>
                   ) : (
                     <ul className="catalog__cards">
@@ -473,7 +471,7 @@ export function Catalog(props: { canLead: boolean }) {
               className="catalog__register"
               aria-labelledby="catalog-register-title"
             >
-              <h3 id="catalog-register-title">Register a source</h3>
+              <h3 id="catalog-register-title">Add an attribution label</h3>
               <p className="catalog__group-copy">
                 Registering creates an attribution label for people to pick when
                 recording where material came from. It stores a name and a
@@ -486,7 +484,7 @@ export function Catalog(props: { canLead: boolean }) {
               ) : null}
               <form className="catalog__form" onSubmit={(e) => void createSource(e)}>
                 <fieldset className="catalog__kind-picker">
-                  <legend>What kind of source is this?</legend>
+                  <legend>Who or what supplied the information?</legend>
                   {KIND_ORDER.map((kind) => (
                     <label key={kind} className="catalog__kind-option">
                       <input
@@ -498,9 +496,6 @@ export function Catalog(props: { canLead: boolean }) {
                       />
                       <span>
                         <strong>{KIND_META[kind].label}</strong>
-                        <small>
-                          <code>{kind}</code>
-                        </small>
                       </span>
                     </label>
                   ))}
@@ -527,7 +522,7 @@ export function Catalog(props: { canLead: boolean }) {
                   />
                 </label>
                 <button className="login__submit" type="submit" disabled={saving}>
-                  Add source
+                  Add label
                 </button>
               </form>
             </section>

@@ -29,7 +29,7 @@ test.describe("self-service profile journey", () => {
     expect(saved.ok(), await saved.text()).toBeTruthy();
     await expect(page.getByText(/Profile saved/)).toBeVisible();
 
-    await page.getByRole("button", { name: "Sources" }).click();
+    await page.getByRole("button", { name: "Attribution" }).click();
     await expect(page).toHaveURL(/\/sources$/);
     await page.goBack();
     await expect(page).toHaveURL(/\/profile$/);

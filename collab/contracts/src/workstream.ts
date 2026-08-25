@@ -521,8 +521,15 @@ export function projectWorkstreams(input: WorkstreamProjectionInput): Workstream
 
     for (const candidate of job.candidates) {
       const key = workstreamKey(job.id, candidate.candidateId);
-      const operatorKind = operatorKindFor(candidate.provider, candidate.model);
-      const evidenceCited: WorkstreamEvidenceCitationV1[] = candidate.evidenceRefs.map((ref) => {
+      const simulation = job.request.mode === "deterministic_mock"
+        && candidate.evidenceRefs.length === 0
+        && candidate.summary?.startsWith("Provider-free simulation completed.") === true;
+      const operatorKind = simulation
+        ? "programmatic"
+        : operatorKindFor(candidate.provider, candidate.model);
+      const evidenceCited: WorkstreamEvidenceCitationV1[] = (simulation
+        ? []
+        : candidate.evidenceRefs).map((ref) => {
         const artifact = evidenceById.get(ref);
         return {
           evidenceId: ref,
@@ -543,10 +550,14 @@ export function projectWorkstreams(input: WorkstreamProjectionInput): Workstream
         schemaId: WORKSTREAM_VIEW_SCHEMA_ID,
         key,
         caseId: input.caseId,
-        label: `${roleLabel(candidate.role)} — ${candidate.model}`,
+        label: simulation
+          ? `${roleLabel(candidate.role).replace("workstream", "simulation")} — ${candidate.model}`
+          : `${roleLabel(candidate.role)} — ${candidate.model}`,
         purpose: job.request.question,
         operatorKind,
-        operatorLabel: OPERATOR_LABELS[operatorKind],
+        operatorLabel: simulation
+          ? "Provider-free simulation — exercises workflow controls; it did not run the named model or analyze evidence"
+          : OPERATOR_LABELS[operatorKind],
         assignedTo: job.requestedByUsername || "not recorded",
         strategyLabel: strategyLabelFor(job.request.strategyId),
         role: candidate.role,
@@ -561,16 +572,20 @@ export function projectWorkstreams(input: WorkstreamProjectionInput): Workstream
         statusCode: candidate.status,
         lifecycle: lifecycleOf(candidate.status),
         statusLabel: STATUS_LABELS[candidate.status],
-        statusDetail: STATUS_DETAILS[candidate.status],
+        statusDetail: simulation && candidate.status === "completed"
+          ? "Simulation finished. No provider or model was contacted, and no evidence was inspected."
+          : STATUS_DETAILS[candidate.status],
         startedAt: candidate.startedAt,
         finishedAt: candidate.finishedAt,
-        findings: candidate.summary,
-        outcome: outcomeFor(
-          candidate.status,
-          candidate.summary,
-          evidenceCited.length,
-          unknowns.length,
-        ),
+        findings: simulation ? null : candidate.summary,
+        outcome: simulation && candidate.status === "completed"
+          ? "Provider-free workflow simulation completed; it produced no investigative finding or evidence citation."
+          : outcomeFor(
+              candidate.status,
+              candidate.summary,
+              evidenceCited.length,
+              unknowns.length,
+            ),
         evidenceCited,
         unknowns,
         activity: activityFor(job, candidate, input.timeline),

@@ -250,8 +250,6 @@ describe("external-run import", () => {
               payload: {
                 outputText: "importer described visibility only",
                 sourceId: tool.id,
-                operatorId: "uid=operator,ou=people,dc=example,dc=test",
-                operatorUsername: "operator",
                 evidenceVisibility: "importer_described",
                 visibilityNote: "Saw the on-call paste, no package.",
               },
@@ -264,6 +262,28 @@ describe("external-run import", () => {
       expect(described.promptText).toBeNull();
       expect(described.promptHash).toBeNull();
       expect(described.promptCompleteness).toBe("unknown");
+      expect(described.operatorUsername).toBe("alice");
+      expect(described.operatorId).toBe(described.importerId);
+
+      for (const partialIdentity of [
+        { operatorId: "uid=operator,ou=people,dc=example,dc=test" },
+        { operatorUsername: "operator" },
+      ]) {
+        const rejected = await app.inject({
+          method: "POST",
+          url: `/api/cases/${created.id}/imports`,
+          headers: { cookie: alice },
+          payload: {
+            outputText: "partial operator identity must fail closed",
+            sourceId: tool.id,
+            ...partialIdentity,
+          },
+        });
+        expect(rejected.statusCode).toBe(400);
+        expect(JSON.parse(rejected.body)).toEqual({
+          error: "operatorId and operatorUsername must be provided together",
+        });
+      }
 
       const outputOnly = parseExternalRun(
         JSON.parse(

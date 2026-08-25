@@ -15,6 +15,7 @@ export function ImportedRun(props: {
   run: ImportedRunView;
   /** Catalog entry matching run.sourceId; null when the id matches no loaded source. */
   source?: { id: string; name: string; kind: string } | null;
+  linkOptions?: { id: string; label: string }[];
   canCorroborate: boolean;
   onCorroborate: (id: string, state: "corroborated" | "contradicted", linkId: string) => void;
 }) {
@@ -48,9 +49,8 @@ export function ImportedRun(props: {
         {banner}
       </p>
       <p className="timeline__meta">
-        importer {run.importerUsername} · operator {run.operatorUsername} · visibility{" "}
-        {run.evidenceVisibility}
-        {run.snapshotBinding ? " · bound to a frozen evidence snapshot" : " · no frozen snapshot recorded"}
+        Imported by {run.importerUsername}
+        {run.operatorUsername !== run.importerUsername ? ` · run by ${run.operatorUsername}` : ""}
       </p>
       {/* The primary line uses recognizable catalog metadata. Exact storage identities
           remain available below for audit/debug work, never substituted or guessed. */}
@@ -58,16 +58,28 @@ export function ImportedRun(props: {
         <p className="catalog__meta">
           {props.source ? (
             <>
-              Source: {props.source.name} · {props.source.kind}
+              From {props.source.name}
             </>
           ) : (
             <>Recorded source metadata unavailable</>
           )}
         </p>
       ) : null}
-      {run.sourceId || run.snapshotBinding ? (
+      {run.sourceId || run.snapshotBinding || run.promptText || run.promptCompleteness || run.evidenceVisibility ? (
         <details className="triage-advanced imported-run__technical">
-          <summary>Technical details</summary>
+          <summary>Prompt and import details</summary>
+          <p className="catalog__meta">
+            Evidence access: {run.evidenceVisibility === "unknown" ? "not recorded" : "described by the importer"}
+            {run.snapshotBinding ? " · tied to a frozen evidence set" : " · no frozen evidence set recorded"}
+          </p>
+          {run.promptText === null ? (
+            <p className="catalog__meta">Original prompt was not recorded.</p>
+          ) : (
+            <>
+              <p className="catalog__meta">Original prompt</p>
+              <pre className="imported-run__text">{run.promptText}</pre>
+            </>
+          )}
           {run.sourceId ? (
             <p className="catalog__meta">
               Recorded source ID: <code>{run.sourceId}</code>
@@ -80,11 +92,6 @@ export function ImportedRun(props: {
           ) : null}
         </details>
       ) : null}
-      {run.promptText === null ? (
-        <p className="timeline__meta">Prompt unknown ({run.promptCompleteness})</p>
-      ) : (
-        <pre className="imported-run__text">{run.promptText}</pre>
-      )}
       <pre className="imported-run__text">{run.outputText}</pre>
       {props.canCorroborate && run.corroborationState === "unverified" ? (
         <form
@@ -99,13 +106,21 @@ export function ImportedRun(props: {
             }
           }}
         >
-          <select className="login__input" name="state" defaultValue="corroborated">
-            <option value="corroborated">corroborated</option>
-            <option value="contradicted">contradicted</option>
+          <select className="login__input" name="state" defaultValue="corroborated" aria-label="Human review result">
+            <option value="corroborated">Supported by the linked record</option>
+            <option value="contradicted">Contradicted by the linked record</option>
           </select>
-          <input className="login__input" name="linkId" placeholder="Evidence or contribution id" required />
+          <select className="login__input" name="linkId" aria-label="Supporting record" required defaultValue="">
+            <option value="" disabled>Choose a note or evidence item</option>
+            {(props.linkOptions ?? []).map((option) => (
+              <option key={option.id} value={option.id}>{option.label}</option>
+            ))}
+          </select>
+          {(props.linkOptions ?? []).length === 0 ? (
+            <p className="triage-capture__hint">Add a human note or evidence item before reviewing this analysis.</p>
+          ) : null}
           <button className="login__submit" type="submit">
-            Record human judgment
+            Save review
           </button>
         </form>
       ) : null}

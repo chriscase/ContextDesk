@@ -45,14 +45,14 @@ test.describe("plain-text external chat import", () => {
 
     const first = page.locator(".imported-run").filter({ hasText: "queue depth is the root cause" });
     await first.locator('select[name="state"]').selectOption("corroborated");
-    await first.getByPlaceholder("Evidence or contribution id").fill(note!.targetId!);
-    await first.getByRole("button", { name: "Record human judgment" }).click();
+    await first.getByRole("combobox", { name: "Supporting record" }).selectOption(note!.targetId!);
+    await first.getByRole("button", { name: "Save review" }).click();
     await expect(first.locator(".imported-run__banner")).toHaveText("Corroborated by a human");
 
     const second = page.locator(".imported-run").filter({ hasText: "DNS NXDOMAIN" });
     await second.locator('select[name="state"]').selectOption("contradicted");
-    await second.getByPlaceholder("Evidence or contribution id").fill(note!.targetId!);
-    await second.getByRole("button", { name: "Record human judgment" }).click();
+    await second.getByRole("combobox", { name: "Supporting record" }).selectOption(note!.targetId!);
+    await second.getByRole("button", { name: "Save review" }).click();
     await expect(second.locator(".imported-run__banner")).toHaveText("Contradicted");
     await screenshot(page, "04-imported-chats-judgment");
   });

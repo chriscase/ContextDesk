@@ -1909,10 +1909,7 @@ export function Cases(props: {
                           <span className="triage-chip triage-chip--imported">
                             imported · unverified
                           </span>
-                          <span>
-                            imported by {run.importerUsername} · evidence visibility{" "}
-                            {run.evidenceVisibility}
-                          </span>
+                          <span>Imported by {run.importerUsername}</span>
                         </p>
                         <ArtifactExcerpt text={run.outputText} label="imported output" />
                         <button
@@ -2134,6 +2131,7 @@ export function Cases(props: {
                   canWrite={canWrite}
                   canLead={canLead}
                   readOnly={readOnly}
+                  {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
                 />
               </div>
@@ -2144,6 +2142,7 @@ export function Cases(props: {
                   caseId={current.id}
                   canLead={canLead}
                   readOnly={readOnly}
+                  {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
                 />
               </div>

@@ -53,7 +53,7 @@ describe("help landing", () => {
       "Compare models & evidence fairness",
       "Decide & share-safe export",
       "Investigation Teams & qualification",
-      "Sources",
+      "Attribution",
       "Collaboration & presence",
       "Privacy & administration",
     ]) {
@@ -218,8 +218,8 @@ describe("glossary", () => {
 describe("real navigation callbacks", () => {
   it("routes area actions through the bounded callback", () => {
     const { onOpenArea } = renderHelp({ onOpenArea: vi.fn() });
-    fireEvent.click(screen.getByRole("button", { name: "The source & provenance library" }));
-    fireEvent.click(screen.getByRole("button", { name: "Go to Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "Who and what supplied the information" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go to Attribution" }));
     expect(onOpenArea).toHaveBeenCalledWith("sources");
   });
 

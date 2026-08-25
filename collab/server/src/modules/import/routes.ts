@@ -72,12 +72,18 @@ export async function registerImportRoutes(
     const body = asRecord(request.body);
     const outputText = str(body.outputText);
     const sourceId = str(body.sourceId);
-    const operatorId = str(body.operatorId);
-    const operatorUsername = str(body.operatorUsername);
-    if (!outputText || !sourceId || !operatorId || !operatorUsername) {
+    const suppliedOperatorId = str(body.operatorId)?.trim() || null;
+    const suppliedOperatorUsername = str(body.operatorUsername)?.trim() || null;
+    if (!outputText || !sourceId) {
       void reply.code(400);
-      return { error: "outputText, sourceId, operatorId, and operatorUsername are required" };
+      return { error: "outputText and sourceId are required" };
     }
+    if (Boolean(suppliedOperatorId) !== Boolean(suppliedOperatorUsername)) {
+      void reply.code(400);
+      return { error: "operatorId and operatorUsername must be provided together" };
+    }
+    const operatorId = suppliedOperatorId ?? ctx.actor.id;
+    const operatorUsername = suppliedOperatorUsername ?? ctx.actor.username;
     const input: Parameters<ImportService["importRun"]>[2] = {
       outputText,
       sourceId,
