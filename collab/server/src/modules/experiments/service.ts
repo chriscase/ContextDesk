@@ -122,6 +122,23 @@ function isGoldVersionConflict(error: unknown): boolean {
   return /gold_references is insert-only|duplicate key.*gold_references/i.test(message);
 }
 
+function isTraceIdentityConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    error
+    && typeof error === "object"
+    && "code" in error
+    && (error as { code: unknown }).code === "23505"
+  ) {
+    const constraint =
+      "constraint" in error && typeof (error as { constraint?: unknown }).constraint === "string"
+        ? (error as { constraint: string }).constraint
+        : "";
+    return /experiment_traces/i.test(`${constraint} ${message}`);
+  }
+  return /experiment_traces is insert-only|duplicate key.*experiment_traces/i.test(message);
+}
+
 export interface ExperimentView {
   id: string;
   caseId: string;
@@ -992,6 +1009,7 @@ export class ExperimentService {
   ): Promise<InteractionTraceV1> {
     const safe = prepareTraceForStorage(incoming);
     const fingerprint = traceFingerprint(safe);
+    await this.store.lockExperiment(row.id);
     const existing = await this.store.findTrace(row.id, safe.candidateId);
     if (existing) {
       if (traceFingerprint(existing) === fingerprint) {
@@ -1009,7 +1027,17 @@ export class ExperimentService {
         "candidate already has a different interaction trace",
       );
     }
-    await this.store.insertTrace(row.id, safe, fingerprint);
+    try {
+      await this.store.insertTrace(row.id, safe, fingerprint);
+    } catch (error) {
+      if (isTraceIdentityConflict(error)) {
+        throw new ExperimentConflictError(
+          "trace_conflict",
+          "candidate already has a different interaction trace",
+        );
+      }
+      throw error;
+    }
     await this.deps.cases.appendDomainTimeline(row.caseId, {
       kind: "experiment_trace_imported",
       actor,
