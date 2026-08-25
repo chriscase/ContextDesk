@@ -66,7 +66,7 @@ The feed is an orientation aid, not a complete audit log, urgency score, or
 inferred priority ranking. **Investigations** remains the full searchable
 inventory.
 
-![Synthetic War Room Overview with recent activity](../assets/war-room/war-room-overview.png)
+![Synthetic War Room Overview with recent activity](../media/gallery/war-room-overview.png)
 
 ## The five investigation stages
 
@@ -76,12 +76,23 @@ inventory.
 | **Capture** | What did people observe, and what outside analysis was brought in? | Human-authored notes, hypotheses, actions, and clearly labeled imported output |
 | **Analyze** | What evidence is available, and what did each strategy try? | Investigation-scoped logs, stack traces, files, frozen evidence snapshots, lane runs, and run history |
 | **Compare** | Where do the attempts align or diverge? | Readable findings, cited evidence, agreement, disagreement, unsupported claims, unknowns, and lane traces |
-| **Decide** | What happens next, and who owns it? | A human-selected action, owner, rationale, discussion context, and export tools |
+| **Decide** | What happens next, and is a responsible person assigned? | A human-selected action, optional owner, rationale, discussion context, and export tools |
 
 The path is deliberately iterative. A comparison may reveal a missing log
 interval and send the team back to Capture or Analyze. A rerun produces a new
 recorded attempt rather than replacing the earlier result. “Gather more
 evidence” can be the correct human decision.
+
+These synthetic captures show the same investigation at the most useful
+handoffs:
+
+![Synthetic Capture stage with human notes, imported output, and investigation-scoped file intake](../media/gallery/war-room-capture-analyze.png)
+
+![Synthetic Analyze stage with evidence board, frozen snapshot lineage, and model lanes](../media/gallery/war-room-analyze.png)
+
+![Synthetic Compare stage with historical artifacts, deep links, and lane focus](../media/gallery/war-room-compare-decide.png)
+
+![Synthetic Decide stage with an accepted human decision and export boundary](../media/gallery/war-room-export.png)
 
 ## Sources are labels; evidence belongs to an investigation
 
@@ -114,12 +125,13 @@ Use the evidence link before accepting the prose:
 
 ## Lanes are attempts, not votes
 
-A lane is one bounded strategy applied to one frozen evidence snapshot. It may
-reconstruct a timeline, locate a failure boundary, challenge a leading claim,
-or use another configured strategy. The Compare stage can focus one lane while
-keeping every lane visible in the aggregate decision basis. Its compact digest
-shows that attempt's question, evidence, conclusion, unknowns, and recorded
-trace. Historical runs and comparisons remain separate artifacts.
+A lane is one candidate attempt within a job's bounded strategy and question,
+applied to one frozen evidence snapshot. A separate strategy or question—such
+as timeline reconstruction, failure-boundary testing, or challenge review—uses
+a separate job. The Compare stage can focus one lane while keeping every lane
+visible in the aggregate decision basis. Its compact digest shows that
+attempt's question, evidence, conclusion, unknowns, and recorded trace.
+Historical runs and comparisons remain separate artifacts.
 
 On a configured gateway, each selected lane chooses its own **Gateway model**.
 The current integrated catalog can expose Qwen 3.6 27B, GPT-OSS 120B, and
@@ -128,8 +140,8 @@ credentials and endpoints remain on the host; the browser receives a bounded
 catalog identity. Model availability depends on deployment configuration.
 
 Agreement is not proof of correctness. A majority is not a decision. The
-human reviewer judges the evidence, records the next action, and owns the
-decision.
+human reviewer judges the evidence and records the decision; assignment may
+remain explicitly unassigned when no responsible person is known.
 
 ## Collaboration and identity
 
@@ -183,7 +195,7 @@ The dry run creates no investigation, user, membership, role, or capability.
 An exact reconstruction can then be restored after typing RESTORE. Historical
 people remain attribution only. Archive signatures are recorded, not verified.
 
-![Synthetic portable investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
+![Synthetic portable investigation archive export and restore workspace](../media/gallery/war-room-export.png)
 
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 
@@ -224,9 +236,9 @@ No live provider or external material is required. Continue with the
 | Area | Current integrated behavior | Residual or non-claim |
 | --- | --- | --- |
 | Navigation | Multi-page Overview, Investigations, Sources, Administration, and Help; five routed investigation stages; breadcrumbs and deep links | Authorization still applies when another person follows a link |
-| Evidence | Investigation-scoped notes, imports, uploads, snapshots, readable excerpts, context links, and Technical details | A citation or polished summary is not proof; web ZIP and directory upload are not claimed |
+| Evidence | Investigation-scoped notes, imports, uploads, ZIP/directory intake, snapshots, readable excerpts, context links, and Technical details | A citation or polished summary is not proof; intake limits and privacy classification still apply |
 | Analysis | Synthetic/offline and configured-gateway runs, independent lanes, run history, and gateway model selection | Model availability and quality depend on the deployment; unknown cost or usage remains unknown |
-| Comparison and decision | Lane focus, evidence-backed differences, unknowns, discussion, human action and owner | Agreement is not proof and a model cannot approve the human decision |
+| Comparison and decision | Lane focus, evidence-backed differences, unknowns, discussion, human action, and optional owner | Agreement is not proof and a model cannot approve the human decision |
 | Discussion | Durable records refreshed through polling | No WebSocket chat, typing indicators, instant delivery, or authoritative presence |
 | Identity and administration | LDAP-capable sign-in adapter, directory display identity, bounded directory visibility, persistent group-to-role mappings | LDAP must be configured and qualified per deployment; the console does not administer the directory itself |
 | Portable archive | Supported-record download, fail-closed dry-run preflight, staged evidence, actor-scoped replay, and exact restore with deterministic ID remapping and historical identity isolation | No Ed25519 verification; metadata-only archives cannot be applied; source membership, audit references, discussions, alignments, and opaque imported-run state are not portable; memory/SQLite require one server instance |
@@ -238,3 +250,12 @@ No live provider or external material is required. Continue with the
   access, and choose the correct export without losing provenance.
 - [End-to-end walkthrough](END_TO_END.md) — a five-minute, fully synthetic
   tour of the integrated workflow.
+- [War Room workflow Help](../help/war-room/war-room-workflow.md) — searchable
+  Capture, Analyze, Compare, and Decide guidance.
+- [Evidence and model-lane Help](../help/war-room/war-room-evidence-review.md) —
+  manual intake, provenance, comparison, and human decision boundaries.
+- [Deployment and handoff Help](../help/war-room/war-room-deployment.md) — local
+  and shared browser-service shapes plus desktop and CLI roles.
+- [Final-source product gallery](../media/gallery/) — existing reviewed product
+  captures and the destination for manager-captured War Room evidence after
+  exact-build provenance and publication review.

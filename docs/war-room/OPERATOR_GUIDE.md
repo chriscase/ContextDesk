@@ -341,7 +341,9 @@ matters.
   are available. Archive signatures are not verified. Metadata-only archives
   cannot be applied.
 - The selected-evidence prompt package is not a full investigation backup.
-- Web ZIP and directory upload are not claimed.
+- Investigation-scoped files, ZIPs, and browser directories can be previewed
+  and committed under the documented intake limits; accepted files become
+  ordinary evidence on that investigation.
 - The first-run web setup wizard is a bounded preparation surface: it can
   claim the installation, stage SQLite/local or PostgreSQL/LDAP settings,
   exchange protected values for host-owned handles, and run structural checks.

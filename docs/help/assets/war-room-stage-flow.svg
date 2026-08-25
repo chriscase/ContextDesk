@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" role="img" aria-labelledby="war-room-stage-title war-room-stage-desc">
+  <title id="war-room-stage-title">War Room evidence-first stage flow</title>
+  <desc id="war-room-stage-desc">Capture preserves authorship and provenance, Analyze freezes evidence and records independent lane attempts, Compare cross-examines claims against citations, and Decide records a human-owned action. A review rail requires source inspection, explicit unknowns, and explicit ownership state throughout.</desc>
+  <defs>
+    <marker id="stage-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1200" height="620" rx="24" fill="#0f172a"/>
+  <text x="40" y="52" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="28" font-weight="700">Capture → Analyze → Compare → Decide</text>
+  <text x="40" y="82" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Evidence can send the investigation backward; recorded history is never silently replaced.</text>
+
+  <path d="M290 250H325" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#stage-arrow)"/>
+  <path d="M580 250H615" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#stage-arrow)"/>
+  <path d="M870 250H905" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#stage-arrow)"/>
+
+  <rect x="40" y="130" width="250" height="235" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="165" y="174" text-anchor="middle" fill="#fbbf24" font-family="system-ui, sans-serif" font-size="16" font-weight="700">1 · CAPTURE</text>
+  <text x="165" y="216" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="20" font-weight="700">Keep authorship clear</text>
+  <text x="165" y="254" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Human notes stay human</text>
+  <text x="165" y="280" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Imports begin unverified</text>
+  <text x="165" y="306" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Unknown fields stay unknown</text>
+  <rect x="60" y="327" width="210" height="24" rx="12" fill="#082f49" stroke="#38bdf8"/>
+  <text x="165" y="344" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Preserve original material</text>
+
+  <rect x="330" y="130" width="250" height="235" rx="16" fill="#111827" stroke="#a78bfa" stroke-width="2"/>
+  <text x="455" y="174" text-anchor="middle" fill="#fbbf24" font-family="system-ui, sans-serif" font-size="16" font-weight="700">2 · ANALYZE</text>
+  <text x="455" y="216" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="20" font-weight="700">Freeze evidence first</text>
+  <text x="455" y="254" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Select bounded evidence</text>
+  <text x="455" y="280" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Record snapshot proof</text>
+  <text x="455" y="306" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Keep each attempt separate</text>
+  <rect x="369" y="327" width="172" height="24" rx="12" fill="#312e81" stroke="#a78bfa"/>
+  <text x="455" y="344" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">One attempt per lane</text>
+
+  <rect x="620" y="130" width="250" height="235" rx="16" fill="#111827" stroke="#fb7185" stroke-width="2"/>
+  <text x="745" y="174" text-anchor="middle" fill="#fbbf24" font-family="system-ui, sans-serif" font-size="16" font-weight="700">3 · COMPARE</text>
+  <text x="745" y="216" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="20" font-weight="700">Cross-examine claims</text>
+  <text x="745" y="254" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Open cited evidence</text>
+  <text x="745" y="280" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Record conflict and gaps</text>
+  <text x="745" y="306" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Do not count prose as votes</text>
+  <rect x="659" y="327" width="172" height="24" rx="12" fill="#4c0519" stroke="#fb7185"/>
+  <text x="745" y="344" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Agreement is not proof</text>
+
+  <rect x="910" y="130" width="250" height="235" rx="16" fill="#111827" stroke="#34d399" stroke-width="2"/>
+  <text x="1035" y="174" text-anchor="middle" fill="#fbbf24" font-family="system-ui, sans-serif" font-size="16" font-weight="700">4 · DECIDE</text>
+  <text x="1035" y="216" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="20" font-weight="700">Keep authority human</text>
+  <text x="1035" y="254" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Choose the next action</text>
+  <text x="1035" y="280" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Name an owner when known</text>
+  <text x="1035" y="306" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Preserve remaining unknowns</text>
+  <rect x="930" y="327" width="210" height="24" rx="12" fill="#064e3b" stroke="#34d399"/>
+  <text x="1035" y="344" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">A person records the call</text>
+
+  <rect x="40" y="425" width="1120" height="145" rx="16" fill="#111827" stroke="#475569" stroke-width="2"/>
+  <text x="65" y="467" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="20" font-weight="700">Review rail · visible at every stage</text>
+  <text x="65" y="505" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Inspect the source in context · distinguish observed from inferred · expose missing provenance and trace gaps</text>
+  <text x="65" y="535" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Return for more evidence when needed · record rationale, uncertainty, and owner or explicit unassigned state</text>
+</svg>

@@ -33,6 +33,78 @@
       "theme": "Slate",
       "claim": "Synthetic Logs library summary with 25,000 events, 10 imported files, level counts, and learned templates",
       "reviewedBy": "Agent: Codex · Model: gpt-5.6-sol"
+    },
+    {
+      "path": "docs/media/gallery/war-room-overview.png",
+      "gitBlob": "d1e0f5359183b335ccb401dbaa139f0dab3e58c4",
+      "sourceSha": "ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd",
+      "privacyReview": "publishable",
+      "modelInventoryVisible": false,
+      "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
+      "theme": "Dark War Room default theme",
+      "claim": "Overview activity feed, recorded status counts, and active investigation entry point",
+      "dimensions": { "width": 1280, "height": 720 },
+      "reviewedBy": "Agent: Codex · visual review · synthetic only"
+    },
+    {
+      "path": "docs/media/gallery/war-room-capture-analyze.png",
+      "gitBlob": "ee1344a34e9b81ac35bf92541d2d5ccc33cfa815",
+      "sourceSha": "ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd",
+      "privacyReview": "publishable",
+      "modelInventoryVisible": false,
+      "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
+      "theme": "Dark War Room default theme",
+      "claim": "Capture workspace with human-authored notes, imported unverified output, provenance, and investigation-scoped file intake",
+      "dimensions": { "width": 1280, "height": 720 },
+      "reviewedBy": "Agent: Codex · visual review · synthetic only"
+    },
+    {
+      "path": "docs/media/gallery/war-room-analyze.png",
+      "gitBlob": "1f0a0d0f0eb0122489bb101a7d857274b49c5883",
+      "sourceSha": "ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd",
+      "privacyReview": "publishable",
+      "modelInventoryVisible": false,
+      "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
+      "theme": "Dark War Room default theme",
+      "claim": "Analyze workspace with recognizable evidence, frozen snapshot lineage, and selectable synthetic model lanes",
+      "dimensions": { "width": 1280, "height": 720 },
+      "reviewedBy": "Agent: Codex · visual review · synthetic only"
+    },
+    {
+      "path": "docs/media/gallery/war-room-compare-decide.png",
+      "gitBlob": "0cc6eaa7a06149203d15f74050be4ea4df0ca8fd",
+      "sourceSha": "ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd",
+      "privacyReview": "publishable",
+      "modelInventoryVisible": false,
+      "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
+      "theme": "Dark War Room default theme",
+      "claim": "Compare workspace with historical artifacts, copyable deep-link sections, and lane-focus controls",
+      "dimensions": { "width": 1280, "height": 720 },
+      "reviewedBy": "Agent: Codex · visual review · synthetic only"
+    },
+    {
+      "path": "docs/media/gallery/war-room-decide-export.png",
+      "gitBlob": "029a25a40ace5db97e10a16a630dd3d18db4d5ee",
+      "sourceSha": "ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd",
+      "privacyReview": "publishable",
+      "modelInventoryVisible": false,
+      "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
+      "theme": "Dark War Room default theme",
+      "claim": "Decide workspace with an accepted, attributable human decision and revision history",
+      "dimensions": { "width": 1280, "height": 720 },
+      "reviewedBy": "Agent: Codex · visual review · synthetic only"
+    },
+    {
+      "path": "docs/media/gallery/war-room-export.png",
+      "gitBlob": "b389a3ea8e05e0f5bd2643fd2daf545fd898174b",
+      "sourceSha": "ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd",
+      "privacyReview": "publishable",
+      "modelInventoryVisible": false,
+      "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
+      "theme": "Dark War Room default theme",
+      "claim": "Accepted human decision beside the share-safe export boundary",
+      "dimensions": { "width": 1280, "height": 720 },
+      "reviewedBy": "Agent: Codex · visual review · synthetic only"
     }
   ]
 }

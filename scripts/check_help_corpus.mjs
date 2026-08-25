@@ -19,6 +19,7 @@ export const HELP_SECTIONS = new Set([
   "permissions",
   "memory",
   "log-analysis",
+  "war-room",
   "connectors",
   "backup",
   "skills",

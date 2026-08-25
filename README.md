@@ -69,10 +69,24 @@ This is a CI evidence status, not a claim that the application cannot run on Ubu
 | **War Room GUI** | **[War Room guide](docs/war-room/README.md)** · [Operator workflow](docs/war-room/OPERATOR_GUIDE.md#the-investigation-workflow) · [Evidence and deep links](docs/war-room/OPERATOR_GUIDE.md#evidence-sources-and-deep-links) · [Administration and LDAP identity](docs/war-room/OPERATOR_GUIDE.md#administration-identity-and-access) · [Exports and portable archives](docs/war-room/OPERATOR_GUIDE.md#three-different-exports) · [Five-minute synthetic walkthrough](docs/war-room/END_TO_END.md) |
 | **Desktop GUI** | [Configure a provider](#configure-a-provider) · Help [first run](docs/help/getting-started/first-run.md) · [Log Explorer](docs/help/log-analysis/log-explorer.md) · [demo datasets](docs/help/log-analysis/demo-datasets.md) |
 | **CLI** | [CLI and log normalization](#cli-and-log-normalization) · [CLI guide](docs/CLI.md) |
+| **War Room Help** | [Workflow](docs/help/war-room/war-room-workflow.md) · [Evidence review](docs/help/war-room/war-room-evidence-review.md) · [Deployment and handoff](docs/help/war-room/war-room-deployment.md) |
 | **Normalization** | [NORMALIZATION.md](docs/NORMALIZATION.md) · [spec](docs/specs/NORMALIZED_LOG_EVENTS_V1.md) |
 | **Logging quality assessment (LQA)** | [LQA guide](docs/help/log-analysis/logging-quality-assessment.md) · [Demo runbook](docs/DEMO_RUNBOOK.md#f-logging-quality-assessment-jsonmarkdown-export) |
 | **Architecture** | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [PRODUCT.md](docs/PRODUCT.md) · [AGENTS.md](AGENTS.md) |
 | **Repeatable demo (GUI + CLI)** | **[Demo runbook](docs/DEMO_RUNBOOK.md)** · [Demo acceptance](docs/DEMO_ACCEPTANCE.md) |
+
+## War Room at a glance
+
+The ContextDesk War Room is a shared command center for difficult technical
+investigations: capture recognizable evidence, freeze the review basis, run
+independent strategy/model lanes, compare what they support or leave unknown,
+and record a human decision. The fully synthetic preview below shows the
+Overview activity feed and direct paths into the work. See the [full War Room
+guide](docs/war-room/README.md) for the stage-by-stage workflow, screenshots,
+desktop ContextDesk relationship, deployment boundaries, and portable archive
+behavior.
+
+![Synthetic ContextDesk War Room overview with activity feed and active investigations](docs/media/gallery/war-room-overview.png)
 
 ## CLI and log normalization
 
@@ -244,6 +258,28 @@ Windows/PowerShell examples.
 ### Product gallery (packaged app)
 
 ![ContextDesk Logs library showing an installed synthetic demonstration corpus](docs/media/gallery/logs-library-demo.png)
+
+## War Room
+
+**ContextDesk War Room is the optional browser workspace for evidence-first,
+human-owned investigations.** A team captures observations and imported output,
+freezes evidence for independent analysis lanes, compares claims against their
+citations, and records a next action with its responsible person when one is
+assigned. A fluent model
+answer never becomes the decision by consensus or by default.
+
+War Room can run privately on one workstation with loopback networking,
+SQLite, local authentication, and filesystem evidence storage, or as an
+operator-deployed shared service with PostgreSQL and encrypted LDAP-backed
+sign-in. The browser is a client of the authoritative service in both modes.
+The ContextDesk desktop and CLI remain separate tools for local exploration,
+normalization, and evidence preparation; transfer into War Room is explicit,
+and automatic desktop/CLI synchronization is not claimed.
+
+Start with the **[War Room guide](docs/war-room/README.md)**, then use the
+searchable Help pages for the [stage workflow](docs/help/war-room/war-room-workflow.md),
+[evidence and decision boundaries](docs/help/war-room/war-room-evidence-review.md),
+and [deployment and ContextDesk handoff](docs/help/war-room/war-room-deployment.md).
 
 ## Integrate your application data
 
