@@ -176,6 +176,18 @@ test.describe("War Room clarity for ordinary triage staff", () => {
     // An imported chat stays marked unverified until a person reads it.
     await expect(page.getByText("Unverified imported run").first()).toBeVisible();
     await screenshot(page, "19-email-and-chat-evidence");
+
+    // A large log is previewed bounded, with the whole trace one disclosure
+    // away — and the preview gives way to it rather than repeating its opening
+    // lines above the full text.
+    await gotoStage(page, "Analyze");
+    const collapsible = page.locator(".experiment-lab__artifact-collapsible").first();
+    if (await collapsible.count()) {
+      await expect(collapsible.locator(".experiment-lab__artifact-preview")).toBeVisible();
+      await collapsible.locator("summary").first().click();
+      await expect(collapsible.locator(".experiment-lab__artifact-preview")).toBeHidden();
+      await expect(collapsible.locator(".experiment-lab__artifact-full")).toBeVisible();
+    }
   });
 
   test("Situation reflects a freeze without needing a page reload", async ({ page }) => {
