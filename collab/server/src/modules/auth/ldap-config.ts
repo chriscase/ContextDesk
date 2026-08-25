@@ -3,6 +3,7 @@
  * Plaintext is refused at load time. Bind secrets stay in this module.
  */
 import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import {
   DEFAULT_DIRECTORY_ATTRIBUTE_MAP,
   assertLdapAttributeName,
@@ -103,7 +104,15 @@ function loadBindPassword(env: NodeJS.ProcessEnv): string | undefined {
     if (!ref.startsWith("file:") || ref.includes("://")) {
       throw new Error("LDAP bind password reference must be a file: path");
     }
-    return readBindSecretFile(ref.slice("file:".length));
+    const refPath = ref.slice("file:".length);
+    // AGENTS.md: an owner-local secret reference is an *absolute* file: path.
+    // A relative one resolves against the server process CWD, which differs
+    // between a systemd unit, a container, and a developer shell - so the same
+    // configuration would silently read a different file, or none.
+    if (!isAbsolute(refPath)) {
+      throw new Error("LDAP bind password reference must be an absolute file: path");
+    }
+    return readBindSecretFile(refPath);
   }
   return undefined;
 }

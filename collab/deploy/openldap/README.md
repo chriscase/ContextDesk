@@ -29,3 +29,15 @@ COLLAB_LDAP_BIND_DN=cn=admin,dc=example,dc=test
 # COLLAB_LDAP_BIND_PASSWORD=replace-from-secret-store
 COLLAB_GROUP_ROLE_MAP=cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
 ```
+
+## What the seed covers
+
+| Entry | Why it is in the fixture |
+| --- | --- |
+| `alice` (contributor), `carol` (viewer), `dave` (admin) | One person per mapped role, so the group→role map is exercised end to end |
+| `bob` in `cn=unmapped` | Default-deny: a directory user with no mapped group must be refused sign-in, not admitted as a viewer |
+| `cn=engineering` | A **nested** group whose member is `cn=contributors`, not a person. Group resolution is direct-membership only (`memberOf` plus one `(member={dn})` search keyed on the user's own DN), so `alice` must resolve `contributors` and **not** `engineering`. The fixture exists to keep that boundary tested rather than assumed — see the "documented non-claim" tests in `ldap-synthetic.test.ts`. |
+
+Passwords here are fixture strings for a throwaway container. Supply the admin
+password from a secret store; `COLLAB_LDAP_BIND_PASSWORD_REF` takes an absolute
+`file:` path (for example `file:/run/secrets/ldap-bind`).

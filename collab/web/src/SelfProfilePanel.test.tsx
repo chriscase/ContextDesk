@@ -242,3 +242,80 @@ describe("SelfProfilePanel", () => {
     expect(onLeaveCancel).toHaveBeenCalled();
   });
 });
+
+describe("SelfProfilePanel identity privacy", () => {
+  const ERIN_DN = "uid=erin,ou=eastwing,ou=people,dc=example,dc=test";
+
+  // `directorySubject` is what the server actually ships to the owner: the
+  // linkage marker, not the DN. See redactProfileForSelfView in contracts.
+  const ldapProfile = (directorySubject = "directory-linked") =>
+    profile({
+      id: directorySubject === "directory-linked" ? "self" : ERIN_DN,
+      username: "erin",
+      displayName: "Erin Directory",
+      provenance: "ldap",
+      directorySubject,
+      directorySyncStatus: "synced",
+      directorySyncedAt: "2026-01-03T00:00:00.000Z",
+    });
+
+  it("leads with the plain name, username, and role and collapses the technical detail", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(ldapProfile())));
+    renderPanel();
+
+    expect(await screen.findAllByText("Erin Directory")).toHaveLength(2);
+    expect(screen.getByText("@erin")).toBeTruthy();
+    expect(screen.getByText("Triage engineer · Response")).toBeTruthy();
+
+    // Provenance and sync state live behind a closed disclosure rather than in
+    // the primary identity summary.
+    const disclosure = screen.getByText("Account and directory details").closest("details");
+    expect(disclosure).toBeTruthy();
+    expect((disclosure as HTMLDetailsElement).open).toBe(false);
+    expect(within(disclosure as HTMLElement).getByText("Directory account")).toBeTruthy();
+    expect(within(disclosure as HTMLElement).getByText("Directory sync")).toBeTruthy();
+  });
+
+  it("never renders a raw DN, even when the response still carries one", async () => {
+    // Defence in depth: a server that has not been updated, a replayed
+    // response, or a future code path must not turn into a rendered DN.
+    vi.stubGlobal("fetch", vi.fn(async () => response(ldapProfile(ERIN_DN))));
+    renderPanel();
+
+    expect(await screen.findAllByText("Erin Directory")).toHaveLength(2);
+    const disclosure = screen.getByText("Account and directory details").closest("details");
+    (disclosure as HTMLDetailsElement).open = true;
+
+    for (const fragment of ["ou=eastwing", "ou=people", "dc=example", "uid=erin"]) {
+      expect(document.body.textContent).not.toContain(fragment);
+    }
+    // The linkage is still reported, without the identifier.
+    expect(
+      screen.getByText("Linked to the LDAP directory (technical identifier hidden)"),
+    ).toBeTruthy();
+  });
+
+  it("shows no directory linkage and no bind or filter detail for a local account", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(profile())));
+    renderPanel();
+
+    expect(await screen.findByText("Local Viewer")).toBeTruthy();
+    const disclosure = screen.getByText("Account and directory details").closest("details");
+    (disclosure as HTMLDetailsElement).open = true;
+    expect(screen.getByText("Not linked to a directory")).toBeTruthy();
+
+    // Nothing in the owner's own view discloses how the installation binds to
+    // a directory or which filters it uses.
+    for (const fragment of [
+      "objectClass",
+      "memberOf",
+      "sAMAccountName",
+      "bindDn",
+      "cn=svc",
+      "ldaps://",
+      "(uid=",
+    ]) {
+      expect(document.body.textContent).not.toContain(fragment);
+    }
+  });
+});
