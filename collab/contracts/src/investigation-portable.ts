@@ -587,6 +587,14 @@ const importedRunShape: ObjectShape = {
   evidenceVisibility: f.opt(f.en(...EVIDENCE_VISIBILITY)),
   snapshotId: f.optNul(f.str),
   privacyClass: f.opt(f.en(...PRIVACY_CLASSES)),
+  importerId: f.opt(f.str),
+  operatorId: f.opt(f.str),
+  claimedTraces: f.opt(f.arr(f.str)),
+  visibilityNote: f.optNul(f.str),
+  uncertainty: f.optNul(f.str),
+  timing: f.optNul(f.str),
+  cost: f.optNul(f.str),
+  redacted: f.opt(f.bool),
   opaquePayloadJson: f.nul(f.str),
   objectHash: f.req(f.str),
 };
@@ -918,6 +926,14 @@ export interface PortableImportedAiRunV1 {
   evidenceVisibility?: (typeof EVIDENCE_VISIBILITY)[number];
   snapshotId?: string | null;
   privacyClass?: (typeof PRIVACY_CLASSES)[number];
+  importerId?: string;
+  operatorId?: string;
+  claimedTraces?: string[];
+  visibilityNote?: string | null;
+  uncertainty?: string | null;
+  timing?: string | null;
+  cost?: string | null;
+  redacted?: boolean;
   opaquePayloadJson: string | null;
   objectHash: string;
 }
@@ -1911,6 +1927,12 @@ export function parsePortableInvestigation(
         `$.importedAiRuns[${i}].promptDigest`,
         "exact prompt completeness requires a prompt digest",
       );
+    }
+    if (row.operatorId) {
+      requireActor(actors, row.operatorId, `$.importedAiRuns[${i}].operatorId`);
+    }
+    if (row.importerId) {
+      requireActor(actors, row.importerId, `$.importedAiRuns[${i}].importerId`);
     }
     if (row.contributionId) {
       const bound = bundle.contributions.find((item) => item.id === row.contributionId);

@@ -1090,6 +1090,12 @@ export async function persistPortableArchive(input: {
         throw new Error("imported run snapshot binding is missing from the destination snapshots");
       }
     }
+    const operator = run.operatorId
+      ? attribution(run.operatorId)
+      : { id: actor.id, username: actor.username };
+    const importer = run.importerId
+      ? attribution(run.importerId)
+      : { id: actor.id, username: actor.username };
     const row: FrozenRunRow = {
       id: remapOf(report, "imported_ai_run", run.id),
       caseId: investigationId,
@@ -1104,19 +1110,19 @@ export async function persistPortableArchive(input: {
       workflowCompleteness: run.workflowCompleteness ?? "unknown",
       evidenceVisibility: run.evidenceVisibility ?? "unknown",
       snapshotBinding,
-      visibilityNote: null,
-      importerId: actor.id,
-      importerUsername: actor.username,
-      operatorId: actor.id,
-      operatorUsername: actor.username,
+      visibilityNote: run.visibilityNote ?? null,
+      importerId: importer.id,
+      importerUsername: importer.username,
+      operatorId: operator.id,
+      operatorUsername: operator.username,
       provider: run.providerKind,
       model: run.model,
       version: run.version,
-      claimedTraces: [],
-      uncertainty: null,
-      timing: null,
-      cost: null,
-      redacted: false,
+      claimedTraces: [...(run.claimedTraces ?? [])],
+      uncertainty: run.uncertainty ?? null,
+      timing: run.timing ?? null,
+      cost: run.cost ?? null,
+      redacted: run.redacted === true,
       privacyClass: run.privacyClass ?? "owner_only",
       createdAt: run.importedAt,
     };

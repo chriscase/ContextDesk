@@ -481,6 +481,10 @@ function applySupportReasons(
     bundle.investigation.createdBy,
     ...bundle.contributions.map((row) => row.authorId),
     ...bundle.evidence.map((row) => row.createdBy),
+    ...bundle.importedAiRuns.flatMap((row) => [
+      ...(row.importerId ? [row.importerId] : []),
+      ...(row.operatorId ? [row.operatorId] : []),
+    ]),
     ...bundle.triageJobs.map((row) => row.requestedBy),
     ...bundle.helpfulnessObservations.map((row) => row.reviewerId),
     ...bundle.decisions.flatMap((row) => [row.authorId, ...(row.ownerId ? [row.ownerId] : [])]),
@@ -728,6 +732,10 @@ export class PortableInvestigationService {
     }
     for (const row of sources) {
       addActor(actors, { id: row.createdBy });
+    }
+    for (const row of importedRuns) {
+      addActor(actors, { id: row.importerId, username: row.importerUsername });
+      addActor(actors, { id: row.operatorId, username: row.operatorUsername });
     }
 
     const contents = new Map<string, ProjectedContent>();
@@ -1257,6 +1265,14 @@ export class PortableInvestigationService {
           evidenceVisibility: row.evidenceVisibility,
           snapshotId: boundSnapshot?.id ?? null,
           privacyClass: row.privacyClass,
+          importerId: row.importerId,
+          operatorId: row.operatorId,
+          claimedTraces: [...row.claimedTraces],
+          visibilityNote: row.visibilityNote,
+          uncertainty: row.uncertainty,
+          timing: row.timing,
+          cost: row.cost,
+          redacted: row.redacted,
           opaquePayloadJson: null,
           objectHash: "",
         };

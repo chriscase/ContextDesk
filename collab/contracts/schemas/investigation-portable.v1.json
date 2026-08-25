@@ -376,6 +376,14 @@
           "evidenceVisibility": { "type": "string", "enum": ["unknown", "importer_described"] },
           "snapshotId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
           "privacyClass": { "$ref": "#/$defs/privacy" },
+          "importerId": { "type": "string", "minLength": 1 },
+          "operatorId": { "type": "string", "minLength": 1 },
+          "claimedTraces": { "type": "array", "items": { "type": "string" } },
+          "visibilityNote": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "uncertainty": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "timing": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "cost": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "redacted": { "type": "boolean" },
           "opaquePayloadJson": { "$ref": "#/$defs/opaquePayloadJson" },
           "objectHash": { "$ref": "#/$defs/objectHash" }
         }

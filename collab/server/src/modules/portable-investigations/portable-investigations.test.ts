@@ -2258,6 +2258,68 @@ describe("portable investigation apply", () => {
     expect(destRun?.snapshotBinding).not.toBe(sourceRun.snapshotBinding);
   });
 
+  it("preserves imported-run redaction, claimed traces, and remapped operator after portable restore", async () => {
+    const row = await fixture();
+    const first = (await row.imports.listRuns(row.caseId, ACTOR, true))[0];
+    if (!first) throw new Error("fixture imported run is missing");
+    const source = await row.imports.importRun(
+      row.caseId,
+      ACTOR,
+      {
+        outputText: "A redacted synthetic stall remains operator-attributed.",
+        promptText: "Inspect the redacted synthetic queue evidence.",
+        sourceId: first.sourceId,
+        operatorId: "actor-historical-run-operator",
+        operatorUsername: "run-operator",
+        promptCompleteness: "exact",
+        outputCompleteness: "exact",
+        claimedTraces: ["synthetic-mailer-pool"],
+        uncertainty: "Retries remain unproven.",
+        timing: "2042-03-04T10:05:00Z",
+        cost: "synthetic-unmetered",
+        visibilityNote: "Importer described a share-safe excerpt only.",
+        redacted: true,
+        privacyClass: "owner_only",
+      },
+      "fixture",
+      false,
+    );
+    expect(source.redacted).toBe(true);
+    expect(source.claimedTraces).toEqual(["synthetic-mailer-pool"]);
+    expect(source.operatorId).not.toBe(ACTOR.id);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const portable = archive.investigation.importedAiRuns.find((run) => run.id === source.id);
+    expect(portable?.redacted).toBe(true);
+    expect(portable?.claimedTraces).toEqual(["synthetic-mailer-pool"]);
+    expect(portable?.operatorId).toBe(source.operatorId);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(preview.apply.confirmationToken).toEqual(expect.any(String));
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const dest = (await row.imports.listRuns(applied.investigationId, ACTOR, true))
+      .find((run) => run.outputText === source.outputText);
+    expect(dest?.redacted).toBe(true);
+    expect(dest?.claimedTraces).toEqual(["synthetic-mailer-pool"]);
+    expect(dest?.uncertainty).toBe("Retries remain unproven.");
+    expect(dest?.timing).toBe("2042-03-04T10:05:00Z");
+    expect(dest?.cost).toBe("synthetic-unmetered");
+    expect(dest?.visibilityNote).toBe("Importer described a share-safe excerpt only.");
+    expect(dest?.importerId).toBe(ACTOR.id);
+    expect(dest?.operatorId).not.toBe(ACTOR.id);
+    expect(dest?.operatorId).not.toBe(source.operatorId);
+    expect(dest?.operatorUsername).toMatch(/^historical-/);
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({
@@ -3809,6 +3871,71 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
         ),
       ).rejects.toThrow(/imported-run corroboration is not exact-applyable/);
       expect(await new PgCaseStore(client).listCases()).toEqual([]);
+    });
+  });
+
+  it("preserves imported-run redaction and remapped operator after PostgreSQL apply", async () => {
+    const row = await fixture();
+    const first = (await row.imports.listRuns(row.caseId, ACTOR, true))[0];
+    if (!first) throw new Error("fixture imported run is missing");
+    const source = await row.imports.importRun(
+      row.caseId,
+      ACTOR,
+      {
+        outputText: "A redacted synthetic stall remains operator-attributed.",
+        promptText: "Inspect the redacted synthetic queue evidence.",
+        sourceId: first.sourceId,
+        operatorId: "actor-historical-run-operator",
+        operatorUsername: "run-operator",
+        promptCompleteness: "exact",
+        outputCompleteness: "exact",
+        claimedTraces: ["synthetic-mailer-pool"],
+        uncertainty: "Retries remain unproven.",
+        visibilityNote: "Importer described a share-safe excerpt only.",
+        redacted: true,
+        privacyClass: "owner_only",
+      },
+      "fixture",
+      false,
+    );
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const pgRoot = await mkdtemp(join(tmpdir(), "cd-portable-pg-redacted-run-"));
+      roots.push(pgRoot);
+      const pgEvidence = new FilesystemEvidenceStore({
+        rootDir: pgRoot,
+        acquireWriteLease: async () => () => undefined,
+      });
+      const investigationId = await withPgApplyTransaction(client, pgEvidence, async (ports) =>
+        persistPortableArchive({
+          archive,
+          report: preview.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: archiveContentBytes(archive),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      );
+      const destRuns = await new PgRunStore(client).listByCase(investigationId);
+      const dest = destRuns.find((run) => run.outputText === source.outputText);
+      expect(dest?.redacted).toBe(true);
+      expect(dest?.claimedTraces).toEqual(["synthetic-mailer-pool"]);
+      expect(dest?.uncertainty).toBe("Retries remain unproven.");
+      expect(dest?.visibilityNote).toBe("Importer described a share-safe excerpt only.");
+      expect(dest?.importerId).toBe(ACTOR.id);
+      expect(dest?.operatorId).not.toBe(ACTOR.id);
+      expect(dest?.operatorId).not.toBe(source.operatorId);
+      expect(dest?.operatorUsername).toMatch(/^historical-/);
     });
   });
 });
