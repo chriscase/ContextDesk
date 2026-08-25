@@ -27,6 +27,8 @@ interface CandidateRow {
 interface ExperimentView {
   id: string;
   packageId: string;
+  /** When this comparison was recorded. Drives ordering and the latest marker. */
+  createdAt?: string;
   taskFingerprint: string;
   snapshotFingerprint: string;
   candidates: CandidateRow[];
@@ -195,6 +197,38 @@ function latencyLabel(value: CandidateRow["observedLatency"]): string {
   return value.status === "observed" && typeof value.milliseconds === "number"
     ? `${value.milliseconds} ms`
     : "unknown";
+}
+
+/**
+ * Comparisons newest first.
+ *
+ * The API returns them oldest first, which is the right storage order and the
+ * wrong reading order: the newest comparison is the one a decision should be
+ * based on, so it belongs at the top and it is what an unspecified selection
+ * must resolve to.
+ */
+function newestFirst(experiments: ExperimentView[]): ExperimentView[] {
+  return [...experiments].sort((left, right) => {
+    const byTime = (right.createdAt ?? "").localeCompare(left.createdAt ?? "");
+    if (byTime !== 0) return byTime;
+    // Without timestamps the API order is the only ordering fact there is;
+    // preserve it reversed rather than inventing one from the ids.
+    return experiments.indexOf(right) - experiments.indexOf(left);
+  });
+}
+
+/** The comparison a decision defaults to when the address names none. */
+function defaultExperimentId(experiments: ExperimentView[]): string | null {
+  return newestFirst(experiments)[0]?.id ?? null;
+}
+
+/** When a comparison was recorded, in local time. */
+function recordedAtLabel(experiment: ExperimentView): string {
+  const stamp = experiment.createdAt;
+  if (!stamp) return "recorded time not captured";
+  const parsed = new Date(stamp);
+  if (Number.isNaN(parsed.getTime())) return "recorded time not captured";
+  return parsed.toLocaleString();
 }
 
 function candidateRunSummary(candidates: CandidateRow[]): string {
@@ -1345,7 +1379,9 @@ export function ExperimentLab(props: {
     }
     const requestedLane = props.routeFocus?.lane;
     const selected = experiments.find((row) =>
-      (requestedExperiment ? row.id === requestedExperiment : row.id === (active ?? experiments[0]?.id)),
+      (requestedExperiment
+        ? row.id === requestedExperiment
+        : row.id === (active ?? defaultExperimentId(experiments))),
     );
     setFocusedCandidateId(
       requestedLane && selected?.candidates.some((row) => row.candidateId === requestedLane)
@@ -1423,7 +1459,12 @@ export function ExperimentLab(props: {
     };
   }, [props.caseId, props.participant?.username, readOnly]);
 
-  const current = experiments.find((row) => row.id === active) ?? experiments[0] ?? null;
+  // An explicit selection always wins; otherwise the newest comparison is the
+  // decision basis, so a stale run can never quietly become one.
+  const current =
+    experiments.find((row) => row.id === active)
+    ?? experiments.find((row) => row.id === defaultExperimentId(experiments))
+    ?? null;
 
   useEffect(() => {
     if (!current) return undefined;
@@ -2079,27 +2120,49 @@ export function ExperimentLab(props: {
         </p>
       ) : null}
       {experiments.length > 1 ? (
-        <nav className="experiment-lab__experiments" aria-label="Historical triage artifacts">
-          <p className="experiment-lab__eyebrow">Historical artifacts</p>
+        <nav className="experiment-lab__experiments" aria-label="Comparisons on this investigation">
+          <p className="experiment-lab__eyebrow">Comparisons on this investigation</p>
+          <p className="experiment-lab__section-note">
+            Newest first. {surface === "decision" ? "A decision" : "This workspace"} uses the newest
+            comparison unless you pick an older one here.
+          </p>
           <ul className="case-list__items">
-            {experiments.map((row, index) => (
-              <li key={row.id}>
-                <button
-                  type="button"
-                  aria-current={row.id === current?.id ? "page" : undefined}
-                  aria-pressed={row.id === current?.id}
-                  onClick={() => selectExperiment(row.id)}
-                >
-                  Comparison {index + 1}: {candidateModelSummary(row.candidates) || "Unlabeled models"}
-                  {" · "}
-                  {row.candidates.length} lane
-                  {row.candidates.length === 1 ? "" : "s"}
-                  {candidateRunSummary(row.candidates)
-                    ? ` · ${candidateRunSummary(row.candidates)}`
-                    : ""}
-                </button>
-              </li>
-            ))}
+            {newestFirst(experiments).map((row, position) => {
+              // The number stays the recording order, so a comparison can be
+              // named out loud and keep that name; the row order and the
+              // marker carry recency instead.
+              const ordinal = experiments.findIndex((item) => item.id === row.id) + 1;
+              const latest = position === 0;
+              const selected = row.id === current?.id;
+              return (
+                <li key={row.id}>
+                  <button
+                    type="button"
+                    aria-current={selected ? "page" : undefined}
+                    aria-pressed={selected}
+                    onClick={() => selectExperiment(row.id)}
+                  >
+                    <span className="experiment-lab__experiment-name">
+                      Comparison {ordinal}:{" "}
+                      {candidateModelSummary(row.candidates) || "Unlabeled lanes"}
+                    </span>
+                    <span className="experiment-lab__experiment-meta">
+                      {latest ? "Latest" : "Earlier"} · recorded {recordedAtLabel(row)} ·{" "}
+                      {row.candidates.length} lane
+                      {row.candidates.length === 1 ? "" : "s"}
+                      {candidateRunSummary(row.candidates)
+                        ? ` · ${candidateRunSummary(row.candidates)}`
+                        : ""}
+                    </span>
+                    {!latest && selected ? (
+                      <span className="experiment-lab__focus-flag">
+                        You are reading an earlier comparison, not the latest one
+                      </span>
+                    ) : null}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </nav>
       ) : null}
@@ -2873,8 +2936,24 @@ export function ExperimentLab(props: {
                   <ul className="experiment-lab__detail-list">
                     {current.agreement.candidateSpecific.map((row) => (
                       <li key={row.candidateId}>
-                        <strong>{candidateLabel(row.candidateId)} uses evidence no other lane cites.</strong>{" "}
-                        Inspect and corroborate it before relying on the lane.
+                        {row.evidenceRefs.length ? (
+                          <>
+                            <strong>{candidateLabel(row.candidateId)} uses evidence no other lane cites.</strong>{" "}
+                            Inspect and corroborate it before relying on the lane.
+                          </>
+                        ) : (
+                          // An empty reference list is a gap in the record, not
+                          // uncorroborated evidence. Claiming unique evidence
+                          // and then reporting none contradicts itself.
+                          <>
+                            <strong>
+                              {candidateLabel(row.candidateId)} is listed as citing evidence no other
+                              lane cites, but no evidence reference was recorded for it.
+                            </strong>{" "}
+                            There is nothing here to inspect; treat the lane as uncorroborated until
+                            a reference is attached.
+                          </>
+                        )}
                         {row.evidenceRefs.length ? (
                           <ul className="experiment-lab__detail-list">
                             {row.evidenceRefs.map((evidenceRef) => {
@@ -2892,9 +2971,7 @@ export function ExperimentLab(props: {
                               );
                             })}
                           </ul>
-                        ) : (
-                          <span> No supporting artifact was recorded.</span>
-                        )}
+                        ) : null}
                       </li>
                     ))}
                     {current.agreement.roleConflicts.map((row) => {

@@ -539,7 +539,8 @@ describe("experiment lab", () => {
       .getByText("Benchmark evidence details")
       .closest("details");
     expect(goldDetails?.hasAttribute("open")).toBe(false);
-    expect(goldDetails?.textContent).toContain("Supporting evidence needs inspection");
+    expect(goldDetails?.textContent).toContain("Demo checkout log");
+    expect(goldDetails?.textContent).toContain("Demo inventory timeout");
     expect(goldDetails?.textContent).not.toContain("ev-demo-inventory-timeout");
 
     openCompareWorkspace("Strategy paths");
@@ -805,6 +806,74 @@ describe("experiment lab", () => {
     );
   });
 
+  it("bases a decision on the newest comparison, not the first one recorded", async () => {
+    // The API returns comparisons oldest first. Reading position as currency
+    // silently pointed the human decision at stale analysis: a later run that
+    // added a lane was recorded, and the decision surface kept showing the
+    // earlier one.
+    const older = { ...cockpitView, id: "exp-older", createdAt: "2026-08-01T00:00:00.000Z" };
+    const newer = {
+      ...seededThreeModelView,
+      id: "exp-newer",
+      createdAt: "2026-08-20T00:00:00.000Z",
+    };
+    stubExperiments([older, newer]);
+    render(
+      <ExperimentLab
+        caseId="00000000-0000-4000-8000-000000000001"
+        surface="decision"
+        canWrite
+        canLead
+      />,
+    );
+
+    const picker = await screen.findByRole("navigation", {
+      name: "Comparisons on this investigation",
+    });
+    const rows = within(picker).getAllByRole("button");
+    // Newest first, and said in words rather than implied by position.
+    expect(rows[0]?.textContent).toMatch(/Latest/);
+    expect(rows[0]?.getAttribute("aria-current")).toBe("page");
+    expect(rows[1]?.textContent).toMatch(/Earlier/);
+    expect(rows[1]?.getAttribute("aria-current")).toBeNull();
+  });
+
+  it("keeps an explicitly addressed older comparison selected", async () => {
+    const older = { ...cockpitView, id: "exp-older", createdAt: "2026-08-01T00:00:00.000Z" };
+    const newer = {
+      ...seededThreeModelView,
+      id: "exp-newer",
+      createdAt: "2026-08-20T00:00:00.000Z",
+    };
+    stubExperiments([older, newer]);
+    render(
+      <ExperimentLab
+        caseId="00000000-0000-4000-8000-000000000001"
+        surface="decision"
+        canWrite
+        canLead
+        routeFocus={{
+          section: "decision-heading",
+          item: null,
+          itemKind: null,
+          lane: null,
+          experiment: "exp-older",
+        }}
+      />,
+    );
+
+    const picker = await screen.findByRole("navigation", {
+      name: "Comparisons on this investigation",
+    });
+    await waitFor(() => {
+      const rows = within(picker).getAllByRole("button");
+      // The address wins over the default, and the surface says plainly that
+      // what is on screen is not the latest analysis.
+      expect(rows[1]?.getAttribute("aria-current")).toBe("page");
+      expect(rows[1]?.textContent).toMatch(/not the latest one/);
+    });
+  });
+
   it("clears an export when the presenter switches historical artifacts", async () => {
     vi.stubGlobal(
       "fetch",
@@ -942,7 +1011,10 @@ describe("experiment lab", () => {
       .getAllByText("Alignment evidence details")[0]
       ?.closest("details");
     expect(alignmentDetails?.hasAttribute("open")).toBe(false);
-    expect(alignmentDetails?.textContent).toContain("Supporting evidence needs inspection");
+    // Each anchor reads as its own name; the previous shared placeholder made
+    // matched, missing, and role-differing anchors indistinguishable.
+    expect(alignmentDetails?.textContent).toContain("Demo checkout log");
+    expect(alignmentDetails?.textContent).not.toMatch(/ev-demo-/);
     expect(alignmentDetails?.textContent).not.toContain("ev-demo-");
     expect(
       screen.getByText(/chat-operator: unscored — no cited evidence to compare/),
@@ -984,7 +1056,7 @@ describe("experiment lab", () => {
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: /pkg-synth/ })).toBeNull();
     expect(screen.getByRole("heading", { name: "Experiment lab" })).toBeTruthy();
-    expect(screen.getByRole("navigation", { name: "Historical triage artifacts" })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Comparisons on this investigation" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Gold reference" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Candidate comparison" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Strategy comparison" })).toBeNull();
@@ -1434,7 +1506,9 @@ describe("experiment lab", () => {
     expect(firstCheckbox.checked).toBe(true);
     expect(firstSearch.value).toBe("checkout");
 
-    fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
+    // Comparison 2 is the newest and therefore already active; switching to
+    // the earlier one is what changes the picker's subject.
+    fireEvent.click(screen.getByRole("button", { name: /Comparison 1/ }));
 
     const secondPicker = screen.getByRole("group", {
       name: "Evidence supporting this decision (optional)",
@@ -1695,7 +1769,7 @@ describe("decision readiness cockpit", () => {
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     const scan = await screen.findByRole("region", { name: "At a glance" });
-    expect(within(scan).getAllByText(/Supporting evidence needs inspection/).length).toBeGreaterThan(0);
+    expect(within(scan).getAllByText(/named from the recorded reference/).length).toBeGreaterThan(0);
     expect(within(scan).getByRole("heading", {
       name: "Models assign different meaning to the same evidence",
     })).toBeTruthy();
@@ -2034,7 +2108,9 @@ describe("decision readiness cockpit", () => {
     expect(within(digest).getByText("Run status")).toBeTruthy();
     expect(within(digest).getByText("completed")).toBeTruthy();
     expect(within(digest).getByText(/Evidence only this lane cites/)).toBeTruthy();
-    expect(within(digest).getAllByText(/Supporting evidence needs inspection/).length).toBeGreaterThan(0);
+    // The lane's own evidence reads as a name, not as the reference it is
+    // addressed by, and not as a placeholder shared with every other item.
+    expect(within(digest).getAllByText(/Demo pool exhaustion/).length).toBeGreaterThan(0);
     expect(digest.textContent).not.toContain("ev-demo-pool-exhaustion");
     expect(
       within(digest).getByText(/4 review queue items mention this lane/),
@@ -2070,11 +2146,13 @@ describe("decision readiness cockpit", () => {
     render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
 
     await screen.findByRole("region", { name: "Decision readiness" });
-    fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
-    expect(await screen.findByText(/Highlighting chat-operator in place/)).toBeTruthy();
+    // The newest comparison is the default, so its lanes are the ones on
+    // screen; switching to the earlier one must drop the lane focus.
+    fireEvent.click(screen.getByRole("button", { name: "qwen-3.6-27b" }));
+    expect(await screen.findByText(/Highlighting qwen-3\.6-27b in place/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
-    expect(screen.queryByText(/Highlighting chat-operator/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Comparison 1/ }));
+    expect(screen.queryByText(/Highlighting qwen-3\.6-27b/)).toBeNull();
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "true",
     );

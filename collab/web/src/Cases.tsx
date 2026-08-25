@@ -2182,6 +2182,17 @@ export function Cases(props: {
                   readOnly={readOnly}
                   {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                  onOpenComparison={(experimentId) => {
+                    const focus: WorkFocus = {
+                      section: "triage-comparison-lab",
+                      item: null,
+                      itemKind: null,
+                      lane: null,
+                      experiment: experimentId,
+                    };
+                    if (props.onDeepNavigate) props.onDeepNavigate("compare", focus);
+                    else selectStage("compare");
+                  }}
                 />
               </div>
             </TriageAnchor>

@@ -461,9 +461,11 @@ describe("TriageRunPanel", () => {
       snapshotId: secondSnapshot.id,
     })));
     expect((snapshotSelect as HTMLSelectElement).value).toBe(secondSnapshot.id);
-    const receipt = await screen.findByRole("status");
+    const receipt = await screen.findByRole("status", { name: "Launch receipt" });
     expect(receipt.textContent).toContain("2 frozen evidence items");
-    expect(receipt.textContent).toContain(secondSnapshot.fingerprint.slice(0, 12));
+    // The receipt names the run in words. A truncated fingerprint identifies
+    // nothing a reader can act on and cannot be matched against another system.
+    expect(receipt.textContent).not.toContain(secondSnapshot.fingerprint.slice(0, 12));
     expect(screen.getByRole("button", { name: "Open the last run" })).toBeTruthy();
   });
 
@@ -827,7 +829,9 @@ describe("TriageRunPanel", () => {
         body: JSON.stringify({ externalRunId: "external-chat-1" }),
       }),
     ));
-    expect((await screen.findByRole("status")).textContent).toMatch(/Experiment .* is ready in Experiment Lab/);
+    expect(
+      (await screen.findByRole("status", { name: "Comparison handoff" })).textContent,
+    ).toMatch(/ready in Compare, opened as the newest comparison/);
   });
 });
 
@@ -944,8 +948,10 @@ describe("evidence snapshot cockpit", () => {
     expect(screen.getByText(/explicit mismatch recorded/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect snapshot for run job-alpha" }));
-    const fingerprint = screen.getByText("a".repeat(64));
-    expect(fingerprint.className).toContain("snapshot-cockpit__fingerprint");
+    const fingerprint = screen
+      .getAllByText("a".repeat(64))
+      .find((node) => node.className.includes("snapshot-cockpit__fingerprint"));
+    expect(fingerprint).toBeTruthy();
   });
 
   it("reports fairness as unknown when a selected run has no settled snapshot proof", async () => {

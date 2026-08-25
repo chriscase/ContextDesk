@@ -1703,3 +1703,84 @@
     padding: 0.6rem;
   }
 }
+
+/* Progressive disclosure for the identifiers a record is addressed by. The
+   words stay on the surface; the exact values live one disclosure away. */
+.technical-id {
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+}
+
+.technical-id > summary {
+  cursor: pointer;
+  color: var(--muted);
+  min-height: 2.25rem;
+  display: flex;
+  align-items: center;
+}
+
+.technical-id > summary:hover {
+  color: var(--accent);
+}
+
+.technical-id__list {
+  margin: 0.35rem 0 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+
+.technical-id__row + .technical-id__row {
+  margin-top: 0.5rem;
+}
+
+.technical-id__row > dt {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.technical-id__row > dd {
+  margin: 0.15rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.technical-id__value {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.technical-id__hint {
+  color: var(--muted);
+}
+
+.technical-id__copy {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.technical-id__copy-button {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 0.3rem;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.74rem;
+  min-height: 2.25rem;
+  padding: 0 0.6rem;
+}
+
+/* Comparison picker rows read as name, then when and how current. */
+.experiment-lab__experiment-name {
+  display: block;
+  font-weight: 600;
+}
+
+.experiment-lab__experiment-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
