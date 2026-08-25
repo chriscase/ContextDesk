@@ -2159,6 +2159,53 @@ describe("portable investigation apply", () => {
       .toBe(false);
   });
 
+  it("preserves remapped hypothesis-status timeline links after portable restore", async () => {
+    const row = await fixture();
+    const hypothesis = await row.cases.addContribution(
+      row.caseId,
+      ACTOR,
+      {
+        kind: "hypothesis",
+        body: "The synthetic stall is corroborated by the worker log.",
+        privacyClass: "share_safe",
+      },
+      "fixture",
+    );
+    await row.cases.setHypothesisStatus(
+      row.caseId,
+      hypothesis.id,
+      ACTOR,
+      "supported",
+      [{ kind: "artifact", id: row.evidenceId }],
+      "fixture",
+    );
+    const sourceEvent = (await row.cases.listTimeline(row.caseId))
+      .find((event) => event.kind === "hypothesis_status");
+    expect(JSON.parse(sourceEvent?.payload ?? "{}").links).toEqual([
+      { kind: "artifact", id: row.evidenceId },
+    ]);
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const destEvidence = await row.cases.listArtifacts(applied.investigationId, ACTOR, false);
+    const destEvent = (await row.cases.listTimeline(applied.investigationId))
+      .find((event) => event.kind === "hypothesis_status");
+    expect(JSON.parse(destEvent?.payload ?? "{}").links).toEqual([
+      { kind: "artifact", id: destEvidence.find((item) => item.contentHash === row.evidenceHash)?.id },
+    ]);
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({

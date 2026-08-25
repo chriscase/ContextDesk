@@ -212,6 +212,9 @@ function importedTimelinePayload(
       payload.sourceId = remapOf(report, "source", contribution.sourceId);
       if (contribution.tombstoned) payload.tombstone = true;
       if (contribution.hypothesisStatus) payload.status = contribution.hypothesisStatus;
+      if (event.kind === "hypothesis_status") {
+        payload.links = remapHypothesisLinks(report, contribution.hypothesisLinks, bundle);
+      }
     }
   }
   if (event.targetNamespace === "evidence" && event.targetId) {
