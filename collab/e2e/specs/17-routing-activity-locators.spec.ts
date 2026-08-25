@@ -51,7 +51,7 @@ test.describe("routing, activity locators, and operator UX", () => {
     await page.getByRole("button", { name: "Discussion", exact: true }).click();
     const panel = page.getByRole("complementary", { name: "Discussion" });
     await expect(panel).toBeVisible();
-    await panel.getByLabel("Message").fill("Synthetic discussion comment for locator routing.");
+    await panel.getByRole("textbox", { name: "Message" }).fill("Synthetic discussion comment for locator routing.");
     await panel.getByRole("button", { name: "Post to discussion" }).click();
     await expect(panel.getByText("Synthetic discussion comment for locator routing.")).toBeVisible();
 
