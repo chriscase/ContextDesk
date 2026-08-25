@@ -1082,6 +1082,15 @@ export class PortableInvestigationService {
           "imported-run timeline is missing a portable imported-run target",
         );
       }
+      if (
+        (/^contribution_/.test(row.kind) || row.kind === "hypothesis_status")
+        && addressed?.namespace !== "contribution"
+      ) {
+        throw new PortableServerError(
+          "unsupported_state",
+          "contribution timeline is missing a portable contribution target",
+        );
+      }
       if (row.kind === "corpus_intake_committed" && addressed?.namespace !== "intake_batch") {
         throw new PortableServerError(
           "unsupported_state",

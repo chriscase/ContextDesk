@@ -733,6 +733,12 @@ export async function persistPortableArchive(input: {
     ) {
       throw new Error("imported-run timeline is missing a portable imported-run target");
     }
+    if (
+      (/^contribution_/.test(event.kind) || event.kind === "hypothesis_status")
+      && (event.targetNamespace !== "contribution" || !event.targetId)
+    ) {
+      throw new Error("contribution timeline is missing a portable contribution target");
+    }
   }
   const remapCandidateId = (candidateId: string): string => {
     const imported = bundle.importedAiRuns.find((run) => candidateId === `chat-${run.id}`);

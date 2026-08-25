@@ -1036,6 +1036,45 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/portable imported-run target/);
   });
 
+  it("refuses apply when contribution timeline lacks a contribution target", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "contribution_created");
+      if (!event) throw new Error("contribution timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/portable contribution target/);
+  });
+
   it("refuses apply when experiment helpfulness timeline lacks a helpfulness target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1925,11 +1964,23 @@ describe("portable investigation apply", () => {
     expect(destDiscussion?.provenanceClass).toBe("historical_restored");
     expect(destObservation?.locator.resourceId).not.toBe(sourceObservation?.locator.resourceId);
     expect(destDiscussion?.locator.resourceId).not.toBe(sourceDiscussion?.locator.resourceId);
+    expect(destObservation?.locator.resourceId).not.toBe(applied.investigationId);
+    expect(destDiscussion?.locator.resourceId).not.toBe(applied.investigationId);
     expect(destEvidence?.locator.resourceId).not.toBe(sourceEvidence?.locator.resourceId);
     expect(destFrozen?.locator.resourceId).not.toBe(sourceFrozen?.locator.resourceId);
     expect(destFrozen?.locator.kind).toBe("evidence_context");
     expect(destFrozen?.locator.resourceId).not.toBe(applied.investigationId);
     const destFrozenTimeline = await row.cases.listTimeline(applied.investigationId);
+    const destContributionEvents = destFrozenTimeline.filter((event) =>
+      /^contribution_|^hypothesis_/.test(event.kind),
+    );
+    expect(destContributionEvents.length).toBeGreaterThan(0);
+    expect(destContributionEvents.some((event) => event.targetId === destObservation?.locator.resourceId)).toBe(true);
+    expect(destContributionEvents.some((event) => event.targetId === destDiscussion?.locator.resourceId)).toBe(true);
+    for (const event of destContributionEvents) {
+      expect(event.targetId).toBeTruthy();
+      expect(event.targetId).not.toBe(applied.investigationId);
+    }
     const destFrozenEvents = destFrozenTimeline.filter((event) => event.kind === "snapshot_frozen");
     expect(destFrozenEvents.length).toBeGreaterThan(0);
     for (const event of destFrozenEvents) {
