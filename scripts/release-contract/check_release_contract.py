@@ -217,6 +217,8 @@ def test_identity() -> None:
     package_version = next(iter(package_versions))
     ga_tag = f"v{package_version}"
     rc_tag = f"{ga_tag}-rc6"
+    major, minor, patch = (int(part) for part in package_version.split("."))
+    mismatched_tag = f"v{major}.{minor}.{patch + 1}"
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=ROOT,
@@ -239,9 +241,9 @@ def test_identity() -> None:
     try:
         rc.check_identity(
             repo_root=ROOT,
-            tag="v0.2.0",
+            tag=mismatched_tag,
             git_sha=sha,
-            git_describe="v0.2.0",
+            git_describe=mismatched_tag,
             channel="installed",
         )
         check("version mismatch vs Cargo is rejected", False)
