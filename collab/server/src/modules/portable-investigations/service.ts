@@ -1237,6 +1237,7 @@ export class PortableInvestigationService {
         usageStatus: "unknown",
         costStatus: "unknown",
         outputDigest: row.outputHash,
+        contributionId: row.contributionId,
         opaquePayloadJson: null,
         objectHash: "",
       })),

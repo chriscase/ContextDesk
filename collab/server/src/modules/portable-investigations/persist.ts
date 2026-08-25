@@ -139,6 +139,21 @@ function remapHypothesisLinks(
     });
 }
 
+function remappedImportedRunContributionId(
+  report: ArchivePreflightReportV1,
+  run: PortableArchiveV1["investigation"]["importedAiRuns"][number],
+  bundle: PortableArchiveV1["investigation"],
+): string {
+  if (!run.contributionId) {
+    throw new Error("imported run is missing a portable external-run contribution target");
+  }
+  const hit = bundle.contributions.find((row) => row.id === run.contributionId);
+  if (!hit || hit.kind !== "external_run") {
+    throw new Error("imported run is missing a portable external-run contribution target");
+  }
+  return remapOf(report, "contribution", run.contributionId);
+}
+
 function isContributionHistoryKind(kind: string): boolean {
   return kind === "contribution_created"
     || kind === "contribution_revised"
@@ -1043,9 +1058,7 @@ export async function persistPortableArchive(input: {
     const row: FrozenRunRow = {
       id: remapOf(report, "imported_ai_run", run.id),
       caseId: investigationId,
-      contributionId: bundle.contributions[0]
-        ? remapOf(report, "contribution", bundle.contributions[0].id)
-        : investigationId,
+      contributionId: remappedImportedRunContributionId(report, run, bundle),
       sourceId: remapOf(report, "source", run.sourceId),
       outputHash: run.outputDigest ?? "00".repeat(32),
       outputText,

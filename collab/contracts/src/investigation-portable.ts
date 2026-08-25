@@ -562,6 +562,7 @@ const importedRunShape: ObjectShape = {
   usageStatus: f.req(f.en(UNKNOWN_STATUS)),
   costStatus: f.req(f.en(UNKNOWN_STATUS)),
   outputDigest: f.nul(f.str),
+  contributionId: f.opt(f.str),
   opaquePayloadJson: f.nul(f.str),
   objectHash: f.req(f.str),
 };
@@ -885,6 +886,7 @@ export interface PortableImportedAiRunV1 {
   usageStatus: "unknown";
   costStatus: "unknown";
   outputDigest: string | null;
+  contributionId?: string;
   opaquePayloadJson: string | null;
   objectHash: string;
 }
@@ -1852,7 +1854,26 @@ export function parsePortableInvestigation(
       );
     }
     if (row.outputDigest !== null) requireSha256(`$.importedAiRuns[${i}].outputDigest`, row.outputDigest);
+    if (row.contributionId) {
+      const bound = bundle.contributions.find((item) => item.id === row.contributionId);
+      if (!bound) {
+        throw new ContractViolation(
+          `$.importedAiRuns[${i}].contributionId`,
+          "dangling contribution reference",
+        );
+      }
+      if (bound.kind !== "external_run") {
+        throw new ContractViolation(
+          `$.importedAiRuns[${i}].contributionId`,
+          "imported run must bind an external-run contribution",
+        );
+      }
+    }
   }
+  uniqueIds(
+    "$.importedAiRuns.contributionId",
+    bundle.importedAiRuns.flatMap((row) => row.contributionId ? [row.contributionId] : []),
+  );
 
   uniqueIds(
     "$.snapshots.id",

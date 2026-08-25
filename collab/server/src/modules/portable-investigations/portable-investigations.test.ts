@@ -2103,6 +2103,62 @@ describe("portable investigation apply", () => {
     ]);
   });
 
+  it("binds each restored imported run to its own remapped external-run contribution", async () => {
+    const row = await fixture();
+    const first = (await row.imports.listRuns(row.caseId, ACTOR, true))[0];
+    if (!first) throw new Error("fixture imported run is missing");
+    await row.imports.importRun(
+      row.caseId,
+      ACTOR,
+      {
+        outputText: "A second synthetic stall follows a distinct worker timeout.",
+        promptText: "Inspect the second synthetic queue evidence.",
+        sourceId: first.sourceId,
+        operatorId: ACTOR.id,
+        operatorUsername: ACTOR.username,
+        promptCompleteness: "exact",
+        outputCompleteness: "exact",
+        workflowCompleteness: "partial",
+        evidenceVisibility: "complete",
+        privacyClass: "owner_only",
+      },
+      "fixture",
+      false,
+    );
+    const sourceRuns = await row.imports.listRuns(row.caseId, ACTOR, true);
+    const sourceExternal = (await row.cases.listContributions(row.caseId, ACTOR, true))
+      .filter((item) => item.kind === "external_run");
+    expect(sourceRuns).toHaveLength(2);
+    expect(new Set(sourceRuns.map((run) => run.contributionId)).size).toBe(2);
+    expect(sourceExternal.map((item) => item.id).sort()).toEqual(
+      sourceRuns.map((run) => run.contributionId).sort(),
+    );
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const destRuns = await row.imports.listRuns(applied.investigationId, ACTOR, true);
+    const destExternal = (await row.cases.listContributions(applied.investigationId, ACTOR, true))
+      .filter((item) => item.kind === "external_run");
+    expect(destRuns).toHaveLength(2);
+    expect(new Set(destRuns.map((run) => run.contributionId)).size).toBe(2);
+    expect(destExternal.map((item) => item.id).sort()).toEqual(
+      destRuns.map((run) => run.contributionId).sort(),
+    );
+    expect(destRuns.some((run) => sourceRuns.some((source) => source.contributionId === run.contributionId)))
+      .toBe(false);
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({
