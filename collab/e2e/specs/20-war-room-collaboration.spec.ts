@@ -116,18 +116,34 @@ test.describe("War Room collaboration journeys", () => {
       const status = decide.getByRole("combobox", { name: "Case status" });
       await expect(status, "a case lead cannot record a decision without a lane").toBeVisible();
       await status.selectOption("resolved");
+      await decide.getByRole("button", { name: "Update status" }).click();
+
+      // Concluding now asks for the reason first. That is not a lane and not a
+      // comparison: the basis is human reasoning, and the form says so without
+      // implying any model run.
+      const resolution = page.getByRole("form", { name: "Record why this is resolved" });
+      await expect(
+        resolution,
+        "a resolved status was accepted with nothing recorded behind it",
+      ).toBeVisible();
+      await expect(resolution.getByLabel("How was this reached?")).toHaveValue("human_only");
+      await expect(page.getByText(/No model run is needed or implied/)).toBeVisible();
+      await resolution
+        .getByLabel("Why")
+        .fill("Two engineers reproduced the synthetic failure and agreed on the cause by reading it.");
+
       const [updated] = await Promise.all([
         page.waitForResponse(
           (res) => res.url().endsWith(`/api/cases/${caseId}/status`) && res.request().method() === "POST",
         ),
-        decide.getByRole("button", { name: "Update status" }).click(),
+        resolution.getByRole("button", { name: "Resolve with this record" }).click(),
       ]);
       expect(updated.ok(), await updated.text()).toBeTruthy();
       const listed = await page.request.get("/api/cases");
       const body = (await listed.json()) as { cases?: Array<{ id: string; status: string }> };
       expect(body.cases?.find((row) => row.id === caseId)?.status).toBe("resolved");
       expect(await triageRuns(page, caseId), "a lane ran after all").toHaveLength(0);
-      return "the investigation reached a recorded resolved decision with zero comparisons launched";
+      return "the investigation reached a resolved decision carrying a written human-only basis, with zero comparisons launched";
     });
 
     await screenshot(page, "20-human-only-investigation");

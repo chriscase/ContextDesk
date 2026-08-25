@@ -19,6 +19,7 @@ import { isDiscussionSection, isWorkLocation, parsePathname, type WorkFocus } fr
 import { EmptyState, StageFlowDiagram, StageIcon } from "./graphics.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
 import { focusArrivalCopy } from "./route-focus-copy.js";
+import { useRoutedItemPresence } from "./route-focus.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { InvestigationRecordPanel } from "./InvestigationRecord.js";
 import { ResolutionForm } from "./ResolutionForm.js";
@@ -1135,9 +1136,13 @@ export function Cases(props: {
       props.focus.lane
       || (props.focus.itemKind === "workstream" && props.focus.item),
     );
+  // Whether the record this address named is actually on the page. The
+  // announcement below states what happened, so it must not say a record was
+  // opened when the surface does not show it.
+  const routedItemPresence = useRoutedItemPresence(props.focus, Boolean(current));
   const arrivalCopy =
     props.focus && props.focus.navigation !== "preserve"
-      ? focusArrivalCopy(props.focus)
+      ? focusArrivalCopy(props.focus, routedItemPresence)
       : null;
   // Situation briefing inputs. Derived from the same records Capture renders,
   // so the briefing restates the working record instead of forking it.

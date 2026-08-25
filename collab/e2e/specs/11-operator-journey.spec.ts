@@ -134,7 +134,10 @@ test.describe("complete war-room operator journey", () => {
     ]);
     expect(sharedPosted.ok(), await sharedPosted.text()).toBeTruthy();
     await expect(page.getByText("shared-timeout.log", { exact: true })).toBeVisible();
-    await expect(page.getByText(/hash [0-9a-f]{12}… · share_safe/)).toBeVisible();
+    await expect(page.getByText("share_safe", { exact: true }).first()).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Copy content hash for shared-timeout.log" }),
+    ).toBeAttached();
 
     await page.locator("#case-evidence-file").setInputFiles({
       name: "unique-worker.log",
@@ -155,7 +158,9 @@ test.describe("complete war-room operator journey", () => {
     ]);
     expect(uniquePosted.ok(), await uniquePosted.text()).toBeTruthy();
     await expect(page.getByText("unique-worker.log", { exact: true })).toBeVisible();
-    await expect(page.getByText(/hash [0-9a-f]{12}… · owner_only/)).toBeVisible();
+    await expect(page.getByText("owner_only", { exact: true }).first()).toBeVisible();
+    // No truncated digest leads any card on the board.
+    await expect(page.getByText(/hash [0-9a-f]{12}…/)).toHaveCount(0);
 
     const includeShared = page.getByRole("checkbox", {
       name: "Include shared-timeout.log in snapshot",
@@ -299,7 +304,7 @@ test.describe("complete war-room operator journey", () => {
     expect(exportedText).not.toContain(acceptedText);
     await gotoStage(page, "Analyze");
     await expect(page.getByText("unique-worker.log", { exact: true })).toBeVisible();
-    await expect(page.getByText(/hash [0-9a-f]{12}… · owner_only/)).toBeVisible();
+    await expect(page.getByText("owner_only", { exact: true }).first()).toBeVisible();
 
     await page.reload();
     await expect(page.getByText(`Signed in as ${dave.username}`)).toBeVisible();

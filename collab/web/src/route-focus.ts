@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   DISCUSSION_ELEMENT_ID,
   isDiscussionSection,
   type WorkFocus,
 } from "./app-location.js";
+import type { RoutedItemPresence } from "./route-focus-copy.js";
 
 /** Hidden stages stay mounted so their state is preserved; they are never valid link targets. */
 export function isVisibleRouteTarget(target: HTMLElement | null): target is HTMLElement {
@@ -140,4 +141,64 @@ export function useRouteFocus(focus: WorkFocus | undefined, ready: boolean): voi
     target.scrollIntoView?.({ block, inline: "nearest" });
     applied.current = { key, exact: Boolean(itemTarget), target, lane: focus.lane ?? null };
   });
+}
+
+/**
+ * Whether the exact record a deep link named is actually on the page.
+ *
+ * Read by the arrival announcement so it can never claim to have opened a
+ * record that is not there. Records named by a copied link routinely arrive
+ * after the first paint, so absence is only reported once the surface has
+ * settled — until then the answer is `pending`, and the announcement says it
+ * is opening rather than that it arrived.
+ */
+/** How often the named record is looked for while a surface is still loading. */
+const ROUTED_ITEM_POLL_MS = 150;
+/** How long it is given to appear before the link is reported as not showing it. */
+const ROUTED_ITEM_SETTLE_MS = 1_200;
+
+export function useRoutedItemPresence(
+  focus: WorkFocus | undefined,
+  ready: boolean,
+): RoutedItemPresence {
+  const [presence, setPresence] = useState<RoutedItemPresence>("none");
+  const key = focus ? [focus.section, focus.itemKind ?? "", focus.item ?? ""].join(":") : "";
+  useEffect(() => {
+    if (!focus?.item) {
+      setPresence("none");
+      return undefined;
+    }
+    if (!ready) {
+      setPresence("pending");
+      return undefined;
+    }
+    if (matchingRouteItem(focus)) {
+      setPresence("exact");
+      return undefined;
+    }
+    // Settled case data does not mean every panel has finished loading its own
+    // records, so the surface is given a bounded chance to render the one that
+    // was named before absence is reported. Reporting it early would blame the
+    // link for a record that is about to appear; never reporting it at all is
+    // the false success this exists to prevent.
+    setPresence("pending");
+    let elapsed = 0;
+    const timer = window.setInterval(() => {
+      elapsed += ROUTED_ITEM_POLL_MS;
+      if (matchingRouteItem(focus)) {
+        window.clearInterval(timer);
+        setPresence("exact");
+        return;
+      }
+      if (elapsed >= ROUTED_ITEM_SETTLE_MS) {
+        window.clearInterval(timer);
+        setPresence("absent");
+      }
+    }, ROUTED_ITEM_POLL_MS);
+    return () => window.clearInterval(timer);
+    // `key` carries every part of `focus` this effect reads — section, itemKind,
+    // and item — so a new focus object with the same address correctly does not
+    // restart the search.
+  }, [key, ready]);
+  return presence;
 }

@@ -1412,7 +1412,11 @@ describe("focused investigation view", () => {
 
     expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Situation" })).toBeTruthy();
-    expect(screen.getByText(/Opened Discussion to the comment this activity recorded/)).toBeTruthy();
+    // The surface opened, and the announcement says exactly that. This fixture
+    // renders no such comment, so the page must not claim it opened one — that
+    // false success is what made every dead deep link read as a lie.
+    expect(await screen.findByText("Opened Discussion.")).toBeTruthy();
+    expect(screen.queryByText(/Opened Discussion to the comment/)).toBeNull();
   });
 
   it("explains a job-level run locator instead of treating it as a missing workstream", async () => {
@@ -1433,9 +1437,11 @@ describe("focused investigation view", () => {
         onStageChange={() => {}}
       />,
     );
-    expect(
-      await screen.findByText(/Opened the workstream run this activity named/),
-    ).toBeTruthy();
+    // A job-level locator still opens Analyze run history and says so; it is
+    // not reported as a missing workstream. The fixture renders no such run,
+    // so the announcement stops at the surface rather than claiming the record.
+    expect(await screen.findByText("Opened Analyze run history.")).toBeTruthy();
+    expect(screen.queryByText(/Opened Analyze run history to the recorded item/)).toBeNull();
     expect(screen.queryByText(/not part of this investigation/)).toBeNull();
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
   });
@@ -1460,7 +1466,11 @@ describe("focused investigation view", () => {
     );
 
     expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
-    expect(screen.getByText(/Opened Discussion to the comment this activity recorded/)).toBeTruthy();
+    // The surface opened, and the announcement says exactly that. This fixture
+    // renders no such comment, so the page must not claim it opened one — that
+    // false success is what made every dead deep link read as a lie.
+    expect(await screen.findByText("Opened Discussion.")).toBeTruthy();
+    expect(screen.queryByText(/Opened Discussion to the comment/)).toBeNull();
   });
 
   it("does not render mutation controls in static read-only mode", async () => {
