@@ -1441,7 +1441,27 @@ describe("portable investigation service", () => {
   it("refuses apply when experiment trace timeline lacks a composite experiment+trace target", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    expect(() =>
+      resealArchive(archive, (investigation) => {
+        const event = investigation.timeline.find((row) => row.kind === "experiment_trace_imported");
+        if (!event) throw new Error("experiment trace timeline is missing");
+        event.targetId = null;
+        event.targetNamespace = null;
+      }),
+    ).toThrow(/experiment traces must match experiment_trace_imported timeline targets/);
+    expect(() =>
+      resealArchive(archive, (investigation) => {
+        const event = investigation.timeline.find((row) => row.kind === "experiment_trace_imported");
+        if (!event) throw new Error("experiment trace timeline is missing");
+        event.targetNamespace = "experiment";
+        event.targetId = investigation.experiments[0]!.id;
+      }),
+    ).toThrow(/experiment traces must match experiment_trace_imported timeline targets/);
+
     const missing = resealArchive(archive, (investigation) => {
+      for (const experiment of investigation.experiments) {
+        delete experiment.traces;
+      }
       const event = investigation.timeline.find((row) => row.kind === "experiment_trace_imported");
       if (!event) throw new Error("experiment trace timeline is missing");
       event.targetId = null;
@@ -1477,6 +1497,9 @@ describe("portable investigation service", () => {
     ).rejects.toThrow(/experiment\+trace target/);
 
     const bareExperiment = resealArchive(archive, (investigation) => {
+      for (const experiment of investigation.experiments) {
+        delete experiment.traces;
+      }
       const event = investigation.timeline.find((row) => row.kind === "experiment_trace_imported");
       if (!event) throw new Error("experiment trace timeline is missing");
       event.targetNamespace = "experiment";
