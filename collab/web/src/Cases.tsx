@@ -258,14 +258,19 @@ function activityProvenance(item: ActivityItem): { className: string; label: str
 }
 
 /**
- * Names a restricted item so a reader knows the record behind this row is not
- * broadly readable. Nothing about the restricted content itself is shown.
+ * Names a restricted record so a reader knows it is not broadly readable, and
+ * so nobody pastes it somewhere wider by accident. Nothing about the
+ * restricted content itself is added or withheld by this label.
  */
-function activityRestriction(item: ActivityItem): string | null {
-  if (item.privacyVisibility === "owner_only") return "restricted to its owner";
-  if (item.privacyVisibility === "redacted") return "redacted";
-  if (item.privacyVisibility === "omitted") return "content omitted";
+function restrictionLabel(privacy: string | undefined): string | null {
+  if (privacy === "owner_only") return "restricted to its owner";
+  if (privacy === "redacted") return "redacted";
+  if (privacy === "omitted") return "content omitted";
   return null;
+}
+
+function activityRestriction(item: ActivityItem): string | null {
+  return restrictionLabel(item.privacyVisibility);
 }
 
 /**
@@ -1834,6 +1839,11 @@ export function Cases(props: {
                                   {row.authorUsername ?? "author not recorded"}
                                   {when ? ` · ${when}` : ""}
                                 </span>
+                                {restrictionLabel(row.privacyClass) ? (
+                                  <span className="activity-feed__restricted">
+                                    {restrictionLabel(row.privacyClass)}
+                                  </span>
+                                ) : null}
                               </p>
                               <ArtifactExcerpt text={row.body ?? ""} label={group.title.toLowerCase()} />
                               <button
@@ -1896,7 +1906,10 @@ export function Cases(props: {
                           <span className="triage-chip triage-chip--imported">
                             imported · unverified
                           </span>
-                          <span>imported by {run.importerUsername}</span>
+                          <span>
+                            imported by {run.importerUsername} · evidence visibility{" "}
+                            {run.evidenceVisibility}
+                          </span>
                         </p>
                         <ArtifactExcerpt text={run.outputText} label="imported output" />
                         <button
