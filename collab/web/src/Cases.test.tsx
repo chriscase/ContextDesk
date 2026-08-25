@@ -530,7 +530,7 @@ describe("operational overview", () => {
     // A human row says so rather than leaving the reader to infer it.
     expect(within(panel).getByText("human-authored")).toBeTruthy();
     expect(within(panel).getByText("AI-assisted · not a human finding")).toBeTruthy();
-    expect(within(panel).getByText("restricted to its owner")).toBeTruthy();
+    expect(within(panel).getByText("private to this case")).toBeTruthy();
   });
 
   it("collects stalled, disagreeing, and unread work with a direct path to each", async () => {
@@ -759,6 +759,15 @@ describe("situation briefing", () => {
                   authorUsername: "dave",
                   createdAt: "2026-08-24T12:06:00.000Z",
                 },
+                {
+                  id: "obs-old",
+                  kind: "note",
+                  body: "Older synthetic observation from before the queue stabilized.",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "alice",
+                  createdAt: "2026-08-24T11:00:00.000Z",
+                },
               ],
             }),
           });
@@ -838,13 +847,24 @@ describe("situation briefing", () => {
     ).toBeTruthy();
   });
 
+  it("orders each briefing group by recorded time rather than API or UUID order", async () => {
+    briefingFetch();
+    renderSituation();
+    const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
+    const observations = within(briefing).getByRole("region", { name: /Latest observations/ });
+    const entries = within(observations).getAllByRole("listitem");
+
+    expect(entries[0]?.textContent).toContain("stalled for 9s at the payment step");
+    expect(entries[1]?.textContent).toContain("Older synthetic observation");
+  });
+
   it("marks a briefing entry whose record is not broadly readable", async () => {
     briefingFetch();
     renderSituation();
     const briefing = await screen.findByRole("region", { name: "Where the investigation stands" });
     const hypotheses = within(briefing).getByRole("region", { name: /Working hypotheses/ });
     // The fixture records this hypothesis as owner_only.
-    expect(within(hypotheses).getByText("restricted to its owner")).toBeTruthy();
+    expect(within(hypotheses).getByText("private to this case")).toBeTruthy();
     // Imported output states the visibility its importer described.
     const imported = within(briefing).getByRole("region", {
       name: /Imported analysis awaiting a human read/,

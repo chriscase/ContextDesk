@@ -197,7 +197,10 @@ function briefingEntries(
   return contributions
     .filter((row) => !row.tombstoned && kinds.includes(row.kind) && (row.body ?? "").trim().length > 0)
     .slice()
-    .reverse();
+    .sort((left, right) => {
+      const byCreated = (right.createdAt ?? "").localeCompare(left.createdAt ?? "");
+      return byCreated !== 0 ? byCreated : right.id.localeCompare(left.id);
+    });
 }
 
 function contributionTime(value: string | undefined): string | null {
@@ -263,7 +266,7 @@ function activityProvenance(item: ActivityItem): { className: string; label: str
  * restricted content itself is added or withheld by this label.
  */
 function restrictionLabel(privacy: string | undefined): string | null {
-  if (privacy === "owner_only") return "restricted to its owner";
+  if (privacy === "owner_only") return "private to this case";
   if (privacy === "redacted") return "redacted";
   if (privacy === "omitted") return "content omitted";
   return null;
