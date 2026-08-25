@@ -103,12 +103,45 @@ decision.
   uses the insecure fixture; a separate test proves verification fail-closed
   against that same cert. `COLLAB_REQUIRE_LDAP=1` makes a missing live URL a
   failure, not a skip.
-- Optional service-bind (`COLLAB_LDAP_BIND_DN` / `COLLAB_LDAP_BIND_PASSWORD`) is
-  secret-store-sourced and never written to the DB, logs, or audit. After a
-  successful user bind it is reused to read group membership when the
-  directory hides group OUs from the user (osixia returns LDAP 0x20).
+- Optional service-bind (`COLLAB_LDAP_BIND_DN` / bind-password secret
+  reference) is secret-store-sourced and never written to the DB, logs, or
+  audit. After a successful user bind it is reused to read group membership
+  when the directory hides group OUs from the user (osixia returns LDAP 0x20).
   `lookupGroups` repeats that service-bind search on each request so directory
   group removal does not wait for the 8h/30m session TTL.
+- Compatible user-resolution modes, when explicitly configured, run in listed
+  order: service-bind search, DN template, AD UPN, and `DOMAIN\user`. ContextDesk
+  never derives a UPN suffix or NetBIOS name from `DC=` components of a search
+  base. `{0}` is an alias for `{username}` after the matching escape.
+- Group membership unions a configured member attribute (commonly `memberOf`)
+  with optional group search, then normalizes, deduplicates, and bounds the
+  result. Role mapping stays exact and default-deny.
+- Login fetches configured display name, work email, role title, and team
+  attributes and passes them through `mapDirectoryClaimsToProfileFields`.
+  Missing attributes skip; unsafe attributes fail closed; identity collisions
+  revoke the new session and return 403.
+- Directory administration (`/admin/ldap`) and first-run `POST /api/setup/ldap-probe`
+  report staged connectivity (transport, service bind, user search, group lookup,
+  role-map readiness) without returning stored secrets.
+
+#### RepoSync LDAP field translation (generic values only)
+
+| RepoSync / typical LDAP admin field | ContextDesk configuration |
+| --- | --- |
+| `url` | `COLLAB_LDAP_URL` (`ldaps://directory.example.test:636` or `ldap://` + `COLLAB_LDAP_STARTTLS=1`) |
+| `base_dn` | `COLLAB_LDAP_USER_SEARCH_BASE=ou=people,dc=example,dc=test` |
+| `search_filter` with `{0}` | `COLLAB_LDAP_USER_SEARCH_FILTER=(sAMAccountName={0})` |
+| `display_name_attr` | `COLLAB_LDAP_ATTR_DISPLAY_NAME` (default `cn`) |
+| `email_attr` | `COLLAB_LDAP_ATTR_EMAIL` (default `mail`) |
+| `group_attr` | `COLLAB_LDAP_MEMBER_ATTR=memberOf` plus optional `COLLAB_LDAP_GROUP_SEARCH_*` |
+| `bind_dn` | `COLLAB_LDAP_BIND_DN` |
+| `bind_password` | bind-password environment, `COLLAB_LDAP_BIND_PASSWORD_FILE`, or `file:` reference — exactly one |
+| `tls_verify` | verified TLS default; fixture-only disable requires `COLLAB_LDAP_TLS_INSECURE=1` and `COLLAB_LDAP_DEV_MODE=1` |
+| Silent UPN/NetBIOS from `DC=` | **Not copied.** Set `COLLAB_LDAP_UPN_SUFFIX=example.test` and `COLLAB_LDAP_NETBIOS_DOMAIN=EXAMPLE` |
+
+This table is a configuration translation. It is not evidence that any live
+company directory works with ContextDesk.
+
 - Sessions: opaque `HttpOnly` `SameSite=Lax` cookies; server-side store;
   TTL + idle timeout; revocation is immediate. No JWTs.
 - Group→role map is persisted (`authz_group_role_map`) and reloaded on every

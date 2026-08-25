@@ -1,4 +1,8 @@
 import {
+  LDAP_PROBE_REQUEST_SCHEMA_ID,
+  parseLdapProbeRequest,
+} from "@cd-collab/contracts";
+import {
   SETUP_SECRET_PURPOSES,
   type SetupSecretPurpose,
 } from "@cd-collab/contracts/setup";
@@ -72,6 +76,37 @@ function parseVerifyBody(raw: unknown): number {
   return body.expectedRevision as number;
 }
 
+function parseLdapProbeBody(raw: unknown): {
+  expectedRevision: number;
+  probeUsername: string | null;
+  probePassword: string | null;
+} {
+  const body = asRecord(raw);
+  if (
+    !body ||
+    Object.keys(body).some(
+      (key) => !["expectedRevision", "probeUsername", "probePassword"].includes(key),
+    ) ||
+    !Number.isSafeInteger(body.expectedRevision)
+  ) {
+    throw new SetupHttpError("invalid_request", 400);
+  }
+  try {
+    const parsed = parseLdapProbeRequest({
+      schemaId: LDAP_PROBE_REQUEST_SCHEMA_ID,
+      probeUsername: body.probeUsername ?? null,
+      probePassword: body.probePassword ?? null,
+    });
+    return {
+      expectedRevision: body.expectedRevision as number,
+      probeUsername: parsed.probeUsername,
+      probePassword: parsed.probePassword,
+    };
+  } catch {
+    throw new SetupHttpError("invalid_request", 400);
+  }
+}
+
 export interface SetupRouteDeps {
   setup: SetupService;
 }
@@ -140,6 +175,22 @@ export async function registerSetupRoutes(
     }
   });
 
+  app.post("/api/setup/ldap-probe", { bodyLimit: 4 * 1024 }, async (request, reply) => {
+    try {
+      const input = parseLdapProbeBody(request.body);
+      const result = await deps.setup.probeDirectory(
+        ownerToken(request),
+        input.expectedRevision,
+        input.probeUsername,
+        input.probePassword,
+      );
+      void reply.header("cache-control", "no-store");
+      return result;
+    } catch (error) {
+      return setupError(reply, error);
+    }
+  });
+
   app.get("/api/setup/capabilities", async (_request, reply) => {
     try {
       await deps.setup.status();
@@ -149,6 +200,7 @@ export async function registerSetupRoutes(
         draft: true,
         boundedVerification: true,
         externalConnectivityVerification: false,
+        directoryProbe: true,
         commit: false,
         restart: false,
         installationComplete: false,

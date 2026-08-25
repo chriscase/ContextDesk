@@ -144,9 +144,10 @@ async function main(): Promise<void> {
   });
   await store.ping();
   const log = createAuthLog();
-  const adapter = config.authMode === "local"
-    ? loadLocalAuthAdapter()
-    : new LdapAuthAdapter(loadLdapConfig(), log);
+  const ldapConfig = config.authMode === "ldap" ? loadLdapConfig() : null;
+  const adapter = ldapConfig
+    ? new LdapAuthAdapter(ldapConfig, log)
+    : loadLocalAuthAdapter();
   const roles = new MutableGroupRoleMap(await storage.roleStore.load());
   const audit = storage.audit;
   const catalog = new CatalogService(storage.catalog, audit);
@@ -263,6 +264,7 @@ async function main(): Promise<void> {
       roles,
       roleStore: storage.roleStore,
       audit,
+      ldapConfig,
     },
   });
   await app.listen({ host: config.host, port: config.port });

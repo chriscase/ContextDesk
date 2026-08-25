@@ -36,13 +36,13 @@ password verification does use fixed-length timing-safe comparison.
 | Canonical profile contract (mutable display profile split from immutable attribution identity) | Shipped | [`user-profile.ts`](../../../collab/contracts/src/user-profile.ts), [`user-profile.test.ts`](../../../collab/contracts/src/user-profile.test.ts) | Real Unicode confusable-skeleton/homoglyph detection is not attempted — only C0/DEL/zero-width/bidi-control/BOM code points are blocked |
 | Capability model (10 fine-grained capabilities, role-default matrix, additive local grants) | Shipped | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts) | None known |
 | Memory + PostgreSQL profile/grant stores with CAS, login-time sync, fail-closed identity collision | Shipped | [`store.ts`](../../../collab/server/src/modules/people/store.ts), [`store.contract-tests.ts`](../../../collab/server/src/modules/people/store.contract-tests.ts) run against both backends by [`store.test.ts`](../../../collab/server/src/modules/people/store.test.ts) and [`pg-store.test.ts`](../../../collab/server/src/modules/people/pg-store.test.ts) | None known |
-| Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | Live LDAP attribute sync and directory-removal auto-disable remain named residuals in §16; browser mutation CSRF is now system-wide (see §10) |
+| Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | Directory-removal auto-disable remains a named residual in §16; browser mutation CSRF is now system-wide (see §10) |
 | Domain-wide session authorization and suspension fail-closed | Shipped | [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`authorization.adversarial.test.ts`](../../../collab/server/src/modules/authz/authorization.adversarial.test.ts), War Room domain/admin `routes.ts` files | None known |
 | Restart recovery re-authorization for queued triage jobs | **Local integration** | [`recovery-authorization.ts`](../../../collab/server/src/modules/authz/recovery-authorization.ts) injected into [`TriageRunService.recoverPending`](../../../collab/server/src/modules/triage-runs/service.ts); adversarial proof in [`recovery.adversarial.test.ts`](../../../collab/server/src/modules/triage-runs/recovery.adversarial.test.ts) | Foreground `create()` still uses the submitting session's current flags. Expired running leases stay `worker_lease_expired` and are not re-executed. Demo/qualification hosts that never call `recoverPending` do not inject the seam; a missing seam fails closed. |
 | Self-service profile API (GET/PATCH own profile, directory-owned fields read-only) | Shipped | [`self-routes.ts`](../../../collab/server/src/modules/people/self-routes.ts), [`self-routes.test.ts`](../../../collab/server/src/modules/people/self-routes.test.ts) | None known for the API |
-| Self-service profile UI (`/profile`, account-menu destination) | Shipped | [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx), [`SelfProfilePanel.test.tsx`](../../../collab/web/src/SelfProfilePanel.test.tsx), [`App.test.tsx`](../../../collab/web/src/App.test.tsx), Help article `my-profile` | Live LDAP attribute values still follow §16 (the UI cannot invent directory writes) |
+| Self-service profile UI (`/profile`, account-menu destination) | Shipped | [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx), [`SelfProfilePanel.test.tsx`](../../../collab/web/src/SelfProfilePanel.test.tsx), [`App.test.tsx`](../../../collab/web/src/App.test.tsx), Help article `my-profile` | Directory-owned fields stay read-only in the UI; the UI still cannot write LDAP |
 | Admin People console (`/admin/people` first-class shell location; `/administration` remains the roles alias) | Shipped | [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), [`AdminPeoplePanel.test.tsx`](../../../collab/web/src/AdminPeoplePanel.test.tsx), [`Administration.test.tsx`](../../../collab/web/src/Administration.test.tsx), [`app-location.ts`](../../../collab/web/src/app-location.ts) | Detail view is inline-expand, not its own URL per person |
-| LDAP-ready claims-to-profile mapping (provider-neutral, pure, admin-previewable) | Shipped as a mapping engine; **not** live-wired | [`directory-mapping.ts`](../../../collab/contracts/src/directory-mapping.ts), preview route in `admin-routes.ts` | Login-time sync never calls this with real directory claims — see §16, this is a named non-claim, not an oversight |
+| LDAP-ready claims-to-profile mapping (provider-neutral, pure, admin-previewable) | **Shipped**; login-time LDAP attribute sync is wired | [`directory-mapping.ts`](../../../collab/contracts/src/directory-mapping.ts), [`ldap-adapter.ts`](../../../collab/server/src/modules/auth/ldap-adapter.ts), preview route in `admin-routes.ts` | Live company-directory qualification is not claimed; directory-removal auto-disable remains residual — see §16 |
 | Portable-investigation interoperability (never grants access, never auto-maps) | Accepted design / already shipped upstream | [`investigation-portable.ts`](../../../collab/contracts/src/investigation-portable.ts) `historicalParticipantsAreAttributionOnly`, `destinationRoleGranted: false` | This chapter does not modify that subsystem; it only keeps `provenance: "imported_historical"` structurally incapable of authenticating or holding a capability (§5) |
 
 ## 3. Reusable method
@@ -344,8 +344,10 @@ counts.
 | --- | --- | --- | --- |
 | Profile/capability contracts, server stores, admin+self routes | Shipped | Full CRUD/CAS/audit path, tested against Memory and real Postgres | Not deployed to any environment by this chapter; that is an operator action |
 | Admin People UI | Shipped | Real, tested React panel at canonical `/admin/people` (legacy `/administration` alias for role mappings) | Not a full user-detail page with its own URL per person |
-| LDAP claim mapping engine | Shipped | Pure, tested, admin-previewable against synthetic sample claims | **Not** wired to any live directory bind - see §16 |
-| Self-service profile UI | Shipped | Real, tested React page at `/profile` for any authenticated user | Does not write to LDAP/OIDC; live directory attribute sync remains unwired (§16) |
+| LDAP claim mapping engine | Shipped | Pure, tested, admin-previewable against synthetic sample claims | Does not contact a live company directory |
+| LDAP login-time attribute sync | **Local integration** | `LdapAuthAdapter` fetches configured display/email/title/team claims and `touchOnLogin` records honest sync status | Not a claim that any employer Active Directory has been qualified |
+| Self-service profile UI | Shipped | Real, tested React page at `/profile` for any authenticated user | Does not write to LDAP/OIDC |
+| Directory administration / probe | **Local integration** | Share-safe `/admin/ldap` view plus staged connectivity test; first-run optional probe | Probe does not install the service; stored secrets are never returned |
 | Directory-removal auto-disable | Not shipped | `disabled` status and manual admin path exist | No automatic detection of a person's removal from the directory |
 | Restart recovery re-authorization | **Local integration** | Queued triage jobs re-resolve current profile/roles/grants/case access/`run:strategies`/`evidence:private:read` before lease claim | Not a claim that in-flight expired leases are replayed, or that hosts other than `cd-collab` `index.ts` inject the seam |
 
@@ -380,24 +382,19 @@ counts.
 
 ## 16. Open residuals
 
-- **Live LDAP attribute sync is not wired.** `directory-mapping.ts` is a
-  complete, tested, pure mapping engine, and the admin preview route
-  exercises it end-to-end against admin-supplied synthetic sample claims -
-  but `touchOnLogin` never receives real directory claims, because
-  `AuthAdapter`/`ldap-adapter.ts` do not currently fetch or expose any LDAP
-  attribute beyond the DN, username, and display name already used for
-  login. Wiring this live requires extending the LDAP adapter's search to
-  fetch `cn`/`title`/`departmentNumber`/`mail` (or a configured
-  equivalent) alongside the existing group search, and threading the
-  result through `AuthSuccess` - deliberately not attempted here to avoid
-  changing already-reviewed, security-sensitive bind/search code in a
-  foundation PR. No issue is filed for this; it is a named non-claim.
+- **Live LDAP attribute sync is wired for login.** `directory-mapping.ts`
+  remains the provider-neutral mapping engine. `LdapAuthAdapter` now fetches
+  the configured display name, work email, role title, and team attributes on
+  authenticated bind, threads them through `AuthSuccess.directoryFields`, and
+  `touchOnLogin` records `synced` when that object is present (including an
+  empty map when every configured attribute was absent). Unsafe claim values
+  fail closed with HTTP 403 rather than a bad-password response. This is still
+  **not** a claim that any live company directory has been qualified.
 - **Self-service profile UI ships.** `/profile` is reachable from the
   authenticated account menu, survives direct load/reload/Back/Forward,
   and uses GET/PATCH `/api/profile/me` with CSRF and CAS. Directory-owned
   fields stay read-only for LDAP/OIDC; local-only contact/avatar/custom
-  fields remain editable. Historical attribution is unchanged. Live LDAP
-  attribute sync remains unwired (the residual above).
+  fields remain editable. Historical attribution is unchanged.
 - **Directory-removal auto-disable is not automatic.** The `disabled`
   status is a real, valid, tested state, settable by an admin through the
   same status endpoint used for suspend/reactivate, but nothing currently
@@ -417,10 +414,12 @@ commissioned to satisfy:
    field from the requirement (role/title/team/contact, avatar, status,
    provenance, directory subject, timestamps, bounded custom attributes)
    is present and validated. §4.
-2. **LDAP-ready mapping.** Shipped as a pure mapping engine and admin
-   preview tool; explicitly **not** live-wired to a real directory (named
-   non-claim, §16). No password handling and no directory contact anywhere
-   in this chapter's code, matching the requirement's own instruction.
+2. **LDAP-ready mapping.** Shipped as a pure mapping engine, admin
+   preview tool, and login-time LDAP attribute sync into
+   `touchOnLogin` with honest skipped/synced status. Live
+   company-directory qualification remains a named non-claim (§16).
+   Bind secrets stay inside the auth module; this chapter does not
+   claim employer Active Directory compatibility.
 3. **Authorization.** Shipped - versioned 10-capability model covering
    every named area (investigation read/write, private evidence, run
    strategies, accept decisions, exports, portable restore, user

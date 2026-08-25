@@ -1,5 +1,13 @@
 import { Buffer } from "node:buffer";
 import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
+import {
+  LDAP_USER_RESOLUTION_MODES,
+  assertLdapAttributeName,
+  assertLdapNetbiosDomain,
+  assertLdapUpnSuffix,
+  parseLdapUserResolutionModes,
+  type LdapUserResolutionMode,
+} from "./ldap-admin.js";
 
 export const SETUP_CLAIM_REQUEST_SCHEMA_ID =
   "cd-collab.setup_claim_request.v1" as const;
@@ -157,6 +165,15 @@ export interface SetupLdapAuthenticationV1 {
   bindDn: string | null;
   bindPasswordRef: SetupSecretReferenceV1 | null;
   adminGroup: string;
+  /** Absent means the host derives modes from template vs search-base. */
+  userResolutionModes?: LdapUserResolutionMode[];
+  upnSuffix?: string | null;
+  netbiosDomain?: string | null;
+  memberAttribute?: string | null;
+  displayNameAttr?: string;
+  roleTitleAttr?: string;
+  teamAttr?: string;
+  emailAttr?: string;
 }
 
 export interface SetupAuthenticationV1 {
@@ -278,6 +295,14 @@ const ldapAuthenticationShape: ObjectShape = {
   bindDn: f.nul(f.str),
   bindPasswordRef: f.nul(f.obj(secretReferenceShape)),
   adminGroup: f.req(f.str),
+  userResolutionModes: f.opt(f.arr(f.en(...LDAP_USER_RESOLUTION_MODES))),
+  upnSuffix: f.optNul(f.str),
+  netbiosDomain: f.optNul(f.str),
+  memberAttribute: f.optNul(f.str),
+  displayNameAttr: f.opt(f.str),
+  roleTitleAttr: f.opt(f.str),
+  teamAttr: f.opt(f.str),
+  emailAttr: f.opt(f.str),
 };
 
 const authenticationShape: ObjectShape = {
@@ -608,7 +633,7 @@ function assertNarrowDn(
     if (separator < 1 || !/^[A-Za-z][A-Za-z0-9-]*$/u.test(attribute)) {
       throw new ContractViolation(path, "outside the narrow RFC4514 DN grammar");
     }
-    if (componentValue === "{username}") {
+    if (componentValue === "{username}" || componentValue === "{0}") {
       usernamePlaceholders += 1;
       if (!usernameTemplate || index !== 0) {
         throw new ContractViolation(path, "ambiguous username placeholder placement");
@@ -618,7 +643,7 @@ function assertNarrowDn(
     }
   }
   if (usernamePlaceholders !== (usernameTemplate ? 1 : 0)) {
-    throw new ContractViolation(path, "must contain {username} exactly once");
+    throw new ContractViolation(path, "must contain {username} or {0} exactly once");
   }
 }
 
@@ -693,7 +718,10 @@ function parseNarrowFilter(
   }
   const assertionValue = value.slice(equals + 1, close);
   const token = `{${placeholder}}`;
-  if (assertionValue === token) {
+  if (
+    assertionValue === token ||
+    (placeholder === "username" && assertionValue === "{0}")
+  ) {
     return {
       next: close + 1,
       placeholderCount: 1,
@@ -720,16 +748,25 @@ function assertNarrowLdapFilter(
     value,
     0,
     placeholder,
-    requireConjunction,
+    requireConjunction || placeholder === "username",
     path,
   );
-  if (
-    parsed.next !== value.length ||
-    parsed.placeholderCount !== 1 ||
-    parsed.conjunction !== requireConjunction ||
-    (requireConjunction && parsed.staticAssertions < 1) ||
-    (!requireConjunction && parsed.staticAssertions !== 0)
-  ) {
+  if (parsed.next !== value.length || parsed.placeholderCount !== 1) {
+    throw new ContractViolation(path, "outside the narrow purpose-bound LDAP filter grammar");
+  }
+  if (requireConjunction) {
+    if (!parsed.conjunction || parsed.staticAssertions < 1) {
+      throw new ContractViolation(path, "outside the narrow purpose-bound LDAP filter grammar");
+    }
+    return;
+  }
+  if (placeholder === "username") {
+    if (parsed.conjunction && parsed.staticAssertions < 1) {
+      throw new ContractViolation(path, "outside the narrow purpose-bound LDAP filter grammar");
+    }
+    return;
+  }
+  if (parsed.conjunction || parsed.staticAssertions !== 0) {
     throw new ContractViolation(path, "outside the narrow purpose-bound LDAP filter grammar");
   }
 }
@@ -968,13 +1005,61 @@ function assertLdapAuthentication(
   path: string,
 ): void {
   assertBasicUrl(authentication.url, `${path}.url`);
+  const modes = authentication.userResolutionModes
+    ? parseLdapUserResolutionModes(
+        authentication.userResolutionModes,
+        `${path}.userResolutionModes`,
+      )
+    : null;
   const hasDnTemplate = authentication.userDnTemplate !== null;
   const hasSearchBase = authentication.userSearchBase !== null;
-  if (hasDnTemplate === hasSearchBase) {
+  if (modes === null && hasDnTemplate === hasSearchBase) {
     throw new ContractViolation(
       path,
       "LDAP identity lookup requires exactly one narrow lookup mode",
     );
+  }
+  if (modes !== null) {
+    if (modes.length === 0) {
+      throw new ContractViolation(
+        `${path}.userResolutionModes`,
+        "ldap auth requires at least one resolution mode",
+      );
+    }
+    if (modes.includes("dn_template") !== hasDnTemplate) {
+      throw new ContractViolation(
+        `${path}.userDnTemplate`,
+        "DN-template resolution requires a user DN template",
+      );
+    }
+    const needsSearch =
+      modes.includes("service_bind_search") ||
+      modes.includes("upn") ||
+      modes.includes("domain_backslash");
+    if (needsSearch !== hasSearchBase && needsSearch) {
+      throw new ContractViolation(
+        `${path}.userSearchBase`,
+        "search, UPN, and DOMAIN\\user resolution require a user search base",
+      );
+    }
+    if (modes.includes("service_bind_search") && authentication.bindDn === null) {
+      throw new ContractViolation(
+        `${path}.bindDn`,
+        "service-bind search requires a service bind DN and password reference",
+      );
+    }
+    if (modes.includes("upn") && !authentication.upnSuffix) {
+      throw new ContractViolation(
+        `${path}.upnSuffix`,
+        "UPN resolution requires an explicit UPN suffix",
+      );
+    }
+    if (modes.includes("domain_backslash") && !authentication.netbiosDomain) {
+      throw new ContractViolation(
+        `${path}.netbiosDomain`,
+        "DOMAIN\\user resolution requires an explicit NetBIOS domain",
+      );
+    }
   }
   if (
     (authentication.bindDn === null) !==
@@ -1052,6 +1137,24 @@ function assertLdapAuthentication(
   }
   assertBoundedText(authentication.adminGroup, `${path}.adminGroup`, 512);
   assertNarrowDn(authentication.adminGroup, `${path}.adminGroup`, false);
+  if (authentication.upnSuffix) {
+    assertLdapUpnSuffix(authentication.upnSuffix, `${path}.upnSuffix`);
+  }
+  if (authentication.netbiosDomain) {
+    assertLdapNetbiosDomain(authentication.netbiosDomain, `${path}.netbiosDomain`);
+  }
+  if (authentication.memberAttribute) {
+    assertLdapAttributeName(authentication.memberAttribute, `${path}.memberAttribute`);
+  }
+  for (const field of [
+    "displayNameAttr",
+    "roleTitleAttr",
+    "teamAttr",
+    "emailAttr",
+  ] as const) {
+    const value = authentication[field];
+    if (value !== undefined) assertLdapAttributeName(value, `${path}.${field}`);
+  }
 }
 
 export function parseSetupSecretReference(

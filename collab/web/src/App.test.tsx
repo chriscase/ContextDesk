@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID } from "@cd-collab/contracts/admin";
+import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID, DEFAULT_DIRECTORY_ATTRIBUTE_MAP, LDAP_PUBLIC_CONFIG_SCHEMA_ID } from "@cd-collab/contracts/admin";
 import { App } from "./App.js";
 import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLocation } from "./app-location.js";
 
@@ -83,6 +83,33 @@ function stubAdminFetch(): FetchStub {
           schemaId: ADMIN_PEOPLE_LIST_SCHEMA_ID,
           people: [],
           nextCursor: null,
+        }),
+      } as Response);
+    }
+    if (url === "/api/admin/ldap/config") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schemaId: LDAP_PUBLIC_CONFIG_SCHEMA_ID,
+          authMode: "local",
+          url: null,
+          starttls: false,
+          verifyTls: true,
+          caConfigured: false,
+          userResolutionModes: [],
+          userDnTemplate: null,
+          userSearchBase: null,
+          userSearchFilter: null,
+          groupSearchBase: null,
+          groupSearchFilter: null,
+          memberAttribute: null,
+          bindDn: null,
+          bindPasswordConfigured: false,
+          upnSuffix: null,
+          netbiosDomain: null,
+          attributeMap: DEFAULT_DIRECTORY_ATTRIBUTE_MAP,
+          timeoutMs: 8000,
         }),
       } as Response);
     }
@@ -364,6 +391,15 @@ describe("authenticated application shell", () => {
       (await screen.findByRole("tab", { name: "Group role mappings" })).getAttribute("aria-selected"),
     ).toBe("true");
     expect(window.location.pathname).toBe("/administration");
+  });
+
+  it("treats /admin/ldap as the canonical Directory location", async () => {
+    window.history.replaceState(null, "", "/admin/ldap");
+    stubAdminFetch();
+    render(<App />);
+    expect((await screen.findByRole("tab", { name: "Directory" })).getAttribute("aria-selected")).toBe("true");
+    expect(window.location.pathname).toBe("/admin/ldap");
+    expect(document.title).toContain("Directory");
   });
 
   it("restores /admin/people after sign-in instead of collapsing to /administration", async () => {
@@ -712,6 +748,19 @@ describe("pathname parsing", () => {
       },
     });
     expect(pathFor(parsePathname("/admin/people"))).toBe("/admin/people");
+    expect(parsePathname("/admin/ldap")).toEqual({
+      area: "administration",
+      caseId: null,
+      stage: "situation",
+      focus: {
+        section: "ldap",
+        item: null,
+        itemKind: null,
+        lane: null,
+        experiment: null,
+      },
+    });
+    expect(pathFor(parsePathname("/admin/ldap"))).toBe("/admin/ldap");
     expect(pathFor({ area: "administration", caseId: null, stage: "situation" })).toBe(
       "/administration",
     );

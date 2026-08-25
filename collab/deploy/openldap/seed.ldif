@@ -13,6 +13,9 @@ objectClass: person
 cn: Alice
 sn: Fixture
 uid: alice
+mail: alice@example.test
+title: Contributor
+departmentNumber: Blue team
 userPassword: fixture-alice-secret
 
 dn: uid=bob,ou=people,dc=example,dc=test
