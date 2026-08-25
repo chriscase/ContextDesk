@@ -659,6 +659,54 @@ describe("portable investigation adversarial lab", () => {
       /dangling actor/,
     );
 
+    const mismatchedExperimentCandidates = syntheticSeal();
+    mismatchedExperimentCandidates.experiments[0]!.candidates = [
+      {
+        candidateId: "cand-other-1",
+        modelLabel: "qwen-3.6-27b",
+        role: "reviewer",
+        runStatus: "completed",
+        observedLatency: { status: "unknown" },
+        cost: { status: "unknown" },
+        usage: { status: "unknown" },
+        helpfulnessState: "unreviewed",
+        goldState: "unknown",
+      },
+    ];
+    expect(() => parsePortableInvestigation(reseal(mismatchedExperimentCandidates))).toThrow(
+      /candidate ids must match candidateIds/,
+    );
+
+    const danglingAgreementEvidence = syntheticSeal();
+    danglingAgreementEvidence.experiments[0]!.candidates = [
+      {
+        candidateId: danglingAgreementEvidence.experiments[0]!.candidateIds[0]!,
+        modelLabel: "qwen-3.6-27b",
+        role: "reviewer",
+        runStatus: "completed",
+        observedLatency: { status: "unknown" },
+        cost: { status: "unknown" },
+        usage: { status: "unknown" },
+        helpfulnessState: "unreviewed",
+        goldState: "unknown",
+      },
+    ];
+    danglingAgreementEvidence.experiments[0]!.agreement = {
+      sharedAnchors: [
+        {
+          evidenceRef: "ghost-evidence",
+          role: "evidence",
+          candidateIds: [danglingAgreementEvidence.experiments[0]!.candidateIds[0]!],
+        },
+      ],
+      candidateSpecific: [],
+      roleConflicts: [],
+      notes: ["Agreement is not proof of correctness."],
+    };
+    expect(() => parsePortableInvestigation(reseal(danglingAgreementEvidence))).toThrow(
+      /dangling evidence/,
+    );
+
     const danglingIntake = syntheticSeal();
     danglingIntake.timeline[0]!.targetNamespace = "intake_batch";
     danglingIntake.timeline[0]!.targetId = "ghost-batch";

@@ -14,9 +14,16 @@ import {
 import { GOLD_ALIGNMENT_NOT_CORRECTNESS, GOLD_ALIGNMENT_STATUSES, GOLD_IS_HUMAN_BENCHMARK } from "./gold.js";
 import { COMPLETENESS, EVIDENCE_VISIBILITY } from "./run.js";
 import {
+  CANDIDATE_ROLES,
   DECISION_STATUSES,
+  GOLD_STATES,
   HELPFULNESS_DIMENSIONS,
+  HELPFULNESS_STATES,
+  RUN_STATUSES,
   SNAPSHOT_LINEAGE_CLASSES,
+  SNAPSHOT_PROOF_BASES,
+  type ExperimentAgreementV1,
+  type ExperimentCandidateV1,
 } from "./experiment.js";
 import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import { assertShareSafeFingerprint, assertShareSafeTimestamp } from "./privacy.js";
@@ -667,6 +674,65 @@ const triageJobShape: ObjectShape = {
   objectHash: f.req(f.str),
 };
 
+const experimentCandidateShape: ObjectShape = {
+  candidateId: f.req(f.str),
+  modelLabel: f.req(f.str),
+  role: f.req(f.en(...CANDIDATE_ROLES)),
+  runStatus: f.req(f.en(...RUN_STATUSES)),
+  observedLatency: f.req(
+    f.obj({
+      status: f.req(f.en("unknown", "observed")),
+      milliseconds: f.opt(f.u64),
+    }),
+  ),
+  cost: f.req(f.obj({ status: f.req(f.en("unknown")) })),
+  usage: f.req(f.obj({ status: f.req(f.en("unknown")) })),
+  helpfulnessState: f.req(f.en(...HELPFULNESS_STATES)),
+  goldState: f.req(f.en(...GOLD_STATES)),
+};
+
+const experimentAgreementShape: ObjectShape = {
+  sharedAnchors: f.req(
+    f.arr(
+      f.obj({
+        evidenceRef: f.req(f.str),
+        role: f.req(f.str),
+        candidateIds: f.req(f.arr(f.str)),
+      }),
+    ),
+  ),
+  candidateSpecific: f.req(
+    f.arr(
+      f.obj({
+        candidateId: f.req(f.str),
+        evidenceRefs: f.req(f.arr(f.str)),
+      }),
+    ),
+  ),
+  roleConflicts: f.req(
+    f.arr(
+      f.obj({
+        evidenceRef: f.req(f.str),
+        assignments: f.req(
+          f.arr(
+            f.obj({
+              candidateId: f.req(f.str),
+              role: f.req(f.str),
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
+  notes: f.req(f.arr(f.str)),
+};
+
+const experimentSnapshotProofShape: ObjectShape = {
+  basis: f.req(f.en(...SNAPSHOT_PROOF_BASES)),
+  fairnessClass: f.req(f.en(...SNAPSHOT_FAIRNESS_CLASSES)),
+  lineageClass: f.req(f.en(...SNAPSHOT_LINEAGE_CLASSES)),
+};
+
 const experimentShape: ObjectShape = {
   id: f.req(f.str),
   packageId: f.req(f.str),
@@ -675,6 +741,9 @@ const experimentShape: ObjectShape = {
   candidateIds: f.req(f.arr(f.str)),
   createdAt: f.req(f.str),
   importerId: f.opt(f.str),
+  candidates: f.opt(f.arr(f.obj(experimentCandidateShape))),
+  agreement: f.opt(f.obj(experimentAgreementShape)),
+  snapshotProof: f.opt(f.obj(experimentSnapshotProofShape)),
   objectHash: f.req(f.str),
 };
 
@@ -1017,6 +1086,13 @@ export interface PortableExperimentV1 {
   candidateIds: string[];
   createdAt: string;
   importerId?: string;
+  candidates?: ExperimentCandidateV1[];
+  agreement?: ExperimentAgreementV1;
+  snapshotProof?: {
+    basis: (typeof SNAPSHOT_PROOF_BASES)[number];
+    fairnessClass: (typeof SNAPSHOT_FAIRNESS_CLASSES)[number];
+    lineageClass: (typeof SNAPSHOT_LINEAGE_CLASSES)[number];
+  };
   objectHash: string;
 }
 
@@ -2100,6 +2176,93 @@ export function parsePortableInvestigation(
           `$.experiments[${i}].candidateIds[${j}]`,
           "experiment candidate is not backed by a triage job or imported AI run",
         );
+      }
+    }
+    if (exp.candidates) {
+      const fromCandidates = exp.candidates.map((row) => row.candidateId);
+      uniqueIds(`$.experiments[${i}].candidates.candidateId`, fromCandidates);
+      if (canonicalJson([...fromCandidates].sort()) !== canonicalJson([...exp.candidateIds].sort())) {
+        throw new ContractViolation(
+          `$.experiments[${i}].candidates`,
+          "candidate ids must match candidateIds",
+        );
+      }
+      for (const [j, candidate] of exp.candidates.entries()) {
+        const milliseconds =
+          "milliseconds" in candidate.observedLatency
+            ? candidate.observedLatency.milliseconds
+            : undefined;
+        if (candidate.observedLatency.status === "observed") {
+          if (typeof milliseconds !== "number") {
+            throw new ContractViolation(
+              `$.experiments[${i}].candidates[${j}].observedLatency.milliseconds`,
+              "observed latency requires milliseconds",
+            );
+          }
+        } else if (typeof milliseconds === "number") {
+          throw new ContractViolation(
+            `$.experiments[${i}].candidates[${j}].observedLatency.milliseconds`,
+            "unknown latency must not include milliseconds",
+          );
+        }
+      }
+    }
+    if (exp.agreement) {
+      const candidateSet = new Set(exp.candidateIds);
+      const evidenceIds = new Set(bundle.evidence.map((row) => row.id));
+      const requireAgreementCandidate = (candidateId: string, path: string): void => {
+        if (!candidateSet.has(candidateId)) {
+          throw new ContractViolation(path, "dangling experiment candidate");
+        }
+      };
+      const requireAgreementEvidence = (evidenceId: string, path: string): void => {
+        if (!evidenceIds.has(evidenceId)) {
+          throw new ContractViolation(path, "dangling evidence reference");
+        }
+      };
+      for (const [j, anchor] of exp.agreement.sharedAnchors.entries()) {
+        requireAgreementEvidence(
+          anchor.evidenceRef,
+          `$.experiments[${i}].agreement.sharedAnchors[${j}].evidenceRef`,
+        );
+        uniqueIds(
+          `$.experiments[${i}].agreement.sharedAnchors[${j}].candidateIds`,
+          anchor.candidateIds,
+        );
+        for (const [k, candidateId] of anchor.candidateIds.entries()) {
+          requireAgreementCandidate(
+            candidateId,
+            `$.experiments[${i}].agreement.sharedAnchors[${j}].candidateIds[${k}]`,
+          );
+        }
+      }
+      for (const [j, row] of exp.agreement.candidateSpecific.entries()) {
+        requireAgreementCandidate(
+          row.candidateId,
+          `$.experiments[${i}].agreement.candidateSpecific[${j}].candidateId`,
+        );
+        uniqueIds(
+          `$.experiments[${i}].agreement.candidateSpecific[${j}].evidenceRefs`,
+          row.evidenceRefs,
+        );
+        for (const [k, evidenceId] of row.evidenceRefs.entries()) {
+          requireAgreementEvidence(
+            evidenceId,
+            `$.experiments[${i}].agreement.candidateSpecific[${j}].evidenceRefs[${k}]`,
+          );
+        }
+      }
+      for (const [j, conflict] of exp.agreement.roleConflicts.entries()) {
+        requireAgreementEvidence(
+          conflict.evidenceRef,
+          `$.experiments[${i}].agreement.roleConflicts[${j}].evidenceRef`,
+        );
+        for (const [k, assignment] of conflict.assignments.entries()) {
+          requireAgreementCandidate(
+            assignment.candidateId,
+            `$.experiments[${i}].agreement.roleConflicts[${j}].assignments[${k}].candidateId`,
+          );
+        }
       }
     }
     if (exp.importerId) {

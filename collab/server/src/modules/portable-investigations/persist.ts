@@ -874,6 +874,27 @@ export async function persistPortableArchive(input: {
       ? `chat-${remapOf(report, "imported_ai_run", imported.id)}`
       : candidateId;
   };
+  const remapAgreement = (
+    agreement: NonNullable<(typeof bundle.experiments)[number]["agreement"]>,
+  ) => ({
+    sharedAnchors: agreement.sharedAnchors.map((anchor) => ({
+      evidenceRef: remapOf(report, "evidence", anchor.evidenceRef),
+      role: anchor.role,
+      candidateIds: anchor.candidateIds.map(remapCandidateId),
+    })),
+    candidateSpecific: agreement.candidateSpecific.map((row) => ({
+      candidateId: remapCandidateId(row.candidateId),
+      evidenceRefs: row.evidenceRefs.map((id) => remapOf(report, "evidence", id)),
+    })),
+    roleConflicts: agreement.roleConflicts.map((conflict) => ({
+      evidenceRef: remapOf(report, "evidence", conflict.evidenceRef),
+      assignments: conflict.assignments.map((assignment) => ({
+        candidateId: remapCandidateId(assignment.candidateId),
+        role: assignment.role,
+      })),
+    })),
+    notes: [...agreement.notes],
+  });
   const caseRow: CaseRow = {
     id: investigationId,
     title: bundle.investigation.title,
@@ -1222,23 +1243,45 @@ export async function persistPortableArchive(input: {
           bundle.snapshots.find((snap) => snap.fingerprint === experiment.snapshotFingerprint)?.id ??
             "",
         ) ?? experiment.snapshotFingerprint,
-      snapshotProof: {
-        basis: "unknown",
-        fairnessClass: "unknown",
-        lineageClass: "unknown",
-      },
-      candidates: experiment.candidateIds.map((candidateId) => ({
-        candidateId: remapCandidateId(candidateId),
-        modelLabel: "imported-historical",
-        role: "reviewer",
-        runStatus: "completed",
-        observedLatency: { status: "unknown" },
-        cost: { status: "unknown" },
-        usage: { status: "unknown" },
-        helpfulnessState: "unreviewed",
-        goldState: "unknown",
-      })),
-      agreement: { sharedAnchors: [], candidateSpecific: [], roleConflicts: [], notes: [] },
+      snapshotProof: experiment.snapshotProof
+        ? { ...experiment.snapshotProof }
+        : {
+            basis: "unknown",
+            fairnessClass: "unknown",
+            lineageClass: "unknown",
+          },
+      candidates: experiment.candidates?.length
+        ? experiment.candidates.map((candidate) => ({
+            candidateId: remapCandidateId(candidate.candidateId),
+            modelLabel: candidate.modelLabel,
+            role: candidate.role,
+            runStatus: candidate.runStatus,
+            observedLatency:
+              candidate.observedLatency.status === "observed"
+                ? {
+                    status: "observed" as const,
+                    milliseconds: candidate.observedLatency.milliseconds,
+                  }
+                : { status: "unknown" as const },
+            cost: { status: "unknown" as const },
+            usage: { status: "unknown" as const },
+            helpfulnessState: candidate.helpfulnessState,
+            goldState: candidate.goldState,
+          }))
+        : experiment.candidateIds.map((candidateId) => ({
+            candidateId: remapCandidateId(candidateId),
+            modelLabel: "imported-historical",
+            role: "reviewer" as const,
+            runStatus: "completed" as const,
+            observedLatency: { status: "unknown" as const },
+            cost: { status: "unknown" as const },
+            usage: { status: "unknown" as const },
+            helpfulnessState: "unreviewed" as const,
+            goldState: "unknown" as const,
+          })),
+      agreement: experiment.agreement
+        ? remapAgreement(experiment.agreement)
+        : { sharedAnchors: [], candidateSpecific: [], roleConflicts: [], notes: [] },
       createdAt: experiment.createdAt,
       importerId: importer.id,
       importerUsername: importer.username,

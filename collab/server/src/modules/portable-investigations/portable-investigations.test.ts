@@ -2397,6 +2397,58 @@ describe("portable investigation apply", () => {
     expect(dest?.importerUsername).toMatch(/^historical-/);
   });
 
+  it("preserves experiment candidate labels, agreement, and snapshot proof after portable restore", async () => {
+    const row = await fixture();
+    const source = (await row.experiments.list(row.caseId, ACTOR, true))[0];
+    if (!source) throw new Error("fixture experiment is missing");
+    expect(source.candidates.map((item) => item.modelLabel)).toEqual(
+      expect.arrayContaining(["qwen-3.6-27b", "gpt-oss-120b"]),
+    );
+    expect(source.candidates.every((item) => item.modelLabel === "imported-historical")).toBe(false);
+    expect(source.snapshotProof.basis).toBe("host_frozen_snapshot");
+    expect(source.agreement.notes).toContain("Agreement is not proof of correctness.");
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const portable = archive.investigation.experiments.find((item) => item.id === source.id);
+    expect(portable?.candidates?.some((item) => item.modelLabel === "qwen-3.6-27b")).toBe(true);
+    expect(portable?.snapshotProof?.basis).toBe("host_frozen_snapshot");
+    expect(portable?.agreement?.notes).toContain("Agreement is not proof of correctness.");
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(preview.apply.confirmationToken).toEqual(expect.any(String));
+    const applied = await row.portable.apply(
+      archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const dest = (await row.experiments.list(applied.investigationId, ACTOR, true))
+      .find((item) => item.packageId === source.packageId);
+    expect(dest?.candidates.every((item) => item.modelLabel === "imported-historical")).toBe(false);
+    expect(
+      dest?.candidates.map((item) => `${item.role}:${item.modelLabel}:${item.runStatus}`).sort(),
+    ).toEqual(
+      source.candidates.map((item) => `${item.role}:${item.modelLabel}:${item.runStatus}`).sort(),
+    );
+    expect(dest?.snapshotProof).toEqual(source.snapshotProof);
+    expect(dest?.agreement.notes).toEqual(source.agreement.notes);
+    const destEvidenceIds = new Set(
+      (await row.cases.listArtifacts(applied.investigationId, ACTOR, true)).map((item) => item.id),
+    );
+    for (const anchor of dest?.agreement.sharedAnchors ?? []) {
+      expect(destEvidenceIds.has(anchor.evidenceRef)).toBe(true);
+    }
+    if (source.agreement.sharedAnchors.length > 0) {
+      expect(dest?.agreement.sharedAnchors.map((item) => item.evidenceRef).sort()).not.toEqual(
+        source.agreement.sharedAnchors.map((item) => item.evidenceRef).sort(),
+      );
+    }
+  });
+
   it("reauthorizes remapped locators after portable restore and hides kind-confused ids", async () => {
     const row = await fixture();
     const activity = new InvestigationActivityService({
@@ -4052,6 +4104,51 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
       expect(dest?.importerId).not.toBe(ACTOR.id);
       expect(dest?.importerId).not.toBe(HISTORICAL_EXPERIMENT_IMPORTER.id);
       expect(dest?.importerUsername).toMatch(/^historical-/);
+    });
+  });
+
+  it("preserves experiment candidate labels and snapshot proof after PostgreSQL apply", async () => {
+    const row = await fixture();
+    const source = (await row.experiments.list(row.caseId, ACTOR, true))[0];
+    if (!source) throw new Error("fixture experiment is missing");
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const pgRoot = await mkdtemp(join(tmpdir(), "cd-portable-pg-experiment-package-"));
+      roots.push(pgRoot);
+      const pgEvidence = new FilesystemEvidenceStore({
+        rootDir: pgRoot,
+        acquireWriteLease: async () => () => undefined,
+      });
+      const investigationId = await withPgApplyTransaction(client, pgEvidence, async (ports) =>
+        persistPortableArchive({
+          archive,
+          report: preview.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: archiveContentBytes(archive),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      );
+      const dest = (await new PgExperimentStore(client).listByCase(investigationId))
+        .find((item) => item.packageId === source.packageId);
+      expect(dest?.candidates.every((item) => item.modelLabel === "imported-historical")).toBe(false);
+      expect(
+        dest?.candidates.map((item) => `${item.role}:${item.modelLabel}:${item.runStatus}`).sort(),
+      ).toEqual(
+        source.candidates.map((item) => `${item.role}:${item.modelLabel}:${item.runStatus}`).sort(),
+      );
+      expect(dest?.snapshotProof).toEqual(source.snapshotProof);
+      expect(dest?.agreement.notes).toEqual(source.agreement.notes);
     });
   });
 });

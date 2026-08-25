@@ -960,6 +960,43 @@ export class PortableInvestigationService {
         candidateIds: experiment.candidates.map((candidate) => candidate.candidateId),
         createdAt: experiment.createdAt,
         importerId: experiment.importerId,
+        candidates: experiment.candidates.map((candidate) => ({
+          candidateId: candidate.candidateId,
+          modelLabel: candidate.modelLabel,
+          role: candidate.role,
+          runStatus: candidate.runStatus,
+          observedLatency:
+            candidate.observedLatency.status === "observed"
+              ? {
+                  status: "observed" as const,
+                  milliseconds: candidate.observedLatency.milliseconds,
+                }
+              : { status: "unknown" as const },
+          cost: { status: "unknown" as const },
+          usage: { status: "unknown" as const },
+          helpfulnessState: candidate.helpfulnessState,
+          goldState: candidate.goldState,
+        })),
+        agreement: {
+          sharedAnchors: experiment.agreement.sharedAnchors.map((anchor) => ({
+            evidenceRef: anchor.evidenceRef,
+            role: anchor.role,
+            candidateIds: [...anchor.candidateIds],
+          })),
+          candidateSpecific: experiment.agreement.candidateSpecific.map((row) => ({
+            candidateId: row.candidateId,
+            evidenceRefs: [...row.evidenceRefs],
+          })),
+          roleConflicts: experiment.agreement.roleConflicts.map((conflict) => ({
+            evidenceRef: conflict.evidenceRef,
+            assignments: conflict.assignments.map((assignment) => ({
+              candidateId: assignment.candidateId,
+              role: assignment.role,
+            })),
+          })),
+          notes: [...experiment.agreement.notes],
+        },
+        snapshotProof: { ...experiment.snapshotProof },
         objectHash: "",
       };
     });
