@@ -2,6 +2,13 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import type { MouseEvent, ReactNode } from "react";
 import { pathFor, type RouteItemKind, type WorkFocus } from "./app-location.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
+import {
+  disambiguateIdentities,
+  evidenceIdentity,
+  readableReferenceName,
+  type EvidenceIdentity,
+  type EvidenceIdentityContext,
+} from "./evidence-identity.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { matchingRouteItem, visibleSectionTarget } from "./route-focus.js";
 
@@ -369,12 +376,46 @@ interface LoadedEvidenceExcerpt {
   truncated: boolean;
 }
 
-function artifactSource(artifact: EvidenceArtifactView): string {
-  return [
-    artifact.kind.replaceAll("_", " "),
-    artifact.verificationStatus?.replaceAll("_", " ") ?? "verification unknown",
-    artifact.privacyClass.replaceAll("_", " "),
-  ].join(" · ");
+/**
+ * Adapter from a recorded evidence reference to the presentation shape the lab
+ * renders. All naming, attribution, and excerpt-scoping rules live in
+ * `evidence-identity`, so every surface answers the same way for the same
+ * reference and two distinct references never render as one.
+ */
+function identityContext(
+  view: ExperimentView,
+  artifacts: EvidenceArtifactView[],
+  excerpts: Record<string, LoadedEvidenceExcerpt>,
+  preferLane?: string | null,
+): EvidenceIdentityContext {
+  return {
+    artifacts,
+    traces: view.traces ?? [],
+    laneName: (candidateId) =>
+      view.candidates.find((row) => row.candidateId === candidateId)?.modelLabel
+      ?? "an unnamed lane",
+    loadedText: excerpts,
+    preferLane: preferLane ?? null,
+  };
+}
+
+/**
+ * Every reference this comparison mentions, named and disambiguated together.
+ *
+ * Names are resolved as a set rather than one at a time so a repeated name can
+ * gain a distinguishing suffix; resolving in isolation cannot see the clash.
+ */
+function evidenceIdentityIndex(
+  view: ExperimentView,
+  artifacts: EvidenceArtifactView[] = [],
+  excerpts: Record<string, LoadedEvidenceExcerpt> = {},
+  preferLane?: string | null,
+): Map<string, EvidenceIdentity> {
+  const context = identityContext(view, artifacts, excerpts, preferLane);
+  const identities = disambiguateIdentities(
+    evidenceRefsFor(view).map((ref) => evidenceIdentity(ref, context)),
+  );
+  return new Map(identities.map((identity) => [identity.reference, identity]));
 }
 
 function supportingArtifact(
@@ -382,45 +423,16 @@ function supportingArtifact(
   evidenceRef: string,
   artifacts: EvidenceArtifactView[] = [],
   excerpts: Record<string, LoadedEvidenceExcerpt> = {},
+  preferLane?: string | null,
 ): SupportingArtifact {
-  const artifact = artifacts.find((row) => row.id === evidenceRef);
-  const loaded = excerpts[evidenceRef];
-  const traceEvent = (view.traces ?? []).flatMap((trace) =>
-    trace.events.map((event) => ({ trace, event })),
-  ).find(({ event }) => event.evidenceRefs.includes(evidenceRef) && Boolean(event.excerpt?.trim()));
-  if (artifact) {
-    const label = evidenceArtifactLabel(artifact) ?? "Recorded evidence";
-    return {
-      label,
-      source: artifactSource(artifact),
-      excerpt: loaded?.text ?? traceEvent?.event.excerpt ?? null,
-      context: loaded
-        ? `Text loaded from the recorded evidence artifact${loaded.truncated ? "; the displayed content is a bounded excerpt" : ""}.`
-        : traceEvent
-          ? `The recorded lane captured this excerpt from ${label}; inspect the evidence board for the complete artifact.`
-          : `The evidence record is available as ${label}, but no readable excerpt was loaded.`,
-    };
-  }
-  for (const trace of view.traces ?? []) {
-    const event = trace.events.find((row) =>
-      row.evidenceRefs.includes(evidenceRef) && Boolean(row.excerpt?.trim()),
-    );
-    if (event?.excerpt) {
-      const model = view.candidates.find((row) => row.candidateId === trace.candidateId)?.modelLabel ??
-        "recorded lane";
-      return {
-        label: `Recorded evidence cited by ${model}`,
-        source: `recorded lane transcript · ${model}`,
-        excerpt: event.excerpt,
-        context: `Trace step ${event.sequence} · ${event.kind} by ${event.authorUsername ?? event.actor}. Timestamp and component were not captured by this experiment record.`,
-      };
-    }
-  }
+  const index = evidenceIdentityIndex(view, artifacts, excerpts, preferLane);
+  const identity = index.get(evidenceRef)
+    ?? evidenceIdentity(evidenceRef, identityContext(view, artifacts, excerpts, preferLane));
   return {
-    label: "Supporting evidence needs inspection",
-    source: "Evidence reference recorded; source label was not captured in this experiment view",
-    excerpt: null,
-    context: "Supporting excerpt, timestamp, and component were not captured. ContextDesk will not reconstruct them from an identifier.",
+    label: identity.name,
+    source: identity.source,
+    excerpt: identity.excerpt,
+    context: identity.excerptCaveat ?? "",
   };
 }
 
@@ -437,19 +449,6 @@ function evidenceRefsFor(view: ExperimentView): string[] {
     }
   }
   return [...refs].sort((left, right) => left.localeCompare(right));
-}
-
-function evidenceArtifactLabel(artifact: EvidenceArtifactView | undefined): string | null {
-  if (!artifact) return null;
-  const filename = artifact.filename?.trim();
-  if (filename) return filename;
-  const uri = artifact.uri?.trim();
-  if (uri) {
-    const withoutQuery = uri.split(/[?#]/, 1)[0] ?? uri;
-    const basename = withoutQuery.split(/[\\/]/).filter(Boolean).at(-1);
-    if (basename) return basename;
-  }
-  return `${artifact.kind.replaceAll("_", " ")} evidence`;
 }
 
 const MAX_EVIDENCE_EXCERPT_BYTES = 64 * 1024;
@@ -477,17 +476,17 @@ function EvidencePicker(props: {
   const [query, setQuery] = useState("");
   const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set());
   const fieldsetRef = useRef<HTMLFieldSetElement>(null);
-  const artifactsById = new Map(props.artifacts.map((artifact) => [artifact.id, artifact]));
+  // Resolve the whole set at once: picking one reference at a time cannot see
+  // that two of them would render under the same name, and a chooser whose
+  // options read identically cannot be used to choose.
+  const identities = evidenceIdentityIndex(props.view, props.artifacts);
   const choices = evidenceRefsFor(props.view).map((ref) => {
-    const artifact = artifactsById.get(ref);
-    const support = supportingArtifact(props.view, ref, props.artifacts);
+    const identity = identities.get(ref);
     return {
       ref,
-      label: evidenceArtifactLabel(artifact) ?? support.label,
-      source: artifact
-        ? `${artifact.kind.replaceAll("_", " ")} · ${artifact.privacyClass.replaceAll("_", " ")}${artifact.verificationStatus ? ` · ${artifact.verificationStatus}` : ""}`
-        : support.source,
-      excerpt: support.excerpt,
+      label: identity?.name ?? readableReferenceName(ref),
+      source: identity?.source ?? "named from the recorded reference",
+      excerpt: identity?.excerpt ?? null,
     };
   });
   const normalized = query.trim().toLowerCase();

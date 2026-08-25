@@ -6,6 +6,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const port = Number.parseInt(process.env.COLLAB_E2E_PORT ?? "8788", 10);
 const baseURL = process.env.COLLAB_E2E_BASE_URL ?? `http://127.0.0.1:${port}`;
 const startFixture = process.env.COLLAB_E2E_START_FIXTURE !== "0";
+// Sandboxes and CI images often pre-provision a Chromium build that does not
+// match the revision this Playwright version would download. Point at it
+// explicitly rather than failing the run or fetching over the network.
+const chromiumPath = process.env.COLLAB_E2E_CHROMIUM_PATH?.trim();
 
 const webServer = {
   command: "node --import tsx/esm src/serve-fixture.ts",
@@ -41,7 +45,10 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        ...(chromiumPath ? { launchOptions: { executablePath: chromiumPath } } : {}),
+      },
     },
   ],
   ...(startFixture ? { webServer } : {}),
