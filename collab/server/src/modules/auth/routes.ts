@@ -6,11 +6,13 @@ import {
   type AppRole,
   type AuthErrorV1,
   type Capability,
+  type DirectoryMappedField,
   type SessionResponseV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import type { AuthAdapter } from "./adapter.js";
+import { DirectoryClaimsUnsafeError } from "./ldap-session.js";
 import type { AuthLog } from "./log.js";
 import type { RateLimiter } from "./rate-limit.js";
 import {
@@ -35,6 +37,7 @@ export interface LoginProfileSync {
     displayName: string;
     provenance: "local" | "ldap";
     directorySubject: string | null;
+    directoryFields?: Partial<Record<DirectoryMappedField, string>>;
   }): Promise<{ outcome: "ok" | "collision" }>;
   getById(id: string): Promise<{ status: string; provenance: string } | null>;
 }
@@ -131,7 +134,24 @@ export async function registerAuthRoutes(
         ? (body as { password: string }).password
         : "";
 
-    const result = await deps.adapter.authenticate(username, password);
+    let result;
+    try {
+      result = await deps.adapter.authenticate(username, password);
+    } catch (err) {
+      if (err instanceof DirectoryClaimsUnsafeError) {
+        await deps.audit.append({
+          identity: null,
+          action: "login",
+          target: "unsafe_directory_claims",
+          origin: originOf(request),
+          outcome: "denied",
+        });
+        deps.log.event({ event: "login_denied_unmapped", username: username.slice(0, 128) });
+        void reply.code(403);
+        return authError("access_denied");
+      }
+      throw err;
+    }
     if (!result) {
       deps.limiter.fail(key);
       await deps.audit.append({
@@ -203,8 +223,13 @@ export async function registerAuthRoutes(
           displayName: result.identity.displayName,
           provenance: deps.adapter.provenance,
           directorySubject: deps.adapter.provenance === "local" ? null : result.identity.id,
+          ...(deps.adapter.provenance === "local" || result.directoryFields === undefined
+            ? {}
+            : { directoryFields: result.directoryFields }),
         });
         if (sync.outcome === "collision") {
+          await deps.sessions.revoke(record.id);
+          clearSessionCookie(reply, deps);
           await deps.audit.append({
             identity: result.identity.id,
             action: "profile_sync",
@@ -212,6 +237,8 @@ export async function registerAuthRoutes(
             origin: originOf(request),
             outcome: "failure",
           });
+          void reply.code(403);
+          return authError("access_denied");
         }
       } catch {
         await deps.sessions.revoke(record.id);

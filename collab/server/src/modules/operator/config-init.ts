@@ -32,6 +32,22 @@ function ldapBindSecretLine(): string {
   return `# ${["COLLAB_LDAP_BIND", "PASSWORD"].join("_")}=replace-from-secret-store`;
 }
 
+function ldapAdCompatibilityComments(): string {
+  return `# Optional AD-compatible resolution. UPN suffix and NetBIOS are never derived from a DN.
+# COLLAB_LDAP_USER_SEARCH_BASE=ou=people,dc=example,dc=test
+# COLLAB_LDAP_USER_SEARCH_FILTER=(sAMAccountName={0})
+# COLLAB_LDAP_USER_RESOLUTION=service_bind_search,upn,domain_backslash
+# COLLAB_LDAP_UPN_SUFFIX=example.test
+# COLLAB_LDAP_NETBIOS_DOMAIN=EXAMPLE
+# COLLAB_LDAP_MEMBER_ATTR=memberOf
+# COLLAB_LDAP_ATTR_DISPLAY_NAME=cn
+# COLLAB_LDAP_ATTR_EMAIL=mail
+# COLLAB_LDAP_ATTR_ROLE_TITLE=title
+# COLLAB_LDAP_ATTR_TEAM=departmentNumber
+# Bind secret: environment value, ${["COLLAB_LDAP_BIND", "PASSWORD_FILE"].join("_")}, or a file: reference. Configure exactly one.
+`;
+}
+
 function isProfile(value: string | undefined): value is ConfigInitProfile {
   return CONFIG_INIT_PROFILES.includes(value as ConfigInitProfile);
 }
@@ -62,6 +78,7 @@ COLLAB_GROUP_ROLE_MAP=local:case-lead=case-lead
 # COLLAB_LDAP_GROUP_SEARCH_BASE=ou=groups,dc=example,dc=test
 # COLLAB_LDAP_BIND_DN=
 ${ldapBindSecretLine()}
+${ldapAdCompatibilityComments()}
 # COLLAB_GROUP_ROLE_MAP=cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
 
 # Optional ContextDesk host bridge (filesystem path only; doctor does not execute it)
@@ -96,6 +113,7 @@ COLLAB_LDAP_USER_DN_TEMPLATE=uid={username},ou=people,dc=example,dc=test
 COLLAB_LDAP_GROUP_SEARCH_BASE=ou=groups,dc=example,dc=test
 # COLLAB_LDAP_BIND_DN=
 ${ldapBindSecretLine()}
+${ldapAdCompatibilityComments()}
 COLLAB_GROUP_ROLE_MAP=cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
 
 # COLLAB_BRIDGE_BIN=
@@ -126,6 +144,7 @@ COLLAB_LDAP_USER_DN_TEMPLATE=uid={username},ou=people,dc=example,dc=test
 COLLAB_LDAP_GROUP_SEARCH_BASE=ou=groups,dc=example,dc=test
 # COLLAB_LDAP_BIND_DN=
 ${ldapBindSecretLine()}
+${ldapAdCompatibilityComments()}
 COLLAB_GROUP_ROLE_MAP=cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
 
 # COLLAB_BRIDGE_BIN=

@@ -16,18 +16,22 @@ import {
 } from "@cd-collab/contracts/admin";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { AdminPeoplePanel } from "./AdminPeoplePanel.js";
+import { AdminLdapPanel } from "./AdminLdapPanel.js";
 import { ComponentHealthPanel } from "./ComponentHealthPanel.js";
 import { protectedApiFetch } from "./protected-api.js";
 
-type AdminTab = "roles" | "people";
+type AdminTab = "roles" | "people" | "ldap";
 
 const ADMIN_TAB_PATHS: Record<AdminTab, string> = {
   roles: "/administration",
   people: "/admin/people",
+  ldap: "/admin/ldap",
 };
 
 function adminTabFromPathname(pathname: string): AdminTab {
-  return pathname === "/admin/people" ? "people" : "roles";
+  if (pathname === "/admin/people") return "people";
+  if (pathname === "/admin/ldap") return "ldap";
+  return "roles";
 }
 
 const ROLE_LABELS: Record<AppRole, string> = {
@@ -157,7 +161,9 @@ export function Administration(props: {
     document.title =
       activeTab === "people"
         ? "People · Administration · ContextDesk War Room"
-        : "Administration · ContextDesk War Room";
+        : activeTab === "ldap"
+          ? "Directory · Administration · ContextDesk War Room"
+          : "Administration · ContextDesk War Room";
   }, [activeTab]);
 
   useEffect(() => {
@@ -376,6 +382,16 @@ export function Administration(props: {
         >
           People
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "ldap"}
+          aria-controls="administration-ldap-panel"
+          id="administration-tab-ldap"
+          onClick={() => selectTab("ldap")}
+        >
+          Directory
+        </button>
       </div>
 
       <div
@@ -385,6 +401,15 @@ export function Administration(props: {
         hidden={activeTab !== "people"}
       >
         {activeTab === "people" ? <AdminPeoplePanel /> : null}
+      </div>
+
+      <div
+        id="administration-ldap-panel"
+        role="tabpanel"
+        aria-labelledby="administration-tab-ldap"
+        hidden={activeTab !== "ldap"}
+      >
+        {activeTab === "ldap" ? <AdminLdapPanel /> : null}
       </div>
 
       <div

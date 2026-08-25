@@ -21,8 +21,21 @@ export {
   ldapClientOptions,
   ldapTlsOptions,
 } from "./ldap-adapter.js";
-export { loadLdapConfig } from "./ldap-config.js";
+export { ldapConfigFromSetup, loadLdapConfig, publicLdapConfig } from "./ldap-config.js";
 export type { LdapConfig } from "./ldap-config.js";
+export { probeLdap } from "./ldap-probe.js";
+export type { LdapProbeInput } from "./ldap-probe.js";
+export {
+  DirectoryClaimsUnsafeError,
+  LdapBindError,
+  LdapTimeoutError,
+  LdapTlsError,
+  LdapUnavailableError,
+} from "./ldap-session.js";
+export type { LdapSession, LdapSessionFactory } from "./ldap-session.js";
+export { createSyntheticLdapFactory, exampleSyntheticDirectory } from "./ldap-synthetic.js";
+export type { SyntheticDirectoryOptions } from "./ldap-synthetic.js";
+export { parseLoginName } from "./ldap-resolution.js";
 export { createAuthLog } from "./log.js";
 export type { AuthLog, AuthLogEvent } from "./log.js";
 export { createRateLimiter } from "./rate-limit.js";

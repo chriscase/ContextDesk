@@ -17,6 +17,8 @@ import {
   registerAuthRoutes,
   registerBrowserMutationCsrfGuard,
   type AuthRouteDeps,
+  type LdapConfig,
+  type LdapSessionFactory,
 } from "./modules/auth/index.js";
 import {
   MemoryGroupRoleStore,
@@ -27,7 +29,7 @@ import {
 } from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
 import { registerAdminAuditRoutes } from "./modules/audit/index.js";
-import { registerAdminDirectoryRoutes } from "./modules/admin/index.js";
+import { registerAdminDirectoryRoutes, registerLdapAdminRoutes } from "./modules/admin/index.js";
 import {
   registerComponentHealthRoutes,
   runtimeComponentHealth,
@@ -65,6 +67,8 @@ export interface SecurityDeps {
   roles: MutableGroupRoleMap;
   roleStore?: GroupRoleStore;
   audit: AuditStore;
+  ldapConfig?: LdapConfig | null;
+  ldapSessions?: LdapSessionFactory;
 }
 
 export interface AppDeps {
@@ -189,6 +193,12 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await registerAdminDirectoryRoutes(app, {
       sessionAuth,
       audit: security.audit,
+    });
+    await registerLdapAdminRoutes(app, {
+      sessionAuth,
+      audit: security.audit,
+      ldapConfig: security.ldapConfig ?? null,
+      ...(security.ldapSessions ? { sessions: security.ldapSessions } : {}),
     });
     await registerComponentHealthRoutes(app, {
       sessionAuth,
