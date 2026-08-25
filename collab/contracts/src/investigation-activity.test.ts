@@ -208,6 +208,7 @@ describe("investigation resource locator", () => {
 describe("human-readable presentation boundary", () => {
   it("never invents a label and uses bounded honest fallbacks", () => {
     expect(safeResourceLabel("evidence_item", null)).toBe("Evidence item");
+    expect(safeResourceLabel("intake_batch", null)).toBe("Intake batch");
     expect(safeResourceLabel("workstream_attempt", CASE_A)).toBe("Workstream attempt");
     expect(safeResourceLabel("evidence_item", "ab".repeat(32))).toBe("Evidence item");
     expect(safeResourceLabel("evidence_item", "case_created")).toBe("Evidence item");
@@ -399,6 +400,7 @@ describe("routed locator focus against shipped War Room sections", () => {
       investigation: { stage: "situation", section: "stage-situation", itemKind: null },
       investigation_stage: { stage: "analyze", section: null, itemKind: null },
       evidence_item: { stage: "analyze", section: "triage-evidence-board", itemKind: "evidence" },
+      intake_batch: { stage: "capture", section: "corpus-intake", itemKind: "intake-batch" },
       evidence_context: { stage: "analyze", section: "triage-evidence-board", itemKind: null },
       workstream: { stage: "analyze", section: "triage-lane-runner", itemKind: "triage-run" },
       workstream_attempt: { stage: "analyze", section: "workstreams", itemKind: "workstream", hasLane: true },

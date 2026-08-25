@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { GOLD_ALIGNMENT_NOT_CORRECTNESS, GOLD_IS_HUMAN_BENCHMARK } from "./gold.js";
+import { CORPUS_INTAKE_BATCH_SCHEMA_ID } from "./investigation-corpus-intake.js";
 import {
   PORTABLE_HISTORY_CAVEAT,
   PORTABLE_PERMISSION_CAVEAT,
@@ -139,6 +140,61 @@ function unsignedSynthetic(): PortableInvestigationUnsigned {
         createdBy: "operator-north",
         createdAt: TS,
         objectHash: Z,
+      },
+      {
+        id: "ev-intake-1",
+        title: "Intake worker excerpt",
+        artifactKind: "log",
+        sourceId: "src-operator",
+        relativePath: "router/timeout.log",
+        intakeBatchId: "batch-intake-1",
+        privacyClass: "share_safe",
+        digest: publicHash,
+        inclusion: "present",
+        contentType: "text/plain",
+        byteLength: Buffer.byteLength(publicBytes),
+        createdBy: "operator-north",
+        createdAt: TS,
+        objectHash: Z,
+      },
+    ],
+    intakeBatches: [
+      {
+        id: "batch-intake-1",
+        caseId: "inv-synth-alpha",
+        idempotencyKey: "batch-syn-0001",
+        requestDigest: sha("synth-intake-request"),
+        origin: "files",
+        sourceLabel: "Synthetic router diagnostics",
+        privacyClass: "share_safe",
+        createdAt: TS,
+        createdBy: "operator-north",
+        payloadJson: JSON.stringify({
+          schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,
+          id: "batch-intake-1",
+          caseId: "inv-synth-alpha",
+          origin: "files",
+          sourceLabel: "Synthetic router diagnostics",
+          privacyClass: "share_safe",
+          idempotencyKey: "batch-syn-0001",
+          requestDigest: sha("synth-intake-request"),
+          replayed: false,
+          createdAt: TS,
+          createdBy: "operator-north",
+          items: [
+            {
+              artifactId: "ev-intake-1",
+              relativePath: "router/timeout.log",
+              digest: publicHash,
+              byteLength: Buffer.byteLength(publicBytes),
+              mediaType: "text/plain",
+              privacyClass: "share_safe",
+              sourceId: "src-operator",
+              duplicateDigest: true,
+            },
+          ],
+          rejected: [],
+        }),
       },
     ],
     contentObjects: [
@@ -432,6 +488,7 @@ describe("portable investigation adversarial lab", () => {
       ["participant", (row) => row.participants[0] as unknown as Record<string, unknown>],
       ["contribution", (row) => row.contributions[0] as unknown as Record<string, unknown>],
       ["evidence", (row) => row.evidence[0] as unknown as Record<string, unknown>],
+      ["intake batch", (row) => row.intakeBatches![0] as unknown as Record<string, unknown>],
       ["content", (row) => row.contentObjects[0] as unknown as Record<string, unknown>],
       ["source", (row) => row.sources[0] as unknown as Record<string, unknown>],
       ["imported run", (row) => row.importedAiRuns[0] as unknown as Record<string, unknown>],
@@ -556,6 +613,11 @@ describe("portable investigation adversarial lab", () => {
     danglingTimeline.timeline[0]!.targetId = "ghost-note";
     expect(() => parsePortableInvestigation(reseal(danglingTimeline))).toThrow(/dangling/);
 
+    const danglingIntake = syntheticSeal();
+    danglingIntake.timeline[0]!.targetNamespace = "intake_batch";
+    danglingIntake.timeline[0]!.targetId = "ghost-batch";
+    expect(() => parsePortableInvestigation(reseal(danglingIntake))).toThrow(/dangling/);
+
     const danglingAudit = syntheticSeal();
     danglingAudit.auditRefs[0]!.actorId = "ghost-operator";
     expect(() => parsePortableInvestigation(reseal(danglingAudit))).toThrow(/dangling actor/);
@@ -568,6 +630,7 @@ describe("portable investigation adversarial lab", () => {
       ["actor", sealed.actors[0]!.sourceActorId],
       ["contribution", sealed.contributions[0]!.id],
       ["evidence", sealed.evidence[0]!.id],
+      ["intake_batch", sealed.intakeBatches![0]!.id],
       ["content", sealed.contentObjects[0]!.digest],
       ["source", sealed.sources[0]!.id],
       ["imported_ai_run", sealed.importedAiRuns[0]!.id],
@@ -754,19 +817,21 @@ describe("portable investigation adversarial lab", () => {
     expect(() => parsePortableInvestigation(fp)).toThrow(/hash\/fingerprint mismatch/);
 
     const ordinal = syntheticSeal();
+    const restricted = ordinal.evidence.find((row) => row.id === "ev-restricted-1")!;
     ordinal.snapshots[0]!.evidence.push({
       evidenceId: "ev-restricted-1",
       ordinal: 0,
-      contentHash: ordinal.evidence[1]!.digest,
+      contentHash: restricted.digest,
       privacyClass: "owner_only",
     });
     expect(() => parsePortableInvestigation(reseal(ordinal))).toThrow(/duplicate ordinal|illegal privacy/);
 
     const privacy = syntheticSeal();
+    const restrictedPrivacy = privacy.evidence.find((row) => row.id === "ev-restricted-1")!;
     privacy.snapshots[0]!.evidence.push({
       evidenceId: "ev-restricted-1",
       ordinal: 1,
-      contentHash: privacy.evidence[1]!.digest,
+      contentHash: restrictedPrivacy.digest,
       privacyClass: "owner_only",
     });
     privacy.snapshots[0]!.fingerprint = portableSnapshotFingerprint(privacy.snapshots[0]!);

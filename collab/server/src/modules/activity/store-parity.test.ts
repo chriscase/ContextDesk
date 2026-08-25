@@ -2,6 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
+import {
+  CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+  formatCompactInvestigationLocator,
+  formatInvestigationResourceLocator,
+} from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { migrateUp } from "../../db/migrate.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
@@ -43,6 +49,28 @@ async function seed(cases: CaseService): Promise<string> {
     serverTime: "2026-08-24T16:01:00.000Z",
     payload: { summary: "PLANTED_MODEL_OUTPUT" },
   });
+  const intakeBytes = new TextEncoder().encode("2026-08-24T00:00:00Z synthetic parity intake\n");
+  const intakeSeed = {
+    origin: "files" as const,
+    sourceLabel: "Synthetic parity intake",
+    privacyClass: "share_safe" as const,
+    idempotencyKey: "batch-synthetic-parity-1",
+    files: [{
+      relativePath: "mailer/parity-intake.log",
+      mediaType: "text/plain",
+      contentBase64: Buffer.from(intakeBytes).toString("base64"),
+    }],
+    archiveBase64: null,
+  };
+  const preview = await cases.previewCorpusIntake(created.id, ALICE, {
+    schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+    ...intakeSeed,
+  });
+  await cases.commitCorpusIntake(created.id, ALICE, {
+    schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+    ...intakeSeed,
+    previewToken: preview.previewToken,
+  }, "test");
   return created.id;
 }
 
@@ -129,6 +157,28 @@ describe.skipIf(!adminUrl())("investigation activity PostgreSQL parity", () => {
           serverTime: "2026-08-24T16:01:00.000Z",
           payload: { summary: "PLANTED_MODEL_OUTPUT" },
         });
+        const intakeBytes = new TextEncoder().encode("2026-08-24T00:00:00Z synthetic parity intake\n");
+        const intakeSeed = {
+          origin: "files" as const,
+          sourceLabel: "Synthetic parity intake",
+          privacyClass: "share_safe" as const,
+          idempotencyKey: "batch-synthetic-parity-1",
+          files: [{
+            relativePath: "mailer/parity-intake.log",
+            mediaType: "text/plain",
+            contentBase64: Buffer.from(intakeBytes).toString("base64"),
+          }],
+          archiveBase64: null,
+        };
+        const preview = await pgCases.previewCorpusIntake(pgCreated.id, ALICE, {
+          schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+          ...intakeSeed,
+        });
+        const batch = await pgCases.commitCorpusIntake(pgCreated.id, ALICE, {
+          schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+          ...intakeSeed,
+          previewToken: preview.previewToken,
+        }, "test");
         const pgActivity = new InvestigationActivityService({
           cases: pgCases,
           installationId: INSTALLATION,
@@ -142,6 +192,28 @@ describe.skipIf(!adminUrl())("investigation activity PostgreSQL parity", () => {
           .toEqual(memPage.items.map((item) => item.activityKind).sort());
         expect(pgPage.items.every((item) => item.humanFinding === false || item.activityKind === "comment_added"))
           .toBe(true);
+        const intake = pgPage.items.find((item) => item.summary === "committed a log intake batch");
+        expect(intake?.locator.kind).toBe("intake_batch");
+        expect(intake?.locator.resourceId).toBe(batch.id);
+        expect(intake?.humanFinding).toBe(false);
+        await expect(
+          pgActivity.resolve(ALICE, false, formatCompactInvestigationLocator(intake!.locator)),
+        ).resolves.toMatchObject({ authorized: true, resourceLabel: "Intake batch" });
+        await expect(
+          pgActivity.resolve({ id: "eve", username: "eve" }, false, formatCompactInvestigationLocator(intake!.locator)),
+        ).rejects.toMatchObject({ code: "not_found" });
+        await expect(
+          pgActivity.resolve(
+            ALICE,
+            false,
+            formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+              installationId: INSTALLATION,
+              investigationId: pgCreated.id,
+              kind: "evidence_item",
+              resourceId: batch.id,
+            })),
+          ),
+        ).rejects.toMatchObject({ code: "not_found" });
         const reloaded = new InvestigationActivityService({
           cases: new CaseService(
             pgEvidence,

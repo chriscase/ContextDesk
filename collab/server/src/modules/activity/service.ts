@@ -302,6 +302,11 @@ export class InvestigationActivityService {
         }
         return this.authorizeViaTimeline(caseId, locator);
       }
+      case "intake_batch": {
+        const batch = await this.deps.cases.getCorpusIntakeBatch(caseId, locator.resourceId);
+        if (batch) return { label: resourceLabelForKind("intake_batch") };
+        return this.authorizeViaTimeline(caseId, locator);
+      }
       case "evidence_context": {
         const snapshots = await this.deps.cases.listSnapshots(caseId, actor, isAdmin);
         if (snapshots.some((row) => row.id === locator.resourceId)) {

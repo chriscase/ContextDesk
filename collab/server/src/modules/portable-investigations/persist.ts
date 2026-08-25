@@ -153,6 +153,9 @@ function importedTimelinePayload(
   if (event.targetNamespace === "snapshot" && event.targetId) {
     payload.snapshotId = remapOf(report, "snapshot", event.targetId);
   }
+  if (event.targetNamespace === "intake_batch" && event.targetId) {
+    payload.intakeBatchId = remapOf(report, "intake_batch", event.targetId);
+  }
   return payload;
 }
 
@@ -653,6 +656,11 @@ export async function persistPortableArchive(input: {
     archive.investigation.investigation.id,
   );
   const bundle = archive.investigation;
+  for (const event of bundle.timeline) {
+    if (event.kind === "corpus_intake_committed" && (event.targetNamespace !== "intake_batch" || !event.targetId)) {
+      throw new Error("corpus intake timeline is missing a portable intake-batch target");
+    }
+  }
   const remapCandidateId = (candidateId: string): string => {
     const imported = bundle.importedAiRuns.find((run) => candidateId === `chat-${run.id}`);
     return imported
@@ -742,12 +750,10 @@ export async function persistPortableArchive(input: {
 
   const intakeBatchIds = new Map<string, string>();
   for (const batch of bundle.intakeBatches ?? []) {
-    const id = portableDestinationUuid(
-      bundle.sourceInstallationId,
-      "evidence",
-      `intake-batch:${batch.id}`,
-      0,
-    );
+    if (!report.idRemap.some((row) => row.namespace === "intake_batch" && row.sourceId === batch.id)) {
+      throw new Error("portable corpus intake batch is missing from the destination remap");
+    }
+    const id = remapOf(report, "intake_batch", batch.id);
     const sourcePayload = parseCorpusIntakeBatch(JSON.parse(batch.payloadJson));
     const createdBy = attribution(batch.createdBy);
     const payload = {

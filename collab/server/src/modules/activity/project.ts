@@ -236,7 +236,7 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
     case "experiment_trace_imported":
       return { activityKind: "import_recorded", resourceKind: "evidence_context", resourceId: target, provenance: "ai_generated", summary: "imported analysis was recorded", humanFinding: false, revision: null, workstreamId: null };
     case "corpus_intake_committed":
-      return { activityKind: "import_recorded", resourceKind: "evidence_item", resourceId: target, provenance: "imported", summary: "committed a log intake batch", humanFinding: false, revision: null, workstreamId: null };
+      return { activityKind: "import_recorded", resourceKind: "intake_batch", resourceId: target, provenance: "imported", summary: "committed a log intake batch", humanFinding: false, revision: null, workstreamId: null };
     case "export_recorded":
     case "export_created":
       return { activityKind: "export_recorded", resourceKind: "export_event", resourceId: target, provenance: "system", summary: "recorded an export", humanFinding: false, revision: null, workstreamId: null };

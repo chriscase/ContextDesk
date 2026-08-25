@@ -39,6 +39,7 @@ export const INVESTIGATION_RESOURCE_KINDS = [
   "investigation",
   "investigation_stage",
   "evidence_item",
+  "intake_batch",
   "evidence_context",
   "workstream",
   "workstream_attempt",
@@ -377,6 +378,14 @@ export function routedInvestigationFocus(
         itemKind: "evidence",
         lane: null,
       };
+    case "intake_batch":
+      return {
+        stage: "capture",
+        section: "corpus-intake",
+        item: resourceId,
+        itemKind: "intake-batch",
+        lane: null,
+      };
     case "evidence_context":
       // Snapshots, corroboration, and imported-run context share this kind.
       // Omit itemKind so the visible element with this id can match.
@@ -578,6 +587,7 @@ const RESOURCE_KIND_FALLBACK: Record<InvestigationResourceKindV1, string> = {
   investigation: "Investigation",
   investigation_stage: "Investigation stage",
   evidence_item: "Evidence item",
+  intake_batch: "Intake batch",
   evidence_context: "Evidence context",
   workstream: "Workstream",
   workstream_attempt: "Workstream attempt",

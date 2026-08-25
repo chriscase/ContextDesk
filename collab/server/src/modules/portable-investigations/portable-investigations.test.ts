@@ -682,6 +682,11 @@ describe("portable investigation service", () => {
       intakeBatchId: committed.id,
       digest: sha256Hex(bytes),
     });
+    const exportedIntake = archive.investigation.timeline.find(
+      (event) => event.kind === "corpus_intake_committed",
+    );
+    expect(exportedIntake?.targetNamespace).toBe("intake_batch");
+    expect(exportedIntake?.targetId).toBe(committed.id);
 
     const identityMap = identityMapFor(archive);
     const dryRun = await row.portable.preflight(
@@ -691,6 +696,14 @@ describe("portable investigation service", () => {
       false,
     );
     expect(dryRun.report.exactReconstruction).toBe(true);
+    expect(dryRun.report.idRemap.some((row) =>
+      row.namespace === "intake_batch" && row.sourceId === committed.id,
+    )).toBe(true);
+    expect(
+      dryRun.report.idRemap.find((row) =>
+        row.namespace === "intake_batch" && row.sourceId === committed.id,
+      )?.destinationId,
+    ).not.toBe(committed.id);
     const applied = await row.portable.apply(
       archive,
       applyInput(dryRun.apply.confirmationToken as string, identityMap),
@@ -717,6 +730,79 @@ describe("portable investigation service", () => {
       relativePath: "router/timeout.log",
       digest: sha256Hex(bytes),
     });
+    const restoredTimeline = await row.cases.listTimeline(applied.investigationId);
+    const restoredIntake = restoredTimeline.find((event) => event.kind === "corpus_intake_committed");
+    expect(restoredIntake?.targetId).toBe(restoredEvidence?.intakeBatchId);
+    expect(restoredIntake?.targetId).not.toBe(committed.id);
+    expect(restoredIntake?.targetId).not.toBeNull();
+  });
+
+  it("refuses apply when corpus intake timeline lacks an intake-batch target", async () => {
+    const row = await fixture();
+    const bytes = new TextEncoder().encode(
+      "2042-03-04T11:30:00Z synthetic-router ERROR request timed out\n",
+    );
+    const seed = {
+      origin: "files" as const,
+      sourceLabel: "Synthetic incomplete intake",
+      privacyClass: "share_safe" as const,
+      idempotencyKey: "batch-synthetic-incomplete-1",
+      files: [{
+        relativePath: "router/incomplete.log",
+        mediaType: "text/plain",
+        contentBase64: Buffer.from(bytes).toString("base64"),
+      }],
+      archiveBase64: null,
+    };
+    const preview = await row.cases.previewCorpusIntake(row.caseId, ACTOR, {
+      schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+      ...seed,
+    });
+    await row.cases.commitCorpusIntake(
+      row.caseId,
+      ACTOR,
+      {
+        schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+        ...seed,
+        previewToken: preview.previewToken,
+      },
+      "fixture",
+    );
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const incomplete = resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.kind === "corpus_intake_committed");
+      if (!event) throw new Error("corpus intake timeline is missing");
+      event.targetId = null;
+      event.targetNamespace = null;
+    });
+    const identityMap = identityMapFor(incomplete);
+    const dryRun = await row.portable.preflight(
+      incomplete,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: incomplete,
+          report: dryRun.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            incomplete.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/intake-batch target/);
   });
 
   it("returns host-owned identity/collision/privacy facts and mints apply only for exact reconstruction", async () => {
@@ -1204,6 +1290,52 @@ describe("portable investigation apply", () => {
     const sourceFrozen = sourcePage.items.find((item) => item.activityKind === "evidence_frozen");
     const sourceDecision = sourcePage.items.find((item) => item.activityKind === "decision_proposed");
     const sourceAttempt = sourcePage.items.find((item) => item.locator.kind === "workstream_attempt");
+    const intakeBytes = new TextEncoder().encode(
+      "2042-03-04T11:31:00Z synthetic-router ERROR request timed out\n",
+    );
+    const intakeSeed = {
+      origin: "files" as const,
+      sourceLabel: "Synthetic locator intake",
+      privacyClass: "share_safe" as const,
+      idempotencyKey: "batch-synthetic-locator-1",
+      files: [{
+        relativePath: "router/locator.log",
+        mediaType: "text/plain",
+        contentBase64: Buffer.from(intakeBytes).toString("base64"),
+      }],
+      archiveBase64: null,
+    };
+    const intakePreview = await row.cases.previewCorpusIntake(row.caseId, ACTOR, {
+      schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+      ...intakeSeed,
+    });
+    const intakeCommitted = await row.cases.commitCorpusIntake(
+      row.caseId,
+      ACTOR,
+      {
+        schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+        ...intakeSeed,
+        previewToken: intakePreview.previewToken,
+      },
+      "fixture",
+    );
+    const sourceIntakePage = await activity.listPage({ actor: ACTOR, isAdmin: false, caseId: row.caseId });
+    const sourceIntake = sourceIntakePage.items.find((item) => item.summary === "committed a log intake batch");
+    expect(sourceIntake?.locator.kind).toBe("intake_batch");
+    expect(sourceIntake?.locator.resourceId).toBe(intakeCommitted.id);
+    expect(sourceIntake?.resolvedRoute).toContain("section=corpus-intake");
+    expect(sourceIntake?.resolvedRoute).toContain("kind=intake-batch");
+    expect(sourceIntake?.humanFinding).toBe(false);
+    await expect(
+      activity.resolve(ACTOR, false, formatCompactInvestigationLocator(sourceIntake!.locator)),
+    ).resolves.toMatchObject({ authorized: true, resourceLabel: "Intake batch" });
+    const confusedIntake = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+      installationId: "inst-syntheticnorth",
+      investigationId: row.caseId,
+      kind: "evidence_item",
+      resourceId: intakeCommitted.id,
+    }));
+    await expect(activity.resolve(ACTOR, false, confusedIntake)).rejects.toMatchObject({ code: "not_found" });
     expect(sourceObservation?.locator.resourceId).toBeTruthy();
     expect(sourceDiscussion?.locator.resourceId).toBeTruthy();
     expect(sourceEvidence?.locator.resourceId).toBe(row.evidenceId);
@@ -1234,6 +1366,14 @@ describe("portable investigation apply", () => {
       expect(event.targetNamespace).toBe("triage_job");
       expect(event.targetId).toMatch(/:/);
       expect(jobIds).toContain(event.targetId?.slice(0, event.targetId.indexOf(":")));
+    }
+    const exportedIntakeEvents = archive.investigation.timeline.filter(
+      (event) => event.kind === "corpus_intake_committed",
+    );
+    expect(exportedIntakeEvents.length).toBeGreaterThan(0);
+    for (const event of exportedIntakeEvents) {
+      expect(event.targetNamespace).toBe("intake_batch");
+      expect(event.targetId).toBe(intakeCommitted.id);
     }
 
     const identityMap = identityMapFor(archive);
@@ -1269,6 +1409,7 @@ describe("portable investigation apply", () => {
     const destFrozen = destPage.items.find((item) => item.activityKind === "evidence_frozen");
     const destDecision = destPage.items.find((item) => item.activityKind === "decision_proposed");
     const destAttempt = destPage.items.find((item) => item.locator.kind === "workstream_attempt");
+    const destIntake = destPage.items.find((item) => item.locator.kind === "intake_batch");
     expect(destObservation?.locator.investigationId).toBe(applied.investigationId);
     expect(destDiscussion?.locator.investigationId).toBe(applied.investigationId);
     expect(destEvidence?.locator.investigationId).toBe(applied.investigationId);
@@ -1288,6 +1429,22 @@ describe("portable investigation apply", () => {
     expect(destAttempt?.locator.resourceId).not.toBe(sourceAttempt?.locator.resourceId);
     expect(destAttempt?.locator.resourceId).toContain(":");
     expect(destAttempt?.locator.resourceId).not.toBe(applied.investigationId);
+    expect(destIntake?.locator.kind).toBe("intake_batch");
+    expect(destIntake?.locator.resourceId).toBeTruthy();
+    expect(destIntake?.locator.resourceId).not.toBe(sourceIntake?.locator.resourceId);
+    expect(destIntake?.locator.resourceId).not.toBe(applied.investigationId);
+    expect(destIntake?.humanFinding).toBe(false);
+    expect(destIntake?.resolvedRoute).toContain("section=corpus-intake");
+    expect(destIntake?.resolvedRoute).toContain(`item=${destIntake?.locator.resourceId}`);
+    const confusedDestIntake = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+      installationId: "inst-syntheticnorth",
+      investigationId: applied.investigationId,
+      kind: "evidence_item",
+      resourceId: destIntake!.locator.resourceId,
+    }));
+    await expect(activity.resolve(ACTOR, false, confusedDestIntake)).rejects.toMatchObject({
+      code: "not_found",
+    });
 
     const destExperiments = await row.experiments.list(applied.investigationId, ACTOR, false);
     const destDecisionIds = destExperiments.flatMap((experiment) =>
@@ -1299,8 +1456,11 @@ describe("portable investigation apply", () => {
     const destJobPrefix = destAttempt?.locator.resourceId.split(":")[0];
     expect(destJobs.map((job) => job.id)).toContain(destJobPrefix);
     expect(destJobs.map((job) => job.id)).not.toContain(sourceAttempt?.locator.resourceId.split(":")[0]);
+    const destArtifacts = await row.cases.listArtifacts(applied.investigationId, ACTOR, false);
+    const destIntakeEvidence = destArtifacts.find((item) => item.relativePath === "router/locator.log");
+    expect(destIntakeEvidence?.intakeBatchId).toBe(destIntake?.locator.resourceId);
 
-    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destAttempt]) {
+    for (const item of [destObservation, destDiscussion, destEvidence, destFrozen, destDecision, destAttempt, destIntake]) {
       await expect(
         activity.resolve(ACTOR, false, formatCompactInvestigationLocator(item!.locator)),
       ).resolves.toMatchObject({ authorized: true, locator: item!.locator });
@@ -1997,6 +2157,105 @@ describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", (
       ).rejects.toBeInstanceOf(PortableCommitOutcomeUnknownError);
       expect(await new PgCaseStore(client).getCase(id)).not.toBeNull();
       expect(await row.store.verify(sha256Hex(bytes))).toBe(true);
+    });
+  });
+
+  it("reauthorizes remapped intake-batch locators after PostgreSQL apply", async () => {
+    const row = await fixture();
+    const bytes = new TextEncoder().encode(
+      "2042-03-04T11:32:00Z synthetic-router ERROR request timed out\n",
+    );
+    const seed = {
+      origin: "files" as const,
+      sourceLabel: "Synthetic postgres intake",
+      privacyClass: "share_safe" as const,
+      idempotencyKey: "batch-synthetic-pg-locator-1",
+      files: [{
+        relativePath: "router/pg-locator.log",
+        mediaType: "text/plain",
+        contentBase64: Buffer.from(bytes).toString("base64"),
+      }],
+      archiveBase64: null,
+    };
+    const previewIntake = await row.cases.previewCorpusIntake(row.caseId, ACTOR, {
+      schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+      ...seed,
+    });
+    const committed = await row.cases.commitCorpusIntake(
+      row.caseId,
+      ACTOR,
+      {
+        schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+        ...seed,
+        previewToken: previewIntake.previewToken,
+      },
+      "fixture",
+    );
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const pgRoot = await mkdtemp(join(tmpdir(), "cd-portable-pg-intake-"));
+      roots.push(pgRoot);
+      const pgEvidence = new FilesystemEvidenceStore({
+        rootDir: pgRoot,
+        acquireWriteLease: async () => () => undefined,
+      });
+      const investigationId = await withPgApplyTransaction(client, pgEvidence, async (ports) =>
+        persistPortableArchive({
+          archive,
+          report: preview.report,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            archive.investigation.contentObjects
+              .filter((item) => item.payloadBase64 !== null)
+              .map((item) => [
+                item.digest,
+                new Uint8Array(Buffer.from(item.payloadBase64 as string, "base64")),
+              ]),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      );
+      const pgCases = new CaseService(pgEvidence, new MemoryAuditStore(), new PgCaseStore(client));
+      const activity = new InvestigationActivityService({
+        cases: pgCases,
+        installationId: "inst-syntheticnorth",
+      });
+      const page = await activity.listPage({ actor: ACTOR, isAdmin: false, caseId: investigationId });
+      const intake = page.items.find((item) => item.locator.kind === "intake_batch");
+      expect(intake?.locator.resourceId).toBeTruthy();
+      expect(intake?.locator.resourceId).not.toBe(committed.id);
+      expect(intake?.humanFinding).toBe(false);
+      const timeline = await pgCases.listTimeline(investigationId);
+      const committedEvent = timeline.find((event) => event.kind === "corpus_intake_committed");
+      expect(committedEvent?.targetId).toBe(intake?.locator.resourceId);
+      await expect(
+        activity.resolve(ACTOR, false, formatCompactInvestigationLocator(intake!.locator)),
+      ).resolves.toMatchObject({ authorized: true, resourceLabel: "Intake batch" });
+      await expect(
+        activity.resolve(
+          { id: "eve", username: "eve" },
+          false,
+          formatCompactInvestigationLocator(intake!.locator),
+        ),
+      ).rejects.toMatchObject({ code: "not_found" });
+      const confused = formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+        installationId: "inst-syntheticnorth",
+        investigationId,
+        kind: "evidence_item",
+        resourceId: intake!.locator.resourceId,
+      }));
+      await expect(activity.resolve(ACTOR, false, confused)).rejects.toMatchObject({ code: "not_found" });
     });
   });
 });

@@ -446,12 +446,53 @@ describe("investigation activity projection", () => {
     expect(frozen?.locator.kind).toBe("evidence_context");
     expect(frozen?.locator.resourceId).toBe(snapshot.id);
 
+    const intakeBytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic intake timeout\n");
+    const intakeSeed = {
+      origin: "files" as const,
+      sourceLabel: "Synthetic intake batch",
+      privacyClass: "share_safe" as const,
+      idempotencyKey: "batch-synthetic-activity-1",
+      files: [{
+        relativePath: "mailer/intake.log",
+        mediaType: "text/plain",
+        contentBase64: Buffer.from(intakeBytes).toString("base64"),
+      }],
+      archiveBase64: null,
+    };
+    const preview = await cases.previewCorpusIntake(created.id, ALICE, {
+      schemaId: "cd-collab.corpus_intake_preview.v1",
+      ...intakeSeed,
+    });
+    const batch = await cases.commitCorpusIntake(
+      created.id,
+      ALICE,
+      {
+        schemaId: "cd-collab.corpus_intake_commit.v1",
+        ...intakeSeed,
+        previewToken: preview.previewToken,
+      },
+      "test",
+    );
+    const intakePage = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const intake = intakePage.items.find((item) => item.summary === "committed a log intake batch");
+    expect(intake?.locator.kind).toBe("intake_batch");
+    expect(intake?.locator.resourceId).toBe(batch.id);
+    expect(intake?.humanFinding).toBe(false);
+    await expect(
+      activity.resolve(ALICE, false, formatCompactInvestigationLocator(intake!.locator)),
+    ).resolves.toMatchObject({ authorized: true, resourceLabel: "Intake batch" });
+    await expect(
+      activity.resolve(EVE, false, formatCompactInvestigationLocator(intake!.locator)),
+    ).rejects.toMatchObject({ code: "not_found" });
+
     const confused = [
       { kind: "evidence_item" as const, resourceId: note.id },
       { kind: "discussion_message" as const, resourceId: note.id },
       { kind: "observation" as const, resourceId: comment.id },
       { kind: "discussion_message" as const, resourceId: uploaded.artifact.id },
       { kind: "evidence_item" as const, resourceId: snapshot.id },
+      { kind: "evidence_item" as const, resourceId: batch.id },
+      { kind: "intake_batch" as const, resourceId: uploaded.artifact.id },
     ].map((row) => formatCompactInvestigationLocator(formatInvestigationResourceLocator({
       installationId: INSTALLATION,
       investigationId: created.id,

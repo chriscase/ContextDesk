@@ -306,6 +306,12 @@ function portableTimelineTarget(
     }
     return null;
   }
+  if (row.kind === "corpus_intake_committed") {
+    if (namespaces.get(row.targetId)?.has("intake_batch")) {
+      return { targetId: row.targetId, namespace: "intake_batch" };
+    }
+    return null;
+  }
   const namespace = targetNamespace(row, namespaces);
   return namespace ? { targetId: row.targetId, namespace } : null;
 }
@@ -983,6 +989,7 @@ export class PortableInvestigationService {
     registerNamespace("investigation", [caseId]);
     registerNamespace("contribution", contributions.map((row) => row.id));
     registerNamespace("evidence", evidence.map((row) => row.id));
+    registerNamespace("intake_batch", intakeBatches.map((row) => row.id));
     registerNamespace("source", sources.map((row) => row.id));
     registerNamespace("imported_ai_run", importedRuns.map((row) => row.id));
     registerNamespace("snapshot", portableSnapshots.map((row) => row.id));
@@ -1007,6 +1014,12 @@ export class PortableInvestigationService {
         throw new PortableServerError(
           "unsupported_state",
           "workstream attempt timeline is missing a portable job target",
+        );
+      }
+      if (row.kind === "corpus_intake_committed" && addressed?.namespace !== "intake_batch") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "corpus intake timeline is missing a portable intake-batch target",
         );
       }
       return {
@@ -1533,6 +1546,7 @@ export class PortableInvestigationService {
         addObjectId(ids, "evidence", row.id);
         if (row.contentHash) addObjectId(ids, "content", row.contentHash);
         if (row.kind === "attachment") addObjectId(ids, "attachment", row.id);
+        if (row.intakeBatchId) addObjectId(ids, "intake_batch", row.intakeBatchId);
       }
       for (const row of snapshots) addObjectId(ids, "snapshot", row.id);
       for (const row of runs) addObjectId(ids, "imported_ai_run", row.id);
