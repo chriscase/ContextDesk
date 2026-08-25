@@ -7,6 +7,7 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 STUDY="$ROOT/scripts/ci_macos_windows_lane_study.sh"
 PLAN="$ROOT/scripts/ci_shard_plan.sh"
+CONFIG="$ROOT/scripts/ci_shard_config.sh"
 EVIDENCE="$ROOT/scripts/fixtures/ci_macos_windows_lane_evidence.json"
 WF="$ROOT/.github/workflows/ci.yml"
 
@@ -36,8 +37,12 @@ grep -q 'name: rust (macos-latest)' "$WF" ||
   fail "ci.yml is missing the macOS preflight check name"
 grep -q 'name: rust (windows-latest)' "$WF" ||
   fail "ci.yml is missing the Windows preflight check name"
-grep -q 'shard: \[1, 2, 3, 4\]' "$WF" ||
-  fail "ci.yml lost the four-way desktop shard matrix"
+for os in macos windows; do
+  [ "$(sh "$CONFIG" count "$os")" = 4 ] ||
+    fail "$os canonical shard count is not four"
+  grep -q "fromJSON(needs.rust-shard-config.outputs.${os}_matrix)" "$WF" ||
+    fail "ci.yml does not consume the canonical $os shard matrix"
+done
 # Each OS chain must stay independent: macOS jobs must not wait on Windows
 # warmup/probe, and Windows must not wait on macOS.
 if awk '
