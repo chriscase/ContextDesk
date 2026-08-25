@@ -355,8 +355,17 @@ export class PgPortableApplyStateStore implements PortableApplyStateStore {
     installationId: string;
     transportHash: string;
   }): Promise<void> {
+    // PostgreSQL text values cannot contain NUL bytes. JSON also preserves
+    // tuple boundaries, unlike delimiter joining, so distinct actor/install/
+    // archive tuples cannot collapse onto the same advisory-lock input.
+    const lockKey = JSON.stringify([
+      "contextdesk-portable-apply-v1",
+      input.actorId,
+      input.installationId,
+      input.transportHash,
+    ]);
     await this.db.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
-      `${input.actorId}\u0000${input.installationId}\u0000${input.transportHash}`,
+      lockKey,
     ]);
   }
 

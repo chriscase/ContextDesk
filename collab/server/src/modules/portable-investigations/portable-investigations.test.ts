@@ -1910,6 +1910,38 @@ describe("portable investigation apply", () => {
       ),
     ).rejects.toThrow(/externally coordinated evidence writes/);
   });
+
+  it("encodes PostgreSQL apply lock tuples without NULs or boundary collisions", async () => {
+    const lockKeys: string[] = [];
+    const db = {
+      query: async (_sql: string, params?: unknown[]) => {
+        lockKeys.push(String(params?.[0]));
+        return { rows: [], rowCount: 1 };
+      },
+    } as unknown as ConstructorParameters<typeof PgPortableApplyStateStore>[0];
+    const store = new PgPortableApplyStateStore(db);
+
+    await store.lockApply({
+      actorId: "actor-north\u0000installation-north",
+      installationId: "archive-north",
+      transportHash: "hash-north",
+    });
+    await store.lockApply({
+      actorId: "actor-north",
+      installationId: "installation-north\u0000archive-north",
+      transportHash: "hash-north",
+    });
+
+    expect(lockKeys).toHaveLength(2);
+    expect(lockKeys.every((key) => !key.includes("\u0000"))).toBe(true);
+    expect(lockKeys[0]).not.toBe(lockKeys[1]);
+    expect(JSON.parse(lockKeys[0] as string)).toEqual([
+      "contextdesk-portable-apply-v1",
+      "actor-north\u0000installation-north",
+      "archive-north",
+      "hash-north",
+    ]);
+  });
 });
 
 describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", () => {
