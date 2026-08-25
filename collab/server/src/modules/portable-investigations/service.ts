@@ -42,6 +42,7 @@ import {
   type StoredPortableApplyIntent,
 } from "./persist.js";
 import type { AuditStore } from "../audit/index.js";
+import type { PublicIdentityCodec } from "../auth/index.js";
 import type { CatalogService } from "../catalog/index.js";
 import type { Actor, CaseService, TimelineRow } from "../cases/index.js";
 import type { ExperimentService } from "../experiments/index.js";
@@ -164,6 +165,7 @@ const APPLY_IDENTITY_ACTIONS = new Set(["map_existing", "preserve_historical_ext
 
 interface PortableDeps {
   installationId: string;
+  publicIdentities?: Pick<PublicIdentityCodec, "publicId" | "sanitizeText">;
   cases: CaseService;
   catalog: CatalogService;
   imports: ImportService;
@@ -175,6 +177,39 @@ interface PortableDeps {
   applyCoordination: "single_instance" | "postgres_transactional";
   confirmationRestartDurable: boolean;
   now?: () => string;
+}
+
+const PORTABLE_IDENTITY_FIELDS = new Set([
+  "actorId",
+  "authorId",
+  "createdBy",
+  "identityId",
+  "ownerId",
+  "promotedById",
+  "requestedBy",
+  "reviewerId",
+  "sourceActorId",
+  "uploaderId",
+]);
+
+function projectPortablePublicIdentities<T>(
+  value: T,
+  codec: Pick<PublicIdentityCodec, "publicId" | "sanitizeText">,
+  field?: string,
+): T {
+  if (typeof value === "string") {
+    if (field && PORTABLE_IDENTITY_FIELDS.has(field)) return codec.publicId(value) as T;
+    if (field === "payloadJson") return codec.sanitizeText(value) as T;
+    return value;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => projectPortablePublicIdentities(item, codec)) as T;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    projectPortablePublicIdentities(item, codec, key),
+  ])) as T;
 }
 
 interface ActorSeed {
@@ -1097,7 +1132,10 @@ export class PortableInvestigationService {
       throw new PortableServerError("archive_size_limit", "portable object count exceeds limit");
     }
     try {
-      const investigation = attachPortableIntegrity(unsigned);
+      const publicUnsigned = this.deps.publicIdentities
+        ? projectPortablePublicIdentities(unsigned, this.deps.publicIdentities)
+        : unsigned;
+      const investigation = attachPortableIntegrity(publicUnsigned);
       const archive = sealPortableArchive({ investigation, exportedAt });
       const encodedBytes = Buffer.byteLength(JSON.stringify(archive), "utf8");
       if (encodedBytes > MAX_PORTABLE_ARCHIVE_BYTES) {

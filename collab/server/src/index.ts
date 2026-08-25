@@ -13,6 +13,7 @@ import {
   defaultSessionPolicy,
   loadLocalAuthAdapter,
   loadLdapConfig,
+  loadPublicIdentityCodec,
   type SessionStore,
 } from "./modules/auth/index.js";
 import {
@@ -143,6 +144,10 @@ async function main(): Promise<void> {
       : {}),
   });
   await store.ping();
+  const publicIdentities = await loadPublicIdentityCodec(
+    config.evidenceRoot,
+    process.env.COLLAB_PUBLIC_IDENTITY_KEY,
+  );
   const log = createAuthLog();
   const ldapConfig = config.authMode === "ldap" ? loadLdapConfig() : null;
   const adapter = ldapConfig
@@ -218,6 +223,7 @@ async function main(): Promise<void> {
   );
   const portable = new PortableInvestigationService({
     installationId,
+    publicIdentities,
     cases: domain,
     catalog,
     imports,
@@ -248,6 +254,7 @@ async function main(): Promise<void> {
     exporter,
     portable,
     installationId,
+    publicIdentities,
     profiles: storage.profiles,
     grants: storage.grants,
     security: {

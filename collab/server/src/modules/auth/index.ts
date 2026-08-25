@@ -63,3 +63,9 @@ export {
 } from "./csrf.js";
 export { escapeDn, escapeFilter } from "./ldap-escape.js";
 export { liveLdapConfigured } from "./ldap-coverage.js";
+export {
+  HmacPublicIdentityCodec,
+  createEphemeralPublicIdentityCodec,
+  loadPublicIdentityCodec,
+} from "./public-identity.js";
+export type { PublicIdentityCodec } from "./public-identity.js";
