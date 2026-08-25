@@ -3,11 +3,12 @@ import { adminUrl, withDisposableDb } from "../test/disposable-db.js";
 import { latestMigrationVersion, listMigrations, migrateDown, migrateUp } from "./migrate.js";
 
 describe("migration versions", () => {
-  it("pins the canonical PostgreSQL head after user profiles", () => {
+  it("pins the canonical PostgreSQL head after log time", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
-    expect(latestMigrationVersion()).toBe("016_contribution_write_intents");
+    expect(versions).toContain("017_log_time");
+    expect(latestMigrationVersion()).toBe("017_log_time");
   });
 });
 
@@ -32,6 +33,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("014_portable_apply_intents");
       expect(up.applied).toContain("015_user_profiles");
       expect(up.applied).toContain("016_contribution_write_intents");
+      expect(up.applied).toContain("017_log_time");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );

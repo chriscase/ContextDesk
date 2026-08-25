@@ -210,6 +210,12 @@ pub enum Command {
     /// live benchmark bridge. The request contains no credentials; provider
     /// profiles and secrets come only from the shared host configuration.
     CollabTriageRun(CollabTriageRunArgs),
+    /// Run one bounded War Room log-time operation against a case-bound
+    /// corpus through the shipped desktop log-analysis pipeline. The request
+    /// contains no credentials and no timezone default: a zone is applied only
+    /// when the request names one explicitly.
+    CollabLogTime(CollabLogTimeArgs),
+
     /// Provider-neutral gateway/model diagnostics for one explicitly selected model.
     Gateway {
         #[command(subcommand)]
@@ -433,6 +439,19 @@ pub struct BenchCompareArgs {
         default_value_t = cd_triage_bench_live::DEFAULT_LIVE_COMPARISON_CONCURRENCY
     )]
     pub concurrency: usize,
+}
+
+/// Bounded JSON input for `contextdesk collab-log-time`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct CollabLogTimeArgs {
+    /// JSON request naming the case, the corpus, and exactly one action
+    /// (build/status/preview/apply/clear/undo). Use `-` to read one bounded
+    /// request from stdin.
+    #[arg(long, value_name = "FILE", required = true)]
+    pub request: PathBuf,
+    /// Cache root holding the durable case-bound corpora.
+    #[arg(long, value_name = "DIR", required = true)]
+    pub cache_root: PathBuf,
 }
 
 /// Bounded JSON input for `contextdesk collab-triage-run`.
@@ -1054,6 +1073,7 @@ pub const KNOWN_SUBCOMMANDS: &[&str] = &[
     "triage",
     "bench-compare",
     "collab-triage-run",
+    "collab-log-time",
     "gateway",
 ];
 

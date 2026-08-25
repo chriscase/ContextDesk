@@ -306,6 +306,135 @@ pub fn preview_source_timezone(
         .map_err(|error| CoreError::Message(error.to_string()))
 }
 
+/// One bounded review row: an event, and what a declaration would do to it.
+///
+/// Produced by the same [`SourceTimezoneResolver`] that computes the aggregate
+/// preview, so a row can never contradict the counters it illustrates. The
+/// retained text is the corpus's already-normalized and redacted `message`;
+/// the raw source line is never re-read.
+#[derive(Debug, Clone)]
+pub struct TimezoneReviewSample {
+    /// Stable ingest ordinal, so ordering is legible without a clock.
+    pub seq: u64,
+    /// Parser-recognized source-local timestamp text, unchanged.
+    pub raw_timestamp: Option<String>,
+    /// What this declaration would decide for this event.
+    pub resolution: TimestampResolution,
+    /// Normalized, redacted message text for side-by-side context.
+    pub message: String,
+}
+
+/// Collect a bounded set of review rows for one source under one declaration.
+///
+/// This never mutates the corpus and never advances a revision. `limit` caps
+/// the rows returned; callers surface it as "the first N lines", never as the
+/// whole source.
+pub fn preview_source_timezone_samples(
+    cache_root: &Path,
+    corpus_id: &str,
+    expected_revision: u64,
+    source: &str,
+    iana_timezone: &str,
+    limit: usize,
+) -> CoreResult<Vec<TimezoneReviewSample>> {
+    let corpus = LogCorpus::open(cache_root, corpus_id)?;
+    let (current_revision, _) = revision_state(&corpus)?;
+    if current_revision != expected_revision {
+        return Err(CoreError::Message(format!(
+            "stale timezone preview: expected revision {expected_revision}, current {current_revision}"
+        )));
+    }
+    let applied_revision = expected_revision
+        .checked_add(1)
+        .ok_or_else(|| CoreError::Message("timezone event revision overflow".into()))?;
+    let resolver = resolver_for(
+        source,
+        iana_timezone,
+        0,
+        applied_revision,
+        TimezoneDeclarationBasis::UserDeclared,
+    )?;
+    let rows = sample_records(&corpus, source, limit)?;
+    let mut samples = Vec::with_capacity(rows.len());
+    for (record, message) in rows {
+        let resolution = resolver
+            .resolve(source, &parsed_record(&record))
+            .map_err(|error| CoreError::Message(error.to_string()))?;
+        samples.push(TimezoneReviewSample {
+            seq: record.seq,
+            raw_timestamp: record.unresolved_local_timestamp.clone(),
+            resolution,
+            message,
+        });
+    }
+    Ok(samples)
+}
+
+fn sample_records(
+    corpus: &LogCorpus,
+    source: &str,
+    limit: usize,
+) -> CoreResult<Vec<(StoredTimestampRecord, String)>> {
+    let limit = i64::try_from(limit)
+        .map_err(|_| CoreError::Message("timezone sample limit is invalid".into()))?;
+    corpus.with_connection(|connection| {
+        let mut statement = connection
+            .prepare(
+                "SELECT seq, ts, timestamp_provenance, active_timestamp_basis,
+                        unresolved_local_timestamp, message
+                 FROM events
+                 WHERE source = ?1
+                 ORDER BY seq
+                 LIMIT ?2",
+            )
+            .map_err(|error| {
+                CoreError::Message(format!("prepare timezone sample scan: {error}"))
+            })?;
+        let rows = statement
+            .query_map(params![source, limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|error| CoreError::Message(format!("scan timezone samples: {error}")))?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (seq, ts, provenance, basis, unresolved_local_timestamp, message) =
+                row.map_err(|error| {
+                    CoreError::Message(format!("read timezone sample event: {error}"))
+                })?;
+            records.push((
+                StoredTimestampRecord {
+                    seq: u64::try_from(seq).map_err(|_| {
+                        CoreError::Message("timezone sample sequence is invalid".into())
+                    })?,
+                    ts,
+                    timestamp_provenance: TimestampProvenance::from_storage_str(
+                        provenance.as_deref(),
+                    )
+                    .ok_or_else(|| {
+                        CoreError::Message("timezone sample provenance is invalid".into())
+                    })?,
+                    active_timestamp_basis: ActiveTimestampBasis::from_storage_str(
+                        basis.as_deref(),
+                    )
+                    .ok_or_else(|| {
+                        CoreError::Message("timezone sample active basis is invalid".into())
+                    })?,
+                    unresolved_local_timestamp,
+                },
+                message,
+            ));
+        }
+        Ok(records)
+    })
+}
+
 /// Apply a previously previewed source timezone after exact recomputation.
 pub fn apply_source_timezone(
     cache_root: &Path,

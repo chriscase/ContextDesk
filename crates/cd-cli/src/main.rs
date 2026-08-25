@@ -305,6 +305,10 @@ async fn dispatch(
             let result = commands::collab_triage_run::run(args, paths, app_cfg).await;
             emit(format, resolved.color.value, "collab_triage_run", result)
         }
+        Command::CollabLogTime(args) => {
+            let result = commands::collab_log_time::run(args);
+            emit(format, resolved.color.value, "collab_log_time", result)
+        }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);
             if matches!(action, cli::CorpusAction::Use { .. }) {
