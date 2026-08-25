@@ -162,6 +162,7 @@ if [ "${CHECK_CLAIMS_SKIP_AUX:-0}" != "1" ]; then
   node "$ROOT/scripts/check_public_media.mjs" "$ROOT"
   node "$ROOT/scripts/check_help_corpus.mjs"
   node "$ROOT/scripts/check_packaged_demo_manifest.mjs" "$ROOT"
+  node "$ROOT/scripts/check_war_room_fixtures.mjs"
 fi
 echo "check_claims: OK"
 exit 0

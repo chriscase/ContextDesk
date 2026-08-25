@@ -120,8 +120,8 @@ test.describe("complete war-room operator journey", () => {
       mimeType: "text/plain",
       buffer: fixtureBytes("evidence", "shared-timeout.log"),
     });
-    await page.getByLabel("Summary").fill("Shared timeout log pasted from the worker host.");
-    await page.getByLabel("Artifact kind").selectOption("log");
+    await page.locator(".case-memory__upload-form").getByLabel("Summary").fill("Shared timeout log pasted from the worker host.");
+    await page.locator(".case-memory__upload-form").getByLabel("Artifact kind").selectOption("log");
     await page.locator(".case-memory__upload-form").getByLabel("Privacy class").selectOption("share_safe");
     const [sharedPosted] = await Promise.all([
       page.waitForResponse(
@@ -141,8 +141,8 @@ test.describe("complete war-room operator journey", () => {
       mimeType: "text/plain",
       buffer: fixtureBytes("evidence", "unique-worker.log"),
     });
-    await page.getByLabel("Summary").fill("Owner-only worker log kept off the share-safe snapshot.");
-    await page.getByLabel("Artifact kind").selectOption("log");
+    await page.locator(".case-memory__upload-form").getByLabel("Summary").fill("Owner-only worker log kept off the share-safe snapshot.");
+    await page.locator(".case-memory__upload-form").getByLabel("Artifact kind").selectOption("log");
     await page.locator(".case-memory__upload-form").getByLabel("Privacy class").selectOption("owner_only");
     const [uniquePosted] = await Promise.all([
       page.waitForResponse(

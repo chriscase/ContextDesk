@@ -5,6 +5,8 @@
   "type": "module",
   "description": "Browser smoke and regression suite for the collab case-memory shell (war-room qualification).",
   "scripts": {
+    "scenarios:check": "node --import tsx/esm src/war-room/matrix.ts --check",
+    "scenarios:matrix": "node --import tsx/esm src/war-room/matrix.ts",
     "serve:fixture": "node --import tsx/esm src/serve-fixture.ts",
     "test": "playwright test",
     "typecheck": "tsc -p tsconfig.json --noEmit"

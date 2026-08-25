@@ -1,0 +1,9 @@
+# Synthetic fixture. Emitted by a host whose logger was configured without an
+# offset, which is the whole point of this file: the timestamps below cannot be
+# placed on a shared timeline without someone asserting the host's timezone.
+2026-03-14 02:14:51 INFO  mailer.worker  queue drained depth=0
+2026-03-14 02:15:07 WARN  mailer.smtp    upstream slow rtt_ms=4180 peer=192.0.2.24
+2026-03-14 02:15:09 ERROR mailer.smtp    send failed id=syn-mailer-118 reason=upstream_timeout
+2026-03-14 02:15:09 ERROR mailer.worker  batch abandoned pending=41
+2026-03-14 02:15:12 INFO  mailer.worker  backoff scheduled next_s=30
+2026-03-14 02:16:44 ERROR mailer.smtp    send failed id=syn-mailer-119 reason=upstream_timeout
