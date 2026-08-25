@@ -10,7 +10,8 @@ import { SESSION_COOKIE } from "./routes.js";
 export const CSRF_HEADER = COLLAB_CSRF_HEADER;
 export const CSRF_HEADER_VALUE = COLLAB_CSRF_HEADER_VALUE;
 
-const rawInject = new WeakMap<FastifyInstance, FastifyInstance["inject"]>();
+type RawInject = (opts: unknown, cb?: unknown) => unknown;
+const rawInject = new WeakMap<FastifyInstance, RawInject>();
 
 export function hasSessionCookieHeader(
   cookieHeader: string | string[] | undefined,
@@ -72,34 +73,48 @@ export function registerBrowserMutationCsrfGuard(app: FastifyInstance): void {
  */
 function decorateInjectWithBrowserCsrf(app: FastifyInstance): void {
   if (rawInject.has(app)) return;
-  const original = app.inject.bind(app) as FastifyInstance["inject"];
+  const original: RawInject = app.inject.bind(app) as RawInject;
   rawInject.set(app, original);
   const wrapped = ((opts?: unknown, cb?: unknown) => {
     if (opts !== undefined && typeof opts === "object" && opts !== null && typeof cb !== "function") {
-      return (original as (options: unknown) => unknown)(attachInjectCsrf(opts as Record<string, unknown>));
+      return original(attachInjectCsrf(opts as Record<string, unknown>));
     }
     if (opts !== undefined && typeof opts === "object" && opts !== null) {
-      return (original as (options: unknown, callback: unknown) => unknown)(
-        attachInjectCsrf(opts as Record<string, unknown>),
-        cb,
-      );
+      return original(attachInjectCsrf(opts as Record<string, unknown>), cb);
     }
-    return (original as (...args: unknown[]) => unknown)(opts, cb);
+    return original(opts, cb);
   }) as FastifyInstance["inject"];
   app.inject = wrapped;
 }
 
-export function injectWithoutBrowserCsrf(
+export async function injectWithoutBrowserCsrf(
   app: FastifyInstance,
   opts: {
-    method: string;
+    method: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE";
     url: string;
     headers?: Record<string, string>;
     payload?: unknown;
   },
-): ReturnType<FastifyInstance["inject"]> {
-  const original = rawInject.get(app) ?? app.inject.bind(app);
-  return original(opts);
+): Promise<{
+  statusCode: number;
+  body: string;
+  headers: Record<string, unknown>;
+  json: <T = unknown>() => T;
+}> {
+  const original = rawInject.get(app);
+  const request = {
+    method: opts.method,
+    url: opts.url,
+    ...(opts.headers ? { headers: opts.headers } : {}),
+    ...(opts.payload === undefined ? {} : { payload: opts.payload }),
+  };
+  const response = original ? original(request) : app.inject(request as never);
+  return response as Promise<{
+    statusCode: number;
+    body: string;
+    headers: Record<string, unknown>;
+    json: <T = unknown>() => T;
+  }>;
 }
 
 function attachInjectCsrf(opts: Record<string, unknown>): Record<string, unknown> {

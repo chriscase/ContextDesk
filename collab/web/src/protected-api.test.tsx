@@ -20,22 +20,23 @@ describe("protectedApiFetch CSRF", () => {
     await protectedApiFetch("/api/authz/group-role-map", { method: "DELETE" });
     await protectedApiFetch("/api/cases");
 
-    const posts = fetchMock.mock.calls.filter(([, init]) => init && typeof init === "object" && "method" in init && init.method !== undefined);
-    expect((posts[0]?.[1] as RequestInit).headers).toMatchObject({
+    const calls = fetchMock.mock.calls as unknown as Array<[unknown, RequestInit | undefined]>;
+    expect(calls).toHaveLength(5);
+    expect(calls[0]?.[1]?.headers).toMatchObject({
       "content-type": "application/json",
       [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
     });
-    expect((posts[1]?.[1] as RequestInit).headers).toMatchObject({
+    expect(calls[1]?.[1]?.headers).toMatchObject({
       [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
     });
-    expect((posts[2]?.[1] as RequestInit).headers).toMatchObject({
+    expect(calls[2]?.[1]?.headers).toMatchObject({
       [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
     });
-    expect((posts[3]?.[1] as RequestInit).headers).toMatchObject({
+    expect(calls[3]?.[1]?.headers).toMatchObject({
       [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
     });
-    const getInit = fetchMock.mock.calls[4]?.[1] as RequestInit | undefined;
-    expect(getInit?.headers?.[COLLAB_CSRF_HEADER as never]).toBeUndefined();
+    const getHeaders = calls[4]?.[1]?.headers as Record<string, string> | undefined;
+    expect(getHeaders?.[COLLAB_CSRF_HEADER]).toBeUndefined();
   });
 
   it("does not overwrite a caller-supplied CSRF header", () => {
