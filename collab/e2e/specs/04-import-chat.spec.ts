@@ -9,6 +9,7 @@ import {
   screenshot,
   timeline,
   uniqueTitle,
+  stagePanel,
 } from "../src/helpers.js";
 import { FIXTURE_USERS, SEEDED_SOURCES } from "../src/users.js";
 
@@ -38,8 +39,9 @@ test.describe("plain-text external chat import", () => {
       operatorId: dave.identityId,
     });
     await expect(page.getByText("Unverified imported run")).toHaveCount(2);
-    await expect(page.getByText(/queue depth is the root cause/)).toBeVisible();
-    await expect(page.getByText(/DNS NXDOMAIN/)).toBeVisible();
+    const captureStage = stagePanel(page, "Capture");
+    await expect(captureStage.getByText(/queue depth is the root cause/)).toBeVisible();
+    await expect(captureStage.getByText(/DNS NXDOMAIN/)).toBeVisible();
 
     const first = page.locator(".imported-run").filter({ hasText: "queue depth is the root cause" });
     await first.locator('select[name="state"]').selectOption("corroborated");

@@ -53,23 +53,56 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "A shared workspace where a team records investigations and moves each one through Capture, Analyze, Compare, and Decide.",
         keywords: ["overview", "workflow", "stages", "orientation", "introduction"],
         what:
-          "The War Room is the web workspace for ContextDesk investigations. Overview is the command center: recorded status counts, high-impact active work, and the latest cross-investigation activity with direct links to the work that changed. Investigations is the searchable case inventory and creation entry point. Opening an investigation focuses it and offers five stages: Situation (the shared picture), Capture (notes and imports), Analyze (evidence and AI lanes), Compare (lanes side by side), and Decide (the human call and export).",
+          "The War Room is the web workspace for ContextDesk investigations. Overview is the command center: recorded status counts, the latest cross-investigation activity, Open threads (recorded work that stopped, disagreed, is still unread, or is waiting on a decision), and high-impact active work — each with direct links to the work itself. Every activity row names the stage it belongs to, who or what produced it, and whether the record behind it is restricted. Investigations is the searchable case inventory and creation entry point. Opening an investigation focuses it and offers five stages: Situation (the shared picture), Capture (notes and imports), Analyze (evidence and AI lanes), Compare (lanes side by side), and Decide (the human call and export).",
         when:
           "Read this first if the navigation is unfamiliar, or when you want to know which stage a task belongs to.",
         steps: [
-          "Open Overview to see what is active, what needs attention, and what changed most recently across investigations.",
+          "Open Overview to see what changed most recently across investigations, and what nothing has carried further yet.",
+          "Read Open threads to find recorded work that stopped short, disagreed across lanes, has not been read, or is waiting on a human decision — each entry links straight to the record.",
           "Select an investigation to focus it; the Situation stage opens first.",
           "Use the stage strip or the Situation page's work-area links to move between Capture, Analyze, Compare, and Decide.",
           "Use the breadcrumb to return to Investigations or the Overview at any time.",
         ],
         recorded:
-          "Overview and Situation restate only recorded facts. Overview's activity feed is a human-readable projection of durable timeline events; opening an item takes you to the relevant investigation stage. It does not infer urgency or correctness from model output.",
+          "Overview and Situation restate only recorded facts. Overview's activity feed and Open threads are both human-readable projections of the same durable timeline events; opening an item takes you to the relevant investigation stage. Neither infers urgency or correctness from model output.",
         limits:
-          "Counts and statuses reflect recorded state only — they never measure progress, completeness, or correctness, and no stage is ever marked \"done\" for you.",
+          "Counts and statuses reflect recorded state only — they never measure progress, completeness, or correctness, and no stage is ever marked \"done\" for you. Open threads is read from the most recent recorded events the page loaded, and says how many that was; older open work can sit outside that window.",
         actions: [
           { label: "Go to Overview", go: { area: "overview" } },
           { label: "Go to Investigations", go: { area: "investigations" } },
         ],
+      },
+      {
+        id: "read-situation",
+        title: "Pick an investigation back up",
+        summary:
+          "Situation opens with the recorded working record: what is suspected, what is outstanding, what was seen, and what nobody has read yet.",
+        keywords: [
+          "situation",
+          "briefing",
+          "hypothesis",
+          "next action",
+          "observation",
+          "handover",
+          "returning",
+          "context",
+          "unverified",
+        ],
+        what:
+          "Below the recorded context fields, Situation shows \"Where the investigation stands\": working hypotheses, next actions, and latest observations as people wrote them, plus imported analysis that no person has corroborated or contradicted yet. Each entry carries its author and time, a bounded excerpt with the complete text one disclosure away, and a control that opens the exact record where it lives. A closing line restates how much evidence the investigation has registered and links to the evidence board.",
+        when:
+          "Read this when you return to an investigation someone else moved on, or when you are handing one over and want to see what a colleague will read first.",
+        steps: [
+          "Open the investigation — Situation opens first.",
+          "Read Where the investigation stands to see the substance of the record rather than a count of it.",
+          "Expand any entry whose excerpt is truncated to read it in full.",
+          "Select \"Open where this was recorded\" on an entry to jump to that exact record on Capture, or \"Open to record a human judgment\" to corroborate or contradict an imported run.",
+        ],
+        recorded:
+          "The briefing re-presents contributions and imported runs this investigation already recorded; it reads nothing the Capture stage does not already hold and writes nothing of its own. Entries removed from the working record are excluded, while the audit history that names them is untouched.",
+        limits:
+          "A working hypothesis is a possibility recorded for testing, never an established cause, and the briefing says so. Imported and AI-assisted output is kept in its own group and is never labeled human-authored. Each group shows the most recent few entries and says how many more are recorded in Capture. Evidence is restated as a count of what was registered; open the evidence board to read the items themselves.",
+        actions: [{ label: "Open the Situation stage", go: { stage: "situation" } }],
       },
       {
         id: "signing-in",
@@ -274,12 +307,12 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "On the Analyze stage, find the workstream under the strategy and question it belongs to.",
           "Select it — the evidence board and run launcher step aside so the workstream is the page.",
           "Read the cited evidence in place; expand a long log or stack trace for the complete text, and copy it if you need it elsewhere.",
-          "Copy the address from the browser to share that exact workstream; reload, Back, and Forward all return to it.",
+          "Select \"Copy link to this workstream\" to share that exact record, or copy the address from the browser; reload, Back, and Forward all return to it.",
         ],
         recorded:
           "The record restates what the run already stored: timestamps, the authenticated requester, per-lane status, cited evidence with its registered summary and integrity state, recorded unknowns, and rerun lineage. Identifiers are collapsed for reading, never dropped — machine exports carry them unchanged.",
         limits:
-          "An empty unknown list means nothing was recorded as unknown, not that nothing is unknown. AI-assisted output is analysis, never a human finding, and agreement between workstreams is not proof of correctness. A citation that no longer resolves is marked unresolved rather than reconstructed, and an address naming a workstream this investigation does not have fails closed.",
+          "An empty unknown list means nothing was recorded as unknown, not that nothing is unknown. AI-assisted output is analysis, never a human finding, and agreement between workstreams is not proof of correctness. A citation that no longer resolves is marked unresolved rather than reconstructed, and an address naming a workstream this investigation does not have fails closed. A copied address is not an access grant: whoever opens it is authorized again at that moment, and sees nothing they could not already read.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
