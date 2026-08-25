@@ -24,7 +24,7 @@ import {
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore } from "../cases/index.js";
-import { buildTestZip } from "./zip.js";
+import { buildTestZip, buildUnicodePathExtra } from "./zip.js";
 import { corpusIntakeRequestDigest, decodeBase64, digestOf } from "./preview.js";
 
 const ALICE = "fixture-alice-secret";
@@ -250,6 +250,33 @@ describe("investigation corpus intake API", () => {
       const encodingReport = parseCorpusIntakePreviewReport(JSON.parse(encodingPreview.body));
       expect(encodingReport.accepted).toEqual([]);
       expect(encodingReport.rejected.some((row) => row.reason === "invalid_encoding")).toBe(true);
+
+      const unicodeSlip = buildTestZip([
+        {
+          name: "mailer/notes.log",
+          data: Buffer.from(LOG),
+          flags: 0,
+          extra: buildUnicodePathExtra("mailer/notes.log", "../../etc/passwd"),
+        },
+      ]);
+      const unicodePreview = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/corpus-intake/preview`,
+        headers: { cookie: alice },
+        payload: {
+          schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+          origin: "zip",
+          sourceLabel: "fixture-zip-unicode-path",
+          privacyClass: "owner_only",
+          idempotencyKey: "batch-syn-unicode-1",
+          files: [],
+          archiveBase64: Buffer.from(unicodeSlip).toString("base64"),
+        },
+      });
+      expect(unicodePreview.statusCode).toBe(200);
+      const unicodeReport = parseCorpusIntakePreviewReport(JSON.parse(unicodePreview.body));
+      expect(unicodeReport.accepted).toEqual([]);
+      expect(unicodeReport.rejected.some((row) => row.reason === "path_traversal")).toBe(true);
 
       const committed = await app.inject({
         method: "POST",

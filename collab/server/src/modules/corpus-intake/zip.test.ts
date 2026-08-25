@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { CORPUS_INTAKE_LIMITS } from "@cd-collab/contracts";
-import { buildTestZip, extractZip, normalizeIntakePath, ZipError } from "./zip.js";
+import {
+  buildTestZip,
+  buildUnicodePathExtra,
+  extractZip,
+  normalizeIntakePath,
+  ZipError,
+} from "./zip.js";
 
 const LOG = new TextEncoder().encode("2026-08-15T00:00:00Z mailer timeout id=syn-1\n");
 const S_IFLNK = 0o120000;
@@ -180,6 +186,79 @@ describe("extractZip adversarial matrix", () => {
     const disagreed = Buffer.from(buildTestZip([{ name: "café/mailer.log", data: LOG, flags: 0x0800 }]));
     disagreed.writeUInt16LE(0, 6);
     expect(() => extractZip(disagreed)).toThrow(/encoding does not match/);
+  });
+
+  it("honors Info-ZIP Unicode Path extra 0x7075 fail-closed", () => {
+    const asciiName = "mailer/notes.log";
+    const traversal = extractZip(
+      buildTestZip([
+        {
+          name: asciiName,
+          data: LOG,
+          flags: 0,
+          extra: buildUnicodePathExtra(asciiName, "../../etc/passwd"),
+        },
+      ]),
+    );
+    expect(reasons(traversal)).toContain("path_traversal");
+    expect(names(traversal)).toEqual([]);
+
+    const renamed = extractZip(
+      buildTestZip([
+        {
+          name: "mailer/cafe.log",
+          data: LOG,
+          flags: 0,
+          extra: buildUnicodePathExtra("mailer/cafe.log", "mailer/café.log"),
+        },
+      ]),
+    );
+    expect(names(renamed)).toEqual(["mailer/café.log"]);
+    expect(renamed.rejected).toEqual([]);
+
+    const badCrc = Buffer.from(buildUnicodePathExtra(asciiName, "mailer/other.log"));
+    badCrc.writeUInt32LE(0, 5);
+    expect(() =>
+      extractZip(buildTestZip([{ name: asciiName, data: LOG, flags: 0, extra: badCrc }])),
+    ).toThrow(/Unicode Path extra CRC/);
+
+    const invalidUtf8Extra = Buffer.from(buildUnicodePathExtra(asciiName, "mailer/x.log"));
+    invalidUtf8Extra.writeUInt8(0xff, invalidUtf8Extra.length - 5);
+    const undecodable = extractZip(
+      buildTestZip([{ name: asciiName, data: LOG, flags: 0, extra: invalidUtf8Extra }]),
+    );
+    expect(reasons(undecodable)).toContain("invalid_encoding");
+    expect(names(undecodable)).toEqual([]);
+    expect(undecodable.rejected.every((row) => !row.detail.includes("\uFFFD"))).toBe(true);
+
+    const unmarkedBytes = Buffer.from("café/mailer.log", "utf8");
+    const recovered = extractZip(
+      buildTestZip([
+        {
+          name: "placeholder.log",
+          data: LOG,
+          flags: 0,
+          nameBytes: unmarkedBytes,
+          extra: buildUnicodePathExtra(unmarkedBytes, "café/mailer.log"),
+        },
+      ]),
+    );
+    expect(names(recovered)).toEqual(["café/mailer.log"]);
+    expect(recovered.rejected).toEqual([]);
+
+    expect(() =>
+      extractZip(
+        buildTestZip([
+          {
+            name: "mailer/cafe.log",
+            data: LOG,
+            flags: 0,
+            extra: buildUnicodePathExtra("mailer/cafe.log", "mailer/café.log"),
+            localExtra: buildUnicodePathExtra("mailer/cafe.log", "../../etc/passwd"),
+          },
+        ]),
+      ),
+    ).toThrow(/Unicode Path extra does not match/);
   });
 
   it("does not leak file bytes in ZipError messages", () => {
