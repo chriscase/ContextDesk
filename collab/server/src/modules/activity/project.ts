@@ -28,6 +28,12 @@ export interface TimelineActivitySource {
   event: CaseTimelineRow;
 }
 
+export interface TimelineActivityProjectionInput {
+  installationId: string;
+  source: TimelineActivitySource;
+  publicIdentityId?: (raw: string) => string;
+}
+
 export interface ProjectedInvestigationActivity {
   item: InvestigationActivityItemV1;
   assignedActorIds: string[];
@@ -247,10 +253,9 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
   }
 }
 
-export function projectTimelineSource(input: {
-  installationId: string;
-  source: TimelineActivitySource;
-}): ProjectedInvestigationActivity | null {
+export function projectTimelineSource(
+  input: TimelineActivityProjectionInput,
+): ProjectedInvestigationActivity | null {
   const payload = payloadOf(input.source.event.payload);
   const mapped = mapEvent(input.source.caseId, input.source.event, payload);
   const restoredImport = payload.imported === true;
@@ -307,7 +312,7 @@ export function projectTimelineSource(input: {
       }),
       occurredAt: input.source.event.serverTime,
       orderTieBreak: input.source.event.seq,
-      actorId: input.source.event.actorId,
+      actorId: input.publicIdentityId?.(input.source.event.actorId) ?? input.source.event.actorId,
       actorLabel: safeActorLabel(input.source.event.actorUsername, historical),
       investigationId: input.source.caseId,
       investigationTitle: safeInvestigationTitle(input.source.title),
@@ -322,7 +327,15 @@ export function projectTimelineSource(input: {
       secondaryContext: { label: "Stage", value: STAGE_LABEL[stage] },
       humanFinding: mapped.humanFinding,
     });
-    return { item, assignedActorIds: assignedActorIds(payload), workstreamId: mapped.workstreamId, stage, timelineKind: input.source.event.kind };
+    return {
+      item,
+      assignedActorIds: assignedActorIds(payload).map(
+        (id) => input.publicIdentityId?.(id) ?? id,
+      ),
+      workstreamId: mapped.workstreamId,
+      stage,
+      timelineKind: input.source.event.kind,
+    };
   } catch {
     return null;
   }

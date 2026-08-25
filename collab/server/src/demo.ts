@@ -12,6 +12,7 @@ import { MemoryAuditStore } from "./modules/audit/index.js";
 import {
   createAuthLog,
   createRateLimiter,
+  HmacPublicIdentityCodec,
   MapAuthAdapter,
   MemorySessionStore,
   defaultSessionPolicy,
@@ -644,6 +645,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   });
   const portable = new PortableInvestigationService({
     installationId: "inst-syntheticdemo",
+    publicIdentities: new HmacPublicIdentityCodec(Buffer.alloc(32, 0x42)),
     cases,
     catalog,
     imports,
@@ -680,6 +682,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       experiments,
       exporter,
       portable,
+      publicIdentities: new HmacPublicIdentityCodec(Buffer.alloc(32, 0x42)),
       ...(options.setup ? { setup: options.setup } : {}),
       componentHealth: () => options.componentHealth ?? syntheticComponentHealth(),
       serveStatic: staticDir !== null,

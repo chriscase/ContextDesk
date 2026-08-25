@@ -9,6 +9,7 @@ import {
   type UserProfileErrorCode,
 } from "@cd-collab/contracts";
 import type { FastifyInstance } from "fastify";
+import type { PublicIdentityCodec } from "../auth/index.js";
 import type { AuditStore } from "../audit/index.js";
 import {
   authorizeSession,
@@ -21,6 +22,16 @@ export interface SelfProfileRouteDeps {
   sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
   profiles: UserProfileStore;
+  publicIdentities?: PublicIdentityCodec;
+}
+
+function selfView(
+  profile: Parameters<typeof redactProfileForSelfView>[0],
+  publicIdentities?: PublicIdentityCodec,
+) {
+  const redacted = redactProfileForSelfView(profile);
+  if (profile.directorySubject === null || !publicIdentities) return redacted;
+  return { ...redacted, id: publicIdentities.publicId(profile.id) };
 }
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
@@ -54,7 +65,7 @@ export async function registerSelfProfileRoutes(
       return profileError("unavailable");
     }
     // The owner never needs the raw LDAP DN / OIDC subject; only an admin does.
-    return redactProfileForSelfView(profile);
+    return selfView(profile, deps.publicIdentities);
   });
 
   app.patch("/api/profile/me", async (request, reply) => {
@@ -117,7 +128,7 @@ export async function registerSelfProfileRoutes(
         origin: request.ip,
         outcome: "success",
       });
-      return redactProfileForSelfView(result.profile);
+      return selfView(result.profile, deps.publicIdentities);
     }
     await recordAudit(deps.audit, {
       identity: resolved.ctx.identity.id,

@@ -258,8 +258,8 @@ describe("source catalog", () => {
       );
       const human = adminList.sources.find((s) => s.kind === "human" && s.identityId);
       expect(human).toBeDefined();
-      expect(human?.identityId).toBe("uid=alice,ou=people,dc=example,dc=test");
-      expect(human?.createdBy).toBe("uid=alice,ou=people,dc=example,dc=test");
+      expect(human?.identityId).toMatch(/^usr-[a-f0-9]{32}$/);
+      expect(human?.createdBy).toBe(human?.identityId);
       expect(human?.name).toBe("alice");
       const assistant = parseSource(
         JSON.parse(
