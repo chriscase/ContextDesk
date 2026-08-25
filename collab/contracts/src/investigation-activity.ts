@@ -21,7 +21,10 @@ export const INVESTIGATION_LOCATOR_COMPACT_PREFIX = "cdl.v1" as const;
 
 export const INVESTIGATION_INSTALLATION_ID_RE = /^inst-[a-z0-9]{8,64}$/;
 export const INVESTIGATION_TIMELINE_EVENT_ID_RE = /^[1-9][0-9]{0,15}$/;
-export const INVESTIGATION_RESOURCE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// Workstream attempt identities are canonically `${runId}:${candidateId}`.
+// A colon is safe inside a single encoded path/query segment; slashes,
+// backslashes, controls, traversal, and URL delimiters remain rejected.
+export const INVESTIGATION_RESOURCE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export const INVESTIGATION_STAGES = [
   "situation",
@@ -315,7 +318,10 @@ export function investigationStageForKind(
   if (kind === "decision_revision" || kind === "export_event") {
     return "decide";
   }
-  if (kind === "evidence_item" || kind === "observation") {
+  if (kind === "evidence_item") {
+    return "analyze";
+  }
+  if (kind === "observation") {
     return "capture";
   }
   return "situation";
@@ -328,9 +334,9 @@ function routeItemKind(kind: InvestigationResourceKindV1): string | null {
       return "evidence";
     case "workstream":
     case "workstream_rerun":
-      return "triage-run";
+      return "workstream";
     case "workstream_attempt":
-      return "triage-candidate";
+      return "workstream";
     case "discussion_message":
       return "comment";
     case "timeline_event":
@@ -347,33 +353,31 @@ function routeItemKind(kind: InvestigationResourceKindV1): string | null {
 function routeSection(kind: InvestigationResourceKindV1): string | null {
   switch (kind) {
     case "investigation":
-      return "situation";
+      return "stage-situation";
     case "evidence_item":
     case "evidence_context":
-      return "evidence";
+      return "triage-evidence-board";
     case "workstream":
     case "workstream_attempt":
     case "workstream_rerun":
-      return "workstream";
+      return "workstreams";
     case "comparison_finding":
     case "comparison_conflict":
-      return "comparison";
+      return "cross-exam-heading";
     case "discussion_message":
-      return "discussion";
+      return "case-discussion";
     case "timeline_event":
-      return "timeline";
+      return "triage-capture";
     case "hypothesis":
-      return "hypothesis";
     case "action":
-      return "action";
     case "observation":
-      return "observation";
+      return "triage-capture";
     case "decision_revision":
-      return "decision";
+      return "decision-heading";
     case "export_event":
-      return "export";
+      return "export-heading";
     case "portable_archive_event":
-      return "portable";
+      return "export-heading";
     default:
       return null;
   }
@@ -391,7 +395,7 @@ export function deriveInvestigationResourcePathname(
   const stage = investigationStageForKind(kind, resourceId);
   const base = `/investigations/${investigationId}/${stage}`;
   if (kind === "investigation") {
-    return `${base}?section=situation#situation`;
+    return `${base}?section=stage-situation#stage-situation`;
   }
   if (kind === "investigation_stage") {
     return base;

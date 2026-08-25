@@ -14,7 +14,7 @@ import {
   type SourceOption,
   type TimelineEvent,
 } from "./TriageWorkspace.js";
-import type { WorkFocus } from "./app-location.js";
+import { isWorkLocation, parsePathname, type WorkFocus } from "./app-location.js";
 import { protectedApiFetch } from "./protected-api.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
@@ -76,6 +76,18 @@ function openQuestionsFrom(value: string): string[] {
 }
 
 interface ActivityItem {
+  activityId: string;
+  occurredAt: string;
+  actorLabel: string;
+  investigationId: string;
+  investigationTitle: string;
+  summary: string;
+  resolvedRoute: string;
+  provenanceClass: "human" | "imported" | "system" | "ai_generated" | "historical_restored";
+  humanFinding: boolean;
+}
+
+interface LegacyActivityItem {
   caseId: string;
   caseTitle: string;
   caseStatus: string;
@@ -84,7 +96,6 @@ interface ActivityItem {
   kind: string;
   actorUsername: string;
   targetId: string | null;
-  occurredAt: string;
   details: Record<string, string | number | boolean | null>;
 }
 
@@ -131,7 +142,8 @@ function openedLine(row: CaseRow): string | null {
   return null;
 }
 
-function activityLabel(item: ActivityItem): string {
+function activityLabel(item: ActivityItem | LegacyActivityItem): string {
+  if ("summary" in item) return item.summary;
   const contributionKind = typeof item.details.kind === "string" ? item.details.kind : null;
   const labels: Record<string, string> = {
     case_created: "opened the investigation",
@@ -173,7 +185,35 @@ function activityLabel(item: ActivityItem): string {
   return labels[item.kind] ?? "updated the investigation";
 }
 
-function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkFocus } {
+function activityDestination(item: ActivityItem | LegacyActivityItem): { stage: StageId; focus: WorkFocus } {
+  if ("resolvedRoute" in item && item.resolvedRoute) {
+    try {
+      const url = new URL(item.resolvedRoute, window.location.origin);
+      const location = parsePathname(url.pathname, url.search, url.hash);
+      if (
+        isWorkLocation(location)
+        && location.caseId === item.investigationId
+        && location.focus
+      ) {
+        return { stage: location.stage, focus: location.focus };
+      }
+    } catch {
+      // A malformed or stale route falls through to the legacy projection;
+      // the trusted server contract normally makes this unreachable.
+    }
+  }
+  if (!("kind" in item) || !item.kind) {
+    return {
+      stage: "situation",
+      focus: {
+        section: "stage-situation",
+        item: null,
+        itemKind: null,
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
   if (item.kind === "contribution_created" && item.details.kind === "message") {
     return {
       stage: "situation",
@@ -408,6 +448,11 @@ export function Cases(props: {
   const [casesLoaded, setCasesLoaded] = useState(false);
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [activitiesLoaded, setActivitiesLoaded] = useState(false);
+  const [activityCopy, setActivityCopy] = useState<{
+    id: string;
+    status: "copied" | "unavailable";
+  } | null>(null);
+  const activityCopyTimer = useRef<number | null>(null);
   // Uncontrolled fallback so the component still navigates when no parent
   // shell wires the callbacks (tests, embedding). The app shell controls it.
   const [localNav, setLocalNav] = useState<{ caseId: string | null; stage: StageId }>({
@@ -438,6 +483,13 @@ export function Cases(props: {
   const titleInputRef = useRef<HTMLInputElement>(null);
   const discussionToggleRef = useRef<HTMLButtonElement>(null);
   const previousStage = useRef<StageId | null>(null);
+
+  useEffect(
+    () => () => {
+      if (activityCopyTimer.current !== null) window.clearTimeout(activityCopyTimer.current);
+    },
+    [],
+  );
 
   function openCase(id: string) {
     if (props.onOpenCase) props.onOpenCase(id);
@@ -480,15 +532,27 @@ export function Cases(props: {
   }, []);
 
   const refreshActivity = useCallback(async () => {
-    const res = await protectedApiFetch("/api/activity?limit=30");
+    const res = await protectedApiFetch("/api/investigation-activity?limit=30");
     if (!res.ok) {
       setActivitiesLoaded(true);
       return;
     }
-    const body = (await res.json()) as { activities?: ActivityItem[] };
-    setActivities(body.activities ?? []);
+    const body = (await res.json()) as { items?: ActivityItem[] };
+    setActivities(body.items ?? []);
     setActivitiesLoaded(true);
   }, []);
+
+  async function copyActivityLink(item: ActivityItem) {
+    if (activityCopyTimer.current !== null) window.clearTimeout(activityCopyTimer.current);
+    try {
+      const href = new URL(item.resolvedRoute, window.location.origin).href;
+      await navigator.clipboard.writeText(href);
+      setActivityCopy({ id: item.activityId, status: "copied" });
+    } catch {
+      setActivityCopy({ id: item.activityId, status: "unavailable" });
+    }
+    activityCopyTimer.current = window.setTimeout(() => setActivityCopy(null), 4000);
+  }
 
   const refreshSources = useCallback(async () => {
     const res = await protectedApiFetch("/api/catalog/sources");
@@ -1007,30 +1071,54 @@ export function Cases(props: {
                   <ol className="activity-feed">
                     {overviewActivities.map((item) => {
                       const destination = activityDestination(item);
+                      const investigation = cases.find((row) => row.id === item.investigationId);
                       return (
-                        <li key={`${item.caseId}:${item.seq}`} className="activity-feed__item">
-                          <button
-                            type="button"
+                        <li key={item.activityId} className="activity-feed__item">
+                          <a
+                            href={item.resolvedRoute}
                             className="activity-feed__open"
-                            onClick={() => {
+                            onClick={(event) => {
+                              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                              event.preventDefault();
                               if (props.onActivityOpen) {
-                                props.onActivityOpen(item.caseId, destination.stage, destination.focus);
+                                props.onActivityOpen(
+                                  item.investigationId,
+                                  destination.stage,
+                                  destination.focus,
+                                );
                               } else {
-                                setLocalNav({ caseId: item.caseId, stage: destination.stage });
+                                setLocalNav({ caseId: item.investigationId, stage: destination.stage });
                               }
                             }}
                           >
                             <span className="activity-feed__verb">
-                              <strong>{item.actorUsername}</strong> {activityLabel(item)}
+                              <strong>{item.actorLabel}</strong> {activityLabel(item)}
                             </span>
-                            <span className="activity-feed__case">{item.caseTitle}</span>
+                            <span className="activity-feed__case">{item.investigationTitle}</span>
                             <span className="activity-feed__meta">
                               <time dateTime={item.occurredAt}>{activityTime(item.occurredAt)}</time>
-                              <span className={`status-pill status-pill--${item.caseStatus}`}>
-                                {item.caseStatus}
-                              </span>
+                              {investigation ? (
+                                <span className={`status-pill status-pill--${investigation.status}`}>
+                                  {investigation.status}
+                                </span>
+                              ) : null}
+                              {item.provenanceClass !== "human" ? (
+                                <span>{item.provenanceClass.replaceAll("_", " ")} · not a human finding</span>
+                              ) : null}
                             </span>
-                          </button>
+                          </a>
+                          <div className="activity-feed__share">
+                            <button type="button" onClick={() => void copyActivityLink(item)}>
+                              Copy link
+                            </button>
+                            <span role="status">
+                              {activityCopy?.id === item.activityId
+                                ? activityCopy.status === "copied"
+                                  ? "Copied."
+                                  : "Clipboard unavailable — use the linked activity address."
+                                : ""}
+                            </span>
+                          </div>
                         </li>
                       );
                     })}

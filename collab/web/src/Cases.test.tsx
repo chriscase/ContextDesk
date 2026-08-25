@@ -35,6 +35,8 @@ const fixtureCases = [
   },
 ];
 
+const ACTIVITY_CASE_ID = "11111111-1111-4111-8111-111111111111";
+
 function stubCaseFetch(options?: {
   cases?: unknown[];
   onRequest?: (url: string, init?: RequestInit) => Promise<unknown> | null;
@@ -49,8 +51,8 @@ function stubCaseFetch(options?: {
     if (url === "/api/catalog/sources") {
       return { ok: true, json: async () => ({ sources: [] }) };
     }
-    if (url === "/api/activity?limit=30") {
-      return { ok: true, json: async () => ({ activities: [] }) };
+    if (url === "/api/investigation-activity?limit=30") {
+      return { ok: true, json: async () => ({ items: [] }) };
     }
     if (url.endsWith("/timeline")) {
       return { ok: true, json: async () => ({ events: [] }) };
@@ -393,24 +395,25 @@ describe("war room overview", () => {
 
   it("shows cross-investigation activity with a direct work-item route", async () => {
     const onActivityOpen = vi.fn();
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
     stubCaseFetch({
       onRequest: (url) => {
-        if (url === "/api/activity?limit=30") {
+        if (url === "/api/investigation-activity?limit=30") {
           return Promise.resolve({
             ok: true,
             json: async () => ({
-              activities: [
+              items: [
                 {
-                  caseId: "c1",
-                  caseTitle: "Fixture incident",
-                  caseStatus: "open",
-                  caseSeverity: "high",
-                  seq: 8,
-                  kind: "contribution_created",
-                  actorUsername: "alice",
-                  targetId: "message-8",
+                  activityId: "a".repeat(64),
                   occurredAt: "2026-08-24T12:00:00.000Z",
-                  details: { kind: "message" },
+                  actorLabel: "alice",
+                  investigationId: ACTIVITY_CASE_ID,
+                  investigationTitle: "Fixture incident",
+                  summary: "added a discussion comment",
+                  resolvedRoute: `/investigations/${ACTIVITY_CASE_ID}/situation?section=case-discussion&item=message-8&kind=comment#case-discussion`,
+                  provenanceClass: "human",
+                  humanFinding: false,
                 },
               ],
             }),
@@ -420,37 +423,41 @@ describe("war room overview", () => {
       },
     });
     render(<Cases roles={["case-lead"]} onActivityOpen={onActivityOpen} />);
-    const activity = await screen.findByRole("button", {
+    const activity = await screen.findByRole("link", {
       name: /alice added a discussion comment Fixture incident/,
     });
     fireEvent.click(activity);
-    expect(onActivityOpen).toHaveBeenCalledWith("c1", "situation", {
-      section: "discussion",
+    expect(onActivityOpen).toHaveBeenCalledWith(ACTIVITY_CASE_ID, "situation", {
+      section: "case-discussion",
       item: "message-8",
       itemKind: "comment",
       lane: null,
       experiment: null,
     });
+    fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(writeText).toHaveBeenCalledWith(
+      `http://localhost:3000/investigations/${ACTIVITY_CASE_ID}/situation?section=case-discussion&item=message-8&kind=comment#case-discussion`,
+    );
+    expect(await screen.findByText("Copied.")).toBeTruthy();
   });
 
   it("keeps the overview bounded when many activities are recorded", async () => {
     stubCaseFetch({
       onRequest: (url) => {
-        if (url !== "/api/activity?limit=30") return null;
+        if (url !== "/api/investigation-activity?limit=30") return null;
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            activities: Array.from({ length: 12 }, (_, index) => ({
-              caseId: "c1",
-              caseTitle: "Fixture incident",
-              caseStatus: "open",
-              caseSeverity: "high",
-              seq: 12 - index,
-              kind: "contribution_created",
-              actorUsername: "alice",
-              targetId: `message-${index}`,
+            items: Array.from({ length: 12 }, (_, index) => ({
+              activityId: String(index).padStart(64, "a"),
               occurredAt: `2026-08-24T12:${String(index).padStart(2, "0")}:00.000Z`,
-              details: { kind: "message" },
+              actorLabel: "alice",
+              investigationId: ACTIVITY_CASE_ID,
+              investigationTitle: "Fixture incident",
+              summary: "added a discussion comment",
+              resolvedRoute: `/investigations/${ACTIVITY_CASE_ID}/situation?section=case-discussion&item=message-${index}&kind=comment#case-discussion`,
+              provenanceClass: "human",
+              humanFinding: false,
             })),
           }),
         });

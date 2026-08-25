@@ -42,7 +42,7 @@ function locatorOverlay(overlay: Record<string, unknown> = {}) {
     investigationId: CASE_A,
     kind: "evidence_item",
     resourceId: EVIDENCE,
-    pathname: `/investigations/${CASE_A}/capture?section=evidence&item=${EVIDENCE}&kind=evidence#evidence`,
+    pathname: `/investigations/${CASE_A}/analyze?section=triage-evidence-board&item=${EVIDENCE}&kind=evidence#triage-evidence-board`,
     ...overlay,
   };
 }
@@ -92,11 +92,37 @@ describe("investigation resource locator", () => {
       resourceId: EVIDENCE,
     });
     expect(locator.pathname).toBe(
-      `/investigations/${CASE_A}/capture?section=evidence&item=${EVIDENCE}&kind=evidence#evidence`,
+      `/investigations/${CASE_A}/analyze?section=triage-evidence-board&item=${EVIDENCE}&kind=evidence#triage-evidence-board`,
     );
     const compact = formatCompactInvestigationLocator(locator);
     expect(compact).toBe(`cdl.v1/${INSTALLATION}/${CASE_A}/evidence_item/${EVIDENCE}`);
     expect(parseCompactInvestigationLocator(compact)).toEqual(locator);
+  });
+
+  it("uses exact shipped War Room sections and preserves a typed workstream key", () => {
+    const workstream = formatInvestigationResourceLocator({
+      installationId: INSTALLATION,
+      investigationId: CASE_A,
+      kind: "workstream_attempt",
+      resourceId: "run-synthetic-1:reviewer-lane",
+    });
+    expect(workstream.pathname).toBe(
+      `/investigations/${CASE_A}/analyze?section=workstreams&item=run-synthetic-1%3Areviewer-lane&kind=workstream#workstreams`,
+    );
+    const comparison = formatInvestigationResourceLocator({
+      installationId: INSTALLATION,
+      investigationId: CASE_A,
+      kind: "comparison_conflict",
+      resourceId: EVIDENCE,
+    });
+    expect(comparison.pathname).toContain("/compare?section=cross-exam-heading");
+    const discussion = formatInvestigationResourceLocator({
+      installationId: INSTALLATION,
+      investigationId: CASE_A,
+      kind: "discussion_message",
+      resourceId: "message-synthetic-1",
+    });
+    expect(discussion.pathname).toContain("/situation?section=case-discussion");
   });
 
   it("requires revision for decision locators and binds the decide stage", () => {
@@ -132,7 +158,7 @@ describe("investigation resource locator", () => {
     expect(() =>
       parseInvestigationResourceLocator(
         locatorOverlay({
-          pathname: `/investigations/${CASE_A}/capture?section=evidence&item=${EVIDENCE}&kind=evidence#/etc/passwd`,
+          pathname: `/investigations/${CASE_A}/analyze?section=triage-evidence-board&item=${EVIDENCE}&kind=evidence#/etc/passwd`,
         }),
       ),
     ).toThrow(/derived resource destination/);

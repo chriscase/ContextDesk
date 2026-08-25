@@ -1,8 +1,9 @@
 # War Room activity and resource locator v1
 
-Status: **local integration** on `grok/war-room-activity-resource-locator-v1`.
-This is a collab **contract, server, store, and test** slice. It does **not**
-ship a new Overview UI, collab web consumer, desktop host, or Rust change.
+Status: **local integration** on the War Room next-release train.
+This is a collab **contract, server, store, web, and test** slice. The Overview
+consumes the projection as a readable activity feed with exact native links
+and a Copy link action. It does not add a desktop host or Rust change.
 
 Schema IDs:
 
@@ -99,11 +100,10 @@ recorded. Assigned-to-me is not invented when that identity data is absent.
 
 Shipped here: locator contract, activity projection, authorization/privacy
 boundary, memory and PostgreSQL projection over existing stores, authenticated
-read APIs, focused tests.
+read APIs, the Overview feed consumer, exact shipped-section routing, copied
+activity URLs, and focused tests.
 
-**Not shipped:** a new Overview UI, collab web wiring of these endpoints,
-deep-link highlighting beyond the existing pathname contract, desktop/Rust
-consumers, an export timeline kind (export locators exist; export lifecycle
-projects only when a timeline event already exists), unbounded overview
-history beyond the 500-event window, and any claim that AI output is a human
-finding.
+**Not shipped:** Overview pagination/filter controls, desktop/Rust consumers,
+an export timeline kind (export locators exist; export lifecycle projects only
+when a timeline event already exists), unbounded overview history beyond the
+500-event window, and any claim that AI output is a human finding.

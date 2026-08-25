@@ -118,7 +118,12 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
     "POST /api/auth/login": { status: "synthetic_demo" },
     "POST /api/auth/logout": { status: "synthetic_demo" },
     "GET /api/cases": await json(app, "GET", "/api/cases", session),
-    "GET /api/activity?limit=30": await json(app, "GET", "/api/activity?limit=30", session),
+    "GET /api/investigation-activity?limit=30": await json(
+      app,
+      "GET",
+      "/api/investigation-activity?limit=30",
+      session,
+    ),
     [`GET /api/cases/${caseId}`]: await json(app, "GET", `/api/cases/${caseId}`, session),
     "GET /api/catalog/sources": await json(app, "GET", "/api/catalog/sources", session),
     "GET /api/triage-profiles": await json(app, "GET", "/api/triage-profiles", session),

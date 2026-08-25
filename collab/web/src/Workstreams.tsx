@@ -132,8 +132,10 @@ export function Workstreams(props: {
   /** Evidence ids already requested, so a re-render never re-reads bytes. */
   const requestedExcerpts = useRef(new Set<string>());
   const loaded = workstreams !== null;
-  const focusedKey =
-    props.routeFocus?.section === WORKSTREAMS_SECTION ? props.routeFocus.lane ?? null : null;
+  const focusedKey = props.routeFocus?.section === WORKSTREAMS_SECTION
+    ? props.routeFocus.lane
+      ?? (props.routeFocus.itemKind === "workstream" ? props.routeFocus.item : null)
+    : null;
   const focused = focusedKey
     ? workstreams?.find((row) => row.key === focusedKey) ?? null
     : null;

@@ -210,6 +210,26 @@ describe("Workstreams list", () => {
 });
 
 describe("focused workstream", () => {
+  it("opens a locator route that identifies the workstream as a typed item", async () => {
+    stubApi();
+    render(
+      <Workstreams
+        caseId={CASE_ID}
+        routeFocus={{
+          section: "workstreams",
+          item: "run-1:reviewer-lane",
+          itemKind: "workstream",
+          lane: null,
+          experiment: null,
+        }}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Reviewer workstream — fixture-reviewer-a" }),
+    ).toBeTruthy();
+  });
+
   it("shows purpose, owner, inputs, findings, unknowns, and ordered history", async () => {
     stubApi();
     render(<Workstreams caseId={CASE_ID} routeFocus={focus("run-1:reviewer-lane")} />);

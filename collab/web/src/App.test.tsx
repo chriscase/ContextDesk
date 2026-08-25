@@ -189,7 +189,7 @@ describe("auth boundary", () => {
           }),
         } as Response);
       }
-      if (url === "/api/activity?limit=30") return activity;
+      if (url === "/api/investigation-activity?limit=30") return activity;
       return null;
     });
     render(<App />);

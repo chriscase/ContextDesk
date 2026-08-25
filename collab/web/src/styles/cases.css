@@ -110,6 +110,10 @@
   cursor: pointer;
 }
 
+.activity-feed__open {
+  text-decoration: none;
+}
+
 .activity-feed__open:hover,
 .overview__attention-list button:hover {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
@@ -147,6 +151,30 @@
   border-top: 1px solid var(--border);
   color: var(--muted);
   font-size: 0.78rem;
+}
+
+.activity-feed__share {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 1rem 0.7rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.activity-feed__share button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.activity-feed__share button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 .overview__attention-list button strong {
