@@ -11,6 +11,12 @@ import {
   createLogTimeCasePort,
   logTimeBridgeOptions,
 } from "./modules/log-time/index.js";
+import {
+  MemoryWorkbenchStore,
+  PgWorkbenchStore,
+  WorkbenchService,
+  createWorkbenchCasePort,
+} from "./modules/workbench/index.js";
 import { PgAuditStore, type AuditStore } from "./modules/audit/index.js";
 import {
   LdapAuthAdapter,
@@ -231,14 +237,14 @@ async function main(): Promise<void> {
   });
   // Log-time review needs the shipped host pipeline. With no host binary or
   // no corpus root configured, the routes stay unregistered rather than
-  // offering a review surface that cannot answer.
+  // offering a review surface that cannot answer. The workbench still serves
+  // investigation-owned intake bytes without that host.
+  const logTimeStore =
+    storage.pool === null ? new MemoryLogTimeStore() : new PgLogTimeStore(storage.pool);
   const logTimeBridge = logTimeBridgeOptions();
   const logTime = logTimeBridge
     ? new LogTimeService({
-        store:
-          storage.pool === null
-            ? new MemoryLogTimeStore()
-            : new PgLogTimeStore(storage.pool),
+        store: logTimeStore,
         bridge: new ProcessLogTimeBridge(logTimeBridge),
         cases: createLogTimeCasePort({
           cases: storage.cases,
@@ -249,6 +255,21 @@ async function main(): Promise<void> {
         audit,
       })
     : null;
+  domain.bindNormalizationRevision(async (caseId) =>
+    (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+  );
+  const workbench = new WorkbenchService({
+    store:
+      storage.pool === null ? new MemoryWorkbenchStore() : new PgWorkbenchStore(storage.pool),
+    cases: createWorkbenchCasePort({
+      cases: storage.cases,
+      domain,
+      evidence: store,
+      currentNormalizationRevision: async (caseId) =>
+        (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+    }),
+    audit,
+  });
   const bridge = triageBridgeOptions();
   const triageRuns = new TriageRunService({
     cases: domain,
@@ -339,6 +360,7 @@ async function main(): Promise<void> {
     ...(storage.databaseProbe ? { databaseProbe: storage.databaseProbe } : {}),
     store,
     ...(logTime ? { logTime } : {}),
+    workbench,
     domain,
     catalog,
     imports,

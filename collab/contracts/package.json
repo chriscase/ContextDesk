@@ -20,6 +20,10 @@
       "types": "./dist/investigation-corpus-intake.d.ts",
       "import": "./dist/investigation-corpus-intake.js"
     },
+    "./workbench": {
+      "types": "./dist/investigation-workbench.d.ts",
+      "import": "./dist/investigation-workbench.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

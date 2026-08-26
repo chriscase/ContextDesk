@@ -33,6 +33,11 @@ import {
   type LogTimeBridge,
 } from "./modules/log-time/index.js";
 import {
+  MemoryWorkbenchStore,
+  WorkbenchService,
+  createWorkbenchCasePort,
+} from "./modules/workbench/index.js";
+import {
   memoryApplyBoundary,
   MemoryPortableApplyStateStore,
   PortableInvestigationService,
@@ -654,9 +659,10 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
         : {}),
     profiles: options.triageProfiles ?? loadConfiguredTriageProfileCatalog(),
   });
+  const logTimeStore = new MemoryLogTimeStore();
   const logTime = options.logTimeBridge
     ? new LogTimeService({
-        store: new MemoryLogTimeStore(),
+        store: logTimeStore,
         bridge: options.logTimeBridge,
         cases: createLogTimeCasePort({
           cases: caseStore,
@@ -667,6 +673,20 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
         audit,
       })
     : null;
+  cases.bindNormalizationRevision(async (caseId) =>
+    (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+  );
+  const workbench = new WorkbenchService({
+    store: new MemoryWorkbenchStore(),
+    cases: createWorkbenchCasePort({
+      cases: caseStore,
+      domain: cases,
+      evidence,
+      currentNormalizationRevision: async (caseId) =>
+        (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+    }),
+    audit,
+  });
   const presence = new PresenceService();
   const exporter = new ExportService({
     cases,
@@ -739,6 +759,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       imports,
       triageRuns,
       ...(logTime ? { logTime } : {}),
+      workbench,
       presence,
       experiments,
       entities,

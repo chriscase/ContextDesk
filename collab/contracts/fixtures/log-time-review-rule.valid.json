@@ -1,0 +1,10 @@
+{
+  "schemaId": "cd-collab.log_time_review_rule.v1",
+  "scope": "rotation_family",
+  "source": null,
+  "rotationFamily": "worker/batch.log",
+  "selectedEvidenceIds": [],
+  "ianaTimezone": "America/Chicago",
+  "expectedRevision": 3,
+  "idempotencyKey": "rule-worker-family-0001"
+}

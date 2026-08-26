@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/log-workbench-chronology.v1.json",
+  "title": "cd-collab Log Workbench Chronology v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "grouping",
+    "events",
+    "bounded",
+    "atLeast",
+    "unknownBuckets",
+    "expectedNormalizationRevision"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.log_workbench_chronology.v1" },
+    "grouping": {
+      "type": "string",
+      "enum": ["none", "component", "file", "batch", "rotation_family", "entity", "severity"]
+    },
+    "events": { "type": "array" },
+    "bounded": { "type": "boolean" },
+    "atLeast": { "type": "integer", "minimum": 0 },
+    "unknownBuckets": { "type": "array" },
+    "expectedNormalizationRevision": { "type": ["integer", "null"], "minimum": 0 }
+  }
+}

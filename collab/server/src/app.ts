@@ -41,6 +41,7 @@ import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/in
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerCorpusIntakeRoutes } from "./modules/corpus-intake/index.js";
 import { registerLogTimeRoutes, type LogTimeService } from "./modules/log-time/index.js";
+import { registerWorkbenchRoutes, type WorkbenchService } from "./modules/workbench/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
 import { registerTriageRunRoutes, type TriageRunService } from "./modules/triage-runs/index.js";
@@ -107,6 +108,7 @@ export interface AppDeps {
   triageRuns?: TriageRunService;
   presence?: PresenceService;
   logTime?: LogTimeService;
+  workbench?: WorkbenchService;
   experiments?: ExperimentService;
   exporter?: ExportService;
   portable?: PortableInvestigationService;
@@ -313,6 +315,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
           sessionAuth,
           audit: security.audit,
           logTime: deps.logTime,
+          cases: deps.domain,
+        });
+      }
+      if (deps.workbench) {
+        await registerWorkbenchRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          workbench: deps.workbench,
           cases: deps.domain,
         });
       }

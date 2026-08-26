@@ -442,3 +442,50 @@ fn an_unknown_request_field_is_refused_rather_than_ignored() {
     assert_eq!(envelope["ok"], json!(false));
     assert_eq!(envelope["error"]["kind"], json!("user_error"));
 }
+
+#[test]
+fn search_returns_the_timeout_line_without_guessing_a_timezone() {
+    let cache = tempfile::tempdir().expect("cache");
+    let data = build(cache.path());
+    let corpus = data["corpusId"].as_str().expect("corpusId");
+    let revision = data["corpusRevision"].as_u64().expect("revision");
+    let envelope = run(
+        cache.path(),
+        &request(
+            "case-synthetic-0001",
+            json!({
+                "kind": "search",
+                "corpusId": corpus,
+                "expectedRevision": revision,
+                "query": "timeout",
+                "mode": "case_insensitive",
+                "caseSensitive": false,
+                "k": 20,
+            }),
+        ),
+    );
+    assert_eq!(envelope["ok"], json!(true), "search failed: {envelope}");
+    let hits = envelope["data"]["search"]["hits"].as_array().expect("hits");
+    assert!(
+        hits.iter()
+            .any(|hit| hit["message"].as_str().unwrap_or("").contains("timeout")),
+        "expected a timeout hit: {hits:?}"
+    );
+    let stale = run(
+        cache.path(),
+        &request(
+            "case-synthetic-0001",
+            json!({
+                "kind": "search",
+                "corpusId": corpus,
+                "expectedRevision": revision + 1,
+                "query": "timeout",
+                "mode": "literal",
+                "caseSensitive": true,
+                "k": 20,
+            }),
+        ),
+    );
+    assert_eq!(stale["ok"], json!(false));
+    assert_eq!(stale["error"]["kind"], json!("conflict"));
+}

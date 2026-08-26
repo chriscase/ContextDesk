@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/log-workbench-view.v1.json",
+  "title": "cd-collab Log Workbench Saved View v1",
+  "description": "Investigation-scoped saved view. A record, never an authorization token.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "investigationId",
+    "name",
+    "filters",
+    "query",
+    "mode",
+    "selectedPanes",
+    "timeFrom",
+    "timeTo",
+    "sort",
+    "grouping",
+    "display",
+    "contextBefore",
+    "contextAfter",
+    "privacyClass",
+    "idempotencyKey",
+    "createdAt",
+    "createdBy",
+    "replayed"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.log_workbench_view.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "investigationId": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "filters": { "type": "object" },
+    "query": { "type": "string" },
+    "mode": { "type": "string", "enum": ["literal", "case_insensitive", "regex"] },
+    "selectedPanes": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "string" } },
+    "timeFrom": { "type": ["string", "null"] },
+    "timeTo": { "type": ["string", "null"] },
+    "sort": { "type": "string", "enum": ["ingest_order", "time_asc", "time_desc"] },
+    "grouping": {
+      "type": "string",
+      "enum": ["none", "component", "file", "batch", "rotation_family", "entity", "severity"]
+    },
+    "display": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["syncScroll", "wrap", "lineNumbers", "displayTimezone"],
+      "properties": {
+        "syncScroll": { "type": "boolean" },
+        "wrap": { "type": "boolean" },
+        "lineNumbers": { "type": "boolean" },
+        "displayTimezone": { "type": ["string", "null"] }
+      }
+    },
+    "contextBefore": { "type": "integer", "minimum": 0 },
+    "contextAfter": { "type": "integer", "minimum": 0 },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "idempotencyKey": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "createdBy": { "type": "string" },
+    "replayed": { "type": "boolean" }
+  }
+}
