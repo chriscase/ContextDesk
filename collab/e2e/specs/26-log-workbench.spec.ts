@@ -78,6 +78,24 @@ test.describe("investigation log workbench", () => {
       return "two files selected for side-by-side panes";
     });
 
+    await record.check("workbench-virtual-row-contract", async () => {
+      const metrics = await workbench
+        .locator("[data-workbench-pane]")
+        .first()
+        .locator(".log-workbench__lines li")
+        .evaluateAll((rows) =>
+          rows.map((row) => ({
+            height: row.getBoundingClientRect().height,
+            whiteSpace: getComputedStyle(row.querySelector(".log-workbench__text")!).whiteSpace,
+          })),
+        );
+      expect(metrics.length).toBeGreaterThan(1);
+      expect(new Set(metrics.map(({ height }) => height)).size).toBe(1);
+      expect(metrics[0]?.height).toBe(40);
+      expect(new Set(metrics.map(({ whiteSpace }) => whiteSpace))).toEqual(new Set(["pre"]));
+      return "virtualized rows keep one measured height and long records scroll instead of drifting match offsets";
+    });
+
     await workbench.getByLabel("Find in logs").fill("timeout");
     await workbench.getByRole("button", { name: "Search" }).click();
     await record.check("workbench-search-timeout", async () => {

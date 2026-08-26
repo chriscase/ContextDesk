@@ -24,7 +24,12 @@ function virtualizedWindow(input: {
   return { start, end, resident: Math.max(0, end - start) };
 }
 
-const ROW_HEIGHT = 24;
+/**
+ * Virtual rows must have a real, enforced height. Log text stays on one visual
+ * line inside a horizontally scrollable pane, so spacer math and match reveal
+ * offsets cannot drift when a long record is shown in a narrow pane.
+ */
+const ROW_HEIGHT = 40;
 const VIEWPORT_HEIGHT = 360;
 const OVERSCAN = 6;
 const MAX_PANES = 4;

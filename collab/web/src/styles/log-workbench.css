@@ -1,5 +1,6 @@
 .log-workbench {
   display: grid;
+  min-width: 0;
   gap: 0.9rem;
   margin-top: 0.75rem;
   padding: 1rem;
@@ -405,11 +406,13 @@
 
 .log-workbench__panes {
   display: grid;
+  min-width: 0;
   grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
   gap: 0.6rem;
 }
 
 .log-workbench__pane {
+  min-width: 0;
   max-height: 22.5rem;
   overflow: auto;
   border: 1px solid var(--border);
@@ -438,6 +441,8 @@
 }
 
 .log-workbench__lines {
+  width: max-content;
+  min-width: 100%;
   margin: 0.4rem 0;
   padding: 0;
   list-style: none;
@@ -447,10 +452,12 @@
 
 .log-workbench__lines li {
   display: grid;
-  grid-template-columns: 3.5rem 1fr auto;
+  grid-template-columns: 3.5rem minmax(max-content, 1fr) auto auto;
   gap: 0.4rem;
+  height: var(--row-height, 2.5rem);
   min-height: var(--row-height, 1.5rem);
-  align-items: start;
+  align-items: center;
+  overflow: hidden;
   border-radius: 0.25rem;
   padding: 0.1rem 0.2rem;
 }
@@ -467,6 +474,19 @@
 .log-workbench__text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.log-workbench__lines .log-workbench__text {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.log-workbench__lines li > .log-workbench__wrap {
+  grid-column: 3;
+}
+
+.log-workbench__lines li > button {
+  grid-column: 4;
 }
 
 .log-workbench__hit {
