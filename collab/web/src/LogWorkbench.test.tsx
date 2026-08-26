@@ -173,7 +173,7 @@ describe("Log workbench", () => {
     expect(screen.getAllByText('<img src=x onerror=alert(1)>.log').length).toBeGreaterThan(0);
     expect(document.querySelector("img")).toBeNull();
     expect(screen.queryByRole("heading", { name: EVIDENCE_A })).toBeNull();
-    expect(screen.getByText("Technical details for troubleshooting (3)")).toBeTruthy();
+    expect(screen.getAllByText("Details")).toHaveLength(2);
   });
 
   it("searches and reports an exact match count", async () => {
@@ -189,6 +189,10 @@ describe("Log workbench", () => {
     expect(screen.getByRole("list", { name: "Search matches" }).textContent).toMatch(
       /upstream timeout/,
     );
+    const navigation = screen.getByRole("group", { name: "Search match navigation" });
+    expect(navigation.textContent).toContain("1 of 1");
+    expect(screen.getByRole("button", { name: "Previous match" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Next match" })).toBeTruthy();
   });
 
   it("restores filters, time window, grouping, and display from a saved view", async () => {

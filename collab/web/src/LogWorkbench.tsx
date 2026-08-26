@@ -706,6 +706,15 @@ export function LogWorkbench(props: {
       ) : null}
 
       <div className="log-workbench__files" role="group" aria-label="Investigation logs">
+        <div className="log-workbench__files-head">
+          <div>
+            <strong>Choose log files</strong>
+            <span>Select one or more to open them side by side.</span>
+          </div>
+          <span className="log-workbench__muted">
+            {items.length.toLocaleString()} {items.length === 1 ? "file" : "files"}
+          </span>
+        </div>
         {items.map((item) => (
           <label key={item.evidenceId} className="log-workbench__file">
             <input
@@ -714,18 +723,21 @@ export function LogWorkbench(props: {
               onChange={() => togglePane(item.evidenceId)}
               aria-label={`Show ${item.displayLabel} in a pane`}
             />
-            <span>{item.displayLabel}</span>
-            {/* A file at the corpus root has no folder to disambiguate it, so
-                repeating its own name as a second column is noise, not
-                provenance. Only the containing path is shown. */}
-            <span className="log-workbench__muted">
-              {item.relativePath === item.displayLabel
-                ? ""
-                : item.relativePath.slice(0, item.relativePath.length - item.displayLabel.length)}
-              {item.fullyRead === false ? "not fully read" : ""}
+            <span className="log-workbench__file-copy">
+              <strong>{item.displayLabel}</strong>
+              {item.relativePath !== item.displayLabel || item.fullyRead === false ? (
+                <small>
+                  {item.relativePath === item.displayLabel
+                    ? ""
+                    : item.relativePath.slice(0, item.relativePath.length - item.displayLabel.length)}
+                  {item.fullyRead === false ? "not fully read" : ""}
+                </small>
+              ) : null}
             </span>
             <TechnicalIdentifiers
               record={item.displayLabel}
+              summary="Details"
+              className="log-workbench__file-details"
               items={[
                 { label: "Evidence id", value: item.evidenceId },
                 { label: "Digest", value: item.digest },
@@ -737,106 +749,136 @@ export function LogWorkbench(props: {
       </div>
 
       <div className="log-workbench__search">
-        <label>
-          <span>Find</span>
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={onSearchKey}
-            aria-label="Find in logs"
-          />
-        </label>
-        <label>
-          <span>Match</span>
-          <select
-            value={mode}
-            onChange={(event) => setMode(event.target.value as typeof mode)}
-            aria-label="Match mode"
+        <div className="log-workbench__search-head">
+          <div>
+            <strong>Search these logs</strong>
+            <span>Start with a word or phrase. Open advanced filters only when you need them.</span>
+          </div>
+        </div>
+        <div className="log-workbench__search-primary">
+          <label>
+            <span>Find</span>
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={onSearchKey}
+              aria-label="Find in logs"
+              placeholder="Message, error, identifier…"
+            />
+          </label>
+          <button type="button" onClick={() => void runSearch()} disabled={searching}>
+            {searching ? "Searching…" : "Search"}
+          </button>
+        </div>
+
+        <details className="log-workbench__search-advanced">
+          <summary>Advanced filters</summary>
+          <div className="log-workbench__search-filters">
+            <label>
+              <span>Match</span>
+              <select
+                value={mode}
+                onChange={(event) => setMode(event.target.value as typeof mode)}
+                aria-label="Match mode"
+              >
+                <option value="literal">Literal</option>
+                <option value="case_insensitive">Ignore case</option>
+                <option value="regex">Bounded regex</option>
+              </select>
+            </label>
+            <label>
+              <span>Include</span>
+              <input
+                value={include}
+                onChange={(event) => setInclude(event.target.value)}
+                aria-label="Include terms"
+              />
+            </label>
+            <label>
+              <span>Exclude</span>
+              <input
+                value={exclude}
+                onChange={(event) => setExclude(event.target.value)}
+                aria-label="Exclude terms"
+              />
+            </label>
+            <label>
+              <span>Severity</span>
+              <input
+                value={severity}
+                onChange={(event) => setSeverity(event.target.value)}
+                aria-label="Severity"
+              />
+            </label>
+            <label>
+              <span>From (UTC)</span>
+              <input
+                value={timeFrom}
+                onChange={(event) => setTimeFrom(event.target.value)}
+                aria-label="From (UTC)"
+              />
+            </label>
+            <label>
+              <span>To (UTC)</span>
+              <input
+                value={timeTo}
+                onChange={(event) => setTimeTo(event.target.value)}
+                aria-label="To (UTC)"
+              />
+            </label>
+          </div>
+          <p className="log-workbench__hint">
+            UTC ranges require a full instant such as <code>2024-03-10T08:00:00Z</code>.
+            Local times without a zone are refused rather than guessed.
+          </p>
+        </details>
+
+        <div
+          className="log-workbench__match-nav"
+          role="group"
+          aria-label="Search match navigation"
+        >
+          <button
+            type="button"
+            aria-label="Previous match"
+            disabled={!search || search.matches.length === 0}
+            onClick={() =>
+              search && search.matches.length > 0
+                ? selectMatch((matchIndex + search.matches.length - 1) % search.matches.length)
+                : undefined
+            }
           >
-            <option value="literal">Literal</option>
-            <option value="case_insensitive">Ignore case</option>
-            <option value="regex">Bounded regex</option>
-          </select>
-        </label>
-        <label>
-          <span>Include</span>
-          <input
-            value={include}
-            onChange={(event) => setInclude(event.target.value)}
-            aria-label="Include terms"
-          />
-        </label>
-        <label>
-          <span>Exclude</span>
-          <input
-            value={exclude}
-            onChange={(event) => setExclude(event.target.value)}
-            aria-label="Exclude terms"
-          />
-        </label>
-        <label>
-          <span>Severity</span>
-          <input
-            value={severity}
-            onChange={(event) => setSeverity(event.target.value)}
-            aria-label="Severity"
-          />
-        </label>
-        <label>
-          <span>From (UTC)</span>
-          <input
-            value={timeFrom}
-            onChange={(event) => setTimeFrom(event.target.value)}
-            aria-label="From (UTC)"
-          />
-        </label>
-        <label>
-          <span>To (UTC)</span>
-          <input
-            value={timeTo}
-            onChange={(event) => setTimeTo(event.target.value)}
-            aria-label="To (UTC)"
-          />
-        </label>
-        <button type="button" onClick={() => void runSearch()} disabled={searching}>
-          {searching ? "Searching…" : "Search"}
-        </button>
-        <button
-          type="button"
-          disabled={!search || search.matches.length === 0}
-          onClick={() =>
-            search && search.matches.length > 0
-              ? selectMatch((matchIndex + search.matches.length - 1) % search.matches.length)
-              : undefined
-          }
-        >
-          Previous match
-        </button>
-        <button
-          type="button"
-          disabled={!search || search.matches.length === 0}
-          onClick={() =>
-            search && search.matches.length > 0
-              ? selectMatch((matchIndex + 1) % search.matches.length)
-              : undefined
-          }
-        >
-          Next match
-        </button>
+            Previous
+          </button>
+          <span aria-live="polite" aria-atomic="true">
+            {search && search.matches.length > 0
+              ? `${matchIndex + 1} of ${search.matches.length}`
+              : "No matches"}
+          </span>
+          <button
+            type="button"
+            aria-label="Next match"
+            disabled={!search || search.matches.length === 0}
+            onClick={() =>
+              search && search.matches.length > 0
+                ? selectMatch((matchIndex + 1) % search.matches.length)
+                : undefined
+            }
+          >
+            Next
+          </button>
+        </div>
       </div>
       <p className="log-workbench__hint">
-        A time range needs a full UTC instant, for example
-        {" "}
-        <code>2024-03-10T08:00:00Z</code>. A local time with no zone is refused rather
-        than guessed. Press F3 (or Ctrl/Cmd+G) in Find to step through matches.
+        Press F3 (or Ctrl/Cmd+G) in Find to move through matches.
       </p>
       {search?.timeFilterUnknownReason ? (
         <p className="log-workbench__notice">{search.timeFilterUnknownReason}</p>
       ) : null}
       {search ? (
-        <div>
-          <p>
+        <section className="log-workbench__search-results" aria-label="Search results">
+          <p className="log-workbench__search-summary" role="status" aria-live="polite">
             {searchSummary(search, corpusTruncated)}
             {activeMatch ? ` Showing match ${matchIndex + 1} of ${search.matches.length}.` : ""}
           </p>
@@ -867,7 +909,7 @@ export function LogWorkbench(props: {
               {searching ? "Loading…" : "Load more matches"}
             </button>
           ) : null}
-        </div>
+        </section>
       ) : null}
 
       <label className="log-workbench__sync">
