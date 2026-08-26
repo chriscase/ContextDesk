@@ -79,6 +79,22 @@ const PREVIEW = {
   ],
 };
 
+const ALL_FOLD_PREVIEW = {
+  ...PREVIEW,
+  affectedRecords: 0,
+  firstResolvedInstant: null,
+  lastResolvedInstant: null,
+  dstGapCount: 0,
+  dstFoldCount: 2,
+  samples: PREVIEW.samples.map((sample) => ({
+    ...sample,
+    outcome: "unresolved" as const,
+    normalizedInstant: null,
+    utcOffsetSeconds: null,
+    unresolvedReason: "ambiguous_dst_fold",
+  })),
+};
+
 /** Route fetches by URL suffix; records every request for assertions. */
 function stubFetch(
   handlers: Record<string, (body: Record<string, unknown>) => unknown>,
@@ -207,6 +223,58 @@ describe("LogTimeReviewPanel", () => {
       await screen.findByText(/fall in the hour this zone skips when clocks go forward/i),
     ).toBeTruthy();
     expect(screen.getByText(/those lines keep file order instead/i)).toBeTruthy();
+  });
+
+  it("does not offer an empty revision when every timestamp remains ambiguous", async () => {
+    const calls: { url: string; body: Record<string, unknown> }[] = [];
+    stubFetch(
+      {
+        "/log-time/preview": () => ALL_FOLD_PREVIEW,
+        "/log-time/apply": () => ({ schemaId: "cd-collab.log_time_outcome.v1" }),
+        "/log-time": () => stateBody(),
+      },
+      calls,
+    );
+    render(panel());
+
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+
+    expect(
+      await screen.findByText(/nothing can be given an exact time with this choice/i),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /apply America\/Chicago to this file/i }),
+    ).toBeNull();
+    expect(calls.some((call) => call.url.endsWith("/log-time/apply"))).toBe(false);
+  });
+
+  it("turns the server's internal sentinel into an actionable operator message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/log-time")) {
+          return { ok: true, status: 200, json: async () => stateBody() };
+        }
+        return { ok: false, status: 400, json: async () => ({ error: "invalid" }) };
+      }),
+    );
+    render(panel());
+
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+
+    expect(
+      await screen.findByText("That timezone could not be previewed."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/^invalid$/i)).toBeNull();
   });
 
   it("sends the exact previewed fingerprint and revision when applying", async () => {
