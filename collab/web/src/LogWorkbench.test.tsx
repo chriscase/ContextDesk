@@ -453,4 +453,50 @@ describe("Log workbench honesty and navigation", () => {
     await waitFor(() => expect(saved).toHaveLength(3));
     expect(saved[2]).toBe(saved[1]);
   });
+  it("keeps a paged pane where the reader left it when another file is opened", async () => {
+    const pageRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: start + 80,
+            bounded: true,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.click(screen.getByLabelText("Show edge.log in a pane"));
+    await waitFor(() => expect(pageRequests.length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByRole("button", { name: "Load next lines" })[0]!);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes("startLine=81"))).toBe(true),
+    );
+    pageRequests.length = 0;
+    // Opening a second file must not re-page the first back to line 1.
+    fireEvent.click(
+      screen.getByLabelText("Show <img src=x onerror=alert(1)>.log in a pane"),
+    );
+    await waitFor(() => expect(pageRequests.length).toBeGreaterThan(0));
+    expect(
+      pageRequests.filter(
+        (url) => url.includes(encodeURIComponent(EVIDENCE_A)) && url.includes("startLine=1&"),
+      ),
+    ).toEqual([]);
+  });
 });

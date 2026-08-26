@@ -220,6 +220,8 @@ export function LogWorkbench(props: {
   const [searching, setSearching] = useState(false);
   const [chronologyBusy, setChronologyBusy] = useState(false);
   const liveRef = useRef<HTMLParagraphElement>(null);
+  /** Panes already read once, so a selection change does not re-page them. */
+  const loadedPanes = useRef<Set<string>>(new Set());
 
   const selectedItems = useMemo(
     () => items.filter((item) => panes.includes(item.evidenceId)),
@@ -229,6 +231,7 @@ export function LogWorkbench(props: {
   const load = useCallback(async () => {
     setLoadState("loading");
     setError(null);
+    loadedPanes.current.clear();
     try {
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench`);
       if (response.status === 401 || response.status === 403) {
@@ -309,6 +312,7 @@ export function LogWorkbench(props: {
 
   const loadPane = useCallback(
     async (evidenceId: string, startLine = 1) => {
+      loadedPanes.current.add(evidenceId);
       try {
         const response = await protectedApiFetch(
           `/api/cases/${props.caseId}/workbench/page?evidenceId=${encodeURIComponent(evidenceId)}&startLine=${startLine}&limit=80`,
@@ -323,9 +327,15 @@ export function LogWorkbench(props: {
     [props.caseId],
   );
 
+  // Only panes that have never been read are opened at line 1. Re-reading them
+  // whenever the selection changes would throw away where the reader had paged
+  // to — including the window a revealed search match just loaded.
   useEffect(() => {
     const ids = panes.length > 0 ? panes : items.slice(0, 1).map((item) => item.evidenceId);
-    for (const id of ids) void loadPane(id);
+    for (const id of ids) {
+      if (loadedPanes.current.has(id)) continue;
+      void loadPane(id);
+    }
   }, [panes, items, loadPane]);
 
   /**
