@@ -83,7 +83,7 @@ test.describe("investigation log workbench", () => {
     await record.check("workbench-search-timeout", async () => {
       // The count states whether it is complete: an exact count says so, and a
       // bounded or partly read one says what it did not count.
-      await expect(workbench.getByRole("status")).toContainText(
+      await expect(workbench.locator(".log-workbench__search-summary")).toContainText(
         /\d+ match(es)?\b.*(every match in the read lines|Load more|were not counted)/,
       );
       await expect(workbench.getByRole("list", { name: "Search matches" })).toContainText(
@@ -218,10 +218,45 @@ test.describe("investigation log workbench", () => {
     await importWorkbenchZip(page);
     await gotoStage(page, "Analyze");
     const workbench = page.locator("#log-workbench");
+    const advanced = workbench.locator("details.log-workbench__search-advanced");
+    await expect(advanced).not.toHaveAttribute("open", "");
+    await expect(workbench.getByText("Details", { exact: true })).toHaveCount(7);
+
     await workbench.getByLabel("Find in logs").focus();
     await page.keyboard.type("timeout");
     await page.keyboard.press("Enter");
-    await expect(workbench.getByRole("status")).toContainText(/\d+ match(es)?\b/);
+    await expect(workbench.locator(".log-workbench__search-summary")).toContainText(
+      /\d+ match(es)?\b/,
+    );
+
+    const navigation = workbench.getByRole("group", {
+      name: "Search match navigation",
+    });
+    await expect(navigation.getByRole("button", { name: "Previous match" })).toBeVisible();
+    await expect(navigation.getByText(/\d+ of \d+/)).toBeVisible();
+    await expect(navigation.getByRole("button", { name: "Next match" })).toBeVisible();
+
+    const geometry = await navigation.evaluate((element) => {
+      const children = Array.from(element.children).map((child) => {
+        const rect = child.getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
+      });
+      const rect = element.getBoundingClientRect();
+      return { children, left: rect.left, right: rect.right };
+    });
+    expect(geometry.children).toHaveLength(3);
+    expect(Math.max(...geometry.children.map((child) => child.top))
+      - Math.min(...geometry.children.map((child) => child.top))).toBeLessThan(2);
+    expect(Math.max(...geometry.children.map((child) => child.bottom))
+      - Math.min(...geometry.children.map((child) => child.bottom))).toBeLessThan(2);
+    expect(geometry.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.right).toBeLessThanOrEqual(390);
+
+    const pageWidths = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(pageWidths.scroll).toBeLessThanOrEqual(pageWidths.client);
     await page.keyboard.press("Escape");
   });
 
