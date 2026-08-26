@@ -1,6 +1,7 @@
+import { CORPUS_INTAKE_LIMITS } from "@cd-collab/contracts";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CorpusIntakePanel } from "./CorpusIntakePanel.js";
+import { CorpusIntakePanel, corpusSelectionLimitError } from "./CorpusIntakePanel.js";
 
 afterEach(() => {
   cleanup();
@@ -8,6 +9,43 @@ afterEach(() => {
 });
 
 describe("CorpusIntakePanel", () => {
+  it("accepts exact browser capacity boundaries and rejects one unit over", () => {
+    expect(corpusSelectionLimitError("zip", [{
+      relativePath: "incident.zip",
+      size: CORPUS_INTAKE_LIMITS.maxArchiveBytes,
+    }])).toBeNull();
+    expect(corpusSelectionLimitError("zip", [{
+      relativePath: "incident.zip",
+      size: CORPUS_INTAKE_LIMITS.maxArchiveBytes + 1,
+    }])).toMatch(/64 MiB/);
+    expect(corpusSelectionLimitError("files", [{
+      relativePath: "incident.log",
+      size: CORPUS_INTAKE_LIMITS.maxFileBytes,
+    }])).toBeNull();
+    expect(corpusSelectionLimitError("files", [{
+      relativePath: "incident.log",
+      size: CORPUS_INTAKE_LIMITS.maxFileBytes + 1,
+    }])).toMatch(/64 MiB/);
+    const exactCount = Array.from(
+      { length: CORPUS_INTAKE_LIMITS.maxFileCount },
+      (_, index) => ({ relativePath: `${index}.log`, size: 0 }),
+    );
+    expect(corpusSelectionLimitError("directory", exactCount)).toBeNull();
+    expect(corpusSelectionLimitError("directory", [
+      ...exactCount,
+      { relativePath: "overflow.log", size: 0 },
+    ])).toMatch(/4,096 files/);
+    const fullCapacity = Array.from({ length: 8 }, (_, index) => ({
+      relativePath: `capacity-${index}.log`,
+      size: CORPUS_INTAKE_LIMITS.maxFileBytes,
+    }));
+    expect(corpusSelectionLimitError("files", fullCapacity)).toBeNull();
+    expect(corpusSelectionLimitError("files", [
+      ...fullCapacity,
+      { relativePath: "one-byte-over.log", size: 1 },
+    ])).toMatch(/512 MiB/);
+  });
+
   it("previews then commits files without duplicating on retry", async () => {
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal(

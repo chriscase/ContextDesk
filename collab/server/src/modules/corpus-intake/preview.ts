@@ -11,6 +11,12 @@ import { createHash } from "node:crypto";
 import { scanShareSafePrivacy } from "@cd-collab/contracts";
 import { classifyBytes, digestOf, type ClassifiedFile } from "./classify.js";
 import { ZipError, extractZip } from "./zip.js";
+import {
+  archiveExceedsLimit,
+  expandedBytesExceedLimit,
+  fileCountExceedsLimit,
+  processingExceedsLimit,
+} from "./limits.js";
 
 export interface PreviewInput {
   caseId: string;
@@ -101,7 +107,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
   const rejected: CorpusRejectedFileV1[] = [];
   const incoming: Array<{ relativePath: string; mediaType?: string; bytes: Uint8Array }> = [];
   if (input.archive && input.archive.byteLength > 0) {
-    if (input.archive.byteLength > CORPUS_INTAKE_LIMITS.maxArchiveBytes) {
+    if (archiveExceedsLimit(input.archive.byteLength)) {
       rejected.push({
         relativePath: "",
         reason: "oversized_archive",
@@ -142,7 +148,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
   const known = input.knownDigests ?? new Set<string>();
   const accepted: CorpusAcceptedFileV1[] = [];
 
-  if (incoming.length > CORPUS_INTAKE_LIMITS.maxFileCount) {
+  if (fileCountExceedsLimit(incoming.length)) {
     return {
       classified: [],
       report: {
@@ -163,8 +169,31 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
     };
   }
 
+  let expandedBytes = 0;
   for (const file of incoming) {
-    if (Date.now() - startedAt > CORPUS_INTAKE_LIMITS.maxProcessingMs) {
+    if (expandedBytesExceedLimit(expandedBytes, file.bytes.byteLength)) {
+      return {
+        classified: [],
+        report: {
+          schemaId: CORPUS_INTAKE_REPORT_SCHEMA_ID,
+          caseId: input.caseId,
+          origin: input.origin,
+          previewToken,
+          accepted: [],
+          rejected: [{
+            relativePath: file.relativePath,
+            reason: "oversized_expanded",
+            detail: "expanded size exceeds cap",
+          }],
+          limits: CORPUS_INTAKE_LIMITS,
+        },
+      };
+    }
+    expandedBytes += file.bytes.byteLength;
+  }
+
+  for (const file of incoming) {
+    if (processingExceedsLimit(startedAt)) {
       rejected.push({
         relativePath: file.relativePath,
         reason: "processing_timeout",

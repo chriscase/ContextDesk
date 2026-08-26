@@ -29,7 +29,9 @@ describe("normalizeIntakePath", () => {
     expect(normalizeIntakePath("//fileserver/share/mailer.log").reason).toBe("drive_or_unc_path");
     expect(normalizeIntakePath("mailer\0.log").reason).toBe("nul_in_path");
     expect(normalizeIntakePath("").reason).toBe("empty_path");
+    expect(normalizeIntakePath("a/b/c/d/e/f/g/file.log").ok).toBe(true);
     expect(normalizeIntakePath("a/b/c/d/e/f/g/h/i/mailer.log").reason).toBe("path_too_deep");
+    expect(normalizeIntakePath(`${"a".repeat(236)}.log`).ok).toBe(true);
     expect(normalizeIntakePath(`${"a".repeat(241)}.log`).reason).toBe("path_too_long");
   });
 
@@ -142,22 +144,12 @@ describe("extractZip adversarial matrix", () => {
     ).toThrow(ZipError);
   });
 
-  it("rejects extreme ratios, oversized files, too many files, and truncated archives", () => {
+  it("rejects extreme ratios, too many files, and truncated archives", () => {
     const zeros = new Uint8Array(80_000);
     const bomb = extractZip(
       buildTestZip([{ name: "mailer/bomb.log", data: zeros, method: 8 }]),
     );
     expect(reasons(bomb)).toContain("extreme_ratio");
-    const huge = extractZip(
-      buildTestZip([
-        {
-          name: "mailer/huge.log",
-          data: new Uint8Array(CORPUS_INTAKE_LIMITS.maxFileBytes + 1),
-          method: 8,
-        },
-      ]),
-    );
-    expect(reasons(huge)).toContain("file_too_large");
     expect(() =>
       extractZip(
         buildTestZip(

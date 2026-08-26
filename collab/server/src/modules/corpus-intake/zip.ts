@@ -3,6 +3,14 @@ import {
   CORPUS_INTAKE_LIMITS,
   type CorpusRejectionReason,
 } from "@cd-collab/contracts";
+import {
+  archiveExceedsLimit,
+  compressionRatioExceedsLimit,
+  expandedBytesExceedLimit,
+  fileCountExceedsLimit,
+  fileExceedsLimit,
+  processingExceedsLimit,
+} from "./limits.js";
 
 const SIG_EOCD = 0x06054b50;
 const SIG_CD = 0x02014b50;
@@ -382,7 +390,7 @@ function unixMode(entry: CdEntry): number | null {
 }
 
 export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtractResult {
-  if (archive.byteLength > CORPUS_INTAKE_LIMITS.maxArchiveBytes) {
+  if (archiveExceedsLimit(archive.byteLength)) {
     throw new ZipError("oversized_archive", "archive exceeds byte cap");
   }
   if (archive.byteLength >= 4 && u32(archive, 0) === SIG_ZIP64_EOCD) {
@@ -396,7 +404,7 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
   let evidenceEntryCount = 0;
   const entries = parseCentralDirectory(archive);
   for (const entry of entries) {
-    if (Date.now() - startedAt > CORPUS_INTAKE_LIMITS.maxProcessingMs) {
+    if (processingExceedsLimit(startedAt)) {
       throw new ZipError("processing_timeout", "extraction exceeded time cap");
     }
     if (!entry.name.ok) {
@@ -434,7 +442,7 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
       || portableBase.startsWith("._")
     ) continue;
     evidenceEntryCount += 1;
-    if (evidenceEntryCount > CORPUS_INTAKE_LIMITS.maxFileCount) {
+    if (fileCountExceedsLimit(evidenceEntryCount)) {
       throw new ZipError("too_many_files", "file count exceeds cap");
     }
     const mode = unixMode(entry);
@@ -482,7 +490,7 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
       });
       continue;
     }
-    if (entry.uncompressed > CORPUS_INTAKE_LIMITS.maxFileBytes) {
+    if (fileExceedsLimit(entry.uncompressed)) {
       rejected.push({
         relativePath: normalized.path,
         reason: "file_too_large",
@@ -490,18 +498,15 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
       });
       continue;
     }
-    if (entry.compressed > 0) {
-      const ratio = entry.uncompressed / Math.max(entry.compressed, 1);
-      if (ratio > CORPUS_INTAKE_LIMITS.maxCompressionRatio) {
-        rejected.push({
-          relativePath: normalized.path,
-          reason: "extreme_ratio",
-          detail: "compression ratio exceeds cap",
-        });
-        continue;
-      }
+    if (compressionRatioExceedsLimit(entry.compressed, entry.uncompressed)) {
+      rejected.push({
+        relativePath: normalized.path,
+        reason: "extreme_ratio",
+        detail: "compression ratio exceeds cap",
+      });
+      continue;
     }
-    if (expanded + entry.uncompressed > CORPUS_INTAKE_LIMITS.maxExpandedBytes) {
+    if (expandedBytesExceedLimit(expanded, entry.uncompressed)) {
       throw new ZipError("oversized_expanded", "expanded size exceeds cap");
     }
     const bytes = extractLocal(archive, entry);

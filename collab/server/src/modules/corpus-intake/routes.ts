@@ -1,4 +1,7 @@
-import { ContractViolation } from "@cd-collab/contracts";
+import {
+  ContractViolation,
+  CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES,
+} from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   capabilityForbidden,
@@ -88,7 +91,7 @@ export async function registerCorpusIntakeRoutes(
 
   app.post(
     "/api/cases/:id/corpus-intake/preview",
-    { bodyLimit: 12 * 1024 * 1024 },
+    { bodyLimit: CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES },
     async (request, reply) => {
       const id = (request.params as { id: string }).id;
       const loaded = await sessionOf(request, reply);
@@ -118,7 +121,7 @@ export async function registerCorpusIntakeRoutes(
 
   app.post(
     "/api/cases/:id/corpus-intake",
-    { bodyLimit: 12 * 1024 * 1024 },
+    { bodyLimit: CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES },
     async (request, reply) => {
       const id = (request.params as { id: string }).id;
       const loaded = await sessionOf(request, reply);

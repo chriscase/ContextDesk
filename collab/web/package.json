@@ -13,6 +13,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@cd-collab/contracts": "*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

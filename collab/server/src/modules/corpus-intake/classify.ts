@@ -4,9 +4,9 @@ import type { ArtifactKind, CorpusAllowedMedia, CorpusRejectionReason, PrivacyCl
 import {
   CORPUS_ALLOWED_EXTENSIONS,
   CORPUS_ALLOWED_MEDIA,
-  CORPUS_INTAKE_LIMITS,
 } from "@cd-collab/contracts";
 import { isNestedArchive, normalizeIntakePath } from "./zip.js";
+import { fileExceedsLimit } from "./limits.js";
 
 const EXT_MEDIA: Record<string, CorpusAllowedMedia> = {
   ".log": "text/x-log",
@@ -128,7 +128,7 @@ export function classifyBytes(
   if (!normalized.ok) {
     return { relativePath, reason: normalized.reason, detail: normalized.detail };
   }
-  if (bytes.byteLength > CORPUS_INTAKE_LIMITS.maxFileBytes) {
+  if (fileExceedsLimit(bytes.byteLength)) {
     return { relativePath: normalized.path, reason: "file_too_large", detail: "file exceeds cap" };
   }
   if (isNestedArchive(normalized.path)) {

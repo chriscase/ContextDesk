@@ -8,6 +8,7 @@ import { ContractViolation } from "./parse.js";
 import {
   CORPUS_INTAKE_BATCH_SCHEMA_ID,
   CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES,
   CORPUS_INTAKE_LIMITS,
   CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
   CORPUS_INTAKE_REPORT_SCHEMA_ID,
@@ -15,6 +16,7 @@ import {
   parseCorpusIntakeCommitRequest,
   parseCorpusIntakePreviewReport,
   parseCorpusIntakePreviewRequest,
+  base64LengthForBytes,
 } from "./investigation-corpus-intake.js";
 
 const Ajv2020 =
@@ -120,15 +122,28 @@ function batchBody(overrides: Record<string, unknown> = {}): Record<string, unkn
 describe("corpus intake contract", () => {
   it("publishes the bounded limits used by preview and commit", () => {
     expect(CORPUS_INTAKE_LIMITS).toEqual({
-      maxArchiveBytes: 8_388_608,
-      maxExpandedBytes: 67_108_864,
-      maxCompressionRatio: 128,
-      maxFileCount: 1_024,
+      maxArchiveBytes: 67_108_864,
+      maxExpandedBytes: 536_870_912,
+      maxCompressionRatio: 256,
+      maxFileCount: 4_096,
       maxPathDepth: 8,
       maxPathLength: 240,
-      maxFileBytes: 9_000_000,
-      maxProcessingMs: 15_000,
+      maxFileBytes: 67_108_864,
+      maxProcessingMs: 60_000,
     });
+    expect(CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES).toBe(
+      base64LengthForBytes(CORPUS_INTAKE_LIMITS.maxExpandedBytes)
+      + CORPUS_INTAKE_LIMITS.maxFileCount * (CORPUS_INTAKE_LIMITS.maxPathLength * 6 + 512)
+      + 4_096,
+    );
+  });
+
+  it("accepts the exact file-count boundary and rejects one file over it", () => {
+    const file = previewBody().files as unknown[];
+    const exact = Array.from({ length: CORPUS_INTAKE_LIMITS.maxFileCount }, () => file[0]);
+    expect(parseCorpusIntakePreviewRequest(previewBody({ files: exact })).files).toHaveLength(4_096);
+    expect(() => parseCorpusIntakePreviewRequest(previewBody({ files: [...exact, file[0]] })))
+      .toThrow(/file count exceeds cap/);
   });
 
   it("accepts file, zip, and directory preview requests and rejects unknown fields", () => {
@@ -180,6 +195,9 @@ describe("corpus intake contract", () => {
   it("parses preview reports and committed batches without unknown fields", () => {
     const report = parseCorpusIntakePreviewReport(reportBody());
     expect(report.accepted[0]?.relativePath).toBe("mailer/shared-timeout.log");
+    expect(() => parseCorpusIntakePreviewReport(reportBody({
+      limits: { ...CORPUS_INTAKE_LIMITS, maxFileCount: CORPUS_INTAKE_LIMITS.maxFileCount - 1 },
+    }))).toThrow(/does not match the corpus intake contract/);
     expect(() => parseCorpusIntakePreviewReport(reportBody({ leaked: "nope" }))).toThrow(/unknown key/);
     const batch = parseCorpusIntakeBatch(batchBody());
     expect(batch.items).toHaveLength(1);

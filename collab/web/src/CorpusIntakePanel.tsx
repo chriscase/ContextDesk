@@ -1,14 +1,15 @@
+import {
+  CORPUS_ALLOWED_EXTENSIONS,
+  CORPUS_INTAKE_LIMITS,
+} from "@cd-collab/contracts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { pathFor, type WorkFocus } from "./app-location.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { useRouteFocus } from "./route-focus.js";
 
 const MAX_ERROR_LENGTH = 240;
-const MAX_FILE_BYTES = 9_000_000;
-const MAX_ARCHIVE_BYTES = 8_388_608;
-const MAX_FILE_COUNT = 1_024;
 const INITIAL_REPORT_ROWS = 12;
-const ALLOWED_EXTENSIONS = [".log", ".txt", ".json", ".csv", ".xml", ".eml", ".md"];
+const ALLOWED_EXTENSIONS = new Set<string>(CORPUS_ALLOWED_EXTENSIONS);
 
 interface PreviewReport {
   previewToken: string;
@@ -20,7 +21,7 @@ interface PreviewReport {
     duplicateDigest: boolean;
   }>;
   rejected: Array<{ relativePath: string; reason: string; detail: string }>;
-  limits?: { maxFileBytes: number; maxArchiveBytes: number; maxFileCount: number };
+  limits?: typeof CORPUS_INTAKE_LIMITS;
 }
 
 interface CommittedBatch {
@@ -33,6 +34,36 @@ interface CommittedBatch {
 }
 
 type Origin = "files" | "zip" | "directory";
+
+function mib(byteLength: number): string {
+  return `${byteLength / (1024 * 1024)} MiB`;
+}
+
+export function corpusSelectionLimitError(
+  origin: Origin,
+  selected: ReadonlyArray<{ relativePath: string; size: number }>,
+): string | null {
+  if (origin === "zip") {
+    const archive = selected[0];
+    return archive && archive.size > CORPUS_INTAKE_LIMITS.maxArchiveBytes
+      ? `ZIP archives must be ${mib(CORPUS_INTAKE_LIMITS.maxArchiveBytes)} or smaller.`
+      : null;
+  }
+  if (selected.length > CORPUS_INTAKE_LIMITS.maxFileCount) {
+    return `A batch may include at most ${CORPUS_INTAKE_LIMITS.maxFileCount.toLocaleString("en-US")} files.`;
+  }
+  let expandedBytes = 0;
+  for (const row of selected) {
+    if (row.size > CORPUS_INTAKE_LIMITS.maxFileBytes) {
+      return `${row.relativePath} is larger than ${mib(CORPUS_INTAKE_LIMITS.maxFileBytes)}.`;
+    }
+    if (row.size > CORPUS_INTAKE_LIMITS.maxExpandedBytes - expandedBytes) {
+      return `The selected files total more than ${mib(CORPUS_INTAKE_LIMITS.maxExpandedBytes)}.`;
+    }
+    expandedBytes += row.size;
+  }
+  return null;
+}
 
 function boundedError(message: string, fallback: string): string {
   const trimmed = message.trim();
@@ -139,7 +170,8 @@ export function CorpusIntakePanel(props: {
     if (origin === "zip") {
       const archive = files[0];
       if (!archive) throw new Error("Choose a ZIP archive.");
-      if (archive.size > MAX_ARCHIVE_BYTES) throw new Error("ZIP archives must be 8 MiB or smaller.");
+      const limitError = corpusSelectionLimitError(origin, [{ relativePath: archive.name, size: archive.size }]);
+      if (limitError) throw new Error(limitError);
       return {
         schemaId,
         origin,
@@ -152,12 +184,13 @@ export function CorpusIntakePanel(props: {
       };
     }
     if (payloadFiles.length === 0) throw new Error("Choose at least one file.");
-    if (payloadFiles.length > MAX_FILE_COUNT) throw new Error("A batch may include at most 1,024 files.");
+    const limitError = corpusSelectionLimitError(
+      origin,
+      payloadFiles.map((row) => ({ relativePath: row.relativePath, size: row.file.size })),
+    );
+    if (limitError) throw new Error(limitError);
     const encoded = [];
     for (const row of payloadFiles) {
-      if (row.file.size > MAX_FILE_BYTES) {
-        throw new Error(`${row.relativePath} is larger than 9 MB.`);
-      }
       encoded.push({
         relativePath: row.relativePath,
         mediaType: row.file.type || "application/octet-stream",
@@ -443,7 +476,7 @@ export function CorpusIntakePanel(props: {
         <p className="corpus-intake__meta">
           {payloadFiles.length} selected
           {payloadFiles
-            .filter((row) => !ALLOWED_EXTENSIONS.includes(extensionOf(row.relativePath)) && origin !== "zip")
+            .filter((row) => !ALLOWED_EXTENSIONS.has(extensionOf(row.relativePath)) && origin !== "zip")
             .length > 0
             ? " · some extensions are outside the allowlist and will be rejected"
             : ""}

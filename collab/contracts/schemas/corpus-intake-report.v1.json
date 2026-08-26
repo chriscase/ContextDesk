@@ -26,14 +26,14 @@
         "maxProcessingMs"
       ],
       "properties": {
-        "maxArchiveBytes": { "type": "integer" },
-        "maxExpandedBytes": { "type": "integer" },
-        "maxCompressionRatio": { "type": "integer" },
-        "maxFileCount": { "type": "integer" },
-        "maxPathDepth": { "type": "integer" },
-        "maxPathLength": { "type": "integer" },
-        "maxFileBytes": { "type": "integer" },
-        "maxProcessingMs": { "type": "integer" }
+        "maxArchiveBytes": { "type": "integer", "const": 67108864 },
+        "maxExpandedBytes": { "type": "integer", "const": 536870912 },
+        "maxCompressionRatio": { "type": "integer", "const": 256 },
+        "maxFileCount": { "type": "integer", "const": 4096 },
+        "maxPathDepth": { "type": "integer", "const": 8 },
+        "maxPathLength": { "type": "integer", "const": 240 },
+        "maxFileBytes": { "type": "integer", "const": 67108864 },
+        "maxProcessingMs": { "type": "integer", "const": 60000 }
       }
     }
   }

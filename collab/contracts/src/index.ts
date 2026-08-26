@@ -245,6 +245,7 @@ export {
   CORPUS_ALLOWED_MEDIA,
   CORPUS_INTAKE_BATCH_SCHEMA_ID,
   CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES,
   CORPUS_INTAKE_LIMITS,
   CORPUS_INTAKE_ORIGINS,
   CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
@@ -254,6 +255,7 @@ export {
   parseCorpusIntakeCommitRequest,
   parseCorpusIntakePreviewReport,
   parseCorpusIntakePreviewRequest,
+  base64LengthForBytes,
 } from "./investigation-corpus-intake.js";
 export type {
   CorpusAcceptedFileV1,

@@ -47,15 +47,32 @@ export const CORPUS_REJECTION_REASONS = [
 export type CorpusRejectionReason = (typeof CORPUS_REJECTION_REASONS)[number];
 
 export const CORPUS_INTAKE_LIMITS = {
-  maxArchiveBytes: 8_388_608,
-  maxExpandedBytes: 67_108_864,
-  maxCompressionRatio: 128,
-  maxFileCount: 1_024,
+  maxArchiveBytes: 64 * 1024 * 1024,
+  maxExpandedBytes: 512 * 1024 * 1024,
+  maxCompressionRatio: 256,
+  maxFileCount: 4_096,
   maxPathDepth: 8,
   maxPathLength: 240,
-  maxFileBytes: 9_000_000,
-  maxProcessingMs: 15_000,
+  maxFileBytes: 64 * 1024 * 1024,
+  maxProcessingMs: 60_000,
 } as const;
+
+export function base64LengthForBytes(byteLength: number): number {
+  return 4 * Math.ceil(byteLength / 3);
+}
+
+/**
+ * Fastify receives intake as JSON with base64 payloads. This transport ceiling
+ * admits the full expanded-byte allowance plus worst-case escaped paths and
+ * bounded per-entry JSON metadata; semantic intake limits still reject excess.
+ */
+export const CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES =
+  base64LengthForBytes(CORPUS_INTAKE_LIMITS.maxExpandedBytes)
+  + CORPUS_INTAKE_LIMITS.maxFileCount * (
+    CORPUS_INTAKE_LIMITS.maxPathLength * 6
+    + 512
+  )
+  + 4_096;
 
 export const CORPUS_ALLOWED_MEDIA = [
   "text/plain",
@@ -215,6 +232,9 @@ function assertOriginRepresentation(
     if (body.files.length !== 0) {
       throw new ContractViolation("$.files", "zip origin does not accept direct files");
     }
+    if (body.archiveBase64.length > base64LengthForBytes(CORPUS_INTAKE_LIMITS.maxArchiveBytes)) {
+      throw new ContractViolation("$.archiveBase64", "encoded archive exceeds cap");
+    }
     return;
   }
   if (body.archiveBase64 !== null) {
@@ -225,6 +245,17 @@ function assertOriginRepresentation(
   }
   if (body.files.length > CORPUS_INTAKE_LIMITS.maxFileCount) {
     throw new ContractViolation("$.files", "file count exceeds cap");
+  }
+  for (const [index, file] of body.files.entries()) {
+    if (file.relativePath.length > CORPUS_INTAKE_LIMITS.maxPathLength) {
+      throw new ContractViolation(`$.files[${index}].relativePath`, "is too long");
+    }
+    if (file.mediaType.length > 128) {
+      throw new ContractViolation(`$.files[${index}].mediaType`, "is too long");
+    }
+    if (file.contentBase64.length > base64LengthForBytes(CORPUS_INTAKE_LIMITS.maxFileBytes)) {
+      throw new ContractViolation(`$.files[${index}].contentBase64`, "encoded file exceeds cap");
+    }
   }
 }
 
@@ -314,6 +345,11 @@ export function parseCorpusIntakePreviewReport(raw: unknown): CorpusIntakePrevie
   checkObject("$", previewReportShape, raw);
   const body = raw as CorpusIntakePreviewReportV1;
   requireDigest("$.previewToken", body.previewToken);
+  for (const key of Object.keys(CORPUS_INTAKE_LIMITS) as Array<keyof typeof CORPUS_INTAKE_LIMITS>) {
+    if (body.limits[key] !== CORPUS_INTAKE_LIMITS[key]) {
+      throw new ContractViolation(`$.limits.${key}`, "does not match the corpus intake contract");
+    }
+  }
   return body;
 }
 
