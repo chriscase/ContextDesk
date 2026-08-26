@@ -3,7 +3,6 @@ import { CaseDiscussion } from "./CaseDiscussion.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
-import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
 import { TriageRunPanel } from "./TriageRunPanel.js";
 import { WORKSTREAMS_SECTION, Workstreams } from "./Workstreams.js";
 import {
@@ -2365,15 +2364,6 @@ export function Cases(props: {
                 workstream's own record is the page. They also stop receiving
                 the route focus while hidden, so only the workstream record
                 claims keyboard focus for that address. */}
-            <TriageAnchor id="triage-log-time" label="Timezone review">
-              <div hidden={workstreamFocused}>
-                <LogTimeReviewPanel
-                  caseId={current.id}
-                  canWrite={canWrite}
-                  readOnly={readOnly}
-                />
-              </div>
-            </TriageAnchor>
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
               <div hidden={workstreamFocused}>
                 <CaseBoardPanel

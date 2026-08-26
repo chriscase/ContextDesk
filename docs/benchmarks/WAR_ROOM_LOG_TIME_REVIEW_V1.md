@@ -32,8 +32,9 @@ against.
 - **DST gap and fold reporting** as first-class output, not an error.
 - **Honest dependent accounting**: what a time change did to snapshots and runs
   that already existed.
-- A **plain-language War Room review surface** in the Analyze stage, showing raw
-  and normalized timestamps side by side against the log lines they came from.
+- A **plain-language War Room review surface** beside log intake in the Capture
+  stage, showing raw and normalized timestamps side by side against the log
+  lines they came from.
 
 ## Reuse, not reimplementation
 
