@@ -1301,11 +1301,14 @@ describe("focused investigation view", () => {
     render(<Cases roles={["case-lead"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
     await screen.findByRole("heading", { name: "Situation" });
+    expect(screen.getByText("Focused investigation")).toBeTruthy();
+    expect(screen.getByText(/Describe the problem and open questions/)).toBeTruthy();
     expect(screen.getByText(/Write the problem and open questions/)).toBeTruthy();
 
     const stageNav = screen.getByRole("navigation", { name: "Investigation stages" });
     fireEvent.click(within(stageNav).getByRole("button", { name: /Capture/ }));
     expect(await screen.findByRole("heading", { name: "Capture evidence and observations" })).toBeTruthy();
+    expect(screen.getByText(/Add notes, chat, or logs/)).toBeTruthy();
     expect(screen.getByText(/Add a note, paste a chat, or upload logs/)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Situation" })).toBeNull();
     expect(
@@ -1314,6 +1317,7 @@ describe("focused investigation view", () => {
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Analyze/ }));
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+    expect(screen.getByText(/Freeze the evidence and ask one clear question/)).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Run history" })).toBeTruthy();
     expect(screen.getByText(/Select the evidence, freeze it/)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Capture evidence and observations" })).toBeNull();
@@ -1322,12 +1326,14 @@ describe("focused investigation view", () => {
     expect(
       await screen.findByRole("heading", { name: "Experiment lab" }),
     ).toBeTruthy();
+    expect(screen.getByText(/Review differences across finished runs/)).toBeTruthy();
     expect(screen.getByText(/Choose two or more finished runs/)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Evidence and snapshots" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Accepted decision" })).toBeNull();
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Decide/ }));
     expect(await screen.findByRole("heading", { name: "Decision journal" })).toBeTruthy();
+    expect(screen.getByText(/Record the human decision and reason/)).toBeTruthy();
     expect(screen.getByText(/Review the record, add the human decision/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Update status" })).toBeTruthy();
     expect(screen.getByText("Case export tools")).toBeTruthy();

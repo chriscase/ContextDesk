@@ -138,6 +138,14 @@ const STAGE_LABELS: Record<StageId, string> = {
   decide: "Decide",
 };
 
+const STAGE_NEXT_ACTIONS: Record<StageId, string> = {
+  situation: "Describe the problem and open questions, then add evidence.",
+  capture: "Add notes, chat, or logs. Move to Analyze when the record is ready.",
+  analyze: "Freeze the evidence and ask one clear question in a triage run.",
+  compare: "Review differences across finished runs; agreement is not proof.",
+  decide: "Record the human decision and reason, then export the safe record.",
+};
+
 function creatorName(row: CaseRow): string | null {
   const fromParticipants = row.createdBy
     ? row.participants?.find((p) => p.identityId === row.createdBy)?.username
@@ -1805,6 +1813,7 @@ export function Cases(props: {
       </nav>
       <header className="focus-head">
         <div className="focus-head__primary">
+          <p className="focus-head__eyebrow">Focused investigation</p>
           <h2 className="case-view__title" id="focus-case-title">
             {current.title}
           </h2>
@@ -1814,6 +1823,9 @@ export function Cases(props: {
               {current.severity} severity
             </span>
             {openedLine(current) ? <span>{openedLine(current)}</span> : null}
+          </p>
+          <p className="focus-head__next">
+            <strong>Next best step:</strong> {STAGE_NEXT_ACTIONS[stage]}
           </p>
         </div>
         <div className="focus-head__discussion">

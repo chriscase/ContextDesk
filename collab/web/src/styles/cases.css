@@ -580,6 +580,15 @@
   min-width: 0;
 }
 
+.focus-head__eyebrow {
+  margin: 0 0 0.2rem;
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .focus-head__discussion {
   display: grid;
   justify-items: end;
@@ -634,6 +643,21 @@
   margin: 0;
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+.focus-head__next {
+  max-width: 52rem;
+  margin: 0.7rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 0.45rem 0.45rem 0;
+  background: var(--surface-deep);
+  color: var(--fg);
+  font-size: 0.84rem;
+}
+
+.focus-head__next strong {
+  color: var(--accent);
 }
 
 .stage-nav {
@@ -1198,6 +1222,13 @@
 .case-memory__copy {
   max-width: 46rem;
   margin: 0.35rem 0 0;
+}
+
+.case-memory__card-copy {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
 }
 
 .case-memory__note,

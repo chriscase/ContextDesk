@@ -447,6 +447,10 @@ export function CaseBoardPanel(props: {
           <div className="case-memory__grid">
             <section className="case-memory__card" aria-labelledby="case-evidence-heading">
               <h4 id="case-evidence-heading">Evidence board</h4>
+              <p className="case-memory__card-copy">
+                Find files by name, path, or kind. In Capture, resolve ambiguous log times before
+                freezing a snapshot.
+              </p>
               {artifacts.length === 0 ? <p className="case-memory__empty">No evidence has been registered yet.</p> : null}
               {artifacts.length > 0 ? (
                 <div className="case-memory__evidence-tools">
@@ -465,12 +469,18 @@ export function CaseBoardPanel(props: {
                     />
                   </label>
                   <p aria-live="polite">
-                    {visibleArtifacts.length} of {artifacts.length} shown · {selectedEvidence.length} selected
+                    {visibleArtifacts.length.toLocaleString()} matching · showing{" "}
+                    {Math.min(renderedArtifacts.length, visibleArtifacts.length).toLocaleString()} ·{" "}
+                    {selectedEvidence.length.toLocaleString()} selected
                   </p>
                   {!props.readOnly && props.canLead ? (
                     <div className="case-memory__selection-actions">
-                      <button type="button" onClick={selectVisibleEvidence} disabled={visibleArtifacts.length === 0}>
-                        Select all shown
+                      <button
+                        type="button"
+                        onClick={selectVisibleEvidence}
+                        disabled={visibleArtifacts.length === 0}
+                      >
+                        {evidenceFilter.trim() ? "Select all matching" : "Select all evidence"}
                       </button>
                       <button type="button" onClick={() => setSelectedEvidence([])} disabled={selectedEvidence.length === 0}>
                         Clear selection
@@ -554,7 +564,7 @@ export function CaseBoardPanel(props: {
                     type="button"
                     onClick={() => setEvidenceLimit((current) => current + INITIAL_EVIDENCE)}
                   >
-                    Show {Math.min(INITIAL_EVIDENCE, hiddenArtifactCount).toLocaleString()} more
+                    Show {Math.min(INITIAL_EVIDENCE, hiddenArtifactCount).toLocaleString()} more matching
                   </button>
                 </div>
               ) : null}
