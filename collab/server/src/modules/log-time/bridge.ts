@@ -77,7 +77,15 @@ export type LogTimeAction =
       declaredAt: number;
     }
   | { kind: "clear"; corpusId: string; expectedRevision: number; source: string }
-  | { kind: "undo"; corpusId: string; expectedRevision: number };
+  | { kind: "undo"; corpusId: string; expectedRevision: number }
+  | {
+      kind: "chronology";
+      corpusId: string;
+      search: string | null;
+      sources: string[];
+      limit: number;
+      cursor: string | null;
+    };
 
 export interface HostSourceStatus {
   source: string;
@@ -130,6 +138,40 @@ export interface HostRevision {
   eventCount: number;
 }
 
+export interface HostChronologyRow {
+  seq: number;
+  source: string;
+  rawTimestamp: string | null;
+  normalizedInstant: string | null;
+  timeState: "resolved" | "order_only";
+  timestampProvenance:
+    | "explicit_wall"
+    | "resolved_local"
+    | "unresolved_local"
+    | "order_only"
+    | "legacy_unknown";
+  orderOnlyReason:
+    | "timezone_unresolved"
+    | "no_recognized_local_timestamp"
+    | "unsupported_local_timestamp_shape"
+    | "ambiguous_dst_fold"
+    | "nonexistent_dst_gap"
+    | "zone_abbreviation_mismatch"
+    | "resolved_instant_out_of_range"
+    | null;
+  level: string;
+  message: string;
+}
+
+export interface HostChronology {
+  corpusRevision: number;
+  rows: HostChronologyRow[];
+  nextCursor: string | null;
+  totalMatched: number;
+  orderOnlyCount: number;
+  timeQuality: "wall" | "mixed" | "order_only";
+}
+
 export interface HostBuild {
   corpusName: string;
   eventsImported: number;
@@ -147,6 +189,7 @@ export interface HostResult {
   sources?: HostSourceStatus[];
   preview?: HostPreview;
   revision?: HostRevision;
+  chronology?: HostChronology;
   declarations: Record<string, HostDeclaration>;
 }
 

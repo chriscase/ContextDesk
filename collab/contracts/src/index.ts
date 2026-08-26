@@ -319,6 +319,28 @@ export type {
 } from "./investigation-log-time.js";
 
 export {
+  LOG_CHRONOLOGY_LIMITS,
+  LOG_CHRONOLOGY_ORDER_ONLY_REASONS,
+  LOG_CHRONOLOGY_PAGE_SCHEMA_ID,
+  LOG_CHRONOLOGY_PROVENANCE,
+  LOG_CHRONOLOGY_QUERY_SCHEMA_ID,
+  LOG_CHRONOLOGY_TIME_QUALITIES,
+  LOG_CHRONOLOGY_TIME_STATES,
+  normalizeLogChronologyQuery,
+  parseLogChronologyPage,
+  parseLogChronologyQuery,
+} from "./investigation-log-chronology.js";
+export type {
+  LogChronologyOrderOnlyReason,
+  LogChronologyPageV1,
+  LogChronologyProvenance,
+  LogChronologyQueryV1,
+  LogChronologyRowV1,
+  LogChronologyTimeQuality,
+  LogChronologyTimeState,
+} from "./investigation-log-chronology.js";
+
+export {
   SNAPSHOT_FAIRNESS_CLASSES,
   SNAPSHOT_LIST_SCHEMA_ID,
   SNAPSHOT_SCHEMA_ID,
