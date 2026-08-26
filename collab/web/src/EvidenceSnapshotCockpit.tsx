@@ -169,7 +169,10 @@ export function EvidenceSnapshotCockpit(props: {
 }) {
   const { snapshots, selectedRuns } = props;
   const [inspectedId, setInspectedId] = useState("");
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "unavailable">("idle");
+  const [copyResult, setCopyResult] = useState<{
+    fingerprint: string;
+    state: "copied" | "unavailable";
+  } | null>(null);
   const lastFocus = useRef(props.focusSnapshotId);
 
   // The launcher's snapshot selection (and "Use this setup again") stays the
@@ -184,11 +187,6 @@ export function EvidenceSnapshotCockpit(props: {
   const inspected = snapshots.find((snapshot) => snapshot.id === inspectedId)
     ?? snapshots.find((snapshot) => snapshot.id === props.focusSnapshotId)
     ?? snapshots.at(-1);
-  const inspectedKey = inspected?.id ?? "";
-  useEffect(() => {
-    setCopyState("idle");
-  }, [inspectedKey]);
-
   const verdict = fairnessVerdict(selectedRuns, snapshots);
 
   function snapshotRef(snapshotId: string, fingerprint: string): string {
@@ -201,14 +199,14 @@ export function EvidenceSnapshotCockpit(props: {
   async function copyFingerprint(fingerprint: string) {
     const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
     if (!clipboard?.writeText) {
-      setCopyState("unavailable");
+      setCopyResult({ fingerprint, state: "unavailable" });
       return;
     }
     try {
       await clipboard.writeText(fingerprint);
-      setCopyState("copied");
+      setCopyResult({ fingerprint, state: "copied" });
     } catch {
-      setCopyState("unavailable");
+      setCopyResult({ fingerprint, state: "unavailable" });
     }
   }
 
@@ -375,13 +373,13 @@ export function EvidenceSnapshotCockpit(props: {
               Copy
             </button>
           </div>
-          {copyState !== "idle" ? (
+          {copyResult?.fingerprint === inspected.fingerprint ? (
             <p
               className="snapshot-cockpit__copy-note"
               role="status"
               aria-label="Snapshot fingerprint copy result"
             >
-              {copyState === "copied"
+              {copyResult.state === "copied"
                 ? "Fingerprint copied to the clipboard."
                 : "Clipboard copy is unavailable here — the fingerprint text is selectable for manual copy."}
             </p>
