@@ -79,7 +79,7 @@ describe("component health route", () => {
         current: latestMigrationVersion(),
         target: latestMigrationVersion(),
       });
-      expect(body.components[0]?.storageMigration.current).toBe("018_log_time");
+      expect(body.components[0]?.storageMigration.current).toBe(latestMigrationVersion());
       expect(body.components[2]?.reportStatus).toBe("not_reported");
       expect(response.body).not.toMatch(/password|secret|email|directory|customer/i);
     } finally {
