@@ -217,6 +217,22 @@ describe("classifyBytes", () => {
     expect(() => decodeBase64("file", "c3ludGhldGljCg")).toThrow(/valid base64/);
     expect(() => decodeBase64("file", "c3ludGhldGljCg==\n")).toThrow(/valid base64/);
     expect(() => decodeBase64("file", "c3ludGhldGljCg===")).toThrow(/valid base64/);
+    expect(() => decodeBase64("file", "c3ludGhldGlj*Cg=")).toThrow(/valid base64/);
+    // Padding is only ever at the end.
+    expect(() => decodeBase64("file", "c3lu=GhldGljCg=")).toThrow(/valid base64/);
+  });
+
+  /**
+   * A committed log file is routinely several megabytes. Validating it with a
+   * backtracking regex overflowed the engine's stack and reported perfectly
+   * good bytes as invalid, so a large intake could never be committed at all.
+   */
+  it("validates a multi-megabyte payload instead of overflowing on it", () => {
+    const text = `${Array.from({ length: 200_000 }, (_, index) => `line ${index + 1} synthetic`).join("\n")}\n`;
+    const encoded = Buffer.from(text, "utf8").toString("base64");
+    expect(encoded.length).toBeGreaterThan(4 * 1024 * 1024);
+    expect(Buffer.from(decodeBase64("file", encoded)).toString("utf8")).toBe(text);
+    expect(() => decodeBase64("file", `${encoded.slice(0, -1)}*`)).toThrow(/valid base64/);
   });
 });
 

@@ -941,8 +941,8 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
         (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
       ...(logTime
         ? {
-            listHostEventStamps: async (caseId) => {
-              const listed = await logTime.listWorkbenchEvents(caseId);
+            listHostEventStamps: async (caseId, sources, k) => {
+              const listed = await logTime.listWorkbenchEvents(caseId, sources ?? [], k);
               if (!listed) return null;
               return listed.search.hits.map((hit) => ({
                 source: hit.source,
@@ -951,6 +951,27 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
                 timeQuality: hit.timeQuality,
                 unresolvedLocalTimestamp: hit.unresolvedLocalTimestamp,
               }));
+            },
+            // The shipped host owns timestamp resolution, so a time-filtered
+            // workbench search is answered against its corpus rather than
+            // against whichever intake lines happened to carry an offset.
+            hostSearch: async (caseId, input) => {
+              const found = await logTime.searchWorkbench(caseId, input);
+              if (!found) return null;
+              return {
+                corpusRevision: found.corpusRevision,
+                stamps: found.search.hits.map((hit) => ({
+                  source: hit.source,
+                  message: hit.message,
+                  ts: hit.ts,
+                  timeQuality: hit.timeQuality,
+                  unresolvedLocalTimestamp: hit.unresolvedLocalTimestamp,
+                })),
+                bounded: found.search.bounded,
+                atLeast: found.search.atLeast,
+                cancelled: found.search.cancelled,
+                diagnostic: found.search.diagnostic,
+              };
             },
           }
         : {}),
