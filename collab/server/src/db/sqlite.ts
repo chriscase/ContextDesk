@@ -9,6 +9,7 @@
  */
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { MemoryAuditStore, type AuditStore } from "../modules/audit/index.js";
 import { MemorySessionStore, type SessionStore } from "../modules/auth/index.js";
@@ -105,6 +106,10 @@ function restoreStore(store: object, state: unknown): void {
     throw new Error("invalid persisted SQLite store state");
   }
   for (const [key, value] of Object.entries(state)) {
+    // Transaction/audit context is process-local infrastructure, not domain
+    // state. Older SQLite documents may contain an encoded empty object for
+    // it; never replace the live AsyncLocalStorage instance on reopen.
+    if (Reflect.get(store, key) instanceof AsyncLocalStorage) continue;
     // SqliteState.read has already revived dates and maps.
     Reflect.set(store, key, value);
   }
@@ -112,7 +117,9 @@ function restoreStore(store: object, state: unknown): void {
 
 function storeState(store: object): JsonValue {
   return Object.fromEntries(
-    Object.entries(store).filter(([, value]) => typeof value !== "function"),
+    Object.entries(store).filter(
+      ([, value]) => typeof value !== "function" && !(value instanceof AsyncLocalStorage),
+    ),
   ) as JsonValue;
 }
 

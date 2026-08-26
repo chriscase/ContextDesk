@@ -201,6 +201,8 @@ const PORTABLE_IDENTITY_FIELDS = new Set([
   "authorId",
   "createdBy",
   "identityId",
+  "importerId",
+  "operatorId",
   "ownerId",
   "promotedById",
   "requestedBy",
