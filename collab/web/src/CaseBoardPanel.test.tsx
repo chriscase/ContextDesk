@@ -229,6 +229,52 @@ describe("CaseBoardPanel", () => {
     );
   });
 
+  it("offers a direct handoff to timestamp review and keeps freeze inactive without a selection", async () => {
+    const openCapture = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) {
+          return {
+            ok: true,
+            json: async () => ({
+              artifacts: [{
+                id: "artifact-1",
+                kind: "log",
+                filename: "worker.log",
+                contentHash: "a".repeat(64),
+                verificationStatus: "verified",
+                privacyClass: "owner_only",
+                uploaderId: "lead",
+              }],
+            }),
+          };
+        }
+        if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: [] }) };
+        return { ok: true, json: async () => ({ snapshotId: null, notice: "", findings: [] }) };
+      }),
+    );
+
+    render(
+      <CaseBoardPanel
+        caseId="case-1"
+        canWrite
+        canLead
+        readOnly={false}
+        onOpenCapture={openCapture}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Review timestamps in Capture" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Review timestamps in Capture" }));
+    expect(openCapture).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Freeze selected evidence (0)" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+  });
+
   it("collapses long finding buckets instead of flooding the case board", async () => {
     vi.stubGlobal(
       "fetch",

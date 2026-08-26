@@ -2390,6 +2390,7 @@ export function Cases(props: {
                   readOnly={readOnly}
                   {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                  onOpenCapture={() => selectStage("capture")}
                 />
               </div>
             </TriageAnchor>

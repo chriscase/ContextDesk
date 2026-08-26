@@ -188,6 +188,7 @@ export function CaseBoardPanel(props: {
   readOnly: boolean;
   participants?: ParticipantLabel[];
   routeFocus?: WorkFocus;
+  onOpenCapture?: () => void;
 }) {
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
@@ -451,6 +452,15 @@ export function CaseBoardPanel(props: {
                 Find files by name, path, or kind. In Capture, resolve ambiguous log times before
                 freezing a snapshot.
               </p>
+              {props.onOpenCapture ? (
+                <button
+                  type="button"
+                  className="case-memory__review-times"
+                  onClick={props.onOpenCapture}
+                >
+                  Review timestamps in Capture
+                </button>
+              ) : null}
               {artifacts.length === 0 ? <p className="case-memory__empty">No evidence has been registered yet.</p> : null}
               {artifacts.length > 0 ? (
                 <div className="case-memory__evidence-tools">
@@ -639,7 +649,12 @@ export function CaseBoardPanel(props: {
                 </form>
               ) : null}
               {!props.readOnly && props.canLead ? (
-                <button className="login__submit" type="button" onClick={() => void freezeSnapshot()}>
+                <button
+                  className="login__submit"
+                  type="button"
+                  onClick={() => void freezeSnapshot()}
+                  disabled={selectedEvidence.length === 0}
+                >
                   Freeze selected evidence ({selectedEvidence.length})
                 </button>
               ) : null}
