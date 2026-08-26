@@ -1001,8 +1001,8 @@ describe("TriageRunPanel", () => {
       }),
     );
     render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
-    await screen.findByRole("heading", { name: "Run history" });
-    expect((screen.getByRole("option", { name: "Gateway unavailable on this host" }) as HTMLOptionElement).disabled).toBe(true);
+    const unavailableOption = await screen.findByRole("option", { name: "Gateway unavailable on this host" });
+    expect((unavailableOption as HTMLOptionElement).disabled).toBe(true);
   });
 
   it("hands a completed or partial connected run to Experiment Lab with an optional chat run", async () => {
