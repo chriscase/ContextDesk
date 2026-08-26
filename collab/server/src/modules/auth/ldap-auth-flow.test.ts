@@ -123,4 +123,27 @@ describe("LDAP login profile sync", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("supports login-time groups without a service bind", async () => {
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      COLLAB_LDAP_USER_DN_TEMPLATE: "uid={username},ou=people,dc=example,dc=test",
+      COLLAB_LDAP_USER_RESOLUTION: "dn_template",
+      COLLAB_LDAP_GROUP_SEARCH_BASE: "ou=groups,dc=example,dc=test",
+      COLLAB_LDAP_MEMBER_ATTR: "memberOf",
+    });
+    const adapter = new LdapAuthAdapter(
+      cfg,
+      createAuthLog(),
+      createSyntheticLdapFactory(cfg, exampleSyntheticDirectory()),
+    );
+    const authenticated = await adapter.authenticate("alice", "fixture-alice-secret");
+    expect(authenticated?.groups).toContain(
+      "cn=contributors,ou=groups,dc=example,dc=test",
+    );
+    expect(adapter.groupRefreshMode).toBe("login_snapshot");
+    await expect(adapter.lookupGroups(authenticated!.identity)).rejects.toThrow(
+      /LDAP search requires a bind/,
+    );
+  });
 });

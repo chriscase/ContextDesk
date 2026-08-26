@@ -18,7 +18,7 @@ import {
   parseGroupRoleMap,
   type GroupRoleStore,
 } from "../authz/index.js";
-import { MapAuthAdapter } from "./adapter.js";
+import { MapAuthAdapter, type AuthAdapter } from "./adapter.js";
 import { createAuthLog } from "./log.js";
 import { createRateLimiter } from "./rate-limit.js";
 import { MemorySessionStore, defaultSessionPolicy } from "./sessions.js";
@@ -96,6 +96,7 @@ async function withApp(
     roleStore?: GroupRoleStore;
     roles?: MutableGroupRoleMap;
     users?: ReturnType<typeof fixtureUsers>;
+    adapter?: AuthAdapter;
   },
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-auth-"));
@@ -111,7 +112,7 @@ async function withApp(
     store,
     security: {
       auth: {
-        adapter: new MapAuthAdapter(users),
+        adapter: opts?.adapter ?? new MapAuthAdapter(users),
         sessions: new MemorySessionStore(),
         policy: defaultSessionPolicy,
         roles,
@@ -483,6 +484,30 @@ describe("auth flow", () => {
       expect(me.statusCode).toBe(200);
       expect(parseSessionResponse(JSON.parse(me.body)).roles).toEqual([]);
     });
+  });
+
+  it("keeps login-time groups when an adapter explicitly uses snapshot refresh", async () => {
+    const users = fixtureUsers();
+    const adapter = new MapAuthAdapter(users, "login_snapshot");
+    await withApp(
+      async ({ app }) => {
+        const login = await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          payload: { username: "alice", password: FIXTURE_PASSWORD },
+        });
+        const cookie = cookieFrom(login);
+        users.get("alice")!.groups = [];
+        const me = await app.inject({
+          method: "GET",
+          url: "/api/auth/me",
+          headers: { cookie },
+        });
+        expect(me.statusCode).toBe(200);
+        expect(parseSessionResponse(JSON.parse(me.body)).roles).toEqual(["contributor"]);
+      },
+      { users, adapter },
+    );
   });
 
   it("applies a group-role revoke on another instance without restart", async () => {

@@ -236,7 +236,11 @@ confirmation dialog.
 LDAP support is deployment-specific. The adapter requires encrypted transport,
 configuration, and qualification against the actual directory. The account
 menu can show the LDAP display name and username after authentication, but the
-War Room admin console is not a general LDAP administration tool.
+War Room admin console is not a general LDAP administration tool. If a service
+bind is configured, group membership is refreshed live for active sessions. If
+the directory does not provide a service bind, the groups proven during login
+are retained for that session and take effect again at the next login; the
+application never stores or reuses the user’s password for this purpose.
 
 ![Synthetic Administration console with explicit group-to-role mappings](../assets/war-room/war-room-administration.png)
 

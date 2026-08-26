@@ -8,6 +8,7 @@ import type {
   AuthIdentity,
   AuthSuccess,
   DirectorySearchOptions,
+  GroupRefreshMode,
 } from "./adapter.js";
 import type { LdapConfig } from "./ldap-config.js";
 import { escapeDn, escapeFilter, interpolate } from "./ldap-escape.js";
@@ -75,12 +76,16 @@ function claimsFromEntry(entry: Record<string, unknown>): Record<string, string>
 
 export class LdapAuthAdapter implements AuthAdapter {
   readonly provenance = "ldap" as const;
+  readonly groupRefreshMode: GroupRefreshMode;
 
   constructor(
     private readonly config: LdapConfig,
     private readonly log: AuthLog,
     private readonly sessions: LdapSessionFactory = createLiveLdapFactory(config),
-  ) {}
+  ) {
+    this.groupRefreshMode =
+      config.bindDn && config.bindPassword ? "live" : "login_snapshot";
+  }
 
   async authenticate(
     username: string,

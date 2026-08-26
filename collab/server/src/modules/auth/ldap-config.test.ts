@@ -96,6 +96,34 @@ describe("LDAP config", () => {
     expect(cfg.bindPassword).toBe("fixture-admin-secret");
   });
 
+  it("makes the no-service-bind group-refresh boundary explicit", async () => {
+    const { LdapAuthAdapter } = await import("./ldap-adapter.js");
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      ...identityEnv,
+    });
+    const adapter = new LdapAuthAdapter(cfg, {
+      event: () => undefined,
+      lines: () => [],
+    });
+    expect(adapter.groupRefreshMode).toBe("login_snapshot");
+  });
+
+  it("uses live group refresh when a service bind is configured", async () => {
+    const { LdapAuthAdapter } = await import("./ldap-adapter.js");
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      COLLAB_LDAP_BIND_DN: "cn=svc,dc=example,dc=test",
+      COLLAB_LDAP_BIND_PASSWORD: "fixture-service-secret",
+      ...identityEnv,
+    });
+    const adapter = new LdapAuthAdapter(cfg, {
+      event: () => undefined,
+      lines: () => [],
+    });
+    expect(adapter.groupRefreshMode).toBe("live");
+  });
+
   it("refuses TLS verification disable without explicit dev mode", () => {
     expect(() =>
       loadLdapConfig({

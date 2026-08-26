@@ -90,11 +90,15 @@ export async function resolveActiveSession(
   const record = await deps.sessions.getByToken(token);
   if (!record || !isSessionActive(record, deps.policy)) return null;
   await deps.sessions.touch(record.id);
-  let groups: string[];
-  try {
-    groups = await deps.adapter.lookupGroups(record.identity);
-  } catch {
-    groups = [];
+  let groups = record.groups;
+  if (deps.adapter.groupRefreshMode !== "login_snapshot") {
+    try {
+      groups = await deps.adapter.lookupGroups(record.identity);
+    } catch {
+      // Live directory refresh is fail-closed. Snapshot adapters never enter
+      // this branch because they have no independent service identity.
+      groups = [];
+    }
   }
   return { ...record, groups };
 }

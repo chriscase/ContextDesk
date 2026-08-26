@@ -46,6 +46,8 @@ function ldapAdCompatibilityComments(): string {
 # COLLAB_LDAP_ATTR_ROLE_TITLE=title
 # COLLAB_LDAP_ATTR_TEAM=departmentNumber
 # Bind secret: environment value, ${["COLLAB_LDAP_BIND", "PASSWORD_FILE"].join("_")}, or a file: reference. Configure exactly one.
+# With no service bind, groups found during login remain in that session until re-authentication.
+# Configure the service bind when immediate directory-membership refresh is required.
 `;
 }
 

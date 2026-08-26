@@ -66,7 +66,9 @@ surfaces.
 
 - SQLite mode is single-node and has no PostgreSQL-to-SQLite migration tool.
 - Directory-backed identity is deployment-specific and requires encrypted,
-  qualified LDAP configuration. See help://war-room-ldap-directory for the
+  qualified LDAP configuration. If no service bind is available, login-time
+  group membership remains stable for the session; a configured service bind
+  enables live membership refresh. See help://war-room-ldap-directory for the
   operator translation table. Live company-directory compatibility is not a
   shipped claim until an owner runs that directory.
 - Discussion uses bounded polling, not WebSocket presence or typing signals.
