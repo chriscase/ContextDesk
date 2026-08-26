@@ -56,7 +56,7 @@ const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AGGREGATE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_PATH_DEPTH: usize = 8;
 const MAX_PATH_CHARS: usize = 240;
-const MAX_REQUEST_BYTES: u64 = 4 * ((MAX_AGGREGATE_BYTES as u64 + 2) / 3)
+const MAX_REQUEST_BYTES: u64 = 4 * (MAX_AGGREGATE_BYTES as u64).div_ceil(3)
     + MAX_FILES as u64 * (MAX_PATH_CHARS as u64 * 6 + 512)
     + 4_096;
 /// Mirrors `LOG_TIME_LIMITS.maxPreviewSamples` in the Collab contract.
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn request_limit_covers_worst_case_base64_and_metadata() {
-        let base64_ceiling = 4 * ((MAX_AGGREGATE_BYTES as u64 + 2) / 3);
+        let base64_ceiling = 4 * (MAX_AGGREGATE_BYTES as u64).div_ceil(3);
         assert!(MAX_REQUEST_BYTES > base64_ceiling);
         assert_eq!(
             MAX_REQUEST_BYTES,
