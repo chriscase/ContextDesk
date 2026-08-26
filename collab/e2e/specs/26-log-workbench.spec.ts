@@ -78,6 +78,7 @@ test.describe("investigation log workbench", () => {
       return "two files selected for side-by-side panes";
     });
 
+    // Variable-height rows make match navigation drift away from the recorded line.
     await record.check("workbench-virtual-row-contract", async () => {
       const metrics = await workbench
         .locator("[data-workbench-pane]")
