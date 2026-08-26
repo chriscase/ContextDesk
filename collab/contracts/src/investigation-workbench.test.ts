@@ -471,6 +471,29 @@ describe("chronology", () => {
     expect(candidates[0]?.parseClass).toBe("local_ambiguous");
     expect(candidates[0]?.explicitOffset).toBeNull();
   });
+
+  it("does not re-queue a local timestamp after the host resolves it", () => {
+    const lines = splitLogText(
+      EVIDENCE_A,
+      "worker/batch.log",
+      DIGEST,
+      "2024-03-10 01:30:00 INFO sweep\n",
+      null,
+    );
+    const resolved = applyHostTimestamps(lines, [
+      {
+        source: "worker/batch.log",
+        message: "sweep",
+        ts: 1_710_045_000,
+        timeQuality: "wall clock",
+        unresolvedLocalTimestamp: "2024-03-10 01:30:00",
+      },
+    ]);
+    expect(resolved[0]?.normalizedUtc).toBeTruthy();
+    expect(extractShapeCandidates(resolved)).toEqual([]);
+    expect(mergeChronology(resolved, "file", 3).unknownBuckets).toEqual([]);
+    expect(mergeChronology(resolved, "file", 3).events[0]?.uncertainty).toEqual([]);
+  });
 });
 
 describe("workbench limits", () => {

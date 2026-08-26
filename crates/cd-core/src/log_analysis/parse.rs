@@ -1642,8 +1642,29 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
             payload,
         });
     }
+
     if looks_like_unresolved_zone_column(token, token_tail) {
         return None;
+    }
+
+    // Many service logs put a component name between the timestamp and
+    // severity while using only one separating space, for example
+    // `2024-11-03 01:15:00 checkout-service INFO message`. Recognize that
+    // shape only when the second token is an explicit severity; this keeps
+    // ordinary prose and ambiguous single-space lines fail-closed while
+    // retaining the local timestamp for timezone review. The zone-column
+    // guard above runs first so an unknown uppercase abbreviation such as
+    // `XYZ INFO ...` remains a whole-line fallback.
+    if let Some((level_token, payload)) = take_token(token_tail) {
+        if let Some(level) = common_level_token(level_token) {
+            let payload = strip_standalone_dash_delimiter(payload.trim_start());
+            return Some(DateTimeMessageParts {
+                timestamp: WildflyTimestamp::Local,
+                source_timestamp,
+                level: Some(level),
+                payload,
+            });
+        }
     }
 
     // One separating space is safe only when the timestamp itself carries a
@@ -2907,6 +2928,48 @@ mod tests {
             assert_eq!(parsed.parsed.message, line, "line={line}");
             assert_eq!(
                 parsed.parsed.unresolved_local_timestamp, None,
+                "line={line}"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_message_accepts_single_space_service_then_level_shape() {
+        let cases = [
+            (
+                "2024-11-03 01:15:00 checkout-service INFO historical batch started",
+                "info",
+                "historical batch started",
+            ),
+            (
+                "2024-11-03 01:30:00 inventory-client WARN pool wait began",
+                "warn",
+                "pool wait began",
+            ),
+            (
+                "2024-11-03 01:45:00 inventory-client ERROR lookup exceeded timeout",
+                "error",
+                "lookup exceeded timeout",
+            ),
+        ];
+
+        for (index, (line, level, message)) in cases.into_iter().enumerate() {
+            let parsed = parse_line_with_fingerprint(line, None, 700 + index as u64);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("datetime-message-record"),
+                "line={line}"
+            );
+            assert_eq!(parsed.parsed.level, level, "line={line}");
+            assert_eq!(parsed.parsed.message, message, "line={line}");
+            assert_eq!(
+                parsed.parsed.timestamp_provenance,
+                TimestampProvenance::UnresolvedLocal,
+                "line={line}"
+            );
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp.as_deref(),
+                Some(&line[..19]),
                 "line={line}"
             );
         }

@@ -414,6 +414,37 @@ describe("chronology and review queue", () => {
     expect(preview.affectedRelativePaths).not.toContain("gateway/edge.log");
   });
 
+  it("removes a resolved local time from the review queue", async () => {
+    const { service } = harness({
+      hostStamps: [
+        {
+          source: "worker/batch.log",
+          message: "batch worker starting scheduled sweep",
+          ts: 1_710_045_000,
+          timeQuality: "wall clock",
+          unresolvedLocalTimestamp: "2024-03-10 01:30:00",
+        },
+        {
+          source: "worker/batch.log",
+          message: "batch worker heartbeat late",
+          ts: 1_710_048_600,
+          timeQuality: "wall clock",
+          unresolvedLocalTimestamp: "2024-03-10 02:30:00",
+        },
+        {
+          source: "worker/batch.log",
+          message: "batch worker sweep failed retry 1",
+          ts: 1_710_050_700,
+          timeQuality: "wall clock",
+          unresolvedLocalTimestamp: "2024-03-10 03:05:00",
+        },
+      ],
+    });
+    const queue = await service.reviewQueue(CASE_ID, ACTOR, false);
+    expect(queue.candidateCount).toBe(0);
+    expect(queue.groups).toEqual([]);
+  });
+
   it("merges a chronology and keeps unknowns in buckets", async () => {
     const { service } = harness();
     const chronology = await service.chronology(CASE_ID, ACTOR, false, "file", []);

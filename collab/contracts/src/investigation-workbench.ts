@@ -1405,7 +1405,9 @@ export function mergeChronology(
     const previousKey = previous ? groupingKeyOf(previous, grouping) : null;
     const uncertainty: string[] = [];
     if (!line.normalizedUtc) uncertainty.push("no usable timestamp");
-    if (line.parseClass === "local_ambiguous") uncertainty.push("ambiguous local time");
+    if (line.parseClass === "local_ambiguous" && !line.normalizedUtc) {
+      uncertainty.push("ambiguous local time");
+    }
     if (
       previous?.normalizedUtc
       && line.normalizedUtc
@@ -1448,7 +1450,9 @@ export function mergeChronology(
   // The buckets are disjoint so their counts can be added without counting the
   // same line twice: an ambiguous local time is a timezone unknown, not also a
   // missing-timestamp unknown.
-  const ambiguous = lines.filter((line) => line.parseClass === "local_ambiguous").length;
+  const ambiguous = lines.filter(
+    (line) => line.parseClass === "local_ambiguous" && !line.normalizedUtc,
+  ).length;
   const missing = lines.filter(
     (line) => !line.normalizedUtc && line.parseClass !== "local_ambiguous",
   ).length;
@@ -1541,7 +1545,10 @@ export function extractShapeCandidates(
 ): WorkbenchTimestampCandidateV1[] {
   const out: WorkbenchTimestampCandidateV1[] = [];
   for (const line of lines) {
-    if (line.parseClass === "missing") continue;
+    // A host-backed explicit timezone declaration may resolve a line whose
+    // source text is still a local/ambiguous shape. It is no longer waiting
+    // for review, so do not keep resurfacing it in the queue.
+    if (line.parseClass === "missing" || line.normalizedUtc) continue;
     const shape = classifyTimestampShape(line.originalTimestamp ?? line.text);
     out.push({
       schemaId: WORKBENCH_TIMESTAMP_CANDIDATE_SCHEMA_ID,
