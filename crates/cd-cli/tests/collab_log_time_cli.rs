@@ -6,6 +6,7 @@
 use assert_cmd::Command;
 use base64::Engine as _;
 use serde_json::{json, Value};
+use std::fs;
 use std::path::Path;
 
 fn cli() -> Command {
@@ -50,6 +51,55 @@ fn request(case: &str, action: Value) -> Value {
         "caseId": case,
         "action": action,
     })
+}
+
+#[test]
+fn explicit_log_time_requests_ignore_broken_unrelated_application_state() {
+    let tmp = tempfile::tempdir().expect("temp root");
+    let poisoned_home = tmp.path().join("home-is-a-file");
+    let poisoned_data = tmp.path().join("data-is-a-file");
+    let bad_project = tmp.path().join("bad-project.toml");
+    let bad_app = tmp.path().join("bad-app.json");
+    let cache = tmp.path().join("log-time-cache");
+    fs::write(&poisoned_home, b"unchanged-home").expect("poison HOME");
+    fs::write(&poisoned_data, b"unchanged-data").expect("poison data dir");
+    fs::write(&bad_project, b"not = [valid").expect("bad project config");
+    fs::write(&bad_app, b"{not-json").expect("bad app config");
+
+    let input = request(
+        "case-synthetic-state-free",
+        json!({
+            "kind": "build",
+            "corpusName": "synthetic state-free corpus",
+            "files": [
+                {"relativePath": "worker/batch.log", "contentBase64": b64(WORKER_LOG)},
+            ],
+        }),
+    );
+    let output = cli()
+        .env("HOME", &poisoned_home)
+        .arg("--data-dir")
+        .arg(&poisoned_data)
+        .arg("--config")
+        .arg(&bad_project)
+        .arg("--app-config")
+        .arg(&bad_app)
+        .arg("collab-log-time")
+        .arg("--request")
+        .arg("-")
+        .arg("--cache-root")
+        .arg(&cache)
+        .args(["--format", "json"])
+        .write_stdin(serde_json::to_vec(&input).expect("request"))
+        .output()
+        .expect("run state-free collab-log-time");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("envelope JSON");
+
+    assert_eq!(envelope["ok"], json!(true), "build failed: {envelope}");
+    assert_eq!(fs::read(&poisoned_home).unwrap(), b"unchanged-home");
+    assert_eq!(fs::read(&poisoned_data).unwrap(), b"unchanged-data");
+    assert_eq!(fs::read(&bad_project).unwrap(), b"not = [valid");
+    assert_eq!(fs::read(&bad_app).unwrap(), b"{not-json");
 }
 
 fn build(cache: &Path) -> Value {
