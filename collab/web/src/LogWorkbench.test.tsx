@@ -173,7 +173,7 @@ describe("Log workbench", () => {
     expect(screen.getAllByText('<img src=x onerror=alert(1)>.log').length).toBeGreaterThan(0);
     expect(document.querySelector("img")).toBeNull();
     expect(screen.queryByRole("heading", { name: EVIDENCE_A })).toBeNull();
-    expect(screen.getByText("Technical identifiers (3)")).toBeTruthy();
+    expect(screen.getByText("Technical details for troubleshooting (3)")).toBeTruthy();
   });
 
   it("searches and reports an exact match count", async () => {
