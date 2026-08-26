@@ -132,6 +132,17 @@ function panel(props: Partial<{ canWrite: boolean; readOnly: boolean }> = {}) {
 }
 
 describe("LogTimeReviewPanel", () => {
+  it("explains when the trusted timestamp host is not configured", async () => {
+    stubFetch({});
+    render(panel());
+
+    expect(
+      await screen.findByText(/timezone review needs the trusted ContextDesk timestamp host/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/stay in file order and keep their time unresolved/i)).toBeTruthy();
+    expect(screen.getByText(/ContextDesk will not guess/i)).toBeTruthy();
+  });
+
   it("says plainly that a timezone is missing and that nothing will be guessed", async () => {
     stubFetch({ "/log-time": () => stateBody() });
     render(panel());
@@ -449,10 +460,10 @@ describe("LogTimeReviewPanel", () => {
     expect(screen.queryByRole("button", { name: /remove this timezone/i })).toBeNull();
   });
 
-  it("renders nothing when this deployment has no log-time pipeline", async () => {
-    // The routes are unregistered without a configured host binary. That is a
-    // deliberate absence, so the panel must not add an error or a live region
-    // to the Analyze stage.
+  it("explains when this deployment has no log-time pipeline", async () => {
+    // The routes are unregistered without a configured host binary. Keep that
+    // absence quiet, but leave a useful explanation at the destination of the
+    // Workbench's timestamp-review handoff.
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -461,13 +472,13 @@ describe("LogTimeReviewPanel", () => {
         json: async () => ({ error: "not_found" }),
       })),
     );
-    const { container } = render(panel());
+    render(panel());
 
-    await waitFor(() => {
-      expect(container.querySelector("#log-time")).toBeNull();
-    });
+    expect(
+      await screen.findByText(/timezone review needs the trusted ContextDesk timestamp host/i),
+    ).toBeTruthy();
     expect(screen.queryByText(/not_found/i)).toBeNull();
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("status")).toBeTruthy();
   });
 
   it("invites building the corpus when the case has none yet", async () => {
