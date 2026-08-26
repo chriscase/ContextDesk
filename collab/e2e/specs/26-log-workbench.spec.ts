@@ -100,15 +100,15 @@ test.describe("investigation log workbench", () => {
     await workbench.getByLabel("Find in logs").fill("timeout");
     await workbench.getByRole("button", { name: "Search" }).click();
     await record.check("workbench-search-timeout", async () => {
-      // The count states whether it is complete: an exact count says so, and a
-      // bounded or partly read one says what it did not count.
+      // Coverage is stated separately from the match count: either every
+      // selected line was searched, or the operator is told that lines remain.
       await expect(workbench.locator(".log-workbench__search-summary")).toContainText(
-        /\d+ match(es)?\b.*(every match in the read lines|Load more|were not counted)/,
+        /(Every selected line was searched|more selected lines to search)/,
       );
       await expect(workbench.getByRole("list", { name: "Search matches" })).toContainText(
         /upstream timeout/,
       );
-      return "timeout line visible with a match count that states its completeness";
+      return "timeout line visible with an answer that states whether every selected line was covered";
     });
 
     await workbench.getByRole("button", { name: "Show merged chronology" }).click();

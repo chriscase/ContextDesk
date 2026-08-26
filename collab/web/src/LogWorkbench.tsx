@@ -69,9 +69,17 @@ interface SearchResult {
   bounded: boolean;
   atLeast: number;
   nextCursor: number | null;
+  /** Position to resume at. Advancing it can never skip an unreached match. */
+  nextPageCursor?: string | null;
   cancelled?: boolean;
   corpusTruncated?: boolean;
+  /** True once every line in the selected files has been searched. */
+  coverageComplete?: boolean;
+  scannedLines?: number;
+  scannedLinesTotal?: number;
+  scopeFileCount?: number;
   timeFilterUnknownReason: string | null;
+  timeAuthorityUnavailableReason?: string | null;
 }
 
 interface PageResult {
@@ -133,18 +141,36 @@ interface ChronologyEvent {
  * complete one: a stopped scan, a cancelled scan, and a corpus that was too
  * large to read to the end each say so in plain words.
  */
-function searchSummary(result: SearchResult, corpusTruncated: boolean): string {
-  const shown = `Showing ${result.returned.toLocaleString()}`;
+function searchSummary(
+  result: SearchResult,
+  total: number,
+  corpusTruncated: boolean,
+): string {
+  const shown = `Showing ${total.toLocaleString()}`;
+  const scanned = (result.scannedLinesTotal ?? result.scannedLines ?? 0).toLocaleString();
   if (result.cancelled) {
     return `${shown} of at least ${result.atLeast.toLocaleString()} matches. The search stopped early, so later matches were not counted.`;
   }
   if (result.corpusTruncated || corpusTruncated) {
-    return `${shown} matches so far. This investigation has more log lines than one search can read, so matches past the read limit were not counted.`;
+    return `${shown} matches so far. Some of the selected files could not be read, so matches inside them were not counted.`;
   }
-  if (result.bounded) {
-    return `${shown} of at least ${result.atLeast.toLocaleString()} matches. Load more to keep going.`;
+  // Coverage and match count are separate truths. A page can be full of
+  // matches and still have lines left to read, and it can find nothing and
+  // still have lines left to read — the reader needs to be told which.
+  if (result.coverageComplete === false) {
+    return result.returned === 0
+      ? `No matches in the first ${scanned} lines searched. There are more selected lines to search — continue to cover the rest.`
+      : `${shown} matches in the first ${scanned} lines searched. There are more selected lines to search — continue to cover the rest.`;
   }
-  return `${result.returned.toLocaleString()} match${result.returned === 1 ? "" : "es"}. That is every match in the read lines.`;
+  const covered = `Every selected line was searched (${scanned} lines).`;
+  // "Load more" is offered exactly when there is a page to load. Tying it to
+  // `bounded` promised more on the last page of a multi-page walk, where
+  // `bounded` is still true only because the cumulative count exceeds what
+  // this one page returned.
+  if (result.nextPageCursor) {
+    return `${shown} of ${result.atLeast.toLocaleString()} matches. ${covered} Load more to see the rest.`;
+  }
+  return `${total.toLocaleString()} match${total === 1 ? "" : "es"}. ${covered}`;
 }
 
 /**
@@ -408,10 +434,14 @@ export function LogWorkbench(props: {
   );
 
   /**
-   * `cursor` continues the previous page rather than starting over, so a
-   * bounded result is reachable instead of being a dead end.
+   * Continue where the last page stopped.
+   *
+   * `pageCursor` names a position in the corpus, so a page that searched
+   * 50,000 lines without a match still leaves the next line reachable. The
+   * older `cursor` is a match ordinal and cannot express that, so it is only
+   * used to start over from the beginning.
    */
-  async function runSearch(cursor = 0) {
+  async function runSearch(pageCursor: string | null = null) {
     setError(null);
     setSearching(true);
     try {
@@ -425,7 +455,8 @@ export function LogWorkbench(props: {
           filters: searchFilters(),
           contextBefore: 1,
           contextAfter: 1,
-          cursor,
+          cursor: 0,
+          pageCursor,
           limit: 50,
           expectedNormalizationRevision: revision,
         }),
@@ -435,13 +466,11 @@ export function LogWorkbench(props: {
         return;
       }
       const result = (await response.json()) as SearchResult;
-      setSearch((current) =>
-        cursor > 0 && current
-          ? { ...result, matches: [...current.matches, ...result.matches] }
-          : result,
-      );
-      if (cursor === 0) setMatchIndex(0);
-      setNotice(searchSummary(result, corpusTruncated));
+      const previous = pageCursor && search ? search.matches : [];
+      const merged = { ...result, matches: [...previous, ...result.matches] };
+      setSearch(merged);
+      if (!pageCursor) setMatchIndex(0);
+      setNotice(searchSummary(result, merged.matches.length, corpusTruncated));
     } finally {
       setSearching(false);
     }
@@ -688,11 +717,10 @@ export function LogWorkbench(props: {
       </header>
       {corpusTruncated ? (
         <p className="log-workbench__notice" role="status">
-          This investigation holds more log lines than one read can cover, so the
-          workbench stopped part-way through
+          Some of this investigation&rsquo;s files could not be read
           {unreadFiles.length > 0 ? ` (${unreadFiles.slice(0, 3).join(", ")}${unreadFiles.length > 3 ? ", and others" : ""})` : ""}
-          . Counts and searches below cover only the lines that were read — select
-          fewer files, or narrow the corpus on Capture, to see the rest.
+          . Counts and searches below leave those files out — re-commit them on
+          Capture to include them.
         </p>
       ) : null}
       {reviewCount && reviewCount > 0 ? (
@@ -884,9 +912,14 @@ export function LogWorkbench(props: {
       {search ? (
         <section className="log-workbench__search-results" aria-label="Search results">
           <p className="log-workbench__search-summary" role="status" aria-live="polite">
-            {searchSummary(search, corpusTruncated)}
+            {searchSummary(search, search.matches.length, corpusTruncated)}
             {activeMatch ? ` Showing match ${matchIndex + 1} of ${search.matches.length}.` : ""}
           </p>
+          {search.timeAuthorityUnavailableReason ? (
+            <p className="log-workbench__notice">
+              {search.timeAuthorityUnavailableReason}
+            </p>
+          ) : null}
           {search.matches.length > 0 ? (
             <ol className="log-workbench__hits" aria-label="Search matches">
               {search.matches.map((row, index) => (
@@ -903,15 +936,23 @@ export function LogWorkbench(props: {
               ))}
             </ol>
           ) : (
-            <p>No line in the read log lines matches this search.</p>
+            <p>
+              {search.coverageComplete === false
+                ? "No match yet in the lines searched so far. There are more selected lines to search."
+                : "No line in the selected files matches this search."}
+            </p>
           )}
-          {search.nextCursor !== null ? (
+          {search.nextPageCursor ? (
             <button
               type="button"
               disabled={searching}
-              onClick={() => void runSearch(search.nextCursor ?? 0)}
+              onClick={() => void runSearch(search.nextPageCursor ?? null)}
             >
-              {searching ? "Loading…" : "Load more matches"}
+              {searching
+                ? "Searching…"
+                : search.coverageComplete === false
+                  ? "Keep searching the rest of the selected lines"
+                  : "Load more matches"}
             </button>
           ) : null}
         </section>

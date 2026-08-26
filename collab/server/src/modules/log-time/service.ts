@@ -170,6 +170,56 @@ export class LogTimeService {
     return { corpusRevision: host.corpusRevision, search: host.search };
   }
 
+  /**
+   * The host's own bounded search over the built corpus.
+   *
+   * The workbench searches intake bytes for text, but it is not the authority
+   * on *when* a line happened: local clocks only become instants after a zone
+   * is declared here. So a time-filtered workbench search asks the host, which
+   * owns that resolution, instead of guessing from whichever lines happened to
+   * carry an offset. Returns null when this case has no built corpus; a host
+   * that cannot be reached throws, and the caller refuses the time range
+   * rather than answering it from an unresolved overlay.
+   */
+  async searchWorkbench(
+    caseId: string,
+    input: {
+      query: string;
+      mode: "literal" | "case_insensitive" | "regex";
+      sources?: string[];
+      timeFrom?: number | null;
+      timeTo?: number | null;
+      k?: number;
+    },
+  ): Promise<{ corpusRevision: number; search: HostSearch } | null> {
+    const corpus = await this.deps.store.getCorpus(caseId);
+    if (!corpus) return null;
+    const host = await this.deps.bridge.run(caseId, {
+      kind: "search",
+      corpusId: corpus.corpusId,
+      expectedRevision: corpus.corpusRevision,
+      query: input.query,
+      mode: input.mode,
+      caseSensitive: input.mode === "literal",
+      k: Math.max(1, Math.min(input.k ?? 2_000, 2_000)),
+      sources: input.sources ?? [],
+      timeFrom: input.timeFrom ?? null,
+      timeTo: input.timeTo ?? null,
+    });
+    return {
+      corpusRevision: host.corpusRevision,
+      search: host.search ?? {
+        bounded: false,
+        atLeast: 0,
+        returned: 0,
+        partial: false,
+        cancelled: false,
+        diagnostic: null,
+        hits: [],
+      },
+    };
+  }
+
   async getState(caseId: string): Promise<LogCorpusStateV1> {
     const corpus = await this.deps.store.getCorpus(caseId);
     if (!corpus) {
