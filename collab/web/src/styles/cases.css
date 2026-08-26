@@ -542,6 +542,76 @@
   line-height: 1.45;
 }
 
+.case-form__context,
+.situation__context {
+  min-width: 0;
+  margin: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+}
+
+.case-form__context legend,
+.situation__context legend {
+  padding: 0 0.35rem;
+  color: var(--fg);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.case-form__context > p,
+.situation__context > p,
+.situation__context-note {
+  margin: 0 0 0.65rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.case-form__context-grid,
+.situation__context-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.case-form__context-grid label,
+.situation__context-grid label {
+  display: grid;
+  min-width: 0;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.case-form__context-grid input,
+.situation__context-grid input {
+  min-width: 0;
+}
+
+.situation__context-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem 0.8rem;
+  margin: 0;
+}
+
+.situation__context-summary dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.situation__context-summary dd {
+  margin: 0.1rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.situation__context-note {
+  margin-top: 0.7rem;
+}
+
 .case-form__wide,
 .situation__form-wide {
   grid-column: 1 / -1;
@@ -907,7 +977,10 @@
 @media (max-width: 680px) {
   .case-form__situation,
   .situation__form,
-  .situation__summary-grid {
+  .situation__summary-grid,
+  .case-form__context-grid,
+  .situation__context-grid,
+  .situation__context-summary {
     grid-template-columns: minmax(0, 1fr);
   }
 

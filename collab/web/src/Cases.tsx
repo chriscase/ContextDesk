@@ -36,6 +36,24 @@ import { loadEntities, type EntityRow } from "./Entities.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
 
+const INVESTIGATION_CONTEXT_FIELDS = [
+  "productName",
+  "version",
+  "build",
+  "component",
+  "environment",
+  "organization",
+] as const;
+type InvestigationContextField = (typeof INVESTIGATION_CONTEXT_FIELDS)[number];
+interface InvestigationContextV1 {
+  productName: string;
+  version: string;
+  build: string;
+  component: string;
+  environment: string;
+  organization: string;
+}
+
 interface CaseParticipantRow {
   identityId?: string;
   username?: string;
@@ -50,6 +68,7 @@ interface CaseRow {
   scope?: string;
   openQuestions?: string[];
   situationVersion?: number;
+  investigationContext?: InvestigationContextV1 | null;
   occurredAt?: string | null;
   occurredAtPrecision?: string;
   occurredAtZone?: string;
@@ -71,7 +90,28 @@ interface SituationDraft {
   impact: string;
   scope: string;
   openQuestions: string;
+  investigationContext: InvestigationContextDraft;
 }
+
+type InvestigationContextDraft = Record<InvestigationContextField, string>;
+
+const CONTEXT_FIELD_LABELS: Record<InvestigationContextField, string> = {
+  productName: "Software or product",
+  version: "Version",
+  build: "Build",
+  component: "Component",
+  environment: "Environment",
+  organization: "Organization, customer, or entity",
+};
+
+const EMPTY_INVESTIGATION_CONTEXT: InvestigationContextDraft = {
+  productName: "",
+  version: "",
+  build: "",
+  component: "",
+  environment: "",
+  organization: "",
+};
 
 const EMPTY_SITUATION: SituationDraft = {
   problemStatement: "",
@@ -79,7 +119,57 @@ const EMPTY_SITUATION: SituationDraft = {
   impact: "",
   scope: "",
   openQuestions: "",
+  investigationContext: EMPTY_INVESTIGATION_CONTEXT,
 };
+
+function contextDraftFor(row?: CaseRow | null): InvestigationContextDraft {
+  const context = row?.investigationContext;
+  return {
+    productName: context?.productName ?? "",
+    version: context?.version ?? "",
+    build: context?.build ?? "",
+    component: context?.component ?? "",
+    environment: context?.environment ?? "",
+    organization: context?.organization ?? "",
+  };
+}
+
+function contextPayload(draft: InvestigationContextDraft): InvestigationContextV1 | null {
+  return Object.values(draft).some((value) => value.trim().length > 0)
+    ? { ...draft }
+    : null;
+}
+
+function normalizedSearchValue(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim();
+}
+
+function ContextComboBox(props: {
+  field: InvestigationContextField;
+  value: string;
+  options: readonly string[];
+  onChange: (value: string) => void;
+}) {
+  const listId = `investigation-context-options-${props.field}`;
+  const label = CONTEXT_FIELD_LABELS[props.field];
+  return (
+    <label>
+      <span>{label}</span>
+      <input
+        className="login__input"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-label={label}
+        list={listId}
+        value={props.value}
+        onChange={(event) => props.onChange(event.target.value)}
+      />
+      <datalist id={listId}>
+        {props.options.map((option) => <option key={option} value={option} />)}
+      </datalist>
+    </label>
+  );
+}
 
 function draftFor(row: CaseRow): SituationDraft {
   return {
@@ -88,6 +178,7 @@ function draftFor(row: CaseRow): SituationDraft {
     impact: row.impact ?? "",
     scope: row.scope ?? "",
     openQuestions: (row.openQuestions ?? []).join("\n"),
+    investigationContext: contextDraftFor(row),
   };
 }
 
@@ -967,6 +1058,7 @@ export function Cases(props: {
         impact: newSituation.impact,
         scope: newSituation.scope,
         openQuestions: openQuestionsFrom(newSituation.openQuestions),
+        investigationContext: contextPayload(newSituation.investigationContext),
         ...(newOccurredAt.trim() ? { occurredAt: newOccurredAt.trim() } : {}),
       }),
     });
@@ -1057,6 +1149,7 @@ export function Cases(props: {
         impact: situationDraft.impact,
         scope: situationDraft.scope,
         openQuestions: openQuestionsFrom(situationDraft.openQuestions),
+        investigationContext: contextPayload(situationDraft.investigationContext),
         expectedVersion: current?.situationVersion ?? 0,
       }),
     });
@@ -1181,6 +1274,13 @@ export function Cases(props: {
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
+  const contextOptions = (field: InvestigationContextField): string[] => [
+    ...new Set(
+      cases
+        .map((row) => row.investigationContext?.[field] ?? "")
+        .filter((value) => value.trim().length > 0),
+    ),
+  ].sort((left, right) => normalizedSearchValue(left).localeCompare(normalizedSearchValue(right)));
   const casesByEntity = new Map<string, Set<string>>();
   for (const entry of involvementIndex) {
     const bucket = casesByEntity.get(entry.entityId) ?? new Set<string>();
@@ -1262,6 +1362,27 @@ export function Cases(props: {
         Record what is known now. Blank fields remain explicitly not recorded and can be refined
         from Situation later.
       </p>
+      <fieldset className="case-form__context case-form__wide">
+        <legend>Structured investigation context</legend>
+        <p>
+          Product name, version, and build are separate context fields so investigations can be
+          found precisely. Flexible tags can remain a later extension.
+        </p>
+        <div className="case-form__context-grid">
+          {INVESTIGATION_CONTEXT_FIELDS.map((field) => (
+            <ContextComboBox
+              key={field}
+              field={field}
+              value={newSituation.investigationContext[field]}
+              options={contextOptions(field)}
+              onChange={(value) => setNewSituation((draft) => ({
+                ...draft,
+                investigationContext: { ...draft.investigationContext, [field]: value },
+              }))}
+            />
+          ))}
+        </div>
+      </fieldset>
       <div className="case-form__situation">
         <label>
           <span>Problem statement</span>
@@ -1353,7 +1474,7 @@ export function Cases(props: {
             value={caseSearch}
             onChange={(e) => setCaseSearch(e.target.value)}
             placeholder="Title, problem, affected parties, people, or ID"
-            aria-label="Search investigations by title, situation text, people, or ID"
+            aria-label="Search investigations by title, situation text, people, context, or ID"
           />
         </label>
         {entityOptions.length > 0 ? (
@@ -2068,6 +2189,27 @@ export function Cases(props: {
                     rows={4}
                   />
                 </label>
+                <fieldset className="situation__context situation__form-wide">
+                  <legend>Structured investigation context</legend>
+                  <p>
+                    Product name, version, and build are structured context for finding related
+                    investigations. Flexible tags can remain a later extension.
+                  </p>
+                  <div className="situation__context-grid">
+                    {INVESTIGATION_CONTEXT_FIELDS.map((field) => (
+                      <ContextComboBox
+                        key={field}
+                        field={field}
+                        value={situationDraft.investigationContext[field]}
+                        options={contextOptions(field)}
+                        onChange={(value) => setSituationDraft((draft) => ({
+                          ...draft,
+                          investigationContext: { ...draft.investigationContext, [field]: value },
+                        }))}
+                      />
+                    ))}
+                  </div>
+                </fieldset>
                 <div className="situation__form-actions">
                   <button className="login__submit" type="submit" disabled={situationConflict}>
                     Save situation
@@ -2114,6 +2256,21 @@ export function Cases(props: {
                 <section>
                   <h5>Scope</h5>
                   <p>{current.scope || "Not recorded"}</p>
+                </section>
+                <section className="situation__summary-primary">
+                  <h5>Structured investigation context</h5>
+                  <dl className="situation__context-summary">
+                    {INVESTIGATION_CONTEXT_FIELDS.map((field) => (
+                      <div key={field}>
+                        <dt>{CONTEXT_FIELD_LABELS[field]}</dt>
+                        <dd>{current.investigationContext?.[field] || "Not recorded"}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  <p className="situation__context-note">
+                    These fields describe the software or product context. Flexible tags are not
+                    part of this slice.
+                  </p>
                 </section>
                 <section className="situation__summary-primary">
                   <h5>Open questions</h5>

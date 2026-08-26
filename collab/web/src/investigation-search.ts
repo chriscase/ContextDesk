@@ -50,6 +50,7 @@ export interface SearchableInvestigation {
   reportedProblem?: string | null | undefined;
   problem?: string | null | undefined;
   summary?: string | null | undefined;
+  investigationContext?: Readonly<Record<string, string | null | undefined>> | null | undefined;
   participants?: readonly { username?: string }[] | undefined;
 }
 
@@ -105,6 +106,7 @@ export function searchableValues(
     row.createdByUsername ?? undefined,
     row.creator ?? undefined,
     ...(row.participants ?? []).map((participant) => participant.username),
+    ...Object.values(row.investigationContext ?? {}),
     ...entityLabels,
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
 }
