@@ -162,6 +162,14 @@ describe("LogChronologyPanel resilience", () => {
     expect(screen.getByRole("alert").textContent).toMatch(/could not be read/);
   });
 
+  it("does not read the corpus while its stage is mounted but hidden", async () => {
+    const urls = stubFetch([page()]);
+    const view = render(<LogChronologyPanel caseId={CASE_ID} active={false} />);
+    await waitFor(() => expect(urls).toEqual([]));
+    view.rerender(<LogChronologyPanel caseId={CASE_ID} active />);
+    await waitFor(() => expect(urls.length).toBe(1));
+  });
+
   it("does not query the corpus once per keystroke while a filter is typed", async () => {
     vi.useFakeTimers();
     try {

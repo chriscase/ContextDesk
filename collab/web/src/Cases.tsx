@@ -2459,7 +2459,7 @@ export function Cases(props: {
                 investigation has no normalized corpus. */}
             <TriageAnchor id="triage-log-chronology" label="Normalized log chronology">
               <div hidden={workstreamFocused}>
-                <LogChronologyPanel caseId={current.id} />
+                <LogChronologyPanel caseId={current.id} active={stage === "analyze"} />
               </div>
             </TriageAnchor>
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">

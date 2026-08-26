@@ -107,7 +107,11 @@ function queryPath(
  * the timezone-wiring branch can choose its insertion point without this slice
  * changing that branch's workspace composition.
  */
-export function LogChronologyPanel(props: { caseId: string }) {
+export function LogChronologyPanel(props: {
+  caseId: string;
+  /** When false, the stage is mounted but hidden — do not read the corpus. */
+  active?: boolean;
+}) {
   const [search, setSearch] = useState("");
   const [source, setSource] = useState("");
   const [page, setPage] = useState<ChronologyPage | null>(null);
@@ -165,19 +169,21 @@ export function LogChronologyPanel(props: { caseId: string }) {
   // keystroke turns a long word into a burst of full-corpus reads; one settled
   // pause is enough for a filter this cheap to change.
   useEffect(() => {
+    if (props.active === false) return;
     const timer = setTimeout(() => void load(null, false), FILTER_SETTLE_MS);
     return () => clearTimeout(timer);
-  }, [load]);
+  }, [load, props.active]);
 
   useEffect(() => {
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId && detail.caseId !== props.caseId) return;
+      if (props.active === false) return;
       void load(null, false);
     };
     window.addEventListener("contextdesk:log-time-changed", refresh);
     return () => window.removeEventListener("contextdesk:log-time-changed", refresh);
-  }, [load, props.caseId]);
+  }, [load, props.caseId, props.active]);
 
   if (unavailable) return null;
 
