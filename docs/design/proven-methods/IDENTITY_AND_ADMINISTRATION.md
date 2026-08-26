@@ -352,7 +352,7 @@ counts.
   [`directory-mapping.ts`](../../../collab/contracts/src/directory-mapping.ts),
   [`admin-people.ts`](../../../collab/contracts/src/admin-people.ts)
 - Server: [`collab/server/src/modules/people/`](../../../collab/server/src/modules/people/)
-- Migration: [`015_user_profiles.up.sql`](../../../collab/server/src/db/migrations/015_user_profiles.up.sql) / [`.down.sql`](../../../collab/server/src/db/migrations/015_user_profiles.down.sql). This is the profile/grants schema only. It is **not** the collab storage head. The next additive migrations are [`016_contribution_write_intents.up.sql`](../../../collab/server/src/db/migrations/016_contribution_write_intents.up.sql) (insert-only contribution write intents), [`017_investigation_record.up.sql`](../../../collab/server/src/db/migrations/017_investigation_record.up.sql) (the investigation record graph), and [`018_log_time.up.sql`](../../../collab/server/src/db/migrations/018_log_time.up.sql) (case-bound log corpora and their timezone review record), which is the current head. Synthetic component-health fixtures must report the head, not `015_user_profiles`; the server fixture now reads it from the migration directory rather than restating it, so landing a migration cannot leave a superseded head behind.
+- Migration: [`015_user_profiles.up.sql`](../../../collab/server/src/db/migrations/015_user_profiles.up.sql) / [`.down.sql`](../../../collab/server/src/db/migrations/015_user_profiles.down.sql). This is the profile/grants schema only. It is **not** the collab storage head. Later additive migrations include [`016_contribution_write_intents.up.sql`](../../../collab/server/src/db/migrations/016_contribution_write_intents.up.sql), [`017_investigation_record.up.sql`](../../../collab/server/src/db/migrations/017_investigation_record.up.sql), [`018_log_time.up.sql`](../../../collab/server/src/db/migrations/018_log_time.up.sql), [`019_experiment_lock_privilege.up.sql`](../../../collab/server/src/db/migrations/019_experiment_lock_privilege.up.sql), [`020_model_purpose_policy.up.sql`](../../../collab/server/src/db/migrations/020_model_purpose_policy.up.sql), and [`021_workbench.up.sql`](../../../collab/server/src/db/migrations/021_workbench.up.sql) (investigation Log workbench records and snapshot normalization-revision binding), which is the current head. Synthetic component-health fixtures must report the head, not `015_user_profiles`; the server fixture now reads it from the migration directory rather than restating it, so landing a migration cannot leave a superseded head behind.
 - Web: [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), the People tab in [`Administration.tsx`](../../../collab/web/src/Administration.tsx), [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx) at `/profile`
 - Deployment/config: [`collab/deploy/README.md`](../../../collab/deploy/README.md)
 - No tracked issue number exists for this chapter at authoring time; residuals below are literal, not linked.
@@ -387,9 +387,10 @@ counts.
   tables, no changes to existing tables) and its `.down.sql` drops both
   cleanly; rolling back loses no data outside those two tables. It does
   not remain the storage head: `016_contribution_write_intents`,
-  `017_investigation_record`, and `018_log_time` follow it, and the last
-  of those is the current collab schema version reported by `/ready` and
-  the synthetic component-health fixture. Grants
+  `017_investigation_record`, `018_log_time`, `019_experiment_lock_privilege`,
+  and `020_model_purpose_policy` and `021_workbench` follow it, and the last of those is the current collab
+  schema version reported by `/ready` and the synthetic component-health
+  fixture. Grants
   cascade-delete with their owning profile row; profiles themselves are
   never hard-deleted by any code path in this chapter (status is the
   lifecycle mechanism), which is why the migration revokes `DELETE` on

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/log-time-candidate.v1.json",
+  "title": "cd-collab Log Time Candidate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "evidenceId",
+    "relativePath",
+    "rotationFamily",
+    "parserId",
+    "parserVersion",
+    "sourceOffset",
+    "sourceLine",
+    "originalText",
+    "parseClass",
+    "precision",
+    "explicitOffset",
+    "confidenceUnknownReason"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.log_time_candidate.v1" },
+    "evidenceId": { "type": "string", "minLength": 1 },
+    "relativePath": { "type": "string" },
+    "rotationFamily": { "type": "string" },
+    "parserId": { "type": "string", "minLength": 1 },
+    "parserVersion": { "type": "string", "minLength": 1 },
+    "sourceOffset": { "type": "integer", "minimum": 0 },
+    "sourceLine": { "type": "integer", "minimum": 0 },
+    "originalText": { "type": "string" },
+    "parseClass": {
+      "type": "string",
+      "enum": ["explicit_offset", "local_ambiguous", "unparsable", "date_only", "missing"]
+    },
+    "precision": { "type": "string", "minLength": 1 },
+    "explicitOffset": { "type": ["string", "null"] },
+    "confidenceUnknownReason": { "type": ["string", "null"] }
+  }
+}

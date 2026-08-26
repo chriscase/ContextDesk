@@ -33,6 +33,7 @@ use cd_core::log_analysis::event_revision::undo_event_revision;
 use cd_core::log_analysis::parse::{LogFormat, ParsedLine, TimestampProvenance};
 use cd_core::log_analysis::query::{
     query_chronology, ChronologyCursor, ChronologyQuery, TimeQuality, MAX_CHRONOLOGY_PAGE,
+    search_events_advanced, EventQuery, EventSearchQuery, SearchMatchMode,
 };
 use cd_core::log_analysis::store::LogCorpus;
 use cd_core::log_analysis::timezone_application::{
@@ -143,6 +144,15 @@ pub enum CollabLogTimeAction {
         limit: usize,
         cursor: Option<String>,
     },
+    /// Bounded event search through the shipped cd-core query pipeline.
+    Search {
+        corpus_id: String,
+        expected_revision: u64,
+        query: String,
+        mode: String,
+        case_sensitive: bool,
+        k: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -171,8 +181,36 @@ pub struct CollabLogTimeResult {
     /// Present for the read-only chronology projection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chronology: Option<ChronologyOut>,
+    /// Present for `search`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<SearchOut>,
     /// Declarations in force after the operation, keyed by source.
     pub declarations: BTreeMap<String, DeclarationOut>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchOut {
+    pub bounded: bool,
+    pub at_least: u64,
+    pub returned: u64,
+    pub partial: bool,
+    pub cancelled: bool,
+    pub diagnostic: Option<String>,
+    pub hits: Vec<SearchHitOut>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHitOut {
+    pub seq: u64,
+    pub source: String,
+    pub message: String,
+    pub level: String,
+    pub ts: i64,
+    pub time_quality: String,
+    pub unresolved_local_timestamp: Option<String>,
+    pub excerpt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -430,6 +468,23 @@ pub fn run(args: &CollabLogTimeArgs) -> CliResult<Box<dyn Render>> {
             *limit,
             cursor.as_deref(),
         ),
+        CollabLogTimeAction::Search {
+            corpus_id,
+            expected_revision,
+            query,
+            mode,
+            case_sensitive,
+            k,
+        } => search(
+            cache_root,
+            &request.case_id,
+            corpus_id,
+            *expected_revision,
+            query,
+            mode,
+            *case_sensitive,
+            *k,
+        ),
     }
 }
 
@@ -503,6 +558,7 @@ fn build(
         preview: None,
         revision: None,
         chronology: None,
+        search: None,
         declarations: declarations_out(&state.declarations),
     }))
 }
@@ -540,6 +596,7 @@ fn status(cache_root: &Path, case_id: &str, corpus_id: &str) -> CliResult<Box<dy
         preview: None,
         revision: None,
         chronology: None,
+        search: None,
         declarations: declarations_out(&state.declarations),
     }))
 }
@@ -595,6 +652,7 @@ fn preview(
         }),
         revision: None,
         chronology: None,
+        search: None,
         declarations: declarations_out(&state.declarations),
     }))
 }
@@ -667,6 +725,96 @@ fn undo(
     revision_result(cache_root, case_id, corpus_id, report, Some(restored))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn search(
+    cache_root: &Path,
+    case_id: &str,
+    corpus_id: &str,
+    expected_revision: u64,
+    query: &str,
+    mode: &str,
+    case_sensitive: bool,
+    k: u64,
+) -> CliResult<Box<dyn Render>> {
+    let corpus_id = validated_corpus_id(corpus_id)?;
+    if query.chars().count() > 512 {
+        return Err(CliError::user("search query exceeds the bounded length"));
+    }
+    let match_mode = match mode {
+        "literal" | "case_insensitive" => SearchMatchMode::Literal,
+        "regex" => SearchMatchMode::Regex,
+        _ => {
+            return Err(CliError::user(
+                "search mode must be literal, case_insensitive, or regex",
+            ))
+        }
+    };
+    let state = load_state(cache_root, corpus_id)?;
+    if state.scope.event_revision != expected_revision {
+        return Err(CliError::conflict(format!(
+            "stale timezone search: expected revision {expected_revision}, current {}",
+            state.scope.event_revision
+        )));
+    }
+    let corpus = LogCorpus::open(cache_root, corpus_id).map_err(map_core_error)?;
+    let result = search_events_advanced(
+        &corpus,
+        &EventSearchQuery {
+            query: if query.is_empty() {
+                None
+            } else {
+                Some(query.to_string())
+            },
+            filter: EventQuery::default(),
+            semantic: false,
+            k: k.min(200) as usize,
+            match_mode,
+            case_sensitive: if mode == "case_insensitive" {
+                false
+            } else {
+                case_sensitive
+            },
+        },
+        None,
+    )
+    .map_err(map_core_error)?;
+    let hits: Vec<SearchHitOut> = result
+        .hits
+        .into_iter()
+        .map(|hit| SearchHitOut {
+            seq: hit.event.seq,
+            source: hit.event.source,
+            message: hit.event.message,
+            level: hit.event.level,
+            ts: hit.event.ts,
+            time_quality: hit.event.time_quality.label().to_string(),
+            unresolved_local_timestamp: hit.event.unresolved_local_timestamp,
+            excerpt: hit.excerpt,
+        })
+        .collect();
+    let returned = hits.len() as u64;
+    Ok(Box::new(CollabLogTimeResult {
+        schema_id: RESULT_SCHEMA_ID,
+        case_id: case_id.to_string(),
+        corpus_id: corpus_id.to_string(),
+        corpus_revision: state.scope.event_revision,
+        build: None,
+        sources: None,
+        preview: None,
+        revision: None,
+        search: Some(SearchOut {
+            bounded: result.partial || result.total_matched.is_none(),
+            at_least: result.total_matched.unwrap_or(returned),
+            returned,
+            partial: result.partial,
+            cancelled: result.cancelled,
+            diagnostic: result.diagnostic,
+            hits,
+        }),
+        declarations: declarations_out(&state.declarations),
+    }))
+}
+
 fn revision_result(
     cache_root: &Path,
     case_id: &str,
@@ -690,6 +838,7 @@ fn revision_result(
             changed_records: report.changed_events,
             event_count: report.event_count,
         }),
+        search: None,
         declarations: declarations_out(&state.declarations),
         chronology: None,
     }))

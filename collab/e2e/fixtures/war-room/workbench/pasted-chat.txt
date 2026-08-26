@@ -1,0 +1,3 @@
+operator-synthetic-01: the edge lane timed out on rid-0003
+operator-synthetic-02: worker heartbeat was late around 02:30 local
+operator-synthetic-01: do not treat this chat as a log file

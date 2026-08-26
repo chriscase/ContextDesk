@@ -773,6 +773,7 @@ export * from "./temporal.js";
 export * from "./investigation-entity.js";
 export * from "./investigation-reference.js";
 export * from "./investigation-resolution.js";
+export * from "./investigation-workbench.js";
 export * from "./capability.js";
 export * from "./user-profile.js";
 export * from "./directory-mapping.js";

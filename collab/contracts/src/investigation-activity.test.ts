@@ -433,6 +433,9 @@ describe("routed locator focus against shipped War Room sections", () => {
       gold: { stage: "decide", section: "decision-heading", itemKind: null },
       export_event: { stage: "decide", section: "export-heading", itemKind: null },
       portable_archive_event: { stage: "decide", section: "export-heading", itemKind: null },
+      log_workbench_view: { stage: "analyze", section: "triage-log-workbench", itemKind: "log-workbench-view" },
+      log_workbench_bookmark: { stage: "analyze", section: "triage-log-workbench", itemKind: "log-workbench-bookmark" },
+      log_workbench_line: { stage: "analyze", section: "triage-log-workbench", itemKind: "log-line" },
     };
     expect(Object.keys(expected).sort()).toEqual([...INVESTIGATION_RESOURCE_KINDS].sort());
 

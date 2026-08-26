@@ -37,6 +37,9 @@ export const ROUTE_ITEM_KINDS = [
   // than about a section, and a link that lands on the section leaves the
   // reader to find the row themselves.
   "lane",
+  "log-workbench-view",
+  "log-workbench-bookmark",
+  "log-line",
 ] as const;
 export type RouteItemKind = (typeof ROUTE_ITEM_KINDS)[number];
 

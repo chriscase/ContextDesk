@@ -1,0 +1,28 @@
+{
+  "schemaId": "cd-collab.log_workbench_chronology.v1",
+  "grouping": "file",
+  "events": [
+    {
+      "evidenceId": "22222222-2222-4222-8222-222222222222",
+      "relativePath": "gateway/edge.log",
+      "rotationFamily": "gateway/edge.log",
+      "lineNumber": 1,
+      "originalTimestamp": "2024-03-10T07:30:00Z",
+      "normalizedUtc": "2024-03-10T07:30:00.000Z",
+      "displayTime": "2024-03-10T07:30:00.000Z",
+      "severity": "info",
+      "component": "edge",
+      "intakeBatchId": "66666666-6666-4666-8666-666666666666",
+      "adjacencyReason": "Adjacent because their normalized UTC instants are consecutive in this window. Grouped by file.",
+      "uncertainty": [],
+      "correlationKind": "observed_identifier",
+      "correlationId": "rid-0001",
+      "anchorStatus": null,
+      "excerpt": "edge accepted request rid-0001"
+    }
+  ],
+  "bounded": false,
+  "atLeast": 1,
+  "unknownBuckets": [],
+  "expectedNormalizationRevision": 3
+}

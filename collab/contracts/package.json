@@ -24,6 +24,10 @@
       "types": "./dist/model-purpose-policy-shared.d.ts",
       "import": "./dist/model-purpose-policy-shared.js"
     },
+    "./workbench": {
+      "types": "./dist/investigation-workbench.d.ts",
+      "import": "./dist/investigation-workbench.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

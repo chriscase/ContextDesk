@@ -35,6 +35,12 @@ export interface SnapshotV1 {
   status: SnapshotStatus;
   createdAt: string;
   createdBy: string;
+  /**
+   * Log-time corpus revision this freeze observed. Absent/null on snapshots
+   * taken before a corpus existed (unknown basis) so older documents keep
+   * their fingerprint.
+   */
+  normalizationRevision?: number | null;
 }
 
 export interface SnapshotListV1 {
@@ -65,6 +71,7 @@ const snapshotShape: ObjectShape = {
   status: f.req(f.en(...SNAPSHOT_STATUSES)),
   createdAt: f.req(f.str),
   createdBy: f.req(f.str),
+  normalizationRevision: f.optNul(f.u64),
 };
 
 const snapshotListShape: ObjectShape = {
@@ -81,6 +88,7 @@ export interface SnapshotFingerprintInput {
   >[];
   visibility: PrivacyClass;
   protocolVersion: string;
+  normalizationRevision?: number | null;
 }
 
 function requireContentHash(path: string, value: string | null): void {
@@ -116,6 +124,9 @@ export function snapshotFingerprint(input: SnapshotFingerprintInput): string {
     evidence: canonicalSnapshotEvidence(input.evidence),
     visibility: input.visibility,
     protocolVersion: input.protocolVersion,
+    ...(typeof input.normalizationRevision === "number"
+      ? { normalizationRevision: input.normalizationRevision }
+      : {}),
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }

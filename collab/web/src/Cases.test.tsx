@@ -66,6 +66,9 @@ function stubCaseFetch(options?: {
     if (url.endsWith("/experiments") || url.endsWith("/export/inventory")) {
       return { ok: true, json: async () => ({ experiments: [], items: [] }) };
     }
+    if (url.includes("/workbench")) {
+      return { ok: true, json: async () => ({ items: [], views: [], bookmarks: [], candidateCount: 0 }) };
+    }
     return { ok: false, json: async () => ({}) };
   });
   vi.stubGlobal("fetch", stub);

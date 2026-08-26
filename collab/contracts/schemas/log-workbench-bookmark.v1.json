@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/log-workbench-bookmark.v1.json",
+  "title": "cd-collab Log Workbench Bookmark v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "investigationId",
+    "locator",
+    "shareSafeToken",
+    "note",
+    "status",
+    "staleReason",
+    "privacyClass",
+    "idempotencyKey",
+    "createdAt",
+    "createdBy",
+    "replayed"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.log_workbench_bookmark.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "investigationId": { "type": "string", "minLength": 1 },
+    "locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "digestAtBind",
+        "byteOffset",
+        "lineNumber",
+        "originalTimestamp",
+        "normalizedUtc",
+        "corpusRevision"
+      ],
+      "properties": {
+        "evidenceId": { "type": "string", "minLength": 1 },
+        "digestAtBind": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "byteOffset": { "type": "integer", "minimum": 0 },
+        "lineNumber": { "type": "integer", "minimum": 0 },
+        "originalTimestamp": { "type": ["string", "null"] },
+        "normalizedUtc": { "type": ["string", "null"] },
+        "corpusRevision": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "shareSafeToken": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "note": { "type": "string" },
+    "status": { "type": "string", "enum": ["resolved", "stale", "unresolvable"] },
+    "staleReason": { "type": ["string", "null"] },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "idempotencyKey": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "createdBy": { "type": "string" },
+    "replayed": { "type": "boolean" }
+  }
+}
