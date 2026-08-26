@@ -13,6 +13,7 @@ import {
 import type { CaseService } from "../cases/index.js";
 import { TriageRunConflictError, TriageRunNotFoundError, TriageRunService } from "./service.js";
 import { listCaseWorkstreams } from "./workstreams.js";
+import type { ModelPurposePolicyService } from "../model-policy/index.js";
 
 export interface TriageRunRouteDeps {
   sessionAuth: SessionAuthorizationDeps;
@@ -24,6 +25,7 @@ export interface TriageRunRouteDeps {
    * into human labels; without it the route is simply not registered.
    */
   cases?: CaseService;
+  modelPolicy?: ModelPurposePolicyService;
 }
 
 export async function registerTriageRunRoutes(
@@ -54,9 +56,11 @@ export async function registerTriageRunRoutes(
     if (!ctx.has("investigation:read")) {
         return capabilityForbidden(reply);
     }
+    const policy = deps.modelPolicy ? await deps.modelPolicy.load() : null;
     return {
       schemaId: "cd-collab.triage_profile_list.v1",
       profiles: deps.runs.listProfiles(),
+      ...(policy ? { policy } : {}),
     };
   });
 
@@ -154,6 +158,7 @@ export async function registerTriageRunRoutes(
         request.ip,
         ctx.isAdmin,
         ctx.has("evidence:private:read"),
+        ctx.roles,
       );
     } catch (error) {
       return fail(reply, error);

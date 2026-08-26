@@ -15,6 +15,25 @@ export type {
 } from "./privacy.js";
 
 export {
+  MODEL_PRIVATE_EVIDENCE_RULES,
+  MODEL_PURPOSES,
+  MODEL_PURPOSE_POLICY_SCHEMA_ID,
+  MODEL_PURPOSE_POLICY_UPDATE_SCHEMA_ID,
+  createModelPurposePolicy,
+  defaultModelPurposeRules,
+  modelPurposePolicyFingerprint,
+  parseModelPurposePolicy,
+  parseModelPurposePolicyInput,
+} from "./model-purpose-policy.js";
+export type {
+  ModelPrivateEvidenceRule,
+  ModelPurpose,
+  ModelPurposePolicyInputV1,
+  ModelPurposePolicyV1,
+  ModelPurposeRuleV1,
+} from "./model-purpose-policy.js";
+
+export {
   HEALTH_SCHEMA_ID,
   READY_SCHEMA_ID,
   parseHealthResponse,

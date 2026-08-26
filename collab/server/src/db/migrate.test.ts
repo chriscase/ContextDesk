@@ -4,16 +4,17 @@ import { latestMigrationVersion, listMigrations, migrateDown, migrateUp } from "
 
 describe("migration versions", () => {
   // The integration-train migrations remain consecutively ordered: the
-  // investigation record graph, the case-bound log corpus, then the narrow
-  // experiment row-lock privilege required by the application role.
-  it("pins the canonical PostgreSQL head at the experiment lock privilege", () => {
+  // investigation record graph, the case-bound log corpus, the narrow
+  // experiment row-lock privilege, then the administrator model-use policy.
+  it("pins the canonical PostgreSQL head at the model-use policy", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
     expect(versions).toContain("017_investigation_record");
     expect(versions).toContain("018_log_time");
     expect(versions).toContain("019_experiment_lock_privilege");
-    expect(latestMigrationVersion()).toBe("019_experiment_lock_privilege");
+    expect(versions).toContain("020_model_purpose_policy");
+    expect(latestMigrationVersion()).toBe("020_model_purpose_policy");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -23,9 +24,9 @@ describe("migration versions", () => {
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
     expect(versions.slice(-3)).toEqual([
-      "017_investigation_record",
       "018_log_time",
       "019_experiment_lock_privilege",
+      "020_model_purpose_policy",
     ]);
   });
 });
@@ -54,6 +55,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("017_investigation_record");
       expect(up.applied).toContain("018_log_time");
       expect(up.applied).toContain("019_experiment_lock_privilege");
+      expect(up.applied).toContain("020_model_purpose_policy");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -113,8 +115,9 @@ describe.skipIf(!adminUrl())("migrations", () => {
         `SELECT to_regclass('public.log_corpora') AS to_regclass`,
       );
       expect(logTimeBeforeRollback.rows[0]?.to_regclass).not.toBeNull();
-      // 019 only narrows the app role's row-lock privilege, so it unwinds
-      // before 018 removes the case-bound log-time tables.
+      // 020 removes the singleton policy state before 019 narrows the app
+      // role's row-lock privilege and 018 removes log-time tables.
+      expect((await migrateDown(client)).rolledBack).toBe("020_model_purpose_policy");
       expect((await migrateDown(client)).rolledBack).toBe("019_experiment_lock_privilege");
       // 018 tables reference cases but
       // nothing in the record graph, so it rolls back independently.
@@ -206,6 +209,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("017_investigation_record");
       expect(dry.pending).toContain("018_log_time");
       expect(dry.pending).toContain("019_experiment_lock_privilege");
+      expect(dry.pending).toContain("020_model_purpose_policy");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

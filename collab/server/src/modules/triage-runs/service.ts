@@ -15,6 +15,7 @@ import {
   type TriageJobRequestV1,
   type TriageJobStatus,
   type TriageJobV1,
+  type AppRole,
 } from "@cd-collab/contracts";
 import type { RecoveryAuthResult, RecoveryInactiveReason } from "../authz/index.js";
 import type { AuditStore } from "../audit/index.js";
@@ -27,6 +28,7 @@ import {
   triageWorkerHoldsLiveLease,
 } from "./store.js";
 import type { TriageProfileOption } from "./profiles.js";
+import { ModelPurposePolicyConflictError, ModelPurposePolicyService } from "../model-policy/index.js";
 
 export type TriageRecoveryAuthorization = (
   requester: { id: string; username: string },
@@ -307,6 +309,7 @@ export class TriageRunService {
       executor?: TriageRunExecutor;
       gatewayExecutor?: TriageBatchRunExecutor;
       profiles?: TriageProfileOption[];
+      modelPolicy?: ModelPurposePolicyService;
       workerId?: string;
       workerLeaseMs?: number;
       /** Live requester re-resolution. Never a cached session role list. */
@@ -624,6 +627,7 @@ export class TriageRunService {
     origin: string,
     isAdmin: boolean,
     canReadPrivate: boolean,
+    roles: readonly AppRole[] = isAdmin ? ["admin"] : ["case-lead"],
   ): Promise<TriageJobV1> {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) {
       throw new TriageRunNotFoundError();
@@ -647,7 +651,7 @@ export class TriageRunService {
     if (request.mode !== "gateway" && request.concurrency !== undefined) {
       throw new TriageRunConflictError("concurrency is only configurable for gateway comparisons");
     }
-    const normalizedRequest: TriageJobRequestV1 = request.mode === "gateway"
+    let normalizedRequest: TriageJobRequestV1 = request.mode === "gateway"
       ? { ...request, concurrency: gatewayConcurrency }
       : request;
     const ids = new Set<string>();
@@ -683,6 +687,22 @@ export class TriageRunService {
       (item) => item.id === request.snapshotId,
     );
     if (!snapshot) throw new TriageRunConflictError("snapshot not found for case");
+    if (this.deps.modelPolicy) {
+      try {
+        const policy = await this.deps.modelPolicy.authorize({
+          request: normalizedRequest,
+          snapshot,
+          roles,
+          isAdmin,
+        });
+        normalizedRequest = { ...normalizedRequest, policyFingerprint: policy.fingerprint };
+      } catch (error) {
+        if (error instanceof ModelPurposePolicyConflictError) {
+          throw new TriageRunConflictError(error.message);
+        }
+        throw new TriageRunConflictError("model-purpose policy could not be verified");
+      }
+    }
     if (request.parentJobId) {
       const parent = await this.deps.jobs.get(request.parentJobId);
       if (!parent || parent.caseId !== caseId) {

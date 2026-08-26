@@ -44,6 +44,11 @@ import {
   TriageRunService,
   type TriageJobStore,
 } from "./modules/triage-runs/index.js";
+import {
+  ModelPurposePolicyService,
+  PgModelPurposePolicyStore,
+  type ModelPurposePolicyStore,
+} from "./modules/model-policy/index.js";
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 import {
   PgLocalGrantStore,
@@ -78,6 +83,7 @@ interface StorageRuntime {
   runs: RunStore;
   experiments: ExperimentStore;
   jobs: TriageJobStore;
+  modelPolicy: ModelPurposePolicyStore;
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
@@ -103,6 +109,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       runs: runtime.runs,
       experiments: runtime.experiments,
       jobs: runtime.jobs,
+      modelPolicy: runtime.modelPolicy,
       applyState: runtime.applyState,
       profiles: runtime.profiles,
       grants: runtime.grants,
@@ -127,6 +134,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     runs: new PgRunStore(pool),
     experiments: new PgExperimentStore(pool),
     jobs: new PgTriageJobStore(pool),
+    modelPolicy: new PgModelPurposePolicyStore(pool),
     applyState: new PgPortableApplyStateStore(pool),
     profiles: new PgUserProfileStore(pool),
     grants: new PgLocalGrantStore(pool),
@@ -250,6 +258,11 @@ async function main(): Promise<void> {
       })
     : null;
   const bridge = triageBridgeOptions();
+  const triageProfiles = loadConfiguredTriageProfileCatalog();
+  const modelPolicy = new ModelPurposePolicyService({
+    store: storage.modelPolicy,
+    profiles: triageProfiles,
+  });
   const triageRuns = new TriageRunService({
     cases: domain,
     audit,
@@ -268,7 +281,8 @@ async function main(): Promise<void> {
           gatewayExecutor: new RustBridgeTriageExecutor(bridge),
         }
       : {}),
-    profiles: loadConfiguredTriageProfileCatalog(),
+    profiles: triageProfiles,
+    modelPolicy,
   });
   await triageRuns.recoverPending();
   const exporter = new ExportService({
@@ -343,6 +357,7 @@ async function main(): Promise<void> {
     catalog,
     imports,
     triageRuns,
+    modelPolicy,
     presence: storage.presence,
     experiments,
     exporter,

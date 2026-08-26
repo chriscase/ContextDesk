@@ -67,6 +67,7 @@ import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js
 import { registerEntityRoutes, type EntityService } from "./modules/entities/index.js";
 import { registerReferenceRoutes, type ReferenceService } from "./modules/references/index.js";
 import { registerResolutionRoutes, type ResolutionService } from "./modules/resolutions/index.js";
+import { registerModelPurposePolicyRoutes, type ModelPurposePolicyService } from "./modules/model-policy/index.js";
 
 function requestPath(url: string): string {
   return url.split("?", 1)[0] ?? url;
@@ -105,6 +106,7 @@ export interface AppDeps {
   catalog?: CatalogService;
   imports?: ImportService;
   triageRuns?: TriageRunService;
+  modelPolicy?: ModelPurposePolicyService;
   presence?: PresenceService;
   logTime?: LogTimeService;
   experiments?: ExperimentService;
@@ -264,6 +266,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       sessionAuth,
       audit: security.audit,
     });
+    if (deps.modelPolicy) {
+      await registerModelPurposePolicyRoutes(app, {
+        sessionAuth,
+        audit: security.audit,
+        policy: deps.modelPolicy,
+      });
+    }
     if (deps.domain) {
       await registerCaseRoutes(app, {
         sessionAuth,
@@ -336,6 +345,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         sessionAuth,
         audit: security.audit,
         runs: deps.triageRuns,
+        ...(deps.modelPolicy ? { modelPolicy: deps.modelPolicy } : {}),
         ...(deps.domain ? { cases: deps.domain } : {}),
       });
     }

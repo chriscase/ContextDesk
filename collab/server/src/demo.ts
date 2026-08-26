@@ -50,6 +50,7 @@ import { PresenceService } from "./modules/presence/index.js";
 import { ReferenceService } from "./modules/references/index.js";
 import { ResolutionService } from "./modules/resolutions/index.js";
 import { syntheticComponentHealth } from "./modules/component-health/index.js";
+import { MemoryModelPurposePolicyStore, ModelPurposePolicyService } from "./modules/model-policy/index.js";
 import type { ComponentHealthProjectorInputV1 } from "@cd-collab/contracts";
 import type { SetupService } from "./modules/setup/index.js";
 
@@ -643,6 +644,11 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     audit,
     experiments: experimentStore,
   });
+  const triageProfiles = options.triageProfiles ?? loadConfiguredTriageProfileCatalog();
+  const modelPolicy = new ModelPurposePolicyService({
+    store: new MemoryModelPurposePolicyStore(),
+    profiles: triageProfiles,
+  });
   const triageRuns = new TriageRunService({
     cases,
     audit,
@@ -652,7 +658,8 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       : options.gatewayRunner
         ? { gatewayExecutor: new RustBridgeTriageExecutor(options.gatewayRunner) }
         : {}),
-    profiles: options.triageProfiles ?? loadConfiguredTriageProfileCatalog(),
+    profiles: triageProfiles,
+    modelPolicy,
   });
   const logTime = options.logTimeBridge
     ? new LogTimeService({
@@ -738,6 +745,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       catalog,
       imports,
       triageRuns,
+      modelPolicy,
       ...(logTime ? { logTime } : {}),
       presence,
       experiments,

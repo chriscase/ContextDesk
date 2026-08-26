@@ -111,6 +111,21 @@ export const LDAP_ADMIN: WorkLocation = {
   },
 };
 
+/** Canonical administrator model-purpose policy tab. */
+export const MODEL_POLICY_SECTION = "model-policy";
+export const MODEL_POLICY: WorkLocation = {
+  area: "administration",
+  caseId: null,
+  stage: "situation",
+  focus: {
+    section: MODEL_POLICY_SECTION,
+    item: null,
+    itemKind: null,
+    lane: null,
+    experiment: null,
+  },
+};
+
 export const SIGN_IN: SignInLocation = { kind: "sign-in" };
 
 export const DISCUSSION_SECTION = "discussion";
@@ -142,6 +157,14 @@ export function isLdapAdminLocation(value: unknown): value is WorkLocation {
     isWorkLocation(value)
     && value.area === "administration"
     && value.focus?.section === LDAP_SECTION
+  );
+}
+
+export function isModelPolicyLocation(value: unknown): value is WorkLocation {
+  return (
+    isWorkLocation(value)
+    && value.area === "administration"
+    && value.focus?.section === MODEL_POLICY_SECTION
   );
 }
 
@@ -351,6 +374,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/admin/ldap") {
     return { ...LDAP_ADMIN };
   }
+  if (path === "/admin/model-policy") {
+    return { ...MODEL_POLICY };
+  }
   if (path === "/administration") {
     return { ...ADMINISTRATION };
   }
@@ -455,9 +481,11 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
   if (location.area === "administration") {
     return isPeopleLocation(location)
       ? "People · Administration · ContextDesk War Room"
-      : isLdapAdminLocation(location)
-        ? "Directory · Administration · ContextDesk War Room"
-        : "Administration · ContextDesk War Room";
+        : isLdapAdminLocation(location)
+          ? "Directory · Administration · ContextDesk War Room"
+          : isModelPolicyLocation(location)
+            ? "Model use · Administration · ContextDesk War Room"
+          : "Administration · ContextDesk War Room";
   }
   if (location.area === "investigations" && location.caseId) {
     const stage = location.stage.slice(0, 1).toUpperCase() + location.stage.slice(1);
