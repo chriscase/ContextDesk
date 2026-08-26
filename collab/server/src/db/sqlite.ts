@@ -37,6 +37,7 @@ import {
   type PortableApplyStateStore,
 } from "../modules/portable-investigations/index.js";
 import { MemoryEntityStore, type EntityStore } from "../modules/entities/index.js";
+import { MemorySoftwareImpactStore, type SoftwareImpactStore } from "../modules/software-impact/index.js";
 import { MemoryReferenceStore, type ReferenceStore } from "../modules/references/index.js";
 import { MemoryResolutionStore, type ResolutionStore } from "../modules/resolutions/index.js";
 
@@ -291,6 +292,7 @@ export interface SqliteRuntime {
   profiles: UserProfileStore;
   grants: LocalGrantStore;
   entities: EntityStore;
+  softwareImpact: SoftwareImpactStore;
   references: ReferenceStore;
   resolutions: ResolutionStore;
   runPortableTransaction: <T>(operation: () => Promise<T>) => Promise<T>;
@@ -395,6 +397,13 @@ export function createSqliteRuntime(
       "restore",
     ]),
   );
+  const rawSoftwareImpact = new MemorySoftwareImpactStore();
+  const softwareImpact = persistentMemoryStore(
+    state,
+    "investigation_software_impact",
+    rawSoftwareImpact,
+    new Set(["insert", "updateStatus", "release", "restore"]),
+  );
   const rawReferences = new MemoryReferenceStore();
   const references = persistentMemoryStore(
     state,
@@ -418,6 +427,7 @@ export function createSqliteRuntime(
     { key: "jobs", store: rawJobs },
     { key: "portable_apply_state", store: rawApplyState },
     { key: "investigation_entities", store: rawEntities },
+    { key: "investigation_software_impact", store: rawSoftwareImpact },
     { key: "investigation_references", store: rawReferences },
     { key: "investigation_resolutions", store: rawResolutions },
   ];
@@ -442,6 +452,7 @@ export function createSqliteRuntime(
     profiles,
     grants,
     entities,
+    softwareImpact,
     references,
     resolutions,
     runPortableTransaction: (operation) => state.transaction(portableStores, operation),

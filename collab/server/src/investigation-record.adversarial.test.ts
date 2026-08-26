@@ -484,3 +484,37 @@ describe("a resolution cannot be forged or bypassed", () => {
     });
   });
 });
+
+describe("software impact authorization", () => {
+  it("does not disclose another investigation's impact rows by identifier", async () => {
+    await withRecordApp(async ({ app }) => {
+      const alice = await login(app, "alice");
+      const bob = await login(app, "bob");
+      const hidden = parseCase(
+        await createInvestigation(app, alice, { title: "Synthetic hidden impact" }),
+      );
+      const created = await app.inject({
+        method: "POST",
+        url: `/api/cases/${hidden.id}/software-impact`,
+        headers: { cookie: alice },
+        payload: { productName: "Secret Catalog", status: "confirmed" },
+      });
+      expect(created.statusCode).toBe(201);
+
+      const listed = await app.inject({
+        method: "GET",
+        url: `/api/cases/${hidden.id}/software-impact`,
+        headers: { cookie: bob },
+      });
+      expect(listed.statusCode).toBe(404);
+
+      const forged = await app.inject({
+        method: "POST",
+        url: `/api/cases/${hidden.id}/software-impact/${body(created).id as string}/status`,
+        headers: { cookie: bob },
+        payload: { status: "ruled_out" },
+      });
+      expect(forged.statusCode).toBe(404);
+    });
+  });
+});

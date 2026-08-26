@@ -63,6 +63,10 @@ import {
   type UserProfileStore,
 } from "./modules/people/index.js";
 import { EntityService, PgEntityStore, type EntityStore } from "./modules/entities/index.js";
+import {
+  SoftwareImpactService,
+  type SoftwareImpactStore,
+} from "./modules/software-impact/index.js";
 import { ReferenceService, PgReferenceStore, type ReferenceStore } from "./modules/references/index.js";
 import {
   ResolutionService,
@@ -94,6 +98,7 @@ interface StorageRuntime {
   profiles: UserProfileStore;
   grants: LocalGrantStore;
   entities: EntityStore;
+  softwareImpact: SoftwareImpactStore | null;
   references: ReferenceStore;
   resolutions: ResolutionStore;
   runPortableTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
@@ -120,6 +125,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       profiles: runtime.profiles,
       grants: runtime.grants,
       entities: runtime.entities,
+      softwareImpact: runtime.softwareImpact,
       references: runtime.references,
       resolutions: runtime.resolutions,
       runPortableTransaction: runtime.runPortableTransaction,
@@ -145,6 +151,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     profiles: new PgUserProfileStore(pool),
     grants: new PgLocalGrantStore(pool),
     entities: new PgEntityStore(pool),
+    softwareImpact: null,
     references: new PgReferenceStore(pool),
     resolutions: new PgResolutionStore(pool),
     presence: new PresenceService(new PgPresenceBackend(pool)),
@@ -226,6 +233,13 @@ async function main(): Promise<void> {
     audit,
     investigations,
   });
+  const softwareImpact = storage.softwareImpact
+    ? new SoftwareImpactService({
+        store: storage.softwareImpact,
+        audit,
+        investigations,
+      })
+    : null;
   const references = new ReferenceService({
     store: storage.references,
     audit,
@@ -421,6 +435,7 @@ async function main(): Promise<void> {
     exporter,
     portable,
     entities,
+    ...(softwareImpact ? { softwareImpact } : {}),
     references,
     resolutions,
     installationId,

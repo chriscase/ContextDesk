@@ -1,0 +1,18 @@
+{
+  "schemaId": "cd-collab.software_impact.v1",
+  "id": "3c8f2a11-6d04-4b91-8e22-9a1c0d4e5f70",
+  "investigationId": "11111111-1111-4111-8111-111111111111",
+  "productName": "Fixture Desk",
+  "version": "4.2",
+  "build": "build-007",
+  "component": "queue-worker",
+  "environment": "QA / us-central",
+  "status": "confirmed",
+  "note": "Failing line appears only on this synthetic worker image.",
+  "state": "active",
+  "recordedAt": "2026-08-26T08:00:00.000Z",
+  "recordedBy": "synthetic-alice",
+  "recordedByUsername": "alice",
+  "updatedAt": "2026-08-26T08:00:00.000Z",
+  "releasedAt": null
+}

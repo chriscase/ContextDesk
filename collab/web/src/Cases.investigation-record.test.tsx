@@ -118,6 +118,12 @@ function stubFetch(options?: {
     if (url.endsWith("/involvement")) {
       return { ok: true, json: async () => ({ involvements: [] }) };
     }
+    if (url.includes("/software-impact/suggestions")) {
+      return { ok: true, json: async () => ({ values: [] }) };
+    }
+    if (url.endsWith("/software-impact")) {
+      return { ok: true, json: async () => ({ records: [] }) };
+    }
     if (url.endsWith("/references")) {
       return { ok: true, json: async () => ({ outbound: [], inbound: [] }) };
     }
