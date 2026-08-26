@@ -146,4 +146,65 @@ describe("LDAP login profile sync", () => {
       /LDAP search requires a bind/,
     );
   });
+
+  it("keeps a no-service-bind LDAP session authorized on /api/auth/me", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-ldap-snapshot-"));
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      COLLAB_LDAP_USER_DN_TEMPLATE: "uid={username},ou=people,dc=example,dc=test",
+      COLLAB_LDAP_USER_RESOLUTION: "dn_template",
+      COLLAB_LDAP_GROUP_SEARCH_BASE: "ou=groups,dc=example,dc=test",
+      COLLAB_LDAP_MEMBER_ATTR: "memberOf",
+    });
+    const roles = new MutableGroupRoleMap(
+      parseGroupRoleMap("cn=contributors,ou=groups,dc=example,dc=test=contributor"),
+    );
+    const audit = new MemoryAuditStore();
+    const app = await buildApp({
+      config: testConfig({ evidenceRoot: root, authMode: "ldap" }),
+      pool: null,
+      store: new FilesystemEvidenceStore({ rootDir: root }),
+      profiles: new MemoryUserProfileStore(),
+      security: {
+        auth: {
+          adapter: new LdapAuthAdapter(
+            cfg,
+            createAuthLog(),
+            createSyntheticLdapFactory(cfg, exampleSyntheticDirectory()),
+          ),
+          sessions: new MemorySessionStore(),
+          policy: defaultSessionPolicy,
+          roles,
+          audit,
+          log: createAuthLog(),
+          limiter: createRateLimiter({ maxFails: 5, windowMs: 60_000 }),
+          cookieSecure: false,
+        },
+        roles,
+        roleStore: new MemoryGroupRoleStore(roles),
+        audit,
+        ldapConfig: cfg,
+      },
+    });
+    try {
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        payload: { username: "alice", password: "fixture-alice-secret" },
+      });
+      expect(login.statusCode).toBe(200);
+      const rawCookie = login.headers["set-cookie"];
+      const cookie = String(Array.isArray(rawCookie) ? rawCookie[0] : rawCookie).split(";")[0];
+      const me = await app.inject({
+        method: "GET",
+        url: "/api/auth/me",
+        headers: { cookie },
+      });
+      expect(me.statusCode).toBe(200);
+      expect(parseSessionResponse(JSON.parse(me.body)).roles).toEqual(["contributor"]);
+    } finally {
+      await app.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
