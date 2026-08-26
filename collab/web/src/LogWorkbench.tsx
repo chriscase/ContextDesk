@@ -35,6 +35,23 @@ const OVERSCAN = 6;
 const MAX_PANES = 4;
 /** Lines of lead-in kept above a revealed match so it has visible context. */
 const PAGE_LEAD_LINES = 10;
+/**
+ * Files the chooser keeps in the DOM for one page of the list.
+ *
+ * An investigation that imported three hundred files must not put three
+ * hundred checkboxes on the page: the list is paged, and the page is the hard
+ * bound. Every file stays reachable — the filter narrows the whole inventory,
+ * not the page, and the pager walks the rest.
+ */
+const FILE_PAGE = 25;
+/**
+ * Files a responder can take in at a glance before scanning beats reading.
+ *
+ * Below this the chooser stays a plain list with nothing to learn: no filter,
+ * no pager, no bulk action. The three-file investigation should not pay for
+ * the three-hundred-file one.
+ */
+const FILE_FILTER_THRESHOLD = 6;
 
 interface InventoryItem {
   evidenceId: string;
@@ -129,6 +146,82 @@ interface ChronologyEvent {
 }
 
 /**
+ * Does this file match what the reader typed into the chooser filter?
+ *
+ * Deliberately narrow: the only text considered is the human name and the path
+ * the file arrived under. Evidence ids, digests, and intake batch ids are how
+ * ContextDesk addresses a record, not how a responder recognises one, and a
+ * filter that matched them would put those strings on screen the moment
+ * someone pasted one in. Every token must appear, so "worker batch" narrows
+ * rather than widens.
+ */
+export function fileMatchesFilter(
+  item: { displayLabel: string; relativePath: string },
+  filter: string,
+): boolean {
+  const tokens = filter.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return true;
+  const haystack = `${item.relativePath} ${item.displayLabel}`.toLowerCase();
+  return tokens.every((token) => haystack.includes(token));
+}
+
+/**
+ * What the chooser is actually showing, in one sentence a responder can trust.
+ *
+ * A count that omits the part it left out reads as a complete one, so a paged
+ * list says which slice is on screen, a filtered list says how much of the
+ * inventory it hid, and a full pane set says why the next file will not open.
+ */
+export function chooserStatus(input: {
+  total: number;
+  matching: number;
+  filtered: boolean;
+  /** 1-based inclusive range of the matching list currently rendered. */
+  from: number;
+  to: number;
+  /** Open files listed outside that range so they can still be closed. */
+  pinned: number;
+  selected: number;
+  maxPanes: number;
+}): string {
+  const files = (count: number) =>
+    `${count.toLocaleString()} ${count === 1 ? "file" : "files"}`;
+  const shown = Math.max(0, input.to - input.from + 1);
+  const parts: string[] = [];
+  if (input.filtered && input.matching === 0) {
+    parts.push(`No file matches this filter. This investigation has ${files(input.total)}.`);
+  } else if (input.filtered) {
+    parts.push(
+      `${input.matching.toLocaleString()} of ${files(input.total)} ${
+        input.matching === 1 ? "matches" : "match"
+      } this filter.`,
+    );
+    if (shown < input.matching) parts.push(`Showing ${input.from}–${input.to}.`);
+  } else if (shown < input.total) {
+    parts.push(`Showing ${input.from}–${input.to} of ${files(input.total)}.`);
+  } else {
+    parts.push(`${files(input.total)}.`);
+  }
+  if (input.pinned > 0) {
+    parts.push(
+      input.pinned === 1
+        ? "1 open file is listed too, so you can close it."
+        : `${input.pinned} open files are listed too, so you can close them.`,
+    );
+  }
+  if (input.selected === 0) {
+    parts.push("No file is open yet.");
+  } else if (input.selected >= input.maxPanes) {
+    parts.push(
+      `${input.selected} of ${input.maxPanes} panes in use — the maximum. Clear one to open another.`,
+    );
+  } else {
+    parts.push(`${input.selected} of ${input.maxPanes} panes in use.`);
+  }
+  return parts.join(" ");
+}
+
+/**
  * One sentence a responder can act on. A partial answer never reads as a
  * complete one: a stopped scan, a cancelled scan, and a corpus that was too
  * large to read to the end each say so in plain words.
@@ -206,6 +299,8 @@ export function LogWorkbench(props: {
   const [timeFrom, setTimeFrom] = useState("");
   const [timeTo, setTimeTo] = useState("");
   const [panes, setPanes] = useState<string[]>([]);
+  const [fileFilter, setFileFilter] = useState("");
+  const [filePage, setFilePage] = useState(0);
   const [syncScroll, setSyncScroll] = useState(true);
   const [grouping, setGrouping] = useState("file");
   const [sort, setSort] = useState("time_asc");
@@ -232,6 +327,38 @@ export function LogWorkbench(props: {
     () => items.filter((item) => panes.includes(item.evidenceId)),
     [items, panes],
   );
+
+  /**
+   * The chooser stays usable at three files and at three hundred.
+   *
+   * `matchingFiles` is the whole inventory narrowed by what the reader typed;
+   * `renderedFiles` is one page of that, plus any open file the page or the
+   * filter would otherwise hide. Pinning open files is what makes the bound
+   * safe: a pane can always be closed from the row that opened it, so paging
+   * never strands a selection the reader can no longer reach.
+   */
+  const filterActive = fileFilter.trim().length > 0;
+  const matchingFiles = useMemo(
+    () => items.filter((item) => fileMatchesFilter(item, fileFilter)),
+    [items, fileFilter],
+  );
+  const filePageCount = Math.max(1, Math.ceil(matchingFiles.length / FILE_PAGE));
+  const filePageIndex = Math.min(Math.max(0, filePage), filePageCount - 1);
+  const fileWindow = useMemo(() => {
+    const start = filePageIndex * FILE_PAGE;
+    return matchingFiles.slice(start, start + FILE_PAGE);
+  }, [matchingFiles, filePageIndex]);
+  const renderedFiles = useMemo(() => {
+    const onPage = new Set(fileWindow.map((item) => item.evidenceId));
+    return items.filter(
+      (item) => onPage.has(item.evidenceId) || panes.includes(item.evidenceId),
+    );
+  }, [items, fileWindow, panes]);
+  const pinnedFileCount = renderedFiles.length - fileWindow.length;
+  const showFileTools = items.length > FILE_FILTER_THRESHOLD;
+  const atPaneLimit = panes.length >= MAX_PANES;
+  const fileRangeStart = fileWindow.length === 0 ? 0 : filePageIndex * FILE_PAGE + 1;
+  const fileRangeEnd = filePageIndex * FILE_PAGE + fileWindow.length;
 
   const load = useCallback(async () => {
     setLoadState("loading");
@@ -384,12 +511,67 @@ export function LogWorkbench(props: {
     if (row) void revealMatch(row);
   }
 
+  /**
+   * Opening a fifth file is refused out loud, never by eviction.
+   *
+   * Silently dropping the oldest pane would take away a file the reader chose
+   * on purpose and give no reason for it, so the selection is left exactly as
+   * it was and the limit is stated instead.
+   */
   function togglePane(evidenceId: string) {
-    setPanes((current) => {
-      if (current.includes(evidenceId)) return current.filter((id) => id !== evidenceId);
-      if (current.length >= MAX_PANES) return current;
-      return [...current, evidenceId];
-    });
+    if (panes.includes(evidenceId)) {
+      setPanes((current) => current.filter((id) => id !== evidenceId));
+      return;
+    }
+    if (panes.length >= MAX_PANES) {
+      const label =
+        items.find((item) => item.evidenceId === evidenceId)?.displayLabel ?? "That file";
+      setNotice(
+        `“${label}” did not open: ${MAX_PANES} panes are already open, which is the maximum. Clear a file first — nothing already open was closed.`,
+      );
+      return;
+    }
+    setPanes((current) =>
+      current.includes(evidenceId) ? current : [...current, evidenceId],
+    );
+  }
+
+  function clearFileSelection() {
+    if (panes.length === 0) return;
+    setPanes([]);
+    setNotice("Cleared the file selection.");
+  }
+
+  /** Open as many listed files as there is room for, closing nothing. */
+  function selectVisibleFiles() {
+    const candidates = renderedFiles.filter((item) => !panes.includes(item.evidenceId));
+    if (candidates.length === 0) {
+      setNotice("Every file listed here is already open.");
+      return;
+    }
+    const room = MAX_PANES - panes.length;
+    if (room <= 0) {
+      setNotice(
+        `Nothing was opened: ${MAX_PANES} panes are already open, which is the maximum. Clear a file first.`,
+      );
+      return;
+    }
+    const added = candidates.slice(0, room);
+    setPanes((current) => [...current, ...added.map((item) => item.evidenceId)]);
+    const remaining = candidates.length - added.length;
+    const opened = `Opened ${added.length} more ${added.length === 1 ? "file" : "files"}.`;
+    setNotice(
+      remaining === 0
+        ? opened
+        : `${opened} ${remaining} listed ${remaining === 1 ? "file" : "files"} did not fit — ${MAX_PANES} panes is the maximum, and nothing already open was closed.`,
+    );
+  }
+
+  function setFileFilterText(next: string) {
+    setFileFilter(next);
+    // A narrowed list starts at its first page; keeping page 7 would show an
+    // empty list and read as "no matches".
+    setFilePage(0);
   }
 
   const searchFilters = useCallback(
@@ -587,6 +769,10 @@ export function LogWorkbench(props: {
 
   function applyView(view: SavedView) {
     setPanes(view.selectedPanes.slice(0, MAX_PANES));
+    // The view names its own files; a leftover filter would hide the rest of
+    // the inventory behind a word the reader typed for a different question.
+    setFileFilter("");
+    setFilePage(0);
     setQuery(view.query);
     setMode((view.mode as typeof mode) || "case_insensitive");
     setInclude(view.filters?.includeTerms?.[0] ?? "");
@@ -638,7 +824,7 @@ export function LogWorkbench(props: {
     return (
       <section className="log-workbench" id="log-workbench" aria-labelledby="log-workbench-heading">
         <h4 id="log-workbench-heading">Log workbench</h4>
-        <p>Loading this investigation’s logs…</p>
+        <p role="status">Loading this investigation’s logs…</p>
       </section>
     );
   }
@@ -654,7 +840,7 @@ export function LogWorkbench(props: {
     return (
       <section className="log-workbench" id="log-workbench" aria-labelledby="log-workbench-heading">
         <h4 id="log-workbench-heading">Log workbench</h4>
-        <p role="alert">{error}</p>
+        <p role="alert">{error ?? "The log workbench could not be loaded."}</p>
         <button type="button" onClick={() => void load()}>
           Try again
         </button>
@@ -716,41 +902,156 @@ export function LogWorkbench(props: {
             <strong>Choose log files</strong>
             <span>Select one or more to open them side by side.</span>
           </div>
-          <span className="log-workbench__muted">
-            {items.length.toLocaleString()} {items.length === 1 ? "file" : "files"}
-          </span>
         </div>
-        {items.map((item) => (
-          <label key={item.evidenceId} className="log-workbench__file">
-            <input
-              type="checkbox"
-              checked={panes.includes(item.evidenceId)}
-              onChange={() => togglePane(item.evidenceId)}
-              aria-label={`Show ${item.displayLabel} in a pane`}
-            />
-            <span className="log-workbench__file-copy">
-              <strong>{item.displayLabel}</strong>
-              {item.relativePath !== item.displayLabel || item.fullyRead === false ? (
-                <small>
-                  {item.relativePath === item.displayLabel
-                    ? ""
-                    : item.relativePath.slice(0, item.relativePath.length - item.displayLabel.length)}
-                  {item.fullyRead === false ? "not fully read" : ""}
-                </small>
-              ) : null}
+        {/* The filter and the bulk action arrive only once the list stops
+            being glanceable. Clearing a selection is useful at any size, so it
+            appears as soon as there is one to clear. */}
+        {showFileTools || panes.length > 0 ? (
+          <div className="log-workbench__file-tools">
+            {showFileTools ? (
+              <>
+                <label className="log-workbench__file-filter">
+                  <span>Filter by name or folder</span>
+                  <input
+                    type="search"
+                    value={fileFilter}
+                    onChange={(event) => setFileFilterText(event.target.value)}
+                    placeholder="worker/, edge.log…"
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="log-workbench__file-action"
+                  onClick={selectVisibleFiles}
+                >
+                  Select visible
+                </button>
+              </>
+            ) : null}
+            {panes.length > 0 ? (
+              <button
+                type="button"
+                className="log-workbench__file-action"
+                onClick={clearFileSelection}
+              >
+                Clear selection
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        <p
+          className="log-workbench__files-status"
+          data-workbench-file-status
+          role="status"
+          aria-live="polite"
+        >
+          {chooserStatus({
+            total: items.length,
+            matching: matchingFiles.length,
+            filtered: filterActive,
+            from: fileRangeStart,
+            to: fileRangeEnd,
+            pinned: pinnedFileCount,
+            selected: panes.length,
+            maxPanes: MAX_PANES,
+          })}
+        </p>
+        {atPaneLimit ? (
+          <p className="log-workbench__file-limit" id="log-workbench-pane-limit">
+            {MAX_PANES} panes is the maximum this workbench opens at once. Clear a file
+            before opening another — choosing one here will not close one you already
+            opened.
+          </p>
+        ) : null}
+        {renderedFiles.length === 0 ? (
+          <div className="log-workbench__file-empty">
+            <p>
+              No file in this investigation matches “{fileFilter.trim()}”. The filter
+              reads file names and the folders they arrived in, nothing else.
+            </p>
+            <button
+              type="button"
+              className="log-workbench__file-action"
+              onClick={() => setFileFilterText("")}
+            >
+              Clear filter
+            </button>
+          </div>
+        ) : (
+          renderedFiles.map((item) => {
+            const selected = panes.includes(item.evidenceId);
+            const blocked = !selected && atPaneLimit;
+            return (
+              <label
+                key={item.evidenceId}
+                className={
+                  blocked
+                    ? "log-workbench__file log-workbench__file--blocked"
+                    : "log-workbench__file"
+                }
+                data-workbench-file={item.evidenceId}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  onChange={() => togglePane(item.evidenceId)}
+                  aria-label={`Show ${item.displayLabel} in a pane`}
+                  // Left focusable on purpose: a control a keyboard reader
+                  // cannot reach cannot tell them why it will not act.
+                  aria-disabled={blocked ? true : undefined}
+                  aria-describedby={blocked ? "log-workbench-pane-limit" : undefined}
+                />
+                <span className="log-workbench__file-copy">
+                  <strong>{item.displayLabel}</strong>
+                  {item.relativePath !== item.displayLabel || item.fullyRead === false ? (
+                    <small>
+                      {item.relativePath === item.displayLabel
+                        ? ""
+                        : item.relativePath.slice(
+                            0,
+                            item.relativePath.length - item.displayLabel.length,
+                          )}
+                      {item.fullyRead === false ? "not fully read" : ""}
+                    </small>
+                  ) : null}
+                </span>
+                <TechnicalIdentifiers
+                  record={item.displayLabel}
+                  summary="Details"
+                  className="log-workbench__file-details"
+                  items={[
+                    { label: "Evidence id", value: item.evidenceId },
+                    { label: "Digest", value: item.digest },
+                    { label: "Intake batch", value: item.intakeBatchId },
+                  ]}
+                />
+              </label>
+            );
+          })
+        )}
+        {filePageCount > 1 ? (
+          <div className="log-workbench__file-pager" role="group" aria-label="File list pages">
+            <button
+              type="button"
+              className="log-workbench__file-action"
+              onClick={() => setFilePage(Math.max(0, filePageIndex - 1))}
+              disabled={filePageIndex === 0}
+            >
+              Previous files
+            </button>
+            <span>
+              Page {filePageIndex + 1} of {filePageCount}
             </span>
-            <TechnicalIdentifiers
-              record={item.displayLabel}
-              summary="Details"
-              className="log-workbench__file-details"
-              items={[
-                { label: "Evidence id", value: item.evidenceId },
-                { label: "Digest", value: item.digest },
-                { label: "Intake batch", value: item.intakeBatchId },
-              ]}
-            />
-          </label>
-        ))}
+            <button
+              type="button"
+              className="log-workbench__file-action"
+              onClick={() => setFilePage(Math.min(filePageCount - 1, filePageIndex + 1))}
+              disabled={filePageIndex >= filePageCount - 1}
+            >
+              More files
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="log-workbench__search">

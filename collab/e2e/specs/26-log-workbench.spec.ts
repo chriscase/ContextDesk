@@ -69,6 +69,32 @@ test.describe("investigation log workbench", () => {
       return "Log workbench listed investigation files by human names";
     });
 
+    const chooser = workbench.locator(".log-workbench__files");
+    const chooserStatus = workbench.locator("[data-workbench-file-status]");
+    await record.check("workbench-file-filter", async () => {
+      const filter = workbench.getByLabel("Filter by name or folder");
+      await filter.fill("worker/");
+      await expect(chooser.getByText("batch.log", { exact: true })).toBeVisible();
+      await expect(chooser.getByText("edge.log", { exact: true })).toHaveCount(0);
+      await expect(chooserStatus).toContainText(
+        /\d+ of \d+ files match(es)? this filter\./,
+      );
+      // The filter reads names and folders. An evidence id is how the record
+      // is addressed, not how a person recognises it, so it matches nothing —
+      // and the empty result says that rather than looking like a broken list.
+      const evidenceId = await chooser
+        .locator("[data-workbench-file]")
+        .first()
+        .getAttribute("data-workbench-file");
+      expect(evidenceId).toBeTruthy();
+      await filter.fill(evidenceId as string);
+      await expect(chooser.locator("[data-workbench-file]")).toHaveCount(0);
+      await expect(chooserStatus).toContainText("No file matches this filter.");
+      await workbench.getByRole("button", { name: "Clear filter" }).click();
+      await expect(chooser.getByText("edge.log", { exact: true })).toBeVisible();
+      return "chooser narrowed by folder, refused a raw evidence id, and stated the hidden remainder";
+    });
+
     await workbench.getByLabel("Show edge.log in a pane", { exact: true }).check();
     await workbench.getByLabel("Show batch.log in a pane", { exact: true }).check();
     await expect(workbench.locator("[data-workbench-pane]")).toHaveCount(2);
@@ -109,6 +135,46 @@ test.describe("investigation log workbench", () => {
       );
       return "timeout line visible with a match count that states its completeness";
     });
+
+    const chooserNames = await chooser
+      .locator("[data-workbench-file] .log-workbench__file-copy > strong")
+      .allTextContents();
+    const unopened = chooserNames.filter(
+      (name) => name !== "edge.log" && name !== "batch.log",
+    );
+    expect(unopened.length).toBeGreaterThanOrEqual(3);
+    await record.check("workbench-pane-limit-refusal", async () => {
+      for (const name of unopened.slice(0, 2)) {
+        await workbench.getByLabel(`Show ${name} in a pane`, { exact: true }).check();
+      }
+      await expect(workbench.locator("[data-workbench-pane]")).toHaveCount(4);
+      await expect(chooserStatus).toContainText("4 of 4 panes in use");
+      await expect(workbench.locator("#log-workbench-pane-limit")).toContainText(
+        "4 panes is the maximum",
+      );
+      const fifth = workbench.getByLabel(`Show ${unopened[2] as string} in a pane`, {
+        exact: true,
+      });
+      await expect(fifth).toHaveAttribute("aria-disabled", "true");
+      // Playwright reads aria-disabled as "not enabled", which is the point:
+      // the refusal is exposed to assistive technology rather than being
+      // silent. Click through it anyway — a determined click must still evict
+      // nothing.
+      await expect(fifth).toBeDisabled();
+      await fifth.click({ force: true });
+      await expect(fifth).not.toBeChecked();
+      // Nothing was evicted to make room, and the refusal says so out loud.
+      await expect(workbench.locator("[data-workbench-pane]")).toHaveCount(4);
+      await expect(workbench.locator(".log-workbench__live")).toContainText(
+        /did not open: 4 panes are already open/,
+      );
+      return "a fifth file was refused with the limit stated and all four open panes stayed put";
+    });
+    // Back to the two panes the rest of this journey reads.
+    for (const name of unopened.slice(0, 2)) {
+      await workbench.getByLabel(`Show ${name} in a pane`, { exact: true }).uncheck();
+    }
+    await expect(workbench.locator("[data-workbench-pane]")).toHaveCount(2);
 
     await workbench.getByRole("button", { name: "Show merged chronology" }).click();
     await expect(workbench.getByRole("heading", { name: "Merged chronology" })).toBeVisible();
@@ -239,6 +305,53 @@ test.describe("investigation log workbench", () => {
     const advanced = workbench.locator("details.log-workbench__search-advanced");
     await expect(advanced).not.toHaveAttribute("open", "");
     await expect(workbench.getByText("Details", { exact: true })).toHaveCount(7);
+
+    // Seven files put the chooser past a glanceable list, so the filter, the
+    // status line, and the row chrome all have to fit the phone — and the
+    // technical identity behind each row stays closed while they do.
+    const chooser = workbench.locator(".log-workbench__files");
+    await expect(workbench.getByLabel("Filter by name or folder")).toBeVisible();
+    await expect(workbench.locator("[data-workbench-file-status]")).toContainText(
+      "7 files.",
+    );
+    expect(
+      await chooser.locator("details.log-workbench__file-details[open]").count(),
+    ).toBe(0);
+    const chooserBox = await chooser.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        right: rect.right,
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      };
+    });
+    expect(chooserBox.left).toBeGreaterThanOrEqual(0);
+    expect(chooserBox.right).toBeLessThanOrEqual(390);
+    expect(chooserBox.scrollWidth).toBeLessThanOrEqual(chooserBox.clientWidth);
+
+    // A checkbox is small; the row that wraps it is the target a thumb hits.
+    const targets = await chooser.evaluate((element) =>
+      Array.from(
+        element.querySelectorAll<HTMLElement>(
+          'input[type="checkbox"], .log-workbench__file-action,'
+            + " .log-workbench__file-filter > input,"
+            + " details.log-workbench__file-details > summary",
+        ),
+      ).map((node) => {
+        const target = node.matches('input[type="checkbox"]')
+          ? (node.closest("label.log-workbench__file") as HTMLElement)
+          : node;
+        return {
+          selector: `${node.tagName}.${node.className}`,
+          height: target.getBoundingClientRect().height,
+        };
+      }),
+    );
+    expect(targets.length).toBeGreaterThan(7);
+    for (const target of targets) {
+      expect(target.height, target.selector).toBeGreaterThanOrEqual(44);
+    }
 
     await workbench.getByLabel("Find in logs").focus();
     await page.keyboard.type("timeout");

@@ -285,6 +285,8 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "bookmark",
           "chronology",
           "timezone",
+          "filter files",
+          "too many files",
         ],
         what:
           "The Log workbench is the Analyze surface for logs that already belong to the investigation. It pages large files, searches with bounded counts, and keeps UUIDs and digests behind technical details. Timezone review stays a separate, explicit step: the workbench will not guess a zone.",
@@ -292,7 +294,8 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Use it after Capture has imported files, a ZIP, or a directory, when you need to read more than one log at once or return to a saved view after reload.",
         steps: [
           "Open Analyze and find Log workbench.",
-          "Tick two or more files to open them side by side.",
+          "Tick two or more files to open them side by side. Four panes is the maximum: a fifth file is refused with the reason, and nothing you already opened is closed for it.",
+          "On an investigation with more than a handful of files, filter the list by file name or the folder it arrived in — the chooser shows one page at a time and says how many files it is holding back.",
           "Search, then choose a hit to open that file at the matching line.",
           "Read the count: an exact count says so, a bounded one says “at least N”, and a corpus too large to read to the end says that matches past the read limit were not counted.",
           "Narrow by time with a full UTC instant such as 2024-03-10T08:00:00Z; a local time with no zone is refused rather than guessed.",

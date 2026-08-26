@@ -107,14 +107,128 @@
   font-weight: 400;
 }
 
+/*
+ * Chooser controls above the list. A three-file investigation never sees this
+ * row; past a glanceable list the filter is what keeps three hundred files
+ * reachable, so it wraps rather than pushing the panel wider than the phone.
+ *
+ * These rules carry an extra `.log-workbench` scope on purpose: the panel's
+ * generic `input`/`button` sizing lives further down this file, and at equal
+ * specificity the later rule would shrink every chooser target below the 44px
+ * a thumb needs.
+ */
+.log-workbench__file-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.5rem;
+  align-items: end;
+  min-width: 0;
+  padding: 0.15rem 0.4rem 0.35rem;
+}
+
+.log-workbench__file-filter {
+  display: grid;
+  gap: 0.2rem;
+  flex: 1 1 12rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.log-workbench .log-workbench__file-filter > input {
+  min-width: 0;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.log-workbench .log-workbench__file-action {
+  min-height: 2.75rem;
+  padding-inline: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.log-workbench .log-workbench__file-action:hover:not([disabled]) {
+  border-color: var(--accent-strong, var(--accent));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-input));
+}
+
+.log-workbench__files-status {
+  margin: 0;
+  padding: 0 0.4rem 0.2rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/*
+ * Why the next file will not open, stated where the refusal happens rather
+ * than only in the announcement a sighted reader never hears.
+ */
+.log-workbench__file-limit {
+  margin: 0 0.4rem 0.15rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  color: var(--fg);
+  font-size: 0.78rem;
+}
+
+.log-workbench__file-empty {
+  display: grid;
+  justify-items: start;
+  gap: 0.5rem;
+  padding: 0.75rem 0.5rem;
+}
+
+.log-workbench__file-empty > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.log-workbench__file-pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.5rem;
+  align-items: center;
+  padding: 0.35rem 0.4rem 0.15rem;
+  border-top: 1px solid var(--line-soft, var(--border));
+}
+
+.log-workbench__file-pager > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .log-workbench__file {
   display: grid;
   grid-template-columns: auto 1fr auto;
   gap: 0.4rem 0.6rem;
   align-items: center;
-  min-height: 2.5rem;
+  min-height: 2.75rem;
   padding: 0.45rem 0.5rem;
   border-radius: 0.45rem;
+}
+
+/*
+ * A row that will not open while four panes are in use stays legible and
+ * focusable — it is refused with a reason, not removed from the list.
+ */
+.log-workbench__file--blocked > .log-workbench__file-copy {
+  color: var(--muted);
 }
 
 .log-workbench__file > input {
@@ -137,6 +251,7 @@
 .log-workbench__file-copy > small {
   color: var(--muted);
   font-size: 0.72rem;
+  overflow-wrap: anywhere;
 }
 
 .log-workbench__file > .log-workbench__file-details {
@@ -146,8 +261,10 @@
 }
 
 .log-workbench__file > .log-workbench__file-details > summary {
-  min-height: 2rem;
-  padding-inline: 0.45rem;
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding-inline: 0.55rem;
   border: 1px solid transparent;
   border-radius: 0.35rem;
   font-size: 0.75rem;
@@ -175,6 +292,27 @@
 .log-workbench__file input,
 .log-workbench__sync input {
   accent-color: var(--accent);
+}
+
+.log-workbench .log-workbench__file-filter > input:focus-visible,
+.log-workbench .log-workbench__file-action:focus-visible,
+.log-workbench .log-workbench__file > input:focus-visible,
+.log-workbench .log-workbench__file > .log-workbench__file-details > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/*
+ * Nothing in the chooser may widen the page. Long nested paths and long
+ * imported names wrap inside the row instead of scrolling the document, so a
+ * 390px viewport keeps a single vertical scroll.
+ */
+.log-workbench__files,
+.log-workbench__file,
+.log-workbench__file-tools,
+.log-workbench__file-pager {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .log-workbench__search,

@@ -687,6 +687,7 @@ export const WAR_ROOM_SCENARIOS: readonly WarRoomScenario[] = [
       "Can I open two logs from this investigation, find the timeout, save that view, and still have it after reload?",
     expectedEvidence: [
       "A Log workbench on Analyze that lists this investigation's imported files by human names.",
+      "A truthful count of how many of those files the chooser is showing, and why a fifth pane will not open.",
       "Two panes open side by side on selected files.",
       "A search hit for the timeout line with an honest match count.",
       "A saved view that reappears after reload.",
@@ -717,9 +718,23 @@ export const WAR_ROOM_SCENARIOS: readonly WarRoomScenario[] = [
         failsWhen: "The operator has to open the global Sources catalog to find the imported logs.",
       },
       {
+        id: "workbench-file-filter",
+        claim:
+          "The file chooser narrows the investigation's files by human name or folder and states how many it is hiding.",
+        failsWhen:
+          "Finding one file among many means reading every row, the count hides the remainder, or the filter answers to a raw evidence id.",
+      },
+      {
         id: "workbench-two-panes",
         claim: "Two selected logs can be opened side by side.",
         failsWhen: "Only one file can be on screen at a time.",
+      },
+      {
+        id: "workbench-pane-limit-refusal",
+        claim:
+          "A fifth file is refused with the four-pane limit stated, leaving every open pane where it was.",
+        failsWhen:
+          "Choosing another file silently closes one the responder opened, or nothing on screen says why it did not open.",
       },
       {
         id: "workbench-virtual-row-contract",
