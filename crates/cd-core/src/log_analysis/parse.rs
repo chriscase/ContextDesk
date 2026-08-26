@@ -1657,6 +1657,20 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
     // `XYZ INFO ...` remains a whole-line fallback.
     if let Some((level_token, payload)) = take_token(token_tail) {
         if let Some(level) = common_level_token(level_token) {
+            // A slash-delimited token can be producer-supplied IANA timezone
+            // evidence (for example `America/Chicago`). We do not interpret
+            // it without an operator declaration, and we must not discard it
+            // as though it were merely a service column. Retain the complete
+            // post-timestamp text so review can see the named zone while the
+            // timestamp remains unresolved and order-only.
+            if looks_like_iana_zone_evidence(token) {
+                return Some(DateTimeMessageParts {
+                    timestamp: WildflyTimestamp::Local,
+                    source_timestamp,
+                    level: Some(level),
+                    payload: body,
+                });
+            }
             let payload = strip_standalone_dash_delimiter(payload.trim_start());
             return Some(DateTimeMessageParts {
                 timestamp: WildflyTimestamp::Local,
@@ -1882,6 +1896,26 @@ fn looks_like_unresolved_zone_column(token: &str, rest: &str) -> bool {
         && (token.bytes().all(|byte| byte.is_ascii_uppercase())
             || AMBIGUOUS_LOCAL_ZONES.contains(&upper.as_str()))
         && next_is_level_like
+}
+
+fn looks_like_iana_zone_evidence(token: &str) -> bool {
+    if !(3..=128).contains(&token.len()) || token.starts_with('/') || token.ends_with('/') {
+        return false;
+    }
+    let mut component_count = 0usize;
+    for component in token.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || !component.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'+' | b'.')
+            })
+        {
+            return false;
+        }
+        component_count += 1;
+    }
+    component_count >= 2
 }
 
 fn strip_standalone_dash_delimiter(payload: &str) -> &str {
