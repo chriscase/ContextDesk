@@ -1,0 +1,8 @@
+From: reporter@example.test
+To: support@example.test
+Subject: Checkout stalled after deploy
+Date: Sun, 10 Mar 2024 08:12:00 +0000
+Message-ID: <synthetic-thread-001@example.test>
+
+The checkout form stayed on "placing order" after the 07:00 UTC deploy.
+This is a human conversation, not a log.

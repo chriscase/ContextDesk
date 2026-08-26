@@ -38,6 +38,11 @@ import {
   createLogTimeCasePort,
 } from "../../server/src/modules/log-time/index.js";
 import {
+  MemoryWorkbenchStore,
+  WorkbenchService,
+  createWorkbenchCasePort,
+} from "../../server/src/modules/workbench/index.js";
+import {
   MemoryLocalGrantStore,
   MemoryUserProfileStore,
 } from "../../server/src/modules/people/index.js";
@@ -202,10 +207,13 @@ async function main(): Promise<void> {
   // is configured, so the browser suite exercises the shipped pipeline rather
   // than a stand-in. Without it the routes stay unregistered and the spec
   // skips, which is honest: there is nothing to review without the pipeline.
+  // The Log workbench still serves investigation-owned intake bytes without
+  // that host — search, panes, views, and locators do not guess a timezone.
+  const logTimeStore = new MemoryLogTimeStore();
   const logTimeBin = process.env.COLLAB_E2E_LOG_TIME_BIN?.trim();
   const logTime = logTimeBin
     ? new LogTimeService({
-        store: new MemoryLogTimeStore(),
+        store: logTimeStore,
         bridge: new ProcessLogTimeBridge({
           command: logTimeBin,
           cacheRoot: join(root, "log-corpora"),
@@ -220,6 +228,35 @@ async function main(): Promise<void> {
         audit,
       })
     : null;
+  domain.bindNormalizationRevision(async (caseId) =>
+    (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+  );
+  const workbench = new WorkbenchService({
+    store: new MemoryWorkbenchStore(),
+    cases: createWorkbenchCasePort({
+      cases: caseStore,
+      domain,
+      evidence: store,
+      currentNormalizationRevision: async (caseId) =>
+        (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+      ...(logTime
+        ? {
+            listHostEventStamps: async (caseId) => {
+              const listed = await logTime.listWorkbenchEvents(caseId);
+              if (!listed) return null;
+              return listed.search.hits.map((hit) => ({
+                source: hit.source,
+                message: hit.message,
+                ts: hit.ts,
+                timeQuality: hit.timeQuality,
+                unresolvedLocalTimestamp: hit.unresolvedLocalTimestamp,
+              }));
+            },
+          }
+        : {}),
+    }),
+    audit,
+  });
   const presence = new PresenceService();
   const exporter = new ExportService({
     cases: domain,
@@ -271,6 +308,7 @@ async function main(): Promise<void> {
     triageRuns,
     presence,
     ...(logTime ? { logTime } : {}),
+    workbench,
     experiments,
     exporter,
     portable,

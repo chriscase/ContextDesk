@@ -38,6 +38,9 @@ export const SCENARIO_IDS = [
   "new-evidence-rerun",
   "degraded-model-lanes",
   "local-vs-shared-service",
+  "log-workbench-triage",
+  "workbench-email-chat",
+  "workbench-locator-privacy",
 ] as const;
 
 export type ScenarioId = (typeof SCENARIO_IDS)[number];
@@ -675,6 +678,141 @@ export const WAR_ROOM_SCENARIOS: readonly WarRoomScenario[] = [
       },
     ],
     spec: "specs/21-war-room-lanes-and-deployment.spec.ts",
+  },
+  {
+    id: "log-workbench-triage",
+    ordinal: 11,
+    title: "Side-by-side log workbench on Analyze",
+    triageQuestion:
+      "Can I open two logs from this investigation, find the timeout, save that view, and still have it after reload?",
+    expectedEvidence: [
+      "A Log workbench on Analyze that lists this investigation's imported files by human names.",
+      "Two panes open side by side on selected files.",
+      "A search hit for the timeout line with an honest match count.",
+      "A saved view that reappears after reload.",
+    ],
+    expectedProvenance: [
+      "The files are investigation evidence, not entries in the global Sources catalog.",
+      "Digests and ids stay behind technical details.",
+    ],
+    expectedUnknowns: [
+      "The timezone of local worker timestamps until a person declares one.",
+      "Whether a bounded search saw every later match.",
+    ],
+    usefulNextActions: [
+      "Declare a timezone in Timezone review for the worker family.",
+      "Freeze the selected evidence after the view is useful.",
+    ],
+    deepLinks: [
+      {
+        id: "log-workbench",
+        purpose: "Land on the Log workbench in Analyze.",
+        template: `${INVESTIGATION}/analyze?section=triage-log-workbench#triage-log-workbench`,
+      },
+    ],
+    assertions: [
+      {
+        id: "workbench-named-on-analyze",
+        claim: "Analyze shows a Log workbench for this investigation's files.",
+        failsWhen: "The operator has to open the global Sources catalog to find the imported logs.",
+      },
+      {
+        id: "workbench-two-panes",
+        claim: "Two selected logs can be opened side by side.",
+        failsWhen: "Only one file can be on screen at a time.",
+      },
+      {
+        id: "workbench-search-timeout",
+        claim: "Search returns the timeout line with a match count.",
+        failsWhen: "The timeout line is missing or the count is empty.",
+      },
+      {
+        id: "workbench-saved-view-reload",
+        claim: "A saved view is still listed after reload.",
+        failsWhen: "Reload forgets the saved view.",
+      },
+    ],
+    spec: "specs/26-log-workbench.spec.ts",
+  },
+  {
+    id: "workbench-email-chat",
+    ordinal: 12,
+    title: "Email and chat sit beside logs without becoming logs",
+    triageQuestion:
+      "Support forwarded an email and a chat. Can I read them next to the logs without treating the conversation as a timestamped log?",
+    expectedEvidence: [
+      "The email and chat files listed in the Log workbench.",
+      "The sentence that the conversation is not a log, searchable as written.",
+    ],
+    expectedProvenance: [
+      "The files keep the names they had in the synthetic bundle.",
+    ],
+    expectedUnknowns: [
+      "Whether the chat's 'around 02:30 local' matches the worker clock.",
+    ],
+    usefulNextActions: [
+      "Search the logs for the request id named in chat.",
+    ],
+    deepLinks: [
+      {
+        id: "log-workbench",
+        purpose: "Read email, chat, and logs in the workbench.",
+        template: `${INVESTIGATION}/analyze?section=triage-log-workbench#triage-log-workbench`,
+      },
+    ],
+    assertions: [
+      {
+        id: "workbench-email-visible",
+        claim: "The support email is listed with the logs.",
+        failsWhen: "The email never appears on Analyze.",
+      },
+      {
+        id: "workbench-chat-not-a-log",
+        claim: "The chat text that it is not a log is readable in search.",
+        failsWhen: "The conversation is rewritten as a log line with a guessed timestamp.",
+      },
+    ],
+    spec: "specs/26-log-workbench.spec.ts",
+  },
+  {
+    id: "workbench-locator-privacy",
+    ordinal: 13,
+    title: "A copied log locator does not leak to someone who cannot open the case",
+    triageQuestion:
+      "If I copy a bookmark token, can a teammate who cannot open this investigation tell that the file exists?",
+    expectedEvidence: [
+      "An authorized reader can resolve the token to a line.",
+      "An unauthorized reader gets the same not-found shape, with no path.",
+    ],
+    expectedProvenance: [
+      "The token is a digest, not a filename.",
+    ],
+    expectedUnknowns: [
+      "Whether the token refers to a missing bookmark or a hidden one — both look the same to the unauthorized reader.",
+    ],
+    usefulNextActions: [
+      "Share the investigation membership instead of the token if the other person should see the line.",
+    ],
+    deepLinks: [
+      {
+        id: "log-workbench",
+        purpose: "The workbench that minted the bookmark.",
+        template: `${INVESTIGATION}/analyze?section=triage-log-workbench#triage-log-workbench`,
+      },
+    ],
+    assertions: [
+      {
+        id: "workbench-locator-authorized",
+        claim: "The owner can mint a bookmark token.",
+        failsWhen: "No share-safe token is recorded.",
+      },
+      {
+        id: "workbench-locator-unauthorized-404",
+        claim: "A teammate without access gets no path and no investigation id.",
+        failsWhen: "The unauthorized response names the file or the investigation.",
+      },
+    ],
+    spec: "specs/26-log-workbench.spec.ts",
   },
 ] as const;
 

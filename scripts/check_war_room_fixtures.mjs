@@ -34,6 +34,8 @@ export const SCAN_TARGETS = [
   "collab/e2e/specs/20-war-room-collaboration.spec.ts",
   "collab/e2e/specs/21-war-room-lanes-and-deployment.spec.ts",
   "collab/e2e/specs/22-war-room-a11y-responsive.spec.ts",
+  "collab/e2e/specs/26-log-workbench.spec.ts",
+  "collab/e2e/fixtures/war-room/workbench",
   "collab/e2e/fixtures/triage-bridge-degraded-runner.mjs",
   "docs/WAR_ROOM_SCENARIO_MATRIX.md",
 ];

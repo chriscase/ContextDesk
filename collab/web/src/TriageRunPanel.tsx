@@ -48,6 +48,11 @@ interface TriageProfileOption {
   provider: string;
 }
 
+interface TriagePolicyView {
+  purposes: Record<string, { enabled: boolean; allowedSubjects: string[]; maxLanes?: number }>;
+  revision: number;
+}
+
 interface TriageCapabilitiesView {
   syntheticAvailable: boolean;
   gatewayAvailable: boolean;
@@ -256,6 +261,7 @@ export function TriageRunPanel(props: {
   const [jobs, setJobs] = useState<JobView[]>([]);
   const [externalChatRuns, setExternalChatRuns] = useState<ExternalChatRunView[]>([]);
   const [gatewayProfiles, setGatewayProfiles] = useState<TriageProfileOption[]>([]);
+  const [triagePolicy, setTriagePolicy] = useState<TriagePolicyView | null>(null);
   const [triageCapabilities, setTriageCapabilities] = useState<TriageCapabilitiesView | null>(null);
   const [compareJobIds, setCompareJobIds] = useState<string[]>([]);
   const [candidateOptions, setCandidateOptions] = useState<CandidateOption[]>(DEFAULT_CANDIDATES);
@@ -317,7 +323,7 @@ export function TriageRunPanel(props: {
       const jobBody = (await jobsResponse.json()) as { jobs?: JobView[] };
       const importsBody = (await importsResponse.json()) as { runs?: ExternalChatRunView[] };
       const profilesBody = profilesResponse.ok
-        ? (await profilesResponse.json()) as { profiles?: TriageProfileOption[] }
+        ? (await profilesResponse.json()) as { profiles?: TriageProfileOption[]; policy?: TriagePolicyView }
         : { profiles: [] };
       const capabilitiesBody = capabilitiesResponse.ok
         ? (await capabilitiesResponse.json()) as TriageCapabilitiesView & { schemaId?: string }
@@ -339,6 +345,7 @@ export function TriageRunPanel(props: {
       setJobs(nextJobs);
       setExternalChatRuns(nextExternalChatRuns);
       setGatewayProfiles(profilesBody.profiles ?? []);
+      setTriagePolicy(profilesBody.policy ?? null);
       setTriageCapabilities(capabilitiesBody);
       setSelectedExternalRunId((current) =>
         current && nextExternalChatRuns.some((run) => run.id === current) ? current : "",
@@ -404,9 +411,15 @@ export function TriageRunPanel(props: {
     () => candidateOptions.filter((candidate) => selectedCandidates.includes(candidate.candidateId)),
     [candidateOptions, selectedCandidates],
   );
+  const gatewayAvailable = triageCapabilities?.gatewayAvailable ?? true;
+  const selectableGatewayProfiles = useMemo(() => {
+    if (!triagePolicy) return gatewayProfiles;
+    const rule = triagePolicy.purposes.comparison;
+    if (!rule) return gatewayProfiles;
+    return gatewayProfiles.filter((profile) => rule.allowedSubjects.includes(profile.id));
+  }, [gatewayProfiles, triagePolicy]);
   const gatewayProfilesReady = mode !== "gateway"
     || selectedGatewayCandidates.every((candidate) => Boolean(profileFor(candidate)));
-  const gatewayAvailable = triageCapabilities?.gatewayAvailable ?? true;
 
   useEffect(() => {
     if (mode === "gateway" && triageCapabilities?.gatewayAvailable === false) {
@@ -416,21 +429,23 @@ export function TriageRunPanel(props: {
 
   function selectedProfileFor(candidate: CandidateOption): TriageProfileOption | undefined {
     const selected = (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim();
-    const exactSelection = gatewayProfiles.find((profile) => profile.id === selected);
+    const exactSelection = selectableGatewayProfiles.find((profile) => profile.id === selected);
     if (exactSelection) return exactSelection;
 
     const hostProfileId = selected || candidate.profileId || "";
-    return gatewayProfiles.find((profile) =>
+    return selectableGatewayProfiles.find((profile) =>
       (profile.profileId ?? profile.id) === hostProfileId
       && (profile.modelId === candidate.model || profile.alias === candidate.model),
-    ) ?? gatewayProfiles.find((profile) =>
+    ) ?? selectableGatewayProfiles.find((profile) =>
       profile.modelId === candidate.model || profile.alias === candidate.model,
     );
   }
 
   function profileFor(candidate: CandidateOption): string {
     return selectedProfileFor(candidate)?.id
-      ?? (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim();
+      ?? (triagePolicy && gatewayProfiles.length > 0
+        ? ""
+        : (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim());
   }
 
   function hostProfileFor(candidate: CandidateOption): string {
@@ -448,7 +463,7 @@ export function TriageRunPanel(props: {
 
   function profileLabelFor(candidate: Pick<CandidateOption, "profileId" | "model">): string | null {
     if (!candidate.profileId) return null;
-    const profile = gatewayProfiles.find((item) =>
+    const profile = selectableGatewayProfiles.find((item) =>
       (item.profileId ?? item.id) === candidate.profileId
       && (!item.modelId || item.modelId === candidate.model || item.alias === candidate.model),
     );
@@ -484,7 +499,7 @@ export function TriageRunPanel(props: {
     const model = String(data.get("laneModel") ?? "").trim();
     const role = String(data.get("laneRole") ?? "").trim() || "single";
     const profileSelectionId = String(data.get("laneProfile") ?? "").trim();
-    const selectedProfile = gatewayProfiles.find((profile) => profile.id === profileSelectionId);
+    const selectedProfile = selectableGatewayProfiles.find((profile) => profile.id === profileSelectionId);
     const profileId = selectedProfile?.profileId ?? selectedProfile?.id ?? profileSelectionId;
     const chosenModel = selectedProfile?.modelId ?? model;
     setLanePickerError(null);
@@ -831,7 +846,7 @@ export function TriageRunPanel(props: {
                           </span>
                         </label>
                         {mode === "gateway" && selectedCandidates.includes(candidate.candidateId) ? (
-                          gatewayProfiles.length > 0 ? (
+                          selectableGatewayProfiles.length > 0 ? (
                             <label className="triage-runs__lane-profile">
                               Gateway model
                               <select
@@ -840,13 +855,18 @@ export function TriageRunPanel(props: {
                                 onChange={(event) => setLaneProfiles((current) => ({ ...current, [candidate.candidateId]: event.target.value }))}
                               >
                                 <option value="" disabled>Select a profile</option>
-                                {gatewayProfiles.map((profile) => (
+                                {selectableGatewayProfiles.map((profile) => (
                                   <option key={profile.id} value={profile.id}>
                                     {profile.label} · {profile.provider}
                                   </option>
                                 ))}
                               </select>
                             </label>
+                          ) : gatewayProfiles.length > 0 ? (
+                            <p className="case-memory__note">
+                              No gateway model is approved for comparison by the current workspace policy.
+                              Ask an administrator to approve a model before starting this run.
+                            </p>
                           ) : (
                             <label className="triage-runs__lane-profile">
                               Gateway connection ID
@@ -866,6 +886,11 @@ export function TriageRunPanel(props: {
                         Each selected lane chooses its own gateway model. Credentials and endpoints stay on the War Room host.
                         {!gatewayAvailable ? " Configure COLLAB_TRIAGE_RUNNER to enable gateway execution." : ""}
                         {selectedCandidates.length < 2 ? " Gateway comparisons require at least two lanes." : ""}
+                        {triagePolicy ? ` Workspace model-use policy revision ${triagePolicy.revision} is applied.` : ""}
+                        {triagePolicy?.purposes.comparison?.enabled === false ? " Model comparison is disabled by workspace policy." : ""}
+                        {triagePolicy && selectableGatewayProfiles.length === 0 && gatewayProfiles.length > 0
+                          ? " No approved gateway models are available for comparison."
+                          : ""}
                       </span>
                     ) : null}
                     <details className="triage-runs__lane-picker">
@@ -911,20 +936,24 @@ export function TriageRunPanel(props: {
                           </select>
                         </label>
                         {mode === "gateway" ? (
-                          gatewayProfiles.length > 0 ? (
+                          selectableGatewayProfiles.length > 0 ? (
                             <label className="triage-runs__field">
                               Gateway model
                               <select name="laneProfile" aria-label="New lane gateway model" defaultValue="">
                                 <option value="" disabled>
                                   Select a profile
                                 </option>
-                                {gatewayProfiles.map((profile) => (
+                                {selectableGatewayProfiles.map((profile) => (
                                   <option key={profile.id} value={profile.id}>
                                     {profile.label} · {profile.provider}
                                   </option>
                                 ))}
                               </select>
                             </label>
+                          ) : gatewayProfiles.length > 0 ? (
+                            <p className="case-memory__note">
+                              No gateway model is approved for comparison by the current workspace policy.
+                            </p>
                           ) : (
                             <label className="triage-runs__field">
                               Gateway connection ID
@@ -950,7 +979,7 @@ export function TriageRunPanel(props: {
                   <button
                     className="login__submit"
                     type="button"
-                    disabled={running || !selectedSnapshotId || selectedCandidates.length === 0 || (mode === "gateway" && (!gatewayAvailable || selectedCandidates.length < 2 || !gatewayProfilesReady))}
+                    disabled={running || !selectedSnapshotId || selectedCandidates.length === 0 || (mode === "gateway" && (!gatewayAvailable || selectedCandidates.length < 2 || !gatewayProfilesReady || triagePolicy?.purposes.comparison?.enabled === false || (gatewayProfiles.length > 0 && selectableGatewayProfiles.length === 0)))}
                     onClick={() => void launch()}
                   >
                     {running ? "Starting…" : mode === "gateway" ? "Run gateway comparison" : "Run synthetic comparison"}

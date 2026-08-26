@@ -1,0 +1,44 @@
+{
+  "schemaId": "cd-collab.log_workbench_view.v1",
+  "id": "33333333-3333-4333-8333-333333333333",
+  "investigationId": "11111111-1111-4111-8111-111111111111",
+  "name": "Timeout window, two panes",
+  "filters": {
+    "includeTerms": ["timeout"],
+    "excludeTerms": [],
+    "severity": null,
+    "component": null,
+    "file": null,
+    "rotationFamily": "gateway/edge.log",
+    "timeFrom": "2024-03-10T07:00:00.000Z",
+    "timeTo": "2024-03-10T09:00:00.000Z",
+    "evidenceIds": [
+      "22222222-2222-4222-8222-222222222222",
+      "55555555-5555-4555-8555-555555555555"
+    ]
+  },
+  "query": "timeout",
+  "mode": "case_insensitive",
+  "selectedPanes": [
+    "22222222-2222-4222-8222-222222222222",
+    "55555555-5555-4555-8555-555555555555"
+  ],
+  "timeFrom": "2024-03-10T07:00:00.000Z",
+  "timeTo": "2024-03-10T09:00:00.000Z",
+  "sort": "time_asc",
+  "grouping": "file",
+  "display": {
+    "syncScroll": true,
+    "wrap": false,
+    "lineNumbers": true,
+    "displayTimezone": "UTC"
+  },
+  "contextBefore": 1,
+  "contextAfter": 1,
+  "privacyClass": "owner_only",
+  "idempotencyKey": "view-timeout-0001",
+  "createdAt": "2024-03-11T12:00:00.000Z",
+  "createdBy": "analyst-synthetic-01",
+  "replayed": false,
+  "authorizationGrant": "never-a-token"
+}

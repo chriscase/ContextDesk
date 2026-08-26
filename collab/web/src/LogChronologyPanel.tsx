@@ -25,6 +25,8 @@ interface ChronologyPage {
 
 const PAGE_SIZE = 50;
 const MAX_ERROR_LENGTH = 240;
+/** Pause after the last keystroke before a filter change reaches the corpus. */
+const FILTER_SETTLE_MS = 250;
 
 const REASON_COPY: Record<string, string> = {
   timezone_unresolved: "Timezone not declared",
@@ -57,6 +59,36 @@ function reasonCopy(reason: string | null): string {
   return reason ? (REASON_COPY[reason] ?? "Order-only: instant unresolved") : "";
 }
 
+const TIME_QUALITIES = ["wall", "mixed", "order_only"] as const;
+
+/**
+ * Accept a chronology page only when it carries the fields this panel reads.
+ *
+ * This panel renders inside the investigation workspace, and an unvalidated
+ * body that is missing a field would throw during render and take the whole
+ * stage down with it. A body this panel cannot read is reported as an error,
+ * not rendered as a partial truth.
+ */
+function toChronologyPage(raw: unknown): ChronologyPage | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const body = raw as Record<string, unknown>;
+  if (typeof body.corpusRevision !== "number") return null;
+  if (!TIME_QUALITIES.includes(body.timeQuality as ChronologyPage["timeQuality"])) return null;
+  if (!Array.isArray(body.rows)) return null;
+  if (typeof body.totalMatched !== "number" || typeof body.orderOnlyCount !== "number") {
+    return null;
+  }
+  if (body.nextCursor !== null && typeof body.nextCursor !== "string") return null;
+  return {
+    corpusRevision: body.corpusRevision,
+    rows: body.rows as ChronologyRow[],
+    nextCursor: body.nextCursor as string | null,
+    totalMatched: body.totalMatched,
+    orderOnlyCount: body.orderOnlyCount,
+    timeQuality: body.timeQuality as ChronologyPage["timeQuality"],
+  };
+}
+
 function queryPath(
   caseId: string,
   search: string,
@@ -75,7 +107,11 @@ function queryPath(
  * the timezone-wiring branch can choose its insertion point without this slice
  * changing that branch's workspace composition.
  */
-export function LogChronologyPanel(props: { caseId: string }) {
+export function LogChronologyPanel(props: {
+  caseId: string;
+  /** When false, the stage is mounted but hidden — do not read the corpus. */
+  active?: boolean;
+}) {
   const [search, setSearch] = useState("");
   const [source, setSource] = useState("");
   const [page, setPage] = useState<ChronologyPage | null>(null);
@@ -109,8 +145,12 @@ export function LogChronologyPanel(props: { caseId: string }) {
           setError(await errorText(response, "Chronology could not be loaded."));
           return;
         }
-        const next = (await response.json()) as ChronologyPage;
+        const next = toChronologyPage(await response.json());
         if (requestVersion.current !== version) return;
+        if (!next) {
+          setError("Chronology could not be read from this server's reply.");
+          return;
+        }
         setUnavailable(false);
         setPage(next);
         setRows((current) => (append ? [...current, ...next.rows] : next.rows));
@@ -125,19 +165,25 @@ export function LogChronologyPanel(props: { caseId: string }) {
     [props.caseId, search, source],
   );
 
+  // The filters are typed, not submitted. Firing a corpus query on every
+  // keystroke turns a long word into a burst of full-corpus reads; one settled
+  // pause is enough for a filter this cheap to change.
   useEffect(() => {
-    void load(null, false);
-  }, [load]);
+    if (props.active === false) return;
+    const timer = setTimeout(() => void load(null, false), FILTER_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [load, props.active]);
 
   useEffect(() => {
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId && detail.caseId !== props.caseId) return;
+      if (props.active === false) return;
       void load(null, false);
     };
     window.addEventListener("contextdesk:log-time-changed", refresh);
     return () => window.removeEventListener("contextdesk:log-time-changed", refresh);
-  }, [load, props.caseId]);
+  }, [load, props.caseId, props.active]);
 
   if (unavailable) return null;
 

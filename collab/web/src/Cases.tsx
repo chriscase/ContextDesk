@@ -3,6 +3,9 @@ import { CaseDiscussion } from "./CaseDiscussion.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
+import { LogChronologyPanel } from "./LogChronologyPanel.js";
+import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
+import { LogWorkbench } from "./LogWorkbench.js";
 import { TriageRunPanel } from "./TriageRunPanel.js";
 import { WORKSTREAMS_SECTION, Workstreams } from "./Workstreams.js";
 import {
@@ -125,8 +128,8 @@ const KNOWN_STATUSES = ["open", "monitoring", "resolved", "archived"] as const;
 const STAGES: readonly { id: StageId; label: string; hint: string }[] = [
   { id: "situation", label: "Situation", hint: "set the question" },
   { id: "capture", label: "Capture", hint: "add evidence" },
-  { id: "analyze", label: "Analyze", hint: "freeze & run" },
-  { id: "compare", label: "Compare", hint: "find differences" },
+  { id: "analyze", label: "Analyze", hint: "inspect logs, freeze & run" },
+  { id: "compare", label: "Compare", hint: "lanes side by side" },
   { id: "decide", label: "Decide", hint: "record the call" },
 ];
 
@@ -693,6 +696,9 @@ export function Cases(props: {
   // Entity filtering reads a server-scoped index, so choosing an entity can
   // only ever narrow what this reader could already list.
   const [entityFilter, setEntityFilter] = useState("all");
+  const [occurredFrom, setOccurredFrom] = useState("");
+  const [decisionFilter, setDecisionFilter] = useState("all");
+  const [serviceFilter, setServiceFilter] = useState("all");
   const [entityOptions, setEntityOptions] = useState<EntityRow[]>([]);
   const [involvementIndex, setInvolvementIndex] = useState<
     { investigationId: string; entityId: string }[]
@@ -1168,6 +1174,10 @@ export function Cases(props: {
   const visibleCases = cases.filter((c) => {
     if (statusFilter !== "all" && c.status !== statusFilter) return false;
     if (entityFilter !== "all" && !casesByEntity.get(entityFilter)?.has(c.id)) return false;
+    if (serviceFilter !== "all" && !casesByEntity.get(serviceFilter)?.has(c.id)) return false;
+    if (decisionFilter === "recorded" && c.status !== "resolved") return false;
+    if (decisionFilter === "open" && c.status === "resolved") return false;
+    if (occurredFrom && (c.occurredAt ?? "") < occurredFrom) return false;
     if (!normalizedSearch) return true;
     return [
       c.title,
@@ -1352,6 +1362,49 @@ export function Cases(props: {
             </select>
           </label>
         ) : null}
+        {entityOptions.some((entity) => entity.kind === "service" || entity.kind === "system") ? (
+          <label className="case-list__filter">
+            <span className="case-list__control-label">Affected service</span>
+            <select
+              className="login__input"
+              aria-label="Filter investigations by affected service"
+              value={serviceFilter}
+              onChange={(e) => setServiceFilter(e.target.value)}
+            >
+              <option value="all">All services</option>
+              {entityOptions
+                .filter((entity) => entity.kind === "service" || entity.kind === "system")
+                .map((entity) => (
+                  <option key={entity.id} value={entity.id}>
+                    {entity.label}
+                  </option>
+                ))}
+            </select>
+          </label>
+        ) : null}
+        <label className="case-list__filter">
+          <span className="case-list__control-label">Observed from</span>
+          <input
+            className="login__input"
+            type="date"
+            aria-label="Filter investigations by observed date"
+            value={occurredFrom}
+            onChange={(e) => setOccurredFrom(e.target.value)}
+          />
+        </label>
+        <label className="case-list__filter">
+          <span className="case-list__control-label">Decision</span>
+          <select
+            className="login__input"
+            aria-label="Filter investigations by decision"
+            value={decisionFilter}
+            onChange={(e) => setDecisionFilter(e.target.value)}
+          >
+            <option value="all">All decisions</option>
+            <option value="recorded">Recorded decision</option>
+            <option value="open">No recorded decision</option>
+          </select>
+        </label>
         <label className="case-list__filter">
           <span className="case-list__control-label">Status</span>
           <select
@@ -2359,7 +2412,7 @@ export function Cases(props: {
             lede={
               workstreamFocused
                 ? "One workstream, in full: what it was asked, what it examined, what it found, and what it left unknown."
-                : "Curate the evidence the investigation may rely on, freeze it, then read each workstream that examined exactly that evidence."
+                : "Open the Log workbench to read this investigation’s files, freeze evidence, then read each workstream that examined exactly that snapshot."
             }
             next="Select the evidence, freeze it, then launch one run with one clear question."
           >
@@ -2381,6 +2434,34 @@ export function Cases(props: {
                 workstream's own record is the page. They also stop receiving
                 the route focus while hidden, so only the workstream record
                 claims keyboard focus for that address. */}
+            <TriageAnchor id="triage-log-workbench" label="Log workbench">
+              <div hidden={workstreamFocused}>
+                <LogWorkbench
+                  caseId={current.id}
+                  canWrite={canWrite}
+                  readOnly={readOnly}
+                  active={stage === "analyze"}
+                />
+              </div>
+            </TriageAnchor>
+            <TriageAnchor id="triage-log-time" label="Timezone review">
+              <div hidden={workstreamFocused}>
+                <LogTimeReviewPanel
+                  caseId={current.id}
+                  canWrite={canWrite}
+                  readOnly={readOnly}
+                />
+              </div>
+            </TriageAnchor>
+            {/* The normalized chronology is where a responder reads one merged
+                order across sources, with every line the host could not place
+                still named as order-only. It renders nothing when this
+                investigation has no normalized corpus. */}
+            <TriageAnchor id="triage-log-chronology" label="Normalized log chronology">
+              <div hidden={workstreamFocused}>
+                <LogChronologyPanel caseId={current.id} active={stage === "analyze"} />
+              </div>
+            </TriageAnchor>
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
               <div hidden={workstreamFocused}>
                 <CaseBoardPanel

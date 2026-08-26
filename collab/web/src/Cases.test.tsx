@@ -66,6 +66,9 @@ function stubCaseFetch(options?: {
     if (url.endsWith("/experiments") || url.endsWith("/export/inventory")) {
       return { ok: true, json: async () => ({ experiments: [], items: [] }) };
     }
+    if (url.includes("/workbench")) {
+      return { ok: true, json: async () => ({ items: [], views: [], bookmarks: [], candidateCount: 0 }) };
+    }
     return { ok: false, json: async () => ({}) };
   });
   vi.stubGlobal("fetch", stub);
@@ -1470,7 +1473,7 @@ describe("focused investigation view", () => {
     });
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Analyze/ }));
-    expect(screen.queryByRole("region", { name: "Timezone review" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Timezone review" })).toBeTruthy();
   });
 
   it("keeps the stable triage anchors mounted for deep links", async () => {

@@ -1,6 +1,19 @@
 /** Browser-safe contracts used by the Administration console. */
 export { APP_ROLES } from "./auth.js";
 export type { AppRole } from "./auth.js";
+export {
+  MODEL_PRIVATE_EVIDENCE_RULES,
+  MODEL_PURPOSES,
+  MODEL_PURPOSE_POLICY_SCHEMA_ID,
+  MODEL_PURPOSE_POLICY_UPDATE_SCHEMA_ID,
+} from "./model-purpose-policy-shared.js";
+export type {
+  ModelPrivateEvidenceRule,
+  ModelPurpose,
+  ModelPurposePolicyInputV1,
+  ModelPurposePolicyV1,
+  ModelPurposeRuleV1,
+} from "./model-purpose-policy-shared.js";
 
 export {
   COMPONENT_HEALTH_COMPONENT_IDS,
