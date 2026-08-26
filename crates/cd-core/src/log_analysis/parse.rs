@@ -2969,7 +2969,7 @@ mod tests {
             );
             assert_eq!(
                 parsed.parsed.unresolved_local_timestamp.as_deref(),
-                Some(&line[..19]),
+                line.get(..19),
                 "line={line}"
             );
         }
