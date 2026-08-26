@@ -21,6 +21,11 @@ import { focusArrivalCopy } from "./route-focus-copy.js";
 import { useRoutedItemPresence } from "./route-focus.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { InvestigationRecordPanel } from "./InvestigationRecord.js";
+import {
+  hiddenArchivedNotice,
+  statusCounts as investigationStatusCounts,
+  visibleInvestigations,
+} from "./investigation-search.js";
 import { LifecyclePanel } from "./LifecyclePanel.js";
 import { ResolutionForm } from "./ResolutionForm.js";
 import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
@@ -694,6 +699,10 @@ export function Cases(props: {
   // Entity filtering reads a server-scoped index, so choosing an entity can
   // only ever narrow what this reader could already list.
   const [entityFilter, setEntityFilter] = useState("all");
+  // Archived investigations stay out of the working list until asked for.
+  // That is what makes archiving mean something; the count of what is
+  // withheld is always reported beside the control that reveals it.
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [entityOptions, setEntityOptions] = useState<EntityRow[]>([]);
   const [involvementIndex, setInvolvementIndex] = useState<
     { investigationId: string; entityId: string }[]
@@ -1166,38 +1175,32 @@ export function Cases(props: {
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
-  const normalizedSearch = caseSearch.trim().toLocaleLowerCase();
   const casesByEntity = new Map<string, Set<string>>();
   for (const entry of involvementIndex) {
     const bucket = casesByEntity.get(entry.entityId) ?? new Set<string>();
     bucket.add(entry.investigationId);
     casesByEntity.set(entry.entityId, bucket);
   }
-  const visibleCases = cases.filter((c) => {
-    if (statusFilter !== "all" && c.status !== statusFilter) return false;
-    if (entityFilter !== "all" && !casesByEntity.get(entityFilter)?.has(c.id)) return false;
-    if (!normalizedSearch) return true;
-    return [
-      c.title,
-      c.reportedProblem,
-      c.problem,
-      c.summary,
-      c.id,
-      c.createdBy,
-      c.createdByUsername,
-      c.creator,
-      creatorName(c),
-      ...(c.participants ?? []).map((p) => p.username),
-    ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch));
-  });
-  const statusCounts: [string, number][] = [
-    ...KNOWN_STATUSES.map(
-      (status): [string, number] => [status, cases.filter((c) => c.status === status).length],
-    ),
-    ...[...new Set(cases.map((c) => c.status))]
-      .filter((status) => !(KNOWN_STATUSES as readonly string[]).includes(status))
-      .map((status): [string, number] => [status, cases.filter((c) => c.status === status).length]),
-  ];
+  // Entity labels travel into the predicate so an investigation is findable by
+  // who or what it is about, not only by what it was titled.
+  const entityLabelsById = new Map(entityOptions.map((entity) => [entity.id, entity.label]));
+  const entityLabelsFor = (row: CaseRow): string[] => {
+    const labels: string[] = [];
+    for (const [entityId, members] of casesByEntity) {
+      if (!members.has(row.id)) continue;
+      const label = entityLabelsById.get(entityId);
+      if (label) labels.push(label);
+    }
+    return labels;
+  };
+  const { visible: visibleCases, hiddenArchived } = visibleInvestigations(
+    cases,
+    { query: caseSearch, status: statusFilter, entityId: entityFilter, includeArchived },
+    casesByEntity,
+    entityLabelsFor,
+  );
+  const archivedNotice = hiddenArchivedNotice(hiddenArchived);
+  const statusCounts = investigationStatusCounts(cases, KNOWN_STATUSES);
   const attentionCases = cases
     .filter((row) =>
       row.status !== "resolved"
@@ -1338,8 +1341,8 @@ export function Cases(props: {
             type="search"
             value={caseSearch}
             onChange={(e) => setCaseSearch(e.target.value)}
-            placeholder="Title, ID, participant, or creator"
-            aria-label="Search investigations by title, ID, participant, or creator"
+            placeholder="Title, problem, affected parties, people, or ID"
+            aria-label="Search investigations by title, situation text, people, or ID"
           />
         </label>
         {entityOptions.length > 0 ? (
@@ -1376,7 +1379,30 @@ export function Cases(props: {
             ))}
           </select>
         </label>
+        <label className="case-list__archived-toggle">
+          <input
+            type="checkbox"
+            checked={includeArchived}
+            onChange={(e) => setIncludeArchived(e.target.checked)}
+          />
+          <span>Include archived</span>
+        </label>
       </div>
+      {/* Archiving is only meaningful if it removes something from view, and
+          only honest if the surface says what it removed. Both, in one line
+          beside the control that brings them back. */}
+      {archivedNotice ? (
+        <p className="case-list__archived-notice" role="status">
+          {archivedNotice}{" "}
+          <button
+            type="button"
+            className="case-list__archived-reveal"
+            onClick={() => setIncludeArchived(true)}
+          >
+            Show them
+          </button>
+        </p>
+      ) : null}
       {cases.length === 0 && casesLoaded ? (
         <EmptyState art="investigations" className="case-list__empty-state">
           <p>

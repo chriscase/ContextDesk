@@ -126,7 +126,7 @@ describe("war room overview", () => {
     stubCaseFetch();
     render(<Cases roles={["case-lead"]} view="investigations" />);
     const search = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, ID, participant, or creator",
+      name: "Search investigations by title, situation text, people, or ID",
     });
 
     fireEvent.change(search, { target: { value: "alice" } });
@@ -1120,7 +1120,7 @@ describe("focused investigation view", () => {
     stubCaseFetch();
     render(<Cases roles={["case-lead"]} view="investigations" />);
     const search = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, ID, participant, or creator",
+      name: "Search investigations by title, situation text, people, or ID",
     });
     fireEvent.change(search, { target: { value: "fixture" } });
     fireEvent.click(screen.getByRole("button", { name: "Fixture incident" }));
@@ -1134,7 +1134,7 @@ describe("focused investigation view", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
     const searchAgain = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, ID, participant, or creator",
+      name: "Search investigations by title, situation text, people, or ID",
     });
     expect((searchAgain as HTMLInputElement).value).toBe("fixture");
   });
