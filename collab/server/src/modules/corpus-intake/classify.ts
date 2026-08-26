@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { scanShareSafePrivacy } from "@cd-collab/contracts";
 import type {
   ArtifactKind,
+  CorpusAllowedExtension,
   CorpusAllowedMedia,
   CorpusRejectionReason,
   CorpusTextEncodingStatus,
@@ -19,6 +20,8 @@ const EXT_MEDIA: Record<string, CorpusAllowedMedia> = {
   ".txt": "text/plain",
   ".md": "text/markdown",
   ".json": "application/json",
+  ".jsonl": "text/x-log",
+  ".ndjson": "text/x-log",
   ".csv": "text/csv",
   ".xml": "application/xml",
   ".eml": "message/rfc822",
@@ -144,6 +147,52 @@ const CLAIM_ALIASES: Partial<Record<CorpusAllowedMedia, readonly string[]>> = {
   "text/markdown": ["text/plain"],
 };
 
+// Browsers and operating systems commonly describe JSON Lines as ordinary
+// JSON or x-ndjson. Keep those aliases extension-scoped so a `.log` file that
+// claims JSON still fails the declared-media consistency check.
+const EXT_CLAIM_ALIASES: Partial<Record<CorpusAllowedExtension, readonly string[]>> = {
+  ".jsonl": ["application/json", "application/x-ndjson"],
+  ".ndjson": ["application/json", "application/x-ndjson"],
+};
+
+function isJsonLinesExtension(ext: CorpusAllowedExtension): boolean {
+  return ext === ".jsonl" || ext === ".ndjson";
+}
+
+/**
+ * Validate JSON Lines without retaining an unbounded array of parsed records.
+ * The optional structured privacy scan closes the gap that scanning raw JSON
+ * text alone would leave around quoted sensitive keys.
+ */
+function inspectJsonLines(
+  text: string,
+  scanStructuredPrivacy: boolean,
+): { valid: boolean; privacyFinding: boolean } {
+  let records = 0;
+  let start = 0;
+  while (start <= text.length) {
+    const newline = text.indexOf("\n", start);
+    const end = newline === -1 ? text.length : newline;
+    const rawLine = text.slice(start, end);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line.trim()) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return { valid: false, privacyFinding: false };
+      }
+      records += 1;
+      if (scanStructuredPrivacy && scanShareSafePrivacy(parsed).length > 0) {
+        return { valid: true, privacyFinding: true };
+      }
+    }
+    if (newline === -1) break;
+    start = newline + 1;
+  }
+  return { valid: records > 0, privacyFinding: false };
+}
+
 function decodeUtf8(bytes: Uint8Array): string | null {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -197,6 +246,7 @@ export function classifyBytes(
     && claimedMedia !== "application/octet-stream"
     && claimedMedia !== media
     && !(CLAIM_ALIASES[media] ?? []).includes(claimedMedia)
+    && !(EXT_CLAIM_ALIASES[ext] ?? []).includes(claimedMedia)
   ) {
     return {
       relativePath: normalized.path,
@@ -237,6 +287,23 @@ export function classifyBytes(
         relativePath: normalized.path,
         reason: "unsupported_media",
         detail: "JSON content must be valid JSON",
+      };
+    }
+  }
+  if (isJsonLinesExtension(ext)) {
+    const inspection = inspectJsonLines(text, privacyClass === "share_safe");
+    if (!inspection.valid) {
+      return {
+        relativePath: normalized.path,
+        reason: "unsupported_media",
+        detail: "JSON Lines content must contain valid JSON on every non-empty line",
+      };
+    }
+    if (inspection.privacyFinding) {
+      return {
+        relativePath: normalized.path,
+        reason: "redaction_failed",
+        detail: "share-safe privacy gate rejected the file",
       };
     }
   }

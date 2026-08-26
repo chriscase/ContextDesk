@@ -1,8 +1,14 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { classifyBytes } from "./classify.js";
 import { decodeBase64, duplicateDigestFlags, previewCorpusBytes } from "./preview.js";
 
 const LOG = new TextEncoder().encode("2026-08-15T00:00:00Z mailer timeout id=syn-1\n");
+const JSON_LINES = new TextEncoder().encode([
+  '{"ts":"2026-08-15T00:00:00Z","level":"info","event":"checkout-started"}',
+  '{"ts":"2026-08-15T00:00:01Z","level":"error","event":"checkout-failed"}',
+  "",
+].join("\n"));
 
 describe("classifyBytes", () => {
   it("accepts allowlisted text/log/json/csv/xml/eml and rejects binaries", () => {
@@ -51,6 +57,55 @@ describe("classifyBytes", () => {
 
     const disguised = classifyBytes("mailer/service.log.exe", LOG, "text/plain", "owner_only");
     expect("reason" in disguised && disguised.reason).toBe("unsupported_media");
+  });
+
+  it("accepts valid JSON Lines as text logs with extension-scoped media aliases", () => {
+    for (const [path, claimedMedia] of [
+      ["api/events.jsonl", "application/json"],
+      ["api/events.ndjson", "application/x-ndjson"],
+    ] as const) {
+      const accepted = classifyBytes(path, JSON_LINES, claimedMedia, "owner_only");
+      expect("mediaType" in accepted && accepted.mediaType).toBe("text/x-log");
+      expect("artifactKind" in accepted && accepted.artifactKind).toBe("log");
+    }
+
+    const ordinaryLogClaimingJson = classifyBytes(
+      "api/events.log",
+      JSON_LINES,
+      "application/json",
+      "owner_only",
+    );
+    expect("reason" in ordinaryLogClaimingJson && ordinaryLogClaimingJson.reason)
+      .toBe("unsupported_media");
+  });
+
+  it("keeps JSON Lines validation, binary rejection, and share-safe privacy gates intact", () => {
+    const malformed = classifyBytes(
+      "api/malformed.jsonl",
+      new TextEncoder().encode('{"event":"ok"}\n{"event":\n'),
+      "application/json",
+      "owner_only",
+    );
+    expect("reason" in malformed && malformed.reason).toBe("unsupported_media");
+
+    const binary = classifyBytes(
+      "api/binary.jsonl",
+      new Uint8Array([0x7b, 0x00, 0x7d]),
+      "application/json",
+      "owner_only",
+    );
+    expect("reason" in binary && binary.reason).toBe("binary_or_unknown");
+
+    const privateStructuredKey = classifyBytes(
+      "api/private.jsonl",
+      new TextEncoder().encode('{"authorization":"fixture-not-a-real-secret"}\n'),
+      "application/json",
+      "share_safe",
+    );
+    expect("reason" in privateStructuredKey && privateStructuredKey.reason).toBe("redaction_failed");
+    if ("detail" in privateStructuredKey) {
+      expect(privateStructuredKey.detail).not.toContain("fixture-not-a-real-secret");
+    }
   });
 
   it("fail-closes share_safe on privacy findings without echoing the payload", () => {
@@ -166,6 +221,36 @@ describe("classifyBytes", () => {
 });
 
 describe("previewCorpusBytes", () => {
+  it("accepts all six logs in the synthetic checkout-cascade ZIP", () => {
+    const archive = readFileSync(
+      new URL("../../../../../fixtures/log-lab/archives/checkout-cascade.zip", import.meta.url),
+    );
+    const preview = previewCorpusBytes({
+      caseId: "case-checkout-cascade",
+      actorId: "actor-synthetic-1",
+      origin: "zip",
+      privacyClass: "owner_only",
+      sourceLabel: "synthetic checkout cascade",
+      idempotencyKey: "batch-checkout-cascade-1",
+      files: [],
+      archive,
+    });
+
+    expect(preview.report.accepted.map((row) => row.relativePath)).toEqual([
+      "api/app.jsonl",
+      "audit/deploy.jsonl",
+      "db/database.log",
+      "edge/access.jsonl",
+      "queue/events.jsonl",
+      "worker/worker.log",
+    ]);
+    expect(preview.report.accepted.filter((row) => row.relativePath.endsWith(".jsonl")))
+      .toHaveLength(4);
+    expect(preview.report.accepted.every((row) => row.mediaType === "text/x-log"))
+      .toBe(true);
+    expect(preview.report.rejected).toEqual([]);
+  });
+
   it("keeps mixed accepted and rejected files visible without decoding rejected bytes as text", () => {
     const preview = previewCorpusBytes({
       caseId: "case-1",

@@ -123,13 +123,17 @@ function batchBody(overrides: Record<string, unknown> = {}): Record<string, unkn
 }
 
 describe("corpus intake contract", () => {
-  it("recognizes bounded rotated log names without treating arbitrary suffixes as logs", () => {
+  it("recognizes JSON Lines and bounded rotated logs without accepting arbitrary suffixes", () => {
     expect(corpusAllowedExtension("logs/service.log")).toBe(".log");
+    expect(corpusAllowedExtension("logs/events.jsonl")).toBe(".jsonl");
+    expect(corpusAllowedExtension("logs/events.NDJSON")).toBe(".ndjson");
     expect(corpusAllowedExtension("logs/service.log.1")).toBe(".log");
     expect(corpusAllowedExtension("logs/service.log-2026-08-25")).toBe(".log");
     expect(corpusAllowedExtension("logs/service.log.previous")).toBe(".log");
     expect(corpusAllowedExtension("logs/service.log.exe")).toBeNull();
     expect(corpusAllowedExtension("logs/service.log.1.gz")).toBeNull();
+    expect(corpusAllowedExtension("logs/events.jsonl.1")).toBeNull();
+    expect(corpusAllowedExtension("logs/events.ndjson.gz")).toBeNull();
   });
 
   it("publishes the bounded limits used by preview and commit", () => {
