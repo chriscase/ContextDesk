@@ -429,6 +429,46 @@ export type {
   TriageJobExecutionState,
   TriageLanePhaseCountsV1,
 } from "./triage-lifecycle.js";
+
+export {
+  TRIAGE_EVIDENCE_BUDGET_ERROR_CODE,
+  TRIAGE_EXECUTABLE_MAX_CANDIDATES,
+  TRIAGE_MAX_CANDIDATES,
+  TRIAGE_MAX_EVIDENCE_AGGREGATE_BYTES,
+  TRIAGE_MAX_EVIDENCE_ITEM_BYTES,
+  TRIAGE_MAX_PROGRESS_EVENTS,
+  TRIAGE_MIN_CANDIDATES,
+  TRIAGE_MIN_GATEWAY_CANDIDATES,
+  TRIAGE_PROGRESS_EVENTS_PER_LANE,
+  checkTriageCandidateCapacity,
+  checkTriageEvidenceBudget,
+  triageEvidenceBudgetExplanation,
+  triageExecutableCandidateCeiling,
+  triageProgressEventBudget,
+} from "./triage-capacity.js";
+export type {
+  TriageCapacityDecision,
+  TriageCapacityRefusalCode,
+  TriageEvidenceBudgetFailureV1,
+  TriageEvidenceBudgetScope,
+} from "./triage-capacity.js";
+
+export {
+  TRIAGE_RUN_OBSERVED_STATES,
+  TRIAGE_RUN_TERMINAL_STATES,
+  TRIAGE_STALL_AFTER_MS,
+  advanceTriageRunState,
+  isTriageRunTerminalState,
+  triageRetryEligibility,
+  triageRunObservation,
+} from "./triage-run-state.js";
+export type {
+  TriageRetryDisposition,
+  TriageRetryEligibilityV1,
+  TriageRunObservationInput,
+  TriageRunObservationV1,
+  TriageRunObservedState,
+} from "./triage-run-state.js";
 export type {
   TriageCandidateRunV1,
   TriageCandidateSpecV1,

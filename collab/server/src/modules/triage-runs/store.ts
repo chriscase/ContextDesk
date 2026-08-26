@@ -169,6 +169,10 @@ export class MemoryTriageJobStore implements TriageJobStore {
       status: "running",
       startedAt,
       updatedAt: startedAt,
+      // Claiming a worker is the run's first durable movement. Without this
+      // the stall clock would start at creation and a run that has only just
+      // been picked up would read as already stuck.
+      lastProgressAt: startedAt,
       workerId,
       leaseExpiresAt,
     };
@@ -367,12 +371,15 @@ export class PgTriageJobStore implements TriageJobStore {
            payload = jsonb_set(
              jsonb_set(
                jsonb_set(
-                 jsonb_set(payload, '{status}', '"running"'::jsonb),
-                 '{workerId}', to_jsonb($3::text), true
+                 jsonb_set(
+                   jsonb_set(payload, '{status}', '"running"'::jsonb),
+                   '{workerId}', to_jsonb($3::text), true
+                 ),
+                 '{startedAt}', to_jsonb($2::text), true
                ),
-               '{startedAt}', to_jsonb($2::text), true
+               '{updatedAt}', to_jsonb($2::text), true
              ),
-             '{updatedAt}', to_jsonb($2::text), true
+             '{lastProgressAt}', to_jsonb($2::text), true
            ),
            updated_at = $2::timestamptz,
            lease_owner = $3,

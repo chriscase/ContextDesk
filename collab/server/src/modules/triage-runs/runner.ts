@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type {
   TriageCandidateRunV1,
 } from "@cd-collab/contracts";
+import { triageProgressEventBudget } from "@cd-collab/contracts";
 import type {
   TriageBatchExecutionContext,
   TriageBatchRunExecutor,
@@ -14,7 +15,11 @@ const RUNNER_SCHEMA_ID = "cd-collab.triage_run_request.v1" as const;
 const RESULT_SCHEMA_ID = "cd-collab.triage_run_result.v1" as const;
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
-const MAX_PROGRESS_EVENTS = 16;
+// The progress-event bound is not a number written here. It is the canonical
+// per-run formula applied to this run's accepted lane count: a lane emits one
+// admission and one settlement, so a fixed ceiling written beside a separate
+// candidate ceiling is how a run inside the advertised limit got accepted and
+// then killed for overrunning a budget it was never measured against.
 const MAX_PROGRESS_LINE_BYTES = 16 * 1024;
 const MAX_SAFE_SUMMARY_CHARS = 2_048;
 const PROGRESS_EVENT_PREFIX = "contextdesk.collab_triage_progress ";
@@ -374,6 +379,7 @@ export class RustBridgeTriageExecutor implements TriageBatchRunExecutor {
       if (this.options.dataDir) args.push("--data-dir", this.options.dataDir);
       args.push("collab-triage-run", "--request", requestPath, "--progress-events");
       if (this.options.library) args.push("--library", this.options.library);
+      const progressEventBudget = triageProgressEventBudget(context.request.candidates.length);
       const result = await this.runProcess(args, signal, async (raw) => {
         const mapped = mapProgressEvent(raw, context);
         if (mapped.kind === "started") {
@@ -389,7 +395,7 @@ export class RustBridgeTriageExecutor implements TriageBatchRunExecutor {
         }
         progressSeen.add(mapped.candidate.candidateId);
         await context.onCandidate?.(mapped.candidate);
-      });
+      }, progressEventBudget);
       if (result.ok !== true) {
         const kind = typeof result.error?.kind === "string" ? result.error.kind : "runner_error";
         if (kind === "cancelled") throw new Error("cancelled");
@@ -418,6 +424,7 @@ export class RustBridgeTriageExecutor implements TriageBatchRunExecutor {
     args: string[],
     signal: AbortSignal,
     onProgress: (raw: unknown) => void | Promise<void> = () => {},
+    progressEventBudget = 0,
   ): Promise<CliEnvelope> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.options.command, [
@@ -501,7 +508,7 @@ export class RustBridgeTriageExecutor implements TriageBatchRunExecutor {
             interruptChild();
           });
         progressTasks.push(task);
-        if (progressTasks.length > MAX_PROGRESS_EVENTS) {
+        if (progressTasks.length > progressEventBudget) {
           progressError = new Error("gateway runner returned too many progress events");
           interruptChild();
         }

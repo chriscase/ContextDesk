@@ -35,10 +35,27 @@ describe("triage job contracts", () => {
       gatewayMaxCandidates: 16,
       profileCatalogConfigured: true,
       profileCount: 2,
+      progressEventsPerLane: 2,
+      maxProgressEvents: 32,
+      maxEvidenceItemBytes: 4 * 1024 * 1024,
+      maxEvidenceAggregateBytes: 8 * 1024 * 1024,
+      cancellationSupported: true,
+      retrySemantics: "explicit_rerun_idempotent",
+      usageAvailable: false,
+      costAvailable: false,
+      unavailable: ["provider cost is not reported by this host"],
     });
     expect(capabilities.gatewayAvailable).toBe(false);
     expect(capabilities.profileCount).toBe(2);
-    expect(JSON.stringify(capabilities)).not.toContain("endpoint");
+    // The advertised ceiling must be one the progress budget can carry.
+    expect(capabilities.gatewayMaxCandidates * capabilities.progressEventsPerLane)
+      .toBeLessThanOrEqual(capabilities.maxProgressEvents);
+    // Unknown stays unknown: no estimate is offered in place of a measurement.
+    expect(capabilities.usageAvailable).toBe(false);
+    expect(capabilities.costAvailable).toBe(false);
+    const serialized = JSON.stringify(capabilities);
+    expect(serialized).not.toContain("endpoint");
+    expect(serialized).not.toMatch(/key|token|secret|credential|password/i);
   });
 
   it("rejects contract drift and preserves unknown metrics", () => {

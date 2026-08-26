@@ -20,6 +20,14 @@
       "types": "./dist/triage-lifecycle.d.ts",
       "import": "./dist/triage-lifecycle.js"
     },
+    "./triage-capacity": {
+      "types": "./dist/triage-capacity.d.ts",
+      "import": "./dist/triage-capacity.js"
+    },
+    "./triage-run-state": {
+      "types": "./dist/triage-run-state.d.ts",
+      "import": "./dist/triage-run-state.js"
+    },
     "./corpus-intake": {
       "types": "./dist/investigation-corpus-intake.d.ts",
       "import": "./dist/investigation-corpus-intake.js"

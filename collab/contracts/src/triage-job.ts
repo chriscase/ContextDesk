@@ -10,6 +10,10 @@ import {
   type TriageCandidateStatus,
   type TriageJobStatus,
 } from "./triage-lifecycle.js";
+import {
+  TRIAGE_EVIDENCE_BUDGET_ERROR_CODE,
+  type TriageEvidenceBudgetFailureV1,
+} from "./triage-capacity.js";
 
 export {
   TRIAGE_CANDIDATE_STATUSES,
@@ -108,6 +112,21 @@ export interface TriageJobV1 {
   workerId?: string | null;
   /** Internal lease expiry; omitted by legacy records. */
   leaseExpiresAt?: string | null;
+  /**
+   * Last durable lane movement — admission or settlement — and nothing else.
+   *
+   * Deliberately not `updatedAt`, which a lease heartbeat also bumps: a frozen
+   * gateway keeps its worker heartbeating while no lane moves, so only a field
+   * the heartbeat does not touch can tell a slow run from a stuck one. Omitted
+   * by records written before this field existed.
+   */
+  lastProgressAt?: string | null;
+  /**
+   * Structured reason this run was refused or stopped, when one is known well
+   * enough to name. Facts only; operator-facing text is rendered from them, so
+   * no host or provider string is ever carried here.
+   */
+  failure?: TriageEvidenceBudgetFailureV1 | null;
 }
 
 export interface TriageJobShareSafeCandidateV1 {
@@ -142,14 +161,38 @@ export interface TriageJobListV1 {
   jobs: TriageJobV1[];
 }
 
+/**
+ * What the host can actually do, stated so an operator is never offered a
+ * setting the host will later refuse.
+ *
+ * `gatewayMaxCandidates` is the executable ceiling, derived from the canonical
+ * progress-event formula rather than written down beside it; the two used to
+ * be independent numbers that disagreed, and a run inside the advertised
+ * ceiling but outside the executable one was accepted and then killed.
+ */
 export interface TriageJobCapabilitiesV1 {
   schemaId: typeof TRIAGE_JOB_CAPABILITIES_SCHEMA_ID;
   syntheticAvailable: boolean;
   gatewayAvailable: boolean;
   gatewayMinCandidates: number;
+  /** Executable, not merely acceptable: every count up to this one can run. */
   gatewayMaxCandidates: number;
   profileCatalogConfigured: boolean;
   profileCount: number;
+  /** Durable progress events one lane emits; the basis of the run budget. */
+  progressEventsPerLane: number;
+  /** Progress events the largest advertised run is permitted to emit. */
+  maxProgressEvents: number;
+  maxEvidenceItemBytes: number;
+  maxEvidenceAggregateBytes: number;
+  /** True only where a cancel request durably stops further provider work. */
+  cancellationSupported: boolean;
+  retrySemantics: "explicit_rerun_idempotent";
+  /** The host does not measure these; a reader must not be shown a guess. */
+  usageAvailable: boolean;
+  costAvailable: boolean;
+  /** Plain-words list of what this deployment simply cannot report. */
+  unavailable: string[];
 }
 
 const candidateSpecShape: ObjectShape = {
@@ -190,6 +233,13 @@ const candidateRunShape: ObjectShape = {
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
 };
 
+const failureShape: ObjectShape = {
+  code: f.req(f.en(TRIAGE_EVIDENCE_BUDGET_ERROR_CODE)),
+  scope: f.req(f.en("item", "aggregate")),
+  allowedBytes: f.req(f.u64),
+  actualBytes: f.req(f.u64),
+};
+
 const jobShape: ObjectShape = {
   schemaId: f.req(f.en(TRIAGE_JOB_SCHEMA_ID)),
   id: f.req(f.str),
@@ -214,6 +264,8 @@ const jobShape: ObjectShape = {
   stoppedReason: f.nul(f.str),
   workerId: f.optNul(f.str),
   leaseExpiresAt: f.optNul(f.str),
+  lastProgressAt: f.optNul(f.str),
+  failure: f.optNul(f.obj(failureShape)),
 };
 
 const jobListShape: ObjectShape = {
@@ -230,6 +282,15 @@ const capabilitiesShape: ObjectShape = {
   gatewayMaxCandidates: f.req(f.u64),
   profileCatalogConfigured: f.req(f.bool),
   profileCount: f.req(f.u64),
+  progressEventsPerLane: f.req(f.u64),
+  maxProgressEvents: f.req(f.u64),
+  maxEvidenceItemBytes: f.req(f.u64),
+  maxEvidenceAggregateBytes: f.req(f.u64),
+  cancellationSupported: f.req(f.bool),
+  retrySemantics: f.req(f.en("explicit_rerun_idempotent")),
+  usageAvailable: f.req(f.bool),
+  costAvailable: f.req(f.bool),
+  unavailable: f.req(f.arr(f.str)),
 };
 
 const shareSafeCandidateShape: ObjectShape = {

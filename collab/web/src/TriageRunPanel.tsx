@@ -5,6 +5,16 @@ import {
   triageLanePhaseCounts,
   type TriageCandidateStatus,
 } from "@cd-collab/contracts/triage-lifecycle";
+import {
+  triageEvidenceBudgetExplanation,
+  type TriageEvidenceBudgetFailureV1,
+} from "@cd-collab/contracts/triage-capacity";
+import {
+  advanceTriageRunState,
+  triageRetryEligibility,
+  triageRunObservation,
+  type TriageRunObservedState,
+} from "@cd-collab/contracts/triage-run-state";
 import { EvidenceSnapshotCockpit } from "./EvidenceSnapshotCockpit.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { TechnicalIdentifiers, recordNickname } from "./technical-identity.js";
@@ -66,6 +76,15 @@ interface TriageCapabilitiesView {
   gatewayMaxCandidates: number;
   profileCatalogConfigured: boolean;
   profileCount: number;
+  progressEventsPerLane?: number;
+  maxProgressEvents?: number;
+  maxEvidenceItemBytes?: number;
+  maxEvidenceAggregateBytes?: number;
+  cancellationSupported?: boolean;
+  retrySemantics?: string;
+  usageAvailable?: boolean;
+  costAvailable?: boolean;
+  unavailable?: string[];
 }
 
 interface CandidateView {
@@ -123,6 +142,10 @@ interface JobView {
   startedAt: string | null;
   finishedAt: string | null;
   cancelRequestedAt: string | null;
+  /** Absent on records written before the host tracked lane movement. */
+  lastProgressAt?: string | null;
+  leaseExpiresAt?: string | null;
+  failure?: TriageEvidenceBudgetFailureV1 | null;
 }
 
 interface LaunchReceipt {
@@ -262,6 +285,14 @@ function executionStateLabel(job: JobView): string {
   return state === "executing" ? "executing" : "executed";
 }
 
+/** Byte bounds as the operator reads them, never as a raw count. */
+function mib(bytes: number | undefined): string {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes)) return "unknown";
+  const value = bytes / (1024 * 1024);
+  const rounded = Math.round(value * 100) / 100;
+  return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(2)} MiB`;
+}
+
 function elapsedLabel(milliseconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -281,24 +312,65 @@ function pollDelayMs(pollsSoFar: number): number {
 }
 
 /**
- * Plain words for an unfinished run, including how long it has been waiting.
+ * The persisted facts the shared rules read, and nothing else.
  *
- * A slow gateway otherwise leaves the reader with a status word and no way to
- * tell a run that is progressing from one that is stuck.
+ * Built once here so the reader's state, its progress line, and its retry
+ * advice cannot be derived from three slightly different views of one run.
+ */
+function observationInput(job: JobView) {
+  return {
+    status: job.status as never,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    cancelRequestedAt: job.cancelRequestedAt,
+    parentJobId: job.parentJobId ?? null,
+    leaseExpiresAt: job.leaseExpiresAt ?? null,
+    lastProgressAt: job.lastProgressAt ?? null,
+    failure: job.failure ?? null,
+    candidates: job.candidates.map((candidate) => ({
+      status: candidate.status as TriageCandidateStatus,
+      role: candidate.role,
+      candidateId: candidate.candidateId,
+      startedAt: candidate.startedAt ?? null,
+    })),
+  };
+}
+
+/** The shared durable observation for one run, from persisted facts only. */
+function observe(job: JobView, nowMs: number) {
+  return triageRunObservation(observationInput(job), nowMs);
+}
+
+/** Whether repeating this run is safe or repeats work of unknown outcome. */
+function retryView(job: JobView) {
+  return triageRetryEligibility(observationInput(job));
+}
+
+/**
+ * The primary progress line for an unfinished run.
+ *
+ * Deliberately five facts and nothing else: which lane, what stage, how many
+ * lanes are done out of how many, how long it has been running, and how long
+ * since anything actually moved. A slow company gateway is exactly the case
+ * where a reader starts hunting through traces, usage counters, and cost
+ * estimates for a signal that is not in any of them — so none of that appears
+ * here. The operator's next step is stated in words rather than implied.
  */
 function waitingText(job: JobView, nowMs: number): string {
-  const counts = laneCounts(job);
-  const waited = waitedMs(job, nowMs);
-  const elapsed = waited === null ? null : elapsedLabel(waited);
-  if (job.status === "queued" || counts.running === 0) {
-    const opening = elapsed
-      ? `Queued for ${elapsed}; no lane has started yet.`
-      : "Queued; no lane has started yet.";
-    return `${opening} Nothing has been sent for you to read.`;
-  }
-  const running = `${counts.running} lane${counts.running === 1 ? "" : "s"} running`;
-  const opening = elapsed ? `Running for ${elapsed}` : "Running";
-  return `${opening} · ${running} · ${counts.queued} queued · ${counts.settled}/${counts.total} settled.`;
+  const view = observe(job, nowMs);
+  const parts = [
+    view.lane ? `Lane ${view.lane}` : "No lane in flight",
+    view.stage,
+    `${view.completed}/${view.total} lanes produced a result`,
+  ];
+  if (view.elapsedMs !== null) parts.push(`running ${elapsedLabel(view.elapsedMs)}`);
+  parts.push(
+    view.sinceLastProgressMs === null
+      ? "nothing has moved yet"
+      : `last movement ${elapsedLabel(view.sinceLastProgressMs)} ago`,
+  );
+  return `${parts.join(" · ")}.`;
 }
 
 function statusLabel(status: string): string {
@@ -414,6 +486,22 @@ export function TriageRunPanel(props: {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const loadRequestToken = useRef(0);
   const launchFocusApplied = useRef<string | null>(null);
+  // Terminal-state monotonicity for the reader.
+  //
+  // The panel polls, so an in-flight response can land after a newer one, and
+  // a late progress frame for a run the host already settled would otherwise
+  // move the row back out of its terminal state. The state is still derived
+  // from the record on every render — this only refuses to walk a run
+  // backwards out of completed, failed, or cancelled once it has been there.
+  const observedState = useRef(new Map<string, TriageRunObservedState>());
+  const runState = useCallback((job: JobView, at: number): TriageRunObservedState => {
+    const next = advanceTriageRunState(
+      observedState.current.get(job.id) ?? null,
+      observe(job, at).state,
+    );
+    observedState.current.set(job.id, next);
+    return next;
+  }, []);
   useRouteFocus(props.routeFocus, !loading);
 
   const load = useCallback(async (preferredSnapshotId?: string | null) => {
@@ -1023,6 +1111,27 @@ export function TriageRunPanel(props: {
                           : ""}
                       </span>
                     ) : null}
+                    {triageCapabilities ? (
+                      <span className="case-memory__note triage-runs__readiness" data-testid="triage-readiness">
+                        {/* Stated from what the host reports it can execute, not
+                            from what it will merely accept: every count listed
+                            here runs to completion. */}
+                        This host runs {triageCapabilities.gatewayMinCandidates}–
+                        {triageCapabilities.gatewayMaxCandidates} gateway lanes, and every count in
+                        that range is executable. Evidence limit{" "}
+                        {mib(triageCapabilities.maxEvidenceAggregateBytes)} per run and{" "}
+                        {mib(triageCapabilities.maxEvidenceItemBytes)} per item; an over-limit run is
+                        refused before anything is sent.{" "}
+                        {triageCapabilities.cancellationSupported === false
+                          ? "Cancellation is not supported on this host."
+                          : "Cancellation is durable: no further lane is dispatched once you request it."}{" "}
+                        A retry is an explicit rerun bound to the run it repeats; an identical run
+                        already in flight is refused rather than duplicated.{" "}
+                        {(triageCapabilities.unavailable ?? []).length > 0
+                          ? `Not reported by this host: ${(triageCapabilities.unavailable ?? []).join("; ")}.`
+                          : ""}
+                      </span>
+                    ) : null}
                     <details className="triage-runs__lane-picker">
                       <summary>Add a model lane</summary>
                       <form className="triage-runs__lane-picker-form" onSubmit={addLane}>
@@ -1365,8 +1474,12 @@ export function TriageRunPanel(props: {
                       role="status"
                       aria-live="polite"
                       aria-label={`${job.request.strategyId} wait state`}
+                      data-run-state={runState(job, nowMs)}
                     >
                       <span>{waitingText(job, nowMs)}</span>
+                      <small className="triage-runs__next-action">
+                        Next: {observe(job, nowMs).nextAction}
+                      </small>
                       {(waitedMs(job, nowMs) ?? 0) >= SLOW_WAIT_MS ? (
                         <small>
                           The host owns this run&apos;s deadline and will stop it on its own. You
@@ -1377,7 +1490,24 @@ export function TriageRunPanel(props: {
                       ) : null}
                     </div>
                   ) : null}
-                  {isTerminal(job.status) && producedLaneCount(job) === 0 ? (
+                  {isTerminal(job.status) && job.failure ? (
+                    <p
+                      className="case-memory__note triage-runs__refusal"
+                      role="status"
+                      data-run-failure={job.failure.code}
+                    >
+                      {triageEvidenceBudgetExplanation(job.failure)}
+                    </p>
+                  ) : null}
+                  {isTerminal(job.status) ? (
+                    <p
+                      className="case-memory__note triage-runs__retry-note"
+                      data-retry-disposition={retryView(job).disposition}
+                    >
+                      Retry: {retryView(job).reason} {retryView(job).nextAction}
+                    </p>
+                  ) : null}
+                  {isTerminal(job.status) && producedLaneCount(job) === 0 && !job.failure ? (
                     <p className="case-memory__note triage-runs__no-result" role="status">
                       No lane produced a result on this run. There is nothing here to review or
                       compare — rerun it or read the per-lane reasons below.

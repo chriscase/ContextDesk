@@ -2,6 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   TRIAGE_JOB_SCHEMA_ID,
   TRIAGE_JOB_CAPABILITIES_SCHEMA_ID,
+  TRIAGE_EVIDENCE_BUDGET_ERROR_CODE,
+  TRIAGE_EXECUTABLE_MAX_CANDIDATES,
+  TRIAGE_MAX_EVIDENCE_AGGREGATE_BYTES,
+  TRIAGE_MAX_EVIDENCE_ITEM_BYTES,
+  TRIAGE_MAX_PROGRESS_EVENTS,
+  TRIAGE_MIN_GATEWAY_CANDIDATES,
+  TRIAGE_PROGRESS_EVENTS_PER_LANE,
+  checkTriageCandidateCapacity,
+  checkTriageEvidenceBudget,
+  triageEvidenceBudgetExplanation,
   snapshotFairness,
   snapshotFingerprint,
   snapshotFingerprintDigest,
@@ -16,6 +26,7 @@ import {
   type TriageJobRequestV1,
   type TriageJobStatus,
   type TriageJobV1,
+  type TriageEvidenceBudgetFailureV1,
   type AppRole,
 } from "@cd-collab/contracts";
 import type { RecoveryAuthResult, RecoveryInactiveReason } from "../authz/index.js";
@@ -46,12 +57,11 @@ export type RecoveryRefusalReason =
   | "requester_unauthorized"
   | "recovery_authorization_unavailable";
 
-const MAX_CANDIDATES = 16;
-const MIN_GATEWAY_CANDIDATES = 2;
+// Capacity and evidence bounds are not written here. They come from the one
+// canonical module the launcher also reads, so an advertised limit and an
+// enforced limit cannot drift apart again.
 const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const MAX_GATEWAY_CONCURRENCY = 4;
-const MAX_GATEWAY_EVIDENCE_ITEM_BYTES = 4 * 1024 * 1024;
-const MAX_GATEWAY_EVIDENCE_AGGREGATE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_WORKER_LEASE_MS = 60_000;
 const WORKER_HEARTBEAT_MS = 20_000;
 const AGREEMENT_NOTICE = "Agreement is not proof of correctness." as const;
@@ -85,6 +95,24 @@ export class TriageRunConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "TriageRunConflictError";
+  }
+}
+
+/**
+ * The frozen evidence for this run is larger than the host will send.
+ *
+ * Distinct from every other runner failure on purpose. This one is decided
+ * entirely on the host, before a byte reaches a gateway, and it is not
+ * transient: the same run retried is refused again for the same reason. It
+ * used to collapse into a generic runner error, which told the operator only
+ * that something broke somewhere and invited exactly the retry that cannot
+ * work. The bound and the actual size travel with it so the run record can say
+ * what to trim without re-deriving anything.
+ */
+export class TriageEvidenceBudgetExceededError extends Error {
+  constructor(readonly failure: TriageEvidenceBudgetFailureV1) {
+    super(triageEvidenceBudgetExplanation(failure));
+    this.name = "TriageEvidenceBudgetExceededError";
   }
 }
 
@@ -384,13 +412,28 @@ export class TriageRunService {
     });
   }
 
-  private async failOwnedRunningJob(jobId: string): Promise<void> {
+  /**
+   * Settles a run this worker owns as failed, naming the reason where the host
+   * actually knows one.
+   *
+   * Every preparation failure used to land here as `runner_error`, which is
+   * accurate about the layer and useless about the cause. A host-decided
+   * refusal the operator can act on — the evidence budget being the one the
+   * host can name exactly — keeps its own code and carries its numbers into
+   * the durable record.
+   */
+  private async failOwnedRunningJob(jobId: string, cause?: unknown): Promise<void> {
     const failed = await this.deps.jobs.get(jobId);
     if (
       !failed
       || isTerminal(failed.status)
       || !triageWorkerHoldsLiveLease(failed, this.workerId, Date.now())
     ) return;
+    const budget = cause instanceof TriageEvidenceBudgetExceededError ? cause.failure : null;
+    const errorCode = budget ? TRIAGE_EVIDENCE_BUDGET_ERROR_CODE : "runner_error";
+    const unknowns = budget
+      ? ["result", "evidence was never sent to a provider"]
+      : ["runner preparation"];
     const finishedAt = now();
     const next: TriageJobV1 = {
       ...failed,
@@ -404,15 +447,19 @@ export class TriageRunService {
               outputHash: null,
               summary: null,
               evidenceRefs: [],
-              unknowns: ["runner preparation"],
-              errorCode: "runner_error",
+              unknowns: [...unknowns],
+              errorCode,
               finishedAt,
             }
           : candidate,
       ),
       finishedAt,
       updatedAt: finishedAt,
-      stoppedReason: "runner_error",
+      lastProgressAt: finishedAt,
+      stoppedReason: errorCode,
+      // Facts only. The operator-facing sentence is rendered from these by the
+      // shared contract, so no host or provider string is stored here.
+      failure: budget,
       leaseExpiresAt: null,
     };
     try {
@@ -420,7 +467,7 @@ export class TriageRunService {
         await this.deps.jobs.update(next);
         await this.persistJobFinished(failed, "failed", {
           action: "triage_job_finish",
-          target: `${failed.id}:failed`,
+          target: `${failed.id}:${errorCode}`,
           outcome: "failure",
         });
       });
@@ -441,10 +488,29 @@ export class TriageRunService {
       schemaId: TRIAGE_JOB_CAPABILITIES_SCHEMA_ID,
       syntheticAvailable: true,
       gatewayAvailable: Boolean(this.deps.gatewayExecutor),
-      gatewayMinCandidates: MIN_GATEWAY_CANDIDATES,
-      gatewayMaxCandidates: MAX_CANDIDATES,
+      gatewayMinCandidates: TRIAGE_MIN_GATEWAY_CANDIDATES,
+      // The executable ceiling, not the advertised one. They are the same
+      // number only because both now come from the canonical formula.
+      gatewayMaxCandidates: TRIAGE_EXECUTABLE_MAX_CANDIDATES,
       profileCatalogConfigured: profileCount > 0,
       profileCount,
+      progressEventsPerLane: TRIAGE_PROGRESS_EVENTS_PER_LANE,
+      maxProgressEvents: TRIAGE_MAX_PROGRESS_EVENTS,
+      maxEvidenceItemBytes: TRIAGE_MAX_EVIDENCE_ITEM_BYTES,
+      maxEvidenceAggregateBytes: TRIAGE_MAX_EVIDENCE_AGGREGATE_BYTES,
+      // A cancel request is durable and stops further dispatch in every mode
+      // this server runs; an in-flight provider call it cannot recall is
+      // reported as an uncertain outcome rather than as a clean stop.
+      cancellationSupported: true,
+      retrySemantics: "explicit_rerun_idempotent",
+      // This host measures neither. Saying so is the only honest answer; a
+      // zero or an estimate would read as a measurement.
+      usageAvailable: false,
+      costAvailable: false,
+      unavailable: [
+        "provider token usage is not reported by this host",
+        "provider cost is not reported by this host",
+      ],
     };
   }
 
@@ -515,6 +581,7 @@ export class TriageRunService {
           candidates: recoveredCandidates,
           finishedAt,
           updatedAt: finishedAt,
+          lastProgressAt: finishedAt,
           stoppedReason: "worker_lease_expired",
         leaseExpiresAt: null,
       };
@@ -630,6 +697,7 @@ export class TriageRunService {
           candidates: refusedCandidates,
           finishedAt,
           updatedAt: finishedAt,
+          lastProgressAt: finishedAt,
           stoppedReason: reason,
           leaseExpiresAt: null,
         });
@@ -659,11 +727,16 @@ export class TriageRunService {
     if (request.mode === "gateway" && !this.deps.gatewayExecutor) {
       throw new TriageRunConflictError("gateway execution is not configured in this server");
     }
-    if (request.candidates.length < 1 || request.candidates.length > MAX_CANDIDATES) {
-      throw new TriageRunConflictError(`candidate count must be between 1 and ${MAX_CANDIDATES}`);
-    }
-    if (request.mode === "gateway" && request.candidates.length < MIN_GATEWAY_CANDIDATES) {
-      throw new TriageRunConflictError(`gateway comparisons require at least ${MIN_GATEWAY_CANDIDATES} candidate lanes`);
+    // One capacity decision, taken before any side effect: no job row, no
+    // timeline entry, no audit record, and no provider work exists yet. A run
+    // the host cannot carry to completion is refused here rather than accepted
+    // and killed once it is already spending.
+    const capacity = checkTriageCandidateCapacity({
+      laneCount: request.candidates.length,
+      gateway: request.mode === "gateway",
+    });
+    if (!capacity.admitted) {
+      throw new TriageRunConflictError(capacity.message ?? "candidate capacity refused");
     }
     const gatewayConcurrency = request.concurrency ?? DEFAULT_GATEWAY_CONCURRENCY;
     if (
@@ -759,6 +832,8 @@ export class TriageRunService {
       finishedAt: null,
       cancelRequestedAt: null,
       stoppedReason: null,
+      lastProgressAt: null,
+      failure: null,
     };
     await this.withJobAtomic(async () => {
       // Checked inside the same atomic section as the insert so two launches
@@ -809,42 +884,54 @@ export class TriageRunService {
     origin: string,
     isAdmin: boolean,
   ): Promise<TriageJobV1> {
-    const job = await this.get(caseId, jobId, actor, isAdmin);
-    if (!job) throw new TriageRunNotFoundError();
-    if (isTerminal(job.status)) return job;
-    if (triageRunningLeaseExpired(job, Date.now())) {
+    const seen = await this.get(caseId, jobId, actor, isAdmin);
+    if (!seen) throw new TriageRunNotFoundError();
+    if (isTerminal(seen.status)) return seen;
+    if (triageRunningLeaseExpired(seen, Date.now())) {
       throw new TriageRunConflictError("worker lease expired");
     }
-    const requestedAt = now();
-    const cancelledCandidates = job.candidates.map((candidate) =>
-      candidate.status === "queued" || candidate.status === "running"
-        ? {
-            ...candidate,
-            status: "cancelled" as const,
-            errorCode: "cancel_requested",
-            finishedAt: requestedAt,
-          }
-        : candidate,
-    );
-    const cancelledStatus = terminalStatus(cancelledCandidates, true);
-    const cancelled = {
-      ...job,
-      cancelRequestedAt: job.cancelRequestedAt ?? requestedAt,
-      status: cancelledStatus,
-      candidates: cancelledCandidates,
-      finishedAt: requestedAt,
-      stoppedReason: "cancel_requested",
-      updatedAt: requestedAt,
-      leaseExpiresAt: null,
-    };
-    await this.withJobAtomic(async () => {
-      await this.deps.jobs.update(cancelled);
+    const cancelled = await this.withJobAtomic(async () => {
+      // Re-read inside the atomic section rather than cancelling the copy the
+      // authorization check read.
+      //
+      // A worker can claim a queued run between those two points, which gives
+      // the record a lease owner the earlier copy does not carry. Writing the
+      // earlier copy is then rejected as a stale write, and the operator's
+      // cancel disappears with an error about the job not existing while the
+      // run carries on — the exact failure an operator hits when a slow
+      // gateway makes them cancel the moment after launching.
+      const current = await this.deps.jobs.get(jobId);
+      if (!current || current.caseId !== caseId) throw new TriageRunNotFoundError();
+      if (isTerminal(current.status)) return current;
+      const requestedAt = now();
+      const cancelledCandidates = current.candidates.map((candidate) =>
+        candidate.status === "queued" || candidate.status === "running"
+          ? {
+              ...candidate,
+              status: "cancelled" as const,
+              errorCode: "cancel_requested",
+              finishedAt: requestedAt,
+            }
+          : candidate,
+      );
+      const next: TriageJobV1 = {
+        ...current,
+        cancelRequestedAt: current.cancelRequestedAt ?? requestedAt,
+        status: terminalStatus(cancelledCandidates, true),
+        candidates: cancelledCandidates,
+        finishedAt: requestedAt,
+        stoppedReason: "cancel_requested",
+        updatedAt: requestedAt,
+        lastProgressAt: requestedAt,
+        leaseExpiresAt: null,
+      };
+      await this.deps.jobs.update(next);
       await this.deps.cases.appendDomainTimeline(caseId, {
         kind: "triage_job_cancel_requested",
         actor,
         targetId: jobId,
         clientTime: null,
-        payload: { cancellationId: job.cancellationId },
+        payload: { cancellationId: current.cancellationId },
       });
       await this.deps.audit.append({
         identity: actor.id,
@@ -853,6 +940,7 @@ export class TriageRunService {
         origin,
         outcome: "success",
       });
+      return next;
     });
     this.controllers.get(jobId)?.abort();
     return cancelled;
@@ -936,6 +1024,7 @@ export class TriageRunService {
           candidates: cancelledCandidates,
           finishedAt,
           updatedAt: finishedAt,
+          lastProgressAt: finishedAt,
           stoppedReason: "cancel_requested",
           leaseExpiresAt: null,
         });
@@ -964,11 +1053,16 @@ export class TriageRunService {
         if (index < 0) throw new Error("gateway returned an unknown candidate id");
         const existing = currentJob.candidates[index];
         if (existing && ["completed", "partial", "failed", "timed_out", "cancelled"].includes(existing.status)) return;
+        const settledAt = now();
         const nextJob = {
           ...currentJob,
           candidates: currentJob.candidates.map((candidate, candidateIndex) => candidateIndex === index ? result : candidate),
-          cancelRequestedAt: currentJob.cancelRequestedAt ?? (controller.signal.aborted ? now() : null),
-          updatedAt: now(),
+          cancelRequestedAt: currentJob.cancelRequestedAt ?? (controller.signal.aborted ? settledAt : null),
+          updatedAt: settledAt,
+          // A settled lane is real movement. The lease heartbeat deliberately
+          // does not touch this, so a gateway that answers nothing leaves it
+          // standing still and the run reads as stalled rather than as busy.
+          lastProgressAt: settledAt,
         };
         await this.withJobAtomic(async () => {
           await this.deps.jobs.update(nextJob);
@@ -1001,12 +1095,14 @@ export class TriageRunService {
         if (!existing || ["completed", "partial", "failed", "timed_out", "cancelled"].includes(existing.status)) return;
         if (existing.status === "running") return;
         const startedAt = existing.startedAt ?? now();
+        const admittedAt = now();
         const nextJob = {
           ...currentJob,
           candidates: currentJob.candidates.map((candidate, candidateIndex) => candidateIndex === index
             ? { ...candidate, status: "running" as const, startedAt }
             : candidate),
-          updatedAt: now(),
+          updatedAt: admittedAt,
+          lastProgressAt: admittedAt,
         };
         await this.withJobAtomic(async () => {
           await this.deps.jobs.update(nextJob);
@@ -1178,6 +1274,7 @@ export class TriageRunService {
           sameSnapshot: evaluateSameSnapshot(snapshot),
           finishedAt,
           updatedAt: finishedAt,
+          lastProgressAt: finishedAt,
           stoppedReason: currentJob.cancelRequestedAt !== null ? "cancel_requested" : null,
           leaseExpiresAt: null,
         };
@@ -1191,8 +1288,8 @@ export class TriageRunService {
         });
         currentJob = finishedJob;
       }
-    } catch {
-      await this.failOwnedRunningJob(jobId);
+    } catch (error) {
+      await this.failOwnedRunningJob(jobId, error);
     } finally {
       if (leaseTimer) clearInterval(leaseTimer);
       this.controllers.delete(jobId);
@@ -1223,13 +1320,17 @@ export class TriageRunService {
         throw new Error("snapshot evidence content is unavailable to the gateway runner");
       }
       if (bytes && requireContent) {
-        if (bytes.byteLength > MAX_GATEWAY_EVIDENCE_ITEM_BYTES) {
-          throw new Error("gateway evidence item exceeds the bounded size");
-        }
+        const itemOverBudget = checkTriageEvidenceBudget({
+          scope: "item",
+          actualBytes: bytes.byteLength,
+        });
+        if (itemOverBudget) throw new TriageEvidenceBudgetExceededError(itemOverBudget);
         aggregateBytes += bytes.byteLength;
-        if (aggregateBytes > MAX_GATEWAY_EVIDENCE_AGGREGATE_BYTES) {
-          throw new Error("gateway evidence exceeds the aggregate bound");
-        }
+        const aggregateOverBudget = checkTriageEvidenceBudget({
+          scope: "aggregate",
+          actualBytes: aggregateBytes,
+        });
+        if (aggregateOverBudget) throw new TriageEvidenceBudgetExceededError(aggregateOverBudget);
         const actualHash = createHash("sha256").update(bytes).digest("hex");
         if (item.contentHash && actualHash !== item.contentHash) {
           throw new Error("snapshot evidence integrity verification failed");
