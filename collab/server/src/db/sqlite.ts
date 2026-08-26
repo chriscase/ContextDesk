@@ -212,6 +212,9 @@ function persistentMemoryStore<T extends object>(
   for (const name of methodNames(store)) {
     const original = Reflect.get(store, name);
     if (typeof original !== "function") continue;
+    // Every method becomes async, including capture()/restore(). Callers must
+    // await Promise.resolve(...) or restore receives a Promise and throws
+    // DataCloneError without rolling the SQLite document back.
     Reflect.set(store, name, async (...args: unknown[]) => {
       const result = await Reflect.apply(original, store, args);
       if (mutatingMethods.has(name)) state.write(key, storeState(store));
@@ -291,6 +294,13 @@ export function createSqliteRuntime(
   const state = new SqliteState(path);
   const rawAudit = new MemoryAuditStore();
   const audit = persistentMemoryStore(state, "audit", rawAudit, new Set(["append", "restore"]));
+  const rawCatalog = new MemoryCatalogStore();
+  const catalog = persistentMemoryStore(
+    state,
+    "catalog",
+    rawCatalog,
+    new Set(["insert", "remove", "updateMeta", "setLifecycle", "restore"]),
+  );
   const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
     state.transaction(
       [
@@ -304,13 +314,6 @@ export function createSqliteRuntime(
     "cases",
     rawCases,
     CASE_SQLITE_MUTATORS,
-  );
-  const rawCatalog = new MemoryCatalogStore();
-  const catalog = persistentMemoryStore(
-    state,
-    "catalog",
-    rawCatalog,
-    new Set(["insert", "updateMeta", "setLifecycle", "restore"]),
   );
   const rawRuns = new MemoryRunStore();
   const runs = persistentMemoryStore(

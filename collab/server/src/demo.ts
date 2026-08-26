@@ -313,24 +313,6 @@ async function seed(app: FastifyInstance): Promise<string> {
       description: "Fixture transcript standing in for a pasted external chat",
     },
   });
-  await okJson(app, {
-    method: "POST",
-    url: `/api/cases/${created.id}/imports`,
-    cookie,
-    payload: {
-      outputText:
-        "The checkout log and inventory timeout point to inventory-client exhaustion; verify pool pressure before changing timeouts.",
-      promptText: "What timed out in checkout, and what should we inspect next?",
-      sourceId: source.id,
-      operatorId: "synthetic-operator",
-      operatorUsername: "demo-operator",
-      evidenceVisibility: "importer_described",
-      visibilityNote: "Synthetic fixture; no private or live-provider data.",
-      snapshotBinding: "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb",
-      redacted: true,
-      privacyClass: "share_safe",
-    },
-  });
 
   const checkoutEvidence = await okJson<{ artifact: { id: string } }>(app, {
     method: "POST",
@@ -419,6 +401,24 @@ async function seed(app: FastifyInstance): Promise<string> {
       ],
       visibility: "owner_only",
       protocolVersion: "synthetic-demo-v1",
+    },
+  });
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/imports`,
+    cookie,
+    payload: {
+      outputText:
+        "The checkout log and inventory timeout point to inventory-client exhaustion; verify pool pressure before changing timeouts.",
+      promptText: "What timed out in checkout, and what should we inspect next?",
+      sourceId: source.id,
+      operatorId: "synthetic-operator",
+      operatorUsername: "demo-operator",
+      evidenceVisibility: "importer_described",
+      visibilityNote: "Synthetic fixture; no private or live-provider data.",
+      snapshotBinding: demoSnapshot.fingerprint,
+      redacted: true,
+      privacyClass: "share_safe",
     },
   });
   await okJson(app, {
@@ -597,6 +597,9 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   const applyState = new MemoryPortableApplyStateStore();
   const catalog = new CatalogService(catalogStore, audit);
   const cases = new CaseService(evidence, audit, caseStore, catalog);
+  evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
+  evidence.addReferencedContentHashSource(() => runStore.listReferencedContentHashes());
+  await evidence.recoverUnreferencedWrites();
   const imports = new ImportService({
     evidence,
     audit,

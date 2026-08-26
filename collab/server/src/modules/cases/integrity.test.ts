@@ -1,10 +1,16 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CORPUS_INTAKE_COMMIT_SCHEMA_ID } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
-import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
+import {
+  FilesystemEvidenceStore,
+  abandonWriteBatchForCrashTest,
+  sha256Hex,
+} from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
+import { corpusIntakeRequestDigest } from "../corpus-intake/index.js";
 import { ContributionConflictError, CaseService, MemoryCaseStore } from "./index.js";
 
 const actor = { id: "alice", username: "alice" };
@@ -186,6 +192,216 @@ describe("case write integrity", () => {
       expect(timeline.some((event) => event.kind === "evidence_registered")).toBe(false);
       expect(timeline.some((event) => event.kind === "contribution_created")).toBe(false);
       expect(await evidence.head(sha256Hex(bytes))).toBeNull();
+    }, boom);
+  });
+
+  it("abandons an unpaired file-server reference when artifact metadata rolls back", async () => {
+    const boom = new BoomArtifactStore();
+    boom.boom = true;
+    await withService(async ({ service, evidence }) => {
+      const created = await service.createCase(actor, { title: "File-server ref atomic fixture" }, "test");
+      await expect(
+        service.addEvidence(
+          created.id,
+          actor,
+          {
+            kind: "file_server_ref",
+            uri: "https://files.example.test/incident/core.bin",
+            expectedHash: sha256Hex(new TextEncoder().encode("remote-synthetic")),
+            summary: "Synthetic core dump stays on the file server.",
+          },
+          "test",
+        ),
+      ).rejects.toThrow(/artifact store failed/);
+      expect(await service.listContributions(created.id, actor, false)).toEqual([]);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(
+        false,
+      );
+      const refs = await readdir(join(evidence.rootDir, "refs")).catch(() => [] as string[]);
+      expect(refs).toEqual([]);
+    }, boom);
+  });
+
+  it("restores the file-server reference when recheck timeline or audit fails", async () => {
+    const boom = new InjectedFailureStore();
+    boom.failTimelineKind = "evidence_recheck";
+    await withService(async ({ service, evidence, audit, store }) => {
+      const created = await service.createCase(actor, { title: "Recheck atomic fixture" }, "test");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "file_server_ref",
+          uri: "https://files.example.test/incident/core.bin",
+          expectedHash: sha256Hex(new TextEncoder().encode("remote-synthetic")),
+          summary: "Synthetic core dump stays on the file server.",
+        },
+        "test",
+      );
+      const row = await store.getArtifact(uploaded.artifact.id);
+      const refId = row?.refId;
+      expect(refId).toBeTruthy();
+      const before = await evidence.getFileServerReference(refId!);
+      expect(before?.verificationStatus).toBe("unverified");
+      await expect(service.recheckReference(created.id, uploaded.artifact.id, actor, "test"))
+        .rejects.toThrow(/injected timeline failure:evidence_recheck/);
+      expect(await evidence.getFileServerReference(refId!)).toEqual(before);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "evidence_recheck")).toBe(
+        false,
+      );
+      expect(await audit.list({ action: "evidence_recheck" })).toEqual([]);
+    }, boom);
+  });
+
+  it("keeps concurrent notes and refuses a forked revision without leaking across cases", async () => {
+    const bob = { id: "bob", username: "bob" };
+    const eve = { id: "eve", username: "eve" };
+    await withService(async ({ service }) => {
+      const created = await service.createCase(actor, { title: "Concurrent notes fixture" }, "test");
+      const other = await service.createCase(eve, { title: "Private synthetic investigation" }, "test");
+      await service.addParticipant(created.id, actor, { identityId: bob.id, username: bob.username }, "test");
+      const notes = await Promise.all([
+        service.addContribution(created.id, actor, { kind: "note", body: "Alice saw the synthetic timeout." }, "test"),
+        service.addContribution(created.id, bob, { kind: "note", body: "Bob saw the synthetic queue depth." }, "test"),
+        service.addContribution(
+          created.id,
+          actor,
+          { kind: "message", body: "Please inspect the synthetic worker trace." },
+          "test",
+        ),
+      ]);
+      expect(new Set(notes.map((row) => row.id)).size).toBe(3);
+      const listed = await service.listContributions(created.id, actor, false);
+      expect(listed.map((row) => row.body).sort()).toEqual([
+        "Alice saw the synthetic timeout.",
+        "Bob saw the synthetic queue depth.",
+        "Please inspect the synthetic worker trace.",
+      ]);
+      const timeline = await service.listTimeline(created.id);
+      expect(timeline.filter((event) => event.kind === "contribution_created")).toHaveLength(3);
+      expect((await service.listContributions(other.id, eve, false)).map((row) => row.body)).toEqual([]);
+      expect((await service.listTimeline(other.id)).some((event) => event.kind === "contribution_created")).toBe(
+        false,
+      );
+
+      const target = notes[0]!;
+      const revisions = await Promise.allSettled([
+        service.reviseContribution(created.id, target.id, actor, "Alice revised the timeout note.", "test", 1),
+        service.reviseContribution(created.id, target.id, bob, "Bob raced the same note revision.", "test", 1),
+      ]);
+      const fulfilled = revisions.filter((row) => row.status === "fulfilled");
+      const conflicts = revisions.filter(
+        (row) => row.status === "rejected" && row.reason instanceof ContributionConflictError,
+      );
+      expect(fulfilled).toHaveLength(1);
+      expect(conflicts).toHaveLength(1);
+      const chain = await service.provenance(created.id, target.id);
+      expect(chain).toHaveLength(2);
+      expect(chain[1]?.revision).toBe(2);
+      expect(
+        (await service.listTimeline(created.id)).filter((event) => event.kind === "contribution_revised"),
+      ).toHaveLength(1);
+    });
+  });
+
+  it("keeps a frozen snapshot immutable after later evidence intake", async () => {
+    await withService(async ({ service }) => {
+      const created = await service.createCase(actor, { title: "Frozen snapshot intake fixture" }, "test");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "mailer.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("2026-08-25T00:00:00Z synthetic timeout\n"),
+          summary: "Synthetic mailer timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const frozen = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [uploaded.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      const frozenEvidence = frozen.evidence.map((item) => ({ ...item }));
+      const later = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "worker.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("2026-08-25T00:01:00Z synthetic worker stall\n"),
+          summary: "Synthetic worker stall.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const listed = await service.listSnapshots(created.id, actor, false);
+      const reloaded = listed.find((row) => row.id === frozen.id);
+      expect(reloaded?.status).toBe("frozen");
+      expect(reloaded?.fingerprint).toBe(frozen.fingerprint);
+      expect(reloaded?.evidence).toEqual(frozenEvidence);
+      expect(reloaded?.evidence.some((item) => item.evidenceId === later.artifact.id)).toBe(false);
+      const next = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [uploaded.artifact.id, later.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      expect(next.id).not.toBe(frozen.id);
+      expect(next.parentSnapshotId).toBe(frozen.id);
+      expect(next.fingerprint).not.toBe(frozen.fingerprint);
+      expect((await service.listTimeline(created.id)).filter((event) => event.kind === "snapshot_frozen")).toHaveLength(
+        2,
+      );
+    });
+  });
+
+  it("rolls back promoted corpus blobs when the post-promote timeline write fails", async () => {
+    const boom = new InjectedFailureStore();
+    boom.failTimelineKind = "corpus_intake_committed";
+    await withService(async ({ service, evidence, audit }) => {
+      const created = await service.createCase(actor, { title: "Corpus promote atomic fixture" }, "test");
+      const bytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic mailer timeout\n");
+      const files = [{ relativePath: "mailer/promote-rollback.log", mediaType: "text/plain", bytes }];
+      const request = {
+        schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+        origin: "files" as const,
+        sourceLabel: "synthetic promote rollback source",
+        privacyClass: "owner_only" as const,
+        idempotencyKey: "batch-syn-promote-rollback-1",
+        files: [{
+          relativePath: files[0]!.relativePath,
+          mediaType: files[0]!.mediaType,
+          contentBase64: Buffer.from(bytes).toString("base64"),
+        }],
+        archiveBase64: null,
+        previewToken: corpusIntakeRequestDigest({
+          caseId: created.id,
+          actorId: actor.id,
+          origin: "files",
+          sourceLabel: "synthetic promote rollback source",
+          privacyClass: "owner_only",
+          idempotencyKey: "batch-syn-promote-rollback-1",
+          files,
+          archive: null,
+        }),
+      };
+      await expect(service.commitCorpusIntake(created.id, actor, request, "test"))
+        .rejects.toThrow(/injected timeline failure:corpus_intake_committed/);
+      expect(await service.listArtifacts(created.id, actor, false)).toEqual([]);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(
+        false,
+      );
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "corpus_intake_committed")).toBe(
+        false,
+      );
+      expect(await evidence.head(sha256Hex(bytes))).toBeNull();
+      expect(await audit.list({ action: "corpus_intake_commit" })).toEqual([]);
     }, boom);
   });
 
@@ -428,6 +644,53 @@ describe("case write integrity", () => {
     }
   });
 
+  it("rolls back case create, status, membership, and legal-hold when timeline or audit fails", async () => {
+    const timelineStore = new InjectedFailureStore();
+    timelineStore.failTimelineKind = "case_created";
+    await withService(async ({ service, audit }) => {
+      await expect(
+        service.createCase(actor, { title: "Synthetic case atomic fixture" }, "test"),
+      ).rejects.toThrow(/injected timeline failure:case_created/);
+      expect(await service.listCases(actor, true)).toEqual([]);
+      expect(await audit.list({ action: "case_create" })).toEqual([]);
+    }, timelineStore);
+
+    await withService(async ({ service, audit, store }) => {
+      const created = await service.createCase(actor, { title: "Synthetic status atomic fixture" }, "test");
+      (store as InjectedFailureStore).failTimelineKind = "case_status";
+      await expect(service.setStatus(created.id, actor, "closed", "test")).rejects.toThrow(
+        /injected timeline failure:case_status/,
+      );
+      expect((await service.getCase(created.id, actor, true))?.status).toBe("open");
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "case_status")).toBe(false);
+      expect(await audit.list({ action: "case_status" })).toEqual([]);
+    }, new InjectedFailureStore());
+
+    await withService(async ({ service, audit, store }) => {
+      const created = await service.createCase(actor, { title: "Synthetic membership atomic fixture" }, "test");
+      (store as InjectedFailureStore).failTimelineKind = "membership";
+      await expect(
+        service.addParticipant(created.id, actor, { identityId: "bob", username: "bob" }, "test"),
+      ).rejects.toThrow(/injected timeline failure:membership/);
+      expect((await service.getCase(created.id, actor, true))?.participants.some((row) => row.identityId === "bob"))
+        .toBe(false);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "membership")).toBe(false);
+      expect(await audit.list({ action: "case_membership" })).toEqual([]);
+    }, new InjectedFailureStore());
+
+    const boomAudit = new InjectedFailureAudit();
+    await withService(async ({ service, audit }) => {
+      const created = await service.createCase(actor, { title: "Synthetic hold atomic fixture" }, "test");
+      boomAudit.failAction = "legal_hold";
+      await expect(service.setLegalHold(created.id, actor, true, "test")).rejects.toThrow(
+        /injected audit failure:legal_hold/,
+      );
+      expect((await service.getCase(created.id, actor, true))?.legalHold).toBe(false);
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "legal_hold")).toBe(false);
+      expect(await audit.list({ action: "legal_hold" })).toEqual([]);
+    }, new MemoryCaseStore(), boomAudit);
+  });
+
   it("replays identical snapshot fingerprints and hypothesis/tombstone retries without forking history", async () => {
     await withService(async ({ service }) => {
       const created = await service.createCase(actor, { title: "Idempotent freeze fixture" }, "test");
@@ -494,6 +757,44 @@ describe("case write integrity", () => {
       expect(tombstoneReplay.revision).toBe(tombstoned.revision);
       expect(tombstoneReplay.tombstoned).toBe(true);
       expect((await service.provenance(created.id, note.id)).filter((row) => row.tombstoned)).toHaveLength(1);
+    });
+  });
+
+  it("reclaims promoted evidence bytes after a crash before commit and keeps referenced digests", async () => {
+    await withService(async ({ service, evidence, store }) => {
+      evidence.addReferencedContentHashSource(() => store.listReferencedContentHashes());
+      const created = await service.createCase(actor, { title: "Promote crash recovery fixture" }, "test");
+      const keptBytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic kept worker stall\n");
+      const kept = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "kept-worker.log",
+          mediaType: "text/plain",
+          bytes: keptBytes,
+          summary: "Synthetic kept worker stall.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const crashedBytes = new TextEncoder().encode("2026-08-25T00:01:00Z synthetic crashed corpus\n");
+      const batch = await evidence.beginWriteBatch();
+      const crashedMeta = await batch.put(crashedBytes, { contentType: "text/plain" });
+      await batch.promote();
+      expect(await evidence.verify(crashedMeta.hash)).toBe(true);
+      await abandonWriteBatchForCrashTest(batch);
+      expect(await store.listArtifactsByCase(created.id)).toHaveLength(1);
+      const recovered = await evidence.recoverUnreferencedWrites();
+      expect(recovered.reclaimed).toEqual([crashedMeta.hash]);
+      expect(await evidence.head(crashedMeta.hash)).toBeNull();
+      expect(await evidence.verify(kept.artifact.contentHash ?? "")).toBe(true);
+      expect((await service.listArtifacts(created.id, actor, false)).map((row) => row.id)).toEqual([
+        kept.artifact.id,
+      ]);
+      expect(
+        (await service.listTimeline(created.id)).filter((event) => event.kind === "evidence_registered"),
+      ).toHaveLength(1);
     });
   });
 });

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { GOLD_ALIGNMENT_NOT_CORRECTNESS, GOLD_IS_HUMAN_BENCHMARK } from "./gold.js";
+import { CORPUS_INTAKE_BATCH_SCHEMA_ID } from "./investigation-corpus-intake.js";
 import {
   PORTABLE_HISTORY_CAVEAT,
   PORTABLE_PERMISSION_CAVEAT,
@@ -18,6 +19,7 @@ import {
   type PortableInvestigationV1,
   type PreflightRequestV1,
 } from "./investigation-portable.js";
+import { INTERACTION_TRACE_SCHEMA_ID, TRACE_UNKNOWN_STAYS_UNKNOWN } from "./trace.js";
 
 const Z = "0".repeat(64);
 const TS = "2026-08-24T15:00:00Z";
@@ -139,6 +141,61 @@ function unsignedSynthetic(): PortableInvestigationUnsigned {
         createdBy: "operator-north",
         createdAt: TS,
         objectHash: Z,
+      },
+      {
+        id: "ev-intake-1",
+        title: "Intake worker excerpt",
+        artifactKind: "log",
+        sourceId: "src-operator",
+        relativePath: "router/timeout.log",
+        intakeBatchId: "batch-intake-1",
+        privacyClass: "share_safe",
+        digest: publicHash,
+        inclusion: "present",
+        contentType: "text/plain",
+        byteLength: Buffer.byteLength(publicBytes),
+        createdBy: "operator-north",
+        createdAt: TS,
+        objectHash: Z,
+      },
+    ],
+    intakeBatches: [
+      {
+        id: "batch-intake-1",
+        caseId: "inv-synth-alpha",
+        idempotencyKey: "batch-syn-0001",
+        requestDigest: sha("synth-intake-request"),
+        origin: "files",
+        sourceLabel: "Synthetic router diagnostics",
+        privacyClass: "share_safe",
+        createdAt: TS,
+        createdBy: "operator-north",
+        payloadJson: JSON.stringify({
+          schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,
+          id: "batch-intake-1",
+          caseId: "inv-synth-alpha",
+          origin: "files",
+          sourceLabel: "Synthetic router diagnostics",
+          privacyClass: "share_safe",
+          idempotencyKey: "batch-syn-0001",
+          requestDigest: sha("synth-intake-request"),
+          replayed: false,
+          createdAt: TS,
+          createdBy: "operator-north",
+          items: [
+            {
+              artifactId: "ev-intake-1",
+              relativePath: "router/timeout.log",
+              digest: publicHash,
+              byteLength: Buffer.byteLength(publicBytes),
+              mediaType: "text/plain",
+              privacyClass: "share_safe",
+              sourceId: "src-operator",
+              duplicateDigest: true,
+            },
+          ],
+          rejected: [],
+        }),
       },
     ],
     contentObjects: [
@@ -361,6 +418,46 @@ function reseal(bundle: PortableInvestigationV1): PortableInvestigationV1 {
   return attachPortableIntegrity(rest);
 }
 
+function syntheticTrace(
+  candidateId: string,
+  overlay: { traceId?: string; evidenceRefs?: string[] } = {},
+) {
+  return {
+    schemaId: INTERACTION_TRACE_SCHEMA_ID,
+    traceId: overlay.traceId ?? `trace-${candidateId}`,
+    candidateId,
+    sourceKind: "programmatic" as const,
+    completeness: "partial" as const,
+    privacyClass: "share_safe" as const,
+    rawHash: null,
+    events: [
+      {
+        eventId: `evt-${candidateId}-question`,
+        sequence: 1,
+        kind: "question" as const,
+        actor: "human" as const,
+        role: null,
+        parentEventId: null,
+        evidenceRefs: overlay.evidenceRefs ?? [],
+        observedAt: { status: "unknown" as const },
+        excerpt: "What should the fictional operator inspect next?",
+        excerptHash: null,
+        unknowns: ["timestamp"],
+      },
+    ],
+    efficiency: {
+      turnCount: { status: "unknown" as const },
+      evidenceAcquisitionSteps: { status: "unknown" as const },
+      latency: { status: "unknown" as const },
+      cost: { status: "unknown" as const },
+      providerCalls: { status: "unknown" as const },
+    },
+    unknowns: ["tools"],
+    notes: [TRACE_UNKNOWN_STAYS_UNKNOWN],
+    createdAt: TS,
+  };
+}
+
 function dryRun(
   bundle: PortableInvestigationV1,
   overlay: Partial<PreflightRequestV1> = {},
@@ -432,6 +529,7 @@ describe("portable investigation adversarial lab", () => {
       ["participant", (row) => row.participants[0] as unknown as Record<string, unknown>],
       ["contribution", (row) => row.contributions[0] as unknown as Record<string, unknown>],
       ["evidence", (row) => row.evidence[0] as unknown as Record<string, unknown>],
+      ["intake batch", (row) => row.intakeBatches![0] as unknown as Record<string, unknown>],
       ["content", (row) => row.contentObjects[0] as unknown as Record<string, unknown>],
       ["source", (row) => row.sources[0] as unknown as Record<string, unknown>],
       ["imported run", (row) => row.importedAiRuns[0] as unknown as Record<string, unknown>],
@@ -563,6 +661,146 @@ describe("portable investigation adversarial lab", () => {
       /dangling timeline target/,
     );
 
+    const danglingImportedPrompt = syntheticSeal();
+    danglingImportedPrompt.importedAiRuns[0]!.promptDigest = "ab".repeat(32);
+    expect(() => parsePortableInvestigation(reseal(danglingImportedPrompt))).toThrow(
+      /dangling content digest/,
+    );
+
+    const exactImportedPrompt = syntheticSeal();
+    exactImportedPrompt.importedAiRuns[0]!.promptCompleteness = "exact";
+    expect(() => parsePortableInvestigation(reseal(exactImportedPrompt))).toThrow(
+      /exact prompt completeness requires a prompt digest/,
+    );
+
+    const withheldImportedPrompt = syntheticSeal();
+    const withheld = withheldImportedPrompt.contentObjects.find((row) => row.inclusion === "private");
+    withheldImportedPrompt.importedAiRuns[0]!.promptDigest = withheld?.digest;
+    withheldImportedPrompt.importedAiRuns[0]!.promptCompleteness = "exact";
+    expect(() => parsePortableInvestigation(reseal(withheldImportedPrompt))).toThrow(
+      /missing required content/,
+    );
+
+    const danglingImportedSnapshot = syntheticSeal();
+    danglingImportedSnapshot.importedAiRuns[0]!.snapshotId = "ghost-snap";
+    expect(() => parsePortableInvestigation(reseal(danglingImportedSnapshot))).toThrow(
+      /dangling snapshot/,
+    );
+
+    const boundImported = syntheticSeal();
+    boundImported.importedAiRuns[0]!.promptDigest = boundImported.contentObjects.find(
+      (row) => row.inclusion === "present",
+    )?.digest;
+    boundImported.importedAiRuns[0]!.promptCompleteness = "exact";
+    boundImported.importedAiRuns[0]!.snapshotId = boundImported.snapshots[0]!.id;
+    expect(() => parsePortableInvestigation(reseal(boundImported))).not.toThrow();
+
+    const danglingImportedOperator = syntheticSeal();
+    danglingImportedOperator.importedAiRuns[0]!.operatorId = "ghost-operator";
+    expect(() => parsePortableInvestigation(reseal(danglingImportedOperator))).toThrow(
+      /dangling actor/,
+    );
+
+    const danglingExperimentImporter = syntheticSeal();
+    danglingExperimentImporter.experiments[0]!.importerId = "ghost-importer";
+    expect(() => parsePortableInvestigation(reseal(danglingExperimentImporter))).toThrow(
+      /dangling actor/,
+    );
+
+    const mismatchedExperimentCandidates = syntheticSeal();
+    mismatchedExperimentCandidates.experiments[0]!.candidates = [
+      {
+        candidateId: "cand-other-1",
+        modelLabel: "qwen-3.6-27b",
+        role: "reviewer",
+        runStatus: "completed",
+        observedLatency: { status: "unknown" },
+        cost: { status: "unknown" },
+        usage: { status: "unknown" },
+        helpfulnessState: "unreviewed",
+        goldState: "unknown",
+      },
+    ];
+    expect(() => parsePortableInvestigation(reseal(mismatchedExperimentCandidates))).toThrow(
+      /candidate ids must match candidateIds/,
+    );
+
+    const danglingAgreementEvidence = syntheticSeal();
+    danglingAgreementEvidence.experiments[0]!.candidates = [
+      {
+        candidateId: danglingAgreementEvidence.experiments[0]!.candidateIds[0]!,
+        modelLabel: "qwen-3.6-27b",
+        role: "reviewer",
+        runStatus: "completed",
+        observedLatency: { status: "unknown" },
+        cost: { status: "unknown" },
+        usage: { status: "unknown" },
+        helpfulnessState: "unreviewed",
+        goldState: "unknown",
+      },
+    ];
+    danglingAgreementEvidence.experiments[0]!.agreement = {
+      sharedAnchors: [
+        {
+          evidenceRef: "ghost-evidence",
+          role: "evidence",
+          candidateIds: [danglingAgreementEvidence.experiments[0]!.candidateIds[0]!],
+        },
+      ],
+      candidateSpecific: [],
+      roleConflicts: [],
+      notes: ["Agreement is not proof of correctness."],
+    };
+    expect(() => parsePortableInvestigation(reseal(danglingAgreementEvidence))).toThrow(
+      /dangling evidence/,
+    );
+
+    const matchingExperimentTrace = syntheticSeal();
+    matchingExperimentTrace.experiments[0]!.traces = [
+      syntheticTrace(matchingExperimentTrace.experiments[0]!.candidateIds[0]!, {
+        evidenceRefs: ["ev-public-1"],
+      }),
+    ];
+    matchingExperimentTrace.timeline.push({
+      seq: 2,
+      kind: "experiment_trace_imported",
+      actorId: "operator-north",
+      targetId: `${matchingExperimentTrace.experiments[0]!.id}:trace-${matchingExperimentTrace.experiments[0]!.candidateIds[0]!}`,
+      targetNamespace: "experiment",
+      serverTime: TS,
+      objectHash: Z,
+    });
+    expect(() => parsePortableInvestigation(reseal(matchingExperimentTrace))).not.toThrow();
+
+    const danglingTraceCandidate = syntheticSeal();
+    danglingTraceCandidate.experiments[0]!.traces = [syntheticTrace("ghost-candidate")];
+    expect(() => parsePortableInvestigation(reseal(danglingTraceCandidate))).toThrow(
+      /dangling experiment candidate/,
+    );
+
+    const danglingTraceEvidence = syntheticSeal();
+    danglingTraceEvidence.experiments[0]!.traces = [
+      syntheticTrace(danglingTraceEvidence.experiments[0]!.candidateIds[0]!, {
+        evidenceRefs: ["ghost-evidence"],
+      }),
+    ];
+    expect(() => parsePortableInvestigation(reseal(danglingTraceEvidence))).toThrow(
+      /dangling evidence/,
+    );
+
+    const missingTraceTimeline = syntheticSeal();
+    missingTraceTimeline.experiments[0]!.traces = [
+      syntheticTrace(missingTraceTimeline.experiments[0]!.candidateIds[0]!),
+    ];
+    expect(() => parsePortableInvestigation(reseal(missingTraceTimeline))).toThrow(
+      /experiment traces must match experiment_trace_imported timeline targets/,
+    );
+
+    const danglingIntake = syntheticSeal();
+    danglingIntake.timeline[0]!.targetNamespace = "intake_batch";
+    danglingIntake.timeline[0]!.targetId = "ghost-batch";
+    expect(() => parsePortableInvestigation(reseal(danglingIntake))).toThrow(/dangling/);
+
     const danglingAudit = syntheticSeal();
     danglingAudit.auditRefs[0]!.actorId = "ghost-operator";
     expect(() => parsePortableInvestigation(reseal(danglingAudit))).toThrow(/dangling actor/);
@@ -575,6 +813,7 @@ describe("portable investigation adversarial lab", () => {
       ["actor", sealed.actors[0]!.sourceActorId],
       ["contribution", sealed.contributions[0]!.id],
       ["evidence", sealed.evidence[0]!.id],
+      ["intake_batch", sealed.intakeBatches![0]!.id],
       ["content", sealed.contentObjects[0]!.digest],
       ["source", sealed.sources[0]!.id],
       ["imported_ai_run", sealed.importedAiRuns[0]!.id],
@@ -617,6 +856,32 @@ describe("portable investigation adversarial lab", () => {
     unknownNamespace.timeline[0]!.targetNamespace = "synthetic_unknown";
     expect(() => parsePortableInvestigation(reseal(unknownNamespace))).toThrow(
       /unknown timeline target namespace/,
+    );
+
+    const job = sealed.triageJobs[0]!;
+    const candidate = job.candidates[0]!;
+    const attempt = structuredClone(sealed);
+    attempt.timeline[0]!.targetNamespace = "triage_job";
+    attempt.timeline[0]!.targetId = `${job.id}:${candidate.candidateId}`;
+    expect(() => parsePortableInvestigation(reseal(attempt))).not.toThrow();
+
+    const unknownLane = structuredClone(sealed);
+    unknownLane.timeline[0]!.targetNamespace = "triage_job";
+    unknownLane.timeline[0]!.targetId = `${job.id}:missing-lane`;
+    expect(() => parsePortableInvestigation(reseal(unknownLane))).toThrow(/dangling timeline target/);
+
+    const experiment = sealed.experiments[0]!;
+    const traceTarget = structuredClone(sealed);
+    traceTarget.timeline[0]!.targetNamespace = "experiment";
+    traceTarget.timeline[0]!.targetId = `${experiment.id}:trace-synthetic-alice`;
+    expect(() => parsePortableInvestigation(reseal(traceTarget))).not.toThrow();
+
+    const unknownExperiment = structuredClone(sealed);
+    unknownExperiment.timeline[0]!.targetNamespace = "experiment";
+    unknownExperiment.timeline[0]!.targetId =
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:trace-synthetic-alice";
+    expect(() => parsePortableInvestigation(reseal(unknownExperiment))).toThrow(
+      /dangling timeline target/,
     );
   });
 
@@ -749,19 +1014,21 @@ describe("portable investigation adversarial lab", () => {
     expect(() => parsePortableInvestigation(fp)).toThrow(/hash\/fingerprint mismatch/);
 
     const ordinal = syntheticSeal();
+    const restricted = ordinal.evidence.find((row) => row.id === "ev-restricted-1")!;
     ordinal.snapshots[0]!.evidence.push({
       evidenceId: "ev-restricted-1",
       ordinal: 0,
-      contentHash: ordinal.evidence[1]!.digest,
+      contentHash: restricted.digest,
       privacyClass: "owner_only",
     });
     expect(() => parsePortableInvestigation(reseal(ordinal))).toThrow(/duplicate ordinal|illegal privacy/);
 
     const privacy = syntheticSeal();
+    const restrictedPrivacy = privacy.evidence.find((row) => row.id === "ev-restricted-1")!;
     privacy.snapshots[0]!.evidence.push({
       evidenceId: "ev-restricted-1",
       ordinal: 1,
-      contentHash: privacy.evidence[1]!.digest,
+      contentHash: restrictedPrivacy.digest,
       privacyClass: "owner_only",
     });
     privacy.snapshots[0]!.fingerprint = portableSnapshotFingerprint(privacy.snapshots[0]!);

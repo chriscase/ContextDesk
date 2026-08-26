@@ -172,6 +172,9 @@ async function main(): Promise<void> {
     config.evidenceRoot,
     process.env.COLLAB_PUBLIC_IDENTITY_KEY,
   );
+  store.addReferencedContentHashSource(() => storage.cases.listReferencedContentHashes());
+  store.addReferencedContentHashSource(() => storage.runs.listReferencedContentHashes());
+  await store.recoverUnreferencedWrites();
   const log = createAuthLog();
   const ldapConfig = config.authMode === "ldap" ? loadLdapConfig() : null;
   const adapter = ldapConfig

@@ -69,6 +69,7 @@ const NAMESPACE_PROBES: Readonly<Record<PortableObjectKind, NamespaceProbe>> = O
   evidence: { probe: "cases", kind: "artifact" },
   attachment: { probe: "cases", kind: "artifact" },
   snapshot: { probe: "cases", kind: "snapshot" },
+  intake_batch: { probe: "cases", kind: "intake_batch" },
   source: { probe: "catalog" },
   imported_ai_run: { probe: "runs" },
   triage_job: { probe: "jobs" },

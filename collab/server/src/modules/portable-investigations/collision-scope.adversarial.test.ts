@@ -527,6 +527,7 @@ describe("portable restore collision scope at the server boundary", () => {
         "gold",
         "helpfulness",
         "imported_ai_run",
+        "intake_batch",
         "investigation",
         "snapshot",
         "source",

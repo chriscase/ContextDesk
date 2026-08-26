@@ -5,13 +5,18 @@ import {
   PORTABLE_OBJECT_KINDS,
   PORTABLE_TERMINAL_TRIAGE_STATUSES,
   parseCorpusIntakeBatch,
+  parseInteractionTrace,
+  parsePortableTriageAttemptTarget,
+  parsePortableExperimentTraceTarget,
   portableDestinationUuid,
   snapshotFairness,
   snapshotFingerprint,
+  traceFingerprint,
   type ArchivePreflightReportV1,
   type GoldReferenceV1,
   type HelpfulnessObservationV1,
   type IdentityMapEntryV1,
+  type InteractionTraceV1,
   type NormalizedExperimentDecisionV1,
   type PortableArchiveV1,
   type PortableObjectKind,
@@ -97,6 +102,202 @@ function remapOf(
     return sourceId;
   }
   return hit?.destinationId ?? sourceId;
+}
+
+export function remapPortableTimelineTarget(
+  report: ArchivePreflightReportV1,
+  namespace: PortableObjectKind,
+  targetId: string,
+): string {
+  if (namespace === "triage_job") {
+    const attempt = parsePortableTriageAttemptTarget(targetId);
+    if (attempt) {
+      return `${remapOf(report, "triage_job", attempt.jobId)}:${attempt.candidateId}`;
+    }
+  }
+  if (namespace === "experiment") {
+    const parsed = parsePortableExperimentTraceTarget(targetId);
+    if (parsed) {
+      return `${remapOf(report, "experiment", parsed.experimentId)}:${parsed.traceId}`;
+    }
+  }
+  return remapOf(report, namespace, targetId);
+}
+
+function remapHypothesisLinks(
+  report: ArchivePreflightReportV1,
+  links: readonly { kind: "artifact" | "contribution"; id: string }[] | undefined,
+  bundle: PortableArchiveV1["investigation"],
+): { kind: "artifact" | "contribution"; id: string }[] {
+  const contributionIds = new Set(bundle.contributions.map((row) => row.id));
+  const evidenceIds = new Set(bundle.evidence.map((row) => row.id));
+  return [...(links ?? [])]
+    .slice()
+    .sort((left, right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`))
+    .map((link) => {
+      if (link.kind === "artifact") {
+        if (!evidenceIds.has(link.id)) {
+          throw new Error("hypothesis artifact link is missing a portable evidence target");
+        }
+        return { kind: link.kind, id: remapOf(report, "evidence", link.id) };
+      }
+      if (!contributionIds.has(link.id)) {
+        throw new Error("hypothesis contribution link is missing a portable contribution target");
+      }
+      return { kind: link.kind, id: remapOf(report, "contribution", link.id) };
+    });
+}
+
+function restoredImportedRunBytes(
+  digest: string | null | undefined,
+  digestBytes: Map<string, Uint8Array>,
+  missing: string,
+): { hash: string | null; text: string | null } {
+  if (!digest) return { hash: null, text: null };
+  const bytes = digestBytes.get(digest);
+  if (!bytes) throw new Error(missing);
+  return { hash: digest, text: Buffer.from(bytes).toString("utf8") };
+}
+
+function remappedImportedRunContributionId(
+  report: ArchivePreflightReportV1,
+  run: PortableArchiveV1["investigation"]["importedAiRuns"][number],
+  bundle: PortableArchiveV1["investigation"],
+): string {
+  if (!run.contributionId) {
+    throw new Error("imported run is missing a portable external-run contribution target");
+  }
+  const hit = bundle.contributions.find((row) => row.id === run.contributionId);
+  if (!hit || hit.kind !== "external_run") {
+    throw new Error("imported run is missing a portable external-run contribution target");
+  }
+  return remapOf(report, "contribution", run.contributionId);
+}
+
+function isContributionHistoryKind(kind: string): boolean {
+  return kind === "contribution_created"
+    || kind === "contribution_revised"
+    || kind === "contribution_tombstoned"
+    || kind === "hypothesis_status";
+}
+
+function isDecisionHistoryKind(kind: string): boolean {
+  return /^experiment_decision_/.test(kind);
+}
+
+function historyRowForEvent<T extends { id: string; revision: number }>(
+  rows: readonly T[],
+  event: PortableArchiveV1["investigation"]["timeline"][number],
+  timeline: PortableArchiveV1["investigation"]["timeline"],
+  matchesKind: (kind: string) => boolean,
+): T | undefined {
+  if (!event.targetId) return undefined;
+  const chain = rows
+    .filter((row) => row.id === event.targetId)
+    .slice()
+    .sort((left, right) => left.revision - right.revision);
+  const events = timeline
+    .filter((row) => row.targetId === event.targetId && matchesKind(row.kind))
+    .slice()
+    .sort((left, right) => left.seq - right.seq);
+  const index = events.findIndex((row) => row.seq === event.seq);
+  if (index < 0) return chain[0];
+  return chain[index];
+}
+
+function importedTimelinePayload(
+  event: PortableArchiveV1["investigation"]["timeline"][number],
+  bundle: PortableArchiveV1["investigation"],
+  report: ArchivePreflightReportV1,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    imported: true,
+    sourceSeq: event.seq,
+    sourceInstallationId: bundle.sourceInstallationId,
+  };
+  if (event.targetNamespace === "contribution" && event.targetId) {
+    const contribution = isContributionHistoryKind(event.kind)
+      ? historyRowForEvent(
+        bundle.contributions,
+        event,
+        bundle.timeline,
+        isContributionHistoryKind,
+      )
+      : bundle.contributions.find((row) => row.id === event.targetId);
+    if (contribution) {
+      payload.kind = contribution.kind;
+      payload.revision = contribution.revision;
+      payload.privacyClass = contribution.privacyClass;
+      payload.contentHash = contribution.contentHash;
+      payload.sourceId = remapOf(report, "source", contribution.sourceId);
+      if (contribution.tombstoned) payload.tombstone = true;
+      if (contribution.hypothesisStatus) payload.status = contribution.hypothesisStatus;
+      if (event.kind === "hypothesis_status") {
+        payload.links = remapHypothesisLinks(report, contribution.hypothesisLinks, bundle);
+      }
+    }
+  }
+  if (event.targetNamespace === "evidence" && event.targetId) {
+    const evidence = bundle.evidence.find((row) => row.id === event.targetId);
+    if (evidence) {
+      payload.artifactKind = evidence.artifactKind ?? null;
+      payload.privacyClass = evidence.privacyClass;
+      payload.contentHash = evidence.digest;
+    }
+  }
+  if (event.targetNamespace === "decision" && event.targetId) {
+    const decision = historyRowForEvent(
+      bundle.decisions,
+      event,
+      bundle.timeline,
+      isDecisionHistoryKind,
+    ) ?? bundle.decisions.find((row) => row.id === event.targetId);
+    if (decision) {
+      payload.decisionId = remapOf(report, "decision", decision.id);
+      payload.revision = decision.revision;
+      const experiment = bundle.experiments.find((row) => row.id === decision.experimentId);
+      if (experiment) payload.packageId = experiment.packageId;
+    }
+  }
+  if (event.targetNamespace === "gold" && event.targetId) {
+    const gold = bundle.gold.find((row) => row.goldId === event.targetId);
+    payload.goldId = remapOf(report, "gold", event.targetId);
+    if (gold) {
+      payload.version = gold.version;
+      payload.acceptedDecisionId = remapOf(report, "decision", gold.acceptedDecisionId);
+      payload.acceptedDecisionRevision = gold.acceptedDecisionRevision;
+      payload.predecessorGoldId = gold.predecessorGoldId
+        ? remapOf(report, "gold", gold.predecessorGoldId)
+        : null;
+    }
+  }
+  if (event.targetNamespace === "helpfulness" && event.targetId) {
+    const observation = bundle.helpfulnessObservations.find((row) => row.id === event.targetId);
+    payload.observationId = remapOf(report, "helpfulness", event.targetId);
+    if (observation) {
+      payload.candidateId = observation.candidateId;
+      payload.dimension = observation.dimension;
+    }
+  }
+  if (event.targetNamespace === "triage_job" && event.targetId) {
+    const attempt = parsePortableTriageAttemptTarget(event.targetId);
+    payload.jobId = remapOf(report, "triage_job", attempt?.jobId ?? event.targetId);
+    if (attempt) payload.candidateId = attempt.candidateId;
+  }
+  if (event.targetNamespace === "experiment" && event.targetId) {
+    const parsed = parsePortableExperimentTraceTarget(event.targetId);
+    if (parsed) {
+      payload.traceId = parsed.traceId;
+      payload.experimentId = remapOf(report, "experiment", parsed.experimentId);
+    }
+  }
+  if (event.targetNamespace === "snapshot" && event.targetId) {
+    payload.snapshotId = remapOf(report, "snapshot", event.targetId);
+  }
+  if (event.targetNamespace === "intake_batch" && event.targetId) {
+    payload.intakeBatchId = remapOf(report, "intake_batch", event.targetId);
+  }
+  return payload;
 }
 
 function actorAttribution(
@@ -564,11 +765,11 @@ export async function withPgApplyTransaction<T>(
           return result as T;
         }
       } catch {
-        await batch.finalize();
+        await batch.finalize({ retainPendingJournal: true });
         throw new PortableCommitOutcomeUnknownError();
       }
     } else if (commitAttempted) {
-      await batch.finalize();
+      await batch.finalize({ retainPendingJournal: true });
       throw new PortableCommitOutcomeUnknownError();
     }
     if (began) {
@@ -605,12 +806,149 @@ export async function persistPortableArchive(input: {
     archive.investigation.investigation.id,
   );
   const bundle = archive.investigation;
+  for (const event of bundle.timeline) {
+    if (event.kind === "corpus_intake_committed" && (event.targetNamespace !== "intake_batch" || !event.targetId)) {
+      throw new Error("corpus intake timeline is missing a portable intake-batch target");
+    }
+    if (
+      /^experiment_decision_/.test(event.kind)
+      && (event.targetNamespace !== "decision" || !event.targetId)
+    ) {
+      throw new Error("experiment decision timeline is missing a portable decision target");
+    }
+    if (event.kind === "experiment_gold_promoted" && (event.targetNamespace !== "gold" || !event.targetId)) {
+      throw new Error("experiment gold timeline is missing a portable gold target");
+    }
+    if (
+      event.kind === "experiment_helpfulness_recorded"
+      && (event.targetNamespace !== "helpfulness" || !event.targetId)
+    ) {
+      throw new Error("experiment helpfulness timeline is missing a portable helpfulness target");
+    }
+    if (event.kind === "experiment_imported" && (event.targetNamespace !== "experiment" || !event.targetId)) {
+      throw new Error("experiment import timeline is missing a portable experiment target");
+    }
+    if (event.kind === "experiment_trace_imported") {
+      const parsed = event.targetId ? parsePortableExperimentTraceTarget(event.targetId) : null;
+      if (event.targetNamespace !== "experiment" || !parsed) {
+        throw new Error("experiment trace timeline is missing a portable experiment+trace target");
+      }
+    }
+    if (/^triage_candidate_/.test(event.kind)) {
+      const parsed = event.targetId ? parsePortableTriageAttemptTarget(event.targetId) : null;
+      if (event.targetNamespace !== "triage_job" || !parsed) {
+        throw new Error("workstream attempt timeline is missing a portable job target");
+      }
+    }
+    if (event.kind === "snapshot_frozen" && (event.targetNamespace !== "snapshot" || !event.targetId)) {
+      throw new Error("snapshot timeline is missing a portable snapshot target");
+    }
+    if (
+      event.kind === "external_run_imported"
+      && (event.targetNamespace !== "imported_ai_run" || !event.targetId)
+    ) {
+      throw new Error("imported-run timeline is missing a portable imported-run target");
+    }
+    if (event.kind === "run_corroboration") {
+      throw new Error("imported-run corroboration is not exact-applyable");
+    }
+    if (
+      (/^contribution_/.test(event.kind) || event.kind === "hypothesis_status")
+      && (event.targetNamespace !== "contribution" || !event.targetId)
+    ) {
+      throw new Error("contribution timeline is missing a portable contribution target");
+    }
+    if (/^evidence_/.test(event.kind) && (event.targetNamespace !== "evidence" || !event.targetId)) {
+      throw new Error("evidence timeline is missing a portable evidence target");
+    }
+    if (/^triage_job_/.test(event.kind)) {
+      const parsed = event.targetId ? parsePortableTriageAttemptTarget(event.targetId) : null;
+      if (event.targetNamespace !== "triage_job" || !event.targetId || parsed) {
+        throw new Error("workstream job timeline is missing a portable job target");
+      }
+    }
+    if (isContributionHistoryKind(event.kind) && event.targetId) {
+      const chain = bundle.contributions.filter((row) => row.id === event.targetId);
+      const events = bundle.timeline.filter(
+        (row) => row.targetId === event.targetId && isContributionHistoryKind(row.kind),
+      );
+      if (chain.length !== events.length) {
+        throw new Error("contribution timeline cannot be reconstructed onto portable revisions exactly");
+      }
+    }
+    if (isDecisionHistoryKind(event.kind) && event.targetId) {
+      const chain = bundle.decisions.filter((row) => row.id === event.targetId);
+      const events = bundle.timeline.filter(
+        (row) => row.targetId === event.targetId && isDecisionHistoryKind(row.kind),
+      );
+      if (chain.length !== events.length) {
+        throw new Error("decision timeline cannot be reconstructed onto portable revisions exactly");
+      }
+    }
+  }
   const remapCandidateId = (candidateId: string): string => {
     const imported = bundle.importedAiRuns.find((run) => candidateId === `chat-${run.id}`);
     return imported
       ? `chat-${remapOf(report, "imported_ai_run", imported.id)}`
       : candidateId;
   };
+  const remapExperimentTrace = (trace: InteractionTraceV1): InteractionTraceV1 =>
+    parseInteractionTrace({
+      schemaId: trace.schemaId,
+      traceId: trace.traceId,
+      candidateId: remapCandidateId(trace.candidateId),
+      sourceKind: trace.sourceKind,
+      completeness: trace.completeness,
+      privacyClass: trace.privacyClass,
+      rawHash: trace.rawHash,
+      events: trace.events.map((event) => ({
+        eventId: event.eventId,
+        sequence: event.sequence,
+        kind: event.kind,
+        actor: event.actor,
+        role: event.role,
+        parentEventId: event.parentEventId,
+        evidenceRefs: event.evidenceRefs.map((id) => remapOf(report, "evidence", id)),
+        observedAt:
+          event.observedAt.status === "observed"
+            ? { status: "observed" as const, timestamp: event.observedAt.timestamp }
+            : { status: "unknown" as const },
+        excerpt: event.excerpt,
+        excerptHash: event.excerptHash,
+        unknowns: [...event.unknowns],
+      })),
+      efficiency: {
+        turnCount: { ...trace.efficiency.turnCount },
+        evidenceAcquisitionSteps: { ...trace.efficiency.evidenceAcquisitionSteps },
+        latency: { ...trace.efficiency.latency },
+        cost: { ...trace.efficiency.cost },
+        providerCalls: { ...trace.efficiency.providerCalls },
+      },
+      unknowns: [...trace.unknowns],
+      notes: [...trace.notes],
+      createdAt: trace.createdAt,
+    });
+  const remapAgreement = (
+    agreement: NonNullable<(typeof bundle.experiments)[number]["agreement"]>,
+  ) => ({
+    sharedAnchors: agreement.sharedAnchors.map((anchor) => ({
+      evidenceRef: remapOf(report, "evidence", anchor.evidenceRef),
+      role: anchor.role,
+      candidateIds: anchor.candidateIds.map(remapCandidateId),
+    })),
+    candidateSpecific: agreement.candidateSpecific.map((row) => ({
+      candidateId: remapCandidateId(row.candidateId),
+      evidenceRefs: row.evidenceRefs.map((id) => remapOf(report, "evidence", id)),
+    })),
+    roleConflicts: agreement.roleConflicts.map((conflict) => ({
+      evidenceRef: remapOf(report, "evidence", conflict.evidenceRef),
+      assignments: conflict.assignments.map((assignment) => ({
+        candidateId: remapCandidateId(assignment.candidateId),
+        role: assignment.role,
+      })),
+    })),
+    notes: [...agreement.notes],
+  });
   const caseRow: CaseRow = {
     id: investigationId,
     title: bundle.investigation.title,
@@ -671,7 +1009,7 @@ export async function persistPortableArchive(input: {
       authorUsername: author.username,
       createdAt: contribution.createdAt,
       hypothesisStatus: contribution.hypothesisStatus,
-      hypothesisLinks: [],
+      hypothesisLinks: remapHypothesisLinks(report, contribution.hypothesisLinks, bundle),
       sourceId: remapOf(report, "source", contribution.sourceId),
     };
     await ports.cases.insertRevision(rev);
@@ -694,12 +1032,10 @@ export async function persistPortableArchive(input: {
 
   const intakeBatchIds = new Map<string, string>();
   for (const batch of bundle.intakeBatches ?? []) {
-    const id = portableDestinationUuid(
-      bundle.sourceInstallationId,
-      "evidence",
-      `intake-batch:${batch.id}`,
-      0,
-    );
+    if (!report.idRemap.some((row) => row.namespace === "intake_batch" && row.sourceId === batch.id)) {
+      throw new Error("portable corpus intake batch is missing from the destination remap");
+    }
+    const id = remapOf(report, "intake_batch", batch.id);
     const sourcePayload = parseCorpusIntakeBatch(JSON.parse(batch.payloadJson));
     const createdBy = attribution(batch.createdBy);
     const payload = {
@@ -806,38 +1142,63 @@ export async function persistPortableArchive(input: {
   }
 
   for (const run of bundle.importedAiRuns) {
-    const output = digestBytes.get(run.outputDigest ?? "") ?? new Uint8Array();
-    const outputText = Buffer.from(output).toString("utf8");
+    const output = restoredImportedRunBytes(
+      run.outputDigest,
+      digestBytes,
+      "imported output digest is missing from materialized content",
+    );
+    if (!output.hash || output.text === null) {
+      throw new Error("imported run is missing output bytes");
+    }
+    const prompt = restoredImportedRunBytes(
+      run.promptDigest,
+      digestBytes,
+      "imported prompt digest is missing from materialized content",
+    );
+    if (run.promptCompleteness === "exact" && (prompt.hash === null || prompt.text === null)) {
+      throw new Error("imported run exact prompt completeness requires prompt bytes");
+    }
+    let snapshotBinding: string | null = null;
+    if (run.snapshotId) {
+      snapshotBinding = destSnapshotFingerprints.get(run.snapshotId) ?? null;
+      if (!snapshotBinding) {
+        throw new Error("imported run snapshot binding is missing from the destination snapshots");
+      }
+    }
+    const operator = run.operatorId
+      ? attribution(run.operatorId)
+      : { id: actor.id, username: actor.username };
+    const importer = run.importerId
+      ? attribution(run.importerId)
+      : { id: actor.id, username: actor.username };
     const row: FrozenRunRow = {
       id: remapOf(report, "imported_ai_run", run.id),
       caseId: investigationId,
-      contributionId: bundle.contributions[0]
-        ? remapOf(report, "contribution", bundle.contributions[0].id)
-        : investigationId,
+      contributionId: remappedImportedRunContributionId(report, run, bundle),
       sourceId: remapOf(report, "source", run.sourceId),
-      outputHash: run.outputDigest ?? "00".repeat(32),
-      outputText,
-      promptHash: null,
-      promptText: null,
-      promptCompleteness: "unknown",
-      outputCompleteness: "unknown",
-      workflowCompleteness: "unknown",
-      evidenceVisibility: "unknown",
-      snapshotBinding: null,
-      visibilityNote: null,
-      importerId: actor.id,
-      importerUsername: actor.username,
-      operatorId: actor.id,
-      operatorUsername: actor.username,
+      outputHash: output.hash,
+      outputText: output.text,
+      promptHash: prompt.hash,
+      promptText: prompt.text,
+      promptCompleteness: run.promptCompleteness ?? "unknown",
+      outputCompleteness: run.outputCompleteness ?? "unknown",
+      workflowCompleteness: run.workflowCompleteness ?? "unknown",
+      evidenceVisibility: run.evidenceVisibility ?? "unknown",
+      snapshotBinding,
+      visibilityNote: run.visibilityNote ?? null,
+      importerId: importer.id,
+      importerUsername: importer.username,
+      operatorId: operator.id,
+      operatorUsername: operator.username,
       provider: run.providerKind,
       model: run.model,
       version: run.version,
-      claimedTraces: [],
-      uncertainty: null,
-      timing: null,
-      cost: null,
-      redacted: false,
-      privacyClass: "owner_only",
+      claimedTraces: [...(run.claimedTraces ?? [])],
+      uncertainty: run.uncertainty ?? null,
+      timing: run.timing ?? null,
+      cost: run.cost ?? null,
+      redacted: run.redacted === true,
+      privacyClass: run.privacyClass ?? "owner_only",
       createdAt: run.importedAt,
     };
     await ports.runs.insert(row);
@@ -922,6 +1283,9 @@ export async function persistPortableArchive(input: {
 
   for (const experiment of bundle.experiments) {
     const id = remapOf(report, "experiment", experiment.id);
+    const importer = experiment.importerId
+      ? attribution(experiment.importerId)
+      : { id: actor.id, username: actor.username };
     const experimentRow: ExperimentRow = {
       id,
       caseId: investigationId,
@@ -933,28 +1297,54 @@ export async function persistPortableArchive(input: {
           bundle.snapshots.find((snap) => snap.fingerprint === experiment.snapshotFingerprint)?.id ??
             "",
         ) ?? experiment.snapshotFingerprint,
-      snapshotProof: {
-        basis: "unknown",
-        fairnessClass: "unknown",
-        lineageClass: "unknown",
-      },
-      candidates: experiment.candidateIds.map((candidateId) => ({
-        candidateId: remapCandidateId(candidateId),
-        modelLabel: "imported-historical",
-        role: "reviewer",
-        runStatus: "completed",
-        observedLatency: { status: "unknown" },
-        cost: { status: "unknown" },
-        usage: { status: "unknown" },
-        helpfulnessState: "unreviewed",
-        goldState: "unknown",
-      })),
-      agreement: { sharedAnchors: [], candidateSpecific: [], roleConflicts: [], notes: [] },
+      snapshotProof: experiment.snapshotProof
+        ? { ...experiment.snapshotProof }
+        : {
+            basis: "unknown",
+            fairnessClass: "unknown",
+            lineageClass: "unknown",
+          },
+      candidates: experiment.candidates?.length
+        ? experiment.candidates.map((candidate) => ({
+            candidateId: remapCandidateId(candidate.candidateId),
+            modelLabel: candidate.modelLabel,
+            role: candidate.role,
+            runStatus: candidate.runStatus,
+            observedLatency:
+              candidate.observedLatency.status === "observed"
+                ? {
+                    status: "observed" as const,
+                    milliseconds: candidate.observedLatency.milliseconds,
+                  }
+                : { status: "unknown" as const },
+            cost: { status: "unknown" as const },
+            usage: { status: "unknown" as const },
+            helpfulnessState: candidate.helpfulnessState,
+            goldState: candidate.goldState,
+          }))
+        : experiment.candidateIds.map((candidateId) => ({
+            candidateId: remapCandidateId(candidateId),
+            modelLabel: "imported-historical",
+            role: "reviewer" as const,
+            runStatus: "completed" as const,
+            observedLatency: { status: "unknown" as const },
+            cost: { status: "unknown" as const },
+            usage: { status: "unknown" as const },
+            helpfulnessState: "unreviewed" as const,
+            goldState: "unknown" as const,
+          })),
+      agreement: experiment.agreement
+        ? remapAgreement(experiment.agreement)
+        : { sharedAnchors: [], candidateSpecific: [], roleConflicts: [], notes: [] },
       createdAt: experiment.createdAt,
-      importerId: actor.id,
-      importerUsername: actor.username,
+      importerId: importer.id,
+      importerUsername: importer.username,
     };
     await ports.experiments.insert(experimentRow);
+    for (const trace of experiment.traces ?? []) {
+      const remapped = remapExperimentTrace(trace);
+      await ports.experiments.insertTrace(id, remapped, traceFingerprint(remapped));
+    }
   }
 
   for (const observation of bundle.helpfulnessObservations) {
@@ -1044,15 +1434,15 @@ export async function persistPortableArchive(input: {
         event.targetId &&
         event.targetNamespace &&
         (PORTABLE_OBJECT_KINDS as readonly string[]).includes(event.targetNamespace)
-          ? remapOf(report, event.targetNamespace as PortableObjectKind, event.targetId)
+          ? remapPortableTimelineTarget(
+            report,
+            event.targetNamespace as PortableObjectKind,
+            event.targetId,
+          )
           : event.targetId,
       clientTime: null,
       serverTime: event.serverTime,
-      payload: {
-        imported: true,
-        sourceSeq: event.seq,
-        sourceInstallationId: bundle.sourceInstallationId,
-      },
+      payload: importedTimelinePayload(event, bundle, report),
     });
   }
 

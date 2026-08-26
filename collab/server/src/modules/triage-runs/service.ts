@@ -20,7 +20,12 @@ import type { RecoveryAuthResult, RecoveryInactiveReason } from "../authz/index.
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
 import type { OverviewJobQuery, OverviewListedJob, TriageJobStore } from "./store.js";
-import { triageRunningLeaseExpired, triageWorkerHoldsLiveLease } from "./store.js";
+import {
+  laterLeaseExpiresAt,
+  MemoryTriageJobStore,
+  triageRunningLeaseExpired,
+  triageWorkerHoldsLiveLease,
+} from "./store.js";
 import type { TriageProfileOption } from "./profiles.js";
 
 export type TriageRecoveryAuthorization = (
@@ -316,6 +321,87 @@ export class TriageRunService {
         : DEFAULT_WORKER_LEASE_MS;
   }
 
+  private async withJobAtomic<T>(operation: () => Promise<T>): Promise<T> {
+    const memory = this.deps.jobs instanceof MemoryTriageJobStore ? this.deps.jobs : null;
+    return this.deps.cases.withAtomic(async () => {
+      const snapshot = memory ? await Promise.resolve(memory.capture()) : undefined;
+      try {
+        return await operation();
+      } catch (error) {
+        if (memory && snapshot !== undefined) {
+          await Promise.resolve(memory.restore(snapshot));
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async persistJobFinished(
+    job: Pick<TriageJobV1, "id" | "caseId" | "requestedBy" | "requestedByUsername" | "requestFingerprint">,
+    status: TriageJobStatus,
+    audit: { action: string; target: string; outcome: "success" | "failure" },
+  ): Promise<void> {
+    await this.deps.cases.appendDomainTimeline(job.caseId, {
+      kind: "triage_job_finished",
+      actor: { id: job.requestedBy, username: job.requestedByUsername },
+      targetId: job.id,
+      clientTime: null,
+      payload: { status, requestFingerprint: job.requestFingerprint },
+    });
+    await this.deps.audit.append({
+      identity: job.requestedBy,
+      action: audit.action,
+      target: audit.target,
+      origin: "triage-runner",
+      outcome: audit.outcome,
+    });
+  }
+
+  private async failOwnedRunningJob(jobId: string): Promise<void> {
+    const failed = await this.deps.jobs.get(jobId);
+    if (
+      !failed
+      || isTerminal(failed.status)
+      || !triageWorkerHoldsLiveLease(failed, this.workerId, Date.now())
+    ) return;
+    const finishedAt = now();
+    const next: TriageJobV1 = {
+      ...failed,
+      status: "failed",
+      candidates: failed.candidates.map((candidate) =>
+        candidate.status === "queued" || candidate.status === "running"
+          ? {
+              ...candidate,
+              status: "failed",
+              benchmarkRunId: candidate.benchmarkRunId,
+              outputHash: null,
+              summary: null,
+              evidenceRefs: [],
+              unknowns: ["runner preparation"],
+              errorCode: "runner_error",
+              finishedAt,
+            }
+          : candidate,
+      ),
+      finishedAt,
+      updatedAt: finishedAt,
+      stoppedReason: "runner_error",
+      leaseExpiresAt: null,
+    };
+    try {
+      await this.withJobAtomic(async () => {
+        await this.deps.jobs.update(next);
+        await this.persistJobFinished(failed, "failed", {
+          action: "triage_job_finish",
+          target: `${failed.id}:failed`,
+          outcome: "failure",
+        });
+      });
+    } catch {
+      // Leave the job running so stale-lease recovery can record the terminal state.
+    }
+  }
+
   /** Safe profile metadata only; no endpoint, credential, or secret is returned. */
   listProfiles(): TriageProfileOption[] {
     return (this.deps.profiles ?? []).map((profile) => ({ ...profile }));
@@ -381,8 +467,7 @@ export class TriageRunService {
       });
     }
     for (const job of staleRunning) {
-      const actor = { id: job.requestedBy, username: job.requestedByUsername };
-        const finishedAt = now();
+      const finishedAt = now();
         const recoveredCandidates = job.candidates.map((candidate) =>
           candidate.status === "queued" || candidate.status === "running"
             ? {
@@ -406,14 +491,16 @@ export class TriageRunService {
           stoppedReason: "worker_lease_expired",
         leaseExpiresAt: null,
       };
-      if (!(await this.deps.jobs.recoverStale(recovered, finishedAt))) continue;
-        await this.deps.audit.append({
-          identity: actor.id,
+      const recoveredOk = await this.withJobAtomic(async () => {
+        if (!(await this.deps.jobs.recoverStale(recovered, finishedAt))) return false;
+        await this.persistJobFinished(job, recovered.status, {
           action: "triage_job_recovered",
           target: `${job.id}:worker_lease_expired`,
-          origin: "triage-runner",
           outcome: "success",
         });
+        return true;
+      });
+      if (!recoveredOk) continue;
     }
   }
 
@@ -509,25 +596,25 @@ export class TriageRunService {
         : candidate,
     );
     try {
-      await this.deps.jobs.update({
-        ...job,
-        status: "failed",
-        candidates: refusedCandidates,
-        finishedAt,
-        updatedAt: finishedAt,
-        stoppedReason: reason,
-        leaseExpiresAt: null,
+      await this.withJobAtomic(async () => {
+        await this.deps.jobs.update({
+          ...job,
+          status: "failed",
+          candidates: refusedCandidates,
+          finishedAt,
+          updatedAt: finishedAt,
+          stoppedReason: reason,
+          leaseExpiresAt: null,
+        });
+        await this.persistJobFinished(job, "failed", {
+          action: "triage_job_recovered",
+          target: `${job.id}:${reason}`,
+          outcome: "failure",
+        });
       });
     } catch {
       return;
     }
-    await this.deps.audit.append({
-      identity: job.requestedBy,
-      action: "triage_job_recovered",
-      target: `${job.id}:${reason}`,
-      origin: "triage-runner",
-      outcome: "failure",
-    });
   }
 
   async create(
@@ -629,27 +716,29 @@ export class TriageRunService {
       cancelRequestedAt: null,
       stoppedReason: null,
     };
-    await this.deps.jobs.insert(job);
-    await this.deps.cases.appendDomainTimeline(caseId, {
-      kind: "triage_job_created",
-      actor,
-      targetId: job.id,
-      clientTime: null,
-      payload: {
-        snapshotId: job.snapshotId,
-        snapshotFingerprint: job.snapshotFingerprint,
-        requestFingerprint: job.requestFingerprint,
-        candidateCount: job.candidates.length,
-        mode: job.request.mode,
-        ...(job.parentJobId ? { parentJobId: job.parentJobId } : {}),
-      },
-    });
-    await this.deps.audit.append({
-      identity: actor.id,
-      action: "triage_job_create",
-      target: job.id,
-      origin,
-      outcome: "success",
+    await this.withJobAtomic(async () => {
+      await this.deps.jobs.insert(job);
+      await this.deps.cases.appendDomainTimeline(caseId, {
+        kind: "triage_job_created",
+        actor,
+        targetId: job.id,
+        clientTime: null,
+        payload: {
+          snapshotId: job.snapshotId,
+          snapshotFingerprint: job.snapshotFingerprint,
+          requestFingerprint: job.requestFingerprint,
+          candidateCount: job.candidates.length,
+          mode: job.request.mode,
+          ...(job.parentJobId ? { parentJobId: job.parentJobId } : {}),
+        },
+      });
+      await this.deps.audit.append({
+        identity: actor.id,
+        action: "triage_job_create",
+        target: job.id,
+        origin,
+        outcome: "success",
+      });
     });
     queueMicrotask(() => {
       void this.execute(job.id, actor, isAdmin, canReadPrivate);
@@ -667,7 +756,6 @@ export class TriageRunService {
     const job = await this.get(caseId, jobId, actor, isAdmin);
     if (!job) throw new TriageRunNotFoundError();
     if (isTerminal(job.status)) return job;
-    this.controllers.get(jobId)?.abort();
     if (triageRunningLeaseExpired(job, Date.now())) {
       throw new TriageRunConflictError("worker lease expired");
     }
@@ -693,22 +781,24 @@ export class TriageRunService {
       updatedAt: requestedAt,
       leaseExpiresAt: null,
     };
-    await this.deps.jobs.update(cancelled);
+    await this.withJobAtomic(async () => {
+      await this.deps.jobs.update(cancelled);
+      await this.deps.cases.appendDomainTimeline(caseId, {
+        kind: "triage_job_cancel_requested",
+        actor,
+        targetId: jobId,
+        clientTime: null,
+        payload: { cancellationId: job.cancellationId },
+      });
+      await this.deps.audit.append({
+        identity: actor.id,
+        action: "triage_job_cancel",
+        target: jobId,
+        origin,
+        outcome: "success",
+      });
+    });
     this.controllers.get(jobId)?.abort();
-    await this.deps.cases.appendDomainTimeline(caseId, {
-      kind: "triage_job_cancel_requested",
-      actor,
-      targetId: jobId,
-      clientTime: null,
-      payload: { cancellationId: job.cancellationId },
-    });
-    await this.deps.audit.append({
-      identity: actor.id,
-      action: "triage_job_cancel",
-      target: jobId,
-      origin,
-      outcome: "success",
-    });
     return cancelled;
   }
 
@@ -725,17 +815,32 @@ export class TriageRunService {
     try {
       const startedAt = now();
       const leaseExpiresAt = new Date(Date.now() + this.workerLeaseMs).toISOString();
-      const job = await this.deps.jobs.claimQueued(
-        jobId,
-        startedAt,
-        this.workerId,
-        leaseExpiresAt,
-      );
-      if (!job) return;
-      if (!isAdmin && !(await this.deps.cases.isMemberOf(job.caseId, job.requestedBy))) {
-        await this.refuseUnauthorizedPendingJob(job);
+      const claimed = await this.withJobAtomic(async () => {
+        const queued = await this.deps.jobs.claimQueued(
+          jobId,
+          startedAt,
+          this.workerId,
+          leaseExpiresAt,
+        );
+        if (!queued) return null;
+        if (!isAdmin && !(await this.deps.cases.isMemberOf(queued.caseId, queued.requestedBy))) {
+          return { job: queued, started: false as const };
+        }
+        await this.deps.cases.appendDomainTimeline(queued.caseId, {
+          kind: "triage_job_started",
+          actor: { id: queued.requestedBy, username: queued.requestedByUsername },
+          targetId: queued.id,
+          clientTime: null,
+          payload: { snapshotId: queued.snapshotId, requestFingerprint: queued.requestFingerprint },
+        });
+        return { job: queued, started: true as const };
+      });
+      if (!claimed) return;
+      if (!claimed.started) {
+        await this.refuseUnauthorizedPendingJob(claimed.job);
         return;
       }
+      const job = claimed.job;
       let currentJob = job;
       leaseTimer = setInterval(() => {
         const nextLeaseExpiresAt = new Date(Date.now() + this.workerLeaseMs).toISOString();
@@ -753,13 +858,6 @@ export class TriageRunService {
             controller.abort();
           });
       }, WORKER_HEARTBEAT_MS);
-      await this.deps.cases.appendDomainTimeline(job.caseId, {
-        kind: "triage_job_started",
-        actor: { id: job.requestedBy, username: job.requestedByUsername },
-        targetId: job.id,
-        clientTime: null,
-        payload: { snapshotId: job.snapshotId, requestFingerprint: job.requestFingerprint },
-      });
       const afterStart = await this.deps.jobs.get(jobId);
       if (!afterStart) {
         return;
@@ -810,24 +908,30 @@ export class TriageRunService {
         if (index < 0) throw new Error("gateway returned an unknown candidate id");
         const existing = currentJob.candidates[index];
         if (existing && ["completed", "partial", "failed", "timed_out", "cancelled"].includes(existing.status)) return;
-        currentJob = {
+        const nextJob = {
           ...currentJob,
           candidates: currentJob.candidates.map((candidate, candidateIndex) => candidateIndex === index ? result : candidate),
           cancelRequestedAt: currentJob.cancelRequestedAt ?? (controller.signal.aborted ? now() : null),
           updatedAt: now(),
         };
-        await this.deps.jobs.update(currentJob);
-        await this.deps.cases.appendDomainTimeline(currentJob.caseId, {
-          kind: "triage_candidate_finished",
-          actor: { id: currentJob.requestedBy, username: currentJob.requestedByUsername },
-          targetId: `${currentJob.id}:${result.candidateId}`,
-          clientTime: null,
-          payload: {
-            status: result.status,
-            outputHash: result.outputHash,
-            evidenceCount: result.evidenceRefs.length,
-          },
+        await this.withJobAtomic(async () => {
+          await this.deps.jobs.update(nextJob);
+          await this.deps.cases.appendDomainTimeline(nextJob.caseId, {
+            kind: "triage_candidate_finished",
+            actor: { id: nextJob.requestedBy, username: nextJob.requestedByUsername },
+            targetId: `${nextJob.id}:${result.candidateId}`,
+            clientTime: null,
+            payload: {
+              status: result.status,
+              outputHash: result.outputHash,
+              evidenceCount: result.evidenceRefs.length,
+            },
+          });
         });
+        currentJob = {
+          ...nextJob,
+          leaseExpiresAt: laterLeaseExpiresAt(currentJob.leaseExpiresAt, nextJob.leaseExpiresAt),
+        };
       };
       const persistCandidateStarted = async (candidateId: string): Promise<void> => {
         if (leaseLost) return;
@@ -841,21 +945,27 @@ export class TriageRunService {
         if (!existing || ["completed", "partial", "failed", "timed_out", "cancelled"].includes(existing.status)) return;
         if (existing.status === "running") return;
         const startedAt = existing.startedAt ?? now();
-        currentJob = {
+        const nextJob = {
           ...currentJob,
           candidates: currentJob.candidates.map((candidate, candidateIndex) => candidateIndex === index
             ? { ...candidate, status: "running" as const, startedAt }
             : candidate),
           updatedAt: now(),
         };
-        await this.deps.jobs.update(currentJob);
-        await this.deps.cases.appendDomainTimeline(currentJob.caseId, {
-          kind: "triage_candidate_started",
-          actor: { id: currentJob.requestedBy, username: currentJob.requestedByUsername },
-          targetId: `${currentJob.id}:${candidateId}`,
-          clientTime: null,
-          payload: { startedAt },
+        await this.withJobAtomic(async () => {
+          await this.deps.jobs.update(nextJob);
+          await this.deps.cases.appendDomainTimeline(nextJob.caseId, {
+            kind: "triage_candidate_started",
+            actor: { id: nextJob.requestedBy, username: nextJob.requestedByUsername },
+            targetId: `${nextJob.id}:${candidateId}`,
+            clientTime: null,
+            payload: { startedAt },
+          });
         });
+        currentJob = {
+          ...nextJob,
+          leaseExpiresAt: laterLeaseExpiresAt(currentJob.leaseExpiresAt, nextJob.leaseExpiresAt),
+        };
       };
       // Progress lines can arrive close together. Serialize their durable
       // updates so a slower database read cannot reorder or lose a lane.
@@ -1006,7 +1116,7 @@ export class TriageRunService {
       if (!isTerminal(currentJob.status)) {
         const finishedAt = now();
         const finalStatus = terminalStatus(currentJob.candidates, currentJob.cancelRequestedAt !== null);
-        currentJob = {
+        const finishedJob = {
           ...currentJob,
           status: finalStatus,
           sameSnapshot: evaluateSameSnapshot(snapshot),
@@ -1015,50 +1125,18 @@ export class TriageRunService {
           stoppedReason: currentJob.cancelRequestedAt !== null ? "cancel_requested" : null,
           leaseExpiresAt: null,
         };
-        await this.deps.jobs.update(currentJob);
-        await this.deps.cases.appendDomainTimeline(currentJob.caseId, {
-          kind: "triage_job_finished",
-          actor: { id: job.requestedBy, username: job.requestedByUsername },
-          targetId: currentJob.id,
-          clientTime: null,
-          payload: { status: finalStatus, requestFingerprint: currentJob.requestFingerprint },
+        await this.withJobAtomic(async () => {
+          await this.deps.jobs.update(finishedJob);
+          await this.persistJobFinished(finishedJob, finalStatus, {
+            action: "triage_job_finish",
+            target: `${job.id}:${finalStatus}`,
+            outcome: "success",
+          });
         });
-        await this.deps.audit.append({
-          identity: currentJob.requestedBy,
-          action: "triage_job_finish",
-          target: `${job.id}:${finalStatus}`,
-          origin: "triage-runner",
-          outcome: "success",
-        });
+        currentJob = finishedJob;
       }
     } catch {
-      const failed = await this.deps.jobs.get(jobId);
-      if (failed && !isTerminal(failed.status)) {
-        const finishedAt = now();
-        await this.deps.jobs.update({
-          ...failed,
-          status: "failed",
-          candidates: failed.candidates.map((candidate) =>
-            candidate.status === "queued" || candidate.status === "running"
-              ? {
-                  ...candidate,
-                  status: "failed",
-                  benchmarkRunId: candidate.benchmarkRunId,
-                  outputHash: null,
-                  summary: null,
-                  evidenceRefs: [],
-                  unknowns: ["runner preparation"],
-                  errorCode: "runner_error",
-                  finishedAt,
-                }
-              : candidate,
-          ),
-          finishedAt,
-          updatedAt: finishedAt,
-          stoppedReason: "runner_error",
-          leaseExpiresAt: null,
-        });
-      }
+      await this.failOwnedRunningJob(jobId);
     } finally {
       if (leaseTimer) clearInterval(leaseTimer);
       this.controllers.delete(jobId);

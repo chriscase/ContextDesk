@@ -690,26 +690,40 @@ export function extractPlainTranscript(
   });
 }
 
+function canonicalFingerprintValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalFingerprintValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, canonicalFingerprintValue(nested)]),
+    );
+  }
+  return value;
+}
+
 export function traceFingerprint(trace: InteractionTraceV1): string {
-  return JSON.stringify({
-    candidateId: trace.candidateId,
-    sourceKind: trace.sourceKind,
-    completeness: trace.completeness,
-    rawHash: trace.rawHash,
-    events: trace.events.map((event) => ({
-      eventId: event.eventId,
-      sequence: event.sequence,
-      kind: event.kind,
-      actor: event.actor,
-      role: event.role,
-      parentEventId: event.parentEventId,
-      evidenceRefs: [...event.evidenceRefs].sort(),
-      excerptHash: event.excerptHash,
-      unknowns: [...event.unknowns].sort(),
-    })),
-    efficiency: trace.efficiency,
-    unknowns: [...trace.unknowns].sort(),
-  });
+  return JSON.stringify(
+    canonicalFingerprintValue({
+      candidateId: trace.candidateId,
+      sourceKind: trace.sourceKind,
+      completeness: trace.completeness,
+      rawHash: trace.rawHash,
+      events: trace.events.map((event) => ({
+        eventId: event.eventId,
+        sequence: event.sequence,
+        kind: event.kind,
+        actor: event.actor,
+        role: event.role,
+        parentEventId: event.parentEventId,
+        evidenceRefs: [...event.evidenceRefs].sort(),
+        excerptHash: event.excerptHash,
+        unknowns: [...event.unknowns].sort(),
+      })),
+      efficiency: trace.efficiency,
+      unknowns: [...trace.unknowns].sort(),
+    }),
+  );
 }
 
 export function projectShareSafeTrace(trace: InteractionTraceV1): InteractionTraceV1 {

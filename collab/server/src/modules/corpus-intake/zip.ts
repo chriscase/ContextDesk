@@ -58,8 +58,131 @@ function u32(buf: Uint8Array, offset: number): number {
   );
 }
 
-function decodeDos(buf: Uint8Array, offset: number, length: number): string {
-  return Buffer.from(buf.subarray(offset, offset + length)).toString("utf8");
+const ZIP_LANGUAGE_UTF8 = 0x0800;
+const ZIP_ENCRYPTED = 0x0001;
+const ZIP_UNICODE_PATH = 0x7075;
+
+function decodeZipNameBytes(
+  bytes: Uint8Array,
+  flags: number,
+): { ok: true; name: string } | { ok: false; reason: CorpusRejectionReason; detail: string } {
+  if (bytes.includes(0)) {
+    return { ok: false, reason: "nul_in_path", detail: "NUL in path" };
+  }
+  if ((flags & ZIP_LANGUAGE_UTF8) !== 0) {
+    try {
+      return { ok: true, name: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+    } catch {
+      return {
+        ok: false,
+        reason: "invalid_encoding",
+        detail: "ZIP UTF-8 language bit is set but the name is not valid UTF-8",
+      };
+    }
+  }
+  if ([...bytes].some((octet) => octet > 0x7f)) {
+    return {
+      ok: false,
+      reason: "invalid_encoding",
+      detail: "ZIP name has non-ASCII bytes without the UTF-8 language bit",
+    };
+  }
+  return { ok: true, name: Buffer.from(bytes).toString("ascii") };
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function slashFold(name: string): string {
+  return name.replace(/\\/g, "/");
+}
+
+function parseExtras(
+  buf: Uint8Array,
+  start: number,
+  end: number,
+  label: string,
+): { unicodePath: { crc: number; nameBytes: Uint8Array } | null } {
+  let unicodePath: { crc: number; nameBytes: Uint8Array } | null = null;
+  for (let extra = start; extra + 4 <= end; ) {
+    const headerId = u16(buf, extra);
+    const dataSize = u16(buf, extra + 2);
+    if (extra + 4 + dataSize > end) {
+      throw new ZipError("malformed_zip", `${label} extra field is truncated`);
+    }
+    if (headerId === 0x0001) {
+      throw new ZipError("unsupported_zip64", "ZIP64 extra field is not accepted");
+    }
+    if (headerId === ZIP_UNICODE_PATH) {
+      if (unicodePath) {
+        throw new ZipError("malformed_zip", "duplicate Info-ZIP Unicode Path extra");
+      }
+      if (dataSize < 5) {
+        throw new ZipError("malformed_zip", "Info-ZIP Unicode Path extra is truncated");
+      }
+      const version = buf[extra + 4]!;
+      if (version !== 1) {
+        throw new ZipError("malformed_zip", "unsupported Info-ZIP Unicode Path extra version");
+      }
+      unicodePath = {
+        crc: u32(buf, extra + 5),
+        nameBytes: buf.subarray(extra + 9, extra + 4 + dataSize),
+      };
+    }
+    extra += 4 + dataSize;
+  }
+  return { unicodePath };
+}
+
+function resolveCanonicalName(
+  filenameBytes: Uint8Array,
+  flags: number,
+  unicodePath: { crc: number; nameBytes: Uint8Array } | null,
+): { ok: true; name: string } | { ok: false; reason: CorpusRejectionReason; detail: string } {
+  if (!unicodePath) return decodeZipNameBytes(filenameBytes, flags);
+  if ((crc32(Buffer.from(filenameBytes)) >>> 0) !== unicodePath.crc) {
+    throw new ZipError(
+      "malformed_zip",
+      "Info-ZIP Unicode Path extra CRC does not match the filename field",
+    );
+  }
+  if (unicodePath.nameBytes.includes(0)) {
+    return { ok: false, reason: "nul_in_path", detail: "NUL in Unicode Path extra" };
+  }
+  try {
+    return {
+      ok: true,
+      name: new TextDecoder("utf-8", { fatal: true }).decode(unicodePath.nameBytes),
+    };
+  } catch {
+    return {
+      ok: false,
+      reason: "invalid_encoding",
+      detail: "Info-ZIP Unicode Path extra is not valid UTF-8",
+    };
+  }
+}
+
+export function buildUnicodePathExtra(
+  filename: string | Uint8Array,
+  unicodeName: string,
+): Uint8Array {
+  const nameBytes = typeof filename === "string" ? Buffer.from(filename, "ascii") : Buffer.from(filename);
+  const utf8 = Buffer.from(unicodeName, "utf8");
+  const data = Buffer.alloc(5 + utf8.length);
+  data.writeUInt8(1, 0);
+  data.writeUInt32LE(crc32(nameBytes) >>> 0, 1);
+  utf8.copy(data, 5);
+  const extra = Buffer.alloc(4 + data.length);
+  extra.writeUInt16LE(ZIP_UNICODE_PATH, 0);
+  extra.writeUInt16LE(data.length, 2);
+  data.copy(extra, 4);
+  return extra;
 }
 
 export function normalizeIntakePath(raw: string): { ok: true; path: string } | { ok: false; reason: CorpusRejectionReason; detail: string } {
@@ -102,7 +225,11 @@ export function isNestedArchive(path: string): boolean {
 }
 
 interface CdEntry {
-  name: string;
+  name:
+    | { ok: true; name: string }
+    | { ok: false; reason: CorpusRejectionReason; detail: string };
+  filenameBytes: Uint8Array;
+  unicodePathPresent: boolean;
   method: number;
   flags: number;
   crc: number;
@@ -158,20 +285,13 @@ function parseCentralDirectory(buf: Uint8Array): CdEntry[] {
     const localOffset = u32(buf, cursor + 42);
     const extraStart = cursor + 46 + nameLen;
     const extraEnd = extraStart + extraLen;
-    for (let extra = extraStart; extra + 4 <= extraEnd; ) {
-      const headerId = u16(buf, extra);
-      const dataSize = u16(buf, extra + 2);
-      if (extra + 4 + dataSize > extraEnd) {
-        throw new ZipError("malformed_zip", "central directory extra field is truncated");
-      }
-      if (headerId === 0x0001) {
-        throw new ZipError("unsupported_zip64", "ZIP64 extra field is not accepted");
-      }
-      extra += 4 + dataSize;
-    }
-    const name = decodeDos(buf, cursor + 46, nameLen);
+    const extras = parseExtras(buf, extraStart, extraEnd, "central directory");
+    const filenameBytes = Uint8Array.from(buf.subarray(cursor + 46, cursor + 46 + nameLen));
+    const name = resolveCanonicalName(filenameBytes, flags, extras.unicodePath);
     entries.push({
       name,
+      filenameBytes,
+      unicodePathPresent: extras.unicodePath !== null,
       method,
       flags,
       crc,
@@ -198,14 +318,42 @@ function extractLocal(buf: Uint8Array, entry: CdEntry): Uint8Array {
   const method = u16(buf, offset + 8);
   const nameLen = u16(buf, offset + 26);
   const extraLen = u16(buf, offset + 28);
-  const name = decodeDos(buf, offset + 30, nameLen);
-  if (name.replace(/\\/g, "/") !== entry.name.replace(/\\/g, "/")) {
-    throw new ZipError("malformed_zip", "local name does not match central directory");
+  if ((flags & ZIP_LANGUAGE_UTF8) !== (entry.flags & ZIP_LANGUAGE_UTF8)) {
+    throw new ZipError("malformed_zip", "local name encoding does not match central directory");
   }
-  if (method !== entry.method || (flags & 1) !== (entry.flags & 1)) {
+  if ((flags & ZIP_ENCRYPTED) !== (entry.flags & ZIP_ENCRYPTED) || method !== entry.method) {
     throw new ZipError("malformed_zip", "local header disagrees with central directory");
   }
-  const dataStart = offset + 30 + nameLen + extraLen;
+  const filenameBytes = buf.subarray(offset + 30, offset + 30 + nameLen);
+  if (!bytesEqual(filenameBytes, entry.filenameBytes)) {
+    throw new ZipError("malformed_zip", "local name does not match central directory");
+  }
+  const extraStart = offset + 30 + nameLen;
+  const extraEnd = extraStart + extraLen;
+  const extras = parseExtras(buf, extraStart, extraEnd, "local");
+  if (entry.unicodePathPresent) {
+    if (extras.unicodePath) {
+      const localName = resolveCanonicalName(filenameBytes, flags, extras.unicodePath);
+      if (
+        !entry.name.ok ||
+        !localName.ok ||
+        slashFold(localName.name) !== slashFold(entry.name.name)
+      ) {
+        throw new ZipError("malformed_zip", "local Unicode Path extra does not match central directory");
+      }
+    }
+  } else if (extras.unicodePath) {
+    throw new ZipError(
+      "malformed_zip",
+      "local Unicode Path extra is not present in the central directory",
+    );
+  } else {
+    const name = decodeZipNameBytes(filenameBytes, flags);
+    if (!entry.name.ok || !name.ok || slashFold(name.name) !== slashFold(entry.name.name)) {
+      throw new ZipError("malformed_zip", "local name does not match central directory");
+    }
+  }
+  const dataStart = extraEnd;
   const dataEnd = dataStart + entry.compressed;
   if (dataEnd > buf.length) {
     throw new ZipError("malformed_zip", "truncated compressed data");
@@ -251,9 +399,18 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
     if (Date.now() - startedAt > CORPUS_INTAKE_LIMITS.maxProcessingMs) {
       throw new ZipError("processing_timeout", "extraction exceeded time cap");
     }
-    if (entry.flags & 0x0001) {
+    if (!entry.name.ok) {
       rejected.push({
-        relativePath: entry.name,
+        relativePath: "<invalid-encoding>",
+        reason: entry.name.reason,
+        detail: entry.name.detail,
+      });
+      continue;
+    }
+    const entryName = entry.name.name;
+    if (entry.flags & ZIP_ENCRYPTED) {
+      rejected.push({
+        relativePath: entryName,
         reason: "encrypted_archive",
         detail: "encrypted ZIP entries are rejected",
       });
@@ -261,11 +418,11 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
     }
     const dosAttr = entry.externalAttr & 0xff;
     if ((dosAttr & 0x08) !== 0) {
-      rejected.push({ relativePath: entry.name, reason: "device_entry", detail: "volume or device label" });
+      rejected.push({ relativePath: entryName, reason: "device_entry", detail: "volume or device label" });
       continue;
     }
-    if ((dosAttr & 0x10) !== 0 || entry.name.endsWith("/")) continue;
-    const portableName = entry.name.replace(/\\/g, "/");
+    if ((dosAttr & 0x10) !== 0 || entryName.endsWith("/")) continue;
+    const portableName = entryName.replace(/\\/g, "/");
     const portableParts = portableName.split("/");
     const portableBase = portableParts.at(-1) ?? "";
     // Finder adds transport metadata that is not investigation evidence. Skip
@@ -284,17 +441,17 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
     if (mode !== null) {
       const type = mode & S_IFMT;
       if (type === S_IFLNK) {
-        rejected.push({ relativePath: entry.name, reason: "symlink_or_hardlink", detail: "symlink" });
+        rejected.push({ relativePath: entryName, reason: "symlink_or_hardlink", detail: "symlink" });
         continue;
       }
       if (type === S_IFBLK || type === S_IFCHR || type === S_IFIFO || type === S_IFSOCK) {
-        rejected.push({ relativePath: entry.name, reason: "device_entry", detail: "device or ipc entry" });
+        rejected.push({ relativePath: entryName, reason: "device_entry", detail: "device or ipc entry" });
         continue;
       }
     }
-    const normalized = normalizeIntakePath(entry.name);
+    const normalized = normalizeIntakePath(entryName);
     if (!normalized.ok) {
-      rejected.push({ relativePath: entry.name, reason: normalized.reason, detail: normalized.detail });
+      rejected.push({ relativePath: entryName, reason: normalized.reason, detail: normalized.detail });
       continue;
     }
     const foldKey = normalized.path.toLocaleLowerCase("en-US");
@@ -368,21 +525,26 @@ export function buildTestZip(
     encrypted?: boolean;
     unixMode?: number;
     extra?: Uint8Array;
+    localExtra?: Uint8Array;
     dosAttr?: number;
+    flags?: number;
+    nameBytes?: Uint8Array;
   }>,
 ): Uint8Array {
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
   let offset = 0;
   for (const file of files) {
-    const name = Buffer.from(file.name, "utf8");
+    const name = Buffer.from(file.nameBytes ?? Buffer.from(file.name, "utf8"));
     const raw = Buffer.from(file.data);
     const extra = file.extra ? Buffer.from(file.extra) : Buffer.alloc(0);
+    const localExtra = file.localExtra !== undefined ? Buffer.from(file.localExtra) : extra;
     const method = file.method ?? 0;
     const payload = method === 8 ? deflateRawSync(raw) : raw;
     const crc = crc32(raw) >>> 0;
-    const flags = file.encrypted ? 1 : 0;
-    const local = Buffer.alloc(30 + name.length + extra.length + payload.length);
+    const high = [...name].some((octet) => octet > 0x7f);
+    const flags = file.flags ?? ((file.encrypted ? 1 : 0) | (high ? 0x0800 : 0));
+    const local = Buffer.alloc(30 + name.length + localExtra.length + payload.length);
     local.writeUInt32LE(SIG_LOCAL, 0);
     local.writeUInt16LE(20, 4);
     local.writeUInt16LE(flags, 6);
@@ -391,10 +553,10 @@ export function buildTestZip(
     local.writeUInt32LE(payload.length, 18);
     local.writeUInt32LE(raw.length, 22);
     local.writeUInt16LE(name.length, 26);
-    local.writeUInt16LE(extra.length, 28);
+    local.writeUInt16LE(localExtra.length, 28);
     name.copy(local, 30);
-    extra.copy(local, 30 + name.length);
-    payload.copy(local, 30 + name.length + extra.length);
+    localExtra.copy(local, 30 + name.length);
+    payload.copy(local, 30 + name.length + localExtra.length);
     locals.push(local);
     const central = Buffer.alloc(46 + name.length + extra.length);
     const unix = file.unixMode !== undefined;

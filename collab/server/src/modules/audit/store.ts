@@ -38,6 +38,7 @@ function asRow(row: Record<string, unknown>): StoredAudit {
 export class MemoryAuditStore implements AuditStore {
   private readonly rows: StoredAudit[] = [];
   private nextId = 1;
+  private readonly tracked = new AsyncLocalStorage<{ ids: number[] }>();
 
   capture(): unknown {
     return { rows: this.rows.map((row) => ({ ...row })), nextId: this.nextId };
@@ -50,10 +51,27 @@ export class MemoryAuditStore implements AuditStore {
     this.nextId = state.nextId;
   }
 
+  runTracked<T>(operation: () => Promise<T>): Promise<T> {
+    const existing = this.tracked.getStore();
+    if (existing) return operation();
+    return this.tracked.run({ ids: [] }, operation);
+  }
+
+  rollbackTracked(): void {
+    const ids = this.tracked.getStore()?.ids;
+    if (!ids || ids.length === 0) return;
+    const remove = new Set(ids);
+    for (let index = this.rows.length - 1; index >= 0; index -= 1) {
+      if (remove.has(this.rows[index]!.id)) this.rows.splice(index, 1);
+    }
+    ids.length = 0;
+  }
+
   async append(record: AuditRecord): Promise<StoredAudit> {
     const stored: StoredAudit = { ...record, id: this.nextId, at: new Date() };
     this.nextId += 1;
     this.rows.push(stored);
+    this.tracked.getStore()?.ids.push(stored.id);
     return stored;
   }
 

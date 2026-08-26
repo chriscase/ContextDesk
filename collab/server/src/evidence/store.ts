@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   FILE_SERVER_REF_SCHEMA_ID,
@@ -52,6 +52,17 @@ export interface EvidenceStore {
     actualBytes?: Uint8Array,
   ): Promise<FileServerReferenceV1>;
 
+  /**
+   * Remove a file-server reference that was never paired with durable artifact
+   * metadata. This is compensating rollback, not general evidence deletion.
+   */
+  abandonFileServerReference(id: string): Promise<void>;
+  /**
+   * Restore a previously read file-server reference after a failed pairing
+   * with timeline/audit. Not general evidence mutation.
+   */
+  restoreFileServerReference(ref: FileServerReferenceV1): Promise<void>;
+
   /** Readiness probe for the byte backend. */
   ping(): Promise<void>;
 
@@ -60,6 +71,35 @@ export interface EvidenceStore {
    * rollback-safe promotion omit this method; portable apply then fails closed.
    */
   beginWriteBatch?(): Promise<EvidenceWriteBatch>;
+
+  /**
+   * Register durable domain rows that may reference content-addressed hashes.
+   * Recovery uses the union of every source so unreferenced crash residue can
+   * be reclaimed without deleting a later retry or a successful COMMIT.
+   */
+  addReferencedContentHashSource?(loader: () => Promise<Iterable<string>>): void;
+
+  /**
+   * Reclaim hashes recorded in pending-write journals that no durable domain
+   * row references. Implementations without journals omit this method.
+   */
+  recoverUnreferencedWrites?(
+    referenced?: ReadonlySet<string>,
+  ): Promise<EvidenceWriteRecoveryReport>;
+}
+
+export interface EvidenceFinalizeOptions {
+  /**
+   * Keep the pending-write journal after releasing the lock. Used when the
+   * surrounding database COMMIT outcome is unknown so a later recovery pass
+   * can reclaim unreferenced hashes or drop the journal once rows exist.
+   */
+  retainPendingJournal?: boolean;
+}
+
+export interface EvidenceWriteRecoveryReport {
+  reclaimed: ContentHash[];
+  journals: number;
 }
 
 export interface EvidenceWriteBatch extends EvidenceStore {
@@ -68,7 +108,7 @@ export interface EvidenceWriteBatch extends EvidenceStore {
   /** Remove staged/promoted bytes and release the exclusive write lock. */
   rollback(): Promise<void>;
   /** Keep promoted bytes, clean scratch state, and release the write lock. */
-  finalize(): Promise<void>;
+  finalize(options?: EvidenceFinalizeOptions): Promise<void>;
 }
 
 export interface EvidenceStage {
@@ -85,6 +125,18 @@ export function sha256Hex(bytes: Uint8Array): ContentHash {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+export const EVIDENCE_PENDING_WRITE_SCHEMA_ID = "cd.evidence.pending_write.v1";
+
+const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
+const PENDING_JOURNAL_FILE_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/i;
+const PENDING_JOURNAL_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isContentHash(value: string): value is ContentHash {
+  return CONTENT_HASH_RE.test(value);
+}
+
 function blobPath(root: string, hash: ContentHash): string {
   return join(root, "blobs", hash.slice(0, 2), hash);
 }
@@ -95,6 +147,36 @@ function metaPath(root: string, hash: ContentHash): string {
 
 function refPath(root: string, id: string): string {
   return join(root, "refs", `${id}.json`);
+}
+
+function pendingDir(root: string): string {
+  return join(root, ".pending");
+}
+
+function stagingDir(root: string): string {
+  return join(root, ".staging");
+}
+
+async function writeFileDurable(path: string, contents: string): Promise<void> {
+  const temporaryPath = `${path}.tmp-${randomUUID()}`;
+  const handle = await open(temporaryPath, "w");
+  try {
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(temporaryPath, path);
+  try {
+    const directory = await open(dirname(path), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } catch {
+    // Directory fsync is best-effort; the journal file itself is already durable.
+  }
 }
 
 export interface FilesystemEvidenceStoreOptions {
@@ -118,6 +200,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
   private readonly acquireWriteLease:
     | (() => Promise<() => void | Promise<void>>)
     | undefined;
+  private readonly referencedSources: Array<() => Promise<Iterable<string>>> = [];
 
   constructor(opts: FilesystemEvidenceStoreOptions) {
     this.rootDir = opts.rootDir;
@@ -125,9 +208,145 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     this.writeCoordination = opts.acquireWriteLease ? "external" : "single_process";
   }
 
+  addReferencedContentHashSource(loader: () => Promise<Iterable<string>>): void {
+    this.referencedSources.push(loader);
+  }
+
   async ping(): Promise<void> {
     await mkdir(join(this.rootDir, "blobs"), { recursive: true });
     await mkdir(join(this.rootDir, "refs"), { recursive: true });
+    await mkdir(pendingDir(this.rootDir), { recursive: true });
+  }
+
+  async beginWriteBatch(): Promise<EvidenceWriteBatch> {
+    const release = await this.acquireWriteLock();
+    try {
+      await this.ping();
+      if (this.referencedSources.length > 0) {
+        await this.recoverUnreferencedWritesUnlocked(await this.loadBoundReferencedHashes());
+      } else {
+        await rm(stagingDir(this.rootDir), { recursive: true, force: true });
+      }
+      return new FilesystemEvidenceWriteBatch(this, release);
+    } catch (error) {
+      await release();
+      throw error;
+    }
+  }
+
+  async recoverUnreferencedWrites(
+    referenced?: ReadonlySet<string>,
+  ): Promise<EvidenceWriteRecoveryReport> {
+    const release = await this.acquireWriteLock();
+    try {
+      const hashes = referenced ?? (this.referencedSources.length > 0
+        ? await this.loadBoundReferencedHashes()
+        : null);
+      if (!hashes) {
+        throw new Error("referenced content hashes are required for evidence recovery");
+      }
+      return await this.recoverUnreferencedWritesUnlocked(hashes);
+    } finally {
+      await release();
+    }
+  }
+
+  async writePendingJournal(id: string, hashes: readonly ContentHash[]): Promise<void> {
+    if (!PENDING_JOURNAL_ID_RE.test(id)) {
+      throw new Error("invalid pending write journal id");
+    }
+    const safeHashes = hashes.filter((hash) => isContentHash(hash));
+    await this.ping();
+    await writeFileDurable(
+      join(pendingDir(this.rootDir), `${id}.json`),
+      JSON.stringify({
+        schemaId: EVIDENCE_PENDING_WRITE_SCHEMA_ID,
+        id,
+        hashes: safeHashes,
+      }),
+    );
+  }
+
+  async deletePendingJournal(id: string): Promise<void> {
+    if (!PENDING_JOURNAL_ID_RE.test(id)) {
+      throw new Error("invalid pending write journal id");
+    }
+    await rm(join(pendingDir(this.rootDir), `${id}.json`), { force: true });
+  }
+
+  private async loadBoundReferencedHashes(): Promise<Set<string>> {
+    const hashes = new Set<string>();
+    for (const loader of this.referencedSources) {
+      for (const hash of await loader()) {
+        if (isContentHash(hash)) hashes.add(hash);
+      }
+    }
+    return hashes;
+  }
+
+  private async recoverUnreferencedWritesUnlocked(
+    referenced: ReadonlySet<string>,
+  ): Promise<EvidenceWriteRecoveryReport> {
+    const reclaimed: ContentHash[] = [];
+    let journals = 0;
+    let names: string[] = [];
+    try {
+      names = await readdir(pendingDir(this.rootDir));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    for (const name of names) {
+      const path = join(pendingDir(this.rootDir), name);
+      if (name.includes(".tmp")) {
+        await rm(path, { force: true });
+        continue;
+      }
+      if (!PENDING_JOURNAL_FILE_RE.test(name)) continue;
+      journals += 1;
+      let parsed: { schemaId?: unknown; hashes?: unknown } | null = null;
+      try {
+        parsed = JSON.parse(await readFile(path, "utf8")) as {
+          schemaId?: unknown;
+          hashes?: unknown;
+        };
+      } catch {
+        await rm(path, { force: true });
+        continue;
+      }
+      if (
+        parsed?.schemaId !== EVIDENCE_PENDING_WRITE_SCHEMA_ID
+        || !Array.isArray(parsed.hashes)
+      ) {
+        await rm(path, { force: true });
+        continue;
+      }
+      for (const hash of parsed.hashes) {
+        if (typeof hash !== "string" || !isContentHash(hash) || referenced.has(hash)) {
+          continue;
+        }
+        const blob = blobPath(this.rootDir, hash);
+        const meta = metaPath(this.rootDir, hash);
+        let existed = false;
+        try {
+          await stat(blob);
+          existed = true;
+        } catch {
+          // Missing canonical bytes are still journaled crash residue.
+        }
+        try {
+          await stat(meta);
+          existed = true;
+        } catch {
+          // Meta may be absent if promotion was interrupted.
+        }
+        await rm(blob, { force: true });
+        await rm(meta, { force: true });
+        if (existed) reclaimed.push(hash);
+      }
+      await rm(path, { force: true });
+    }
+    await rm(stagingDir(this.rootDir), { recursive: true, force: true });
+    return { reclaimed, journals };
   }
 
   async put(
@@ -139,17 +358,6 @@ export class FilesystemEvidenceStore implements EvidenceStore {
       return await this.putUnlocked(bytes, opts);
     } finally {
       await release();
-    }
-  }
-
-  async beginWriteBatch(): Promise<EvidenceWriteBatch> {
-    const release = await this.acquireWriteLock();
-    try {
-      await this.ping();
-      return new FilesystemEvidenceWriteBatch(this, release);
-    } catch (error) {
-      await release();
-      throw error;
     }
   }
 
@@ -385,6 +593,21 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     return ref;
   }
 
+  async abandonFileServerReference(id: string): Promise<void> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+      throw new Error("invalid file-server reference id");
+    }
+    await rm(refPath(this.rootDir, id), { force: true });
+  }
+
+  async restoreFileServerReference(ref: FileServerReferenceV1): Promise<void> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ref.id)) {
+      throw new Error("invalid file-server reference id");
+    }
+    await this.ping();
+    await writeFile(refPath(this.rootDir, ref.id), JSON.stringify(ref), "utf8");
+  }
+
   async getFileServerReference(
     id: string,
   ): Promise<FileServerReferenceV1 | null> {
@@ -428,12 +651,13 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
   private readonly created: Array<{ blob: string; meta: string }> = [];
   private released = false;
   private promoted = false;
+  private journalId: string | null = null;
 
   constructor(
     private readonly owner: FilesystemEvidenceStore,
     private readonly releaseLock: () => Promise<void>,
   ) {
-    this.stageRoot = join(owner.rootDir, ".staging", randomUUID());
+    this.stageRoot = join(stagingDir(owner.rootDir), randomUUID());
   }
 
   async put(bytes: Uint8Array, opts?: { contentType?: string }): Promise<BlobMetaV1> {
@@ -487,6 +711,14 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
     return this.owner.getFileServerReference(id);
   }
 
+  async abandonFileServerReference(): Promise<void> {
+    throw new Error("file-server references are unsupported in an evidence write batch");
+  }
+
+  async restoreFileServerReference(): Promise<void> {
+    throw new Error("file-server references are unsupported in an evidence write batch");
+  }
+
   async verifyFileServerReference(): Promise<FileServerReferenceV1> {
     throw new Error("file-server references are unsupported in an evidence write batch");
   }
@@ -501,14 +733,21 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
 
   async promote(): Promise<void> {
     if (this.promoted) return;
+    const createdHashes: ContentHash[] = [];
     for (const [hash] of this.staged) {
       const destinationBlob = blobPath(this.owner.rootDir, hash);
       try {
         await stat(destinationBlob);
-        continue;
       } catch {
-        // This batch holds the owner's exclusive write lock, so absence is stable.
+        createdHashes.push(hash);
       }
+    }
+    if (createdHashes.length > 0) {
+      this.journalId = randomUUID();
+      await this.owner.writePendingJournal(this.journalId, createdHashes);
+    }
+    for (const hash of createdHashes) {
+      const destinationBlob = blobPath(this.owner.rootDir, hash);
       const destinationMeta = metaPath(this.owner.rootDir, hash);
       await mkdir(dirname(destinationBlob), { recursive: true });
       await rename(blobPath(this.stageRoot, hash), destinationBlob);
@@ -526,20 +765,34 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
         await rm(row.blob, { force: true });
       }
       await rm(this.stageRoot, { recursive: true, force: true });
+      if (this.journalId) {
+        await this.owner.deletePendingJournal(this.journalId);
+        this.journalId = null;
+      }
     } finally {
       await this.release();
     }
   }
 
-  async finalize(): Promise<void> {
+  async finalize(options?: EvidenceFinalizeOptions): Promise<void> {
     if (this.released) return;
     try {
       await rm(this.stageRoot, { recursive: true, force: true });
+      if (!options?.retainPendingJournal && this.journalId) {
+        await this.owner.deletePendingJournal(this.journalId);
+        this.journalId = null;
+      }
     } catch {
       // Committed evidence remains canonical; stale scratch cleanup is best effort.
     } finally {
       await this.release();
     }
+  }
+
+  async abandonForCrashTest(): Promise<void> {
+    if (this.released) return;
+    this.released = true;
+    await this.releaseLock();
   }
 
   private async release(): Promise<void> {
@@ -557,4 +810,16 @@ export async function corruptBlobForTest(
 ): Promise<void> {
   const path = blobPath(store.rootDir, hash);
   await writeFile(path, mutated);
+}
+
+/**
+ * Test helper: release the exclusive write lock while leaving promoted bytes
+ * and the pending-write journal in place, as a process crash after promote
+ * and before COMMIT would.
+ */
+export async function abandonWriteBatchForCrashTest(batch: EvidenceWriteBatch): Promise<void> {
+  if (!(batch instanceof FilesystemEvidenceWriteBatch)) {
+    throw new Error("crash abandonment is only defined for filesystem evidence batches");
+  }
+  await batch.abandonForCrashTest();
 }
