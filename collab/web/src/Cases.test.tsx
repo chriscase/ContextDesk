@@ -1473,7 +1473,7 @@ describe("focused investigation view", () => {
     });
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Analyze/ }));
-    expect(screen.queryByRole("region", { name: "Timezone review" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Timezone review" })).toBeTruthy();
   });
 
   it("keeps the stable triage anchors mounted for deep links", async () => {
