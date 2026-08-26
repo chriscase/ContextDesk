@@ -56,7 +56,13 @@ import { ReferenceService } from "./modules/references/index.js";
 import { ResolutionService } from "./modules/resolutions/index.js";
 import { syntheticComponentHealth } from "./modules/component-health/index.js";
 import { MemoryModelPurposePolicyStore, ModelPurposePolicyService } from "./modules/model-policy/index.js";
-import type { ComponentHealthProjectorInputV1 } from "@cd-collab/contracts";
+import {
+  CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+  type ComponentHealthProjectorInputV1,
+  type CorpusIntakeBatchV1,
+  type CorpusIntakePreviewReportV1,
+} from "@cd-collab/contracts";
 import type { SetupService } from "./modules/setup/index.js";
 
 export const DEMO_USERNAME = "demo";
@@ -276,10 +282,10 @@ const DEMO_CHECKOUT_LOG = [
 
 const DEMO_INVENTORY_LOG = [
   "2026-08-24T06:14:20Z inventory-client INFO synthetic lookup started for syn-4412",
-  "2026-08-24T06:14:22Z inventory-client ERROR TimeoutError: synthetic inventory lookup exceeded 30000ms",
-  "    at InventoryClient.fetch (fixtures/inventory-client.ts:118:15)",
-  "    at CheckoutSession.reserve (fixtures/checkout-session.ts:64:22)",
-  "    at async CheckoutHandler.submit (fixtures/checkout-handler.ts:31:5)",
+  "2026-08-24T06:14:22Z inventory-client ERROR TimeoutError — synthetic inventory lookup exceeded 30000ms",
+  "    at InventoryClient.fetch (fixtures/inventory-client.ts line 118, column 15)",
+  "    at CheckoutSession.reserve (fixtures/checkout-session.ts line 64, column 22)",
+  "    at async CheckoutHandler.submit (fixtures/checkout-handler.ts line 31, column 5)",
   "2026-08-24T06:14:22Z inventory-client WARN synthetic client pool had no free connection for 30000ms",
 ].join("\n") + "\n";
 
@@ -573,52 +579,64 @@ async function seed(app: FastifyInstance): Promise<string> {
     },
   });
 
-  const checkoutEvidence = await okJson<{ artifact: { id: string } }>(app, {
-    method: "POST",
-    url: `/api/cases/${created.id}/evidence`,
-    cookie,
-    payload: {
-      kind: "log",
-      filename: "checkout.log",
+  const corpusFiles = [
+    {
+      relativePath: "checkout.log",
       mediaType: "text/plain",
       contentBase64: Buffer.from(DEMO_CHECKOUT_LOG).toString("base64"),
-      summary: "Synthetic checkout log: order syn-4412 waits on the inventory call, then times out.",
-      sourceId: source.id,
-      privacyClass: "share_safe",
     },
-  });
-  const inventoryEvidence = await okJson<{ artifact: { id: string } }>(app, {
-    method: "POST",
-    url: `/api/cases/${created.id}/evidence`,
-    cookie,
-    payload: {
-      kind: "log",
-      filename: "inventory-timeout.log",
+    {
+      relativePath: "inventory-timeout.log",
       mediaType: "text/plain",
       contentBase64: Buffer.from(DEMO_INVENTORY_LOG).toString("base64"),
-      summary: "Synthetic inventory-client trace: the failing frames for the timed-out lookup.",
-      sourceId: source.id,
-      privacyClass: "share_safe",
     },
-  });
-  const poolEvidence = await okJson<{ artifact: { id: string } }>(app, {
-    method: "POST",
-    url: `/api/cases/${created.id}/evidence`,
-    cookie,
-    payload: {
-      kind: "log",
-      filename: "connection-pool.log",
+    {
+      relativePath: "connection-pool.log",
       mediaType: "text/plain",
       contentBase64: Buffer.from(DEMO_POOL_LOG).toString("base64"),
-      summary: "Synthetic connection-pool counters across the timeout window.",
-      sourceId: source.id,
+    },
+  ];
+  const corpusPreview = await okJson<CorpusIntakePreviewReportV1>(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/corpus-intake/preview`,
+    cookie,
+    payload: {
+      schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+      origin: "files",
+      sourceLabel: "Synthetic checkout log fixture",
       privacyClass: "share_safe",
+      idempotencyKey: "demo-checkout-corpus-v1",
+      files: corpusFiles,
+      archiveBase64: null,
     },
   });
+  const corpusBatch = await okJson<CorpusIntakeBatchV1>(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/corpus-intake`,
+    cookie,
+    payload: {
+      schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+      origin: "files",
+      sourceLabel: "Synthetic checkout log fixture",
+      privacyClass: "share_safe",
+      idempotencyKey: "demo-checkout-corpus-v1",
+      previewToken: corpusPreview.previewToken,
+      files: corpusFiles,
+      archiveBase64: null,
+    },
+  });
+  const evidenceId = (relativePath: string) => {
+    const item = corpusBatch.items.find((candidate) => candidate.relativePath === relativePath);
+    if (!item) throw new Error(`synthetic demo corpus is missing ${relativePath}`);
+    return item.artifactId;
+  };
+  const checkoutEvidenceId = evidenceId("checkout.log");
+  const inventoryEvidenceId = evidenceId("inventory-timeout.log");
+  const poolEvidenceId = evidenceId("connection-pool.log");
   const demoEvidenceIds = {
-    "ev-demo-checkout-log": checkoutEvidence.artifact.id,
-    "ev-demo-inventory-timeout": inventoryEvidence.artifact.id,
-    "ev-demo-pool-exhaustion": poolEvidence.artifact.id,
+    "ev-demo-checkout-log": checkoutEvidenceId,
+    "ev-demo-inventory-timeout": inventoryEvidenceId,
+    "ev-demo-pool-exhaustion": poolEvidenceId,
   } as const;
   const demoCandidateIds = {
     "cand-qwen-3.6-27b": "qwen-reviewer",
@@ -641,8 +659,8 @@ async function seed(app: FastifyInstance): Promise<string> {
         privacyClass: "share_safe",
         hypothesisStatus: "supported",
         hypothesisLinks: [
-          { kind: "artifact", id: inventoryEvidence.artifact.id },
-          { kind: "artifact", id: checkoutEvidence.artifact.id },
+          { kind: "artifact", id: inventoryEvidenceId },
+          { kind: "artifact", id: checkoutEvidenceId },
         ],
         sourceId: source.id,
       },
@@ -654,9 +672,9 @@ async function seed(app: FastifyInstance): Promise<string> {
     cookie,
     payload: {
       evidenceIds: [
-        checkoutEvidence.artifact.id,
-        inventoryEvidence.artifact.id,
-        poolEvidence.artifact.id,
+        checkoutEvidenceId,
+        inventoryEvidenceId,
+        poolEvidenceId,
       ],
       visibility: "owner_only",
       protocolVersion: "synthetic-demo-v1",

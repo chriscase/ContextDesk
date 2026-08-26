@@ -22,6 +22,7 @@ import type {
   TriageBatchRunExecutor,
   TriageProfileOption,
 } from "./modules/triage-runs/index.js";
+import type { LogTimeAction } from "./modules/log-time/index.js";
 
 const apps: Awaited<ReturnType<typeof buildDemoApp>>[] = [];
 
@@ -135,6 +136,62 @@ describe("synthetic demo server", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(JSON.parse(response.body).state.corpusId).toBeNull();
+  });
+
+  it("seeds the visible demo logs through corpus intake so timezone review can build them", async () => {
+    const actions: LogTimeAction[] = [];
+    const demo = await buildDemoApp({
+      staticDir: null,
+      logTimeBridge: {
+        async run(caseId, action) {
+          actions.push(action);
+          return {
+            caseId,
+            corpusId: "corpus-demo-checkout",
+            corpusRevision: 1,
+            build: {
+              corpusName: `case ${caseId} log corpus`,
+              eventsImported: 18,
+              sourcesSelected: 3,
+              sourcesFailed: 0,
+              partial: false,
+              timezoneAmbiguousSources: [],
+            },
+            sources: ["checkout.log", "connection-pool.log", "inventory-timeout.log"].map(
+              (source) => ({
+                source,
+                unresolvedLocalRecords: 0,
+                resolvedLocalRecords: 0,
+                explicitWallClockRecords: 1,
+                otherOrderOnlyRecords: 0,
+              }),
+            ),
+            declarations: {},
+          };
+        },
+      },
+    });
+    apps.push(demo);
+    const login = await demo.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: DEMO_USERNAME, password: DEMO_PASSWORD },
+    });
+    const response = await demo.app.inject({
+      method: "POST",
+      url: `/api/cases/${demo.caseId}/log-time/build`,
+      headers: { cookie: cookie(login) },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const build = actions.find((action) => action.kind === "build");
+    expect(build?.kind).toBe("build");
+    if (build?.kind !== "build") throw new Error("demo did not ask the host to build a corpus");
+    expect(build.files.map((file) => file.relativePath).sort()).toEqual([
+      "checkout.log",
+      "connection-pool.log",
+      "inventory-timeout.log",
+    ]);
   });
 
   it("seeds the three-model and interaction-strategy review stories", async () => {
