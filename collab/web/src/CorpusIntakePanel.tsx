@@ -18,6 +18,7 @@ interface PreviewReport {
     byteLength: number;
     digest: string;
     duplicateDigest: boolean;
+    encodingStatus?: "utf8" | "normalized_non_utf8";
   }>;
   rejected: Array<{ relativePath: string; reason: string; detail: string }>;
   limits?: typeof CORPUS_INTAKE_LIMITS;
@@ -28,11 +29,74 @@ interface CommittedBatch {
   caseId: string;
   origin: string;
   replayed: boolean;
-  items: Array<{ artifactId: string; relativePath: string; digest: string; duplicateDigest: boolean }>;
+  items: Array<{
+    artifactId: string;
+    relativePath: string;
+    digest: string;
+    duplicateDigest: boolean;
+    encodingStatus?: "utf8" | "normalized_non_utf8";
+  }>;
   rejected: Array<{ relativePath: string; reason: string; detail: string }>;
 }
 
 type Origin = "files" | "zip" | "directory";
+
+const REJECTION_COPY: Record<string, { label: string; guidance: string }> = {
+  unsupported_media: {
+    label: "Unrecognized file type",
+    guidance: "Rename genuine text logs to a recognized log or text extension, then preview again.",
+  },
+  binary_or_unknown: {
+    label: "Not safely readable as text",
+    guidance: "Inspect these files outside the War Room before deciding whether they belong in the investigation.",
+  },
+  redaction_failed: {
+    label: "Not safe for the selected sharing level",
+    guidance: "Keep the upload private or remove sensitive content before previewing it again.",
+  },
+  file_too_large: {
+    label: "Individual file is too large",
+    guidance: "Split the file into smaller chronological segments before intake.",
+  },
+  too_many_files: {
+    label: "Too many files in one batch",
+    guidance: "Divide the corpus into smaller related batches.",
+  },
+  oversized_archive: {
+    label: "ZIP archive is too large",
+    guidance: "Split the archive into smaller related archives.",
+  },
+  oversized_expanded: {
+    label: "Expanded corpus is too large",
+    guidance: "Remove unrelated material or divide the corpus into smaller batches.",
+  },
+  processing_timeout: {
+    label: "Preview did not finish in time",
+    guidance: "Divide the corpus into smaller batches and retry.",
+  },
+};
+
+export interface CorpusRejectionSummary {
+  reason: string;
+  label: string;
+  guidance: string;
+  count: number;
+}
+
+export function summarizeCorpusRejections(
+  rejected: ReadonlyArray<{ reason: string }>,
+): CorpusRejectionSummary[] {
+  const counts = new Map<string, number>();
+  for (const row of rejected) counts.set(row.reason, (counts.get(row.reason) ?? 0) + 1);
+  return [...counts.entries()]
+    .map(([reason, count]) => ({
+      reason,
+      count,
+      label: REJECTION_COPY[reason]?.label ?? "Could not be accepted",
+      guidance: REJECTION_COPY[reason]?.guidance ?? "Open the file details for the recorded reason.",
+    }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+}
 
 function mib(byteLength: number): string {
   return `${byteLength / (1024 * 1024)} MiB`;
@@ -356,6 +420,7 @@ export function CorpusIntakePanel(props: {
           </a>
         </div>
   ) : null;
+  const rejectionSummary = preview ? summarizeCorpusRejections(preview.rejected) : [];
 
   if (props.readOnly || !props.canWrite) {
     return (
@@ -504,6 +569,9 @@ export function CorpusIntakePanel(props: {
                 <span>
                   {row.mediaType} · {row.byteLength} bytes
                   {row.duplicateDigest ? " · duplicate digest" : ""}
+                  {row.encodingStatus === "normalized_non_utf8"
+                    ? " · original bytes preserved; unreadable bytes replaced in analysis text"
+                    : ""}
                 </span>
               </li>
             ))}
@@ -518,39 +586,54 @@ export function CorpusIntakePanel(props: {
                     <span>
                       {row.mediaType} · {row.byteLength} bytes
                       {row.duplicateDigest ? " · duplicate digest" : ""}
+                      {row.encodingStatus === "normalized_non_utf8"
+                        ? " · original bytes preserved; unreadable bytes replaced in analysis text"
+                        : ""}
                     </span>
                   </li>
                 ))}
               </ul>
             </details>
           ) : null}
-          <h5>Rejected ({preview.rejected.length})</h5>
-          {preview.rejected.length === 0 ? <p className="corpus-intake__meta">None.</p> : null}
-          <ul>
-            {preview.rejected.slice(0, INITIAL_REPORT_ROWS).map((row, index) => (
-              <li key={`${row.relativePath}:${row.reason}:${index}`}>
-                <strong>{row.relativePath || "(archive)"}</strong>
-                <span>
-                  {row.reason} · {row.detail}
-                </span>
-              </li>
-            ))}
-          </ul>
-          {preview.rejected.length > INITIAL_REPORT_ROWS ? (
-            <details>
-              <summary>Show {preview.rejected.length - INITIAL_REPORT_ROWS} more rejected files</summary>
+          <h5>Needs attention ({preview.rejected.length})</h5>
+          {preview.rejected.length === 0 ? (
+            <p className="corpus-intake__meta">Every selected file can be committed.</p>
+          ) : (
+            <>
               <ul>
-                {preview.rejected.slice(INITIAL_REPORT_ROWS).map((row, index) => (
-                  <li key={`${row.relativePath}:${row.reason}:${index + INITIAL_REPORT_ROWS}`}>
-                    <strong>{row.relativePath || "(archive)"}</strong>
-                    <span>
-                      {row.reason} · {row.detail}
-                    </span>
+                {rejectionSummary.map((row) => (
+                  <li key={row.reason}>
+                    <strong>{row.count} · {row.label}</strong>
+                    <span>{row.guidance}</span>
                   </li>
                 ))}
               </ul>
-            </details>
-          ) : null}
+              <details>
+                <summary>Review rejected file details</summary>
+                <ul>
+                  {preview.rejected.slice(0, INITIAL_REPORT_ROWS).map((row, index) => (
+                    <li key={`${row.relativePath}:${row.reason}:${index}`}>
+                      <strong>{row.relativePath || "(archive)"}</strong>
+                      <span>{row.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+                {preview.rejected.length > INITIAL_REPORT_ROWS ? (
+                  <details>
+                    <summary>Show {preview.rejected.length - INITIAL_REPORT_ROWS} more rejected files</summary>
+                    <ul>
+                      {preview.rejected.slice(INITIAL_REPORT_ROWS).map((row, index) => (
+                        <li key={`${row.relativePath}:${row.reason}:${index + INITIAL_REPORT_ROWS}`}>
+                          <strong>{row.relativePath || "(archive)"}</strong>
+                          <span>{row.detail}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
+              </details>
+            </>
+          )}
         </div>
       ) : null}
       {batchCard}

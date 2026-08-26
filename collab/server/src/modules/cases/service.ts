@@ -1494,6 +1494,7 @@ export class CaseService {
           privacyClass: request.privacyClass,
           sourceId,
           duplicateDigest: duplicateFlags[index] ?? false,
+          encodingStatus: file.encodingStatus,
         }));
         const batch: CorpusIntakeBatchV1 = {
           schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,

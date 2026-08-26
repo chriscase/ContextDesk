@@ -47,12 +47,18 @@ use crate::envelope::{CliError, CliResult, Render};
 const REQUEST_SCHEMA_ID: &str = "cd-collab.log_time_request.v1";
 const RESULT_SCHEMA_ID: &str = "cd-collab.log_time_result.v1";
 
-const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_FILES: usize = 1_024;
-const MAX_FILE_BYTES: usize = 9_000_000;
-const MAX_AGGREGATE_BYTES: usize = 64 * 1024 * 1024;
+// Keep the trusted host boundary aligned with the War Room intake envelope.
+// The JSON request carries base64, so its transport cap includes worst-case
+// base64 expansion plus bounded path and per-entry metadata overhead. The
+// decoded checks below remain authoritative and reject any larger corpus.
+const MAX_FILES: usize = 4_096;
+const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_AGGREGATE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_PATH_DEPTH: usize = 8;
 const MAX_PATH_CHARS: usize = 240;
+const MAX_REQUEST_BYTES: u64 = 4 * ((MAX_AGGREGATE_BYTES as u64 + 2) / 3)
+    + MAX_FILES as u64 * (MAX_PATH_CHARS as u64 * 6 + 512)
+    + 4_096;
 /// Mirrors `LOG_TIME_LIMITS.maxPreviewSamples` in the Collab contract.
 const MAX_SAMPLES: usize = 24;
 /// Mirrors `LOG_TIME_LIMITS.maxExcerptChars` in the Collab contract.
@@ -367,9 +373,7 @@ fn build(
     if files.is_empty() {
         return Err(CliError::user("at least one log file is required"));
     }
-    if files.len() > MAX_FILES {
-        return Err(CliError::user("file count exceeds the bounded input size"));
-    }
+    validate_file_count(files.len())?;
 
     let staging = tempfile::tempdir()
         .map_err(|_| CliError::internal("could not stage the Collab log corpus"))?;
@@ -379,15 +383,7 @@ fn build(
         let bytes = BASE64
             .decode(file.content_base64.as_bytes())
             .map_err(|_| CliError::user("log file content is not valid base64"))?;
-        if bytes.len() > MAX_FILE_BYTES {
-            return Err(CliError::user("a log file exceeds the bounded input size"));
-        }
-        aggregate = aggregate.saturating_add(bytes.len());
-        if aggregate > MAX_AGGREGATE_BYTES {
-            return Err(CliError::user(
-                "log files exceed the bounded aggregate input size",
-            ));
-        }
+        aggregate = checked_aggregate_size(aggregate, bytes.len())?;
         let target = staging.path().join(&relative);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
@@ -432,6 +428,26 @@ fn build(
         revision: None,
         declarations: declarations_out(&state.declarations),
     }))
+}
+
+fn validate_file_count(file_count: usize) -> CliResult<()> {
+    if file_count > MAX_FILES {
+        return Err(CliError::user("file count exceeds the bounded input size"));
+    }
+    Ok(())
+}
+
+fn checked_aggregate_size(aggregate: usize, file_size: usize) -> CliResult<usize> {
+    if file_size > MAX_FILE_BYTES {
+        return Err(CliError::user("a log file exceeds the bounded input size"));
+    }
+    let aggregate = aggregate.saturating_add(file_size);
+    if aggregate > MAX_AGGREGATE_BYTES {
+        return Err(CliError::user(
+            "log files exceed the bounded aggregate input size",
+        ));
+    }
+    Ok(aggregate)
 }
 
 fn status(cache_root: &Path, case_id: &str, corpus_id: &str) -> CliResult<Box<dyn Render>> {
@@ -827,5 +843,44 @@ fn map_core_error(error: cd_core::error::CoreError) -> CliError {
         CliError::user(message)
     } else {
         CliError::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trusted_host_capacity_matches_the_war_room_intake_envelope() {
+        assert_eq!(MAX_FILES, 4_096);
+        assert_eq!(MAX_FILE_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_AGGREGATE_BYTES, 512 * 1024 * 1024);
+        assert!(validate_file_count(MAX_FILES).is_ok());
+        assert!(validate_file_count(MAX_FILES + 1).is_err());
+    }
+
+    #[test]
+    fn decoded_file_and_aggregate_limits_are_fail_closed() {
+        assert_eq!(
+            checked_aggregate_size(0, MAX_FILE_BYTES).expect("exact file boundary"),
+            MAX_FILE_BYTES
+        );
+        assert!(checked_aggregate_size(0, MAX_FILE_BYTES + 1).is_err());
+        assert_eq!(
+            checked_aggregate_size(MAX_AGGREGATE_BYTES - 1, 1).expect("exact aggregate boundary"),
+            MAX_AGGREGATE_BYTES
+        );
+        assert!(checked_aggregate_size(MAX_AGGREGATE_BYTES, 1).is_err());
+        assert!(checked_aggregate_size(usize::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn request_limit_covers_worst_case_base64_and_metadata() {
+        let base64_ceiling = 4 * ((MAX_AGGREGATE_BYTES as u64 + 2) / 3);
+        assert!(MAX_REQUEST_BYTES > base64_ceiling);
+        assert_eq!(
+            MAX_REQUEST_BYTES,
+            base64_ceiling + MAX_FILES as u64 * (MAX_PATH_CHARS as u64 * 6 + 512) + 4_096
+        );
     }
 }

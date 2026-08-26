@@ -224,6 +224,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
       byteLength: result.bytes.byteLength,
       digest: result.digest,
       duplicateDigest: false,
+      encodingStatus: result.encodingStatus,
     });
   }
 

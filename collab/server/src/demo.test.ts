@@ -57,6 +57,30 @@ async function waitForTerminalTriage(
 }
 
 describe("synthetic demo server", () => {
+  it("can expose provider-free log chronology through an explicitly configured local bridge", async () => {
+    const demo = await buildDemoApp({
+      staticDir: null,
+      logTimeBridge: {
+        async run() {
+          throw new Error("the state read must not invoke the host bridge");
+        },
+      },
+    });
+    apps.push(demo);
+    const login = await demo.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: DEMO_USERNAME, password: DEMO_PASSWORD },
+    });
+    const response = await demo.app.inject({
+      method: "GET",
+      url: `/api/cases/${demo.caseId}/log-time`,
+      headers: { cookie: cookie(login) },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body).state.corpusId).toBeNull();
+  });
+
   it("seeds the three-model and interaction-strategy review stories", async () => {
     const demo = await buildDemoApp({ staticDir: null });
     apps.push(demo);
@@ -130,10 +154,12 @@ describe("synthetic demo server", () => {
     const jobs = parseTriageJobList(JSON.parse(jobsResponse.body)).jobs;
     expect(jobs).toHaveLength(2);
     expect(jobs.every((job) => job.status === "completed" && job.sameSnapshot === true)).toBe(true);
-    expect(jobs[0]?.candidates).toHaveLength(3);
+    expect(jobs.map((job) => job.candidates.length).sort()).toEqual([2, 3]);
+    const threeLaneJob = jobs.find((job) => job.candidates.length === 3);
+    expect(threeLaneJob).toBeTruthy();
     const shareSafeJob = await demo.app.inject({
       method: "GET",
-      url: `/api/cases/${demo.caseId}/triage-runs/${jobs[0]?.id}/share-safe`,
+      url: `/api/cases/${demo.caseId}/triage-runs/${threeLaneJob?.id}/share-safe`,
       headers,
     });
     expect(shareSafeJob.statusCode).toBe(200);

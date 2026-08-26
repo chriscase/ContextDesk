@@ -76,6 +76,7 @@ function reportBody(overrides: Record<string, unknown> = {}): Record<string, unk
         byteLength: 44,
         digest: "a".repeat(64),
         duplicateDigest: false,
+        encodingStatus: "utf8",
       },
     ],
     rejected: [],
@@ -107,6 +108,7 @@ function batchBody(overrides: Record<string, unknown> = {}): Record<string, unkn
         privacyClass: "share_safe",
         sourceId: "source-1",
         duplicateDigest: false,
+        encodingStatus: "utf8",
       },
     ],
     rejected: [
@@ -226,6 +228,16 @@ describe("corpus intake contract", () => {
       ).rejected[0]?.reason,
     ).toBe("invalid_encoding");
     expect(() => parseCorpusIntakeBatch(batchBody({ extra: 1 }))).toThrow(/unknown key/);
+  });
+
+  it("keeps historical v1 reports parseable when encoding status was not recorded", () => {
+    const historicalReport = reportBody();
+    delete (historicalReport.accepted as Array<Record<string, unknown>>)[0]?.encodingStatus;
+    expect(parseCorpusIntakePreviewReport(historicalReport).accepted[0]?.encodingStatus).toBeUndefined();
+
+    const historicalBatch = batchBody();
+    delete (historicalBatch.items as Array<Record<string, unknown>>)[0]?.encodingStatus;
+    expect(parseCorpusIntakeBatch(historicalBatch).items[0]?.encodingStatus).toBeUndefined();
   });
 
   it("matches the JSON Schemas", () => {

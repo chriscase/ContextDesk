@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import { scanShareSafePrivacy } from "@cd-collab/contracts";
-import type { ArtifactKind, CorpusAllowedMedia, CorpusRejectionReason, PrivacyClass } from "@cd-collab/contracts";
+import type {
+  ArtifactKind,
+  CorpusAllowedMedia,
+  CorpusRejectionReason,
+  CorpusTextEncodingStatus,
+  PrivacyClass,
+} from "@cd-collab/contracts";
 import {
   CORPUS_ALLOWED_MEDIA,
   corpusAllowedExtension,
@@ -68,6 +74,7 @@ export interface ClassifiedFile {
   artifactKind: ArtifactKind;
   bytes: Uint8Array;
   digest: string;
+  encodingStatus: CorpusTextEncodingStatus;
 }
 
 export interface ClassifiedRejection {
@@ -76,13 +83,52 @@ export interface ClassifiedRejection {
   detail: string;
 }
 
-function looksBinary(bytes: Uint8Array): boolean {
-  if (bytes.includes(0)) return true;
-  let odd = 0;
+function disallowedControlCount(bytes: Uint8Array): number {
+  let count = 0;
   for (const octet of bytes) {
-    if (octet < 9 || (octet > 13 && octet < 32)) odd += 1;
+    if ((octet < 0x20 || octet === 0x7f) && ![0x09, 0x0a, 0x0c, 0x0d].includes(octet)) {
+      count += 1;
+    }
   }
-  return odd > bytes.length / 5;
+  return count;
+}
+
+function invalidUtf8ByteCount(bytes: Uint8Array): number {
+  let invalid = 0;
+  for (let index = 0; index < bytes.length;) {
+    const first = bytes[index] ?? 0;
+    if (first <= 0x7f) {
+      index += 1;
+      continue;
+    }
+    const second = bytes[index + 1];
+    const third = bytes[index + 2];
+    const fourth = bytes[index + 3];
+    const continuation = (value: number | undefined) =>
+      value !== undefined && value >= 0x80 && value <= 0xbf;
+    const valid =
+      (first >= 0xc2 && first <= 0xdf && continuation(second))
+      || (first === 0xe0 && second !== undefined && second >= 0xa0 && second <= 0xbf && continuation(third))
+      || (first >= 0xe1 && first <= 0xec && continuation(second) && continuation(third))
+      || (first === 0xed && second !== undefined && second >= 0x80 && second <= 0x9f && continuation(third))
+      || (first >= 0xee && first <= 0xef && continuation(second) && continuation(third))
+      || (first === 0xf0 && second !== undefined && second >= 0x90 && second <= 0xbf && continuation(third) && continuation(fourth))
+      || (first >= 0xf1 && first <= 0xf3 && continuation(second) && continuation(third) && continuation(fourth))
+      || (first === 0xf4 && second !== undefined && second >= 0x80 && second <= 0x8f && continuation(third) && continuation(fourth));
+    if (valid) {
+      index += first <= 0xdf ? 2 : first <= 0xef ? 3 : 4;
+    } else {
+      invalid += 1;
+      index += 1;
+    }
+  }
+  return invalid;
+}
+
+function looksBinary(bytes: Uint8Array, invalidUtf8Bytes: number): boolean {
+  if (bytes.includes(0)) return true;
+  return disallowedControlCount(bytes) * 16 > bytes.length
+    || invalidUtf8Bytes * 8 > bytes.length;
 }
 
 const SHARE_SAFE_MEDIA = new Set<CorpusAllowedMedia>([
@@ -158,21 +204,30 @@ export function classifyBytes(
       detail: "declared media type does not match allowlist",
     };
   }
-  if (looksBinary(bytes)) {
+  const invalidUtf8Bytes = invalidUtf8ByteCount(bytes);
+  if (looksBinary(bytes, invalidUtf8Bytes)) {
     return {
       relativePath: normalized.path,
       reason: "binary_or_unknown",
       detail: "bytes are not treated as text",
     };
   }
-  const text = decodeUtf8(bytes);
-  if (text === null) {
+  const utf8 = decodeUtf8(bytes);
+  const encodingStatus: CorpusTextEncodingStatus = utf8 === null ? "normalized_non_utf8" : "utf8";
+  if (
+    utf8 === null
+    && (privacyClass === "share_safe"
+      || !["text/plain", "text/x-log", "text/csv", "text/markdown"].includes(media))
+  ) {
     return {
       relativePath: normalized.path,
       reason: "binary_or_unknown",
-      detail: "bytes are not valid UTF-8 text",
+      detail: privacyClass === "share_safe"
+        ? "non-UTF-8 text requires private intake before normalization review"
+        : "structured content must be valid UTF-8 text",
     };
   }
+  const text = utf8 ?? new TextDecoder("utf-8").decode(bytes);
   let structuredContent: unknown = text;
   if (media === "application/json") {
     try {
@@ -212,5 +267,6 @@ export function classifyBytes(
     artifactKind,
     bytes,
     digest: digestOf(bytes),
+    encodingStatus,
   };
 }

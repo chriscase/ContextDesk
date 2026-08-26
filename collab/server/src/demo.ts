@@ -24,6 +24,14 @@ import { ExperimentService, MemoryExperimentStore } from "./modules/experiments/
 import { ExportService, testExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
 import {
+  createLogTimeCasePort,
+  logTimeBridgeOptions,
+  LogTimeService,
+  MemoryLogTimeStore,
+  ProcessLogTimeBridge,
+  type LogTimeBridge,
+} from "./modules/log-time/index.js";
+import {
   memoryApplyBoundary,
   MemoryPortableApplyStateStore,
   PortableInvestigationService,
@@ -62,6 +70,8 @@ interface DemoAppOptions {
   gatewayRunner?: RustBridgeTriageExecutorOptions;
   /** Deterministic test seam for the same gateway orchestration path. */
   gatewayExecutor?: TriageBatchRunExecutor;
+  /** Optional trusted local timestamp pipeline; never contacts a provider. */
+  logTimeBridge?: LogTimeBridge;
   /** Safe profile metadata paired with a test gateway executor. */
   triageProfiles?: TriageProfileOption[];
   /** Test seam for proving construction-failure cleanup; production uses buildApp. */
@@ -623,6 +633,19 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
         : {}),
     profiles: options.triageProfiles ?? loadConfiguredTriageProfileCatalog(),
   });
+  const logTime = options.logTimeBridge
+    ? new LogTimeService({
+        store: new MemoryLogTimeStore(),
+        bridge: options.logTimeBridge,
+        cases: createLogTimeCasePort({
+          cases: caseStore,
+          domain: cases,
+          evidence,
+          jobs: jobStore,
+        }),
+        audit,
+      })
+    : null;
   const presence = new PresenceService();
   const exporter = new ExportService({
     cases,
@@ -688,6 +711,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       catalog,
       imports,
       triageRuns,
+      ...(logTime ? { logTime } : {}),
       presence,
       experiments,
       exporter,
@@ -759,7 +783,11 @@ function demoGatewayRunner(): RustBridgeTriageExecutorOptions | undefined {
 
 async function main(): Promise<void> {
   const gatewayRunner = demoGatewayRunner();
-  const { app } = await buildDemoApp(gatewayRunner ? { gatewayRunner } : {});
+  const localLogTime = logTimeBridgeOptions();
+  const { app } = await buildDemoApp({
+    ...(gatewayRunner ? { gatewayRunner } : {}),
+    ...(localLogTime ? { logTimeBridge: new ProcessLogTimeBridge(localLogTime) } : {}),
+  });
   const close = () => {
     void app.close().catch((error: unknown) => {
       process.stderr.write(
@@ -780,6 +808,9 @@ async function main(): Promise<void> {
         gatewayRunner
           ? "Case state is synthetic and memory-backed; gateway runs are explicitly enabled through the host bridge."
           : "All state is synthetic, memory-backed, and removed when the server stops.",
+        localLogTime
+          ? "Local log chronology and timezone review are enabled through the trusted ContextDesk host."
+          : "Local log chronology is hidden until COLLAB_BRIDGE_BIN and COLLAB_LOG_CORPUS_ROOT are configured.",
         "Use /health for a smoke check; /ready intentionally reports no production database.",
       ].join("\n") + "\n",
     );

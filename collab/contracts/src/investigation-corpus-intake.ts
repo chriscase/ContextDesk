@@ -86,6 +86,9 @@ export const CORPUS_ALLOWED_MEDIA = [
 ] as const;
 export type CorpusAllowedMedia = (typeof CORPUS_ALLOWED_MEDIA)[number];
 
+export const CORPUS_TEXT_ENCODING_STATUSES = ["utf8", "normalized_non_utf8"] as const;
+export type CorpusTextEncodingStatus = (typeof CORPUS_TEXT_ENCODING_STATUSES)[number];
+
 export const CORPUS_ALLOWED_EXTENSIONS = [
   ".log",
   ".txt",
@@ -179,6 +182,8 @@ export interface CorpusAcceptedFileV1 {
   byteLength: number;
   digest: string;
   duplicateDigest: boolean;
+  /** Added compatibly to v1; absent historical reports mean UTF-8 status was not recorded. */
+  encodingStatus?: CorpusTextEncodingStatus;
 }
 
 export interface CorpusIntakePreviewReportV1 {
@@ -200,6 +205,8 @@ export interface CorpusIntakeCommittedItemV1 {
   privacyClass: PrivacyClass;
   sourceId: string;
   duplicateDigest: boolean;
+  /** Added compatibly to v1; absent historical batches mean encoding status was not recorded. */
+  encodingStatus?: CorpusTextEncodingStatus;
 }
 
 export interface CorpusIntakeBatchV1 {
@@ -307,6 +314,7 @@ const acceptedShape: ObjectShape = {
   byteLength: f.req(f.u64),
   digest: f.req(f.str),
   duplicateDigest: f.req(f.bool),
+  encodingStatus: f.opt(f.en(...CORPUS_TEXT_ENCODING_STATUSES)),
 };
 
 const limitsShape: ObjectShape = {
@@ -339,6 +347,7 @@ const committedItemShape: ObjectShape = {
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
   sourceId: f.req(f.str),
   duplicateDigest: f.req(f.bool),
+  encodingStatus: f.opt(f.en(...CORPUS_TEXT_ENCODING_STATUSES)),
 };
 
 const batchShape: ObjectShape = {

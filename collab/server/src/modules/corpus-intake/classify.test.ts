@@ -75,11 +75,22 @@ describe("classifyBytes", () => {
     expect("digest" in allowed).toBe(true);
   });
 
-  it("rejects invalid UTF-8 and binary markers even when they occur after a text prefix", () => {
+  it("accepts sparse non-UTF-8 private text but rejects binary markers and dense invalid bytes", () => {
     const invalidUtf8 = new Uint8Array(2_050).fill(0x41);
     invalidUtf8.set([0xc3, 0x28], 2_048);
     const invalid = classifyBytes("mailer/invalid-tail.log", invalidUtf8, "text/plain", "owner_only");
-    expect("reason" in invalid && invalid.reason).toBe("binary_or_unknown");
+    expect("encodingStatus" in invalid && invalid.encodingStatus).toBe("normalized_non_utf8");
+
+    const shareSafe = classifyBytes("mailer/invalid-tail.log", invalidUtf8, "text/plain", "share_safe");
+    expect("reason" in shareSafe && shareSafe.reason).toBe("binary_or_unknown");
+
+    const denseInvalid = classifyBytes(
+      "mailer/dense-invalid.log",
+      new Uint8Array(80).fill(0xff),
+      "text/plain",
+      "owner_only",
+    );
+    expect("reason" in denseInvalid && denseInvalid.reason).toBe("binary_or_unknown");
 
     const binaryTail = new Uint8Array(2_049).fill(0x41);
     binaryTail[2_048] = 0;
