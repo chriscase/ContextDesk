@@ -22,6 +22,7 @@ type Overrides = Partial<{
   provenanceClass: string;
   revision: number | null;
   orderTieBreak: number;
+  intakeBatchId: string | null;
 }>;
 
 function row(overrides: Overrides = {}): ProjectedInvestigationActivity {
@@ -43,6 +44,7 @@ function row(overrides: Overrides = {}): ProjectedInvestigationActivity {
     workstreamId: null,
     stage: "compare",
     timelineKind: overrides.timelineKind ?? "experiment_observation_recorded",
+    intakeBatchId: overrides.intakeBatchId ?? null,
   } as unknown as ProjectedInvestigationActivity;
 }
 
@@ -72,6 +74,51 @@ describe("dedupeProjectedActivity", () => {
       ),
     );
     expect(kept).toHaveLength(4);
+  });
+
+  it("represents one committed corpus upload once while preserving its per-file audit rows", () => {
+    const kept = dedupeProjectedActivity([
+      row({
+        activityId: "batch",
+        timelineKind: "corpus_intake_committed",
+        activityKind: "import_recorded",
+        summary: "committed a log intake batch",
+        resolvedRoute: "/investigations/case-1/capture?item=batch-1",
+        orderTieBreak: 4,
+        intakeBatchId: "batch-1",
+      }),
+      ...[1, 2, 3].map((seq) => row({
+        activityId: `evidence-${seq}`,
+        timelineKind: "evidence_registered",
+        activityKind: "evidence_added",
+        summary: "added evidence",
+        resolvedRoute: `/investigations/case-1/analyze?item=evidence-${seq}`,
+        orderTieBreak: seq,
+        intakeBatchId: "batch-1",
+      })),
+      row({
+        activityId: "manual-evidence",
+        timelineKind: "evidence_registered",
+        activityKind: "evidence_added",
+        summary: "added evidence",
+        resolvedRoute: "/investigations/case-1/analyze?item=manual-evidence",
+        orderTieBreak: 0,
+      }),
+    ]);
+
+    expect(kept.map((entry) => entry.item.activityId)).toEqual(["batch", "manual-evidence"]);
+  });
+
+  it("keeps corpus file activity when its batch event is not in the authorized projection", () => {
+    const kept = dedupeProjectedActivity([
+      row({
+        activityId: "evidence-1",
+        timelineKind: "evidence_registered",
+        activityKind: "evidence_added",
+        intakeBatchId: "batch-filtered-out",
+      }),
+    ]);
+    expect(kept).toHaveLength(1);
   });
 
   it("keeps the same action repeated at a different time", () => {

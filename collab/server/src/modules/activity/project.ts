@@ -41,6 +41,8 @@ export interface ProjectedInvestigationActivity {
   workstreamId: string | null;
   stage: InvestigationStageV1;
   timelineKind: string;
+  /** Present only when a timeline row belongs to one committed corpus intake. */
+  intakeBatchId: string | null;
 }
 
 const STAGE_LABEL: Record<InvestigationStageV1, string> = {
@@ -333,6 +335,24 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
 export function dedupeProjectedActivity(
   rows: ProjectedInvestigationActivity[],
 ): ProjectedInvestigationActivity[] {
+  // A corpus commit preserves one evidence_registered audit event per file and
+  // one corpus_intake_committed event for the operator action. Overview should
+  // show that action once, not let hundreds of file-level audit rows crowd all
+  // other work out of the feed. If the batch event is not in this authorized
+  // projection (for example because a caller filtered to evidence_added), the
+  // file rows remain visible rather than being suppressed on an assumption.
+  const committedIntakeBatches = new Set(
+    rows
+      .filter((row) => row.timelineKind === "corpus_intake_committed")
+      .map((row) => row.intakeBatchId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const presentationalRows = rows.filter(
+    (row) =>
+      row.timelineKind !== "evidence_registered"
+      || row.intakeBatchId === null
+      || !committedIntakeBatches.has(row.intakeBatchId),
+  );
   const visibleIdentity = (row: ProjectedInvestigationActivity): string =>
     JSON.stringify([
       row.item.investigationId,
@@ -345,7 +365,7 @@ export function dedupeProjectedActivity(
       row.item.revision,
     ]);
   const timelineKinds = new Map<string, Set<string>>();
-  for (const row of rows) {
+  for (const row of presentationalRows) {
     const key = visibleIdentity(row);
     const kinds = timelineKinds.get(key) ?? new Set<string>();
     kinds.add(row.timelineKind);
@@ -353,7 +373,7 @@ export function dedupeProjectedActivity(
   }
   const collapsed = new Set<string>();
   const kept: ProjectedInvestigationActivity[] = [];
-  for (const row of rows) {
+  for (const row of presentationalRows) {
     const key = visibleIdentity(row);
     // A single event kind repeated means the work happened more than once.
     if ((timelineKinds.get(key)?.size ?? 1) < 2) {
@@ -450,6 +470,10 @@ export function projectTimelineSource(
       workstreamId: mapped.workstreamId,
       stage,
       timelineKind: input.source.event.kind,
+      intakeBatchId: str(payload, "intakeBatchId")
+        ?? (input.source.event.kind === "corpus_intake_committed"
+          ? input.source.event.targetId
+          : null),
     };
   } catch {
     return null;
