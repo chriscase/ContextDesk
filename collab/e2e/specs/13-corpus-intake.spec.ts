@@ -128,7 +128,9 @@ test.describe("investigation-scoped corpus intake", () => {
     };
     expect(launched.snapshotId).toBe(secondSnapshot.id);
     expect(launched.snapshotFingerprint).toBe(secondSnapshot.fingerprint);
-    await expect(analyze.getByRole("status")).toContainText("2 frozen evidence items");
+    await expect(analyze.getByRole("status", { name: "Launch receipt" })).toContainText(
+      "2 frozen evidence items",
+    );
     const launchedCard = analyze.locator(`[id="triage-run-${launched.id}"]`);
     await expect(launchedCard.locator(".triage-runs__status--completed")).toBeVisible({
       timeout: 30_000,
