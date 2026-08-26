@@ -21,6 +21,7 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "./modules/authz/index.js
 import { CatalogService, MemoryCatalogStore } from "./modules/catalog/index.js";
 import { CaseService, MemoryCaseStore } from "./modules/cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "./modules/experiments/index.js";
+import { EntityService } from "./modules/entities/index.js";
 import { ExportService, testExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
 import {
@@ -46,6 +47,8 @@ import {
   type RustBridgeTriageExecutorOptions,
 } from "./modules/triage-runs/index.js";
 import { PresenceService } from "./modules/presence/index.js";
+import { ReferenceService } from "./modules/references/index.js";
+import { ResolutionService } from "./modules/resolutions/index.js";
 import { syntheticComponentHealth } from "./modules/component-health/index.js";
 import type { ComponentHealthProjectorInputV1 } from "@cd-collab/contracts";
 import type { SetupService } from "./modules/setup/index.js";
@@ -606,7 +609,25 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   const jobStore = new MemoryTriageJobStore();
   const applyState = new MemoryPortableApplyStateStore();
   const catalog = new CatalogService(catalogStore, audit);
-  const cases = new CaseService(evidence, audit, caseStore, catalog);
+  const resolutions = new ResolutionService({ audit });
+  const cases = new CaseService(evidence, audit, caseStore, catalog, resolutions);
+  const investigations = {
+    getCase: (id: string, actor: { id: string; username: string }, isAdmin: boolean) =>
+      cases.getCase(id, actor, isAdmin),
+    appendDomainTimeline: (
+      caseId: string,
+      event: {
+        kind: string;
+        actor: { id: string; username: string };
+        targetId: string | null;
+        clientTime: string | null;
+        payload: unknown;
+      },
+    ) => cases.appendDomainTimeline(caseId, event),
+  };
+  resolutions.bindInvestigations(investigations);
+  const entities = new EntityService({ audit, investigations });
+  const references = new ReferenceService({ audit, investigations });
   evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
   evidence.addReferencedContentHashSource(() => runStore.listReferencedContentHashes());
   await evidence.recoverUnreferencedWrites();
@@ -652,6 +673,12 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     catalog,
     imports,
     audit,
+    record: {
+      involvementFor: (caseId) => entities.involvementsForExport(caseId),
+      entityPrivacy: () => entities.entityPrivacyMap(),
+      referencesFor: (caseId) => references.exportProjection(caseId),
+      activeResolutionFor: (caseId) => resolutions.active(caseId),
+    },
     privacy: testExportPrivacyConfig({
       identityRedactions: {
         "uid=demo,ou=people,dc=example,dc=test": "demo-case-lead",
@@ -714,6 +741,9 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       ...(logTime ? { logTime } : {}),
       presence,
       experiments,
+      entities,
+      references,
+      resolutions,
       exporter,
       portable,
       publicIdentities: new HmacPublicIdentityCodec(Buffer.alloc(32, 0x42)),
