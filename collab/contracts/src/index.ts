@@ -760,3 +760,5 @@ export * from "./directory-mapping.js";
 export * from "./ldap-admin.js";
 export * from "./admin-people.js";
 export * from "./admin-audit.js";
+
+export * from "./investigation-lifecycle.js";

@@ -21,6 +21,7 @@ import { focusArrivalCopy } from "./route-focus-copy.js";
 import { useRoutedItemPresence } from "./route-focus.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { InvestigationRecordPanel } from "./InvestigationRecord.js";
+import { LifecyclePanel } from "./LifecyclePanel.js";
 import { ResolutionForm } from "./ResolutionForm.js";
 import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
 import { loadEntities, type EntityRow } from "./Entities.js";
@@ -1001,6 +1002,13 @@ export function Cases(props: {
       if (detail.error === "resolution_required") {
         setResolutionOpen(true);
         setResolutionPrompted(true);
+        return;
+      }
+      // A lifecycle refusal already reads as a complete, actionable sentence
+      // ("...under legal hold... clear the hold first"). Prefixing it with a
+      // generic failure line would bury the part that says what to do.
+      if (detail.error === "lifecycle_refused" && detail.detail) {
+        setActionError(detail.detail);
         return;
       }
       if (detail.error === "resolution_conflict") {
@@ -2511,7 +2519,12 @@ export function Cases(props: {
                   }}
                 />
               ) : null}
-              {canLead ? (
+              {/* An archived investigation has no working status to set: its one
+                  available move is a restore, which the lifecycle panel owns.
+                  Offering the ordinary select here would default to `open`
+                  because `archived` is deliberately not one of its options, and
+                  a submit would then silently un-archive the case. */}
+              {canLead && current.status !== "archived" ? (
                 <form
                   key={current.id}
                   className="composer"
@@ -2539,14 +2552,21 @@ export function Cases(props: {
                     <option value="open">open</option>
                     <option value="monitoring">monitoring</option>
                     <option value="resolved">resolved</option>
-                    <option value="archived">archived</option>
                   </select>
                   <button className="login__submit" type="submit">
                     Update status
                   </button>
                 </form>
-              ) : !readOnly ? (
+              ) : !readOnly && current.status !== "archived" ? (
                 <p className="triage-step__note">Only a case lead can change the case status.</p>
+              ) : null}
+              {!readOnly ? (
+                <LifecyclePanel
+                  caseId={current.id}
+                  status={current.status}
+                  canLead={canLead}
+                  onChanged={() => Promise.all([refresh(), refreshActivity()]).then(() => undefined)}
+                />
               ) : null}
               {!readOnly ? (
                 <details className="case-view__support">
