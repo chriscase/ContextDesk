@@ -39,8 +39,8 @@ type FairnessVerdict =
   }
   | { kind: "pending"; missingSnapshot: boolean; fairnessUnknown: boolean };
 
-function shortToken(value: string | null | undefined): string {
-  return value ? `${value.slice(0, 12)}…` : "not available";
+function evidenceCountLabel(count: number): string {
+  return `${count} evidence item${count === 1 ? "" : "s"}`;
 }
 
 function statusText(status: string): string {
@@ -189,11 +189,11 @@ export function EvidenceSnapshotCockpit(props: {
     ?? snapshots.at(-1);
   const verdict = fairnessVerdict(selectedRuns, snapshots);
 
-  function snapshotRef(snapshotId: string, fingerprint: string): string {
+  function snapshotRef(snapshotId: string): string {
     const index = snapshots.findIndex((snapshot) => snapshot.id === snapshotId);
     return index >= 0
-      ? `S${index} (${shortToken(fingerprint)})`
-      : `not in the visible snapshot list (${shortToken(fingerprint)})`;
+      ? `Snapshot S${index}`
+      : "Snapshot unavailable";
   }
 
   async function copyFingerprint(fingerprint: string) {
@@ -221,7 +221,6 @@ export function EvidenceSnapshotCockpit(props: {
         ? "none — root snapshot"
         : snapshotRef(
           inspected.parentSnapshotId,
-          snapshots.find((snapshot) => snapshot.id === inspected.parentSnapshotId)?.fingerprint ?? "",
         )
     : "unknown";
 
@@ -319,7 +318,7 @@ export function EvidenceSnapshotCockpit(props: {
               <li className="snapshot-cockpit__run" key={run.id}>
                 <strong>{run.request.strategyId}</strong>
                 <span>
-                  {statusText(run.status)} · snapshot {snapshotRef(run.snapshotId, run.snapshotFingerprint)} · {proofText(run, snapshots)}
+                  {statusText(run.status)} · {snapshotRef(run.snapshotId)} · {proofText(run, snapshots)}
                 </span>
                 {snapshots.some((snapshot) => snapshot.id === run.snapshotId) ? (
                   <button
@@ -348,7 +347,7 @@ export function EvidenceSnapshotCockpit(props: {
               >
                 {snapshots.map((snapshot, index) => (
                   <option key={snapshot.id} value={snapshot.id}>
-                    S{index} · {snapshot.evidence.length} evidence · {shortToken(snapshot.fingerprint)}
+                    Snapshot S{index} · {evidenceCountLabel(snapshot.evidence.length)}
                   </option>
                 ))}
               </select>

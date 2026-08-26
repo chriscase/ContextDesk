@@ -153,9 +153,16 @@ function stubFetch() {
           bounded: false,
           atLeast: 1,
           nextCursor: null,
+          nextPageCursor: null,
           cancelled: false,
+          corpusTruncated: false,
+          coverageComplete: true,
+          scannedLines: 3,
+          scannedLinesTotal: 3,
+          scopeFileCount: 1,
           timeFilterApplied: false,
           timeFilterUnknownReason: null,
+          timeAuthorityUnavailableReason: null,
           expectedNormalizationRevision: 3,
         });
       }
@@ -173,7 +180,7 @@ describe("Log workbench", () => {
     expect(screen.getAllByText('<img src=x onerror=alert(1)>.log').length).toBeGreaterThan(0);
     expect(document.querySelector("img")).toBeNull();
     expect(screen.queryByRole("heading", { name: EVIDENCE_A })).toBeNull();
-    expect(screen.getByText("Technical identifiers (3)")).toBeTruthy();
+    expect(screen.getAllByText("Details")).toHaveLength(2);
   });
 
   it("searches and reports an exact match count", async () => {
@@ -185,10 +192,14 @@ describe("Log workbench", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() => expect(screen.getAllByText(/1 match\b/).length).toBeGreaterThan(0));
-    expect(screen.getAllByText(/every match in the read lines/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Every selected line was searched/).length).toBeGreaterThan(0);
     expect(screen.getByRole("list", { name: "Search matches" }).textContent).toMatch(
       /upstream timeout/,
     );
+    const navigation = screen.getByRole("group", { name: "Search match navigation" });
+    expect(navigation.textContent).toContain("1 of 1");
+    expect(screen.getByRole("button", { name: "Previous match" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Next match" })).toBeTruthy();
   });
 
   it("restores filters, time window, grouping, and display from a saved view", async () => {
@@ -269,7 +280,7 @@ describe("Log workbench", () => {
  * not collide.
  */
 describe("Log workbench honesty and navigation", () => {
-  it("says so on Analyze when the corpus was only read part-way", async () => {
+  it("says so on Analyze when a file's bytes could not be read", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -288,7 +299,7 @@ describe("Log workbench honesty and navigation", () => {
       }),
     );
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
-    expect(await screen.findByText(/more log lines than one read can cover/)).toBeTruthy();
+    expect(await screen.findByText(/could not be read/)).toBeTruthy();
     expect(screen.getByText(/batch\.log/)).toBeTruthy();
   });
 
@@ -319,10 +330,16 @@ describe("Log workbench honesty and navigation", () => {
             bounded: true,
             atLeast: 0,
             nextCursor: null,
+            nextPageCursor: "cursor-page-two",
             cancelled: false,
-            corpusTruncated: true,
+            corpusTruncated: false,
+            coverageComplete: false,
+            scannedLines: 50_000,
+            scannedLinesTotal: 50_000,
+            scopeFileCount: 1,
             timeFilterApplied: false,
             timeFilterUnknownReason: null,
+            timeAuthorityUnavailableReason: null,
             expectedNormalizationRevision: 3,
           });
         }
@@ -334,10 +351,109 @@ describe("Log workbench honesty and navigation", () => {
     fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "needle" } });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() =>
-      expect(screen.getAllByText(/matches past the read limit were not counted/).length)
-        .toBeGreaterThan(0),
+      expect(screen.getAllByText(/more selected lines to search/).length).toBeGreaterThan(0),
     );
+    // "No matches" must never be the last word while lines remain unsearched.
     expect(screen.queryByText(/^0 matches\./)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Keep searching the rest of the selected lines/ }),
+    ).toBeTruthy();
+  });
+
+  /**
+   * The defect this journey pins: a root cause past the first page's work
+   * budget used to be unreachable, because the only cursor was a match count
+   * and a page that found nothing could not advance it.
+   */
+  it("reaches a late match by advancing the page cursor, then says coverage is complete", async () => {
+    const sentCursors: (string | null | undefined)[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/search")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { pageCursor?: string | null };
+          sentCursors.push(body.pageCursor);
+          if (!body.pageCursor) {
+            return jsonResponse({
+              matches: [],
+              returned: 0,
+              bounded: true,
+              atLeast: 0,
+              nextCursor: null,
+              nextPageCursor: "resume-at-50001",
+              cancelled: false,
+              corpusTruncated: false,
+              coverageComplete: false,
+              scannedLines: 50_000,
+              scannedLinesTotal: 50_000,
+              scopeFileCount: 1,
+              timeFilterApplied: false,
+              timeFilterUnknownReason: null,
+              timeAuthorityUnavailableReason: null,
+              expectedNormalizationRevision: 3,
+            });
+          }
+          return jsonResponse({
+            matches: [
+              {
+                evidenceId: EVIDENCE_A,
+                relativePath: "gateway/edge.log",
+                rotationFamily: "gateway/edge.log",
+                lineNumber: 50_001,
+                byteOffset: 900_000,
+                text: "ERROR the needle is here rid-late",
+                wrapped: false,
+                originalTimestamp: null,
+                normalizedUtc: null,
+                parseClass: "unparsable",
+                contextBefore: [],
+                contextAfter: [],
+              },
+            ],
+            returned: 1,
+            bounded: false,
+            atLeast: 1,
+            nextCursor: null,
+            nextPageCursor: null,
+            cancelled: false,
+            corpusTruncated: false,
+            coverageComplete: true,
+            scannedLines: 1,
+            scannedLinesTotal: 50_001,
+            scopeFileCount: 1,
+            timeFilterApplied: false,
+            timeFilterUnknownReason: null,
+            timeAuthorityUnavailableReason: null,
+            expectedNormalizationRevision: 3,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "needle" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    const keepGoing = await screen.findByRole("button", {
+      name: /Keep searching the rest of the selected lines/,
+    });
+    fireEvent.click(keepGoing);
+    await waitFor(() =>
+      expect(screen.getAllByText(/Every selected line was searched/).length).toBeGreaterThan(0),
+    );
+    expect(screen.getByText(/gateway\/edge\.log:50001/)).toBeTruthy();
+    expect(sentCursors).toEqual([null, "resume-at-50001"]);
+    expect(
+      screen.queryByRole("button", { name: /Keep searching the rest of the selected lines/ }),
+    ).toBeNull();
+    // Nothing left to load, so nothing offers to load it.
+    expect(screen.queryByRole("button", { name: /Load more matches/ })).toBeNull();
+    expect(screen.queryByText(/Load more to see the rest/)).toBeNull();
   });
 
   it("opens the matched file at the matched line when a hit is chosen", async () => {

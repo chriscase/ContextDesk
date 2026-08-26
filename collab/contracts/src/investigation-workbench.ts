@@ -102,7 +102,17 @@ export type ChronologyAnchorStatus = (typeof CHRONOLOGY_ANCHOR_STATUSES)[number]
 export const WORKBENCH_LIMITS = {
   maxPageRows: 200,
   maxReturnedMatches: 200,
+  /**
+   * Lines one search *page* may scan. This is a per-request work budget, not a
+   * cap on the corpus: a page that spends it stops at an exact corpus position
+   * and hands back a cursor that resumes there, so every selected line stays
+   * reachable across pages.
+   */
   maxSearchWorkLines: 50_000,
+  /** Rows held resident while streaming one file. Bounds peak memory. */
+  corpusWindowLines: 2_000,
+  /** Bound on the opaque resume token so a cursor can never grow unbounded. */
+  maxPageCursorChars: 1_024,
   maxLineChars: 16_384,
   maxRegexChars: 256,
   maxIncludeTerms: 16,
@@ -146,6 +156,140 @@ export function displayLabelForPath(relativePath: string): string {
   const base = relativePath.replace(/\\/g, "/");
   const leaf = base.split("/").pop() ?? base;
   return leaf.length > 0 ? leaf : "untitled log";
+}
+
+export const WORKBENCH_PAGE_CURSOR_VERSION = 1 as const;
+
+/**
+ * Where a search page stopped, so the next one resumes at that exact corpus
+ * position.
+ *
+ * The first contract only had a match ordinal. An ordinal cannot express "the
+ * scan stopped at line 50,000 having found nothing": advancing it skips
+ * *matches*, never corpus lines, so a root cause past the stopping point was
+ * unreachable no matter how many pages a responder asked for. This names the
+ * position instead.
+ *
+ * It carries no capability. Authorization is re-checked on every request; the
+ * digest here only refuses a cursor minted against a different corpus, so a
+ * stale token fails closed instead of silently reading past a moved boundary.
+ */
+export interface WorkbenchPageCursorV1 {
+  version: typeof WORKBENCH_PAGE_CURSOR_VERSION;
+  /** Identity of the scoped file set this cursor was minted against. */
+  scopeDigest: string;
+  /** Normalization revision in force when it was minted. */
+  normalizationRevision: number | null;
+  /** File to resume in. Empty means "the first file in scope". */
+  evidenceId: string;
+  /** First line not yet scanned, 1-based. */
+  lineNumber: number;
+  /** Matches counted strictly before this position. */
+  matchOrdinal: number;
+  /** Lines scanned by every page before this one. */
+  scannedLines: number;
+}
+
+const cursorShape: ObjectShape = {
+  version: f.req(f.u64),
+  scopeDigest: f.req(f.nstr),
+  normalizationRevision: f.nul(f.u64),
+  evidenceId: f.req(f.str),
+  lineNumber: f.req(f.u64),
+  matchOrdinal: f.req(f.u64),
+  scannedLines: f.req(f.u64),
+};
+
+export function encodeWorkbenchPageCursor(cursor: WorkbenchPageCursorV1): string {
+  const token = Buffer.from(canonicalJson(cursor), "utf8").toString("base64url");
+  if (token.length > WORKBENCH_LIMITS.maxPageCursorChars) {
+    throw new ContractViolation("$.pageCursor", "resume token exceeds its bound");
+  }
+  return token;
+}
+
+export function decodeWorkbenchPageCursor(raw: string): WorkbenchPageCursorV1 {
+  if (!raw || raw.length > WORKBENCH_LIMITS.maxPageCursorChars) {
+    throw new ContractViolation("$.pageCursor", "is not a bounded resume token");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    throw new ContractViolation("$.pageCursor", "is not a readable resume token");
+  }
+  checkObject("$.pageCursor", cursorShape, parsed);
+  const cursor = parsed as WorkbenchPageCursorV1;
+  if (cursor.version !== WORKBENCH_PAGE_CURSOR_VERSION) {
+    throw new ContractViolation("$.pageCursor", "was minted by a different contract");
+  }
+  return cursor;
+}
+
+/** Identity of one file as far as a resume cursor is concerned. */
+export interface WorkbenchScopedFile {
+  evidenceId: string;
+  relativePath: string;
+  digest: string;
+}
+
+/**
+ * Identity of a scoped corpus: which files, in which order, at which bytes.
+ * A cursor minted before an intake changed the set will not match, and is
+ * refused rather than resumed against different lines.
+ */
+export function workbenchCorpusScopeDigest(
+  files: readonly WorkbenchScopedFile[],
+): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson(
+        files.map((file) => [file.evidenceId, file.digest] as const),
+      ),
+      "utf8",
+    )
+    .digest("hex");
+}
+
+/** File-level selection, resolved before a single byte is read. */
+export interface WorkbenchCorpusScope {
+  evidenceIds: readonly string[];
+  file: string | null;
+  rotationFamily: string | null;
+}
+
+export function scopeFromSearchFilters(
+  filters: WorkbenchSearchFiltersV1,
+): WorkbenchCorpusScope {
+  return {
+    evidenceIds: filters.evidenceIds,
+    file: filters.file,
+    rotationFamily: filters.rotationFamily,
+  };
+}
+
+/**
+ * Whether a file is in scope at all.
+ *
+ * This runs against file metadata, before its bytes are read. Applying the
+ * same predicate after a read budget was already spent is what let a selected
+ * file sit unread behind unselected ones.
+ */
+export function fileInScope(
+  scope: WorkbenchCorpusScope,
+  file: { evidenceId: string; relativePath: string },
+): boolean {
+  if (scope.evidenceIds.length > 0 && !scope.evidenceIds.includes(file.evidenceId)) {
+    return false;
+  }
+  if (scope.file !== null && scope.file !== file.relativePath) return false;
+  if (
+    scope.rotationFamily !== null
+    && scope.rotationFamily !== rotationFamilyOf(file.relativePath)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -317,7 +461,17 @@ export interface WorkbenchSearchRequestV1 {
   filters: WorkbenchSearchFiltersV1;
   contextBefore: number;
   contextAfter: number;
+  /**
+   * Match ordinal already returned. Kept for callers written against the first
+   * contract: resuming by ordinal re-scans from the start of the scoped corpus.
+   */
   cursor: number;
+  /**
+   * Opaque resume token from a previous page's `nextPageCursor`. When present
+   * it wins over `cursor`, because it names the exact corpus position the last
+   * page stopped at instead of a count that has to be re-derived.
+   */
+  pageCursor?: string | null;
   limit: number;
   expectedNormalizationRevision: number | null;
 }
@@ -344,11 +498,33 @@ export interface WorkbenchSearchResultV1 {
   bounded: boolean;
   atLeast: number;
   nextCursor: number | null;
+  /**
+   * Resume token for the next page, or null when there is nothing left to do.
+   * Unlike `nextCursor` this names a corpus *position*, so advancing it can
+   * never skip a match that this page did not reach.
+   */
+  nextPageCursor: string | null;
   cancelled: boolean;
-  /** True when the host stopped reading the corpus before its last line. */
+  /**
+   * True only when the scan stopped short and cannot be resumed. A page that
+   * stopped on its work budget is *not* truncated: it hands back a cursor.
+   */
   corpusTruncated: boolean;
+  /** True when every line in the selected scope has now been searched. */
+  coverageComplete: boolean;
+  /** Lines this page examined. */
+  scannedLines: number;
+  /** Lines examined by this page and every page before it. */
+  scannedLinesTotal: number;
+  /** Files the selected scope resolved to, before any line was read. */
+  scopeFileCount: number;
   timeFilterApplied: boolean;
   timeFilterUnknownReason: string | null;
+  /**
+   * Set when a time-filtered search could not consult the timestamp authority.
+   * The workbench refuses to answer a time range from intake bytes alone.
+   */
+  timeAuthorityUnavailableReason: string | null;
   expectedNormalizationRevision: number | null;
 }
 
@@ -533,27 +709,62 @@ export function groupingKeyOf(
  * never becomes UTC unless the host reports wall-clock quality after an
  * explicit timezone apply.
  */
+export interface HostTimestampOverlay {
+  /** Overlay one bounded window. Each stamp is still consumed at most once. */
+  apply(lines: readonly WorkbenchLine[]): WorkbenchLine[];
+  readonly empty: boolean;
+}
+
+/**
+ * Build a reusable overlay over host stamps.
+ *
+ * The overlay is stateful across windows because a stamp describes one event
+ * and must not be spent twice. Candidates are bucketed by file leaf so a
+ * window costs the stamps that could plausibly belong to it, not the whole
+ * host result: matching every line against every stamp is quadratic, and on a
+ * corpus large enough to need windowing that cost is the whole search.
+ */
+export function createHostTimestampOverlay(
+  stamps: readonly HostEventStampV1[],
+): HostTimestampOverlay {
+  const buckets = new Map<string, HostEventStampV1[]>();
+  for (const stamp of stamps) {
+    const leaf = stamp.source.replace(/\\/g, "/").split("/").pop() ?? stamp.source;
+    const bucket = buckets.get(leaf);
+    if (bucket) bucket.push(stamp);
+    else buckets.set(leaf, [stamp]);
+  }
+  return {
+    empty: stamps.length === 0,
+    apply(lines) {
+      if (stamps.length === 0) return [...lines];
+      return lines.map((line) => {
+        const leaf = line.relativePath.replace(/\\/g, "/").split("/").pop()
+          ?? line.relativePath;
+        const bucket = buckets.get(leaf);
+        if (!bucket || bucket.length === 0) return line;
+        const index = bucket.findIndex((stamp) => stampMatchesLine(stamp, line));
+        if (index < 0) return line;
+        const [stamp] = bucket.splice(index, 1);
+        if (!stamp) return line;
+        const wall = stamp.timeQuality === "wall clock";
+        const normalizedUtc =
+          wall && Number.isFinite(stamp.ts) ? new Date(stamp.ts * 1000).toISOString() : null;
+        return {
+          ...line,
+          originalTimestamp: stamp.unresolvedLocalTimestamp ?? line.originalTimestamp,
+          normalizedUtc,
+        };
+      });
+    },
+  };
+}
+
 export function applyHostTimestamps(
   lines: readonly WorkbenchLine[],
   stamps: readonly HostEventStampV1[],
 ): WorkbenchLine[] {
-  if (stamps.length === 0) return [...lines];
-  const remaining = [...stamps];
-  return lines.map((line) => {
-    const index = remaining.findIndex((stamp) => stampMatchesLine(stamp, line));
-    if (index < 0) return line;
-    const [stamp] = remaining.splice(index, 1);
-    if (!stamp) return line;
-    const wall = stamp.timeQuality === "wall clock";
-    const normalizedUtc =
-      wall && Number.isFinite(stamp.ts) ? new Date(stamp.ts * 1000).toISOString() : null;
-    return {
-      ...line,
-      originalTimestamp:
-        stamp.unresolvedLocalTimestamp ?? line.originalTimestamp,
-      normalizedUtc,
-    };
-  });
+  return createHostTimestampOverlay(stamps).apply(lines);
 }
 
 function stampMatchesLine(stamp: HostEventStampV1, line: WorkbenchLine): boolean {
@@ -612,6 +823,8 @@ const searchRequestShape: ObjectShape = {
   contextBefore: f.req(f.u64),
   contextAfter: f.req(f.u64),
   cursor: f.req(f.u64),
+  // Optional so a client written against the first contract still validates.
+  pageCursor: f.optNul(f.str),
   limit: f.req(f.u64),
   expectedNormalizationRevision: f.nul(f.u64),
 };
@@ -638,10 +851,16 @@ const searchResultShape: ObjectShape = {
   bounded: f.req(f.bool),
   atLeast: f.req(f.u64),
   nextCursor: f.nul(f.u64),
+  nextPageCursor: f.nul(f.str),
   cancelled: f.req(f.bool),
   corpusTruncated: f.req(f.bool),
+  coverageComplete: f.req(f.bool),
+  scannedLines: f.req(f.u64),
+  scannedLinesTotal: f.req(f.u64),
+  scopeFileCount: f.req(f.u64),
   timeFilterApplied: f.req(f.bool),
   timeFilterUnknownReason: f.nul(f.str),
+  timeAuthorityUnavailableReason: f.nul(f.str),
   expectedNormalizationRevision: f.nul(f.u64),
 };
 
@@ -1159,20 +1378,77 @@ function applyTimeFilter(
   return { keep: true, unresolved: false };
 }
 
-export function searchLogLines(
-  lines: readonly WorkbenchLine[],
+/** Why a scan stopped. `complete` is the only one that means "all of it". */
+export type WorkbenchScanStop = "complete" | "budget" | "cancelled";
+
+export interface WorkbenchScanResume {
+  /** Matches counted strictly before the resume position. */
+  matchOrdinal: number;
+  /** Lines scanned by every page before this one. */
+  scannedLines: number;
+  /** File the resume lands in. */
+  evidenceId: string;
+  /** First line to evaluate. Earlier rows of that file only feed context. */
+  lineNumber: number;
+}
+
+export interface WorkbenchSearchScanOptions {
+  cancelled?: () => boolean;
+  /** Lines this page may scan before it must stop and hand back a cursor. */
+  scanBudgetLines?: number;
+  resume?: WorkbenchScanResume | null;
+}
+
+export interface WorkbenchScanResumePoint {
+  evidenceId: string;
+  lineNumber: number;
+  matchOrdinal: number;
+  scannedLines: number;
+}
+
+export interface WorkbenchSearchScanFinish {
+  scopeFileCount: number;
+  /** Bytes the reader could not obtain, so the scan cannot be resumed past them. */
+  corpusUnreadable?: boolean;
+  timeAuthorityUnavailableReason?: string | null;
+  expectedNormalizationRevision?: number | null;
+  /** False for callers with no corpus behind them to resume into. */
+  offerResume?: boolean;
+  mintCursor?: (point: WorkbenchScanResumePoint) => string;
+}
+
+/**
+ * A search that consumes the corpus in bounded windows and can stop anywhere.
+ *
+ * The scan holds at most one window of rows, the requested context lines, and
+ * the matches this page will return — never the corpus. When it stops early it
+ * reports the exact position it stopped at, so the next page resumes on the
+ * next unscanned line rather than re-deriving a position from a match count.
+ */
+export interface WorkbenchSearchScan {
+  /** Feed the next window, in corpus order. Returns false once the scan is done. */
+  feed(rows: readonly WorkbenchLine[]): boolean;
+  /** No more rows for the current file; drop its context window. */
+  endFile(): void;
+  /** Every file in scope was fed to its last line. */
+  markComplete(): void;
+  readonly stop: WorkbenchScanStop | null;
+  readonly scannedLines: number;
+  finish(input: WorkbenchSearchScanFinish): WorkbenchSearchResultV1;
+}
+
+export function createLogSearchScan(
   request: WorkbenchSearchRequestV1,
-  options: { cancelled?: () => boolean; corpusTruncated?: boolean } = {},
-): WorkbenchSearchResultV1 {
+  options: WorkbenchSearchScanOptions = {},
+): WorkbenchSearchScan {
   parseWorkbenchSearchRequest(request);
   const matcher = compileMatcher(request);
-  const matches: WorkbenchMatchV1[] = [];
-  let scanned = 0;
-  let atLeast = 0;
-  // A corpus the host could not read to the end already means this answer is
-  // partial, whatever the scan finds.
-  let bounded = options.corpusTruncated === true;
-  let cancelled = false;
+  const resume = options.resume ?? null;
+  const budget = Math.max(1, options.scanBudgetLines ?? WORKBENCH_LIMITS.maxSearchWorkLines);
+  // With a position cursor every match found from here is this page's to
+  // return. Only an ordinal cursor still has to walk past matches it already
+  // handed out.
+  const start = resume ? resume.matchOrdinal : request.cursor;
   const timeFilterApplied = Boolean(request.filters.timeFrom || request.filters.timeTo);
   const window = timeFilterApplied
     ? {
@@ -1184,77 +1460,240 @@ export function searchLogLines(
           : null,
       }
     : null;
-  let unresolvedInWindow = 0;
-  const start = request.cursor;
 
-  for (let index = 0; index < lines.length; index += 1) {
+  const emitted: WorkbenchMatchV1[] = [];
+  const pending: { match: WorkbenchMatchV1; remaining: number }[] = [];
+  let contextRing: WorkbenchLine[] = [];
+  let ringFile: string | null = null;
+  let matchOrdinal = resume ? resume.matchOrdinal : 0;
+  let scanned = 0;
+  let unresolvedInWindow = 0;
+  let stop: WorkbenchScanStop | null = null;
+  let lastScanned: { evidenceId: string; lineNumber: number } | null = null;
+  let lastEmit: WorkbenchScanResumePoint | null = null;
+
+  const resetContext = (evidenceId: string) => {
+    if (ringFile === evidenceId) return;
+    ringFile = evidenceId;
+    contextRing = [];
+    pending.length = 0;
+  };
+
+  function consume(line: WorkbenchLine): boolean {
     if (options.cancelled?.()) {
-      cancelled = true;
-      bounded = true;
-      break;
+      stop = "cancelled";
+      return false;
+    }
+    resetContext(line.evidenceId);
+    // A resumed page reads a short lead-in so the first match still shows the
+    // lines above it. Those rows are context only: matching or counting them
+    // again would return a match this reader has already been given.
+    const contextOnly =
+      resume !== null
+      && line.evidenceId === resume.evidenceId
+      && line.lineNumber < resume.lineNumber;
+    if (contextOnly) {
+      contextRing.push(line);
+      if (contextRing.length > request.contextBefore) contextRing.shift();
+      return true;
+    }
+    if (scanned >= budget) {
+      stop = "budget";
+      return false;
     }
     scanned += 1;
-    if (scanned > WORKBENCH_LIMITS.maxSearchWorkLines) {
-      bounded = true;
-      break;
+    lastScanned = { evidenceId: line.evidenceId, lineNumber: line.lineNumber };
+
+    for (const entry of pending) {
+      if (entry.remaining > 0) {
+        entry.match.contextAfter.push(line.text);
+        entry.remaining -= 1;
+      }
     }
-    const line = lines[index]!;
+
     const time = applyTimeFilter(line, window);
     if (time.unresolved) unresolvedInWindow += 1;
-    if (!time.keep) continue;
-    if (!lineMatches(line, request, matcher)) continue;
-    atLeast += 1;
-    if (atLeast <= start) continue;
-    if (matches.length >= request.limit) {
-      bounded = true;
-      continue;
+    if (time.keep && lineMatches(line, request, matcher)) {
+      matchOrdinal += 1;
+      if (matchOrdinal > start) {
+        if (emitted.length < request.limit) {
+          const match: WorkbenchMatchV1 = {
+            evidenceId: line.evidenceId,
+            relativePath: line.relativePath,
+            rotationFamily: line.rotationFamily,
+            lineNumber: line.lineNumber,
+            byteOffset: line.byteOffset,
+            text: line.text,
+            wrapped: line.wrapped,
+            originalTimestamp: line.originalTimestamp,
+            normalizedUtc: line.normalizedUtc,
+            parseClass: line.parseClass,
+            contextBefore: contextRing.map((row) => row.text),
+            contextAfter: [],
+          };
+          emitted.push(match);
+          if (request.contextAfter > 0) {
+            pending.push({ match, remaining: request.contextAfter });
+          }
+          lastEmit = {
+            evidenceId: line.evidenceId,
+            lineNumber: line.lineNumber,
+            matchOrdinal,
+            scannedLines: (resume?.scannedLines ?? 0) + scanned,
+          };
+        }
+      }
     }
-    const before = lines
-      .slice(Math.max(0, index - request.contextBefore), index)
-      .filter((row) => row.evidenceId === line.evidenceId)
-      .map((row) => row.text);
-    const after = lines
-      .slice(index + 1, index + 1 + request.contextAfter)
-      .filter((row) => row.evidenceId === line.evidenceId)
-      .map((row) => row.text);
-    matches.push({
-      evidenceId: line.evidenceId,
-      relativePath: line.relativePath,
-      rotationFamily: line.rotationFamily,
-      lineNumber: line.lineNumber,
-      byteOffset: line.byteOffset,
-      text: line.text,
-      wrapped: line.wrapped,
-      originalTimestamp: line.originalTimestamp,
-      normalizedUtc: line.normalizedUtc,
-      parseClass: line.parseClass,
-      contextBefore: before,
-      contextAfter: after,
-    });
+
+    contextRing.push(line);
+    if (contextRing.length > request.contextBefore) contextRing.shift();
+    return true;
   }
-  if (atLeast > matches.length) bounded = true;
-  // A cursor is only offered when advancing it can actually reach a match this
-  // page did not return. Offering one otherwise loops the reader on the same
-  // page forever.
-  const nextCursor =
-    !cancelled && atLeast > start + matches.length ? start + matches.length : null;
-  return parseWorkbenchSearchResult({
-    schemaId: WORKBENCH_SEARCH_RESULT_SCHEMA_ID,
-    matches,
-    returned: matches.length,
-    bounded,
-    atLeast: Math.max(atLeast, matches.length),
-    nextCursor,
-    cancelled,
-    corpusTruncated: options.corpusTruncated === true,
-    timeFilterApplied,
-    timeFilterUnknownReason:
-      unresolvedInWindow > 0
-        ? unresolvedInWindow === 1
-          ? "1 line was left out of this time range because it has no normalized timestamp yet. Declare a timezone in Timezone review to place it."
-          : `${unresolvedInWindow.toLocaleString()} lines were left out of this time range because they have no normalized timestamp yet. Declare a timezone in Timezone review to place them.`
-        : null,
-    expectedNormalizationRevision: request.expectedNormalizationRevision,
+
+  return {
+    get stop() {
+      return stop;
+    },
+    get scannedLines() {
+      return scanned;
+    },
+    feed(rows) {
+      if (stop !== null) return false;
+      for (const row of rows) {
+        if (!consume(row)) return false;
+      }
+      return true;
+    },
+    endFile() {
+      ringFile = null;
+      contextRing = [];
+      pending.length = 0;
+    },
+    markComplete() {
+      if (stop === null) stop = "complete";
+    },
+    finish(input) {
+      const cancelled = stop === "cancelled";
+      const complete = stop === "complete";
+      const unreadable = input.corpusUnreadable === true;
+      const atLeast = Math.max(matchOrdinal, emitted.length);
+      const moreMatchesHere = atLeast > start + emitted.length;
+      const coverageComplete = complete && !unreadable;
+      // A page that spent its budget is not a truncated corpus: it stopped at a
+      // position it can resume from. Truncation is reserved for a scan that
+      // stopped and cannot continue, which is the only case where "no matches"
+      // could still be hiding something.
+      const resumable =
+        input.offerResume !== false
+        && typeof input.mintCursor === "function"
+        && !cancelled
+        && !unreadable
+        && (!complete || moreMatchesHere);
+      let point: WorkbenchScanResumePoint | null = null;
+      if (resumable) {
+        point = lastEmit
+          ? {
+              evidenceId: lastEmit.evidenceId,
+              lineNumber: lastEmit.lineNumber + 1,
+              matchOrdinal: lastEmit.matchOrdinal,
+              scannedLines: lastEmit.scannedLines,
+            }
+          : lastScanned
+            ? {
+                evidenceId: lastScanned.evidenceId,
+                lineNumber: lastScanned.lineNumber + 1,
+                matchOrdinal,
+                scannedLines: (resume?.scannedLines ?? 0) + scanned,
+              }
+            : resume
+              ? {
+                  evidenceId: resume.evidenceId,
+                  lineNumber: resume.lineNumber,
+                  matchOrdinal: resume.matchOrdinal,
+                  scannedLines: resume.scannedLines,
+                }
+              : null;
+      }
+      const nextPageCursor = point === null ? null : input.mintCursor!(point);
+      return parseWorkbenchSearchResult({
+        schemaId: WORKBENCH_SEARCH_RESULT_SCHEMA_ID,
+        matches: emitted,
+        returned: emitted.length,
+        bounded: cancelled || unreadable || !complete || atLeast > emitted.length,
+        atLeast,
+        // Unchanged meaning: a match ordinal, offered only when advancing it can
+        // reach a match this page did not return.
+        nextCursor: !cancelled && moreMatchesHere ? start + emitted.length : null,
+        nextPageCursor,
+        cancelled,
+        corpusTruncated: !coverageComplete && nextPageCursor === null,
+        coverageComplete,
+        scannedLines: scanned,
+        scannedLinesTotal: (resume?.scannedLines ?? 0) + scanned,
+        scopeFileCount: input.scopeFileCount,
+        timeFilterApplied,
+        timeFilterUnknownReason:
+          unresolvedInWindow > 0
+            ? unresolvedInWindow === 1
+              ? "1 line was left out of this time range because it has no normalized timestamp yet. Declare a timezone in Timezone review to place it."
+              : `${unresolvedInWindow.toLocaleString()} lines were left out of this time range because they have no normalized timestamp yet. Declare a timezone in Timezone review to place them.`
+            : null,
+        timeAuthorityUnavailableReason: input.timeAuthorityUnavailableReason ?? null,
+        expectedNormalizationRevision:
+          input.expectedNormalizationRevision !== undefined
+            ? input.expectedNormalizationRevision
+            : request.expectedNormalizationRevision,
+      });
+    },
+  };
+}
+
+/**
+ * Search an already-materialized array of lines.
+ *
+ * Kept for callers that legitimately hold a small corpus in memory (a single
+ * file page, a fixture). Anything corpus-sized must drive `createLogSearchScan`
+ * with windows instead, so the rows never all exist at once.
+ */
+export function searchLogLines(
+  lines: readonly WorkbenchLine[],
+  request: WorkbenchSearchRequestV1,
+  options: { cancelled?: () => boolean; corpusTruncated?: boolean } = {},
+): WorkbenchSearchResultV1 {
+  const scan = createLogSearchScan(request, {
+    ...(options.cancelled ? { cancelled: options.cancelled } : {}),
+  });
+  let file: string | null = null;
+  let buffer: WorkbenchLine[] = [];
+  let stopped = false;
+  const flush = () => {
+    if (buffer.length === 0) return true;
+    const ok = scan.feed(buffer);
+    buffer = [];
+    return ok;
+  };
+  for (const line of lines) {
+    if (file !== null && line.evidenceId !== file) {
+      if (!flush()) {
+        stopped = true;
+        break;
+      }
+      scan.endFile();
+    }
+    file = line.evidenceId;
+    buffer.push(line);
+    if (buffer.length >= WORKBENCH_LIMITS.corpusWindowLines && !flush()) {
+      stopped = true;
+      break;
+    }
+  }
+  if (!stopped && flush()) scan.markComplete();
+  // This entry point has no corpus behind it to resume into, so it never offers
+  // a cursor: a scan that stopped short here really is a truncated answer.
+  return scan.finish({
+    scopeFileCount: new Set(lines.map((line) => line.evidenceId)).size,
+    ...(options.corpusTruncated === true ? { corpusUnreadable: true } : {}),
+    offerResume: false,
   });
 }
 
@@ -1405,7 +1844,9 @@ export function mergeChronology(
     const previousKey = previous ? groupingKeyOf(previous, grouping) : null;
     const uncertainty: string[] = [];
     if (!line.normalizedUtc) uncertainty.push("no usable timestamp");
-    if (line.parseClass === "local_ambiguous") uncertainty.push("ambiguous local time");
+    if (line.parseClass === "local_ambiguous" && !line.normalizedUtc) {
+      uncertainty.push("ambiguous local time");
+    }
     if (
       previous?.normalizedUtc
       && line.normalizedUtc
@@ -1448,7 +1889,9 @@ export function mergeChronology(
   // The buckets are disjoint so their counts can be added without counting the
   // same line twice: an ambiguous local time is a timezone unknown, not also a
   // missing-timestamp unknown.
-  const ambiguous = lines.filter((line) => line.parseClass === "local_ambiguous").length;
+  const ambiguous = lines.filter(
+    (line) => line.parseClass === "local_ambiguous" && !line.normalizedUtc,
+  ).length;
   const missing = lines.filter(
     (line) => !line.normalizedUtc && line.parseClass !== "local_ambiguous",
   ).length;
@@ -1486,6 +1929,135 @@ export function mergeChronology(
   });
 }
 
+/** One log file's identity, without its bytes. */
+export interface WorkbenchFileIdentity {
+  evidenceId: string;
+  relativePath: string;
+  digest: string;
+  intakeBatchId: string | null;
+}
+
+const SEVERITY_RE = /\b(ERROR|WARN|WARNING|INFO|DEBUG|FATAL|TRACE)\b/i;
+
+function buildLine(
+  file: WorkbenchFileIdentity,
+  family: string,
+  component: string,
+  lineNumber: number,
+  byteOffset: number,
+  raw: string,
+): WorkbenchLine {
+  const truncated = truncateLine(raw);
+  const shape = classifyTimestampShape(raw);
+  const severityMatch = raw.match(SEVERITY_RE);
+  return {
+    evidenceId: file.evidenceId,
+    relativePath: file.relativePath,
+    rotationFamily: family,
+    intakeBatchId: file.intakeBatchId,
+    lineNumber,
+    byteOffset,
+    text: truncated.text,
+    wrapped: truncated.wrapped,
+    severity: severityMatch?.[1]?.toLowerCase() ?? null,
+    component,
+    originalTimestamp: shape.originalText,
+    normalizedUtc: shape.parseClass === "explicit_offset"
+      ? normalizeExplicitUtc(shape.originalText)
+      : null,
+    parseClass: shape.parseClass,
+    digest: file.digest,
+  };
+}
+
+/**
+ * Walk one file's text as bounded windows of rows.
+ *
+ * The whole point is that nothing here ever holds the file's rows all at once:
+ * a caller searching a 200,000-line file sees it `windowLines` at a time and
+ * can drop each window before asking for the next. Line numbering and byte
+ * offsets are identical to reading the file in one piece, so a locator bound
+ * from a windowed read and one bound from a whole read name the same line.
+ *
+ * `startLine` skips ahead without allocating the rows before it, which is how
+ * a resumed page picks up where the previous one stopped.
+ */
+export function* iterateLogLineWindows(
+  file: WorkbenchFileIdentity,
+  text: string,
+  options: { windowLines?: number; startLine?: number } = {},
+): Generator<WorkbenchLine[], void, undefined> {
+  const windowLines = Math.max(
+    1,
+    Math.min(options.windowLines ?? WORKBENCH_LIMITS.corpusWindowLines, WORKBENCH_LIMITS.corpusWindowLines),
+  );
+  const startLine = Math.max(1, options.startLine ?? 1);
+  const family = rotationFamilyOf(file.relativePath);
+  const component = family.split("/").pop() ?? family;
+  let window: WorkbenchLine[] = [];
+  let lineNumber = 0;
+  let byteOffset = 0;
+  let cursor = 0;
+
+  // A file that ends with a newline has no extra line after it. Emitting the
+  // trailing empty segment would add a phantom blank row to every pane and
+  // report every line count one too high, so the last segment is held back
+  // until we know whether anything follows it.
+  let pending: string | null = null;
+  let sawSeparator = false;
+
+  const emit = function* (raw: string): Generator<WorkbenchLine[], void, undefined> {
+    lineNumber += 1;
+    if (lineNumber >= startLine) {
+      window.push(buildLine(file, family, component, lineNumber, byteOffset, raw));
+      if (window.length >= windowLines) {
+        yield window;
+        window = [];
+      }
+    }
+    byteOffset += Buffer.byteLength(raw, "utf8") + 1;
+  };
+
+  while (cursor <= text.length) {
+    const next = text.indexOf("\n", cursor);
+    const end = next < 0 ? text.length : next;
+    // Only a CR that a newline actually terminated is a line ending; a lone
+    // CR is ordinary text and stays in the line, as a whole-file read leaves it.
+    const hasCr = next >= 0 && end > cursor && text.charCodeAt(end - 1) === 13;
+    const raw = text.slice(cursor, hasCr ? end - 1 : end);
+    if (pending !== null) yield* emit(pending);
+    pending = raw;
+    if (next < 0) break;
+    sawSeparator = true;
+    cursor = next + 1;
+  }
+  if (pending !== null && !(sawSeparator && pending === "")) {
+    yield* emit(pending);
+  }
+  if (window.length > 0) yield window;
+}
+
+/**
+ * Count a file's lines without building a single row. Inventory needs the
+ * count, not the content, and a corpus-sized allocation to answer "how many
+ * lines" is exactly the cost this path exists to avoid.
+ */
+export function countLogTextLines(text: string): number {
+  if (text.length === 0) return 1;
+  let count = 0;
+  let cursor = 0;
+  for (;;) {
+    const next = text.indexOf("\n", cursor);
+    if (next < 0) {
+      // A trailing segment only counts when the file did not end on a newline.
+      if (cursor < text.length) count += 1;
+      return count === 0 ? 1 : count;
+    }
+    count += 1;
+    cursor = next + 1;
+  }
+}
+
 export function splitLogText(
   evidenceId: string,
   relativePath: string,
@@ -1493,38 +2065,12 @@ export function splitLogText(
   text: string,
   intakeBatchId: string | null,
 ): WorkbenchLine[] {
-  const family = rotationFamilyOf(relativePath);
   const rows: WorkbenchLine[] = [];
-  let offset = 0;
-  const parts = text.split(/\r?\n/);
-  // A file that ends with a newline has no extra line after it. Keeping the
-  // trailing empty split would add a phantom blank row to every pane and
-  // report every line count one too high.
-  if (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
-  for (let index = 0; index < parts.length; index += 1) {
-    const raw = parts[index] ?? "";
-    const truncated = truncateLine(raw);
-    const shape = classifyTimestampShape(raw);
-    const severityMatch = raw.match(/\b(ERROR|WARN|WARNING|INFO|DEBUG|FATAL|TRACE)\b/i);
-    rows.push({
-      evidenceId,
-      relativePath,
-      rotationFamily: family,
-      intakeBatchId,
-      lineNumber: index + 1,
-      byteOffset: offset,
-      text: truncated.text,
-      wrapped: truncated.wrapped,
-      severity: severityMatch?.[1]?.toLowerCase() ?? null,
-      component: family.split("/").pop() ?? family,
-      originalTimestamp: shape.originalText,
-      normalizedUtc: shape.parseClass === "explicit_offset"
-        ? normalizeExplicitUtc(shape.originalText)
-        : null,
-      parseClass: shape.parseClass,
-      digest,
-    });
-    offset += Buffer.byteLength(raw, "utf8") + 1;
+  for (const window of iterateLogLineWindows(
+    { evidenceId, relativePath, digest, intakeBatchId },
+    text,
+  )) {
+    for (const row of window) rows.push(row);
   }
   return rows;
 }
@@ -1541,7 +2087,10 @@ export function extractShapeCandidates(
 ): WorkbenchTimestampCandidateV1[] {
   const out: WorkbenchTimestampCandidateV1[] = [];
   for (const line of lines) {
-    if (line.parseClass === "missing") continue;
+    // A host-backed explicit timezone declaration may resolve a line whose
+    // source text is still a local/ambiguous shape. It is no longer waiting
+    // for review, so do not keep resurfacing it in the queue.
+    if (line.parseClass === "missing" || line.normalizedUtc) continue;
     const shape = classifyTimestampShape(line.originalTimestamp ?? line.text);
     out.push({
       schemaId: WORKBENCH_TIMESTAMP_CANDIDATE_SCHEMA_ID,

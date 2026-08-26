@@ -1642,8 +1642,43 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
             payload,
         });
     }
+
     if looks_like_unresolved_zone_column(token, token_tail) {
         return None;
+    }
+
+    // Many service logs put a component name between the timestamp and
+    // severity while using only one separating space, for example
+    // `2024-11-03 01:15:00 checkout-service INFO message`. Recognize that
+    // shape only when the second token is an explicit severity; this keeps
+    // ordinary prose and ambiguous single-space lines fail-closed while
+    // retaining the local timestamp for timezone review. The zone-column
+    // guard above runs first so an unknown uppercase abbreviation such as
+    // `XYZ INFO ...` remains a whole-line fallback.
+    if let Some((level_token, payload)) = take_token(token_tail) {
+        if let Some(level) = common_level_token(level_token) {
+            // A slash-delimited token can be producer-supplied IANA timezone
+            // evidence (for example `America/Chicago`). We do not interpret
+            // it without an operator declaration, and we must not discard it
+            // as though it were merely a service column. Retain the complete
+            // post-timestamp text so review can see the named zone while the
+            // timestamp remains unresolved and order-only.
+            if looks_like_iana_zone_evidence(token) {
+                return Some(DateTimeMessageParts {
+                    timestamp: WildflyTimestamp::Local,
+                    source_timestamp,
+                    level: Some(level),
+                    payload: body,
+                });
+            }
+            let payload = strip_standalone_dash_delimiter(payload.trim_start());
+            return Some(DateTimeMessageParts {
+                timestamp: WildflyTimestamp::Local,
+                source_timestamp,
+                level: Some(level),
+                payload,
+            });
+        }
     }
 
     // One separating space is safe only when the timestamp itself carries a
@@ -1861,6 +1896,26 @@ fn looks_like_unresolved_zone_column(token: &str, rest: &str) -> bool {
         && (token.bytes().all(|byte| byte.is_ascii_uppercase())
             || AMBIGUOUS_LOCAL_ZONES.contains(&upper.as_str()))
         && next_is_level_like
+}
+
+fn looks_like_iana_zone_evidence(token: &str) -> bool {
+    if !(3..=128).contains(&token.len()) || token.starts_with('/') || token.ends_with('/') {
+        return false;
+    }
+    let mut component_count = 0usize;
+    for component in token.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || !component.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'+' | b'.')
+            })
+        {
+            return false;
+        }
+        component_count += 1;
+    }
+    component_count >= 2
 }
 
 fn strip_standalone_dash_delimiter(payload: &str) -> &str {
@@ -2907,6 +2962,48 @@ mod tests {
             assert_eq!(parsed.parsed.message, line, "line={line}");
             assert_eq!(
                 parsed.parsed.unresolved_local_timestamp, None,
+                "line={line}"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_message_accepts_single_space_service_then_level_shape() {
+        let cases = [
+            (
+                "2024-11-03 01:15:00 checkout-service INFO historical batch started",
+                "info",
+                "historical batch started",
+            ),
+            (
+                "2024-11-03 01:30:00 inventory-client WARN pool wait began",
+                "warn",
+                "pool wait began",
+            ),
+            (
+                "2024-11-03 01:45:00 inventory-client ERROR lookup exceeded timeout",
+                "error",
+                "lookup exceeded timeout",
+            ),
+        ];
+
+        for (index, (line, level, message)) in cases.into_iter().enumerate() {
+            let parsed = parse_line_with_fingerprint(line, None, 700 + index as u64);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("datetime-message-record"),
+                "line={line}"
+            );
+            assert_eq!(parsed.parsed.level, level, "line={line}");
+            assert_eq!(parsed.parsed.message, message, "line={line}");
+            assert_eq!(
+                parsed.parsed.timestamp_provenance,
+                TimestampProvenance::UnresolvedLocal,
+                "line={line}"
+            );
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp.as_deref(),
+                line.get(..19),
                 "line={line}"
             );
         }

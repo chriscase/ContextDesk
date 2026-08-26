@@ -287,14 +287,15 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "timezone",
         ],
         what:
-          "The Log workbench is the Analyze surface for logs that already belong to the investigation. It pages large files, searches with bounded counts, and keeps UUIDs and digests behind technical details. Timezone review stays a separate, explicit step: the workbench will not guess a zone.",
+          "The Log workbench is the Analyze surface for logs that already belong to the investigation. It searches every line of the files you select — a large investigation is searched a page at a time rather than cut off — and keeps UUIDs and digests behind technical details. Timezone review stays a separate, explicit step: the workbench will not guess a zone.",
         when:
           "Use it after Capture has imported files, a ZIP, or a directory, when you need to read more than one log at once or return to a saved view after reload.",
         steps: [
           "Open Analyze and find Log workbench.",
           "Tick two or more files to open them side by side.",
           "Search, then choose a hit to open that file at the matching line.",
-          "Read the count: an exact count says so, a bounded one says “at least N”, and a corpus too large to read to the end says that matches past the read limit were not counted.",
+          "Read the two facts in the answer separately: how many matches it found, and whether every selected line was searched. When lines remain, choose “Keep searching the rest of the selected lines” to continue from exactly where it stopped — including after a page that found nothing.",
+          "Tick only the files you care about to search them first. The selection is applied before anything is read, so a small file is searched immediately even when the investigation also holds a very large one.",
           "Narrow by time with a full UTC instant such as 2024-03-10T08:00:00Z; a local time with no zone is refused rather than guessed.",
           "Save a view or bookmark a line. Those records are not permission tokens.",
           "Declare timezones in Timezone review when local clocks have no offset, then read Normalized log chronology for one merged order.",
@@ -302,7 +303,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Saved views and bookmarks stay with the investigation. A stale bookmark explains that the file bytes moved; it does not silently jump to another line.",
         limits:
-          "Search and paging are bounded, and a bounded answer says so rather than reading as a complete one. An investigation with more log lines than one read can cover reports which files it did not finish. Regex that would run unbounded is refused. Share-safe locator tokens re-check authorization and do not reveal a private filename to someone who cannot open the investigation.",
+          "Each search page does a bounded amount of work and then says where it stopped, so continuing is always possible and no match is skipped or shown twice. An answer that has not covered every selected line says so instead of reading as a complete count. If the files you selected change, or a timezone is applied, a half-finished search is refused rather than resumed against different lines — start it again. A time range is answered by the timezone host, which owns that resolution; if that host cannot be reached the time range is refused rather than guessed. Regex that would run unbounded is refused. Share-safe locator tokens re-check authorization and do not reveal a private filename to someone who cannot open the investigation.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {

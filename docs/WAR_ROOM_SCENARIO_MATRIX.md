@@ -37,7 +37,7 @@ passing quietly.
 | 8 | New evidence arrives, and the earlier comparison is rerun | A second log landed after we already compared. Does the earlier conclusion still hold, and can I tell the two runs apart? | 4 | `specs/20-war-room-collaboration.spec.ts` | default fixture server |
 | 9 | Partial and failed model lanes | One lane failed and one came back partial. Is what is left still usable, and can I see what I am missing? | 5 | `specs/21-war-room-lanes-and-deployment.spec.ts` | `COLLAB_E2E_BRIDGE=degraded` |
 | 10 | The same investigation on a private workstation and on the shared service | I started this on my laptop and now the team needs it. What changes when the same investigation is on the shared deployment instead of mine? | 4 | `specs/21-war-room-lanes-and-deployment.spec.ts` | default fixture server |
-| 11 | Side-by-side log workbench on Analyze | Can I open two logs from this investigation, find the timeout, save that view, and still have it after reload? | 4 | `specs/26-log-workbench.spec.ts` | default fixture server |
+| 11 | Side-by-side log workbench on Analyze | Can I open two logs from this investigation, find the timeout, save that view, and still have it after reload? | 5 | `specs/26-log-workbench.spec.ts` | default fixture server |
 | 12 | Email and chat sit beside logs without becoming logs | Support forwarded an email and a chat. Can I read them next to the logs without treating the conversation as a timestamped log? | 2 | `specs/26-log-workbench.spec.ts` | default fixture server |
 | 13 | A copied log locator does not leak to someone who cannot open the case | If I copy a bookmark token, can a teammate who cannot open this investigation tell that the file exists? | 2 | `specs/26-log-workbench.spec.ts` | default fixture server |
 
@@ -509,6 +509,7 @@ passing quietly.
 | --- | --- | --- |
 | `workbench-named-on-analyze` | Analyze shows a Log workbench for this investigation's files. | The operator has to open the global Sources catalog to find the imported logs. |
 | `workbench-two-panes` | Two selected logs can be opened side by side. | Only one file can be on screen at a time. |
+| `workbench-virtual-row-contract` | Long records keep the fixed row height used by virtual scrolling. | A wrapped row makes match navigation drift away from its recorded line. |
 | `workbench-search-timeout` | Search returns the timeout line with a match count. | The timeout line is missing or the count is empty. |
 | `workbench-saved-view-reload` | A saved view is still listed after reload. | Reload forgets the saved view. |
 

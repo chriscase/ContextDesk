@@ -667,7 +667,11 @@ function PreviewCard(props: {
 
   return (
     <div className="log-time__preview" role="group" aria-label="Preview of this timezone">
-      <h5>If you apply {preview.ianaTimezone}</h5>
+      <h5>
+        {preview.affectedRecords > 0
+          ? `If you apply ${preview.ianaTimezone}`
+          : `What ${preview.ianaTimezone} would do`}
+      </h5>
       <p className="log-time__copy">
         {lines(preview.affectedRecords)} would get an exact time
         {preview.firstResolvedInstant && preview.lastResolvedInstant

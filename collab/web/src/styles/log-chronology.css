@@ -1,9 +1,10 @@
 .log-chronology {
   margin-top: 1rem;
   padding: 1rem;
-  border: 1px solid var(--cd-border, #d7dce2);
-  border-radius: 0.6rem;
-  background: var(--cd-surface, #fff);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel, 0.85rem);
+  background: color-mix(in srgb, var(--surface) 88%, var(--bg));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.025);
 }
 
 .log-chronology__head {
@@ -15,14 +16,14 @@
 
 .log-chronology__head h4 {
   margin: 0;
-  color: var(--cd-ink, #18212b);
+  color: var(--fg);
 }
 
 .log-chronology__copy,
 .log-chronology__summary,
 .log-chronology__empty {
   margin: 0.35rem 0 0;
-  color: var(--cd-muted, #5b6672);
+  color: var(--muted);
   font-size: 0.86rem;
 }
 
@@ -30,8 +31,9 @@
   flex: none;
   padding: 0.25rem 0.5rem;
   border-radius: 999px;
-  background: var(--cd-subtle, #eef1f4);
-  color: var(--cd-muted, #5b6672);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+  color: var(--fg);
   font-size: 0.75rem;
   white-space: nowrap;
 }
@@ -46,7 +48,7 @@
 .log-chronology__filters label {
   display: grid;
   gap: 0.25rem;
-  color: var(--cd-muted, #5b6672);
+  color: var(--muted);
   font-size: 0.78rem;
   font-weight: 600;
 }
@@ -54,17 +56,31 @@
 .log-chronology__filters input {
   min-width: 0;
   padding: 0.45rem 0.55rem;
-  border: 1px solid var(--cd-border, #c9d0d8);
+  border: 1px solid var(--border);
   border-radius: 0.35rem;
-  background: var(--cd-surface, #fff);
-  color: var(--cd-ink, #18212b);
+  background: var(--surface-input);
+  color: var(--fg);
   font: inherit;
   font-weight: 400;
 }
 
+.log-chronology__filters input::placeholder {
+  color: color-mix(in srgb, var(--muted) 78%, transparent);
+}
+
+.log-chronology__filters input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
 .log-chronology__error {
   margin: 0.75rem 0 0;
-  color: var(--cd-danger, #a42d2d);
+  padding: 0.6rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border));
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--fg);
 }
 
 .log-chronology__table-wrap {
@@ -75,22 +91,31 @@
 .log-chronology__table {
   width: 100%;
   border-collapse: collapse;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-deep);
   font-size: 0.82rem;
 }
 
 .log-chronology__table th,
 .log-chronology__table td {
   padding: 0.55rem 0.5rem;
-  border-top: 1px solid var(--cd-border, #e2e6ea);
+  border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
   text-align: left;
   vertical-align: top;
 }
 
 .log-chronology__table th {
-  color: var(--cd-muted, #5b6672);
+  background: color-mix(in srgb, var(--surface) 72%, var(--surface-deep));
+  color: var(--muted);
   font-size: 0.72rem;
   letter-spacing: 0.03em;
   text-transform: uppercase;
+}
+
+.log-chronology__table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .log-chronology__table code {
@@ -106,32 +131,32 @@
 .log-chronology__time code {
   display: block;
   margin-top: 0.2rem;
-  color: var(--cd-muted, #5b6672);
+  color: var(--muted);
 }
 
 .log-chronology__order-label {
-  color: var(--cd-muted, #5b6672);
+  color: var(--muted);
   font-weight: 600;
 }
 
 .log-chronology__state {
   display: inline-block;
   max-width: 15rem;
-  color: var(--cd-muted, #5b6672);
+  color: var(--muted);
   font-size: 0.78rem;
 }
 
 .log-chronology__state--resolved {
-  color: var(--cd-success, #216c46);
+  color: var(--success);
   font-weight: 600;
 }
 
 .log-chronology__state--order-only {
-  color: var(--cd-warning, #805a10);
+  color: var(--warning);
 }
 
 .log-chronology__row--order-only {
-  background: color-mix(in srgb, var(--cd-warning, #f5e7bd) 16%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
 }
 
 .log-chronology__message {
@@ -143,12 +168,22 @@
 .log-chronology__more {
   margin-top: 0.8rem;
   padding: 0.45rem 0.7rem;
-  border: 1px solid var(--cd-border, #c9d0d8);
+  border: 1px solid var(--border);
   border-radius: 0.35rem;
-  background: var(--cd-surface, #fff);
-  color: var(--cd-ink, #18212b);
+  background: var(--surface-input);
+  color: var(--fg);
   cursor: pointer;
   font: inherit;
+}
+
+.log-chronology__more:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.log-chronology button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .log-chronology__more:disabled {

@@ -24,7 +24,12 @@ function virtualizedWindow(input: {
   return { start, end, resident: Math.max(0, end - start) };
 }
 
-const ROW_HEIGHT = 24;
+/**
+ * Virtual rows must have a real, enforced height. Log text stays on one visual
+ * line inside a horizontally scrollable pane, so spacer math and match reveal
+ * offsets cannot drift when a long record is shown in a narrow pane.
+ */
+const ROW_HEIGHT = 40;
 const VIEWPORT_HEIGHT = 360;
 const OVERSCAN = 6;
 const MAX_PANES = 4;
@@ -64,9 +69,17 @@ interface SearchResult {
   bounded: boolean;
   atLeast: number;
   nextCursor: number | null;
+  /** Position to resume at. Advancing it can never skip an unreached match. */
+  nextPageCursor?: string | null;
   cancelled?: boolean;
   corpusTruncated?: boolean;
+  /** True once every line in the selected files has been searched. */
+  coverageComplete?: boolean;
+  scannedLines?: number;
+  scannedLinesTotal?: number;
+  scopeFileCount?: number;
   timeFilterUnknownReason: string | null;
+  timeAuthorityUnavailableReason?: string | null;
 }
 
 interface PageResult {
@@ -128,18 +141,36 @@ interface ChronologyEvent {
  * complete one: a stopped scan, a cancelled scan, and a corpus that was too
  * large to read to the end each say so in plain words.
  */
-function searchSummary(result: SearchResult, corpusTruncated: boolean): string {
-  const shown = `Showing ${result.returned.toLocaleString()}`;
+function searchSummary(
+  result: SearchResult,
+  total: number,
+  corpusTruncated: boolean,
+): string {
+  const shown = `Showing ${total.toLocaleString()}`;
+  const scanned = (result.scannedLinesTotal ?? result.scannedLines ?? 0).toLocaleString();
   if (result.cancelled) {
     return `${shown} of at least ${result.atLeast.toLocaleString()} matches. The search stopped early, so later matches were not counted.`;
   }
   if (result.corpusTruncated || corpusTruncated) {
-    return `${shown} matches so far. This investigation has more log lines than one search can read, so matches past the read limit were not counted.`;
+    return `${shown} matches so far. Some of the selected files could not be read, so matches inside them were not counted.`;
   }
-  if (result.bounded) {
-    return `${shown} of at least ${result.atLeast.toLocaleString()} matches. Load more to keep going.`;
+  // Coverage and match count are separate truths. A page can be full of
+  // matches and still have lines left to read, and it can find nothing and
+  // still have lines left to read — the reader needs to be told which.
+  if (result.coverageComplete === false) {
+    return result.returned === 0
+      ? `No matches in the first ${scanned} lines searched. There are more selected lines to search — continue to cover the rest.`
+      : `${shown} matches in the first ${scanned} lines searched. There are more selected lines to search — continue to cover the rest.`;
   }
-  return `${result.returned.toLocaleString()} match${result.returned === 1 ? "" : "es"}. That is every match in the read lines.`;
+  const covered = `Every selected line was searched (${scanned} lines).`;
+  // "Load more" is offered exactly when there is a page to load. Tying it to
+  // `bounded` promised more on the last page of a multi-page walk, where
+  // `bounded` is still true only because the cumulative count exceeds what
+  // this one page returned.
+  if (result.nextPageCursor) {
+    return `${shown} of ${result.atLeast.toLocaleString()} matches. ${covered} Load more to see the rest.`;
+  }
+  return `${total.toLocaleString()} match${total === 1 ? "" : "es"}. ${covered}`;
 }
 
 /**
@@ -403,10 +434,14 @@ export function LogWorkbench(props: {
   );
 
   /**
-   * `cursor` continues the previous page rather than starting over, so a
-   * bounded result is reachable instead of being a dead end.
+   * Continue where the last page stopped.
+   *
+   * `pageCursor` names a position in the corpus, so a page that searched
+   * 50,000 lines without a match still leaves the next line reachable. The
+   * older `cursor` is a match ordinal and cannot express that, so it is only
+   * used to start over from the beginning.
    */
-  async function runSearch(cursor = 0) {
+  async function runSearch(pageCursor: string | null = null) {
     setError(null);
     setSearching(true);
     try {
@@ -420,7 +455,8 @@ export function LogWorkbench(props: {
           filters: searchFilters(),
           contextBefore: 1,
           contextAfter: 1,
-          cursor,
+          cursor: 0,
+          pageCursor,
           limit: 50,
           expectedNormalizationRevision: revision,
         }),
@@ -430,13 +466,11 @@ export function LogWorkbench(props: {
         return;
       }
       const result = (await response.json()) as SearchResult;
-      setSearch((current) =>
-        cursor > 0 && current
-          ? { ...result, matches: [...current.matches, ...result.matches] }
-          : result,
-      );
-      if (cursor === 0) setMatchIndex(0);
-      setNotice(searchSummary(result, corpusTruncated));
+      const previous = pageCursor && search ? search.matches : [];
+      const merged = { ...result, matches: [...previous, ...result.matches] };
+      setSearch(merged);
+      if (!pageCursor) setMatchIndex(0);
+      setNotice(searchSummary(result, merged.matches.length, corpusTruncated));
     } finally {
       setSearching(false);
     }
@@ -683,11 +717,10 @@ export function LogWorkbench(props: {
       </header>
       {corpusTruncated ? (
         <p className="log-workbench__notice" role="status">
-          This investigation holds more log lines than one read can cover, so the
-          workbench stopped part-way through
+          Some of this investigation&rsquo;s files could not be read
           {unreadFiles.length > 0 ? ` (${unreadFiles.slice(0, 3).join(", ")}${unreadFiles.length > 3 ? ", and others" : ""})` : ""}
-          . Counts and searches below cover only the lines that were read — select
-          fewer files, or narrow the corpus on Capture, to see the rest.
+          . Counts and searches below leave those files out — re-commit them on
+          Capture to include them.
         </p>
       ) : null}
       {reviewCount && reviewCount > 0 ? (
@@ -706,6 +739,15 @@ export function LogWorkbench(props: {
       ) : null}
 
       <div className="log-workbench__files" role="group" aria-label="Investigation logs">
+        <div className="log-workbench__files-head">
+          <div>
+            <strong>Choose log files</strong>
+            <span>Select one or more to open them side by side.</span>
+          </div>
+          <span className="log-workbench__muted">
+            {items.length.toLocaleString()} {items.length === 1 ? "file" : "files"}
+          </span>
+        </div>
         {items.map((item) => (
           <label key={item.evidenceId} className="log-workbench__file">
             <input
@@ -714,18 +756,21 @@ export function LogWorkbench(props: {
               onChange={() => togglePane(item.evidenceId)}
               aria-label={`Show ${item.displayLabel} in a pane`}
             />
-            <span>{item.displayLabel}</span>
-            {/* A file at the corpus root has no folder to disambiguate it, so
-                repeating its own name as a second column is noise, not
-                provenance. Only the containing path is shown. */}
-            <span className="log-workbench__muted">
-              {item.relativePath === item.displayLabel
-                ? ""
-                : item.relativePath.slice(0, item.relativePath.length - item.displayLabel.length)}
-              {item.fullyRead === false ? "not fully read" : ""}
+            <span className="log-workbench__file-copy">
+              <strong>{item.displayLabel}</strong>
+              {item.relativePath !== item.displayLabel || item.fullyRead === false ? (
+                <small>
+                  {item.relativePath === item.displayLabel
+                    ? ""
+                    : item.relativePath.slice(0, item.relativePath.length - item.displayLabel.length)}
+                  {item.fullyRead === false ? "not fully read" : ""}
+                </small>
+              ) : null}
             </span>
             <TechnicalIdentifiers
               record={item.displayLabel}
+              summary="Details"
+              className="log-workbench__file-details"
               items={[
                 { label: "Evidence id", value: item.evidenceId },
                 { label: "Digest", value: item.digest },
@@ -737,109 +782,144 @@ export function LogWorkbench(props: {
       </div>
 
       <div className="log-workbench__search">
-        <label>
-          <span>Find</span>
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={onSearchKey}
-            aria-label="Find in logs"
-          />
-        </label>
-        <label>
-          <span>Match</span>
-          <select
-            value={mode}
-            onChange={(event) => setMode(event.target.value as typeof mode)}
-            aria-label="Match mode"
+        <div className="log-workbench__search-head">
+          <div>
+            <strong>Search these logs</strong>
+            <span>Start with a word or phrase. Open advanced filters only when you need them.</span>
+          </div>
+        </div>
+        <div className="log-workbench__search-primary">
+          <label>
+            <span>Find</span>
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={onSearchKey}
+              aria-label="Find in logs"
+              placeholder="Message, error, identifier…"
+            />
+          </label>
+          <button type="button" onClick={() => void runSearch()} disabled={searching}>
+            {searching ? "Searching…" : "Search"}
+          </button>
+        </div>
+
+        <details className="log-workbench__search-advanced">
+          <summary>Advanced filters</summary>
+          <div className="log-workbench__search-filters">
+            <label>
+              <span>Match</span>
+              <select
+                value={mode}
+                onChange={(event) => setMode(event.target.value as typeof mode)}
+                aria-label="Match mode"
+              >
+                <option value="literal">Literal</option>
+                <option value="case_insensitive">Ignore case</option>
+                <option value="regex">Bounded regex</option>
+              </select>
+            </label>
+            <label>
+              <span>Include</span>
+              <input
+                value={include}
+                onChange={(event) => setInclude(event.target.value)}
+                aria-label="Include terms"
+              />
+            </label>
+            <label>
+              <span>Exclude</span>
+              <input
+                value={exclude}
+                onChange={(event) => setExclude(event.target.value)}
+                aria-label="Exclude terms"
+              />
+            </label>
+            <label>
+              <span>Severity</span>
+              <input
+                value={severity}
+                onChange={(event) => setSeverity(event.target.value)}
+                aria-label="Severity"
+              />
+            </label>
+            <label>
+              <span>From (UTC)</span>
+              <input
+                value={timeFrom}
+                onChange={(event) => setTimeFrom(event.target.value)}
+                aria-label="From (UTC)"
+              />
+            </label>
+            <label>
+              <span>To (UTC)</span>
+              <input
+                value={timeTo}
+                onChange={(event) => setTimeTo(event.target.value)}
+                aria-label="To (UTC)"
+              />
+            </label>
+          </div>
+          <p className="log-workbench__hint">
+            UTC ranges require a full instant such as <code>2024-03-10T08:00:00Z</code>.
+            Local times without a zone are refused rather than guessed.
+          </p>
+        </details>
+
+        <div
+          className="log-workbench__match-nav"
+          role="group"
+          aria-label="Search match navigation"
+        >
+          <button
+            type="button"
+            aria-label="Previous match"
+            disabled={!search || search.matches.length === 0}
+            onClick={() =>
+              search && search.matches.length > 0
+                ? selectMatch((matchIndex + search.matches.length - 1) % search.matches.length)
+                : undefined
+            }
           >
-            <option value="literal">Literal</option>
-            <option value="case_insensitive">Ignore case</option>
-            <option value="regex">Bounded regex</option>
-          </select>
-        </label>
-        <label>
-          <span>Include</span>
-          <input
-            value={include}
-            onChange={(event) => setInclude(event.target.value)}
-            aria-label="Include terms"
-          />
-        </label>
-        <label>
-          <span>Exclude</span>
-          <input
-            value={exclude}
-            onChange={(event) => setExclude(event.target.value)}
-            aria-label="Exclude terms"
-          />
-        </label>
-        <label>
-          <span>Severity</span>
-          <input
-            value={severity}
-            onChange={(event) => setSeverity(event.target.value)}
-            aria-label="Severity"
-          />
-        </label>
-        <label>
-          <span>From (UTC)</span>
-          <input
-            value={timeFrom}
-            onChange={(event) => setTimeFrom(event.target.value)}
-            aria-label="From (UTC)"
-          />
-        </label>
-        <label>
-          <span>To (UTC)</span>
-          <input
-            value={timeTo}
-            onChange={(event) => setTimeTo(event.target.value)}
-            aria-label="To (UTC)"
-          />
-        </label>
-        <button type="button" onClick={() => void runSearch()} disabled={searching}>
-          {searching ? "Searching…" : "Search"}
-        </button>
-        <button
-          type="button"
-          disabled={!search || search.matches.length === 0}
-          onClick={() =>
-            search && search.matches.length > 0
-              ? selectMatch((matchIndex + search.matches.length - 1) % search.matches.length)
-              : undefined
-          }
-        >
-          Previous match
-        </button>
-        <button
-          type="button"
-          disabled={!search || search.matches.length === 0}
-          onClick={() =>
-            search && search.matches.length > 0
-              ? selectMatch((matchIndex + 1) % search.matches.length)
-              : undefined
-          }
-        >
-          Next match
-        </button>
+            Previous
+          </button>
+          <span aria-live="polite" aria-atomic="true">
+            {search && search.matches.length > 0
+              ? `${matchIndex + 1} of ${search.matches.length}`
+              : "No matches"}
+          </span>
+          <button
+            type="button"
+            aria-label="Next match"
+            disabled={!search || search.matches.length === 0}
+            onClick={() =>
+              search && search.matches.length > 0
+                ? selectMatch((matchIndex + 1) % search.matches.length)
+                : undefined
+            }
+          >
+            Next
+          </button>
+        </div>
       </div>
       <p className="log-workbench__hint">
-        A time range needs a full UTC instant, for example
-        {" "}
-        <code>2024-03-10T08:00:00Z</code>. A local time with no zone is refused rather
-        than guessed. Press F3 (or Ctrl/Cmd+G) in Find to step through matches.
+        Press F3 (or Ctrl/Cmd+G) in Find to move through matches.
       </p>
       {search?.timeFilterUnknownReason ? (
         <p className="log-workbench__notice">{search.timeFilterUnknownReason}</p>
       ) : null}
       {search ? (
-        <div>
-          <p>
-            {searchSummary(search, corpusTruncated)}
+        <section className="log-workbench__search-results" aria-label="Search results">
+          <p className="log-workbench__search-summary" role="status" aria-live="polite">
+            {searchSummary(search, search.matches.length, corpusTruncated)}
             {activeMatch ? ` Showing match ${matchIndex + 1} of ${search.matches.length}.` : ""}
           </p>
+          {search.timeAuthorityUnavailableReason ? (
+            <p className="log-workbench__notice">
+              {search.timeAuthorityUnavailableReason}
+            </p>
+          ) : null}
           {search.matches.length > 0 ? (
             <ol className="log-workbench__hits" aria-label="Search matches">
               {search.matches.map((row, index) => (
@@ -856,18 +936,26 @@ export function LogWorkbench(props: {
               ))}
             </ol>
           ) : (
-            <p>No line in the read log lines matches this search.</p>
+            <p>
+              {search.coverageComplete === false
+                ? "No match yet in the lines searched so far. There are more selected lines to search."
+                : "No line in the selected files matches this search."}
+            </p>
           )}
-          {search.nextCursor !== null ? (
+          {search.nextPageCursor ? (
             <button
               type="button"
               disabled={searching}
-              onClick={() => void runSearch(search.nextCursor ?? 0)}
+              onClick={() => void runSearch(search.nextPageCursor ?? null)}
             >
-              {searching ? "Loading…" : "Load more matches"}
+              {searching
+                ? "Searching…"
+                : search.coverageComplete === false
+                  ? "Keep searching the rest of the selected lines"
+                  : "Load more matches"}
             </button>
           ) : null}
-        </div>
+        </section>
       ) : null}
 
       <label className="log-workbench__sync">

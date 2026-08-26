@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TriageRunPanel } from "./TriageRunPanel.js";
 import { recordNickname } from "./technical-identity.js";
@@ -487,6 +487,7 @@ describe("TriageRunPanel", () => {
       }));
     });
     await waitFor(() => expect((snapshotSelect as HTMLSelectElement).value).toBe(secondSnapshot.id));
+    expect(within(snapshotSelect).getByRole("option", { name: "Snapshot S1 · 2 evidence items" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Run synthetic comparison" }));
     await waitFor(() => expect(postedBody).toEqual(expect.objectContaining({
@@ -1248,6 +1249,31 @@ describe("evidence snapshot cockpit", () => {
       .getAllByText("a".repeat(64))
       .find((node) => node.className.includes("snapshot-cockpit__fingerprint"));
     expect(fingerprint).toBeTruthy();
+  });
+
+  it("leads with snapshot labels and keeps exact fingerprints in the inspection details", async () => {
+    const firstFingerprint = "a".repeat(64);
+    stubCockpitFetch({
+      snapshots: [
+        { id: "snapshot-1", fingerprint: firstFingerprint, evidence: [{ evidenceId: "artifact-1" }, { evidenceId: "artifact-2" }], createdBy: "lead" },
+        { id: "snapshot-2", fingerprint: "b".repeat(64), evidence: [{ evidenceId: "artifact-3" }], createdBy: "lead" },
+      ],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy", snapshotFingerprint: firstFingerprint }),
+        cockpitJob({ id: "job-beta", strategyId: "beta-strategy", snapshotFingerprint: firstFingerprint }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+    expect(await screen.findByText(/Snapshot S0 · run binding recorded · content equivalence unknown/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect snapshot for run job-alpha" }));
+
+    const selector = screen.getByRole("combobox", { name: "Snapshot under inspection" });
+    expect(within(selector).getByRole("option", { name: "Snapshot S0 · 2 evidence items" })).toBeTruthy();
+    expect(within(selector).getByRole("option", { name: "Snapshot S1 · 1 evidence item" })).toBeTruthy();
+    expect(screen.queryByText(/S0 \(aaaaaaaaaaaa…/)).toBeNull();
+    expect(screen.getAllByText(firstFingerprint).some((node) => node.className.includes("snapshot-cockpit__fingerprint"))).toBe(true);
   });
 
   it("reports fairness as unknown when a selected run has no settled snapshot proof", async () => {

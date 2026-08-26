@@ -250,12 +250,40 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
   };
 }
 
+/**
+ * Base64 alphabet check as a linear scan.
+ *
+ * The obvious spelling — `/^(?:[A-Za-z0-9+\/]{4})*.../` — overflows the regex
+ * engine's stack once the payload is a few megabytes, because the outer `*`
+ * builds a backtracking frame per group. A committed log file is routinely
+ * that large, so the pattern turned a valid intake into "not valid base64".
+ * Scanning the characters costs one pass and cannot overflow.
+ */
+function isBase64Alphabet(raw: string): boolean {
+  let limit = raw.length;
+  // Canonical padding is at most two `=`, and only at the very end.
+  if (limit > 0 && raw.charCodeAt(limit - 1) === 0x3d) limit -= 1;
+  if (limit > 0 && raw.charCodeAt(limit - 1) === 0x3d) limit -= 1;
+  for (let index = 0; index < limit; index += 1) {
+    const code = raw.charCodeAt(index);
+    const allowed =
+      (code >= 0x41 && code <= 0x5a) // A-Z
+      || (code >= 0x61 && code <= 0x7a) // a-z
+      || (code >= 0x30 && code <= 0x39) // 0-9
+      || code === 0x2b // +
+      || code === 0x2f; // /
+    if (!allowed) return false;
+  }
+  return true;
+}
+
 export function decodeBase64(path: string, raw: string): Uint8Array {
-  const canonical = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-  if (raw.length % 4 !== 0 || !canonical.test(raw)) {
+  if (raw.length % 4 !== 0 || !isBase64Alphabet(raw)) {
     throw new Error(`${path} is not valid base64`);
   }
   const decoded = Buffer.from(raw, "base64");
+  // Round-tripping is the real canonical test: it rejects stray padding and
+  // any non-canonical spelling the alphabet scan let through.
   if (decoded.toString("base64") !== raw) {
     throw new Error(`${path} is not valid base64`);
   }

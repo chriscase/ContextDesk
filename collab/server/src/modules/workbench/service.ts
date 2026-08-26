@@ -10,35 +10,46 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   WORKBENCH_BOOKMARK_SCHEMA_ID,
   WORKBENCH_LIMITS,
+  WORKBENCH_PAGE_CURSOR_VERSION,
   WORKBENCH_SEARCH_REQUEST_SCHEMA_ID,
   WORKBENCH_VIEW_SCHEMA_ID,
-  applyHostTimestamps,
   chronologyAnchorKey,
+  countLogTextLines,
+  createHostTimestampOverlay,
+  createLogSearchScan,
+  decodeWorkbenchPageCursor,
+  encodeWorkbenchPageCursor,
   extractShapeCandidates,
+  fileInScope,
   groupReviewQueue,
+  iterateLogLineWindows,
   mergeChronology,
   pageLogLines,
   parseWorkbenchBookmark,
   parseWorkbenchReviewRule,
   parseWorkbenchSearchRequest,
+  parseWorkbenchSearchResult,
   parseWorkbenchShareSafeLocator,
   parseWorkbenchView,
   previewReviewRule,
   privacySafeNotFound,
   resolveLocatorAgainstEvidence,
   rotationFamilyOf,
-  searchLogLines,
-  splitLogText,
+  scopeFromSearchFilters,
+  workbenchCorpusScopeDigest,
   workbenchShareSafeToken,
   type ChronologyAnchorStatus,
   type HostEventStampV1,
+  type HostTimestampOverlay,
   type PrivacyClass,
   type WorkbenchBookmarkV1,
   type WorkbenchChronologyV1,
+  type WorkbenchCorpusScope,
   type WorkbenchLine,
   type WorkbenchLocatorResolveV1,
   type WorkbenchPageV1,
   type WorkbenchReviewPreviewV1,
+  type WorkbenchSearchRequestV1,
   type WorkbenchSearchResultV1,
   type WorkbenchViewV1,
 } from "@cd-collab/contracts";
@@ -60,13 +71,38 @@ export class WorkbenchConflictError extends Error {
   }
 }
 
-export interface WorkbenchEvidenceFile {
+/** One intake file's identity, without its bytes. */
+export interface WorkbenchEvidenceDescriptor {
   evidenceId: string;
   relativePath: string;
   digest: string;
   intakeBatchId: string | null;
   privacyClass: PrivacyClass;
+}
+
+export interface WorkbenchEvidenceFile extends WorkbenchEvidenceDescriptor {
   text: string;
+}
+
+/** What the workbench asks the timestamp authority for. */
+export interface WorkbenchHostSearchInput {
+  query: string;
+  mode: "literal" | "case_insensitive" | "regex";
+  /** Relative paths already narrowed to the caller's selection. */
+  sources: string[];
+  timeFrom: number | null;
+  timeTo: number | null;
+  k: number;
+}
+
+export interface WorkbenchHostSearchOutcome {
+  corpusRevision: number;
+  stamps: HostEventStampV1[];
+  /** True when the host answered from a bounded slice of its corpus. */
+  bounded: boolean;
+  atLeast: number;
+  cancelled: boolean;
+  diagnostic: string | null;
 }
 
 export interface WorkbenchCasePort {
@@ -75,9 +111,36 @@ export interface WorkbenchCasePort {
     actor: Actor,
     isAdmin: boolean,
   ): Promise<{ id: string } | null>;
+  /**
+   * Whole-corpus read including bytes.
+   *
+   * Kept for callers written against the first port and for small fixtures.
+   * Anything corpus-sized must go through `listEvidenceDescriptors` plus
+   * `readEvidenceText`, because this method materializes every file at once.
+   */
   listEvidenceFiles(caseId: string): Promise<WorkbenchEvidenceFile[]>;
+  /** Metadata only, so a selection can be applied before any byte is read. */
+  listEvidenceDescriptors?(caseId: string): Promise<WorkbenchEvidenceDescriptor[]>;
+  /** One file's bytes, fetched only once that file is known to be in scope. */
+  readEvidenceText?(caseId: string, evidenceId: string): Promise<string | null>;
+  /**
+   * Host stamps for the normalization overlay, narrowed to the paths in scope.
+   * Older implementations ignore the extra arguments and answer for the case.
+   */
+  listHostEventStamps?(
+    caseId: string,
+    sources?: string[],
+    k?: number,
+  ): Promise<HostEventStampV1[] | null>;
+  /**
+   * The shipped log-time host's own search. Returns null when this case has no
+   * built corpus; throws when the host cannot be reached at all.
+   */
+  hostSearch?(
+    caseId: string,
+    input: WorkbenchHostSearchInput,
+  ): Promise<WorkbenchHostSearchOutcome | null>;
   currentNormalizationRevision(caseId: string): Promise<number | null>;
-  listHostEventStamps?(caseId: string): Promise<HostEventStampV1[] | null>;
   casePrivacyClass(caseId: string): Promise<PrivacyClass>;
   appendTimeline(
     caseId: string,
@@ -101,6 +164,36 @@ export interface WorkbenchCorpus {
   partiallyRead: string[];
 }
 
+/**
+ * One operation's view of the investigation's files: which are in scope, in
+ * what order, and how to fetch one file's bytes when its turn comes.
+ */
+interface ScopedCorpus {
+  files: WorkbenchEvidenceDescriptor[];
+  /** Every file in the case, in scope or not. */
+  allFiles: WorkbenchEvidenceDescriptor[];
+  scopeDigest: string;
+  read(evidenceId: string): Promise<string | null>;
+}
+
+/**
+ * Total order over intake files.
+ *
+ * Locale collation is not a total order — it can call two distinct paths equal
+ * and reorder them between machines — and a resume cursor that names position
+ * N is only meaningful if N is the same file on every request.
+ */
+function compareDescriptors(
+  left: WorkbenchEvidenceDescriptor,
+  right: WorkbenchEvidenceDescriptor,
+): number {
+  if (left.relativePath !== right.relativePath) {
+    return left.relativePath < right.relativePath ? -1 : 1;
+  }
+  if (left.evidenceId === right.evidenceId) return 0;
+  return left.evidenceId < right.evidenceId ? -1 : 1;
+}
+
 export interface WorkbenchServiceDeps {
   store: WorkbenchStore;
   cases: WorkbenchCasePort;
@@ -115,6 +208,16 @@ function decodeText(text: string): string {
   return text.split("\0").join("");
 }
 
+/** Every file in the investigation; the default for surfaces with no selection. */
+const EMPTY_SCOPE: WorkbenchCorpusScope = {
+  evidenceIds: [],
+  file: null,
+  rotationFamily: null,
+};
+
+/** Bound on how many host events one overlay fetch may pull back. */
+const HOST_STAMP_LIMIT = 2_000;
+
 export class WorkbenchService {
   constructor(private readonly deps: WorkbenchServiceDeps) {}
 
@@ -127,58 +230,157 @@ export class WorkbenchService {
     if (!found) throw new WorkbenchNotFoundError();
   }
 
+  // -------------------------------------------------------------------------
+  // Reading
+  // -------------------------------------------------------------------------
+
+  /**
+   * Resolve which files an operation may read, before reading any of them.
+   *
+   * Scope first is the whole point. Applying a selection *after* a read budget
+   * was already spent is what let a selected file sit unread behind files the
+   * responder never asked for, and then told them to select fewer files.
+   */
+  private async openCorpus(
+    caseId: string,
+    scope: WorkbenchCorpusScope,
+  ): Promise<ScopedCorpus> {
+    const port = this.deps.cases;
+    if (port.listEvidenceDescriptors && port.readEvidenceText) {
+      const all = (await port.listEvidenceDescriptors(caseId)).slice().sort(compareDescriptors);
+      const files = all.filter((file) => fileInScope(scope, file));
+      return {
+        allFiles: all,
+        files,
+        scopeDigest: workbenchCorpusScopeDigest(files),
+        read: async (evidenceId) => {
+          const text = await port.readEvidenceText!(caseId, evidenceId);
+          return text === null ? null : decodeText(text);
+        },
+      };
+    }
+    // Compatibility path for ports written against the first contract. It
+    // materializes every file, so it is only sound for small corpora; the
+    // shipped port implements the streaming methods above.
+    const loaded = (await port.listEvidenceFiles(caseId)).slice().sort(compareDescriptors);
+    const byId = new Map(loaded.map((file) => [file.evidenceId, file.text]));
+    const all = loaded.map(({ text: _text, ...rest }) => rest);
+    const files = all.filter((file) => fileInScope(scope, file));
+    return {
+      allFiles: all,
+      files,
+      scopeDigest: workbenchCorpusScopeDigest(files),
+      read: async (evidenceId) => {
+        const text = byId.get(evidenceId);
+        return text === undefined ? null : decodeText(text);
+      },
+    };
+  }
+
+  /** Host stamps for exactly the paths in scope, or an empty overlay. */
+  private async overlayFor(
+    caseId: string,
+    files: readonly WorkbenchEvidenceDescriptor[],
+  ): Promise<HostTimestampOverlay> {
+    const stamps = await this.deps.cases.listHostEventStamps?.(
+      caseId,
+      files.map((file) => file.relativePath),
+      HOST_STAMP_LIMIT,
+    );
+    return createHostTimestampOverlay(stamps ?? []);
+  }
+
   /**
    * Read the investigation's intake bytes up to the bounded work limit.
    *
-   * The limit is real, so the result says where it stopped. Callers must carry
-   * `truncated` into whatever they return: a search that silently dropped the
-   * tail of a corpus and then reports "no matches" is worse than one that
-   * admits it did not read to the end.
+   * This materializes rows, so it stays bounded and says where it stopped.
+   * Search and paging no longer use it: they stream. Surfaces that genuinely
+   * need a whole-corpus projection (chronology, the review queue) still do,
+   * and still carry `truncated` into what they return, because a projection
+   * that silently dropped a tail and then reported nothing is worse than one
+   * that admits it did not read to the end.
    */
-  async loadCorpus(caseId: string): Promise<WorkbenchCorpus> {
-    const files = await this.deps.cases.listEvidenceFiles(caseId);
+  async loadCorpus(
+    caseId: string,
+    scope: WorkbenchCorpusScope = EMPTY_SCOPE,
+  ): Promise<WorkbenchCorpus> {
+    const corpus = await this.openCorpus(caseId, scope);
+    const overlay = await this.overlayFor(caseId, corpus.files);
     const lines: WorkbenchLine[] = [];
     const fullyRead = new Set<string>();
     const partiallyRead: string[] = [];
     let work = 0;
     let truncated = false;
-    for (const file of files) {
+    for (const file of corpus.files) {
       if (truncated) {
         partiallyRead.push(file.relativePath);
         continue;
       }
-      const rows = splitLogText(
-        file.evidenceId,
-        file.relativePath,
-        file.digest,
-        decodeText(file.text),
-        file.intakeBatchId,
-      );
-      let taken = 0;
-      for (const row of rows) {
-        if (work >= WORKBENCH_LIMITS.maxSearchWorkLines) {
-          truncated = true;
-          break;
-        }
-        work += 1;
-        taken += 1;
-        lines.push(row);
-      }
-      if (taken < rows.length) {
+      const text = await corpus.read(file.evidenceId);
+      if (text === null) {
         truncated = true;
         partiallyRead.push(file.relativePath);
-      } else {
-        fullyRead.add(file.evidenceId);
+        continue;
+      }
+      let complete = true;
+      for (const window of iterateLogLineWindows(file, text)) {
+        const room = WORKBENCH_LIMITS.maxSearchWorkLines - work;
+        if (room <= 0) {
+          complete = false;
+          break;
+        }
+        const taken = window.length <= room ? window : window.slice(0, room);
+        for (const row of overlay.apply(taken)) lines.push(row);
+        work += taken.length;
+        if (taken.length < window.length) {
+          complete = false;
+          break;
+        }
+      }
+      if (complete) fullyRead.add(file.evidenceId);
+      else {
+        truncated = true;
+        partiallyRead.push(file.relativePath);
       }
     }
-    const stamps = await this.deps.cases.listHostEventStamps?.(caseId);
-    const stamped =
-      !stamps || stamps.length === 0 ? lines : applyHostTimestamps(lines, stamps);
-    return { lines: stamped, truncated, fullyRead, partiallyRead };
+    return { lines, truncated, fullyRead, partiallyRead };
   }
 
-  async loadLines(caseId: string): Promise<WorkbenchLine[]> {
-    return (await this.loadCorpus(caseId)).lines;
+  async loadLines(
+    caseId: string,
+    scope: WorkbenchCorpusScope = EMPTY_SCOPE,
+  ): Promise<WorkbenchLine[]> {
+    return (await this.loadCorpus(caseId, scope)).lines;
+  }
+
+  /**
+   * Read one file's rows around a window, without touching any other file.
+   *
+   * Locator resolution and paging both want one line out of one file. Reading
+   * the whole investigation to find it is what made a bookmark past the old
+   * read boundary unresolvable.
+   */
+  private async readFileWindow(
+    caseId: string,
+    evidenceId: string,
+    startLine: number,
+    maxRows: number,
+  ): Promise<{ rows: WorkbenchLine[]; lineCount: number; found: boolean }> {
+    const corpus = await this.openCorpus(caseId, EMPTY_SCOPE);
+    const file = corpus.allFiles.find((item) => item.evidenceId === evidenceId);
+    if (!file) return { rows: [], lineCount: 0, found: false };
+    const text = await corpus.read(evidenceId);
+    if (text === null) return { rows: [], lineCount: 0, found: false };
+    const overlay = await this.overlayFor(caseId, [file]);
+    const rows: WorkbenchLine[] = [];
+    for (const window of iterateLogLineWindows(file, text, { startLine })) {
+      for (const row of overlay.apply(window)) {
+        if (rows.length >= maxRows) break;
+        rows.push(row);
+      }
+      if (rows.length >= maxRows) break;
+    }
+    return { rows, lineCount: countLogTextLines(text), found: true };
   }
 
   async inventory(caseId: string, actor: Actor, isAdmin: boolean): Promise<{
@@ -191,24 +393,37 @@ export class WorkbenchService {
       intakeBatchId: string | null;
       privacyClass: PrivacyClass;
       lineCount: number;
-      /** False when the read limit stopped before this file's last line. */
+      /** False when this file's bytes could not be read at all. */
       fullyRead: boolean;
     }[];
     normalizationRevision: number | null;
-    /** True when this investigation has more lines than one read can cover. */
+    /** True only when some file's bytes could not be read. */
     corpusTruncated: boolean;
-    /** Files the read limit cut short or never reached, by display name. */
+    /** Files whose bytes are missing, by display name. */
     unreadFiles: string[];
   }> {
     await this.assertReadable(caseId, actor, isAdmin);
-    const files = await this.deps.cases.listEvidenceFiles(caseId);
-    const corpus = await this.loadCorpus(caseId);
-    const counts = new Map<string, number>();
-    for (const line of corpus.lines) {
-      counts.set(line.evidenceId, (counts.get(line.evidenceId) ?? 0) + 1);
-    }
-    return {
-      items: files.map((file) => ({
+    const corpus = await this.openCorpus(caseId, EMPTY_SCOPE);
+    const items: {
+      evidenceId: string;
+      relativePath: string;
+      rotationFamily: string;
+      displayLabel: string;
+      digest: string;
+      intakeBatchId: string | null;
+      privacyClass: PrivacyClass;
+      lineCount: number;
+      fullyRead: boolean;
+    }[] = [];
+    const unreadFiles: string[] = [];
+    for (const file of corpus.allFiles) {
+      // One file's bytes at a time, counted and released. Nothing here builds
+      // a row, so an inventory over a large corpus costs its bytes, not its
+      // rows.
+      const text = await corpus.read(file.evidenceId);
+      const readable = text !== null;
+      if (!readable) unreadFiles.push(file.relativePath.split("/").pop() || file.relativePath);
+      items.push({
         evidenceId: file.evidenceId,
         relativePath: file.relativePath,
         rotationFamily: rotationFamilyOf(file.relativePath),
@@ -216,23 +431,35 @@ export class WorkbenchService {
         digest: file.digest,
         intakeBatchId: file.intakeBatchId,
         privacyClass: file.privacyClass,
-        lineCount: counts.get(file.evidenceId) ?? 0,
-        fullyRead: corpus.fullyRead.has(file.evidenceId),
-      })),
+        lineCount: readable ? countLogTextLines(text) : 0,
+        fullyRead: readable,
+      });
+    }
+    return {
+      items,
       normalizationRevision: await this.deps.cases.currentNormalizationRevision(caseId),
-      corpusTruncated: corpus.truncated,
-      unreadFiles: corpus.partiallyRead.map((path) => path.split("/").pop() || path),
+      corpusTruncated: unreadFiles.length > 0,
+      unreadFiles,
     };
   }
 
+  /**
+   * Search the selected files, from the start or from where a page stopped.
+   *
+   * Reading is scoped, then streamed in bounded windows, then searched. Nothing
+   * truncates the corpus before the filters are applied, and a page that spends
+   * its work budget hands back the position it stopped at rather than a match
+   * count that cannot express "stopped at line 50,000 having found nothing".
+   */
   async search(
     caseId: string,
     actor: Actor,
     isAdmin: boolean,
     body: unknown,
+    options: { cancelled?: () => boolean } = {},
   ): Promise<WorkbenchSearchResultV1> {
     await this.assertReadable(caseId, actor, isAdmin);
-    const request = parseWorkbenchSearchRequest(
+    const request: WorkbenchSearchRequestV1 = parseWorkbenchSearchRequest(
       body && typeof body === "object" && "schemaId" in (body as object)
         ? body
         : { schemaId: WORKBENCH_SEARCH_REQUEST_SCHEMA_ID, ...(body as object) },
@@ -246,12 +473,140 @@ export class WorkbenchService {
         `stale normalization revision: expected ${request.expectedNormalizationRevision}, current ${current ?? "none"}`,
       );
     }
-    const corpus = await this.loadCorpus(caseId);
-    return searchLogLines(
-      corpus.lines,
-      { ...request, expectedNormalizationRevision: current },
-      { corpusTruncated: corpus.truncated },
-    );
+
+    const scope = scopeFromSearchFilters(request.filters);
+    const corpus = await this.openCorpus(caseId, scope);
+
+    let resume: {
+      matchOrdinal: number;
+      scannedLines: number;
+      evidenceId: string;
+      lineNumber: number;
+    } | null = null;
+    if (request.pageCursor) {
+      const cursor = decodeWorkbenchPageCursor(request.pageCursor);
+      // A cursor names a position in one exact set of files at one exact
+      // revision. Resuming it against a corpus that has since moved would read
+      // a different line than the one the reader was promised, so it is
+      // refused rather than approximated.
+      if (cursor.scopeDigest !== corpus.scopeDigest) {
+        throw new WorkbenchConflictError(
+          "The selected files changed since this page was read, so continuing from here would skip lines. Run the search again from the start.",
+        );
+      }
+      if ((cursor.normalizationRevision ?? 0) !== (current ?? 0)) {
+        throw new WorkbenchConflictError(
+          `stale normalization revision: expected ${cursor.normalizationRevision ?? "none"}, current ${current ?? "none"}`,
+        );
+      }
+      if (!corpus.files.some((file) => file.evidenceId === cursor.evidenceId)) {
+        throw new WorkbenchConflictError(
+          "The file this page stopped in is no longer selected. Run the search again from the start.",
+        );
+      }
+      resume = {
+        matchOrdinal: cursor.matchOrdinal,
+        scannedLines: cursor.scannedLines,
+        evidenceId: cursor.evidenceId,
+        lineNumber: cursor.lineNumber,
+      };
+    }
+
+    const timeFilterApplied = Boolean(request.filters.timeFrom || request.filters.timeTo);
+    let overlay: HostTimestampOverlay;
+    let timeAuthorityUnavailableReason: string | null = null;
+    let hostBounded = false;
+    if (timeFilterApplied && this.deps.cases.hostSearch) {
+      // The host owns timestamp resolution. A time range answered from intake
+      // bytes alone would silently drop every line whose clock carries no
+      // offset, so the authority is consulted or the range is refused.
+      let outcome: WorkbenchHostSearchOutcome | null;
+      try {
+        outcome = await this.deps.cases.hostSearch(caseId, {
+          query: request.query,
+          mode: request.mode,
+          sources: corpus.files.map((file) => file.relativePath),
+          timeFrom: request.filters.timeFrom
+            ? Math.floor(Date.parse(request.filters.timeFrom) / 1000)
+            : null,
+          timeTo: request.filters.timeTo
+            ? Math.floor(Date.parse(request.filters.timeTo) / 1000)
+            : null,
+          k: HOST_STAMP_LIMIT,
+        });
+      } catch {
+        throw new WorkbenchConflictError(
+          "The timestamp authority could not be reached, so a time-filtered search cannot be answered. Remove the time range to search text, or try again once the log-time host is back.",
+        );
+      }
+      if (outcome === null) {
+        overlay = await this.overlayFor(caseId, corpus.files);
+        timeAuthorityUnavailableReason =
+          "This investigation has no built log corpus yet, so the time range was applied only to lines whose own timestamp already carries a UTC offset.";
+      } else {
+        overlay = createHostTimestampOverlay(outcome.stamps);
+        hostBounded = outcome.bounded || outcome.cancelled;
+      }
+    } else {
+      overlay = await this.overlayFor(caseId, corpus.files);
+    }
+
+    const scan = createLogSearchScan(request, {
+      ...(options.cancelled ? { cancelled: options.cancelled } : {}),
+      ...(resume ? { resume } : {}),
+    });
+
+    let unreadable = false;
+    let stopped = false;
+    const startIndex = resume
+      ? corpus.files.findIndex((file) => file.evidenceId === resume!.evidenceId)
+      : 0;
+    for (let index = Math.max(0, startIndex); index < corpus.files.length; index += 1) {
+      const file = corpus.files[index]!;
+      const text = await corpus.read(file.evidenceId);
+      if (text === null) {
+        unreadable = true;
+        break;
+      }
+      // A resumed file is opened a few lines early so the first match on this
+      // page still shows the lines above it; the scan treats the lead-in as
+      // context and never re-counts it.
+      const startLine =
+        resume && file.evidenceId === resume.evidenceId
+          ? Math.max(1, resume.lineNumber - request.contextBefore)
+          : 1;
+      for (const window of iterateLogLineWindows(file, text, { startLine })) {
+        if (!scan.feed(overlay.apply(window))) {
+          stopped = true;
+          break;
+        }
+      }
+      scan.endFile();
+      if (stopped) break;
+    }
+    if (!stopped && !unreadable) scan.markComplete();
+
+    const result = scan.finish({
+      scopeFileCount: corpus.files.length,
+      corpusUnreadable: unreadable,
+      timeAuthorityUnavailableReason,
+      expectedNormalizationRevision: current,
+      mintCursor: (point) =>
+        encodeWorkbenchPageCursor({
+          version: WORKBENCH_PAGE_CURSOR_VERSION,
+          scopeDigest: corpus.scopeDigest,
+          normalizationRevision: current,
+          evidenceId: point.evidenceId,
+          lineNumber: point.lineNumber,
+          matchOrdinal: point.matchOrdinal,
+          scannedLines: point.scannedLines,
+        }),
+    });
+    // The host answering from a bounded slice makes this answer partial too,
+    // whatever the local scan managed to cover.
+    return hostBounded && !result.bounded
+      ? parseWorkbenchSearchResult({ ...result, bounded: true })
+      : result;
   }
 
   async page(
@@ -263,17 +618,18 @@ export class WorkbenchService {
     limit: number,
   ): Promise<WorkbenchPageV1> {
     await this.assertReadable(caseId, actor, isAdmin);
-    const corpus = await this.loadCorpus(caseId);
-    const owned = corpus.lines.filter((line) => line.evidenceId === evidenceId);
-    if (owned.length === 0) {
-      if (corpus.truncated) {
-        throw new WorkbenchConflictError(
-          "This investigation holds more log lines than one read can cover, so this file was not reached. Narrow the selected files and try again.",
-        );
-      }
-      throw new WorkbenchNotFoundError();
+    const windowLimit = Math.min(Math.max(limit, 1), WORKBENCH_LIMITS.maxPageRows);
+    const start = Math.max(1, startLine);
+    // One row past the window, so "are there more lines" is answered from the
+    // file itself rather than from how much of the corpus a budget reached.
+    const read = await this.readFileWindow(caseId, evidenceId, start, windowLimit + 1);
+    if (!read.found) throw new WorkbenchNotFoundError();
+    if (read.rows.length === 0 && start > read.lineCount) {
+      throw new WorkbenchConflictError(
+        `This file ends at line ${read.lineCount.toLocaleString()}, so there is nothing to show from line ${start.toLocaleString()}.`,
+      );
     }
-    return pageLogLines(owned, evidenceId, startLine, limit);
+    return pageLogLines(read.rows, evidenceId, start, windowLimit);
   }
 
   async chronology(
@@ -285,11 +641,14 @@ export class WorkbenchService {
   ): Promise<WorkbenchChronologyV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const current = await this.deps.cases.currentNormalizationRevision(caseId);
-    const corpus = await this.loadCorpus(caseId);
-    let lines = corpus.lines;
-    if (evidenceIds.length > 0) {
-      lines = lines.filter((line) => evidenceIds.includes(line.evidenceId));
-    }
+    // Narrowing the read to the selected files first means the work budget is
+    // spent on what was asked for, not on files that get filtered out after.
+    const corpus = await this.loadCorpus(caseId, {
+      evidenceIds,
+      file: null,
+      rotationFamily: null,
+    });
+    const lines = corpus.lines;
     const anchors = new Map(
       (await this.deps.store.listAnchors(caseId)).map((row) => [
         chronologyAnchorKey(row.evidenceId, row.lineNumber),
@@ -497,17 +856,8 @@ export class WorkbenchService {
     const id = typeof draft.id === "string" && draft.id ? draft.id : randomUUID();
     const privacyClass = await this.deps.cases.casePrivacyClass(caseId);
     const shareSafeToken = workbenchShareSafeToken(caseId, locator);
-    const lines = await this.loadLines(caseId);
-    const fileLines = lines.filter((line) => line.evidenceId === locator.evidenceId);
-    const currentLine = fileLines.find((line) => line.lineNumber === locator.lineNumber);
-    const status = resolveLocatorAgainstEvidence(locator, currentLine
-      ? {
-          digest: currentLine.digest,
-          lineNumber: currentLine.lineNumber,
-          byteOffset: currentLine.byteOffset,
-          lineCount: fileLines.length,
-        }
-      : null);
+    const resolved = await this.resolveLocatorLine(caseId, locator);
+    const status = resolveLocatorAgainstEvidence(locator, resolved.evidence);
     const document = parseWorkbenchBookmark({
       schemaId: WORKBENCH_BOOKMARK_SCHEMA_ID,
       id,
@@ -570,25 +920,92 @@ export class WorkbenchService {
   ): Promise<WorkbenchBookmarkV1[]> {
     await this.assertReadable(caseId, actor, isAdmin);
     const rows = await this.deps.store.listBookmarks(caseId);
-    const lines = await this.loadLines(caseId);
-    return rows.map((row) => {
-      const stored = parseWorkbenchBookmark(JSON.parse(row.payloadJson));
-      const fileLines = lines.filter((line) => line.evidenceId === stored.locator.evidenceId);
-      const currentLine = fileLines.find((line) => line.lineNumber === stored.locator.lineNumber);
-      const status = resolveLocatorAgainstEvidence(stored.locator, currentLine
+    const stored = rows.map((row) => parseWorkbenchBookmark(JSON.parse(row.payloadJson)));
+    // Bookmarks cluster on a handful of files. Reading each of those files
+    // once, rather than once per bookmark, keeps a long list cheap without
+    // ever holding more than one file.
+    const corpus = await this.openCorpus(caseId, EMPTY_SCOPE);
+    const byFile = new Map<string, { lineCount: number; lines: Map<number, WorkbenchLine> }>();
+    for (const bookmark of stored) {
+      const evidenceId = bookmark.locator.evidenceId;
+      let entry = byFile.get(evidenceId);
+      if (!entry) {
+        const file = corpus.allFiles.find((item) => item.evidenceId === evidenceId);
+        const text = file ? await corpus.read(evidenceId) : null;
+        entry = { lineCount: text === null ? 0 : countLogTextLines(text), lines: new Map() };
+        if (file && text !== null) {
+          const wanted = new Set(
+            stored
+              .filter((item) => item.locator.evidenceId === evidenceId)
+              .map((item) => item.locator.lineNumber),
+          );
+          const overlay = await this.overlayFor(caseId, [file]);
+          for (const window of iterateLogLineWindows(file, text)) {
+            for (const line of overlay.apply(window)) {
+              if (wanted.has(line.lineNumber)) entry.lines.set(line.lineNumber, line);
+            }
+          }
+        }
+        byFile.set(evidenceId, entry);
+      }
+    }
+    return stored.map((bookmark) => {
+      const entry = byFile.get(bookmark.locator.evidenceId);
+      const line = entry?.lines.get(bookmark.locator.lineNumber) ?? null;
+      const status = resolveLocatorAgainstEvidence(bookmark.locator, line
         ? {
-            digest: currentLine.digest,
-            lineNumber: currentLine.lineNumber,
-            byteOffset: currentLine.byteOffset,
-            lineCount: fileLines.length,
+            digest: line.digest,
+            lineNumber: line.lineNumber,
+            byteOffset: line.byteOffset,
+            lineCount: entry?.lineCount ?? 0,
           }
         : null);
       return parseWorkbenchBookmark({
-        ...stored,
+        ...bookmark,
         status: status.status,
         staleReason: status.staleReason,
       });
     });
+  }
+
+  /**
+   * Re-read exactly the line a locator names.
+   *
+   * A bookmark is resolved by reading its own file at its own line, so a
+   * locator deep in a large investigation resolves as readily as one on the
+   * first page. Resolving it out of a corpus-wide read is what made a
+   * bookmark past the old read boundary look unresolvable.
+   */
+  private async resolveLocatorLine(
+    caseId: string,
+    locator: WorkbenchBookmarkV1["locator"],
+  ): Promise<{
+    line: WorkbenchLine | null;
+    evidence: {
+      digest: string;
+      lineNumber: number;
+      byteOffset: number;
+      lineCount: number;
+    } | null;
+  }> {
+    const read = await this.readFileWindow(
+      caseId,
+      locator.evidenceId,
+      Math.max(1, locator.lineNumber),
+      1,
+    );
+    const line = read.rows.find((row) => row.lineNumber === locator.lineNumber) ?? null;
+    return {
+      line,
+      evidence: line
+        ? {
+            digest: line.digest,
+            lineNumber: line.lineNumber,
+            byteOffset: line.byteOffset,
+            lineCount: read.lineCount,
+          }
+        : null,
+    };
   }
 
   async resolveLocator(
@@ -607,17 +1024,9 @@ export class WorkbenchService {
     const readable = await this.deps.cases.getCase(row.caseId, actor, isAdmin);
     if (!readable) return privacySafeNotFound();
     const stored = parseWorkbenchBookmark(JSON.parse(row.payloadJson));
-    const lines = await this.loadLines(row.caseId);
-    const fileLines = lines.filter((line) => line.evidenceId === stored.locator.evidenceId);
-    const currentLine = fileLines.find((line) => line.lineNumber === stored.locator.lineNumber);
-    const status = resolveLocatorAgainstEvidence(stored.locator, currentLine
-      ? {
-          digest: currentLine.digest,
-          lineNumber: currentLine.lineNumber,
-          byteOffset: currentLine.byteOffset,
-          lineCount: fileLines.length,
-        }
-      : null);
+    const resolved = await this.resolveLocatorLine(row.caseId, stored.locator);
+    const currentLine = resolved.line;
+    const status = resolveLocatorAgainstEvidence(stored.locator, resolved.evidence);
     if (status.status !== "resolved") {
       return {
         schemaId: "cd-collab.log_workbench_locator_resolve.v1",

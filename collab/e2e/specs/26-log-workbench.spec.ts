@@ -78,18 +78,37 @@ test.describe("investigation log workbench", () => {
       return "two files selected for side-by-side panes";
     });
 
+    // Variable-height rows make match navigation drift away from the recorded line.
+    await record.check("workbench-virtual-row-contract", async () => {
+      const metrics = await workbench
+        .locator("[data-workbench-pane]")
+        .first()
+        .locator(".log-workbench__lines li")
+        .evaluateAll((rows) =>
+          rows.map((row) => ({
+            height: row.getBoundingClientRect().height,
+            whiteSpace: getComputedStyle(row.querySelector(".log-workbench__text")!).whiteSpace,
+          })),
+        );
+      expect(metrics.length).toBeGreaterThan(1);
+      expect(new Set(metrics.map(({ height }) => height)).size).toBe(1);
+      expect(metrics[0]?.height).toBe(40);
+      expect(new Set(metrics.map(({ whiteSpace }) => whiteSpace))).toEqual(new Set(["pre"]));
+      return "virtualized rows keep one measured height and long records scroll instead of drifting match offsets";
+    });
+
     await workbench.getByLabel("Find in logs").fill("timeout");
     await workbench.getByRole("button", { name: "Search" }).click();
     await record.check("workbench-search-timeout", async () => {
-      // The count states whether it is complete: an exact count says so, and a
-      // bounded or partly read one says what it did not count.
-      await expect(workbench.getByRole("status")).toContainText(
-        /\d+ match(es)?\b.*(every match in the read lines|Load more|were not counted)/,
+      // Coverage is stated separately from the match count: either every
+      // selected line was searched, or the operator is told that lines remain.
+      await expect(workbench.locator(".log-workbench__search-summary")).toContainText(
+        /(Every selected line was searched|more selected lines to search)/,
       );
       await expect(workbench.getByRole("list", { name: "Search matches" })).toContainText(
         /upstream timeout/,
       );
-      return "timeout line visible with a match count that states its completeness";
+      return "timeout line visible with an answer that states whether every selected line was covered";
     });
 
     await workbench.getByRole("button", { name: "Show merged chronology" }).click();
@@ -218,10 +237,45 @@ test.describe("investigation log workbench", () => {
     await importWorkbenchZip(page);
     await gotoStage(page, "Analyze");
     const workbench = page.locator("#log-workbench");
+    const advanced = workbench.locator("details.log-workbench__search-advanced");
+    await expect(advanced).not.toHaveAttribute("open", "");
+    await expect(workbench.getByText("Details", { exact: true })).toHaveCount(7);
+
     await workbench.getByLabel("Find in logs").focus();
     await page.keyboard.type("timeout");
     await page.keyboard.press("Enter");
-    await expect(workbench.getByRole("status")).toContainText(/\d+ match(es)?\b/);
+    await expect(workbench.locator(".log-workbench__search-summary")).toContainText(
+      /\d+ match(es)?\b/,
+    );
+
+    const navigation = workbench.getByRole("group", {
+      name: "Search match navigation",
+    });
+    await expect(navigation.getByRole("button", { name: "Previous match" })).toBeVisible();
+    await expect(navigation.getByText(/\d+ of \d+/)).toBeVisible();
+    await expect(navigation.getByRole("button", { name: "Next match" })).toBeVisible();
+
+    const geometry = await navigation.evaluate((element) => {
+      const children = Array.from(element.children).map((child) => {
+        const rect = child.getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
+      });
+      const rect = element.getBoundingClientRect();
+      return { children, left: rect.left, right: rect.right };
+    });
+    expect(geometry.children).toHaveLength(3);
+    expect(Math.max(...geometry.children.map((child) => child.top))
+      - Math.min(...geometry.children.map((child) => child.top))).toBeLessThan(2);
+    expect(Math.max(...geometry.children.map((child) => child.bottom))
+      - Math.min(...geometry.children.map((child) => child.bottom))).toBeLessThan(2);
+    expect(geometry.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.right).toBeLessThanOrEqual(390);
+
+    const pageWidths = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(pageWidths.scroll).toBeLessThanOrEqual(pageWidths.client);
     await page.keyboard.press("Escape");
   });
 
@@ -324,18 +378,23 @@ test.describe("host-backed log workbench chronology", () => {
     await workerRow.getByRole("button", { name: "Declare a timezone" }).click();
     await panel.getByLabel("Which timezone was this file written in?").fill("America/Chicago");
     await panel.getByRole("button", { name: "Show me what this would do" }).click();
-    await expect(panel.getByText("2024-03-10T07:30:00Z")).toBeVisible();
+    await expect(panel.getByText("2024-03-10T07:30:00Z", { exact: true })).toBeVisible();
     await panel.getByRole("button", { name: "Apply America/Chicago to this file" }).click();
     await expect(workerRow.locator(".log-time__chip--declared")).toHaveText("America/Chicago");
 
     const workbench = page.locator("#log-workbench");
     await workbench.getByRole("button", { name: "Show merged chronology" }).click();
     await expect(workbench.getByRole("heading", { name: "Merged chronology" })).toBeVisible();
-    await expect(workbench.getByText(/2024-03-10T07:30:00/)).toBeVisible();
+    const normalizedWorkerEvent = workbench
+      .getByRole("region", { name: "Merged chronology" })
+      .locator("li")
+      .filter({ hasText: "worker/batch.log" })
+      .filter({ hasText: "2024-03-10T07:30:00.000Z" });
+    await expect(normalizedWorkerEvent).toBeVisible();
 
     await page.getByLabel("Include worker/batch.log in snapshot").check();
     await page.getByRole("button", { name: /Freeze selected evidence/ }).click();
-    await expect(page.getByText(/Frozen evidence set/)).toBeVisible();
+    await expect(page.getByRole("button", { name: /S0 1 item/ })).toBeVisible();
     const caseId = await caseIdForTitle(page, title);
     const snapshots = await page.request.get(`/api/cases/${caseId}/snapshots`);
     expect(snapshots.ok()).toBeTruthy();
@@ -344,7 +403,7 @@ test.describe("host-backed log workbench chronology", () => {
     };
     expect(body.snapshots?.[0]?.normalizationRevision).toBeGreaterThan(0);
     await gotoStage(page, "Compare");
-    await expect(page.getByText(/Frozen evidence set/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Experiment lab" })).toBeVisible();
     await gotoStage(page, "Decide");
     await expect(page.getByRole("heading", { name: /Decide/i }).first()).toBeVisible();
   });

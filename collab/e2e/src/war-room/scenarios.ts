@@ -722,6 +722,11 @@ export const WAR_ROOM_SCENARIOS: readonly WarRoomScenario[] = [
         failsWhen: "Only one file can be on screen at a time.",
       },
       {
+        id: "workbench-virtual-row-contract",
+        claim: "Long records keep the fixed row height used by virtual scrolling.",
+        failsWhen: "A wrapped row makes match navigation drift away from its recorded line.",
+      },
+      {
         id: "workbench-search-timeout",
         claim: "Search returns the timeout line with a match count.",
         failsWhen: "The timeout line is missing or the count is empty.",

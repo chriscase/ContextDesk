@@ -414,6 +414,37 @@ describe("chronology and review queue", () => {
     expect(preview.affectedRelativePaths).not.toContain("gateway/edge.log");
   });
 
+  it("removes a resolved local time from the review queue", async () => {
+    const { service } = harness({
+      hostStamps: [
+        {
+          source: "worker/batch.log",
+          message: "batch worker starting scheduled sweep",
+          ts: 1_710_045_000,
+          timeQuality: "wall clock",
+          unresolvedLocalTimestamp: "2024-03-10 01:30:00",
+        },
+        {
+          source: "worker/batch.log",
+          message: "batch worker heartbeat late",
+          ts: 1_710_048_600,
+          timeQuality: "wall clock",
+          unresolvedLocalTimestamp: "2024-03-10 02:30:00",
+        },
+        {
+          source: "worker/batch.log",
+          message: "batch worker sweep failed retry 1",
+          ts: 1_710_050_700,
+          timeQuality: "wall clock",
+          unresolvedLocalTimestamp: "2024-03-10 03:05:00",
+        },
+      ],
+    });
+    const queue = await service.reviewQueue(CASE_ID, ACTOR, false);
+    expect(queue.candidateCount).toBe(0);
+    expect(queue.groups).toEqual([]);
+  });
+
   it("merges a chronology and keeps unknowns in buckets", async () => {
     const { service } = harness();
     const chronology = await service.chronology(CASE_ID, ACTOR, false, "file", []);
@@ -434,56 +465,97 @@ describe("chronology and review queue", () => {
 });
 
 /**
- * The read limit is real. A responder must never be told "no matches" about a
- * corpus the workbench stopped reading part-way through: that is a confident
- * false negative on exactly the question they opened the workbench to answer.
+ * A page limit is real; a corpus limit was not. A responder must never be told
+ * "no matches" about a corpus the workbench stopped reading part-way through:
+ * that is a confident false negative on exactly the question they opened the
+ * workbench to answer. Every line the reader selected is now reachable, and a
+ * page that stopped early says where it stopped instead of where it gave up.
  */
-describe("a corpus larger than one read admits what it did not read", () => {
+describe("a corpus larger than one page stays reachable, and says how far it got", () => {
   const filler = (count: number, from = 0) =>
     Array.from({ length: count }, (_, index) => `line ${from + index} filler`).join("\n");
 
-  it("reports a search over a truncated corpus as bounded, not as zero matches", async () => {
+  it("reaches a match past the old read boundary by advancing the page cursor", async () => {
     const oversized = `${filler(50_000)}\nthe needle is here\n`;
     const { service } = harness({
       files: [file(EVIDENCE_A, "big/app.log", oversized)],
     });
-    const result = await service.search(CASE_ID, ACTOR, false, {
+    const first = await service.search(CASE_ID, ACTOR, false, {
       ...SEARCH,
       query: "needle",
     });
-    expect(result.returned).toBe(0);
-    expect(result.corpusTruncated).toBe(true);
-    expect(result.bounded).toBe(true);
+    // The first page spends its work budget without reaching the needle. That
+    // is a bounded page, not a truncated corpus: it hands back a position.
+    expect(first.returned).toBe(0);
+    expect(first.bounded).toBe(true);
+    expect(first.corpusTruncated).toBe(false);
+    expect(first.coverageComplete).toBe(false);
+    expect(first.scannedLines).toBe(50_000);
+    expect(first.nextPageCursor).not.toBeNull();
+
+    const second = await service.search(CASE_ID, ACTOR, false, {
+      ...SEARCH,
+      query: "needle",
+      pageCursor: first.nextPageCursor,
+    });
+    expect(second.returned).toBe(1);
+    expect(second.matches[0]?.lineNumber).toBe(50_001);
+    expect(second.matches[0]?.text).toContain("the needle is here");
+    expect(second.coverageComplete).toBe(true);
+    expect(second.corpusTruncated).toBe(false);
+    expect(second.nextPageCursor).toBeNull();
+    expect(second.scannedLinesTotal).toBe(50_001);
   });
 
-  it("names the files the read limit never reached instead of listing them as empty", async () => {
+  it("reads a selected file that lies entirely past the old boundary, first", async () => {
     const { service } = harness({
       files: [
-        file(EVIDENCE_A, "a-big/app.log", filler(50_000)),
+        file(EVIDENCE_A, "a-big/app.log", filler(120_000)),
+        file(EVIDENCE_B, "b-small/app.log", "the needle is here\n"),
+      ],
+    });
+    // Selecting the small file narrows the read before a byte is spent on the
+    // large one, so the match is on the first page rather than four pages in.
+    const result = await service.search(CASE_ID, ACTOR, false, {
+      ...SEARCH,
+      query: "needle",
+      filters: { ...SEARCH.filters, evidenceIds: [EVIDENCE_B] },
+    });
+    expect(result.returned).toBe(1);
+    expect(result.scopeFileCount).toBe(1);
+    expect(result.scannedLines).toBe(1);
+    expect(result.coverageComplete).toBe(true);
+    expect(result.corpusTruncated).toBe(false);
+  });
+
+  it("counts every file's lines in the inventory, however far in it sits", async () => {
+    const { service } = harness({
+      files: [
+        file(EVIDENCE_A, "a-big/app.log", `${filler(50_000)}\n`),
         file(EVIDENCE_B, "b-small/app.log", "the needle is here\n"),
       ],
     });
     const inventory = await service.inventory(CASE_ID, ACTOR, false);
-    expect(inventory.corpusTruncated).toBe(true);
-    expect(inventory.unreadFiles).toContain("app.log");
-    expect(inventory.items.find((item) => item.evidenceId === EVIDENCE_B)?.fullyRead).toBe(
-      false,
+    expect(inventory.corpusTruncated).toBe(false);
+    expect(inventory.unreadFiles).toEqual([]);
+    expect(inventory.items.every((item) => item.fullyRead)).toBe(true);
+    expect(inventory.items.find((item) => item.evidenceId === EVIDENCE_A)?.lineCount).toBe(
+      50_000,
     );
-    expect(inventory.items.find((item) => item.evidenceId === EVIDENCE_A)?.fullyRead).toBe(
-      true,
-    );
+    expect(inventory.items.find((item) => item.evidenceId === EVIDENCE_B)?.lineCount).toBe(1);
   });
 
-  it("explains an unreached file instead of reporting it as missing", async () => {
+  it("pages a file that used to sit behind the read limit instead of refusing it", async () => {
     const { service } = harness({
       files: [
         file(EVIDENCE_A, "a-big/app.log", filler(50_000)),
         file(EVIDENCE_B, "b-small/app.log", "the needle is here\n"),
       ],
     });
-    await expect(
-      service.page(CASE_ID, ACTOR, false, EVIDENCE_B, 1, 80),
-    ).rejects.toThrow(/more log lines than one read can cover/);
+    const page = await service.page(CASE_ID, ACTOR, false, EVIDENCE_B, 1, 80);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]?.text).toContain("the needle is here");
+    expect(page.bounded).toBe(false);
   });
 
   it("still reports an ordinary corpus as a complete answer", async () => {

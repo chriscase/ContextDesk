@@ -720,6 +720,41 @@
   line-height: 1.45;
 }
 
+.log-time button {
+  justify-self: start;
+  min-height: 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.45rem 0.7rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+}
+
+.log-time button:hover:not(:disabled),
+.log-time button:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.log-time button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.log-time button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.log-time__actions button:first-child,
+.log-time__more button:first-child {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-soft);
+  font-weight: 650;
+}
+
 .log-time__sources {
   list-style: none;
   margin: 0;

@@ -1133,7 +1133,7 @@ describe("pathname shell routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(screen.queryByLabelText("Username")).toBeNull();
-    expect(window.location.pathname).toBe("/");
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
   });
 
   it("shows first-run setup before sign-in when the host reports an unconfigured installation", async () => {
