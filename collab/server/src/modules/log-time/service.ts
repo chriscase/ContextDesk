@@ -8,11 +8,15 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import {
+  LOG_CHRONOLOGY_LIMITS,
+  LOG_CHRONOLOGY_PAGE_SCHEMA_ID,
   LOG_CORPUS_STATE_SCHEMA_ID,
   LOG_TIME_LIMITS,
   LOG_TIME_OUTCOME_SCHEMA_ID,
   LOG_TIME_PREVIEW_SCHEMA_ID,
   parseLogCorpusState,
+  parseLogChronologyPage,
+  parseLogChronologyQuery,
   parseLogTimeApplyRequest,
   parseLogTimeClearRequest,
   parseLogTimeOutcome,
@@ -20,6 +24,7 @@ import {
   parseLogTimePreviewRequest,
   parseLogTimeUndoRequest,
   type LogCorpusStateV1,
+  type LogChronologyPageV1,
   type LogTimeDeclarationV1,
   type LogTimeDependentDisposition,
   type LogTimeDependentV1,
@@ -35,7 +40,9 @@ import {
   LogTimeConflictError,
   LogTimeNotFoundError,
   LogTimeRequestError,
+  type HostChronologyRow,
   type HostResult,
+  type HostSearch,
   type LogTimeBridge,
 } from "./bridge.js";
 import type {
@@ -132,6 +139,37 @@ export class LogTimeService {
    * declaration provenance comes from the durable record, because the host
    * corpus does not know who declared a zone or which preview they saw.
    */
+  /**
+   * Bounded corpus events for the Log workbench overlay. Returns null when
+   * this case has no host corpus yet — callers must keep intake-byte UTC
+   * empty for local-ambiguous lines rather than inventing a zone.
+   */
+  async listWorkbenchEvents(
+    caseId: string,
+    sources: string[] = [],
+    k = 2_000,
+  ): Promise<{ corpusRevision: number; search: HostSearch } | null> {
+    const corpus = await this.deps.store.getCorpus(caseId);
+    if (!corpus) return null;
+    const host = await this.deps.bridge.run(caseId, {
+      kind: "events",
+      corpusId: corpus.corpusId,
+      expectedRevision: corpus.corpusRevision,
+      sources,
+      k,
+    });
+    if (!host.search) return { corpusRevision: host.corpusRevision, search: {
+      bounded: false,
+      atLeast: 0,
+      returned: 0,
+      partial: false,
+      cancelled: false,
+      diagnostic: null,
+      hits: [],
+    } };
+    return { corpusRevision: host.corpusRevision, search: host.search };
+  }
+
   async getState(caseId: string): Promise<LogCorpusStateV1> {
     const corpus = await this.deps.store.getCorpus(caseId);
     if (!corpus) {
@@ -152,6 +190,43 @@ export class LogTimeService {
       corpusId: corpus.corpusId,
     });
     return this.projectState(corpus, host);
+  }
+
+  /**
+   * Read one cursor-paged chronology projection. The host owns timestamp
+   * provenance and DST decisions; this layer only applies the wire contract
+   * and keeps the returned message/source fields bounded.
+   */
+  async chronology(caseId: string, raw: unknown): Promise<LogChronologyPageV1> {
+    const request = parseLogChronologyQuery(raw);
+    const corpus = await this.requireCorpus(caseId);
+    const host = await this.deps.bridge.run(caseId, {
+      kind: "chronology",
+      corpusId: corpus.corpusId,
+      search: request.search,
+      sources: request.sources,
+      limit: request.limit,
+      cursor: request.cursor,
+    });
+    const chronology = host.chronology;
+    if (!chronology) throw new Error("log-time host returned no chronology page");
+
+    const rows = chronology.rows
+      .slice(0, LOG_CHRONOLOGY_LIMITS.maxPageRows)
+      .map(toChronologyRow);
+    return parseLogChronologyPage({
+      schemaId: LOG_CHRONOLOGY_PAGE_SCHEMA_ID,
+      caseId,
+      corpusId: corpus.corpusId,
+      corpusRevision: chronology.corpusRevision,
+      search: request.search,
+      sources: request.sources,
+      rows,
+      nextCursor: chronology.nextCursor,
+      totalMatched: chronology.totalMatched,
+      orderOnlyCount: chronology.orderOnlyCount,
+      timeQuality: chronology.timeQuality,
+    });
   }
 
   private async projectState(
@@ -677,5 +752,19 @@ function toDependent(row: LogTimeDependentRow): LogTimeDependentV1 {
     disposition: row.disposition,
     reason: row.reason,
     observedRevision: row.observedRevision,
+  };
+}
+
+function toChronologyRow(row: HostChronologyRow) {
+  return {
+    seq: row.seq,
+    source: row.source,
+    rawTimestamp: row.rawTimestamp,
+    normalizedInstant: row.normalizedInstant,
+    timeState: row.timeState,
+    timestampProvenance: row.timestampProvenance,
+    orderOnlyReason: row.orderOnlyReason,
+    level: row.level,
+    message: row.message.slice(0, LOG_CHRONOLOGY_LIMITS.maxMessageChars),
   };
 }

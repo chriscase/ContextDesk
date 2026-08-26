@@ -550,7 +550,7 @@ describe("triage workspace permissions", () => {
 describe("step and anchor wrappers", () => {
   it("renders a labeled, focusable step section", () => {
     render(
-      <TriageStepSection id="triage-demo" step={2} title="Analyze" lede="Freeze first.">
+      <TriageStepSection id="triage-demo" step={2} title="Analyze" lede="Freeze first." next="Run one clear question.">
         <p>panel goes here</p>
       </TriageStepSection>,
     );
@@ -558,6 +558,7 @@ describe("step and anchor wrappers", () => {
     expect(section.tabIndex).toBe(-1);
     expect(section.getAttribute("aria-labelledby")).toBe("triage-demo-title");
     expect(screen.getByRole("heading", { name: "Analyze" })).toBeTruthy();
+    expect(screen.getByText(/Run one clear question/)).toBeTruthy();
     expect(screen.getByText("panel goes here")).toBeTruthy();
   });
 

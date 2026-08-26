@@ -41,6 +41,7 @@ import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/in
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerCorpusIntakeRoutes } from "./modules/corpus-intake/index.js";
 import { registerLogTimeRoutes, type LogTimeService } from "./modules/log-time/index.js";
+import { registerWorkbenchRoutes, type WorkbenchService } from "./modules/workbench/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
 import { registerTriageRunRoutes, type TriageRunService } from "./modules/triage-runs/index.js";
@@ -67,6 +68,7 @@ import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js
 import { registerEntityRoutes, type EntityService } from "./modules/entities/index.js";
 import { registerReferenceRoutes, type ReferenceService } from "./modules/references/index.js";
 import { registerResolutionRoutes, type ResolutionService } from "./modules/resolutions/index.js";
+import { registerModelPurposePolicyRoutes, type ModelPurposePolicyService } from "./modules/model-policy/index.js";
 
 function requestPath(url: string): string {
   return url.split("?", 1)[0] ?? url;
@@ -105,8 +107,10 @@ export interface AppDeps {
   catalog?: CatalogService;
   imports?: ImportService;
   triageRuns?: TriageRunService;
+  modelPolicy?: ModelPurposePolicyService;
   presence?: PresenceService;
   logTime?: LogTimeService;
+  workbench?: WorkbenchService;
   experiments?: ExperimentService;
   exporter?: ExportService;
   portable?: PortableInvestigationService;
@@ -132,7 +136,15 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   if (deps.security && !publicIdentities) {
     throw new Error("a durable public identity codec is required when authentication is enabled");
   }
-  const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
+  // trustProxy governs request.ip, which keys the login rate limiter and is
+  // recorded as the audit origin. It stays off unless an operator declares the
+  // ingress, so a directly exposed deployment cannot be steered by a forged
+  // X-Forwarded-For. See config.ts parseTrustProxy.
+  const app = Fastify({
+    logger: false,
+    bodyLimit: 2 * 1024 * 1024,
+    ...(deps.config.trustProxy === null ? {} : { trustProxy: deps.config.trustProxy }),
+  });
   registerBrowserMutationCsrfGuard(app);
   const requiredMigrationVersion = latestMigrationVersion();
 
@@ -264,6 +276,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       sessionAuth,
       audit: security.audit,
     });
+    if (deps.modelPolicy) {
+      await registerModelPurposePolicyRoutes(app, {
+        sessionAuth,
+        audit: security.audit,
+        policy: deps.modelPolicy,
+      });
+    }
     if (deps.domain) {
       await registerCaseRoutes(app, {
         sessionAuth,
@@ -316,6 +335,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
           cases: deps.domain,
         });
       }
+      if (deps.workbench) {
+        await registerWorkbenchRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          workbench: deps.workbench,
+          cases: deps.domain,
+        });
+      }
     }
     if (deps.catalog) {
       await registerCatalogRoutes(app, {
@@ -336,6 +363,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         sessionAuth,
         audit: security.audit,
         runs: deps.triageRuns,
+        ...(deps.modelPolicy ? { modelPolicy: deps.modelPolicy } : {}),
         ...(deps.domain ? { cases: deps.domain } : {}),
       });
     }

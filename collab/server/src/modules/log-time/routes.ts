@@ -1,4 +1,7 @@
-import { ContractViolation } from "@cd-collab/contracts";
+import {
+  ContractViolation,
+  LOG_CHRONOLOGY_QUERY_SCHEMA_ID,
+} from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   capabilityForbidden,
@@ -17,6 +20,7 @@ import type { LogTimeService } from "./service.js";
 
 type DeniedAction =
   | "log_corpus_build"
+  | "log_chronology"
   | "log_time_preview"
   | "log_time_apply"
   | "log_time_clear"
@@ -105,6 +109,23 @@ export async function registerLogTimeRoutes(
     }
   });
 
+  /** Read-only normalized chronology. Cursor changes never mutate the corpus. */
+  app.get("/api/cases/:id/log-time/chronology", async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!(await requireAccess(ctx, id, reply, "log_chronology", request.ip))) {
+      return { error: "not_found" };
+    }
+    try {
+      return await deps.logTime.chronology(id, chronologyQuery(request));
+    } catch (err) {
+      void reply.code(statusFor(err));
+      return { error: publicError(err) };
+    }
+  });
+
   /**
    * Mutating review routes. Each requires write capability, is audited on
    * denial, and surfaces a host conflict as 409 so a stale client re-reads
@@ -164,4 +185,28 @@ export async function registerLogTimeRoutes(
   mutation("/api/cases/:id/log-time/undo", "log_time_undo", (ctx, id, body) =>
     deps.logTime.undo(id, ctx.actor, body),
   );
+}
+
+function chronologyQuery(request: FastifyRequest): unknown {
+  const query = (request.query ?? {}) as Record<string, unknown>;
+  const rawSources = query.sources;
+  const sources = Array.isArray(rawSources)
+    ? rawSources
+    : rawSources === undefined
+      ? []
+      : [rawSources];
+  const rawLimit = query.limit;
+  const limit =
+    typeof rawLimit === "number"
+      ? rawLimit
+      : typeof rawLimit === "string" && rawLimit.length > 0
+        ? Number(rawLimit)
+        : 0;
+  return {
+    schemaId: LOG_CHRONOLOGY_QUERY_SCHEMA_ID,
+    search: typeof query.search === "string" ? query.search : null,
+    sources,
+    limit,
+    cursor: typeof query.cursor === "string" ? query.cursor : null,
+  };
 }

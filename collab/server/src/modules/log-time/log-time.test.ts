@@ -106,6 +106,44 @@ class FakeBridge implements LogTimeBridge {
         };
       case "status":
         return base();
+      case "chronology":
+        return {
+          ...base(),
+          chronology: {
+            corpusRevision: this.state.revision,
+            rows: [
+              {
+                seq: 0,
+                source: SOURCE,
+                rawTimestamp: "2024-03-10 02:30:00",
+                normalizedInstant: null,
+                timeState: "order_only",
+                timestampProvenance: "unresolved_local",
+                orderOnlyReason: "timezone_unresolved",
+                level: "warn",
+                message: "batch worker heartbeat late",
+              },
+            ],
+            nextCursor: null,
+            totalMatched: 1,
+            orderOnlyCount: 1,
+            timeQuality: "order_only",
+          },
+        };
+      case "search":
+      case "events":
+        return {
+          ...base(),
+          search: {
+            bounded: false,
+            atLeast: 0,
+            returned: 0,
+            partial: false,
+            cancelled: false,
+            diagnostic: null,
+            hits: [],
+          },
+        };
       case "preview": {
         requireFresh(action.expectedRevision);
         return {
@@ -294,6 +332,15 @@ async function built(options: HarnessOptions = {}) {
   return h;
 }
 
+describe("workbench host events", () => {
+  it("asks the host for corpus events without a search query", async () => {
+    const { service, bridge } = await built();
+    const listed = await service.listWorkbenchEvents(CASE_ID);
+    expect(listed).not.toBeNull();
+    expect(bridge.calls.some((call) => call.kind === "events")).toBe(true);
+  });
+});
+
 function applyRequest(expectedRevision: number, key = "apply-worker-0001") {
   return {
     schemaId: "cd-collab.log_time_apply_request.v1",
@@ -388,6 +435,57 @@ describe("preview", () => {
       }),
     ).rejects.toThrow(/IANA zone id/);
     expect(bridge.calls.length).toBe(before);
+  });
+});
+
+describe("normalized chronology", () => {
+  it("projects retained local text, explicit order-only state, and exact filters", async () => {
+    const { service, bridge, store } = await built();
+    const page = await service.chronology(CASE_ID, {
+      schemaId: "cd-collab.log_chronology_query.v1",
+      search: "heartbeat%",
+      sources: [SOURCE],
+      limit: 10,
+      cursor: null,
+    });
+
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({
+      source: SOURCE,
+      rawTimestamp: "2024-03-10 02:30:00",
+      normalizedInstant: null,
+      timeState: "order_only",
+      orderOnlyReason: "timezone_unresolved",
+    });
+    expect(page.search).toBe("heartbeat%");
+    expect(page.sources).toEqual([SOURCE]);
+    expect(page.totalMatched).toBe(1);
+    expect(page.orderOnlyCount).toBe(1);
+    expect(bridge.calls.at(-1)).toEqual({
+      kind: "chronology",
+      corpusId: CORPUS_ID,
+      search: "heartbeat%",
+      sources: [SOURCE],
+      limit: 10,
+      cursor: null,
+    });
+    expect(JSON.stringify(page)).not.toMatch(/sk-[A-Za-z0-9]/);
+    expect((await store.getCorpus(CASE_ID))?.corpusRevision).toBe(1);
+  });
+
+  it("rejects a chronology query before the host when its page is unbounded", async () => {
+    const { service, bridge } = await built();
+    const before = bridge.calls.length;
+    await expect(
+      service.chronology(CASE_ID, {
+        schemaId: "cd-collab.log_chronology_query.v1",
+        search: null,
+        sources: [],
+        limit: 201,
+        cursor: null,
+      }),
+    ).rejects.toThrow(/page size exceeds cap/);
+    expect(bridge.calls).toHaveLength(before);
   });
 });
 

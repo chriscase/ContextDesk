@@ -264,7 +264,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each accepted file gets its own evidence identity and records relative path, media type, digest, byte length, privacy class, uploader identity, import time, source attribution, and intake batch id. Equal digests reuse the same content-addressed bytes without collapsing those distinct evidence records. Deep links exist for the batch on Capture and each evidence item on Analyze.",
         limits:
-          `${CORPUS_CAPACITY_COPY} These are hard resource bounds, not a promise that every member is accepted. Building the investigation's log corpus uses the same file-count, per-file, and expanded-byte bounds and rejects overflow instead of silently dropping files. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .jsonl, .ndjson, .csv, .xml, .eml, and .md; common rotated log names such as service.log.1 and service.log-2026-08-25 are also recognized. Declared media must match; JSON documents and every non-empty JSON Lines record must parse. Private line-oriented text with sparse legacy encoding bytes keeps its original bytes and digest while text views and log analysis replace unreadable bytes explicitly; dense invalid data and binary content are rejected. Non-UTF-8 content cannot enter through share_safe intake. share_safe accepts plain text, logs, CSV, Markdown, valid JSON, and valid JSON Lines only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.`,
+          `${CORPUS_CAPACITY_COPY} These are hard bounds: overflow is rejected, never silently dropped. ZIP intake rejects unsafe paths, links, duplicate normalized paths, nested/encrypted archives, and malformed archives. Supported text formats include logs, rotated logs, TXT, JSON, JSONL/NDJSON, CSV, XML, email, and Markdown; structured JSON and JSONL records must parse. The intake validates privacy and content, but marking an item share_safe does not scrub it. XML and email require owner_only, and the global source catalog is not the path for investigation uploads.`,
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
     ],
@@ -273,6 +273,38 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
     id: "analyze",
     title: "Analyze & triage runs",
     articles: [
+      {
+        id: "log-workbench",
+        title: "Use the Log workbench",
+        summary:
+          "Read this investigation’s imported logs side by side, search them, save a view, and bookmark a line without putting evidence in the global Sources catalog.",
+        keywords: [
+          "log workbench",
+          "side by side",
+          "saved view",
+          "bookmark",
+          "chronology",
+          "timezone",
+        ],
+        what:
+          "The Log workbench is the Analyze surface for logs that already belong to the investigation. It pages large files, searches with bounded counts, and keeps UUIDs and digests behind technical details. Timezone review stays a separate, explicit step: the workbench will not guess a zone.",
+        when:
+          "Use it after Capture has imported files, a ZIP, or a directory, when you need to read more than one log at once or return to a saved view after reload.",
+        steps: [
+          "Open Analyze and find Log workbench.",
+          "Tick two or more files to open them side by side.",
+          "Search, then choose a hit to open that file at the matching line.",
+          "Read the count: an exact count says so, a bounded one says “at least N”, and a corpus too large to read to the end says that matches past the read limit were not counted.",
+          "Narrow by time with a full UTC instant such as 2024-03-10T08:00:00Z; a local time with no zone is refused rather than guessed.",
+          "Save a view or bookmark a line. Those records are not permission tokens.",
+          "Declare timezones in Timezone review when local clocks have no offset, then read Normalized log chronology for one merged order.",
+        ],
+        recorded:
+          "Saved views and bookmarks stay with the investigation. A stale bookmark explains that the file bytes moved; it does not silently jump to another line.",
+        limits:
+          "Search and paging are bounded, and a bounded answer says so rather than reading as a complete one. An investigation with more log lines than one read can cover reports which files it did not finish. Regex that would run unbounded is refused. Share-safe locator tokens re-check authorization and do not reveal a private filename to someone who cannot open the investigation.",
+        actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
+      },
       {
         id: "freeze-snapshot",
         title: "Freeze an evidence snapshot",
@@ -292,6 +324,38 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Each snapshot records who froze it, when, its parent, each item's content hash and verification status, and the derived fingerprint. Loading a snapshot re-derives the fingerprint and rejects a mismatch.",
         limits:
           "Runs bound to a snapshot never silently widen to newer evidence — new evidence means freezing a new snapshot. The fingerprint is a content hash, not a cryptographic signature.",
+        actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
+      },
+      {
+        id: "ask-investigation-question",
+        title: "Ask a question about an investigation",
+        summary:
+          "Turn a frozen evidence set and a clear question into a recorded triage run; compare lanes only when it helps.",
+        keywords: [
+          "ask",
+          "question",
+          "triage",
+          "start triage",
+          "run",
+          "investigate",
+          "log corpus",
+          "gateway",
+        ],
+        what:
+          "A triage starts with a question about one investigation and a frozen evidence snapshot. The run records the question, strategy, snapshot, selected lanes, and each lane's result. Comparison is an optional review step after the run — it is not the purpose of every triage.",
+        when:
+          "Use this after Capture when you want an answer about the evidence, a second pass over the same snapshot, or a documented next question.",
+        steps: [
+          "Capture the logs, email, chat, notes, or other evidence on the investigation.",
+          "On Analyze, select the evidence and freeze a snapshot.",
+          "Open Run history and launcher, choose the snapshot, and write the question you want answered.",
+          "Choose a strategy and one or more lanes. Use Synthetic / offline to test the workflow; choose Configured gateway only when the host is prepared for live provider calls.",
+          "Launch the run, then open each workstream to inspect its evidence, unknowns, and recorded result. Start another run when the next question needs a new attempt.",
+        ],
+        recorded:
+          "The server stores the question, task fingerprint, strategy, snapshot fingerprint, requester, lane identities, progress, results, citations, and unknowns. A run remains attributed to the person and evidence set that created it.",
+        limits:
+          "Synthetic / offline runs are deterministic plumbing checks: they do not inspect evidence or run a model. Configured gateway runs use the host bridge, not browser credentials; gateway runs require at least two lanes. Usage and cost remain unknown unless the host reports them. A slow gateway can leave a run waiting for minutes; launching the identical run again while the first is still in flight is refused rather than run twice.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
@@ -331,22 +395,75 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         id: "run-lanes",
         title: "Run AI lanes against a snapshot",
         summary:
-          "A case lead launches a triage run: two or more model lanes bound to one frozen snapshot, synthetic or through the host's gateway.",
-        keywords: ["triage run", "lane", "model", "synthetic", "gateway", "launch", "profile", "runner", "job", "concurrency"],
+          "A case lead launches a recorded triage run against one frozen snapshot, then compares lanes when useful.",
+        keywords: [
+          "triage run",
+          "lane",
+          "model",
+          "synthetic",
+          "gateway",
+          "launch",
+          "profile",
+          "runner",
+          "job",
+          "concurrency",
+          "slow",
+          "waiting",
+          "timeout",
+          "deadline",
+          "cancel",
+          "duplicate",
+          "retry",
+        ],
         what:
-          "A triage run binds two to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Two execution modes exist in this build: Synthetic / offline (a deterministic, provider-free stand-in run on the server) and Configured gateway (the host bridge executes real lanes; it owns provider calls and credentials, and each lane sends only a profile ID). Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled.",
+          "A triage run binds one to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Synthetic / offline is a deterministic, provider-free stand-in. Configured gateway sends the request through the host bridge, which owns provider calls and credentials. Gateway mode requires at least two lanes. Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled. A run is partial only when at least one lane actually produced a result; when every lane failed, missed its deadline, or was cancelled, the run says failed, timed out, or cancelled rather than partial, and nothing is offered for review.",
         when:
-          "Run lanes after freezing a snapshot, when the team wants structured, comparable model output over exactly that evidence.",
+          "Run lanes after freezing a snapshot, when the team wants a recorded answer over exactly that evidence or wants structured outputs to compare.",
         steps: [
           "On the Analyze stage, open the AI lane runner and pick a frozen snapshot.",
           "Choose the execution mode. Gateway appears only when the host has a runner configured.",
-          "Pick model lanes — for gateway lanes, select each lane's host profile — and set the question and strategy.",
-          "Launch, and watch lanes settle independently; a finished run can be handed to the Experiment Lab for review.",
+          "Set the question and strategy, then pick one or more model lanes. For gateway lanes, select each lane's host profile.",
+          "Launch, watch lanes settle independently, and open the workstreams. Select two or more finished runs only when you want the Experiment Lab comparison view.",
         ],
         recorded:
           "Each run records its snapshot binding and fingerprint, request fingerprint, who requested it, per-lane model and profile identity, per-lane output hashes and cited evidence, and timestamps. Usage and cost are always recorded as unknown — the workspace never invents them.",
         limits:
           "Launching requires the case-lead role. Synthetic lanes are placeholders and say so — they make no live-model claims. Gateway availability depends on host configuration this app can only report, not change. Agreement between lanes is not proof of correctness, and the run panel says exactly that.",
+        actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
+      },
+      {
+        id: "slow-gateway-run",
+        title: "When a gateway run is slow or does not answer",
+        summary:
+          "What the panel shows while you wait, who owns the deadline, what cancelling keeps, and why the same run cannot be started twice.",
+        keywords: [
+          "slow",
+          "stuck",
+          "waiting",
+          "hang",
+          "timeout",
+          "deadline",
+          "cancel",
+          "duplicate",
+          "retry",
+          "rerun",
+          "unreliable",
+          "gateway",
+        ],
+        what:
+          "While a run is unfinished the panel reports the wait in plain words: how long it has been queued or running, how many lanes are queued, running, and settled, and how many produced a result. Selecting gateway mode is a request, not proof a provider was reached, so a run whose lanes never started reads as configured — no lane executed, never as a run that happened. A run that has not started shows no start time instead of borrowing the time it was created.",
+        when:
+          "Read this when a run sits without visible progress, when lanes settle without results, or before starting the same run a second time.",
+        steps: [
+          "Read the wait line on the run: queued with no lane started means nothing has been sent for you to read yet.",
+          "Check the lane counts. Lanes settle independently, so some may finish while others are still running.",
+          "Wait for the host deadline, or request cancellation if you no longer need the answer.",
+          "If the run produced nothing, read the per-lane reason, then launch a fresh attempt.",
+        ],
+        recorded:
+          "The run records per-lane start and finish times, the settled outcome and error code for each lane, whether cancellation was requested, and why the run stopped. Missing host timing is recorded as unknown rather than filled in.",
+        limits:
+          "The host owns the run deadline; this app cannot extend or shorten it and does not run its own clock against the provider. Cancellation is a request, and lanes that already settled keep their recorded results. Starting an identical run while one is still in flight is refused, naming the run already running, so a slow gateway is not billed twice for one question — change the question, lanes, or settings, or reuse the earlier setup as an explicit rerun, to launch a genuinely different attempt. Once a run has settled, launching the same one again is always allowed.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
@@ -488,6 +605,39 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Each export reports a snapshot identity: the content hash of its manifest, so identical inputs reproduce the same identity. Export never edits the case.",
         limits:
           "The snapshot identity is a content hash, not a cryptographic signature — exports are not signed. share_safe is deny-by-default, and a blocked export sends nothing. Neither current export can reconstruct the complete investigation on another installation.",
+        actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
+      },
+      {
+        id: "archive-or-restore-investigation",
+        title: "Archive an investigation, and bring it back",
+        summary:
+          "Archiving takes an investigation out of the working list and deletes nothing. Restoring returns it to the status it held before. A legal hold refuses an archive; it never refuses a restore.",
+        keywords: [
+          "archive",
+          "unarchive",
+          "restore",
+          "delete",
+          "remove",
+          "close",
+          "file away",
+          "hide",
+          "legal hold",
+          "working list",
+        ],
+        what:
+          "Archiving is how a finished, duplicate, or superseded investigation stops competing for attention without leaving the record. Every contribution, evidence file, timeline row, and audit entry survives it unchanged. This is a different thing from the portable investigation archive, which is a file you download to move a case to another installation — same word, unrelated mechanism. Restoring reads the status the investigation held before it was archived and returns it there, so an investigation archived out of monitoring comes back as monitoring rather than being flattened to open.",
+        when:
+          "Read this when an investigation is finished or duplicated and you want it out of the way, when you cannot find an investigation you know exists, or when someone asks whether an investigation can be deleted.",
+        steps: [
+          "Open the investigation and use Archive investigation at the Decide stage. It asks once to confirm; the first click never writes anything.",
+          "Archived investigations are withheld from the inventory. The list says how many it is withholding and offers to show them; Include archived, or choosing the archived status directly, brings them back into view.",
+          "To bring one back, open it and use Restore investigation. The control names the status it will return to before you commit.",
+          "An investigation under legal hold cannot be archived. Clear the hold first if it genuinely should be archived — the refusal names the hold so you know which control to open.",
+        ],
+        recorded:
+          "Both directions write a status change to the investigation timeline and an audit entry naming the actor and the origin. A refused archive writes nothing at all: the investigation is left exactly as it was, with nothing half-recorded.",
+        limits:
+          "There is no delete. Investigations are archived, never removed, and no route, control, or export path deletes one. If something needs to leave the workspace, export a share-safe copy instead — that produces a disclosable record without destroying the original. Archiving requires no resolution record, because it claims no conclusion; only resolving an investigation does. Restore falls back to open when the recorded history cannot say where the investigation came from, and never to resolved.",
         actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
       },
       {

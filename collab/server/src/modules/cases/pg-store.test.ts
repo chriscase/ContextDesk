@@ -1031,6 +1031,50 @@ describe.skipIf(!adminUrl())("postgres snapshot persistence", () => {
     });
   });
 
+  /**
+   * The normalization revision distinguishes "this freeze observed corpus
+   * revision N" from "this freeze had no corpus to observe". Both backends
+   * must round-trip the same document, or an exported or portable snapshot
+   * would differ by which store happened to serve it.
+   */
+  it("round-trips an observed corpus revision and an absent one identically to memory", async () => {
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const pg = new PgCaseStore(client);
+      const memory = new MemoryCaseStore();
+      await pg.insertCase(caseRow());
+
+      const evidence = evidencePair();
+      // `validSnapshot` only carries the fields it knows about, so the
+      // observed-revision case is assembled here with a fingerprint that
+      // actually covers the revision.
+      const observed: SnapshotV1 = {
+        ...validSnapshot({ id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", evidence }),
+        normalizationRevision: 4,
+        fingerprint: snapshotFingerprint({
+          parentSnapshotId: null,
+          evidence,
+          visibility: "owner_only",
+          protocolVersion: "triage-v1",
+          normalizationRevision: 4,
+        }),
+      };
+      await pg.insertSnapshot(observed);
+      await memory.insertSnapshot(observed);
+      expect(await pg.getSnapshot(observed.id)).toEqual(observed);
+      expect(await pg.getSnapshot(observed.id)).toEqual(await memory.getSnapshot(observed.id));
+
+      const unknown = validSnapshot({ id: "ffffffff-ffff-4fff-8fff-ffffffffffff" });
+      expect("normalizationRevision" in unknown).toBe(false);
+      await pg.insertSnapshot(unknown);
+      await memory.insertSnapshot(unknown);
+      const fromPg = await pg.getSnapshot(unknown.id);
+      expect(fromPg).toEqual(unknown);
+      expect(fromPg).toEqual(await memory.getSnapshot(unknown.id));
+      expect("normalizationRevision" in (fromPg as object)).toBe(false);
+    });
+  });
+
   it("preserves stored fairnessClass and does not invent hashes", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);

@@ -13,8 +13,8 @@
       "protocol": { "name": "cd", "version": "v1" },
       "storageMigration": {
         "state": "current",
-        "current": "018_log_time",
-        "target": "018_log_time"
+        "current": "021_workbench",
+        "target": "021_workbench"
       },
       "compatibility": {
         "status": "compatible",

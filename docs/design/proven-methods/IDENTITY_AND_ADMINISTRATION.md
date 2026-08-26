@@ -43,6 +43,9 @@ password verification does use fixed-length timing-safe comparison.
 | Self-service profile UI (`/profile`, account-menu destination) | Shipped | [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx), [`SelfProfilePanel.test.tsx`](../../../collab/web/src/SelfProfilePanel.test.tsx), [`App.test.tsx`](../../../collab/web/src/App.test.tsx), Help article `my-profile` | Directory-owned fields stay read-only in the UI; the UI still cannot write LDAP |
 | Admin People console (`/admin/people` first-class shell location; `/administration` remains the roles alias) | Shipped | [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), [`AdminPeoplePanel.test.tsx`](../../../collab/web/src/AdminPeoplePanel.test.tsx), [`Administration.test.tsx`](../../../collab/web/src/Administration.test.tsx), [`app-location.ts`](../../../collab/web/src/app-location.ts) | Detail view is inline-expand, not its own URL per person |
 | LDAP-ready claims-to-profile mapping (provider-neutral, pure, admin-previewable) | **Shipped**; login-time LDAP attribute sync is wired | [`directory-mapping.ts`](../../../collab/contracts/src/directory-mapping.ts), [`ldap-adapter.ts`](../../../collab/server/src/modules/auth/ldap-adapter.ts), preview route in `admin-routes.ts` | Live company-directory qualification is not claimed; directory-removal auto-disable remains residual — see §16 |
+| Client-address attribution behind a TLS-terminating ingress (`COLLAB_TRUST_PROXY`) | Shipped | [`config.ts`](../../../collab/server/src/config.ts) `parseTrustProxy`, wired in [`app.ts`](../../../collab/server/src/app.ts), [`ingress-trust.test.ts`](../../../collab/server/src/modules/auth/ingress-trust.test.ts) | Opt-in: unset means the socket peer is the client. Trust-all is refused, so an operator must state the hop count or the proxy addresses |
+| Directory transport trust: PEM-only CA, refused paths, proven LDAPS handshake | Shipped | [`ldap-config.ts`](../../../collab/server/src/modules/auth/ldap-config.ts) `loadTrustAnchors`, [`ldap-live.ts`](../../../collab/server/src/modules/auth/ldap-live.ts) `handshake`, [`ldap-transport.test.ts`](../../../collab/server/src/modules/auth/ldap-transport.test.ts) | `COLLAB_LDAP_CA` replaces Node's default roots rather than adding to them; adding to system trust is `NODE_EXTRA_CA_CERTS`, which this code does not validate |
+| Administrative group picker across OpenLDAP and Active Directory schemas | Shipped | [`ldap-adapter.ts`](../../../collab/server/src/modules/auth/ldap-adapter.ts) `directoryGroupFilter`, [`ldap-directory-schema.test.ts`](../../../collab/server/src/modules/auth/ldap-directory-schema.test.ts) | Matches `groupOfNames`, `groupOfUniqueNames`, `group`, `posixGroup` only; a site-specific structural class is not discovered |
 | Portable-investigation interoperability (never grants access, never auto-maps) | Accepted design / already shipped upstream | [`investigation-portable.ts`](../../../collab/contracts/src/investigation-portable.ts) `historicalParticipantsAreAttributionOnly`, `destinationRoleGranted: false` | This chapter does not modify that subsystem; it only keeps `provenance: "imported_historical"` structurally incapable of authenticating or holding a capability (§5) |
 
 ## 3. Reusable method
@@ -148,6 +151,24 @@ mapping function. See [`directory-mapping.ts`](../../../collab/contracts/src/dir
 - **Invariant:** An admin mutation route decides authorization *before*
   looking up the target id, so a forbidden caller receives an identical 403
   for a real id and a nonexistent one (no enumeration signal).
+- **Trust boundary:** `request.ip` is the client identity used by the login
+  rate limiter and written as the audit `origin`. Fastify derives it from the
+  socket peer unless an ingress is declared, so behind a TLS-terminating
+  reverse proxy every request is attributed to the proxy: one account's failed
+  sign-ins bucket the whole workspace, and no audit row can name an origin.
+  `COLLAB_TRUST_PROXY` moves that boundary explicitly - a hop count, or the
+  proxy addresses/CIDRs. It is opt-in because a directly exposed deployment
+  must not honour `X-Forwarded-For`, and trust-all is refused outright: it
+  would let any client choose its own rate-limit bucket and audit origin.
+- **Trust boundary:** directory transport trust is proven, never assumed.
+  `COLLAB_LDAP_CA` carries PEM content and *replaces* Node's default roots for
+  the directory connection; `node:tls` accepts any string for `ca` without
+  error, so a filesystem path would leave an empty trust store and fail every
+  handshake opaquely - `loadTrustAnchors` refuses it at load time. On LDAPS the
+  transport stage passes only when the directory answered over the established
+  socket (an LDAP result code, or a still-open connection); a connect, DNS, or
+  certificate failure stays a transport failure, so the operator probe cannot
+  report an unreachable directory as available.
 - **Trust boundary:** the auth adapter boundary is unchanged - this chapter
   never calls `authenticate()` and never sees a password. `touchOnLogin`
   only receives what `AuthSuccess`/`AuthAdapter.provenance` already expose.
@@ -352,7 +373,7 @@ counts.
   [`directory-mapping.ts`](../../../collab/contracts/src/directory-mapping.ts),
   [`admin-people.ts`](../../../collab/contracts/src/admin-people.ts)
 - Server: [`collab/server/src/modules/people/`](../../../collab/server/src/modules/people/)
-- Migration: [`015_user_profiles.up.sql`](../../../collab/server/src/db/migrations/015_user_profiles.up.sql) / [`.down.sql`](../../../collab/server/src/db/migrations/015_user_profiles.down.sql). This is the profile/grants schema only. It is **not** the collab storage head. The next additive migrations are [`016_contribution_write_intents.up.sql`](../../../collab/server/src/db/migrations/016_contribution_write_intents.up.sql) (insert-only contribution write intents), [`017_investigation_record.up.sql`](../../../collab/server/src/db/migrations/017_investigation_record.up.sql) (the investigation record graph), and [`018_log_time.up.sql`](../../../collab/server/src/db/migrations/018_log_time.up.sql) (case-bound log corpora and their timezone review record), which is the current head. Synthetic component-health fixtures must report the head, not `015_user_profiles`; the server fixture now reads it from the migration directory rather than restating it, so landing a migration cannot leave a superseded head behind.
+- Migration: [`015_user_profiles.up.sql`](../../../collab/server/src/db/migrations/015_user_profiles.up.sql) / [`.down.sql`](../../../collab/server/src/db/migrations/015_user_profiles.down.sql). This is the profile/grants schema only. It is **not** the collab storage head. Later additive migrations include [`016_contribution_write_intents.up.sql`](../../../collab/server/src/db/migrations/016_contribution_write_intents.up.sql), [`017_investigation_record.up.sql`](../../../collab/server/src/db/migrations/017_investigation_record.up.sql), [`018_log_time.up.sql`](../../../collab/server/src/db/migrations/018_log_time.up.sql), [`019_experiment_lock_privilege.up.sql`](../../../collab/server/src/db/migrations/019_experiment_lock_privilege.up.sql), [`020_model_purpose_policy.up.sql`](../../../collab/server/src/db/migrations/020_model_purpose_policy.up.sql), and [`021_workbench.up.sql`](../../../collab/server/src/db/migrations/021_workbench.up.sql) (investigation Log workbench records and snapshot normalization-revision binding), which is the current head. Synthetic component-health fixtures must report the head, not `015_user_profiles`; the server fixture now reads it from the migration directory rather than restating it, so landing a migration cannot leave a superseded head behind.
 - Web: [`AdminPeoplePanel.tsx`](../../../collab/web/src/AdminPeoplePanel.tsx), the People tab in [`Administration.tsx`](../../../collab/web/src/Administration.tsx), [`SelfProfilePanel.tsx`](../../../collab/web/src/SelfProfilePanel.tsx) at `/profile`
 - Deployment/config: [`collab/deploy/README.md`](../../../collab/deploy/README.md)
 - No tracked issue number exists for this chapter at authoring time; residuals below are literal, not linked.
@@ -387,9 +408,10 @@ counts.
   tables, no changes to existing tables) and its `.down.sql` drops both
   cleanly; rolling back loses no data outside those two tables. It does
   not remain the storage head: `016_contribution_write_intents`,
-  `017_investigation_record`, and `018_log_time` follow it, and the last
-  of those is the current collab schema version reported by `/ready` and
-  the synthetic component-health fixture. Grants
+  `017_investigation_record`, `018_log_time`, `019_experiment_lock_privilege`,
+  and `020_model_purpose_policy` and `021_workbench` follow it, and the last of those is the current collab
+  schema version reported by `/ready` and the synthetic component-health
+  fixture. Grants
   cascade-delete with their owning profile row; profiles themselves are
   never hard-deleted by any code path in this chapter (status is the
   lifecycle mechanism), which is why the migration revokes `DELETE` on
@@ -424,6 +446,14 @@ counts.
   `ldap-synthetic.test.ts` "LDAP group resolution scope (documented
   non-claim)" and the `cn=engineering` nested group in
   `deploy/openldap/seed.ldif`.
+- **`DirectorySearchOptions.timeoutMs` is inert for the LDAP adapter.**
+  `LdapAuthAdapter.directoryClient` ignores the per-call value and reuses the
+  session factory built from `COLLAB_LDAP_TIMEOUT_MS`. The admin directory
+  routes bound themselves with their own `withDeadline`, so the only observable
+  effect is that `/api/admin/ldap/test` can spend the configured directory
+  timeout per search instead of the 3s the probe asks for. Honouring it means
+  threading an override through `LdapSessionFactory`, which the synthetic test
+  factories also implement.
 - **No post-install LDAP editing, apply, or rollback.** Transport, bind, and
   resolution settings are operator-owned environment values (or first-run
   setup draft values). `/admin/ldap` is read-plus-probe: there is no

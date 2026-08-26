@@ -188,6 +188,7 @@ export function CaseBoardPanel(props: {
   readOnly: boolean;
   participants?: ParticipantLabel[];
   routeFocus?: WorkFocus;
+  onOpenCapture?: () => void;
 }) {
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
@@ -324,6 +325,19 @@ export function CaseBoardPanel(props: {
     );
   }
 
+  /**
+   * Analyze shows this board and the Log workbench side by side over the same
+   * investigation. A file uploaded here belongs in both, so the upload says so
+   * rather than leaving the workbench listing a stale inventory until reload.
+   */
+  function announceEvidenceChanged() {
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:evidence-changed", {
+        detail: { caseId: props.caseId },
+      }),
+    );
+  }
+
   async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (props.readOnly || !props.canWrite || uploading) return;
@@ -377,6 +391,7 @@ export function CaseBoardPanel(props: {
         if (!artifactId) {
           setError("Upload succeeded but the snapshot was not frozen: the new evidence id was unavailable. Freeze it from the evidence board.");
           await load(null);
+          announceEvidenceChanged();
           return;
         }
         const evidenceIds = [...new Set([...selectedEvidence, artifactId])];
@@ -388,6 +403,7 @@ export function CaseBoardPanel(props: {
         if (!snapshotResponse.ok) {
           setError(await errorText(snapshotResponse, "Upload succeeded but the snapshot could not be frozen."));
           await load(null);
+          announceEvidenceChanged();
           return;
         }
         const snapshot = (await snapshotResponse.json()) as SnapshotView;
@@ -398,9 +414,11 @@ export function CaseBoardPanel(props: {
             detail: { caseId: props.caseId, snapshotId: snapshot.id },
           }),
         );
+        announceEvidenceChanged();
         return;
       }
       await load(null);
+      announceEvidenceChanged();
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -447,6 +465,19 @@ export function CaseBoardPanel(props: {
           <div className="case-memory__grid">
             <section className="case-memory__card" aria-labelledby="case-evidence-heading">
               <h4 id="case-evidence-heading">Evidence board</h4>
+              <p className="case-memory__card-copy">
+                Find files by name, path, or kind. In Capture, resolve ambiguous log times before
+                freezing a snapshot.
+              </p>
+              {props.onOpenCapture ? (
+                <button
+                  type="button"
+                  className="case-memory__review-times"
+                  onClick={props.onOpenCapture}
+                >
+                  Review timestamps in Capture
+                </button>
+              ) : null}
               {artifacts.length === 0 ? <p className="case-memory__empty">No evidence has been registered yet.</p> : null}
               {artifacts.length > 0 ? (
                 <div className="case-memory__evidence-tools">
@@ -465,12 +496,18 @@ export function CaseBoardPanel(props: {
                     />
                   </label>
                   <p aria-live="polite">
-                    {visibleArtifacts.length} of {artifacts.length} shown · {selectedEvidence.length} selected
+                    {visibleArtifacts.length.toLocaleString()} matching · showing{" "}
+                    {Math.min(renderedArtifacts.length, visibleArtifacts.length).toLocaleString()} ·{" "}
+                    {selectedEvidence.length.toLocaleString()} selected
                   </p>
                   {!props.readOnly && props.canLead ? (
                     <div className="case-memory__selection-actions">
-                      <button type="button" onClick={selectVisibleEvidence} disabled={visibleArtifacts.length === 0}>
-                        Select all shown
+                      <button
+                        type="button"
+                        onClick={selectVisibleEvidence}
+                        disabled={visibleArtifacts.length === 0}
+                      >
+                        {evidenceFilter.trim() ? "Select all matching" : "Select all evidence"}
                       </button>
                       <button type="button" onClick={() => setSelectedEvidence([])} disabled={selectedEvidence.length === 0}>
                         Clear selection
@@ -554,7 +591,7 @@ export function CaseBoardPanel(props: {
                     type="button"
                     onClick={() => setEvidenceLimit((current) => current + INITIAL_EVIDENCE)}
                   >
-                    Show {Math.min(INITIAL_EVIDENCE, hiddenArtifactCount).toLocaleString()} more
+                    Show {Math.min(INITIAL_EVIDENCE, hiddenArtifactCount).toLocaleString()} more matching
                   </button>
                 </div>
               ) : null}
@@ -629,7 +666,12 @@ export function CaseBoardPanel(props: {
                 </form>
               ) : null}
               {!props.readOnly && props.canLead ? (
-                <button className="login__submit" type="button" onClick={() => void freezeSnapshot()}>
+                <button
+                  className="login__submit"
+                  type="button"
+                  onClick={() => void freezeSnapshot()}
+                  disabled={selectedEvidence.length === 0}
+                >
                   Freeze selected evidence ({selectedEvidence.length})
                 </button>
               ) : null}

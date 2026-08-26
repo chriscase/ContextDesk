@@ -31,6 +31,7 @@ import {
 } from "../modules/people/index.js";
 import { MemoryExperimentStore, type ExperimentStore } from "../modules/experiments/index.js";
 import { MemoryTriageJobStore, type TriageJobStore } from "../modules/triage-runs/index.js";
+import { MemoryModelPurposePolicyStore, type ModelPurposePolicyStore } from "../modules/model-policy/index.js";
 import {
   MemoryPortableApplyStateStore,
   type PortableApplyStateStore,
@@ -285,6 +286,7 @@ export interface SqliteRuntime {
   runs: RunStore;
   experiments: ExperimentStore;
   jobs: TriageJobStore;
+  modelPolicy: ModelPurposePolicyStore;
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
@@ -350,6 +352,12 @@ export function createSqliteRuntime(
     "jobs",
     rawJobs,
     new Set(["insert", "claimQueued", "renewLease", "recoverStale", "update", "restore"]),
+  );
+  const modelPolicy = persistentMemoryStore(
+    state,
+    "model_purpose_policy",
+    new MemoryModelPurposePolicyStore(),
+    new Set(["save", "restore"]),
   );
   const rawApplyState = new MemoryPortableApplyStateStore();
   const applyState = persistentMemoryStore(
@@ -429,6 +437,7 @@ export function createSqliteRuntime(
     runs,
     experiments,
     jobs,
+    modelPolicy,
     applyState,
     profiles,
     grants,

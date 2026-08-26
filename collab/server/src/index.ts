@@ -11,6 +11,12 @@ import {
   createLogTimeCasePort,
   logTimeBridgeOptions,
 } from "./modules/log-time/index.js";
+import {
+  MemoryWorkbenchStore,
+  PgWorkbenchStore,
+  WorkbenchService,
+  createWorkbenchCasePort,
+} from "./modules/workbench/index.js";
 import { PgAuditStore, type AuditStore } from "./modules/audit/index.js";
 import {
   LdapAuthAdapter,
@@ -44,6 +50,11 @@ import {
   TriageRunService,
   type TriageJobStore,
 } from "./modules/triage-runs/index.js";
+import {
+  ModelPurposePolicyService,
+  PgModelPurposePolicyStore,
+  type ModelPurposePolicyStore,
+} from "./modules/model-policy/index.js";
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 import {
   PgLocalGrantStore,
@@ -78,6 +89,7 @@ interface StorageRuntime {
   runs: RunStore;
   experiments: ExperimentStore;
   jobs: TriageJobStore;
+  modelPolicy: ModelPurposePolicyStore;
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
@@ -103,6 +115,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       runs: runtime.runs,
       experiments: runtime.experiments,
       jobs: runtime.jobs,
+      modelPolicy: runtime.modelPolicy,
       applyState: runtime.applyState,
       profiles: runtime.profiles,
       grants: runtime.grants,
@@ -127,6 +140,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     runs: new PgRunStore(pool),
     experiments: new PgExperimentStore(pool),
     jobs: new PgTriageJobStore(pool),
+    modelPolicy: new PgModelPurposePolicyStore(pool),
     applyState: new PgPortableApplyStateStore(pool),
     profiles: new PgUserProfileStore(pool),
     grants: new PgLocalGrantStore(pool),
@@ -231,14 +245,14 @@ async function main(): Promise<void> {
   });
   // Log-time review needs the shipped host pipeline. With no host binary or
   // no corpus root configured, the routes stay unregistered rather than
-  // offering a review surface that cannot answer.
+  // offering a review surface that cannot answer. The workbench still serves
+  // investigation-owned intake bytes without that host.
+  const logTimeStore =
+    storage.pool === null ? new MemoryLogTimeStore() : new PgLogTimeStore(storage.pool);
   const logTimeBridge = logTimeBridgeOptions();
   const logTime = logTimeBridge
     ? new LogTimeService({
-        store:
-          storage.pool === null
-            ? new MemoryLogTimeStore()
-            : new PgLogTimeStore(storage.pool),
+        store: logTimeStore,
         bridge: new ProcessLogTimeBridge(logTimeBridge),
         cases: createLogTimeCasePort({
           cases: storage.cases,
@@ -249,7 +263,42 @@ async function main(): Promise<void> {
         audit,
       })
     : null;
+  domain.bindNormalizationRevision(async (caseId) =>
+    (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+  );
+  const workbench = new WorkbenchService({
+    store:
+      storage.pool === null ? new MemoryWorkbenchStore() : new PgWorkbenchStore(storage.pool),
+    cases: createWorkbenchCasePort({
+      cases: storage.cases,
+      domain,
+      evidence: store,
+      currentNormalizationRevision: async (caseId) =>
+        (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+      ...(logTime
+        ? {
+            listHostEventStamps: async (caseId) => {
+              const listed = await logTime.listWorkbenchEvents(caseId);
+              if (!listed) return null;
+              return listed.search.hits.map((hit) => ({
+                source: hit.source,
+                message: hit.message,
+                ts: hit.ts,
+                timeQuality: hit.timeQuality,
+                unresolvedLocalTimestamp: hit.unresolvedLocalTimestamp,
+              }));
+            },
+          }
+        : {}),
+    }),
+    audit,
+  });
   const bridge = triageBridgeOptions();
+  const triageProfiles = loadConfiguredTriageProfileCatalog();
+  const modelPolicy = new ModelPurposePolicyService({
+    store: storage.modelPolicy,
+    profiles: triageProfiles,
+  });
   const triageRuns = new TriageRunService({
     cases: domain,
     audit,
@@ -268,7 +317,8 @@ async function main(): Promise<void> {
           gatewayExecutor: new RustBridgeTriageExecutor(bridge),
         }
       : {}),
-    profiles: loadConfiguredTriageProfileCatalog(),
+    profiles: triageProfiles,
+    modelPolicy,
   });
   await triageRuns.recoverPending();
   const exporter = new ExportService({
@@ -339,10 +389,12 @@ async function main(): Promise<void> {
     ...(storage.databaseProbe ? { databaseProbe: storage.databaseProbe } : {}),
     store,
     ...(logTime ? { logTime } : {}),
+    workbench,
     domain,
     catalog,
     imports,
     triageRuns,
+    modelPolicy,
     presence: storage.presence,
     experiments,
     exporter,

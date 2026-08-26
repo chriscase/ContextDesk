@@ -16,9 +16,21 @@
       "types": "./dist/admin-web.d.ts",
       "import": "./dist/admin-web.js"
     },
+    "./triage-lifecycle": {
+      "types": "./dist/triage-lifecycle.d.ts",
+      "import": "./dist/triage-lifecycle.js"
+    },
     "./corpus-intake": {
       "types": "./dist/investigation-corpus-intake.d.ts",
       "import": "./dist/investigation-corpus-intake.js"
+    },
+    "./model-purpose-policy-shared": {
+      "types": "./dist/model-purpose-policy-shared.d.ts",
+      "import": "./dist/model-purpose-policy-shared.js"
+    },
+    "./workbench": {
+      "types": "./dist/investigation-workbench.d.ts",
+      "import": "./dist/investigation-workbench.js"
     },
     "./schemas/*.json": "./schemas/*.json"
   },

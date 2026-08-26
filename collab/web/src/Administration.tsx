@@ -17,20 +17,23 @@ import {
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { AdminPeoplePanel } from "./AdminPeoplePanel.js";
 import { AdminLdapPanel } from "./AdminLdapPanel.js";
+import { AdminModelPolicyPanel } from "./AdminModelPolicyPanel.js";
 import { ComponentHealthPanel } from "./ComponentHealthPanel.js";
 import { protectedApiFetch } from "./protected-api.js";
 
-type AdminTab = "roles" | "people" | "ldap";
+export type AdminTab = "roles" | "people" | "ldap" | "model-policy";
 
 const ADMIN_TAB_PATHS: Record<AdminTab, string> = {
   roles: "/administration",
   people: "/admin/people",
   ldap: "/admin/ldap",
+  "model-policy": "/admin/model-policy",
 };
 
 function adminTabFromPathname(pathname: string): AdminTab {
   if (pathname === "/admin/people") return "people";
   if (pathname === "/admin/ldap") return "ldap";
+  if (pathname === "/admin/model-policy") return "model-policy";
   return "roles";
 }
 
@@ -163,6 +166,8 @@ export function Administration(props: {
         ? "People · Administration · ContextDesk War Room"
         : activeTab === "ldap"
           ? "Directory · Administration · ContextDesk War Room"
+          : activeTab === "model-policy"
+            ? "Model use · Administration · ContextDesk War Room"
           : "Administration · ContextDesk War Room";
   }, [activeTab]);
 
@@ -392,6 +397,16 @@ export function Administration(props: {
         >
           Directory
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "model-policy"}
+          aria-controls="administration-model-policy-panel"
+          id="administration-tab-model-policy"
+          onClick={() => selectTab("model-policy")}
+        >
+          Model use
+        </button>
       </div>
 
       <div
@@ -569,6 +584,15 @@ export function Administration(props: {
           Permissions come only from the persistent mappings shown above.
         </p>
       </aside>
+      </div>
+
+      <div
+        id="administration-model-policy-panel"
+        role="tabpanel"
+        aria-labelledby="administration-tab-model-policy"
+        hidden={activeTab !== "model-policy"}
+      >
+        {activeTab === "model-policy" ? <AdminModelPolicyPanel /> : null}
       </div>
 
       {pending ? <Confirmation change={pending} onCancel={closeConfirmation} onConfirm={() => void applyChange(pending)} /> : null}

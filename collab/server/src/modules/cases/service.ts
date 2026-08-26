@@ -45,12 +45,20 @@ import {
   previewCorpusBytes,
 } from "../corpus-intake/index.js";
 import {
+  ARCHIVED_STATUS,
   CORPUS_INTAKE_BATCH_SCHEMA_ID,
+  evaluateArchive,
+  evaluateRestore,
+  isLifecycleTransition,
   parseCorpusIntakeBatch,
   parseCorpusIntakeCommitRequest,
   parseCorpusIntakePreviewRequest,
+  restoreTarget,
   type CorpusIntakeBatchV1,
   type CorpusIntakePreviewReportV1,
+  type LifecycleRefusal,
+  type LifecycleVerdict,
+  type StatusHistoryEntry,
 } from "@cd-collab/contracts";
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
 import { deriveCaseBoard, type AcceptedDecisionBoardInput } from "./board.js";
@@ -138,6 +146,23 @@ export class SituationConflictError extends Error {
 }
 
 export class CorpusIntakeConflictError extends Error {}
+
+/**
+ * An archive or restore the lifecycle contract refused.
+ *
+ * Carries the machine-readable reason so the surface can open the control
+ * that would clear it — a legal-hold refusal should point at the hold, not at
+ * a generic failure the operator has to guess about.
+ */
+export class LifecycleRefusedError extends Error {
+  constructor(
+    readonly reason: LifecycleRefusal,
+    readonly detail: string,
+  ) {
+    super(detail);
+    this.name = "LifecycleRefusedError";
+  }
+}
 
 export class ContributionConflictError extends Error {
   constructor(readonly currentRevision?: number) {
@@ -307,6 +332,10 @@ export interface StatusChangeOptions {
 }
 
 export class CaseService {
+  private normalizationRevisionFor:
+    | ((caseId: string) => Promise<number | null>)
+    | null = null;
+
   constructor(
     private readonly evidence: EvidenceStore,
     private readonly audit: AuditStore,
@@ -314,6 +343,12 @@ export class CaseService {
     private readonly catalog: CatalogService = new CatalogService(),
     private readonly resolutionGuard?: StatusResolutionGuard,
   ) {}
+
+  bindNormalizationRevision(
+    lookup: (caseId: string) => Promise<number | null>,
+  ): void {
+    this.normalizationRevisionFor = lookup;
+  }
 
   async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
     return withCatalogCaseMutation(async () => {
@@ -659,6 +694,20 @@ export class CaseService {
     const canonicalTime = canonicalClientTime(options.clientTime);
     const row = await this.requireCase(caseId);
     const previousStatus = row.status;
+    // Archiving and restoring are the two transitions that move an
+    // investigation in or out of the working list, so they answer to the
+    // lifecycle contract before anything else runs. Ordinary transitions
+    // between working statuses are none of its business and fall straight
+    // through. Evaluated before the resolution guard and before any write, so
+    // a refused archive leaves the investigation exactly as it was.
+    if (isLifecycleTransition(previousStatus, status)) {
+      const subject = { status: previousStatus, legalHold: row.legalHold };
+      const verdict =
+        status === ARCHIVED_STATUS
+          ? evaluateArchive(subject)
+          : evaluateRestore(subject, await this.statusHistory(caseId));
+      if (!verdict.allowed) throw new LifecycleRefusedError(verdict.reason, verdict.detail);
+    }
     // Fail closed rather than fail open. An installation wired without a
     // resolution guard cannot reach a status that claims the question was
     // answered — the absence of a guard is treated as "nothing authorises
@@ -699,6 +748,62 @@ export class CaseService {
       });
       return this.toCase(await this.requireCase(caseId));
     }, this.audit);
+  }
+
+  /**
+   * The recorded status changes for this investigation, oldest first.
+   *
+   * Read from the timeline rather than a dedicated column: `case_status` rows
+   * already carry the status that was written and the clock it was written
+   * on, so restore reads history that has always been there instead of
+   * requiring a migration to record it a second time.
+   *
+   * A row whose payload cannot be read is skipped rather than guessed at —
+   * `restoreTarget` treats an absent history as "land on open", which is the
+   * safe answer.
+   */
+  private async statusHistory(caseId: string): Promise<StatusHistoryEntry[]> {
+    const rows = await this.store.listTimeline(caseId);
+    const history: StatusHistoryEntry[] = [];
+    for (const row of rows) {
+      if (row.kind !== "case_status") continue;
+      let status: unknown;
+      try {
+        status = (JSON.parse(row.payload) as { status?: unknown }).status;
+      } catch {
+        continue;
+      }
+      if (typeof status !== "string") continue;
+      history.push({ status, recordedAt: row.serverTime });
+    }
+    return history;
+  }
+
+  /**
+   * What archiving or restoring this investigation would do, decided once
+   * from the same recorded history the write path uses.
+   *
+   * Both verdicts come from here rather than being recomputed by a caller, so
+   * the answer a surface shows before the click and the answer the write path
+   * enforces after it cannot drift apart.
+   */
+  async lifecycleFor(caseId: string): Promise<{
+    status: CaseStatus;
+    legalHold: boolean;
+    archive: LifecycleVerdict;
+    restore: LifecycleVerdict;
+    restoreTarget: CaseStatus;
+  }> {
+    const row = await this.requireCase(caseId);
+    const subject = { status: row.status, legalHold: row.legalHold };
+    const history = await this.statusHistory(caseId);
+    return {
+      status: row.status,
+      legalHold: row.legalHold,
+      archive: evaluateArchive(subject),
+      restore: evaluateRestore(subject, history),
+      restoreTarget: restoreTarget(history),
+    };
   }
 
   async addParticipant(
@@ -789,6 +894,7 @@ export class CaseService {
       visibility?: PrivacyClass;
       protocolVersion?: string;
       clientTime?: string;
+      normalizationRevision?: number | null;
     },
     origin: string,
   ): Promise<SnapshotV1> {
@@ -821,11 +927,18 @@ export class CaseService {
       if (visibility === "share_safe" && selected.some((item) => item.privacyClass !== "share_safe")) {
         throw new Error("share-safe snapshot cannot include owner-only evidence");
       }
+      const normalizationRevision =
+        input.normalizationRevision !== undefined
+          ? input.normalizationRevision
+          : (await this.normalizationRevisionFor?.(caseId)) ?? null;
       const fingerprint = snapshotFingerprint({
         parentSnapshotId,
         evidence: selected,
         visibility,
         protocolVersion,
+        ...(typeof normalizationRevision === "number"
+          ? { normalizationRevision }
+          : {}),
       });
       const replay = existing.find((row) => row.fingerprint === fingerprint);
       if (replay) return replay;
@@ -842,6 +955,9 @@ export class CaseService {
         status: "frozen",
         createdAt: new Date().toISOString(),
         createdBy: actor.id,
+        ...(typeof normalizationRevision === "number"
+          ? { normalizationRevision }
+          : { normalizationRevision: null }),
       };
       try {
         await this.store.insertSnapshot(row);

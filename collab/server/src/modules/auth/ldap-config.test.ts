@@ -96,6 +96,34 @@ describe("LDAP config", () => {
     expect(cfg.bindPassword).toBe("fixture-admin-secret");
   });
 
+  it("makes the no-service-bind group-refresh boundary explicit", async () => {
+    const { LdapAuthAdapter } = await import("./ldap-adapter.js");
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      ...identityEnv,
+    });
+    const adapter = new LdapAuthAdapter(cfg, {
+      event: () => undefined,
+      lines: () => [],
+    });
+    expect(adapter.groupRefreshMode).toBe("login_snapshot");
+  });
+
+  it("uses live group refresh when a service bind is configured", async () => {
+    const { LdapAuthAdapter } = await import("./ldap-adapter.js");
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      COLLAB_LDAP_BIND_DN: "cn=svc,dc=example,dc=test",
+      COLLAB_LDAP_BIND_PASSWORD: "fixture-service-secret",
+      ...identityEnv,
+    });
+    const adapter = new LdapAuthAdapter(cfg, {
+      event: () => undefined,
+      lines: () => [],
+    });
+    expect(adapter.groupRefreshMode).toBe("live");
+  });
+
   it("refuses TLS verification disable without explicit dev mode", () => {
     expect(() =>
       loadLdapConfig({
@@ -113,6 +141,48 @@ describe("LDAP config", () => {
     expect(cfg.verifyTls).toBe(true);
     expect(ldapTlsOptions(cfg).rejectUnauthorized).toBe(true);
     expect(ldapTlsOptions(cfg).ecdhCurve).toBeUndefined();
+  });
+
+  it("refuses a directory CA that Node would silently load as an empty trust store", () => {
+    // node:tls accepts any string for `ca` without throwing, so a filesystem
+    // path leaves an empty trust store and turns every handshake into an
+    // opaque verification failure. Refuse it where the operator can see it.
+    for (const value of [
+      "/etc/ssl/certs/company-root.pem",
+      "C:\\ProgramData\\company\\root.pem",
+      "not a certificate",
+    ]) {
+      expect(() =>
+        loadLdapConfig({
+          COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+          COLLAB_LDAP_CA: value,
+          ...identityEnv,
+        }),
+      ).toThrow(/PEM certificate content, not a file path/);
+    }
+  });
+
+  it("treats a blank directory CA as system trust and keeps PEM content", () => {
+    const blank = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      COLLAB_LDAP_CA: "   ",
+      ...identityEnv,
+    });
+    expect(blank.ca).toBeUndefined();
+    // Unset `ca` means Node's default roots (plus NODE_EXTRA_CA_CERTS), so the
+    // TLS options must not carry an empty override.
+    expect(ldapTlsOptions(blank).ca).toBeUndefined();
+    expect(publicLdapConfig(blank, "ldap").caConfigured).toBe(false);
+
+    const pem = `-----BEGIN CERTIFICATE-----\n${"A".repeat(64)}\n-----END CERTIFICATE-----\n`;
+    const configured = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      COLLAB_LDAP_CA: pem,
+      ...identityEnv,
+    });
+    expect(configured.ca).toBe(pem.trim());
+    expect(ldapTlsOptions(configured).ca).toBe(pem.trim());
+    expect(publicLdapConfig(configured, "ldap").caConfigured).toBe(true);
   });
 
   it("fails closed when required live LDAP coverage is missing its URL", () => {

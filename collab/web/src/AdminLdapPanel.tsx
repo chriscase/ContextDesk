@@ -192,6 +192,24 @@ export function AdminLdapPanel() {
               <dd>{config.bindPasswordConfigured ? "configured (not displayed)" : "not configured"}</dd>
             </div>
             <div>
+              <dt>Group refresh</dt>
+              <dd>
+                {config.authMode !== "ldap"
+                  ? "not applicable"
+                  : config.bindPasswordConfigured
+                    ? "live — the service bind re-reads membership on each request"
+                    : "login-time snapshot — membership changes apply at next sign-in"}
+              </dd>
+            </div>
+            <div>
+              <dt>Trusted CA</dt>
+              <dd>
+                {config.caConfigured
+                  ? "operator-supplied CA (replaces the system trust store)"
+                  : "system trust store"}
+              </dd>
+            </div>
+            <div>
               <dt>UPN suffix</dt>
               <dd>
                 <code>{config.upnSuffix ?? "not set"}</code>

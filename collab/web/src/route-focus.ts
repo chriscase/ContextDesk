@@ -41,13 +41,36 @@ export function matchingRouteItem(focus: WorkFocus): HTMLElement | null {
   return null;
 }
 
+/**
+ * All elements carrying this id, in document order.
+ *
+ * The same panel can legitimately be anchored under more than one stage (for
+ * example Timezone review, which sits on both Capture and Analyze). Only one
+ * of those copies is visible at a time, and `getElementById` returns whichever
+ * comes first in the document — so a link addressed at the visible copy would
+ * otherwise resolve to a hidden one and focus nothing.
+ */
+function elementsWithId(id: string): HTMLElement[] {
+  const escaped =
+    typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? CSS.escape(id)
+      : id.replace(/["\\]/g, "\\$&");
+  try {
+    return [...document.querySelectorAll<HTMLElement>(`#${escaped}`)];
+  } catch {
+    const only = document.getElementById(id);
+    return only ? [only] : [];
+  }
+}
+
 export function visibleSectionTarget(section: string): HTMLElement | null {
   const ids = isDiscussionSection(section)
     ? [section, DISCUSSION_ELEMENT_ID]
     : [section];
   for (const id of ids) {
-    const target = document.getElementById(id);
-    if (isVisibleRouteTarget(target)) return target;
+    for (const target of elementsWithId(id)) {
+      if (isVisibleRouteTarget(target)) return target;
+    }
   }
   return null;
 }

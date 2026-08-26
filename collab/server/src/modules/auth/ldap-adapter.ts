@@ -8,6 +8,7 @@ import type {
   AuthIdentity,
   AuthSuccess,
   DirectorySearchOptions,
+  GroupRefreshMode,
 } from "./adapter.js";
 import type { LdapConfig } from "./ldap-config.js";
 import { escapeDn, escapeFilter, interpolate } from "./ldap-escape.js";
@@ -40,8 +41,24 @@ export function directoryIdentityFilter(term: string): string {
   return `(&(objectClass=person)(|(uid=${escaped}*)(cn=${escaped}*)(displayName=${escaped}*)))`;
 }
 
+/**
+ * Group object classes the administrative directory picker will match.
+ * `groupOfNames` / `groupOfUniqueNames` / `posixGroup` cover the common
+ * OpenLDAP schemas; Active Directory groups are plain `group` and would
+ * otherwise never appear in this list.
+ */
+const DIRECTORY_GROUP_OBJECT_CLASSES = [
+  "groupOfNames",
+  "groupOfUniqueNames",
+  "group",
+  "posixGroup",
+] as const;
+
 export function directoryGroupFilter(term: string): string {
-  return `(&(objectClass=groupOfNames)(cn=${escapeFilter(term)}*))`;
+  const classes = DIRECTORY_GROUP_OBJECT_CLASSES.map(
+    (name) => `(objectClass=${name})`,
+  ).join("");
+  return `(&(|${classes})(cn=${escapeFilter(term)}*))`;
 }
 
 function userFilter(config: LdapConfig, username: string): string {
@@ -75,12 +92,16 @@ function claimsFromEntry(entry: Record<string, unknown>): Record<string, string>
 
 export class LdapAuthAdapter implements AuthAdapter {
   readonly provenance = "ldap" as const;
+  readonly groupRefreshMode: GroupRefreshMode;
 
   constructor(
     private readonly config: LdapConfig,
     private readonly log: AuthLog,
     private readonly sessions: LdapSessionFactory = createLiveLdapFactory(config),
-  ) {}
+  ) {
+    this.groupRefreshMode =
+      config.bindDn && config.bindPassword ? "live" : "login_snapshot";
+  }
 
   async authenticate(
     username: string,

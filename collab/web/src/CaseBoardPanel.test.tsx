@@ -189,13 +189,13 @@ describe("CaseBoardPanel", () => {
     const { rerender } = render(
       <CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />,
     );
-    expect(await screen.findByText("80 of 80 shown · 0 selected")).toBeTruthy();
+    expect(await screen.findByText("80 matching · showing 25 · 0 selected")).toBeTruthy();
     expect(screen.queryByText("note-49.txt")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Show 25 more" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show 25 more matching" }));
     expect(screen.getByText("note-49.txt")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "node-a" } });
-    expect(screen.getByText("5 of 80 shown · 0 selected")).toBeTruthy();
+    expect(screen.getByText("5 matching · showing 5 · 0 selected")).toBeTruthy();
     expect(screen.queryByText("note-12.txt")).toBeNull();
     rerender(
       <CaseBoardPanel
@@ -218,14 +218,60 @@ describe("CaseBoardPanel", () => {
     const routedEvidence = screen.getByText("note-79.txt").closest("li") as HTMLElement;
     await waitFor(() => expect(document.activeElement).toBe(routedEvidence));
     fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "node-a" } });
-    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
-    expect(screen.getByText("5 of 80 shown · 5 selected")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select all matching" }));
+    expect(screen.getByText("5 matching · showing 5 · 5 selected")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Freeze selected evidence (5)" }));
 
     await waitFor(() =>
       expect(snapshotBody).toEqual({
         evidenceIds: ["artifact-0", "artifact-1", "artifact-2", "artifact-3", "artifact-4"],
       }),
+    );
+  });
+
+  it("offers a direct handoff to timestamp review and keeps freeze inactive without a selection", async () => {
+    const openCapture = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) {
+          return {
+            ok: true,
+            json: async () => ({
+              artifacts: [{
+                id: "artifact-1",
+                kind: "log",
+                filename: "worker.log",
+                contentHash: "a".repeat(64),
+                verificationStatus: "verified",
+                privacyClass: "owner_only",
+                uploaderId: "lead",
+              }],
+            }),
+          };
+        }
+        if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: [] }) };
+        return { ok: true, json: async () => ({ snapshotId: null, notice: "", findings: [] }) };
+      }),
+    );
+
+    render(
+      <CaseBoardPanel
+        caseId="case-1"
+        canWrite
+        canLead
+        readOnly={false}
+        onOpenCapture={openCapture}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Review timestamps in Capture" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Review timestamps in Capture" }));
+    expect(openCapture).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Freeze selected evidence (0)" })).toHaveProperty(
+      "disabled",
+      true,
     );
   });
 

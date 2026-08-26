@@ -162,10 +162,17 @@ describe("synthetic demo server", () => {
       activities: { caseId: string; caseTitle: string; targetId: string | null }[];
     };
     expect(activity.activities.length).toBeGreaterThan(0);
-    expect(activity.activities.every((row) => row.caseId === demo.caseId)).toBe(true);
+    // The feed spans every seeded investigation, not only the primary one:
+    // the demo now also carries a correspondence case, a human-notes-only
+    // case, and an archived one. Each row still names the investigation it
+    // belongs to, which is what the projection has to guarantee.
+    expect(activity.activities.every((row) => row.caseId.length > 0)).toBe(true);
+    expect(activity.activities.every((row) => row.caseTitle.length > 0)).toBe(true);
+    expect(activity.activities.some((row) => row.caseId === demo.caseId)).toBe(true);
     expect(activity.activities.some((row) => row.caseTitle.includes("Checkout timeouts"))).toBe(
       true,
     );
+    expect(new Set(activity.activities.map((row) => row.caseId)).size).toBeGreaterThan(1);
     const unauthenticatedPresence = await demo.app.inject({
       method: "GET",
       url: `/api/cases/${demo.caseId}/presence`,

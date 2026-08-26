@@ -77,7 +77,34 @@ export type LogTimeAction =
       declaredAt: number;
     }
   | { kind: "clear"; corpusId: string; expectedRevision: number; source: string }
-  | { kind: "undo"; corpusId: string; expectedRevision: number };
+  | { kind: "undo"; corpusId: string; expectedRevision: number }
+  | {
+      kind: "chronology";
+      corpusId: string;
+      search: string | null;
+      sources: string[];
+      limit: number;
+      cursor: string | null;
+    }
+  | {
+      kind: "search";
+      corpusId: string;
+      expectedRevision: number;
+      query: string;
+      mode: "literal" | "case_insensitive" | "regex";
+      caseSensitive: boolean;
+      k: number;
+      sources?: string[];
+      timeFrom?: number | null;
+      timeTo?: number | null;
+    }
+  | {
+      kind: "events";
+      corpusId: string;
+      expectedRevision: number;
+      sources?: string[];
+      k: number;
+    };
 
 export interface HostSourceStatus {
   source: string;
@@ -130,6 +157,40 @@ export interface HostRevision {
   eventCount: number;
 }
 
+export interface HostChronologyRow {
+  seq: number;
+  source: string;
+  rawTimestamp: string | null;
+  normalizedInstant: string | null;
+  timeState: "resolved" | "order_only";
+  timestampProvenance:
+    | "explicit_wall"
+    | "resolved_local"
+    | "unresolved_local"
+    | "order_only"
+    | "legacy_unknown";
+  orderOnlyReason:
+    | "timezone_unresolved"
+    | "no_recognized_local_timestamp"
+    | "unsupported_local_timestamp_shape"
+    | "ambiguous_dst_fold"
+    | "nonexistent_dst_gap"
+    | "zone_abbreviation_mismatch"
+    | "resolved_instant_out_of_range"
+    | null;
+  level: string;
+  message: string;
+}
+
+export interface HostChronology {
+  corpusRevision: number;
+  rows: HostChronologyRow[];
+  nextCursor: string | null;
+  totalMatched: number;
+  orderOnlyCount: number;
+  timeQuality: "wall" | "mixed" | "order_only";
+}
+
 export interface HostBuild {
   corpusName: string;
   eventsImported: number;
@@ -137,6 +198,27 @@ export interface HostBuild {
   sourcesFailed: number;
   partial: boolean;
   timezoneAmbiguousSources: string[];
+}
+
+export interface HostSearchHit {
+  seq: number;
+  source: string;
+  message: string;
+  level: string;
+  ts: number;
+  timeQuality: string;
+  unresolvedLocalTimestamp: string | null;
+  excerpt: string | null;
+}
+
+export interface HostSearch {
+  bounded: boolean;
+  atLeast: number;
+  returned: number;
+  partial: boolean;
+  cancelled: boolean;
+  diagnostic: string | null;
+  hits: HostSearchHit[];
 }
 
 export interface HostResult {
@@ -147,6 +229,8 @@ export interface HostResult {
   sources?: HostSourceStatus[];
   preview?: HostPreview;
   revision?: HostRevision;
+  chronology?: HostChronology;
+  search?: HostSearch;
   declarations: Record<string, HostDeclaration>;
 }
 

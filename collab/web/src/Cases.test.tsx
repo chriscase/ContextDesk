@@ -66,6 +66,9 @@ function stubCaseFetch(options?: {
     if (url.endsWith("/experiments") || url.endsWith("/export/inventory")) {
       return { ok: true, json: async () => ({ experiments: [], items: [] }) };
     }
+    if (url.includes("/workbench")) {
+      return { ok: true, json: async () => ({ items: [], views: [], bookmarks: [], candidateCount: 0 }) };
+    }
     return { ok: false, json: async () => ({}) };
   });
   vi.stubGlobal("fetch", stub);
@@ -126,7 +129,7 @@ describe("war room overview", () => {
     stubCaseFetch();
     render(<Cases roles={["case-lead"]} view="investigations" />);
     const search = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, ID, participant, or creator",
+      name: "Search investigations by title, situation text, people, or ID",
     });
 
     fireEvent.change(search, { target: { value: "alice" } });
@@ -1120,7 +1123,7 @@ describe("focused investigation view", () => {
     stubCaseFetch();
     render(<Cases roles={["case-lead"]} view="investigations" />);
     const search = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, ID, participant, or creator",
+      name: "Search investigations by title, situation text, people, or ID",
     });
     fireEvent.change(search, { target: { value: "fixture" } });
     fireEvent.click(screen.getByRole("button", { name: "Fixture incident" }));
@@ -1134,7 +1137,7 @@ describe("focused investigation view", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
     const searchAgain = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, ID, participant, or creator",
+      name: "Search investigations by title, situation text, people, or ID",
     });
     expect((searchAgain as HTMLInputElement).value).toBe("fixture");
   });
@@ -1301,10 +1304,15 @@ describe("focused investigation view", () => {
     render(<Cases roles={["case-lead"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
     await screen.findByRole("heading", { name: "Situation" });
+    expect(screen.getByText("Focused investigation")).toBeTruthy();
+    expect(screen.getByText(/Describe the problem and open questions/)).toBeTruthy();
+    expect(screen.getByText(/Write the problem and open questions/)).toBeTruthy();
 
     const stageNav = screen.getByRole("navigation", { name: "Investigation stages" });
     fireEvent.click(within(stageNav).getByRole("button", { name: /Capture/ }));
     expect(await screen.findByRole("heading", { name: "Capture evidence and observations" })).toBeTruthy();
+    expect(screen.getByText(/Add notes, chat, or logs/)).toBeTruthy();
+    expect(screen.getByText(/Add a note, paste a chat, or upload logs/)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Situation" })).toBeNull();
     expect(
       within(stageNav).getByRole("button", { name: /Capture/ }).getAttribute("aria-current"),
@@ -1312,18 +1320,24 @@ describe("focused investigation view", () => {
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Analyze/ }));
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+    expect(screen.getByText(/Freeze the evidence and ask one clear question/)).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Run history" })).toBeTruthy();
+    expect(screen.getByText(/Select the evidence, freeze it/)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Capture evidence and observations" })).toBeNull();
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Compare/ }));
     expect(
       await screen.findByRole("heading", { name: "Experiment lab" }),
     ).toBeTruthy();
+    expect(screen.getByText(/Review differences across finished runs/)).toBeTruthy();
+    expect(screen.getByText(/Choose two or more finished runs/)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Evidence and snapshots" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Accepted decision" })).toBeNull();
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Decide/ }));
     expect(await screen.findByRole("heading", { name: "Decision journal" })).toBeTruthy();
+    expect(screen.getByText(/Record the human decision and reason/)).toBeTruthy();
+    expect(screen.getByText(/Review the record, add the human decision/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Update status" })).toBeTruthy();
     expect(screen.getByText("Case export tools")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Experiment lab" })).toBeNull();
@@ -1459,7 +1473,7 @@ describe("focused investigation view", () => {
     });
 
     fireEvent.click(within(stageNav).getByRole("button", { name: /Analyze/ }));
-    expect(screen.queryByRole("region", { name: "Timezone review" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Timezone review" })).toBeTruthy();
   });
 
   it("keeps the stable triage anchors mounted for deep links", async () => {

@@ -3,6 +3,9 @@ import { CaseDiscussion } from "./CaseDiscussion.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
+import { LogChronologyPanel } from "./LogChronologyPanel.js";
+import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
+import { LogWorkbench } from "./LogWorkbench.js";
 import { TriageRunPanel } from "./TriageRunPanel.js";
 import { WORKSTREAMS_SECTION, Workstreams } from "./Workstreams.js";
 import {
@@ -21,6 +24,12 @@ import { focusArrivalCopy } from "./route-focus-copy.js";
 import { useRoutedItemPresence } from "./route-focus.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { InvestigationRecordPanel } from "./InvestigationRecord.js";
+import {
+  hiddenArchivedNotice,
+  statusCounts as investigationStatusCounts,
+  visibleInvestigations,
+} from "./investigation-search.js";
+import { LifecyclePanel } from "./LifecyclePanel.js";
 import { ResolutionForm } from "./ResolutionForm.js";
 import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
 import { loadEntities, type EntityRow } from "./Entities.js";
@@ -123,11 +132,11 @@ interface LegacyActivityItem {
 const KNOWN_STATUSES = ["open", "monitoring", "resolved", "archived"] as const;
 
 const STAGES: readonly { id: StageId; label: string; hint: string }[] = [
-  { id: "situation", label: "Situation", hint: "shared picture" },
-  { id: "capture", label: "Capture", hint: "notes & imports" },
-  { id: "analyze", label: "Analyze", hint: "evidence & AI lanes" },
+  { id: "situation", label: "Situation", hint: "set the question" },
+  { id: "capture", label: "Capture", hint: "add evidence" },
+  { id: "analyze", label: "Analyze", hint: "inspect logs, freeze & run" },
   { id: "compare", label: "Compare", hint: "lanes side by side" },
-  { id: "decide", label: "Decide", hint: "human call & export" },
+  { id: "decide", label: "Decide", hint: "record the call" },
 ];
 
 const STAGE_LABELS: Record<StageId, string> = {
@@ -136,6 +145,14 @@ const STAGE_LABELS: Record<StageId, string> = {
   analyze: "Analyze",
   compare: "Compare",
   decide: "Decide",
+};
+
+const STAGE_NEXT_ACTIONS: Record<StageId, string> = {
+  situation: "Describe the problem and open questions, then add evidence.",
+  capture: "Add notes, chat, or logs. Move to Analyze when the record is ready.",
+  analyze: "Freeze the evidence and ask one clear question in a triage run.",
+  compare: "Review differences across finished runs; agreement is not proof.",
+  decide: "Record the human decision and reason, then export the safe record.",
 };
 
 function creatorName(row: CaseRow): string | null {
@@ -685,6 +702,13 @@ export function Cases(props: {
   // Entity filtering reads a server-scoped index, so choosing an entity can
   // only ever narrow what this reader could already list.
   const [entityFilter, setEntityFilter] = useState("all");
+  const [occurredFrom, setOccurredFrom] = useState("");
+  const [decisionFilter, setDecisionFilter] = useState("all");
+  const [serviceFilter, setServiceFilter] = useState("all");
+  // Archived investigations stay out of the working list until asked for.
+  // That is what makes archiving mean something; the count of what is
+  // withheld is always reported beside the control that reveals it.
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [entityOptions, setEntityOptions] = useState<EntityRow[]>([]);
   const [involvementIndex, setInvolvementIndex] = useState<
     { investigationId: string; entityId: string }[]
@@ -995,6 +1019,13 @@ export function Cases(props: {
         setResolutionPrompted(true);
         return;
       }
+      // A lifecycle refusal already reads as a complete, actionable sentence
+      // ("...under legal hold... clear the hold first"). Prefixing it with a
+      // generic failure line would bury the part that says what to do.
+      if (detail.error === "lifecycle_refused" && detail.detail) {
+        setActionError(detail.detail);
+        return;
+      }
       if (detail.error === "resolution_conflict") {
         setResolutionError(
           "Someone else recorded a conclusion while this form was open. Reload the investigation and read theirs before replacing it.",
@@ -1150,38 +1181,37 @@ export function Cases(props: {
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
-  const normalizedSearch = caseSearch.trim().toLocaleLowerCase();
   const casesByEntity = new Map<string, Set<string>>();
   for (const entry of involvementIndex) {
     const bucket = casesByEntity.get(entry.entityId) ?? new Set<string>();
     bucket.add(entry.investigationId);
     casesByEntity.set(entry.entityId, bucket);
   }
-  const visibleCases = cases.filter((c) => {
-    if (statusFilter !== "all" && c.status !== statusFilter) return false;
-    if (entityFilter !== "all" && !casesByEntity.get(entityFilter)?.has(c.id)) return false;
-    if (!normalizedSearch) return true;
-    return [
-      c.title,
-      c.reportedProblem,
-      c.problem,
-      c.summary,
-      c.id,
-      c.createdBy,
-      c.createdByUsername,
-      c.creator,
-      creatorName(c),
-      ...(c.participants ?? []).map((p) => p.username),
-    ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch));
+  const entityLabelsById = new Map(entityOptions.map((entity) => [entity.id, entity.label]));
+  const entityLabelsFor = (row: CaseRow): string[] => {
+    const labels: string[] = [];
+    for (const [entityId, members] of casesByEntity) {
+      if (!members.has(row.id)) continue;
+      const label = entityLabelsById.get(entityId);
+      if (label) labels.push(label);
+    }
+    return labels;
+  };
+  const { visible: searchableCases, hiddenArchived } = visibleInvestigations(
+    cases,
+    { query: caseSearch, status: statusFilter, entityId: entityFilter, includeArchived },
+    casesByEntity,
+    entityLabelsFor,
+  );
+  const visibleCases = searchableCases.filter((c) => {
+    if (serviceFilter !== "all" && !casesByEntity.get(serviceFilter)?.has(c.id)) return false;
+    if (decisionFilter === "recorded" && c.status !== "resolved") return false;
+    if (decisionFilter === "open" && c.status === "resolved") return false;
+    if (occurredFrom && (c.occurredAt ?? "") < occurredFrom) return false;
+    return true;
   });
-  const statusCounts: [string, number][] = [
-    ...KNOWN_STATUSES.map(
-      (status): [string, number] => [status, cases.filter((c) => c.status === status).length],
-    ),
-    ...[...new Set(cases.map((c) => c.status))]
-      .filter((status) => !(KNOWN_STATUSES as readonly string[]).includes(status))
-      .map((status): [string, number] => [status, cases.filter((c) => c.status === status).length]),
-  ];
+  const archivedNotice = hiddenArchivedNotice(hiddenArchived);
+  const statusCounts = investigationStatusCounts(cases, KNOWN_STATUSES);
   const attentionCases = cases
     .filter((row) =>
       row.status !== "resolved"
@@ -1322,8 +1352,8 @@ export function Cases(props: {
             type="search"
             value={caseSearch}
             onChange={(e) => setCaseSearch(e.target.value)}
-            placeholder="Title, ID, participant, or creator"
-            aria-label="Search investigations by title, ID, participant, or creator"
+            placeholder="Title, problem, affected parties, people, or ID"
+            aria-label="Search investigations by title, situation text, people, or ID"
           />
         </label>
         {entityOptions.length > 0 ? (
@@ -1344,6 +1374,49 @@ export function Cases(props: {
             </select>
           </label>
         ) : null}
+        {entityOptions.some((entity) => entity.kind === "service" || entity.kind === "system") ? (
+          <label className="case-list__filter">
+            <span className="case-list__control-label">Affected service</span>
+            <select
+              className="login__input"
+              aria-label="Filter investigations by affected service"
+              value={serviceFilter}
+              onChange={(e) => setServiceFilter(e.target.value)}
+            >
+              <option value="all">All services</option>
+              {entityOptions
+                .filter((entity) => entity.kind === "service" || entity.kind === "system")
+                .map((entity) => (
+                  <option key={entity.id} value={entity.id}>
+                    {entity.label}
+                  </option>
+                ))}
+            </select>
+          </label>
+        ) : null}
+        <label className="case-list__filter">
+          <span className="case-list__control-label">Observed from</span>
+          <input
+            className="login__input"
+            type="date"
+            aria-label="Filter investigations by observed date"
+            value={occurredFrom}
+            onChange={(e) => setOccurredFrom(e.target.value)}
+          />
+        </label>
+        <label className="case-list__filter">
+          <span className="case-list__control-label">Decision</span>
+          <select
+            className="login__input"
+            aria-label="Filter investigations by decision"
+            value={decisionFilter}
+            onChange={(e) => setDecisionFilter(e.target.value)}
+          >
+            <option value="all">All decisions</option>
+            <option value="recorded">Recorded decision</option>
+            <option value="open">No recorded decision</option>
+          </select>
+        </label>
         <label className="case-list__filter">
           <span className="case-list__control-label">Status</span>
           <select
@@ -1360,7 +1433,30 @@ export function Cases(props: {
             ))}
           </select>
         </label>
+        <label className="case-list__archived-toggle">
+          <input
+            type="checkbox"
+            checked={includeArchived}
+            onChange={(e) => setIncludeArchived(e.target.checked)}
+          />
+          <span>Include archived</span>
+        </label>
       </div>
+      {/* Archiving is only meaningful if it removes something from view, and
+          only honest if the surface says what it removed. Both, in one line
+          beside the control that brings them back. */}
+      {archivedNotice ? (
+        <p className="case-list__archived-notice" role="status">
+          {archivedNotice}{" "}
+          <button
+            type="button"
+            className="case-list__archived-reveal"
+            onClick={() => setIncludeArchived(true)}
+          >
+            Show them
+          </button>
+        </p>
+      ) : null}
       {cases.length === 0 && casesLoaded ? (
         <EmptyState art="investigations" className="case-list__empty-state">
           <p>
@@ -1805,6 +1901,7 @@ export function Cases(props: {
       </nav>
       <header className="focus-head">
         <div className="focus-head__primary">
+          <p className="focus-head__eyebrow">Focused investigation</p>
           <h2 className="case-view__title" id="focus-case-title">
             {current.title}
           </h2>
@@ -1814,6 +1911,9 @@ export function Cases(props: {
               {current.severity} severity
             </span>
             {openedLine(current) ? <span>{openedLine(current)}</span> : null}
+          </p>
+          <p className="focus-head__next">
+            <strong>Next best step:</strong> {STAGE_NEXT_ACTIONS[stage]}
           </p>
         </div>
         <div className="focus-head__discussion">
@@ -1882,8 +1982,12 @@ export function Cases(props: {
           <header className="stage-panel__intro">
             <h3 className="stage-panel__title">Situation</h3>
             <p className="stage-panel__purpose">
-              The shared operating picture for this investigation — only what is recorded, never
-              an inferred verdict or readiness score.
+              Start with the shared picture: what happened, who or what is affected, and what is
+              still unanswered.
+            </p>
+            <p className="stage-panel__next">
+              <strong>Start here:</strong> Write the problem and open questions, then move to
+              Capture to add the evidence.
             </p>
           </header>
           <section className="situation__summary" aria-labelledby="situation-summary-title">
@@ -2343,8 +2447,9 @@ export function Cases(props: {
             lede={
               workstreamFocused
                 ? "One workstream, in full: what it was asked, what it examined, what it found, and what it left unknown."
-                : "Curate the evidence the investigation may rely on, freeze it, then read each workstream that examined exactly that evidence."
+                : "Open the Log workbench to read this investigation’s files, freeze evidence, then read each workstream that examined exactly that snapshot."
             }
+            next="Select the evidence, freeze it, then launch one run with one clear question."
           >
             <TriageAnchor id={WORKSTREAMS_SECTION} label="Workstreams">
               <Workstreams
@@ -2364,6 +2469,34 @@ export function Cases(props: {
                 workstream's own record is the page. They also stop receiving
                 the route focus while hidden, so only the workstream record
                 claims keyboard focus for that address. */}
+            <TriageAnchor id="triage-log-workbench" label="Log workbench">
+              <div hidden={workstreamFocused}>
+                <LogWorkbench
+                  caseId={current.id}
+                  canWrite={canWrite}
+                  readOnly={readOnly}
+                  active={stage === "analyze"}
+                />
+              </div>
+            </TriageAnchor>
+            <TriageAnchor id="triage-log-time" label="Timezone review">
+              <div hidden={workstreamFocused}>
+                <LogTimeReviewPanel
+                  caseId={current.id}
+                  canWrite={canWrite}
+                  readOnly={readOnly}
+                />
+              </div>
+            </TriageAnchor>
+            {/* The normalized chronology is where a responder reads one merged
+                order across sources, with every line the host could not place
+                still named as order-only. It renders nothing when this
+                investigation has no normalized corpus. */}
+            <TriageAnchor id="triage-log-chronology" label="Normalized log chronology">
+              <div hidden={workstreamFocused}>
+                <LogChronologyPanel caseId={current.id} active={stage === "analyze"} />
+              </div>
+            </TriageAnchor>
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
               <div hidden={workstreamFocused}>
                 <CaseBoardPanel
@@ -2373,6 +2506,7 @@ export function Cases(props: {
                   readOnly={readOnly}
                   {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                  onOpenCapture={() => selectStage("capture")}
                 />
               </div>
             </TriageAnchor>
@@ -2412,6 +2546,7 @@ export function Cases(props: {
             step={3}
             title="Compare"
             lede="Review model and strategy lanes side by side against the human benchmark. Agreement is not proof of correctness."
+            next="Choose two or more finished runs, inspect the differences, and treat agreement as a clue—not a verdict."
           >
             <TriageAnchor id="triage-comparison-lab" label="Comparison lab">
               <ExperimentLab
@@ -2447,6 +2582,7 @@ export function Cases(props: {
             step={4}
             title="Decide"
             lede="Decisions are human calls. Analysis and agreement inform them; they never make them."
+            next="Review the record, add the human decision and reason, then export only what is share-safe."
           >
             <div className="triage-decide">
               <p className="triage-step__note">
@@ -2491,7 +2627,12 @@ export function Cases(props: {
                   }}
                 />
               ) : null}
-              {canLead ? (
+              {/* An archived investigation has no working status to set: its one
+                  available move is a restore, which the lifecycle panel owns.
+                  Offering the ordinary select here would default to `open`
+                  because `archived` is deliberately not one of its options, and
+                  a submit would then silently un-archive the case. */}
+              {canLead && current.status !== "archived" ? (
                 <form
                   key={current.id}
                   className="composer"
@@ -2519,14 +2660,21 @@ export function Cases(props: {
                     <option value="open">open</option>
                     <option value="monitoring">monitoring</option>
                     <option value="resolved">resolved</option>
-                    <option value="archived">archived</option>
                   </select>
                   <button className="login__submit" type="submit">
                     Update status
                   </button>
                 </form>
-              ) : !readOnly ? (
+              ) : !readOnly && current.status !== "archived" ? (
                 <p className="triage-step__note">Only a case lead can change the case status.</p>
+              ) : null}
+              {!readOnly ? (
+                <LifecyclePanel
+                  caseId={current.id}
+                  status={current.status}
+                  canLead={canLead}
+                  onChanged={() => Promise.all([refresh(), refreshActivity()]).then(() => undefined)}
+                />
               ) : null}
               {!readOnly ? (
                 <details className="case-view__support">

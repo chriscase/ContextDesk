@@ -67,6 +67,7 @@
     "fairnessClass": { "type": "string", "enum": ["same_snapshot", "unknown"] },
     "status": { "type": "string", "enum": ["frozen"] },
     "createdAt": { "type": "string", "format": "date-time" },
-    "createdBy": { "type": "string", "minLength": 1 }
+    "createdBy": { "type": "string", "minLength": 1 },
+    "normalizationRevision": { "type": ["integer", "null"], "minimum": 0 }
   }
 }

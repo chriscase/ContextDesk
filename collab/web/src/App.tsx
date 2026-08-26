@@ -11,11 +11,13 @@ import {
   ADMINISTRATION,
   HOME,
   LDAP_ADMIN,
+  MODEL_POLICY,
   PEOPLE,
   PROFILE,
   SIGN_IN,
   historyUrl,
   isLdapAdminLocation,
+  isModelPolicyLocation,
   isPeopleLocation,
   isProfileLocation,
   isShellLocation,
@@ -778,11 +780,19 @@ export function App() {
                         ? "people"
                         : isLdapAdminLocation(work)
                           ? "ldap"
-                          : "roles"
+                          : isModelPolicyLocation(work)
+                            ? "model-policy"
+                            : "roles"
                     }
                     onSelectTab={(tab) =>
                       guardedNavigate(
-                        tab === "people" ? PEOPLE : tab === "ldap" ? LDAP_ADMIN : ADMINISTRATION,
+                        tab === "people"
+                          ? PEOPLE
+                          : tab === "ldap"
+                            ? LDAP_ADMIN
+                            : tab === "model-policy"
+                              ? MODEL_POLICY
+                              : ADMINISTRATION,
                       )
                     }
                   />

@@ -11,6 +11,7 @@ export type {
   AuthIdentity,
   AuthSuccess,
   DirectorySearchOptions,
+  GroupRefreshMode,
 } from "./adapter.js";
 export { MapAuthAdapter } from "./adapter.js";
 export { loadLocalAuthAdapter } from "./local-adapter.js";

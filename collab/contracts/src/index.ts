@@ -15,6 +15,25 @@ export type {
 } from "./privacy.js";
 
 export {
+  MODEL_PRIVATE_EVIDENCE_RULES,
+  MODEL_PURPOSES,
+  MODEL_PURPOSE_POLICY_SCHEMA_ID,
+  MODEL_PURPOSE_POLICY_UPDATE_SCHEMA_ID,
+  createModelPurposePolicy,
+  defaultModelPurposeRules,
+  modelPurposePolicyFingerprint,
+  parseModelPurposePolicy,
+  parseModelPurposePolicyInput,
+} from "./model-purpose-policy.js";
+export type {
+  ModelPrivateEvidenceRule,
+  ModelPurpose,
+  ModelPurposePolicyInputV1,
+  ModelPurposePolicyV1,
+  ModelPurposeRuleV1,
+} from "./model-purpose-policy.js";
+
+export {
   HEALTH_SCHEMA_ID,
   READY_SCHEMA_ID,
   parseHealthResponse,
@@ -319,6 +338,28 @@ export type {
 } from "./investigation-log-time.js";
 
 export {
+  LOG_CHRONOLOGY_LIMITS,
+  LOG_CHRONOLOGY_ORDER_ONLY_REASONS,
+  LOG_CHRONOLOGY_PAGE_SCHEMA_ID,
+  LOG_CHRONOLOGY_PROVENANCE,
+  LOG_CHRONOLOGY_QUERY_SCHEMA_ID,
+  LOG_CHRONOLOGY_TIME_QUALITIES,
+  LOG_CHRONOLOGY_TIME_STATES,
+  normalizeLogChronologyQuery,
+  parseLogChronologyPage,
+  parseLogChronologyQuery,
+} from "./investigation-log-chronology.js";
+export type {
+  LogChronologyOrderOnlyReason,
+  LogChronologyPageV1,
+  LogChronologyProvenance,
+  LogChronologyQueryV1,
+  LogChronologyRowV1,
+  LogChronologyTimeQuality,
+  LogChronologyTimeState,
+} from "./investigation-log-chronology.js";
+
+export {
   SNAPSHOT_FAIRNESS_CLASSES,
   SNAPSHOT_LIST_SCHEMA_ID,
   SNAPSHOT_SCHEMA_ID,
@@ -374,6 +415,20 @@ export {
   parseTriageJobShareSafe,
   projectTriageJobShareSafe,
 } from "./triage-job.js";
+
+export {
+  TRIAGE_PRODUCING_CANDIDATE_STATUSES,
+  TRIAGE_SETTLED_CANDIDATE_STATUSES,
+  isTriageProducingStatus,
+  isTriageSettledStatus,
+  resolveTriageJobStatus,
+  triageJobExecutionState,
+  triageLanePhaseCounts,
+} from "./triage-lifecycle.js";
+export type {
+  TriageJobExecutionState,
+  TriageLanePhaseCountsV1,
+} from "./triage-lifecycle.js";
 export type {
   TriageCandidateRunV1,
   TriageCandidateSpecV1,
@@ -732,9 +787,12 @@ export * from "./temporal.js";
 export * from "./investigation-entity.js";
 export * from "./investigation-reference.js";
 export * from "./investigation-resolution.js";
+export * from "./investigation-workbench.js";
 export * from "./capability.js";
 export * from "./user-profile.js";
 export * from "./directory-mapping.js";
 export * from "./ldap-admin.js";
 export * from "./admin-people.js";
 export * from "./admin-audit.js";
+
+export * from "./investigation-lifecycle.js";

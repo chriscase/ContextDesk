@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/log-time-review-rule.v1.json",
+  "title": "cd-collab Log Time Review Rule v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "scope",
+    "source",
+    "rotationFamily",
+    "selectedEvidenceIds",
+    "ianaTimezone",
+    "expectedRevision",
+    "idempotencyKey"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.log_time_review_rule.v1" },
+    "scope": { "type": "string", "enum": ["source", "rotation_family", "selected_items"] },
+    "source": { "type": ["string", "null"] },
+    "rotationFamily": { "type": ["string", "null"] },
+    "selectedEvidenceIds": { "type": "array", "items": { "type": "string" } },
+    "ianaTimezone": { "type": "string", "minLength": 1 },
+    "expectedRevision": { "type": "integer", "minimum": 0 },
+    "idempotencyKey": { "type": "string" }
+  }
+}

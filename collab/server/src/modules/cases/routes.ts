@@ -7,10 +7,12 @@ import {
   CASE_STATUSES,
   CONTRIBUTION_LIST_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
+  INVESTIGATION_LIFECYCLE_SCHEMA_ID,
   PRIVACY_CLASSES,
   PROVENANCE_SCHEMA_ID,
   SNAPSHOT_LIST_SCHEMA_ID,
   TIMELINE_SCHEMA_ID,
+  describeDeleteRequest,
   isContributionIdempotencyKey,
   type ArtifactKind,
   type AuthErrorV1,
@@ -32,6 +34,7 @@ import {
 } from "../resolutions/index.js";
 import {
   ContributionConflictError,
+  LifecycleRefusedError,
   LegalHoldError,
   SituationConflictError,
   type Actor,
@@ -119,7 +122,20 @@ function situationInput(body: Record<string, unknown>):
 function domainError(
   reply: { code: (status: number) => unknown },
   err: unknown,
-): { error: string; detail?: string; currentVersion?: number; currentRevision?: number } {
+): {
+  error: string;
+  detail?: string;
+  currentVersion?: number;
+  currentRevision?: number;
+  reason?: string;
+} {
+  // A refused archive or restore is a conflict with recorded state, not a
+  // malformed request. The reason travels with it so the surface can point at
+  // the legal-hold control instead of printing an unexplained 400.
+  if (err instanceof LifecycleRefusedError) {
+    void reply.code(409);
+    return { error: "lifecycle_refused", reason: err.reason, detail: err.detail };
+  }
   if (err instanceof LegalHoldError) {
     void reply.code(409);
     return { error: "legal_hold" };
@@ -343,6 +359,37 @@ export async function registerCaseRoutes(
       // right form instead of showing an unexplained failure.
       const mapped = resolutionDomainError(reply, err);
       if (mapped) return mapped;
+      return domainError(reply, err);
+    }
+  });
+
+  /**
+   * What archiving or restoring this investigation would do, before anyone
+   * commits to it.
+   *
+   * A surface that offers "Archive" without knowing a legal hold will refuse
+   * it can only report the refusal after the click. A surface that offers
+   * "Restore" without knowing where it lands has to describe the outcome
+   * vaguely, or wrongly. Both answers are already derivable from recorded
+   * state, so they are served rather than guessed.
+   */
+  app.get("/api/cases/:id/lifecycle", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return { error: "not_found" };
+    }
+    try {
+      const lifecycle = await deps.domain.lifecycleFor(id);
+      return {
+        schemaId: INVESTIGATION_LIFECYCLE_SCHEMA_ID,
+        investigationId: id,
+        ...lifecycle,
+        deletion: describeDeleteRequest(),
+      };
+    } catch (err) {
       return domainError(reply, err);
     }
   });

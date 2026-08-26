@@ -34,7 +34,8 @@ describe("LDAP administrative directory filters", () => {
       "(&(objectClass=person)(|(uid=a\\2a\\29\\28uid=\\2a\\29*)(cn=a\\2a\\29\\28uid=\\2a\\29*)(displayName=a\\2a\\29\\28uid=\\2a\\29*)))",
     );
     expect(directoryGroupFilter("ad*(member=*)")).toBe(
-      "(&(objectClass=groupOfNames)(cn=ad\\2a\\28member=\\2a\\29*))",
+      "(&(|(objectClass=groupOfNames)(objectClass=groupOfUniqueNames)(objectClass=group)(objectClass=posixGroup))" +
+        "(cn=ad\\2a\\28member=\\2a\\29*))",
     );
   });
 });

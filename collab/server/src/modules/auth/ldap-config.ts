@@ -21,6 +21,8 @@ export const LDAP_MIN_TIMEOUT_MS = 100;
 export const LDAP_MAX_TIMEOUT_MS = 30_000;
 export const LDAP_DEFAULT_TIMEOUT_MS = 8_000;
 const BIND_SECRET_MAX_BYTES = 16 * 1024;
+const PEM_CERTIFICATE =
+  /-----BEGIN CERTIFICATE-----[\s\S]*-----END CERTIFICATE-----/u;
 
 export interface LdapConfig {
   url: string;
@@ -115,6 +117,32 @@ function loadBindPassword(env: NodeJS.ProcessEnv): string | undefined {
     return readBindSecretFile(refPath);
   }
   return undefined;
+}
+
+/**
+ * Trust anchors for the directory connection, as PEM *content* (not a path).
+ *
+ * Node treats `tls.ConnectionOptions.ca` as a replacement for its default root
+ * store and silently accepts any string, so an unparsable value - a filesystem
+ * path, or an empty `COLLAB_LDAP_CA=` line - yields an empty trust store and
+ * turns every LDAPS/StartTLS handshake into an opaque verification failure.
+ * Refuse that at load time. To *add* an internal CA to the system trust store
+ * instead of replacing it, leave this unset and start Node with
+ * NODE_EXTRA_CA_CERTS=/path/to/ca.pem.
+ */
+function loadTrustAnchors(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.COLLAB_LDAP_CA;
+  if (raw === undefined) return undefined;
+  const value = raw.trim();
+  // A blank value is "not configured", matching the other optional settings.
+  if (!value) return undefined;
+  if (!PEM_CERTIFICATE.test(value)) {
+    throw new Error(
+      "COLLAB_LDAP_CA must be PEM certificate content, not a file path; " +
+        "use NODE_EXTRA_CA_CERTS to add a CA to the system trust store",
+    );
+  }
+  return value;
 }
 
 function optionalAttr(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
@@ -265,7 +293,7 @@ export function loadLdapConfig(env: NodeJS.ProcessEnv = process.env): LdapConfig
     url,
     starttls,
     verifyTls: !insecure,
-    ca: env.COLLAB_LDAP_CA,
+    ca: loadTrustAnchors(env),
     userDnTemplate,
     userSearchBase,
     userSearchFilter: env.COLLAB_LDAP_USER_SEARCH_FILTER ?? "(uid={username})",

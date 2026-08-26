@@ -96,7 +96,16 @@ decision.
   filters keep RFC 4515 escaping. The two are not interchangeable.
 - Transport: `ldaps://` or `ldap://` + StartTLS. Plaintext is refused at
   `loadLdapConfig`. Disabling TLS verification requires explicit
-  `COLLAB_LDAP_DEV_MODE=1` (fixture only). Hosted CI uses StartTLS against
+  `COLLAB_LDAP_DEV_MODE=1` (fixture only). `COLLAB_LDAP_CA` is PEM
+  **content**, not a path: `node:tls` accepts any string for `ca` without
+  complaint, so a path would leave an empty trust store and fail every
+  handshake opaquely — `loadLdapConfig` refuses it. Setting it **replaces**
+  Node's default roots for the directory connection; to add an internal CA to
+  system trust instead, leave it unset and use `NODE_EXTRA_CA_CERTS`. On
+  LDAPS the transport stage is proven by the directory answering over the
+  established socket (an LDAP result code, or a still-open connection); a
+  connect, DNS, or certificate failure stays a transport failure instead of
+  being reported as an available directory. Hosted CI uses StartTLS against
   the osixia fixture — Node 22 cannot complete LDAPS to that image's
   self-signed cert. Constructor `tlsOptions` are omitted for StartTLS so
   ldapts does not wrap port 389 as LDAPS. The encrypted-transport test still
@@ -115,7 +124,16 @@ decision.
   base. `{0}` is an alias for `{username}` after the matching escape.
 - Group membership unions a configured member attribute (commonly `memberOf`)
   with optional group search, then normalizes, deduplicates, and bounds the
-  result. Role mapping stays exact and default-deny.
+  result. Role mapping stays exact and default-deny. Membership is
+  direct-only: nested groups expand only if the operator supplies a filter
+  that asks the directory to do it (for example Active Directory's
+  `(member:1.2.840.113556.1.4.1941:={dn})`). Search continuation references
+  (referrals) are not followed, so a search that spans naming contexts
+  reports only what the contacted server returns.
+- The administrative directory picker (`/api/admin/directory/groups/search`)
+  matches `groupOfNames`, `groupOfUniqueNames`, `group`, and `posixGroup`, so
+  Active Directory groups appear alongside the OpenLDAP schemas. It returns
+  names and DNs only, never a membership roster.
 - Login fetches configured display name, work email, role title, and team
   attributes and passes them through `mapDirectoryClaimsToProfileFields`.
   Missing attributes skip; unsafe attributes fail closed; identity collisions
@@ -137,6 +155,8 @@ decision.
 | `bind_dn` | `COLLAB_LDAP_BIND_DN` |
 | `bind_password` | bind-password environment, `COLLAB_LDAP_BIND_PASSWORD_FILE`, or `file:` reference — exactly one |
 | `tls_verify` | verified TLS default; fixture-only disable requires `COLLAB_LDAP_TLS_INSECURE=1` and `COLLAB_LDAP_DEV_MODE=1` |
+| `ca_cert` / `tls_ca` | `COLLAB_LDAP_CA` as PEM content (replaces system trust), or `NODE_EXTRA_CA_CERTS` to add to it |
+| `timeout` | `COLLAB_LDAP_TIMEOUT_MS` (100..30000, default 8000). No automatic retry |
 | Silent UPN/NetBIOS from `DC=` | **Not copied.** Set `COLLAB_LDAP_UPN_SUFFIX=example.test` and `COLLAB_LDAP_NETBIOS_DOMAIN=EXAMPLE` |
 
 This table is a configuration translation. It is not evidence that any live
@@ -157,6 +177,13 @@ company directory works with ContextDesk.
   (`x-cd-collab-csrf: 1`) on cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE`
   `/api` requests. Login, logout, and `/api/setup/*` are the documented
   exemptions. TLS terminates at ingress; set `COLLAB_COOKIE_SECURE=1` behind HTTPS.
+- Ingress: `request.ip` keys the login rate limiter and is the audit `origin`.
+  Behind a TLS-terminating proxy the socket peer is the proxy, so declare the
+  ingress with `COLLAB_TRUST_PROXY` (hop count, or proxy addresses/CIDRs).
+  Unset means "no proxy" and is correct for a directly exposed or loopback
+  deployment; trusting every forwarded address is refused, because a forged
+  `X-Forwarded-For` would otherwise let a client pick its own rate-limit
+  bucket and audit origin.
 - MFA and SSO/OIDC are out of v1 (adapter seam only). MFA is a directory/VPN
   responsibility.
 

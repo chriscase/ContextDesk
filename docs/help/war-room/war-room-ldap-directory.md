@@ -43,6 +43,8 @@ own directory before treating a deployment as compatible.
 | Group search | `COLLAB_LDAP_GROUP_SEARCH_BASE` and filter | Optional when `memberOf` (or `COLLAB_LDAP_MEMBER_ATTR`) is set. |
 | Display, email, title, team | `COLLAB_LDAP_ATTR_*` | Mapped through the provider-neutral profile contract at login. |
 | Bind secret | environment, bind-password file, or `file:` reference | Exactly one source. Never stored in the browser or logs. |
+| Directory CA | `COLLAB_LDAP_CA`, or `NODE_EXTRA_CA_CERTS` | PEM content, not a path. `COLLAB_LDAP_CA` replaces system trust; `NODE_EXTRA_CA_CERTS` adds to it. |
+| Directory timeout | `COLLAB_LDAP_TIMEOUT_MS` | 100-30000 ms, default 8000. There is no automatic retry. |
 | Workspace access | `COLLAB_GROUP_ROLE_MAP` | Exact DN-to-role entries. Unmapped groups are denied. |
 
 ## RepoSync field translation
@@ -61,6 +63,7 @@ shown here are generic examples, not an employer directory.
 | Service bind DN | `COLLAB_LDAP_BIND_DN` | Shown in the Directory admin view; password is not. |
 | Service bind password | secret reference or bind-password file | Never paste into git, Help, or browser storage. |
 | Verify TLS | verified TLS default | Disabling verification requires an explicit fixture/dev flag. |
+| CA bundle path | `COLLAB_LDAP_CA` takes PEM **content** | A path is refused at startup. Use `COLLAB_LDAP_CA="$(cat ca.pem)"`, or `NODE_EXTRA_CA_CERTS=/path/to/ca.pem` to keep system trust. |
 | Silent domain from `DC=` | not supported | Set `COLLAB_LDAP_UPN_SUFFIX` and `COLLAB_LDAP_NETBIOS_DOMAIN` explicitly. |
 
 ## How to prove the directory
@@ -76,6 +79,13 @@ shown here are generic examples, not an employer directory.
 5. Confirm at least one group maps to a workspace role before expecting
    sign-in to succeed.
 
+Read the stages literally. Encrypted transport passes only when the directory
+answered over the connection this server opened, so a wrong host, a closed
+port, or an untrusted certificate is reported as a transport failure rather
+than as an available directory. The configuration view names the group-refresh
+mode and whether an operator-supplied CA is in use, so a failing stage can be
+matched to the setting behind it.
+
 ## Current limits
 
 - Login-time attribute sync is wired for display name, work email, role title,
@@ -84,6 +94,13 @@ shown here are generic examples, not an employer directory.
 - Identity collisions refuse sign-in rather than merging local and directory
   people.
 - Automatic disable after directory removal is not shipped.
+- Group membership is direct-only. Nested groups expand only if you supply a
+  filter that asks the directory to do the work, such as Active Directory's
+  `(member:1.2.840.113556.1.4.1941:={dn})`.
+- Search continuation references (referrals) are not followed. A search that
+  spans naming contexts reports only what the contacted server returns.
+- Directory operations use one bounded timeout and are not retried; a failed
+  operation fails that request.
 - Live company Active Directory, LDAPS to an untrusted internal CA, nested
   group expansion, Global Catalog port 3269/3268, and Kerberos/GSSAPI are not
   qualified by this page.

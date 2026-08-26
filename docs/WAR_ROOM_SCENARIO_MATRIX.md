@@ -37,6 +37,9 @@ passing quietly.
 | 8 | New evidence arrives, and the earlier comparison is rerun | A second log landed after we already compared. Does the earlier conclusion still hold, and can I tell the two runs apart? | 4 | `specs/20-war-room-collaboration.spec.ts` | default fixture server |
 | 9 | Partial and failed model lanes | One lane failed and one came back partial. Is what is left still usable, and can I see what I am missing? | 5 | `specs/21-war-room-lanes-and-deployment.spec.ts` | `COLLAB_E2E_BRIDGE=degraded` |
 | 10 | The same investigation on a private workstation and on the shared service | I started this on my laptop and now the team needs it. What changes when the same investigation is on the shared deployment instead of mine? | 4 | `specs/21-war-room-lanes-and-deployment.spec.ts` | default fixture server |
+| 11 | Side-by-side log workbench on Analyze | Can I open two logs from this investigation, find the timeout, save that view, and still have it after reload? | 4 | `specs/26-log-workbench.spec.ts` | default fixture server |
+| 12 | Email and chat sit beside logs without becoming logs | Support forwarded an email and a chat. Can I read them next to the logs without treating the conversation as a timestamped log? | 2 | `specs/26-log-workbench.spec.ts` | default fixture server |
+| 13 | A copied log locator does not leak to someone who cannot open the case | If I copy a bookmark token, can a teammate who cannot open this investigation tell that the file exists? | 2 | `specs/26-log-workbench.spec.ts` | default fixture server |
 
 ## Journeys
 
@@ -467,3 +470,112 @@ passing quietly.
 | `deployment-role-gates-share-safe` | Share-safe export is unavailable to a role that may not use it. | A viewer-role account can produce a share-safe export. |
 | `deployment-authorship-stable` | Authored records keep their original author. | Records are re-attributed to whoever is currently signed in. |
 | `deployment-privacy-class-persists` | An owner-only artifact stays owner-only when the case is shared. | Sharing the investigation widens an artifact's privacy class. |
+
+### 11. Side-by-side log workbench on Analyze
+
+**Triage question.** Can I open two logs from this investigation, find the timeout, save that view, and still have it after reload?
+
+**Expected evidence visible to humans**
+
+- A Log workbench on Analyze that lists this investigation's imported files by human names.
+- Two panes open side by side on selected files.
+- A search hit for the timeout line with an honest match count.
+- A saved view that reappears after reload.
+
+**Expected provenance**
+
+- The files are investigation evidence, not entries in the global Sources catalog.
+- Digests and ids stay behind technical details.
+
+**Stays unknown**
+
+- The timezone of local worker timestamps until a person declares one.
+- Whether a bounded search saw every later match.
+
+**Useful next actions**
+
+- Declare a timezone in Timezone review for the worker family.
+- Freeze the selected evidence after the view is useful.
+
+**Deep-link targets**
+
+| Target | Purpose | Address |
+| --- | --- | --- |
+| `log-workbench` | Land on the Log workbench in Analyze. | `/investigations/{caseId}/analyze?section=triage-log-workbench#triage-log-workbench` |
+
+**Pass/fail usability assertions**
+
+| Assertion | Passes when | Fails when |
+| --- | --- | --- |
+| `workbench-named-on-analyze` | Analyze shows a Log workbench for this investigation's files. | The operator has to open the global Sources catalog to find the imported logs. |
+| `workbench-two-panes` | Two selected logs can be opened side by side. | Only one file can be on screen at a time. |
+| `workbench-search-timeout` | Search returns the timeout line with a match count. | The timeout line is missing or the count is empty. |
+| `workbench-saved-view-reload` | A saved view is still listed after reload. | Reload forgets the saved view. |
+
+### 12. Email and chat sit beside logs without becoming logs
+
+**Triage question.** Support forwarded an email and a chat. Can I read them next to the logs without treating the conversation as a timestamped log?
+
+**Expected evidence visible to humans**
+
+- The email and chat files listed in the Log workbench.
+- The sentence that the conversation is not a log, searchable as written.
+
+**Expected provenance**
+
+- The files keep the names they had in the synthetic bundle.
+
+**Stays unknown**
+
+- Whether the chat's 'around 02:30 local' matches the worker clock.
+
+**Useful next actions**
+
+- Search the logs for the request id named in chat.
+
+**Deep-link targets**
+
+| Target | Purpose | Address |
+| --- | --- | --- |
+| `log-workbench` | Read email, chat, and logs in the workbench. | `/investigations/{caseId}/analyze?section=triage-log-workbench#triage-log-workbench` |
+
+**Pass/fail usability assertions**
+
+| Assertion | Passes when | Fails when |
+| --- | --- | --- |
+| `workbench-email-visible` | The support email is listed with the logs. | The email never appears on Analyze. |
+| `workbench-chat-not-a-log` | The chat text that it is not a log is readable in search. | The conversation is rewritten as a log line with a guessed timestamp. |
+
+### 13. A copied log locator does not leak to someone who cannot open the case
+
+**Triage question.** If I copy a bookmark token, can a teammate who cannot open this investigation tell that the file exists?
+
+**Expected evidence visible to humans**
+
+- An authorized reader can resolve the token to a line.
+- An unauthorized reader gets the same not-found shape, with no path.
+
+**Expected provenance**
+
+- The token is a digest, not a filename.
+
+**Stays unknown**
+
+- Whether the token refers to a missing bookmark or a hidden one — both look the same to the unauthorized reader.
+
+**Useful next actions**
+
+- Share the investigation membership instead of the token if the other person should see the line.
+
+**Deep-link targets**
+
+| Target | Purpose | Address |
+| --- | --- | --- |
+| `log-workbench` | The workbench that minted the bookmark. | `/investigations/{caseId}/analyze?section=triage-log-workbench#triage-log-workbench` |
+
+**Pass/fail usability assertions**
+
+| Assertion | Passes when | Fails when |
+| --- | --- | --- |
+| `workbench-locator-authorized` | The owner can mint a bookmark token. | No share-safe token is recorded. |
+| `workbench-locator-unauthorized-404` | A teammate without access gets no path and no investigation id. | The unauthorized response names the file or the investigation. |

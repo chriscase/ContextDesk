@@ -29,6 +29,12 @@ export interface SyntheticGroup {
   cn: string;
   members: string[];
   hiddenFromUserBind?: boolean;
+  /**
+   * Schema this group is published under. Defaults to the OpenLDAP shape.
+   * Active Directory groups are `group` and carry no `groupOfNames`, so a
+   * fixture that always claimed both would hide filters that only match one.
+   */
+  objectClass?: string[];
 }
 
 export interface SyntheticDirectoryOptions {
@@ -154,7 +160,7 @@ export class SyntheticLdapSession implements LdapSession {
     return {
       dn: group.dn,
       cn: group.cn,
-      objectClass: ["groupOfNames", "group"],
+      objectClass: group.objectClass ?? ["top", "groupOfNames"],
       member: [...group.members],
     };
   }

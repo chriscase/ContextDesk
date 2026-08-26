@@ -1,5 +1,33 @@
 import { checkObject, f, type ObjectShape } from "./parse.js";
 import { PRIVACY_CLASSES } from "./case.js";
+// The lifecycle vocabulary and its rules live in a dependency-free leaf module
+// so a browser bundle can take them without the schema machinery, which
+// transitively reaches Node built-ins. Re-exported here so every existing
+// importer of this module is unaffected.
+import {
+  TRIAGE_CANDIDATE_STATUSES,
+  TRIAGE_JOB_STATUSES,
+  type TriageCandidateStatus,
+  type TriageJobStatus,
+} from "./triage-lifecycle.js";
+
+export {
+  TRIAGE_CANDIDATE_STATUSES,
+  TRIAGE_JOB_STATUSES,
+  TRIAGE_PRODUCING_CANDIDATE_STATUSES,
+  TRIAGE_SETTLED_CANDIDATE_STATUSES,
+  isTriageProducingStatus,
+  isTriageSettledStatus,
+  resolveTriageJobStatus,
+  triageJobExecutionState,
+  triageLanePhaseCounts,
+} from "./triage-lifecycle.js";
+export type {
+  TriageCandidateStatus,
+  TriageJobExecutionState,
+  TriageJobStatus,
+  TriageLanePhaseCountsV1,
+} from "./triage-lifecycle.js";
 
 export const TRIAGE_JOB_REQUEST_SCHEMA_ID = "cd-collab.triage_job_request.v1" as const;
 export const TRIAGE_JOB_SCHEMA_ID = "cd-collab.triage_job.v1" as const;
@@ -10,19 +38,6 @@ export const TRIAGE_JOB_CAPABILITIES_SCHEMA_ID = "cd-collab.triage_job_capabilit
 export const TRIAGE_JOB_MODES = ["deterministic_mock", "gateway"] as const;
 export type TriageJobMode = (typeof TRIAGE_JOB_MODES)[number];
 
-export const TRIAGE_JOB_STATUSES = [
-  "queued",
-  "running",
-  "completed",
-  "partial",
-  "failed",
-  "timed_out",
-  "cancelled",
-] as const;
-export type TriageJobStatus = (typeof TRIAGE_JOB_STATUSES)[number];
-
-export const TRIAGE_CANDIDATE_STATUSES = TRIAGE_JOB_STATUSES;
-export type TriageCandidateStatus = TriageJobStatus;
 
 export interface TriageCandidateSpecV1 {
   candidateId: string;

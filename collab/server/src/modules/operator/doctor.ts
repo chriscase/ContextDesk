@@ -224,7 +224,13 @@ function checkLdap(env: NodeJS.ProcessEnv, intent: Intent): DoctorCheckV1 {
     if (!cfg.verifyTls) {
       return check("ldap_tls", "warn", "directory TLS verification is disabled; fixture-only");
     }
-    return check("ldap_tls", "ok", "directory transport is encrypted");
+    return check(
+      "ldap_tls",
+      "ok",
+      cfg.bindDn && cfg.bindPassword
+        ? "directory transport is encrypted; live group refresh uses the service bind"
+        : "directory transport is encrypted; login-time groups remain in the session until re-authentication",
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "directory configuration rejected";
     if (/plaintext LDAP refused/i.test(message)) {

@@ -220,6 +220,18 @@
   font-size: 0.78rem;
 }
 
+.triage-step__next {
+  max-width: 48rem;
+  margin: 0.35rem 0 0;
+  color: var(--fg);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.triage-step__next strong {
+  color: var(--accent);
+}
+
 .triage-step__note {
   max-width: 48rem;
   margin: 0.75rem 0 0;

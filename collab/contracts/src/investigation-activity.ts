@@ -59,6 +59,9 @@ export const INVESTIGATION_RESOURCE_KINDS = [
   "gold",
   "export_event",
   "portable_archive_event",
+  "log_workbench_view",
+  "log_workbench_bookmark",
+  "log_workbench_line",
 ] as const;
 export type InvestigationResourceKindV1 = (typeof INVESTIGATION_RESOURCE_KINDS)[number];
 
@@ -489,6 +492,30 @@ export function routedInvestigationFocus(
         itemKind: null,
         lane: null,
       };
+    case "log_workbench_view":
+      return {
+        stage: "analyze",
+        section: "triage-log-workbench",
+        item: resourceId,
+        itemKind: "log-workbench-view",
+        lane: null,
+      };
+    case "log_workbench_bookmark":
+      return {
+        stage: "analyze",
+        section: "triage-log-workbench",
+        item: resourceId,
+        itemKind: "log-workbench-bookmark",
+        lane: null,
+      };
+    case "log_workbench_line":
+      return {
+        stage: "analyze",
+        section: "triage-log-workbench",
+        item: resourceId,
+        itemKind: "log-line",
+        lane: null,
+      };
   }
 }
 
@@ -649,6 +676,9 @@ const RESOURCE_KIND_FALLBACK: Record<InvestigationResourceKindV1, string> = {
   gold: "Outcome benchmark",
   export_event: "Export",
   portable_archive_event: "Portable archive event",
+  log_workbench_view: "Saved log view",
+  log_workbench_bookmark: "Log bookmark",
+  log_workbench_line: "Log line",
 };
 
 export function safeResourceLabel(

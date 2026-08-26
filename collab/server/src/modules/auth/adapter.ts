@@ -14,6 +14,14 @@ export interface AuthSuccess {
   directoryFields?: Partial<Record<DirectoryMappedField, string>>;
 }
 
+/**
+ * How an authenticated session obtains groups after login. A live refresh is
+ * safe only when the adapter has an independent directory credential. A
+ * login snapshot is the honest mode for directories that expose membership
+ * during the user bind but do not permit later service-bound lookups.
+ */
+export type GroupRefreshMode = "live" | "login_snapshot";
+
 export interface DirectorySearchOptions {
   limit: number;
   timeoutMs: number;
@@ -31,11 +39,14 @@ const LOCAL_DIRECTORY_SCAN_LIMIT = 1_000;
 export interface AuthAdapter {
   /** Which profile provenance a successful authenticate() through this adapter represents. */
   readonly provenance: "local" | "ldap";
+  /** Defaults to live for compatibility with existing adapters. */
+  readonly groupRefreshMode?: GroupRefreshMode;
   authenticate(username: string, password: string): Promise<AuthSuccess | null>;
   /**
-   * Live directory groups for an already-authenticated identity.
-   * Must not require the user password. Failures should throw so callers
-   * can fail closed instead of keeping login-time groups.
+   * Live directory groups for an already-authenticated identity when
+   * groupRefreshMode is live. Must not require the user password. Failures
+   * should throw so callers can fail closed instead of keeping login-time
+   * groups.
    */
   lookupGroups(identity: AuthIdentity): Promise<string[]>;
   /** Bounded, allowlisted administrative directory visibility. */
@@ -52,6 +63,7 @@ export interface AuthAdapter {
 
 export class MapAuthAdapter implements AuthAdapter {
   readonly provenance = "local" as const;
+  readonly groupRefreshMode: GroupRefreshMode;
   /**
    * Synthetic probe used so unknown-user authenticate() still runs the same
    * compare work as a known user. Generated per adapter instance, never logged,
@@ -64,7 +76,9 @@ export class MapAuthAdapter implements AuthAdapter {
       string,
       { password: string; identity: AuthIdentity; groups: string[] }
     >,
+    groupRefreshMode: GroupRefreshMode = "live",
   ) {
+    this.groupRefreshMode = groupRefreshMode;
     this.unknownUserProbe = randomBytes(32).toString("base64");
   }
 

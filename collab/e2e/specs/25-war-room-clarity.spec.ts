@@ -71,6 +71,54 @@ async function seedComparison(
 }
 
 test.describe("War Room clarity for ordinary triage staff", () => {
+  test("a large evidence set stays searchable and bulk selection freezes only the matching files", async ({ page }) => {
+    const title = uniqueTitle("Large evidence set");
+    await loginAs(page, FIXTURE_USERS.dave);
+    await createCase(page, title);
+    const caseId = await caseIdForTitle(page, title);
+
+    for (let index = 0; index < 40; index += 1) {
+      const isWorkerLog = index < 6;
+      await uploadEvidence(page, caseId, {
+        kind: isWorkerLog ? "log" : "attachment",
+        summary: isWorkerLog ? "Synthetic worker log for large-set selection." : "Synthetic support attachment.",
+        filename: isWorkerLog ? `node-a/service-${index}.log` : `notes/note-${index}.txt`,
+        mediaType: "text/plain",
+        bytes: Buffer.from(`record ${index}\n`, "utf8"),
+        privacyClass: "owner_only",
+      });
+    }
+
+    // The records were seeded through the authenticated API to keep this
+    // journey focused on large-set browsing. Reopen the stage just as a
+    // returning operator would; the UI's own upload flow refreshes in place.
+    await page.reload();
+    await gotoStage(page, "Analyze");
+    const analyze = page.locator("#stage-analyze");
+    await expect(analyze.getByText("40 matching · showing 25 · 0 selected")).toBeVisible();
+    await expect(analyze.locator(".case-memory__list .case-memory__item")).toHaveCount(25);
+    await analyze.getByRole("button", { name: "Show 15 more matching" }).click();
+    await expect(analyze.locator(".case-memory__list .case-memory__item")).toHaveCount(40);
+
+    await analyze.getByLabel("Filter evidence").fill("node-a");
+    await expect(analyze.getByText("6 matching · showing 6 · 0 selected")).toBeVisible();
+    await analyze.getByRole("button", { name: "Select all matching" }).click();
+    await expect(analyze.getByText("6 matching · showing 6 · 6 selected")).toBeVisible();
+
+    const [frozen] = await Promise.all([
+      page.waitForResponse(
+        (res) =>
+          res.url().endsWith(`/api/cases/${caseId}/snapshots`)
+          && res.request().method() === "POST"
+          && res.ok(),
+      ),
+      analyze.getByRole("button", { name: "Freeze selected evidence (6)" }).click(),
+    ]);
+    const snapshot = (await frozen.json()) as { evidence?: { evidenceId: string }[] };
+    expect(snapshot.evidence).toHaveLength(6);
+    await expect(analyze.getByText("6 items · frozen by dave")).toBeVisible();
+  });
+
   test("a ZIP of support files records a saved email as email, not as a log", async ({ page }) => {
     const title = uniqueTitle("ZIP intake");
     await loginAs(page, FIXTURE_USERS.dave);
