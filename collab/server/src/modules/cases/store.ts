@@ -914,8 +914,8 @@ export class PgCaseStore implements CaseStore {
          situation_version, investigation_context, occurred_at, occurred_at_precision, occurred_at_zone,
          severity, status, legal_hold, retention_class,
          created_at, created_by, created_by_username, last_seq
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12, $13, $14, $15,
-                 $16, $17, $18, 0)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16,
+                 $17, $18, $19, 0)`,
       [
         row.id,
         row.title,
