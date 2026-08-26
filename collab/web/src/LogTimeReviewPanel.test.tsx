@@ -127,6 +127,28 @@ describe("LogTimeReviewPanel", () => {
     expect(screen.getByText(/5 lines still in file order only/i)).toBeTruthy();
   });
 
+  it("keeps a large timezone review searchable without rendering every file at once", async () => {
+    const sources = Array.from({ length: 30 }, (_, index) =>
+      sourceStatus({ source: `worker/source-${String(index).padStart(2, "0")}.log` }),
+    );
+    stubFetch({ "/log-time": () => stateBody({ sources }) });
+    render(panel());
+
+    expect(await screen.findByText("worker/source-11.log")).toBeTruthy();
+    expect(screen.queryByText("worker/source-12.log")).toBeNull();
+    expect(screen.getByText("30 of 30 files match")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show 12 more" }));
+    expect(screen.getByText("worker/source-23.log")).toBeTruthy();
+    expect(screen.queryByText("worker/source-24.log")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Find a log file"), {
+      target: { value: "source-29" },
+    });
+    expect(screen.getByText("worker/source-29.log")).toBeTruthy();
+    expect(screen.getByText("1 of 30 files match")).toBeTruthy();
+  });
+
   it("offers no timezone until a person types one", async () => {
     stubFetch({ "/log-time": () => stateBody() });
     render(panel());

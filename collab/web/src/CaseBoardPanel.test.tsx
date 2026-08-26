@@ -190,6 +190,9 @@ describe("CaseBoardPanel", () => {
       <CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />,
     );
     expect(await screen.findByText("80 of 80 shown · 0 selected")).toBeTruthy();
+    expect(screen.queryByText("note-49.txt")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show 25 more" }));
+    expect(screen.getByText("note-49.txt")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "node-a" } });
     expect(screen.getByText("5 of 80 shown · 0 selected")).toBeTruthy();
@@ -202,7 +205,7 @@ describe("CaseBoardPanel", () => {
         readOnly={false}
         routeFocus={{
           section: "triage-evidence-board",
-          item: "artifact-12",
+          item: "artifact-79",
           itemKind: "evidence",
           lane: null,
           experiment: null,
@@ -212,7 +215,7 @@ describe("CaseBoardPanel", () => {
     await waitFor(() =>
       expect((screen.getByLabelText("Filter evidence") as HTMLInputElement).value).toBe(""),
     );
-    const routedEvidence = screen.getByText("note-12.txt").closest("li") as HTMLElement;
+    const routedEvidence = screen.getByText("note-79.txt").closest("li") as HTMLElement;
     await waitFor(() => expect(document.activeElement).toBe(routedEvidence));
     fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "node-a" } });
     fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));

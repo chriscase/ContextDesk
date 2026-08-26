@@ -15,6 +15,7 @@ import { protectedApiFetch } from "./protected-api.js";
 
 const MAX_ERROR_LENGTH = 240;
 const VISIBLE_SAMPLE_ROWS = 6;
+const INITIAL_SOURCE_ROWS = 12;
 
 interface Declaration {
   source: string;
@@ -174,6 +175,8 @@ export function LogTimeReviewPanel(props: {
   const [state, setState] = useState<CorpusState | null>(null);
   const [dependents, setDependents] = useState<Dependent[]>([]);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [sourceLimit, setSourceLimit] = useState(INITIAL_SOURCE_ROWS);
   const [zone, setZone] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
   const [busy, setBusy] = useState<
@@ -222,6 +225,17 @@ export function LogTimeReviewPanel(props: {
     () => (state?.sources ?? []).filter((s) => s.unresolvedLocalRecords > 0),
     [state],
   );
+  const filteredSources = useMemo(() => {
+    const needle = sourceFilter.trim().toLocaleLowerCase();
+    if (!needle) return state?.sources ?? [];
+    return (state?.sources ?? []).filter((source) =>
+      [source.source, source.declaration?.ianaTimezone]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => value.toLocaleLowerCase().includes(needle)),
+    );
+  }, [sourceFilter, state]);
+  const renderedSources = filteredSources.slice(0, sourceLimit);
+  const hiddenSourceCount = Math.max(0, filteredSources.length - renderedSources.length);
 
   /** Any durable change invalidates the preview a reviewer was looking at. */
   function resetAfterChange(message: string) {
@@ -434,8 +448,29 @@ export function LogTimeReviewPanel(props: {
         </p>
       ) : null}
 
+      {state.sources.length > 0 ? (
+        <div className="log-time__tools">
+          <label htmlFor="log-time-source-filter">
+            Find a log file
+            <input
+              id="log-time-source-filter"
+              type="search"
+              value={sourceFilter}
+              placeholder="Filename or timezone"
+              onChange={(event) => {
+                setSourceFilter(event.target.value);
+                setSourceLimit(INITIAL_SOURCE_ROWS);
+              }}
+            />
+          </label>
+          <p aria-live="polite">
+            {filteredSources.length.toLocaleString()} of {state.sources.length.toLocaleString()} files match
+          </p>
+        </div>
+      ) : null}
+
       <ul className="log-time__sources">
-        {state.sources.map((source) => {
+        {renderedSources.map((source) => {
           const isSelected = selectedSource === source.source;
           const showPreview = preview && preview.source === source.source;
           return (
@@ -570,6 +605,20 @@ export function LogTimeReviewPanel(props: {
           );
         })}
       </ul>
+
+      {hiddenSourceCount > 0 ? (
+        <div className="log-time__more">
+          <p>
+            Showing {renderedSources.length.toLocaleString()} of {filteredSources.length.toLocaleString()} matching files.
+          </p>
+          <button
+            type="button"
+            onClick={() => setSourceLimit((current) => current + INITIAL_SOURCE_ROWS)}
+          >
+            Show {Math.min(INITIAL_SOURCE_ROWS, hiddenSourceCount).toLocaleString()} more
+          </button>
+        </div>
+      ) : null}
 
       {state.undoableRevision !== null && props.canWrite && !props.readOnly ? (
         <div className="log-time__undo">

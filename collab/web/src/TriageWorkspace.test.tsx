@@ -282,6 +282,40 @@ describe("triage workspace guidance and provenance", () => {
     expect(screen.getByText("1 human entry · 1 imported run")).toBeTruthy();
   });
 
+  it("summarizes a corpus upload as one batch instead of hundreds of human entries", () => {
+    const corpusContributions: ContributionView[] = Array.from({ length: 30 }, (_, index) => ({
+      id: `corpus-file-${index}`,
+      kind: "upload",
+      body: `Corpus intake logs/service-${index}.log`,
+      privacyClass: "owner_only",
+      tombstoned: false,
+    }));
+    const corpusEvents: TimelineEvent[] = [
+      ...sampleEvents,
+      {
+        seq: 3,
+        kind: "corpus_intake_committed",
+        actorUsername: "alice",
+        targetId: "batch-1",
+        serverTime: "2026-08-15T00:02:00.000Z",
+        payload: '{"accepted":30,"rejected":2,"origin":"zip"}',
+      },
+    ];
+    render(
+      <TriageWorkspace
+        {...makeProps({
+          events: corpusEvents,
+          contributions: [...sampleContributions, ...corpusContributions],
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByText("1 human entry · 1 imported run · 30 files in 1 corpus upload"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Evidence: Corpus intake logs\/service-0\.log/)).toBeNull();
+  });
+
   it("keeps the timeline region focusable for keyboard scrolling", () => {
     render(<TriageWorkspace {...makeProps()} />);
     const region = screen.getByRole("region", { name: "Case timeline events" });

@@ -716,6 +716,47 @@
   gap: 0.55rem;
 }
 
+.log-time__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin: 0.75rem 0;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-deep);
+}
+
+.log-time__tools label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.log-time__tools input {
+  min-width: min(24rem, 70vw);
+}
+
+.log-time__tools p,
+.log-time__more p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.log-time__more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
 .log-time__source {
   border: 1px solid var(--border);
   border-radius: 8px;

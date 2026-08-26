@@ -48,6 +48,10 @@ export interface SourceOption {
 
 const HUMAN_CONTRIBUTION_KINDS = new Set(["message", "note", "hypothesis", "action", "upload"]);
 
+function isCorpusFileContribution(row: ContributionView): boolean {
+  return row.kind === "upload" && (row.body ?? "").startsWith("Corpus intake ");
+}
+
 /**
  * Provenance chip for a timeline contribution. Human-authored only for kinds a
  * person writes directly; the server mirrors imported runs as `external_run`
@@ -190,10 +194,23 @@ export function TriageWorkspace(props: {
   // so retired sources keep their recorded name and kind on existing imports.
   const activeSources = props.sources.filter((source) => source.lifecycle !== "retired");
   const humanEntries = props.contributions.filter(
-    (row) => !row.tombstoned && HUMAN_CONTRIBUTION_KINDS.has(row.kind),
+    (row) =>
+      !row.tombstoned
+      && HUMAN_CONTRIBUTION_KINDS.has(row.kind)
+      && !isCorpusFileContribution(row),
   ).length;
+  const corpusIntakeEvents = props.events.filter((event) => event.kind === "corpus_intake_committed");
+  const corpusFileCount = corpusIntakeEvents.reduce((total, event) => {
+    const accepted = parsedTimelinePayload(event.payload)?.accepted;
+    return total + (typeof accepted === "number" && Number.isFinite(accepted) ? accepted : 0);
+  }, 0);
   const reviewLinks = props.contributions
-    .filter((row) => !row.tombstoned && HUMAN_CONTRIBUTION_KINDS.has(row.kind))
+    .filter(
+      (row) =>
+        !row.tombstoned
+        && HUMAN_CONTRIBUTION_KINDS.has(row.kind)
+        && !isCorpusFileContribution(row),
+    )
     .map((row) => ({
       id: row.id,
       label: `${row.kind === "upload" ? "Evidence" : row.kind === "hypothesis" ? "Possible explanation" : row.kind === "action" ? "Next step" : row.kind === "message" ? "Observation" : "Note"}: ${(row.body ?? "Recorded item").slice(0, 100)}`,
@@ -489,6 +506,9 @@ export function TriageWorkspace(props: {
             <span className="case-memory__badge">
               {humanEntries} human {humanEntries === 1 ? "entry" : "entries"} · {props.runs.length}{" "}
               imported {props.runs.length === 1 ? "run" : "runs"}
+              {corpusIntakeEvents.length > 0
+                ? ` · ${corpusFileCount.toLocaleString()} files in ${corpusIntakeEvents.length} corpus ${corpusIntakeEvents.length === 1 ? "upload" : "uploads"}`
+                : ""}
             </span>
           </header>
           <ul className="triage-legend" aria-label="Provenance classes">

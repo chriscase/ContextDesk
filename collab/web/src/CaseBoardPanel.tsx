@@ -9,6 +9,7 @@ const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
 const MAX_UPLOAD_BYTES = 1_000_000;
 const MAX_ERROR_LENGTH = 240;
 const INITIAL_FINDINGS = 12;
+const INITIAL_EVIDENCE = 25;
 
 interface ArtifactView {
   id: string;
@@ -194,6 +195,7 @@ export function CaseBoardPanel(props: {
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
   const [selectedEvidence, setSelectedEvidence] = useState<string[]>([]);
   const [evidenceFilter, setEvidenceFilter] = useState("");
+  const [evidenceLimit, setEvidenceLimit] = useState(INITIAL_EVIDENCE);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -220,7 +222,9 @@ export function CaseBoardPanel(props: {
     if (handledEvidenceRoute.current === evidenceRouteKey) return;
     handledEvidenceRoute.current = evidenceRouteKey;
     if (evidenceFilter) setEvidenceFilter("");
-  }, [evidenceFilter, evidenceRouteKey]);
+    const routeIndex = artifacts.findIndex((artifact) => artifact.id === evidenceRouteKey);
+    if (routeIndex >= evidenceLimit) setEvidenceLimit(routeIndex + 1);
+  }, [artifacts, evidenceFilter, evidenceLimit, evidenceRouteKey]);
   useRouteFocus(props.routeFocus, !loading && !evidenceRouteNeedsFilterReset);
 
   const load = useCallback(async (snapshotId?: string | null) => {
@@ -418,6 +422,8 @@ export function CaseBoardPanel(props: {
           .some((value) => value.toLocaleLowerCase().includes(normalizedEvidenceFilter)),
       )
     : artifacts;
+  const renderedArtifacts = visibleArtifacts.slice(0, evidenceLimit);
+  const hiddenArtifactCount = Math.max(0, visibleArtifacts.length - renderedArtifacts.length);
 
   function selectVisibleEvidence() {
     const visibleIds = visibleArtifacts.map((artifact) => artifact.id);
@@ -451,7 +457,10 @@ export function CaseBoardPanel(props: {
                       id="case-evidence-filter"
                       type="search"
                       value={evidenceFilter}
-                      onChange={(event) => setEvidenceFilter(event.target.value)}
+                      onChange={(event) => {
+                        setEvidenceFilter(event.target.value);
+                        setEvidenceLimit(INITIAL_EVIDENCE);
+                      }}
                       placeholder="Filename, path, or kind"
                     />
                   </label>
@@ -471,7 +480,7 @@ export function CaseBoardPanel(props: {
                 </div>
               ) : null}
               <ul className="case-memory__list">
-                {visibleArtifacts.map((artifact) => (
+                {renderedArtifacts.map((artifact) => (
                   <li
                     key={artifact.id}
                     className="case-memory__item"
@@ -536,6 +545,19 @@ export function CaseBoardPanel(props: {
                   </li>
                 ))}
               </ul>
+              {hiddenArtifactCount > 0 ? (
+                <div className="case-memory__more">
+                  <p>
+                    Showing {renderedArtifacts.length.toLocaleString()} of {visibleArtifacts.length.toLocaleString()} matching items.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setEvidenceLimit((current) => current + INITIAL_EVIDENCE)}
+                  >
+                    Show {Math.min(INITIAL_EVIDENCE, hiddenArtifactCount).toLocaleString()} more
+                  </button>
+                </div>
+              ) : null}
               {artifacts.length > 0 && visibleArtifacts.length === 0 ? (
                 <p className="case-memory__empty">No evidence matches this filter.</p>
               ) : null}
