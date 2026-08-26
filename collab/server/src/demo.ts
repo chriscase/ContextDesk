@@ -291,6 +291,246 @@ const DEMO_POOL_LOG = [
   "2026-08-24T06:14:26Z connection-pool INFO active=31 idle=9 queued=0",
 ].join("\n") + "\n";
 
+/**
+ * Fixture material for the scenarios beside the model-comparison case.
+ *
+ * The demo showed exactly one investigation, and it was the most elaborate
+ * kind the product supports: three model lanes, two experiments, gold scoring,
+ * transcripts. Anyone opening the demo learned that a War Room investigation
+ * means a model comparison — which is the opposite of what the product claims,
+ * since a case resolved by a person reading notes is a first-class outcome
+ * with its own contract (`investigation-resolution.ts`).
+ *
+ * So the demo now also shows the ordinary shapes: a case whose whole record is
+ * human notes, one whose evidence is pasted correspondence rather than logs,
+ * and one that is closed and filed away. Each is small on purpose — they exist
+ * to show that the shape is legitimate, not to compete with the primary case.
+ *
+ * Everything here is synthetic: invented systems, invented people at
+ * example.test, invented timestamps. Nothing is derived from a real
+ * investigation, a real customer, or a real address.
+ */
+const DEMO_MAILER_LOG = [
+  "2026-08-19T21:02:11Z mailer-worker INFO synthetic queue drain started depth=1840",
+  "2026-08-19T21:02:44Z mailer-worker WARN synthetic queue depth rising depth=2610 drained=0",
+  "2026-08-19T21:03:02Z mailer-worker ERROR synthetic worker restarted while holding 2610 queued messages",
+  "2026-08-19T21:07:55Z mailer-worker INFO synthetic queue drain resumed depth=2610",
+].join("\n") + "\n";
+
+const DEMO_SUPPORT_EMAIL = [
+  "From: operations@fixture-northwind.example.test",
+  "To: oncall@example.test",
+  "Date: Wed, 19 Aug 2026 21:31:00 +0000",
+  "Subject: Synthetic report — overnight statements never arrived",
+  "",
+  "Our overnight statement run reported success but no statements reached",
+  "recipients. Nothing was changed on our side this week. The fixture",
+  "operations group noticed at the 21:30 check.",
+  "",
+  "-- Synthetic fixture correspondence; no real sender or recipient.",
+].join("\r\n") + "\r\n";
+
+const DEMO_CHAT_EXCERPT = [
+  "[2026-08-19 21:34] fixture-oncall: statements job says success, nothing delivered",
+  "[2026-08-19 21:36] fixture-platform: mailer worker restarted around 21:03, queue never drained",
+  "[2026-08-19 21:41] fixture-oncall: so the job succeeded and the delivery stage silently dropped it?",
+  "[2026-08-19 21:43] fixture-platform: that matches the restart window. nothing else touched that path.",
+].join("\n") + "\n";
+
+/**
+ * A second investigation whose evidence is correspondence, not logs.
+ *
+ * Shows the email and chat capture path, and closes on a human-only
+ * resolution: a person read the report, matched it to a restart window, and
+ * wrote down what they concluded and what stayed unknown. No model ran.
+ */
+async function seedCorrespondenceCase(
+  app: FastifyInstance,
+  cookie: string,
+  sourceId: string,
+): Promise<string> {
+  const created = await okJson<{ id: string }>(app, {
+    method: "POST",
+    url: "/api/cases",
+    cookie,
+    payload: {
+      title: "Overnight statements reported sent but never arrived",
+      severity: "medium",
+      problemStatement:
+        "A synthetic statement run reported success while no statement reached a recipient.",
+      affectedParties: "Fixture Northwind operations group and their statement recipients",
+      impact: "One synthetic overnight statement cycle was not delivered.",
+      scope:
+        "The recorded fixture covers the reported symptom, one mailer log, and the chat that followed. Delivery-provider records are not available here.",
+      openQuestions: [
+        "Did the delivery stage report success independently of the queue actually draining?",
+        "Which statement recipients were affected in the fixture window?",
+      ],
+      // Recorded the evening it happened, before anyone opened the case.
+      occurredAt: "2026-08-19T21:30:00Z",
+    },
+  });
+
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/evidence`,
+    cookie,
+    payload: {
+      kind: "email",
+      filename: "reported-symptom.eml",
+      mediaType: "message/rfc822",
+      contentBase64: Buffer.from(DEMO_SUPPORT_EMAIL).toString("base64"),
+      summary:
+        "Synthetic report from the fixture operations group: statement run reported success, nothing delivered.",
+      sourceId,
+      privacyClass: "share_safe",
+    },
+  });
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/evidence`,
+    cookie,
+    payload: {
+      kind: "attachment",
+      filename: "oncall-chat.txt",
+      mediaType: "text/plain",
+      contentBase64: Buffer.from(DEMO_CHAT_EXCERPT).toString("base64"),
+      summary: "Synthetic on-call chat excerpt pasted into the investigation as recorded context.",
+      sourceId,
+      privacyClass: "share_safe",
+    },
+  });
+  const mailerLog = await okJson<{ artifact: { id: string } }>(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/evidence`,
+    cookie,
+    payload: {
+      kind: "log",
+      filename: "mailer-worker.log",
+      mediaType: "text/plain",
+      contentBase64: Buffer.from(DEMO_MAILER_LOG).toString("base64"),
+      summary: "Synthetic mailer-worker log across the restart and the undrained queue.",
+      sourceId,
+      privacyClass: "share_safe",
+    },
+  });
+
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/contributions`,
+    cookie,
+    payload: {
+      kind: "hypothesis",
+      body:
+        "The statement job reported success for enqueueing, not for delivery, so a worker restart during the drain lost the batch silently.",
+      privacyClass: "share_safe",
+      hypothesisStatus: "supported",
+      hypothesisLinks: [{ kind: "artifact", id: mailerLog.artifact.id }],
+      sourceId,
+    },
+  });
+
+  return created.id;
+}
+
+/**
+ * A third investigation carrying nothing but human notes.
+ *
+ * No evidence file, no run, no snapshot — the record is what people wrote
+ * down. This is the shape a historical or hand-reconstructed investigation
+ * takes, and the demo previously had no example of it at all.
+ *
+ * It is also the backfill example: the work happened well before it was
+ * written down, so `occurredAt` sits far behind the recording clock and the
+ * surface labels it as historical rather than implying it happened today.
+ */
+async function seedHumanOnlyCase(app: FastifyInstance, cookie: string): Promise<string> {
+  const created = await okJson<{ id: string }>(app, {
+    method: "POST",
+    url: "/api/cases",
+    cookie,
+    payload: {
+      title: "Reconstructed: batch cutover stall (historical notes only)",
+      severity: "low",
+      problemStatement:
+        "A synthetic overnight batch cutover stalled. Reconstructed from a hand-written on-call notebook; no machine records survive.",
+      affectedParties: "Fixture batch operations rota",
+      impact: "One synthetic overnight cycle ran late. No data was lost.",
+      scope:
+        "Everything recorded here is a person's recollection written down later. There is no log, no export, and no way to verify the timings.",
+      openQuestions: ["Was the stall ever reproduced after the fixture cutover?"],
+      // Only the day is known. Deliberately no time and no zone: the notebook
+      // said "4 November", and inventing an offset would invent a fact.
+      occurredAt: "2024-11-04",
+    },
+  });
+
+  for (const note of [
+    "Notebook, page 12: cutover started late because the preceding job had not released its lock.",
+    "Notebook, page 13: operator waited for the lock rather than forcing it. Cycle completed roughly ninety minutes late.",
+    "Recollection, recorded now: nobody wrote down which job held the lock, and the fixture system was decommissioned before this tool existed.",
+  ]) {
+    await okJson(app, {
+      method: "POST",
+      url: `/api/cases/${created.id}/contributions`,
+      cookie,
+      payload: { kind: "note", body: note, privacyClass: "share_safe" },
+    });
+  }
+
+  return created.id;
+}
+
+/**
+ * A fourth investigation that is finished and filed away.
+ *
+ * Exists so the archived state is visible in the demo at all: without one,
+ * the archive control, the hidden-archived notice, and the restore path have
+ * nothing to act on until the operator archives something themselves.
+ */
+async function seedArchivedCase(app: FastifyInstance, cookie: string): Promise<string> {
+  const created = await okJson<{ id: string }>(app, {
+    method: "POST",
+    url: "/api/cases",
+    cookie,
+    payload: {
+      title: "Duplicate report of the synthetic checkout timeouts",
+      severity: "low",
+      problemStatement:
+        "A second synthetic report of the same checkout timeout, opened before the first was found.",
+      affectedParties: "Fixture storefront operators",
+      impact: "None beyond the original report.",
+      scope: "Superseded by the primary checkout investigation.",
+      occurredAt: "2026-08-24T07:05:00Z",
+    },
+  });
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/contributions`,
+    cookie,
+    payload: {
+      kind: "note",
+      body: "Closing this as a duplicate: the primary checkout investigation already holds the evidence.",
+      privacyClass: "share_safe",
+    },
+  });
+  // Monitoring first, so restoring it demonstrates the recorded prior status
+  // rather than the `open` fallback.
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/status`,
+    cookie,
+    payload: { status: "monitoring" },
+  });
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/status`,
+    cookie,
+    payload: { status: "archived" },
+  });
+  return created.id;
+}
+
 async function seed(app: FastifyInstance): Promise<string> {
   const login = await app.inject({
     method: "POST",
@@ -600,6 +840,14 @@ async function seed(app: FastifyInstance): Promise<string> {
       evidenceRefs: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
     },
   );
+
+  // Seeded after the primary case so the inventory opens with the elaborate
+  // investigation first and the ordinary shapes beside it, rather than
+  // teaching a first-time reader that every case looks like a model bake-off.
+  await seedCorrespondenceCase(app, cookie, source.id);
+  await seedHumanOnlyCase(app, cookie);
+  await seedArchivedCase(app, cookie);
+
   return created.id;
 }
 

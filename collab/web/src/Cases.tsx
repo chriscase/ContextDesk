@@ -24,6 +24,12 @@ import { focusArrivalCopy } from "./route-focus-copy.js";
 import { useRoutedItemPresence } from "./route-focus.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { InvestigationRecordPanel } from "./InvestigationRecord.js";
+import {
+  hiddenArchivedNotice,
+  statusCounts as investigationStatusCounts,
+  visibleInvestigations,
+} from "./investigation-search.js";
+import { LifecyclePanel } from "./LifecyclePanel.js";
 import { ResolutionForm } from "./ResolutionForm.js";
 import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
 import { loadEntities, type EntityRow } from "./Entities.js";
@@ -699,6 +705,10 @@ export function Cases(props: {
   const [occurredFrom, setOccurredFrom] = useState("");
   const [decisionFilter, setDecisionFilter] = useState("all");
   const [serviceFilter, setServiceFilter] = useState("all");
+  // Archived investigations stay out of the working list until asked for.
+  // That is what makes archiving mean something; the count of what is
+  // withheld is always reported beside the control that reveals it.
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [entityOptions, setEntityOptions] = useState<EntityRow[]>([]);
   const [involvementIndex, setInvolvementIndex] = useState<
     { investigationId: string; entityId: string }[]
@@ -1009,6 +1019,13 @@ export function Cases(props: {
         setResolutionPrompted(true);
         return;
       }
+      // A lifecycle refusal already reads as a complete, actionable sentence
+      // ("...under legal hold... clear the hold first"). Prefixing it with a
+      // generic failure line would bury the part that says what to do.
+      if (detail.error === "lifecycle_refused" && detail.detail) {
+        setActionError(detail.detail);
+        return;
+      }
       if (detail.error === "resolution_conflict") {
         setResolutionError(
           "Someone else recorded a conclusion while this form was open. Reload the investigation and read theirs before replacing it.",
@@ -1164,42 +1181,37 @@ export function Cases(props: {
   useEffect(() => {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
-  const normalizedSearch = caseSearch.trim().toLocaleLowerCase();
   const casesByEntity = new Map<string, Set<string>>();
   for (const entry of involvementIndex) {
     const bucket = casesByEntity.get(entry.entityId) ?? new Set<string>();
     bucket.add(entry.investigationId);
     casesByEntity.set(entry.entityId, bucket);
   }
-  const visibleCases = cases.filter((c) => {
-    if (statusFilter !== "all" && c.status !== statusFilter) return false;
-    if (entityFilter !== "all" && !casesByEntity.get(entityFilter)?.has(c.id)) return false;
+  const entityLabelsById = new Map(entityOptions.map((entity) => [entity.id, entity.label]));
+  const entityLabelsFor = (row: CaseRow): string[] => {
+    const labels: string[] = [];
+    for (const [entityId, members] of casesByEntity) {
+      if (!members.has(row.id)) continue;
+      const label = entityLabelsById.get(entityId);
+      if (label) labels.push(label);
+    }
+    return labels;
+  };
+  const { visible: searchableCases, hiddenArchived } = visibleInvestigations(
+    cases,
+    { query: caseSearch, status: statusFilter, entityId: entityFilter, includeArchived },
+    casesByEntity,
+    entityLabelsFor,
+  );
+  const visibleCases = searchableCases.filter((c) => {
     if (serviceFilter !== "all" && !casesByEntity.get(serviceFilter)?.has(c.id)) return false;
     if (decisionFilter === "recorded" && c.status !== "resolved") return false;
     if (decisionFilter === "open" && c.status === "resolved") return false;
     if (occurredFrom && (c.occurredAt ?? "") < occurredFrom) return false;
-    if (!normalizedSearch) return true;
-    return [
-      c.title,
-      c.reportedProblem,
-      c.problem,
-      c.summary,
-      c.id,
-      c.createdBy,
-      c.createdByUsername,
-      c.creator,
-      creatorName(c),
-      ...(c.participants ?? []).map((p) => p.username),
-    ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch));
+    return true;
   });
-  const statusCounts: [string, number][] = [
-    ...KNOWN_STATUSES.map(
-      (status): [string, number] => [status, cases.filter((c) => c.status === status).length],
-    ),
-    ...[...new Set(cases.map((c) => c.status))]
-      .filter((status) => !(KNOWN_STATUSES as readonly string[]).includes(status))
-      .map((status): [string, number] => [status, cases.filter((c) => c.status === status).length]),
-  ];
+  const archivedNotice = hiddenArchivedNotice(hiddenArchived);
+  const statusCounts = investigationStatusCounts(cases, KNOWN_STATUSES);
   const attentionCases = cases
     .filter((row) =>
       row.status !== "resolved"
@@ -1340,8 +1352,8 @@ export function Cases(props: {
             type="search"
             value={caseSearch}
             onChange={(e) => setCaseSearch(e.target.value)}
-            placeholder="Title, ID, participant, or creator"
-            aria-label="Search investigations by title, ID, participant, or creator"
+            placeholder="Title, problem, affected parties, people, or ID"
+            aria-label="Search investigations by title, situation text, people, or ID"
           />
         </label>
         {entityOptions.length > 0 ? (
@@ -1421,7 +1433,30 @@ export function Cases(props: {
             ))}
           </select>
         </label>
+        <label className="case-list__archived-toggle">
+          <input
+            type="checkbox"
+            checked={includeArchived}
+            onChange={(e) => setIncludeArchived(e.target.checked)}
+          />
+          <span>Include archived</span>
+        </label>
       </div>
+      {/* Archiving is only meaningful if it removes something from view, and
+          only honest if the surface says what it removed. Both, in one line
+          beside the control that brings them back. */}
+      {archivedNotice ? (
+        <p className="case-list__archived-notice" role="status">
+          {archivedNotice}{" "}
+          <button
+            type="button"
+            className="case-list__archived-reveal"
+            onClick={() => setIncludeArchived(true)}
+          >
+            Show them
+          </button>
+        </p>
+      ) : null}
       {cases.length === 0 && casesLoaded ? (
         <EmptyState art="investigations" className="case-list__empty-state">
           <p>
@@ -2592,7 +2627,12 @@ export function Cases(props: {
                   }}
                 />
               ) : null}
-              {canLead ? (
+              {/* An archived investigation has no working status to set: its one
+                  available move is a restore, which the lifecycle panel owns.
+                  Offering the ordinary select here would default to `open`
+                  because `archived` is deliberately not one of its options, and
+                  a submit would then silently un-archive the case. */}
+              {canLead && current.status !== "archived" ? (
                 <form
                   key={current.id}
                   className="composer"
@@ -2620,14 +2660,21 @@ export function Cases(props: {
                     <option value="open">open</option>
                     <option value="monitoring">monitoring</option>
                     <option value="resolved">resolved</option>
-                    <option value="archived">archived</option>
                   </select>
                   <button className="login__submit" type="submit">
                     Update status
                   </button>
                 </form>
-              ) : !readOnly ? (
+              ) : !readOnly && current.status !== "archived" ? (
                 <p className="triage-step__note">Only a case lead can change the case status.</p>
+              ) : null}
+              {!readOnly ? (
+                <LifecyclePanel
+                  caseId={current.id}
+                  status={current.status}
+                  canLead={canLead}
+                  onChanged={() => Promise.all([refresh(), refreshActivity()]).then(() => undefined)}
+                />
               ) : null}
               {!readOnly ? (
                 <details className="case-view__support">

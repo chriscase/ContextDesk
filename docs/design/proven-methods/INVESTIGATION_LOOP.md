@@ -511,6 +511,7 @@ responsive rails are not fully represented by DOM tests.
 | Finding walkthrough            | **Planned**                                        | Individual items can be opened                                        | Guided ranked sequence                                             |
 | Report assembly/export         | **Partial**                                        | Versioned accepted-state projection, deterministic Markdown, confirmation-gated bounded export | Fuller #532 vocabulary, report patches/undo, unsupported-claim detection, HTML/PDF, evidence appendix |
 | Multi-corpus investigation     | **Planned/non-goal for current slice**             | Document schema permits bounded links                                 | Complete multi-corpus UI/semantics                                 |
+| War Room archive / restore     | **Local integration**                              | Archiving is a confirmed, explained act separate from the ordinary status control; legal hold refuses it fail-closed before any write, and never refuses a restore; restore reads the recorded `case_status` timeline and returns the investigation to the status it actually held, falling back to `open` and never to `resolved`; `GET /api/cases/:id/lifecycle` answers before the click so a refusal is stated rather than discovered; archived investigations leave the working list with the withheld count reported beside the control that reveals them | No delete path of any kind, and none implied — deletion is answered, not offered. No retention-policy expiry, no bulk archive, no scheduled archival, and no archive-driven storage reclamation. `retentionClass` remains recorded and unused |
 
 ## 15. Reimplementation notes
 
@@ -535,6 +536,16 @@ but unauditable notes.
 Freeze whether “delete” means archive, tombstone, purge, or retention-policy
 removal across append-only revisions. Freeze view recipe units and identity
 before persisting them.
+
+For the War Room investigation this is now frozen: “delete” means **archive**,
+and nothing else exists. Contribution *content* can be tombstoned; an
+investigation cannot be removed. The distinction is enforced rather than
+documented — `investigation-lifecycle.ts` exposes no delete verb, and
+`describeDeleteRequest` returns the honest answer so a caller asking to delete
+is told what the workspace offers instead of meeting an unexplained failure.
+Reimplementations that add a purge should expect to revisit legal hold,
+audit retention, and the portable archive together; none of the three assumes
+an investigation can stop existing.
 
 ## 16. Open residuals
 

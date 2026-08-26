@@ -173,7 +173,42 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
       `/api/cases/${caseId}/export/inventory`,
       session,
     ),
+    [`GET /api/cases/${caseId}/lifecycle`]: await json(
+      app,
+      "GET",
+      `/api/cases/${caseId}/lifecycle`,
+      session,
+    ),
   };
+  // The demo seeds several investigations, and `GET /api/cases` lists all of
+  // them. A static fallback that captured detail routes for only the primary
+  // case would render the others in the inventory and then 404 the moment
+  // anyone clicked one — a broken link in a read-only artefact nobody can fix
+  // from the page. So every listed investigation gets the read routes the case
+  // view opens with. The elaborate per-experiment and per-snapshot captures
+  // above stay scoped to the primary case, which is the only one that has them.
+  const listed = (routes["GET /api/cases"] ?? {}) as { cases?: { id?: string }[] };
+  for (const row of listed.cases ?? []) {
+    if (!row.id || row.id === caseId) continue;
+    for (const suffix of [
+      "",
+      "/timeline",
+      "/contributions",
+      "/imports",
+      "/evidence",
+      "/snapshots",
+      "/board",
+      "/triage-runs",
+      "/experiments",
+      "/presence",
+      "/lifecycle",
+      "/export/inventory",
+    ]) {
+      const url = `/api/cases/${row.id}${suffix}`;
+      routes[`GET ${url}`] = await json(app, "GET", url, session);
+    }
+  }
+
   const liveOverview = parseOverview(await json(app, "GET", "/api/overview", session));
   routes["GET /api/overview"] = projectOverviewForStaticSnapshot(liveOverview);
   for (const snapshot of snapshotList.snapshots ?? []) {

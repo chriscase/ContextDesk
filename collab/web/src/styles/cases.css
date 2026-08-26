@@ -350,6 +350,40 @@
   width: 100%;
 }
 
+/* Aligns to the bottom of the row so the checkbox sits level with the select
+   controls rather than with their labels. */
+.case-list__archived-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: end;
+  padding-bottom: 0.4rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.case-list__archived-notice {
+  margin: -0.5rem 0 1rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.case-list__archived-reveal {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.case-list__archived-reveal:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .case-list__empty {
   margin: 0 0 1rem;
   color: var(--muted);
@@ -2502,4 +2536,119 @@
   cursor: pointer;
   color: var(--accent);
   font-size: 0.72rem;
+}
+
+/* Archive and restore.
+
+   Set apart from the ordinary status control on purpose: these two moves take
+   an investigation in or out of the working list, and a surface that renders
+   them like any other field invites the accidental click it should be
+   preventing. Themed entirely from tokens, so every skin and the light themes
+   pick it up without a second rule. */
+.lifecycle-panel {
+  margin-top: 1rem;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+
+.lifecycle-panel__title {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.lifecycle-panel__explainer {
+  margin: 0 0 0.6rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  max-width: 60ch;
+}
+
+/* A refusal is information, not a failure: it is styled as a standing
+   condition the operator can act on, not as an error they caused. */
+.lifecycle-panel__refusal {
+  margin: 0 0 0.6rem;
+  padding: 0.45rem 0.6rem;
+  border-left: 3px solid var(--warning);
+  border-radius: 0.25rem;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  font-size: 0.85rem;
+}
+
+.lifecycle-panel__error {
+  margin: 0 0 0.6rem;
+  padding: 0.45rem 0.6rem;
+  border-left: 3px solid var(--danger);
+  border-radius: 0.25rem;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  font-size: 0.85rem;
+}
+
+.lifecycle-panel__action,
+.lifecycle-panel__confirm-yes,
+.lifecycle-panel__confirm-no {
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.lifecycle-panel__action:disabled,
+.lifecycle-panel__confirm-yes:disabled,
+.lifecycle-panel__confirm-no:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.lifecycle-panel__action:not(:disabled):hover,
+.lifecycle-panel__confirm-no:not(:disabled):hover {
+  border-color: var(--accent);
+}
+
+/* The committing control is the only emphasised thing in the panel, and only
+   once the operator has already asked for it. */
+.lifecycle-panel__confirm-yes {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.lifecycle-panel__confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.lifecycle-panel__confirm-question {
+  flex: 1 1 100%;
+  margin: 0 0 0.15rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  max-width: 60ch;
+}
+
+.lifecycle-panel__deletion {
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.lifecycle-panel__deletion > summary {
+  cursor: pointer;
+}
+
+.lifecycle-panel__deletion > p {
+  margin: 0.4rem 0 0;
+  max-width: 60ch;
+}
+
+.lifecycle-panel :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
