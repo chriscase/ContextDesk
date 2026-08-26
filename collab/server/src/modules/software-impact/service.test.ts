@@ -101,7 +101,11 @@ describe("software impact service", () => {
   it("does not disclose another investigation's records or suggestion values", async () => {
     const service = new SoftwareImpactService({
       investigations: {
-        getCase: async (id) => (id === "case-a" ? { id, title: "A" } : id === "case-b" ? { id, title: "B" } : null),
+        getCase: async (id, actor) => {
+          if (id === "case-a" && actor.username === "alice") return { id, title: "A" };
+          if (id === "case-b" && actor.username === "bob") return { id, title: "B" };
+          return null;
+        },
         appendDomainTimeline: async () => undefined,
       },
     });

@@ -76,7 +76,7 @@ describe("SoftwareImpactPanel", () => {
       await screen.findByText(/builds are not ordered, and a later version is never inferred/i),
     ).toBeTruthy();
     expect(screen.getByText(/recording order, not build order/i)).toBeTruthy();
-    expect(screen.getByText("Confirmed")).toBeTruthy();
+    expect(screen.getByText("Confirmed", { selector: ".software-impact__status" })).toBeTruthy();
   });
 
   it("lets a person type a new value while still offering existing suggestions", async () => {

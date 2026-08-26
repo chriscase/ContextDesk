@@ -9,7 +9,6 @@ import {
   type SoftwareImpactField,
   type SoftwareImpactIdentityV1,
   type SoftwareImpactListV1,
-  type SoftwareImpactStatus,
   type SoftwareImpactSuggestionsV1,
   type SoftwareImpactV1,
 } from "@cd-collab/contracts";
