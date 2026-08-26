@@ -534,6 +534,7 @@ function EvidencePicker(props: {
   const [query, setQuery] = useState("");
   const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set());
   const fieldsetRef = useRef<HTMLFieldSetElement>(null);
+  const previousViewId = useRef(props.view.id);
   // Resolve the whole set at once: picking one reference at a time cannot see
   // that two of them would render under the same name, and a chooser whose
   // options read identically cannot be used to choose.
@@ -569,6 +570,8 @@ function EvidencePicker(props: {
   }, []);
 
   useEffect(() => {
+    if (previousViewId.current === props.view.id) return;
+    previousViewId.current = props.view.id;
     setSelectedRefs(new Set());
     setQuery("");
   }, [props.view.id]);
