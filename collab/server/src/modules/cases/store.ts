@@ -5,6 +5,7 @@ import {
   SNAPSHOT_SCHEMA_ID,
   CASE_SEVERITIES,
   CASE_STATUSES,
+  normalizeInvestigationContext,
   OVERVIEW_OPEN_STATUSES,
   type ArtifactKind,
   type CaseSeverity,
@@ -14,6 +15,7 @@ import {
   type OverviewOpenStatus,
   type OverviewSeverityCountsV1,
   type OverviewStatusCountsV1,
+  type InvestigationContextV1,
   type OccurredAtPrecision,
   type OccurredAtZone,
   type PrivacyClass,
@@ -54,6 +56,7 @@ export interface CaseRow {
   scope?: string;
   openQuestions?: string[];
   situationVersion?: number;
+  investigationContext?: InvestigationContextV1 | null;
   /**
    * When the investigated work actually happened, as recorded. Literal text,
    * so an unknown time zone is never guessed into UTC. `createdAt` keeps
@@ -154,6 +157,7 @@ export interface AtomicSituationUpdate {
     impact: string;
     scope: string;
     openQuestions: string[];
+    investigationContext: InvestigationContextV1 | null;
   };
   changedFields: string[];
   timeline: TimelineInsert;
@@ -498,6 +502,7 @@ export class MemoryCaseStore implements CaseStore {
         existing.impact = input.situation.impact;
         existing.scope = input.situation.scope;
         existing.openQuestions = [...input.situation.openQuestions];
+        existing.investigationContext = input.situation.investigationContext;
         existing.situationVersion = currentVersion + 1;
         this.appendTimelineInMemory(input.id, input.timeline);
         await audit.append(input.audit);
@@ -898,10 +903,10 @@ export class PgCaseStore implements CaseStore {
     await this.db.query(
       `INSERT INTO cases (
          id, title, problem_statement, affected_parties, impact, situation_scope, open_questions,
-         situation_version, occurred_at, occurred_at_precision, occurred_at_zone,
+         situation_version, investigation_context, occurred_at, occurred_at_precision, occurred_at_zone,
          severity, status, legal_hold, retention_class,
          created_at, created_by, created_by_username, last_seq
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12, $13, $14, $15,
                  $16, $17, $18, 0)`,
       [
         row.id,
@@ -912,6 +917,9 @@ export class PgCaseStore implements CaseStore {
         row.scope ?? "",
         JSON.stringify(row.openQuestions ?? []),
         row.situationVersion ?? 0,
+        row.investigationContext === undefined || row.investigationContext === null
+          ? null
+          : JSON.stringify(row.investigationContext),
         row.occurredAt ?? null,
         row.occurredAtPrecision ?? "unknown",
         row.occurredAtZone ?? "unspecified",
@@ -1005,8 +1013,9 @@ export class PgCaseStore implements CaseStore {
       const updated = await transaction.query(
         `UPDATE cases
          SET problem_statement = $2, affected_parties = $3, impact = $4, situation_scope = $5,
-             open_questions = $6::jsonb, situation_version = situation_version + 1
-         WHERE id = $1 AND situation_version = $7`,
+             open_questions = $6::jsonb, investigation_context = $7::jsonb,
+             situation_version = situation_version + 1
+         WHERE id = $1 AND situation_version = $8`,
         [
           input.id,
           input.situation.problemStatement,
@@ -1014,6 +1023,9 @@ export class PgCaseStore implements CaseStore {
           input.situation.impact,
           input.situation.scope,
           JSON.stringify(input.situation.openQuestions),
+          input.situation.investigationContext === null
+            ? null
+            : JSON.stringify(input.situation.investigationContext),
           input.expectedVersion,
         ],
       );
@@ -1504,7 +1516,7 @@ export class PgCaseStore implements CaseStore {
 
 const CASE_SELECT = `
   SELECT c.id, c.title, c.problem_statement, c.affected_parties, c.impact, c.situation_scope,
-         c.open_questions, c.situation_version,
+         c.open_questions, c.situation_version, c.investigation_context,
          c.occurred_at, c.occurred_at_precision, c.occurred_at_zone,
          c.severity, c.status, c.legal_hold,
          c.retention_class,
@@ -1528,6 +1540,10 @@ function cloneCase(row: CaseRow): CaseRow {
     scope: row.scope ?? "",
     openQuestions: caseOpenQuestions(row.openQuestions, "case.openQuestions"),
     situationVersion: caseSituationVersion(row.situationVersion),
+    investigationContext: normalizeInvestigationContext(
+      row.investigationContext,
+      "case.investigationContext",
+    ),
     occurredAt: row.occurredAt ?? null,
     occurredAtPrecision: row.occurredAtPrecision ?? "unknown",
     occurredAtZone: row.occurredAtZone ?? "unspecified",
@@ -1578,6 +1594,10 @@ function asCase(row: Record<string, unknown>): CaseRow {
       : String(row.situation_scope),
     openQuestions: caseOpenQuestions(row.open_questions, "cases.open_questions"),
     situationVersion: caseSituationVersion(row.situation_version),
+    investigationContext: normalizeInvestigationContext(
+      row.investigation_context,
+      "cases.investigation_context",
+    ),
     occurredAt:
       row.occurred_at === null || row.occurred_at === undefined ? null : String(row.occurred_at),
     occurredAtPrecision: (row.occurred_at_precision as OccurredAtPrecision | undefined) ?? "unknown",

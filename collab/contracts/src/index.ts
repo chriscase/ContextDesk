@@ -133,7 +133,10 @@ export {
   CASE_SCHEMA_ID,
   CASE_SEVERITIES,
   CASE_STATUSES,
+  INVESTIGATION_CONTEXT_FIELDS,
+  INVESTIGATION_CONTEXT_VALUE_MAX_LENGTH,
   PRIVACY_CLASSES,
+  normalizeInvestigationContext,
   parseCase,
   parseCaseList,
 } from "./case.js";
@@ -143,6 +146,8 @@ export type {
   CaseSeverity,
   CaseStatus,
   CaseV1,
+  InvestigationContextField,
+  InvestigationContextV1,
   PrivacyClass,
 } from "./case.js";
 

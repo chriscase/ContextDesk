@@ -6,6 +6,7 @@ import {
   OVERVIEW_ACTIVITY_CAP,
   OVERVIEW_OPEN_CASE_CAP,
   isContributionIdempotencyKey,
+  normalizeInvestigationContext,
   snapshotFairness,
   snapshotFingerprint,
   type ArtifactKind,
@@ -19,6 +20,7 @@ import {
   type CaseV1,
   type ContributionV1,
   type HypothesisStatus,
+  type InvestigationContextV1,
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
@@ -129,6 +131,7 @@ export interface CaseSituationInput {
   impact: string;
   scope: string;
   openQuestions: string[];
+  investigationContext?: unknown;
 }
 
 export class SituationConflictError extends Error {
@@ -476,6 +479,7 @@ export class CaseService {
       impact?: string;
       scope?: string;
       openQuestions?: string[];
+      investigationContext?: unknown;
       occurredAt?: unknown;
       occurredAtPrecision?: unknown;
       occurredAtZone?: unknown;
@@ -496,11 +500,13 @@ export class CaseService {
       scope: input.scope ?? "",
       openQuestions: input.openQuestions ?? [],
     });
+    const investigationContext = normalizeInvestigationContext(input.investigationContext);
     const row = {
       id,
       title: input.title,
       ...situation,
       situationVersion: 0,
+      investigationContext,
       occurredAt: occurrence.occurredAt,
       occurredAtPrecision: occurrence.occurredAtPrecision,
       occurredAtZone: occurrence.occurredAtZone,
@@ -593,7 +599,14 @@ export class CaseService {
     }
     const row = await this.requireCase(caseId);
     const suppliedFields = Object.keys(input).filter((key) =>
-      ["problemStatement", "affectedParties", "impact", "scope", "openQuestions"].includes(key),
+      [
+        "problemStatement",
+        "affectedParties",
+        "impact",
+        "scope",
+        "openQuestions",
+        "investigationContext",
+      ].includes(key),
     );
     if (suppliedFields.length === 0) throw new Error("no situation fields supplied");
     const situation = cleanSituation({
@@ -603,18 +616,24 @@ export class CaseService {
       scope: input.scope ?? row.scope ?? "",
       openQuestions: input.openQuestions ?? row.openQuestions ?? [],
     });
+    const investigationContext = Object.prototype.hasOwnProperty.call(input, "investigationContext")
+      ? normalizeInvestigationContext(input.investigationContext)
+      : row.investigationContext ?? null;
     const changedFields = suppliedFields.filter((field) => {
+      if (field === "investigationContext") {
+        return JSON.stringify(investigationContext) !== JSON.stringify(row.investigationContext ?? null);
+      }
       if (field === "openQuestions") {
         return JSON.stringify(situation.openQuestions) !== JSON.stringify(row.openQuestions ?? []);
       }
-      return situation[field as keyof Omit<CaseSituationInput, "openQuestions">]
-        !== (row[field as keyof Omit<CaseSituationInput, "openQuestions">] ?? "");
+      return situation[field as keyof Omit<CaseSituationInput, "openQuestions" | "investigationContext">]
+        !== (row[field as keyof Omit<CaseSituationInput, "openQuestions" | "investigationContext">] ?? "");
     });
     const result = await this.store.updateSituationAtomic(
       {
         id: row.id,
         expectedVersion,
-        situation,
+        situation: { ...situation, investigationContext },
         changedFields,
         timeline: {
           kind: "case_situation_updated",
@@ -1814,6 +1833,7 @@ export class CaseService {
     scope?: string;
     openQuestions?: string[];
     situationVersion?: number;
+    investigationContext?: InvestigationContextV1 | null;
     occurredAt?: string | null;
     occurredAtPrecision?: OccurredAtPrecision;
     occurredAtZone?: OccurredAtZone;
@@ -1835,6 +1855,7 @@ export class CaseService {
       scope: row.scope ?? "",
       openQuestions: row.openQuestions ? [...row.openQuestions] : [],
       situationVersion: row.situationVersion ?? 0,
+      investigationContext: row.investigationContext ?? null,
       occurredAt: row.occurredAt ?? null,
       occurredAtPrecision: row.occurredAtPrecision ?? "unknown",
       occurredAtZone: row.occurredAtZone ?? "unspecified",

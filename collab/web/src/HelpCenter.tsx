@@ -143,21 +143,38 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         title: "Start and find investigations",
         summary:
           "Contributors and leads can open a new investigation; everyone can search and filter the recorded list.",
-        keywords: ["create", "new case", "search cases", "filter", "status", "severity", "title"],
+        keywords: [
+          "create",
+          "new case",
+          "search cases",
+          "filter",
+          "status",
+          "severity",
+          "title",
+          "product",
+          "version",
+          "build",
+          "component",
+          "environment",
+          "organization",
+          "customer",
+          "tags",
+        ],
         what:
-          "An investigation is the unit of work: a titled case with a durable Situation, recorded status (open, monitoring, resolved, or archived), severity, participants, and timeline. Situation records the problem statement, affected people or systems, impact, scope, and open questions without treating missing context as fact. The Investigations area lists every case visible to your account, with search over title, ID, creator, and participants, plus a status filter.",
+          "An investigation is the unit of work: a titled case with a durable Situation, recorded status (open, monitoring, resolved, or archived), severity, participants, structured software or product context, and timeline. Situation records the problem statement, affected people or systems, impact, scope, and open questions without treating missing context as fact. The structured context fields are software or product, version, build, component, environment, and organization, customer, or entity. The Investigations area lists every case visible to your account, with search over title, ID, creator, participants, and these context fields, plus a status filter.",
         when:
           "Start an investigation when your team begins working a problem it wants a durable, attributable record of.",
         steps: [
           "Select Start investigation in the top bar (or use the form under the investigation list).",
-          "Enter a title and the Situation context you know now: the observed problem, affected people or systems, impact, scope, and one open question per line. Blank fields remain visibly not recorded.",
+          "Enter a title and the Situation context you know now: the observed problem, affected people or systems, impact, scope, one open question per line, and any structured software or product context. Blank fields remain visibly not recorded.",
+          "Use the structured context suggestions when one matches, or enter a new value when it does not. The display value you enter is kept as written; flexible tags are a later extension.",
           "Create the investigation — it opens on Situation, where an authorized member can refine those fields as the investigation develops.",
           "To find existing work, use the list's search field or the status filter.",
         ],
         recorded:
           "Creation records who opened the case and when. Situation edits and status changes are recorded. Contributors, case leads, and admins can edit Situation on a case they can access; only a case lead can change status.",
         limits:
-          "Creating requires the investigation:write capability (the contributor, case-lead, and admin roles include it; a local grant can add it to a viewer). Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses.",
+          "Creating requires the investigation:write capability (the contributor, case-lead, and admin roles include it; a local grant can add it to a viewer). Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses. Suggestions are existing recorded values, not a controlled vocabulary.",
         actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
       },
     ],

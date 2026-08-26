@@ -806,6 +806,7 @@ describe("atomic memory Situation updates", () => {
         impact: field === "impact" ? value : "",
         scope: "",
         openQuestions: [],
+        investigationContext: null,
       },
       changedFields: [field],
       timeline: {
@@ -852,6 +853,7 @@ describe("atomic memory Situation updates", () => {
         impact: "",
         scope: "",
         openQuestions: [],
+        investigationContext: null,
       },
       changedFields: ["problemStatement"],
       timeline: {
@@ -929,6 +931,7 @@ describe("PostgreSQL Situation SQL boundary", () => {
         impact: "",
         scope: "",
         openQuestions: ["What changed?"],
+        investigationContext: null,
       },
       changedFields: ["problemStatement", "openQuestions"],
       timeline: {
@@ -950,7 +953,7 @@ describe("PostgreSQL Situation SQL boundary", () => {
     expect(result.status).toBe("updated");
     expect(statements[0]).toBe("BEGIN");
     expect(statements.some((sql) => sql.includes("FOR UPDATE"))).toBe(true);
-    expect(statements.some((sql) => sql.includes("WHERE id = $1 AND situation_version = $7")))
+    expect(statements.some((sql) => sql.includes("WHERE id = $1 AND situation_version = $8")))
       .toBe(true);
     expect(statements.some((sql) => sql.includes("INSERT INTO timeline_events"))).toBe(true);
     expect(statements.some((sql) => sql.includes("INSERT INTO audit_events"))).toBe(true);
@@ -983,6 +986,7 @@ describe("PostgreSQL Situation SQL boundary", () => {
         impact: "",
         scope: "",
         openQuestions: [],
+        investigationContext: null,
       },
       changedFields: ["problemStatement"],
       timeline: {
