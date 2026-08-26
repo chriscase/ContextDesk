@@ -732,6 +732,18 @@
   line-height: 1.5;
 }
 
+.stage-panel__next {
+  max-width: 46rem;
+  margin: 0.45rem 0 0;
+  color: var(--fg);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.stage-panel__next strong {
+  color: var(--accent);
+}
+
 .stage-panel__note {
   margin: 0.5rem 0 0;
   color: var(--muted);

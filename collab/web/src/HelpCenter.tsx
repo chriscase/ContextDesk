@@ -264,7 +264,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each accepted file gets its own evidence identity and records relative path, media type, digest, byte length, privacy class, uploader identity, import time, source attribution, and intake batch id. Equal digests reuse the same content-addressed bytes without collapsing those distinct evidence records. Deep links exist for the batch on Capture and each evidence item on Analyze.",
         limits:
-          `${CORPUS_CAPACITY_COPY} These are hard resource bounds, not a promise that every member is accepted. Building the investigation's log corpus uses the same file-count, per-file, and expanded-byte bounds and rejects overflow instead of silently dropping files. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .jsonl, .ndjson, .csv, .xml, .eml, and .md; common rotated log names such as service.log.1 and service.log-2026-08-25 are also recognized. Declared media must match; JSON documents and every non-empty JSON Lines record must parse. Private line-oriented text with sparse legacy encoding bytes keeps its original bytes and digest while text views and log analysis replace unreadable bytes explicitly; dense invalid data and binary content are rejected. Non-UTF-8 content cannot enter through share_safe intake. share_safe accepts plain text, logs, CSV, Markdown, valid JSON, and valid JSON Lines only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.`,
+          `${CORPUS_CAPACITY_COPY} These are hard bounds: overflow is rejected, never silently dropped. ZIP intake rejects unsafe paths, links, duplicate normalized paths, nested/encrypted archives, and malformed archives. Supported text formats include logs, rotated logs, TXT, JSON, JSONL/NDJSON, CSV, XML, email, and Markdown; structured JSON and JSONL records must parse. The intake validates privacy and content, but marking an item share_safe does not scrub it. XML and email require owner_only, and the global source catalog is not the path for investigation uploads.`,
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
     ],
@@ -292,6 +292,38 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Each snapshot records who froze it, when, its parent, each item's content hash and verification status, and the derived fingerprint. Loading a snapshot re-derives the fingerprint and rejects a mismatch.",
         limits:
           "Runs bound to a snapshot never silently widen to newer evidence — new evidence means freezing a new snapshot. The fingerprint is a content hash, not a cryptographic signature.",
+        actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
+      },
+      {
+        id: "ask-investigation-question",
+        title: "Ask a question about an investigation",
+        summary:
+          "Turn a frozen evidence set and a clear question into a recorded triage run; compare lanes only when it helps.",
+        keywords: [
+          "ask",
+          "question",
+          "triage",
+          "start triage",
+          "run",
+          "investigate",
+          "log corpus",
+          "gateway",
+        ],
+        what:
+          "A triage starts with a question about one investigation and a frozen evidence snapshot. The run records the question, strategy, snapshot, selected lanes, and each lane's result. Comparison is an optional review step after the run — it is not the purpose of every triage.",
+        when:
+          "Use this after Capture when you want an answer about the evidence, a second pass over the same snapshot, or a documented next question.",
+        steps: [
+          "Capture the logs, email, chat, notes, or other evidence on the investigation.",
+          "On Analyze, select the evidence and freeze a snapshot.",
+          "Open Run history and launcher, choose the snapshot, and write the question you want answered.",
+          "Choose a strategy and one or more lanes. Use Synthetic / offline to test the workflow; choose Configured gateway only when the host is prepared for live provider calls.",
+          "Launch the run, then open each workstream to inspect its evidence, unknowns, and recorded result. Start another run when the next question needs a new attempt.",
+        ],
+        recorded:
+          "The server stores the question, task fingerprint, strategy, snapshot fingerprint, requester, lane identities, progress, results, citations, and unknowns. A run remains attributed to the person and evidence set that created it.",
+        limits:
+          "Synthetic / offline runs are deterministic plumbing checks: they do not inspect evidence or run a model. Configured gateway runs use the host bridge, not browser credentials; gateway runs require at least two lanes. Usage and cost remain unknown unless the host reports them.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
@@ -331,17 +363,17 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         id: "run-lanes",
         title: "Run AI lanes against a snapshot",
         summary:
-          "A case lead launches a triage run: two or more model lanes bound to one frozen snapshot, synthetic or through the host's gateway.",
+          "A case lead launches a recorded triage run against one frozen snapshot, then compares lanes when useful.",
         keywords: ["triage run", "lane", "model", "synthetic", "gateway", "launch", "profile", "runner", "job", "concurrency"],
         what:
-          "A triage run binds two to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Two execution modes exist in this build: Synthetic / offline (a deterministic, provider-free stand-in run on the server) and Configured gateway (the host bridge executes real lanes; it owns provider calls and credentials, and each lane sends only a profile ID). Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled.",
+          "A triage run binds one to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Synthetic / offline is a deterministic, provider-free stand-in. Configured gateway sends the request through the host bridge, which owns provider calls and credentials. Gateway mode requires at least two lanes. Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled.",
         when:
-          "Run lanes after freezing a snapshot, when the team wants structured, comparable model output over exactly that evidence.",
+          "Run lanes after freezing a snapshot, when the team wants a recorded answer over exactly that evidence or wants structured outputs to compare.",
         steps: [
           "On the Analyze stage, open the AI lane runner and pick a frozen snapshot.",
           "Choose the execution mode. Gateway appears only when the host has a runner configured.",
-          "Pick model lanes — for gateway lanes, select each lane's host profile — and set the question and strategy.",
-          "Launch, and watch lanes settle independently; a finished run can be handed to the Experiment Lab for review.",
+          "Set the question and strategy, then pick one or more model lanes. For gateway lanes, select each lane's host profile.",
+          "Launch, watch lanes settle independently, and open the workstreams. Select two or more finished runs only when you want the Experiment Lab comparison view.",
         ],
         recorded:
           "Each run records its snapshot binding and fingerprint, request fingerprint, who requested it, per-lane model and profile identity, per-lane output hashes and cited evidence, and timestamps. Usage and cost are always recorded as unknown — the workspace never invents them.",

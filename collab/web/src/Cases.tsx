@@ -123,11 +123,11 @@ interface LegacyActivityItem {
 const KNOWN_STATUSES = ["open", "monitoring", "resolved", "archived"] as const;
 
 const STAGES: readonly { id: StageId; label: string; hint: string }[] = [
-  { id: "situation", label: "Situation", hint: "shared picture" },
-  { id: "capture", label: "Capture", hint: "notes & imports" },
-  { id: "analyze", label: "Analyze", hint: "evidence & AI lanes" },
-  { id: "compare", label: "Compare", hint: "lanes side by side" },
-  { id: "decide", label: "Decide", hint: "human call & export" },
+  { id: "situation", label: "Situation", hint: "set the question" },
+  { id: "capture", label: "Capture", hint: "add evidence" },
+  { id: "analyze", label: "Analyze", hint: "freeze & run" },
+  { id: "compare", label: "Compare", hint: "find differences" },
+  { id: "decide", label: "Decide", hint: "record the call" },
 ];
 
 const STAGE_LABELS: Record<StageId, string> = {
@@ -1882,8 +1882,12 @@ export function Cases(props: {
           <header className="stage-panel__intro">
             <h3 className="stage-panel__title">Situation</h3>
             <p className="stage-panel__purpose">
-              The shared operating picture for this investigation — only what is recorded, never
-              an inferred verdict or readiness score.
+              Start with the shared picture: what happened, who or what is affected, and what is
+              still unanswered.
+            </p>
+            <p className="stage-panel__next">
+              <strong>Start here:</strong> Write the problem and open questions, then move to
+              Capture to add the evidence.
             </p>
           </header>
           <section className="situation__summary" aria-labelledby="situation-summary-title">
@@ -2345,6 +2349,7 @@ export function Cases(props: {
                 ? "One workstream, in full: what it was asked, what it examined, what it found, and what it left unknown."
                 : "Curate the evidence the investigation may rely on, freeze it, then read each workstream that examined exactly that evidence."
             }
+            next="Select the evidence, freeze it, then launch one run with one clear question."
           >
             <TriageAnchor id={WORKSTREAMS_SECTION} label="Workstreams">
               <Workstreams
@@ -2412,6 +2417,7 @@ export function Cases(props: {
             step={3}
             title="Compare"
             lede="Review model and strategy lanes side by side against the human benchmark. Agreement is not proof of correctness."
+            next="Choose two or more finished runs, inspect the differences, and treat agreement as a clue—not a verdict."
           >
             <TriageAnchor id="triage-comparison-lab" label="Comparison lab">
               <ExperimentLab
@@ -2447,6 +2453,7 @@ export function Cases(props: {
             step={4}
             title="Decide"
             lede="Decisions are human calls. Analysis and agreement inform them; they never make them."
+            next="Review the record, add the human decision and reason, then export only what is share-safe."
           >
             <div className="triage-decide">
               <p className="triage-step__note">

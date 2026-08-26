@@ -135,12 +135,12 @@ describe("help search", () => {
     expect(screen.getByText(/Archives are capped at 64 MiB/)).toBeTruthy();
     expect(screen.getByText(/expanded bytes at 512 MiB, 4,096 files/)).toBeTruthy();
     expect(screen.getByText(/64 MiB per file, compression ratio 256, and 60 seconds/)).toBeTruthy();
-    expect(screen.getByText(/rejects overflow instead of silently dropping files/)).toBeTruthy();
-    expect(screen.getByText(/\.jsonl, \.ndjson/)).toBeTruthy();
-    expect(screen.getByText(/every non-empty JSON Lines record must parse/)).toBeTruthy();
-    expect(screen.getByText(/share_safe accepts plain text/)).toBeTruthy();
+    expect(screen.getByText(/overflow is rejected, never silently dropped/)).toBeTruthy();
+    expect(screen.getByText(/JSONL\/NDJSON/)).toBeTruthy();
+    expect(screen.getByText(/structured JSON and JSONL records must parse/)).toBeTruthy();
+    expect(screen.getByText(/marking an item share_safe does not scrub/)).toBeTruthy();
     expect(screen.getByText(/qwen-3.6-27b, gpt-oss-120b, and ministral/)).toBeTruthy();
-    expect(screen.getByText(/global source catalog is not the intake path/)).toBeTruthy();
+    expect(screen.getByText(/global source catalog is not the path for investigation uploads/)).toBeTruthy();
   });
 
   it("explains the supported portable restore boundary", () => {
@@ -291,6 +291,15 @@ describe("honest limitation copy", () => {
 });
 
 describe("help for behavior this build ships", () => {
+  it("explains how to start a question-driven triage before comparing runs", () => {
+    renderHelp({ onOpenStage: vi.fn() });
+    fireEvent.click(screen.getByRole("button", { name: "Ask a question about an investigation" }));
+    expect(screen.getByText(/A triage starts with a question about one investigation/)).toBeTruthy();
+    expect(screen.getByText(/Synthetic \/ offline runs are deterministic plumbing checks/)).toBeTruthy();
+    expect(screen.getByText(/gateway runs require at least two lanes/)).toBeTruthy();
+    expect(screen.getByText(/Open the Analyze stage/)).toBeTruthy();
+  });
+
   it("explains the Situation briefing without promising more than it shows", () => {
     renderHelp();
     fireEvent.click(screen.getByRole("button", { name: "Pick an investigation back up" }));

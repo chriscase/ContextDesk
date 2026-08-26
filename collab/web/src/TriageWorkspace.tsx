@@ -141,6 +141,7 @@ export function TriageStepSection(props: {
   step: number;
   title: string;
   lede: string;
+  next?: string;
   children: ReactNode;
 }) {
   return (
@@ -159,6 +160,11 @@ export function TriageStepSection(props: {
             {props.title}
           </h3>
           <p className="triage-step__lede">{props.lede}</p>
+          {props.next ? (
+            <p className="triage-step__next">
+              <strong>Do this now:</strong> {props.next}
+            </p>
+          ) : null}
         </div>
       </header>
       {props.children}
@@ -260,6 +266,7 @@ export function TriageWorkspace(props: {
         step={1}
         title="Record what you know"
         lede="Start with a note, paste analysis gathered elsewhere, or add logs and files."
+        next="Add a note, paste a chat, or upload logs. When the material is ready, open Analyze."
       >
         {props.canWrite ? (
           <div className="triage-capture__paths">
