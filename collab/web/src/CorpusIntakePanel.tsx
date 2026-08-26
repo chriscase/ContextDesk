@@ -373,7 +373,7 @@ export function CorpusIntakePanel(props: {
                 >
                   {item.relativePath}
                 </a>
-                {item.duplicateDigest ? " · reused stored bytes" : ""}
+                {item.duplicateDigest ? " · same content, stored once" : ""}
               </li>
             ))}
           </ul>
@@ -399,7 +399,7 @@ export function CorpusIntakePanel(props: {
                     >
                       {item.relativePath}
                     </a>
-                    {item.duplicateDigest ? " · reused stored bytes" : ""}
+                    {item.duplicateDigest ? " · same content, stored once" : ""}
                   </li>
                 ))}
               </ul>
@@ -445,8 +445,8 @@ export function CorpusIntakePanel(props: {
         <span className="triage-chip triage-chip--human">stays with this investigation</span>
       </header>
       <p className="corpus-intake__copy">
-        Add files, a ZIP, or a browser directory. Preview the selection before saving it. Repeating
-        the same upload will not create duplicate evidence.
+        Add files, a ZIP, or a browser directory. Preview the selection before saving it. Identical
+        bytes are stored once, while each uploaded path remains a separate evidence reference.
       </p>
       <fieldset className="corpus-intake__origin" aria-label="Intake origin">
         {(["files", "zip", "directory"] as const).map((value) => (
@@ -572,7 +572,7 @@ export function CorpusIntakePanel(props: {
                 <strong>{row.relativePath}</strong>
                 <span>
                   {row.mediaType} · {row.byteLength} bytes
-                  {row.duplicateDigest ? " · duplicate digest" : ""}
+                  {row.duplicateDigest ? " · same content, stored once" : ""}
                   {row.encodingStatus === "normalized_non_utf8"
                     ? " · original bytes preserved; unreadable bytes replaced in analysis text"
                     : ""}
@@ -589,7 +589,7 @@ export function CorpusIntakePanel(props: {
                     <strong>{row.relativePath}</strong>
                     <span>
                       {row.mediaType} · {row.byteLength} bytes
-                      {row.duplicateDigest ? " · duplicate digest" : ""}
+                      {row.duplicateDigest ? " · same content, stored once" : ""}
                       {row.encodingStatus === "normalized_non_utf8"
                         ? " · original bytes preserved; unreadable bytes replaced in analysis text"
                         : ""}
