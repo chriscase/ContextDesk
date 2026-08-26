@@ -169,9 +169,37 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
             'alice'
           )`,
         );
+        const lockPrivileges = await app.query<{
+          table_update: boolean;
+          id_update: boolean;
+          package_id_update: boolean;
+        }>(`
+          SELECT
+            has_table_privilege(current_user, 'experiment_packages', 'UPDATE') AS table_update,
+            has_column_privilege(current_user, 'experiment_packages', 'id', 'UPDATE') AS id_update,
+            has_column_privilege(current_user, 'experiment_packages', 'package_id', 'UPDATE')
+              AS package_id_update
+        `);
+        expect(lockPrivileges.rows[0]).toEqual({
+          table_update: false,
+          id_update: true,
+          package_id_update: false,
+        });
+        const locked = await app.query(
+          `SELECT id FROM experiment_packages
+           WHERE id = '33333333-3333-3333-3333-333333333333'
+           FOR UPDATE`,
+        );
+        expect(locked.rowCount).toBe(1);
         await expect(
           app.query(`UPDATE experiment_packages SET package_id = 'tamper'`),
-        ).rejects.toThrow(/insert-only|permission denied/);
+        ).rejects.toThrow(/permission denied/);
+        await expect(
+          app.query(
+            `UPDATE experiment_packages
+             SET id = '77777777-7777-4777-8777-777777777777'`,
+          ),
+        ).rejects.toThrow(/insert-only/);
         await app.query(
           `INSERT INTO gold_references (gold_id, experiment_id, version, payload)
            VALUES (
