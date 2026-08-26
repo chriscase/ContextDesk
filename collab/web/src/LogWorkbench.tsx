@@ -699,9 +699,14 @@ export function LogWorkbench(props: {
               aria-label={`Show ${item.displayLabel} in a pane`}
             />
             <span>{item.displayLabel}</span>
+            {/* A file at the corpus root has no folder to disambiguate it, so
+                repeating its own name as a second column is noise, not
+                provenance. Only the containing path is shown. */}
             <span className="log-workbench__muted">
-              {item.relativePath}
-              {item.fullyRead === false ? " · not fully read" : ""}
+              {item.relativePath === item.displayLabel
+                ? ""
+                : item.relativePath.slice(0, item.relativePath.length - item.displayLabel.length)}
+              {item.fullyRead === false ? "not fully read" : ""}
             </span>
             <TechnicalIdentifiers
               record={item.displayLabel}

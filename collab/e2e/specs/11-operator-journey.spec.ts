@@ -159,7 +159,12 @@ test.describe("complete war-room operator journey", () => {
       page.getByRole("button", { name: "Upload evidence" }).click(),
     ]);
     expect(uniquePosted.ok(), await uniquePosted.text()).toBeTruthy();
-    await expect(page.getByText("unique-worker.log", { exact: true })).toBeVisible();
+    // Scoped to the evidence board: Analyze legitimately names this file in
+    // two places now, since the Log workbench also lists the investigation's
+    // logs. The claim here is that the upload reached the board.
+    await expect(
+      page.getByLabel("Evidence and snapshots").getByText("unique-worker.log", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByText("owner_only", { exact: true }).first()).toBeVisible();
     // No truncated digest leads any card on the board.
     await expect(page.getByText(/hash [0-9a-f]{12}…/)).toHaveCount(0);

@@ -1850,9 +1850,12 @@ function asSnapshot(row: Record<string, unknown>): SnapshotRow {
     status: row.status,
     createdAt: timestampColumn(row.created_at),
     createdBy: row.created_by,
-    normalizationRevision:
-      row.normalization_revision === null || row.normalization_revision === undefined
-        ? null
-        : Number(row.normalization_revision),
+    // A NULL column means the freeze observed no corpus revision. That is the
+    // same "unknown basis" the memory store represents by omitting the key, so
+    // both backends must round-trip a snapshot to the same document rather
+    // than one of them inventing an explicit null.
+    ...(row.normalization_revision === null || row.normalization_revision === undefined
+      ? {}
+      : { normalizationRevision: Number(row.normalization_revision) }),
   });
 }

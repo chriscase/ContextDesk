@@ -81,17 +81,21 @@ test.describe("investigation log workbench", () => {
     await workbench.getByLabel("Find in logs").fill("timeout");
     await workbench.getByRole("button", { name: "Search" }).click();
     await record.check("workbench-search-timeout", async () => {
-      await expect(workbench.getByRole("status")).toContainText(/matches/);
+      // The count states whether it is complete: an exact count says so, and a
+      // bounded or partly read one says what it did not count.
+      await expect(workbench.getByRole("status")).toContainText(
+        /\d+ match(es)?\b.*(every match in the read lines|Load more|were not counted)/,
+      );
       await expect(workbench.getByRole("list", { name: "Search matches" })).toContainText(
         /upstream timeout/,
       );
-      return "timeout line visible with a match count";
+      return "timeout line visible with a match count that states its completeness";
     });
 
     await workbench.getByRole("button", { name: "Show merged chronology" }).click();
     await expect(workbench.getByRole("heading", { name: "Merged chronology" })).toBeVisible();
     await workbench.getByRole("button", { name: "Save view" }).click();
-    await expect(workbench.getByText(/Saved view recorded/)).toBeVisible();
+    await expect(workbench.getByText(/Saved view .*recorded for this investigation/)).toBeVisible();
     await page.reload();
     await gotoStage(page, "Analyze");
     await record.check("workbench-saved-view-reload", async () => {
@@ -217,7 +221,7 @@ test.describe("investigation log workbench", () => {
     await workbench.getByLabel("Find in logs").focus();
     await page.keyboard.type("timeout");
     await page.keyboard.press("Enter");
-    await expect(workbench.getByRole("status")).toContainText(/matches/);
+    await expect(workbench.getByRole("status")).toContainText(/\d+ match(es)?\b/);
     await page.keyboard.press("Escape");
   });
 
