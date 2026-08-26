@@ -246,6 +246,7 @@ describe("LogTimeReviewPanel", () => {
     expect(
       await screen.findByText(/nothing can be given an exact time with this choice/i),
     ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "What America/Chicago would do" })).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: /apply America\/Chicago to this file/i }),
     ).toBeNull();

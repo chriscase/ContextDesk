@@ -85,7 +85,7 @@ export function TechnicalIdentifiers(props: {
       typeof item.value === "string" && item.value.trim().length > 0,
   );
   if (!present.length) return null;
-  const summary = props.summary ?? `Technical identifiers (${present.length})`;
+  const summary = props.summary ?? `Technical details for troubleshooting (${present.length})`;
   const of = props.record ? ` for ${props.record}` : "";
   return (
     <details className={props.className ? `technical-id ${props.className}` : "technical-id"}>

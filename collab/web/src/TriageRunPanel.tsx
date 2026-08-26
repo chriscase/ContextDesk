@@ -900,7 +900,7 @@ export function TriageRunPanel(props: {
                     <select value={selectedSnapshotId} onChange={(event) => setSelectedSnapshotId(event.target.value)}>
                       {snapshots.map((snapshot, index) => (
                         <option key={snapshot.id} value={snapshot.id}>
-                          Snapshot {index} · {snapshot.evidence.length} evidence item
+                          Snapshot S{index} · {snapshot.evidence.length} evidence item
                           {snapshot.evidence.length === 1 ? "" : "s"}
                         </option>
                       ))}
