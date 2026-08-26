@@ -843,6 +843,7 @@ fn search(
         sources: None,
         preview: None,
         revision: None,
+        chronology: None,
         search: Some(SearchOut {
             bounded: result.partial || result.total_matched.is_none(),
             at_least: result.total_matched.unwrap_or(returned),
@@ -932,6 +933,7 @@ fn list_events(
         sources: None,
         preview: None,
         revision: None,
+        chronology: None,
         search: Some(SearchOut {
             bounded: more,
             at_least: returned,
@@ -1030,6 +1032,7 @@ fn chronology(
             order_only_count: page.order_only_count,
             time_quality: chronology_time_quality(page.time_quality),
         }),
+        search: None,
         declarations: declarations_out(&state.declarations),
     }))
 }
