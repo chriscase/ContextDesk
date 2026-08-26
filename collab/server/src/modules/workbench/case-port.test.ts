@@ -25,7 +25,7 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore } from "../cases/index.js";
 import { MemoryLogTimeStore } from "../log-time/index.js";
-import { createWorkbenchCasePort } from "./case-port.js";
+import { createWorkbenchCasePort, workbenchHostEventStamps } from "./case-port.js";
 import { MemoryWorkbenchStore, WorkbenchService } from "./index.js";
 
 const ALICE = "fixture-alice-secret";
@@ -172,5 +172,58 @@ describe("workbench case-port over committed intake", () => {
       await app.close();
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("host event stamp adapter", () => {
+  /**
+   * Every process that serves the workbench — server, demo, browser fixture —
+   * wires this through a conditional spread, which defeats the contextual
+   * typing that would otherwise check the shape at each site. One shared
+   * adapter is the fix; this pins what it produces.
+   */
+  it("carries the host's revision alongside the stamps it read", async () => {
+    const stamps = workbenchHostEventStamps({
+      async listWorkbenchEvents(caseId) {
+        expect(caseId).toBe("case-synthetic-0001");
+        return {
+          corpusRevision: 7,
+          search: {
+            hits: [
+              {
+                source: "worker/batch.log",
+                message: "batch worker heartbeat late",
+                ts: 1_710_048_600,
+                timeQuality: "wall clock",
+                unresolvedLocalTimestamp: "2024-03-10 02:30:00",
+              },
+            ],
+          },
+        };
+      },
+    });
+    await expect(stamps("case-synthetic-0001")).resolves.toEqual({
+      corpusRevision: 7,
+      stamps: [
+        {
+          source: "worker/batch.log",
+          message: "batch worker heartbeat late",
+          ts: 1_710_048_600,
+          timeQuality: "wall clock",
+          unresolvedLocalTimestamp: "2024-03-10 02:30:00",
+        },
+      ],
+    });
+  });
+
+  it("reports no host corpus rather than an empty one", async () => {
+    const stamps = workbenchHostEventStamps({
+      async listWorkbenchEvents() {
+        return null;
+      },
+    });
+    // Null and "zero stamps" mean different things: the first says this case
+    // has no host corpus, so no line may gain a UTC instant at all.
+    await expect(stamps("case-synthetic-0002")).resolves.toBeNull();
   });
 });

@@ -16,6 +16,7 @@ import {
   PgWorkbenchStore,
   WorkbenchService,
   createWorkbenchCasePort,
+  workbenchHostEventStamps,
 } from "./modules/workbench/index.js";
 import { PgAuditStore, type AuditStore } from "./modules/audit/index.js";
 import {
@@ -277,17 +278,7 @@ async function main(): Promise<void> {
         (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
       ...(logTime
         ? {
-            listHostEventStamps: async (caseId) => {
-              const listed = await logTime.listWorkbenchEvents(caseId);
-              if (!listed) return null;
-              return listed.search.hits.map((hit) => ({
-                source: hit.source,
-                message: hit.message,
-                ts: hit.ts,
-                timeQuality: hit.timeQuality,
-                unresolvedLocalTimestamp: hit.unresolvedLocalTimestamp,
-              }));
-            },
+            listHostEventStamps: workbenchHostEventStamps(logTime),
           }
         : {}),
     }),

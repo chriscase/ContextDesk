@@ -1,5 +1,5 @@
 import { ContractViolation, privacySafeNotFound } from "@cd-collab/contracts";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   capabilityForbidden,
   requireSessionCapability,
@@ -9,8 +9,10 @@ import {
 import type { AuditStore } from "../audit/index.js";
 import type { CaseService } from "../cases/index.js";
 import {
+  WorkbenchCancelledError,
   WorkbenchConflictError,
   WorkbenchNotFoundError,
+  type WorkbenchReadOptions,
   type WorkbenchService,
 } from "./service.js";
 
@@ -26,6 +28,9 @@ function publicError(err: unknown): string {
 }
 
 function statusFor(err: unknown): number {
+  // 499: the client closed the request. Nothing is listening for this body,
+  // but the code keeps an abandoned read out of the 4xx/5xx error budget.
+  if (err instanceof WorkbenchCancelledError) return 499;
   if (err instanceof WorkbenchConflictError) return 409;
   if (err instanceof WorkbenchNotFoundError) return 404;
   if (err instanceof ContractViolation) return 400;
@@ -37,6 +42,23 @@ export interface WorkbenchRouteDeps {
   audit: AuditStore;
   workbench: WorkbenchService;
   cases: Pick<CaseService, "getCase">;
+}
+
+/**
+ * A read that stops when the client hangs up.
+ *
+ * The response stream closing before it finished writing is the moment nobody
+ * is waiting for the answer any more. A bounded corpus read watches this so an
+ * abandoned request stops spending the box's only thread on nobody's behalf —
+ * which matters most for exactly the large corpora that made it worth leaving.
+ */
+function untilClientLeaves(reply: FastifyReply): WorkbenchReadOptions {
+  const state = { aborted: false };
+  const raw = reply.raw;
+  raw.once("close", () => {
+    if (!raw.writableFinished) state.aborted = true;
+  });
+  return { signal: state };
 }
 
 export async function registerWorkbenchRoutes(
@@ -88,7 +110,12 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.inventory(id, loaded.ctx.actor, loaded.ctx.isAdmin);
+      return await deps.workbench.inventory(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        untilClientLeaves(reply),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -103,7 +130,13 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.search(id, loaded.ctx.actor, loaded.ctx.isAdmin, request.body);
+      return await deps.workbench.search(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        request.body,
+        untilClientLeaves(reply),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -128,6 +161,7 @@ export async function registerWorkbenchRoutes(
         query.evidenceId ?? "",
         Number.isFinite(startLine) ? startLine : 1,
         Number.isFinite(limit) ? limit : 80,
+        untilClientLeaves(reply),
       );
     } catch (err) {
       void reply.code(statusFor(err));
@@ -150,6 +184,7 @@ export async function registerWorkbenchRoutes(
         loaded.ctx.isAdmin,
         (body.grouping as "file") ?? "file",
         Array.isArray(body.evidenceIds) ? body.evidenceIds : [],
+        untilClientLeaves(reply),
       );
     } catch (err) {
       void reply.code(statusFor(err));
@@ -199,7 +234,12 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.reviewQueue(id, loaded.ctx.actor, loaded.ctx.isAdmin);
+      return await deps.workbench.reviewQueue(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        untilClientLeaves(reply),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -215,7 +255,13 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.previewRule(id, loaded.ctx.actor, loaded.ctx.isAdmin, request.body);
+      return await deps.workbench.previewRule(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        request.body,
+        untilClientLeaves(reply),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };

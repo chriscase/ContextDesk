@@ -529,52 +529,27 @@ export function groupingKeyOf(
 }
 
 /**
- * Overlay host/cd-core timestamps onto intake lines. Local-ambiguous text
- * never becomes UTC unless the host reports wall-clock quality after an
- * explicit timezone apply.
+ * Overlay host/cd-core timestamps onto intake lines.
+ *
+ * The join itself lives in `./investigation-workbench-timestamps.js`, which
+ * keeps this predicate byte-for-byte while answering it from an index rather
+ * than by comparing every line against every stamp. Re-exported here so the
+ * `@cd-collab/contracts/workbench` entry point stays the one place callers
+ * reach for workbench behaviour.
  */
-export function applyHostTimestamps(
-  lines: readonly WorkbenchLine[],
-  stamps: readonly HostEventStampV1[],
-): WorkbenchLine[] {
-  if (stamps.length === 0) return [...lines];
-  const remaining = [...stamps];
-  return lines.map((line) => {
-    const index = remaining.findIndex((stamp) => stampMatchesLine(stamp, line));
-    if (index < 0) return line;
-    const [stamp] = remaining.splice(index, 1);
-    if (!stamp) return line;
-    const wall = stamp.timeQuality === "wall clock";
-    const normalizedUtc =
-      wall && Number.isFinite(stamp.ts) ? new Date(stamp.ts * 1000).toISOString() : null;
-    return {
-      ...line,
-      originalTimestamp:
-        stamp.unresolvedLocalTimestamp ?? line.originalTimestamp,
-      normalizedUtc,
-    };
-  });
-}
-
-function stampMatchesLine(stamp: HostEventStampV1, line: WorkbenchLine): boolean {
-  const source = stamp.source.replace(/\\/g, "/");
-  const path = line.relativePath.replace(/\\/g, "/");
-  const sourceOk =
-    source === path
-    || path.endsWith(`/${source}`)
-    || source.endsWith(`/${path}`)
-    || source.split("/").pop() === path.split("/").pop();
-  if (!sourceOk) return false;
-  const local = stamp.unresolvedLocalTimestamp?.trim();
-  const original = line.originalTimestamp?.trim();
-  if (local && original && local === original) return true;
-  const message = stamp.message.trim();
-  const text = line.text.trim();
-  if (!message || !text) return false;
-  if (text.includes(message) || message.includes(text)) return true;
-  const fold = (value: string) => value.toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ");
-  return fold(text).includes(fold(message));
-}
+export {
+  HOST_TIMESTAMP_OVERLAY_LIMITS,
+  HostTimestampOverlayCancelledError,
+  applyHostTimestamps,
+  applyHostTimestampsChunked,
+  buildHostTimestampIndex,
+  foldForMatch,
+  hostTimestampSourceMatch,
+  sourceMatchKey,
+  type HostTimestampIndex,
+  type HostTimestampOverlayOptions,
+  type OverlayAbortLike,
+} from "./investigation-workbench-timestamps.js";
 
 export interface WorkbenchUnknownBucketV1 {
   category: string;

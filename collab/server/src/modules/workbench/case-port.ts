@@ -1,21 +1,70 @@
 /**
  * Adapts case, evidence, and log-time stores to the Log workbench port.
  */
-import {
-  corpusAllowedExtension,
-  type HostEventStampV1,
-  type PrivacyClass,
-} from "@cd-collab/contracts";
+import { corpusAllowedExtension, type PrivacyClass } from "@cd-collab/contracts";
 import type { EvidenceStore } from "../../evidence/store.js";
 import type { Actor, CaseService, CaseStore } from "../cases/index.js";
-import type { WorkbenchCasePort, WorkbenchEvidenceFile } from "./service.js";
+import type {
+  WorkbenchCasePort,
+  WorkbenchEvidenceFile,
+  WorkbenchHostStamps,
+} from "./service.js";
 
 export interface WorkbenchCasePortDeps {
   cases: CaseStore;
   domain: Pick<CaseService, "getCase" | "appendDomainTimeline">;
   evidence: EvidenceStore;
   currentNormalizationRevision: (caseId: string) => Promise<number | null>;
-  listHostEventStamps?: (caseId: string) => Promise<HostEventStampV1[] | null>;
+  listHostEventStamps?: (caseId: string) => Promise<WorkbenchHostStamps | null>;
+}
+
+/**
+ * The slice of the log-time service the overlay reads. Declared structurally so
+ * the workbench does not reach into another module for a type.
+ */
+export interface WorkbenchHostEventSource {
+  listWorkbenchEvents(caseId: string): Promise<{
+    corpusRevision: number;
+    search: {
+      hits: {
+        source: string;
+        message: string;
+        ts: number;
+        timeQuality: string;
+        unresolvedLocalTimestamp: string | null;
+      }[];
+    };
+  } | null>;
+}
+
+/**
+ * Adapt the host corpus reader to the workbench port.
+ *
+ * There is one definition because there are three callers — the server, the
+ * demo, and the browser fixture — and each wires it through a conditional
+ * spread. A spread defeats the contextual typing that would otherwise catch a
+ * drifting shape, so a hand-rolled copy at each site can go wrong silently and
+ * only fail at runtime. Written once, it is checked once.
+ */
+export function workbenchHostEventStamps(
+  logTime: WorkbenchHostEventSource,
+): (caseId: string) => Promise<WorkbenchHostStamps | null> {
+  return async (caseId) => {
+    const listed = await logTime.listWorkbenchEvents(caseId);
+    if (listed === null) return null;
+    // The revision travels with the stamps: the overlay describes this
+    // revision of the host corpus and no other.
+    return {
+      corpusRevision: listed.corpusRevision,
+      stamps: listed.search.hits.map((hit) => ({
+        source: hit.source,
+        message: hit.message,
+        ts: hit.ts,
+        timeQuality: hit.timeQuality,
+        unresolvedLocalTimestamp: hit.unresolvedLocalTimestamp,
+      })),
+    };
+  };
 }
 
 export function createWorkbenchCasePort(deps: WorkbenchCasePortDeps): WorkbenchCasePort {

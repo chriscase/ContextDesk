@@ -68,6 +68,8 @@ function harness(options: {
     timeQuality: string;
     unresolvedLocalTimestamp: string | null;
   }[];
+  /** Host corpus revision reported alongside the stamps. */
+  hostRevision?: number;
 } = {}) {
   const store = options.store ?? new MemoryWorkbenchStore();
   const timeline: { kind: string; targetId: string | null }[] = [];
@@ -89,7 +91,13 @@ function harness(options: {
       return options.revision === undefined ? 3 : options.revision;
     },
     async listHostEventStamps() {
-      return options.hostStamps ?? null;
+      if (!options.hostStamps) return null;
+      return {
+        corpusRevision:
+          options.hostRevision
+          ?? (options.revision === undefined ? 3 : (options.revision ?? 0)),
+        stamps: options.hostStamps,
+      };
     },
     async casePrivacyClass() {
       return "owner_only";

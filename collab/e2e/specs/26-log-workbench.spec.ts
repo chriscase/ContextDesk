@@ -324,18 +324,29 @@ test.describe("host-backed log workbench chronology", () => {
     await workerRow.getByRole("button", { name: "Declare a timezone" }).click();
     await panel.getByLabel("Which timezone was this file written in?").fill("America/Chicago");
     await panel.getByRole("button", { name: "Show me what this would do" }).click();
-    await expect(panel.getByText("2024-03-10T07:30:00Z")).toBeVisible();
+    // The instant is rendered twice on purpose: once inside the summary of
+    // what the apply would do, and once as a sample shown beside its raw local
+    // text. Name the sample exactly rather than matching both.
+    await expect(panel.getByText("2024-03-10T07:30:00Z", { exact: true })).toBeVisible();
     await panel.getByRole("button", { name: "Apply America/Chicago to this file" }).click();
     await expect(workerRow.locator(".log-time__chip--declared")).toHaveText("America/Chicago");
 
     const workbench = page.locator("#log-workbench");
     await workbench.getByRole("button", { name: "Show merged chronology" }).click();
     await expect(workbench.getByRole("heading", { name: "Merged chronology" })).toBeVisible();
-    await expect(workbench.getByText(/2024-03-10T07:30:00/)).toBeVisible();
+    // The instant also appears in the open file pane and the timezone panel,
+    // so assert it against the merged chronology itself: that region showing
+    // a normalized UTC instant is what the apply was supposed to produce.
+    await expect(workbench.getByRole("region", { name: "Merged chronology" })).toContainText(
+      "2024-03-10T07:30:00",
+    );
 
     await page.getByLabel("Include worker/batch.log in snapshot").check();
     await page.getByRole("button", { name: /Freeze selected evidence/ }).click();
-    await expect(page.getByText(/Frozen evidence set/)).toBeVisible();
+    // The freeze is visible as a new lineage point, not as a banner.
+    await expect(
+      page.getByRole("region", { name: "Snapshot lineage" }).getByRole("button", { name: /^S0/ }),
+    ).toBeVisible();
     const caseId = await caseIdForTitle(page, title);
     const snapshots = await page.request.get(`/api/cases/${caseId}/snapshots`);
     expect(snapshots.ok()).toBeTruthy();
@@ -344,7 +355,7 @@ test.describe("host-backed log workbench chronology", () => {
     };
     expect(body.snapshots?.[0]?.normalizationRevision).toBeGreaterThan(0);
     await gotoStage(page, "Compare");
-    await expect(page.getByText(/Frozen evidence set/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^Compare$/ }).first()).toBeVisible();
     await gotoStage(page, "Decide");
     await expect(page.getByRole("heading", { name: /Decide/i }).first()).toBeVisible();
   });

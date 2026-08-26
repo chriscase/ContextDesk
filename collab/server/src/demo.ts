@@ -36,6 +36,7 @@ import {
   MemoryWorkbenchStore,
   WorkbenchService,
   createWorkbenchCasePort,
+  workbenchHostEventStamps,
 } from "./modules/workbench/index.js";
 import {
   memoryApplyBoundary,
@@ -941,17 +942,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
         (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
       ...(logTime
         ? {
-            listHostEventStamps: async (caseId) => {
-              const listed = await logTime.listWorkbenchEvents(caseId);
-              if (!listed) return null;
-              return listed.search.hits.map((hit) => ({
-                source: hit.source,
-                message: hit.message,
-                ts: hit.ts,
-                timeQuality: hit.timeQuality,
-                unresolvedLocalTimestamp: hit.unresolvedLocalTimestamp,
-              }));
-            },
+            listHostEventStamps: workbenchHostEventStamps(logTime),
           }
         : {}),
     }),

@@ -8,11 +8,13 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import {
+  HOST_TIMESTAMP_OVERLAY_LIMITS,
+  HostTimestampOverlayCancelledError,
   WORKBENCH_BOOKMARK_SCHEMA_ID,
   WORKBENCH_LIMITS,
   WORKBENCH_SEARCH_REQUEST_SCHEMA_ID,
   WORKBENCH_VIEW_SCHEMA_ID,
-  applyHostTimestamps,
+  applyHostTimestampsChunked,
   chronologyAnchorKey,
   extractShapeCandidates,
   groupReviewQueue,
@@ -32,6 +34,7 @@ import {
   workbenchShareSafeToken,
   type ChronologyAnchorStatus,
   type HostEventStampV1,
+  type OverlayAbortLike,
   type PrivacyClass,
   type WorkbenchBookmarkV1,
   type WorkbenchChronologyV1,
@@ -60,6 +63,33 @@ export class WorkbenchConflictError extends Error {
   }
 }
 
+/** The caller went away before the read finished; nothing was produced. */
+export class WorkbenchCancelledError extends Error {
+  constructor(message = "read cancelled") {
+    super(message);
+    this.name = "WorkbenchCancelledError";
+  }
+}
+
+/**
+ * Host stamps together with the corpus revision they were read at.
+ *
+ * The revision travels with the stamps rather than being read separately,
+ * because the overlay describes exactly one revision of the host corpus. A
+ * revision sampled at some other moment could describe a different one, and a
+ * reader that reported it would be claiming a timeline the rows do not have.
+ */
+export interface WorkbenchHostStamps {
+  corpusRevision: number;
+  stamps: HostEventStampV1[];
+}
+
+/** Per-request controls for a bounded corpus read. */
+export interface WorkbenchReadOptions {
+  /** Abandons the read, whole, once the caller has stopped waiting. */
+  signal?: OverlayAbortLike;
+}
+
 export interface WorkbenchEvidenceFile {
   evidenceId: string;
   relativePath: string;
@@ -77,7 +107,7 @@ export interface WorkbenchCasePort {
   ): Promise<{ id: string } | null>;
   listEvidenceFiles(caseId: string): Promise<WorkbenchEvidenceFile[]>;
   currentNormalizationRevision(caseId: string): Promise<number | null>;
-  listHostEventStamps?(caseId: string): Promise<HostEventStampV1[] | null>;
+  listHostEventStamps?(caseId: string): Promise<WorkbenchHostStamps | null>;
   casePrivacyClass(caseId: string): Promise<PrivacyClass>;
   appendTimeline(
     caseId: string,
@@ -99,6 +129,12 @@ export interface WorkbenchCorpus {
   fullyRead: Set<string>;
   /** Paths that were cut short or never reached, in intake order. */
   partiallyRead: string[];
+  /**
+   * The normalization revision these rows actually reflect. When the host
+   * supplied stamps this is the revision the host reported alongside them, so
+   * a caller reporting it is describing the timeline it really returned.
+   */
+  normalizationRevision: number | null;
 }
 
 export interface WorkbenchServiceDeps {
@@ -134,8 +170,16 @@ export class WorkbenchService {
    * `truncated` into whatever they return: a search that silently dropped the
    * tail of a corpus and then reports "no matches" is worse than one that
    * admits it did not read to the end.
+   *
+   * The host timestamp overlay runs cooperatively. It is the one unbounded-ish
+   * piece of work on this path, so it yields the event loop on a fixed cadence
+   * and stops outright if the caller has gone away — an abandoned read must not
+   * keep spending the box's only thread on nobody's behalf.
    */
-  async loadCorpus(caseId: string): Promise<WorkbenchCorpus> {
+  async loadCorpus(
+    caseId: string,
+    options: WorkbenchReadOptions = {},
+  ): Promise<WorkbenchCorpus> {
     const files = await this.deps.cases.listEvidenceFiles(caseId);
     const lines: WorkbenchLine[] = [];
     const fullyRead = new Set<string>();
@@ -171,17 +215,62 @@ export class WorkbenchService {
         fullyRead.add(file.evidenceId);
       }
     }
-    const stamps = await this.deps.cases.listHostEventStamps?.(caseId);
-    const stamped =
-      !stamps || stamps.length === 0 ? lines : applyHostTimestamps(lines, stamps);
-    return { lines: stamped, truncated, fullyRead, partiallyRead };
+    const host = (await this.deps.cases.listHostEventStamps?.(caseId)) ?? null;
+    let stamped = lines;
+    if (host !== null && host.stamps.length > 0) {
+      try {
+        stamped = await applyHostTimestampsChunked(lines, host.stamps, {
+          chunkLines: HOST_TIMESTAMP_OVERLAY_LIMITS.defaultChunkLines,
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+      } catch (error) {
+        if (error instanceof HostTimestampOverlayCancelledError) {
+          throw new WorkbenchCancelledError();
+        }
+        throw error;
+      }
+    }
+    // With no host corpus there is no overlay and no host revision to bind to,
+    // so the durable record is the only honest answer.
+    const normalizationRevision =
+      host !== null
+        ? host.corpusRevision
+        : await this.deps.cases.currentNormalizationRevision(caseId);
+    return { lines: stamped, truncated, fullyRead, partiallyRead, normalizationRevision };
   }
 
-  async loadLines(caseId: string): Promise<WorkbenchLine[]> {
-    return (await this.loadCorpus(caseId)).lines;
+  async loadLines(
+    caseId: string,
+    options: WorkbenchReadOptions = {},
+  ): Promise<WorkbenchLine[]> {
+    return (await this.loadCorpus(caseId, options)).lines;
   }
 
-  async inventory(caseId: string, actor: Actor, isAdmin: boolean): Promise<{
+  /**
+   * Refuse a read whose rows do not describe the revision the caller asked for.
+   *
+   * The cheap pre-check that guards the request happens before the corpus is
+   * read; this is the check after it, against the revision the returned rows
+   * actually reflect. Without it a zone applied mid-read could hand back rows
+   * from one revision under the banner of another.
+   */
+  private assertRevisionUnmoved(
+    expected: number | null,
+    observed: number | null,
+  ): void {
+    if (expected === null) return;
+    if ((observed ?? 0) === expected) return;
+    throw new WorkbenchConflictError(
+      `stale normalization revision: expected ${expected}, current ${observed ?? "none"}`,
+    );
+  }
+
+  async inventory(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    options: WorkbenchReadOptions = {},
+  ): Promise<{
     items: {
       evidenceId: string;
       relativePath: string;
@@ -202,7 +291,7 @@ export class WorkbenchService {
   }> {
     await this.assertReadable(caseId, actor, isAdmin);
     const files = await this.deps.cases.listEvidenceFiles(caseId);
-    const corpus = await this.loadCorpus(caseId);
+    const corpus = await this.loadCorpus(caseId, options);
     const counts = new Map<string, number>();
     for (const line of corpus.lines) {
       counts.set(line.evidenceId, (counts.get(line.evidenceId) ?? 0) + 1);
@@ -219,7 +308,7 @@ export class WorkbenchService {
         lineCount: counts.get(file.evidenceId) ?? 0,
         fullyRead: corpus.fullyRead.has(file.evidenceId),
       })),
-      normalizationRevision: await this.deps.cases.currentNormalizationRevision(caseId),
+      normalizationRevision: corpus.normalizationRevision,
       corpusTruncated: corpus.truncated,
       unreadFiles: corpus.partiallyRead.map((path) => path.split("/").pop() || path),
     };
@@ -230,6 +319,7 @@ export class WorkbenchService {
     actor: Actor,
     isAdmin: boolean,
     body: unknown,
+    options: WorkbenchReadOptions = {},
   ): Promise<WorkbenchSearchResultV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const request = parseWorkbenchSearchRequest(
@@ -238,18 +328,15 @@ export class WorkbenchService {
         : { schemaId: WORKBENCH_SEARCH_REQUEST_SCHEMA_ID, ...(body as object) },
     );
     const current = await this.deps.cases.currentNormalizationRevision(caseId);
-    if (
-      request.expectedNormalizationRevision !== null
-      && (current ?? 0) !== request.expectedNormalizationRevision
-    ) {
-      throw new WorkbenchConflictError(
-        `stale normalization revision: expected ${request.expectedNormalizationRevision}, current ${current ?? "none"}`,
-      );
-    }
-    const corpus = await this.loadCorpus(caseId);
+    this.assertRevisionUnmoved(request.expectedNormalizationRevision, current);
+    const corpus = await this.loadCorpus(caseId, options);
+    this.assertRevisionUnmoved(
+      request.expectedNormalizationRevision,
+      corpus.normalizationRevision,
+    );
     return searchLogLines(
       corpus.lines,
-      { ...request, expectedNormalizationRevision: current },
+      { ...request, expectedNormalizationRevision: corpus.normalizationRevision },
       { corpusTruncated: corpus.truncated },
     );
   }
@@ -261,9 +348,10 @@ export class WorkbenchService {
     evidenceId: string,
     startLine: number,
     limit: number,
+    options: WorkbenchReadOptions = {},
   ): Promise<WorkbenchPageV1> {
     await this.assertReadable(caseId, actor, isAdmin);
-    const corpus = await this.loadCorpus(caseId);
+    const corpus = await this.loadCorpus(caseId, options);
     const owned = corpus.lines.filter((line) => line.evidenceId === evidenceId);
     if (owned.length === 0) {
       if (corpus.truncated) {
@@ -282,10 +370,11 @@ export class WorkbenchService {
     isAdmin: boolean,
     grouping: WorkbenchChronologyV1["grouping"],
     evidenceIds: string[],
+    options: WorkbenchReadOptions = {},
   ): Promise<WorkbenchChronologyV1> {
     await this.assertReadable(caseId, actor, isAdmin);
-    const current = await this.deps.cases.currentNormalizationRevision(caseId);
-    const corpus = await this.loadCorpus(caseId);
+    const corpus = await this.loadCorpus(caseId, options);
+    const current = corpus.normalizationRevision;
     let lines = corpus.lines;
     if (evidenceIds.length > 0) {
       lines = lines.filter((line) => evidenceIds.includes(line.evidenceId));
@@ -347,16 +436,21 @@ export class WorkbenchService {
     });
   }
 
-  async reviewQueue(caseId: string, actor: Actor, isAdmin: boolean) {
+  async reviewQueue(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    options: WorkbenchReadOptions = {},
+  ) {
     await this.assertReadable(caseId, actor, isAdmin);
-    const lines = await this.loadLines(caseId);
-    const candidates = extractShapeCandidates(lines).filter(
+    const corpus = await this.loadCorpus(caseId, options);
+    const candidates = extractShapeCandidates(corpus.lines).filter(
       (item) => item.parseClass === "local_ambiguous" || item.parseClass === "date_only",
     );
     return {
       groups: groupReviewQueue(candidates),
       candidateCount: candidates.length,
-      normalizationRevision: await this.deps.cases.currentNormalizationRevision(caseId),
+      normalizationRevision: corpus.normalizationRevision,
     };
   }
 
@@ -365,18 +459,16 @@ export class WorkbenchService {
     actor: Actor,
     isAdmin: boolean,
     body: unknown,
+    options: WorkbenchReadOptions = {},
   ): Promise<WorkbenchReviewPreviewV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const rule = parseWorkbenchReviewRule(body);
     const current = await this.deps.cases.currentNormalizationRevision(caseId);
-    if ((current ?? 0) !== rule.expectedRevision) {
-      throw new WorkbenchConflictError(
-        `stale normalization revision: expected ${rule.expectedRevision}, current ${current ?? "none"}`,
-      );
-    }
+    this.assertRevisionUnmoved(rule.expectedRevision, current);
     const files = await this.deps.cases.listEvidenceFiles(caseId);
-    const lines = await this.loadLines(caseId);
-    const byId = new Map(lines.map((line) => [line.evidenceId, line]));
+    const corpus = await this.loadCorpus(caseId, options);
+    this.assertRevisionUnmoved(rule.expectedRevision, corpus.normalizationRevision);
+    const byId = new Map(corpus.lines.map((line) => [line.evidenceId, line]));
     return previewReviewRule(
       rule,
       files.map((file) => ({

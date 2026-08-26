@@ -23,5 +23,5 @@ export type {
 export { registerWorkbenchRoutes } from "./routes.js";
 export type { WorkbenchRouteDeps } from "./routes.js";
 
-export { createWorkbenchCasePort } from "./case-port.js";
-export type { WorkbenchCasePortDeps } from "./case-port.js";
+export { createWorkbenchCasePort, workbenchHostEventStamps } from "./case-port.js";
+export type { WorkbenchCasePortDeps, WorkbenchHostEventSource } from "./case-port.js";
