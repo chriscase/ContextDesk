@@ -393,7 +393,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("reclaims unreferenced CAS bytes after a promote crash across SQLite reopen", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-pending-write-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-pending-write-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     const evidenceRoot = join(root, "evidence");
@@ -442,7 +442,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("rolls a triage job insert back across SQLite reopen after timeline failure", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-triage-atomic-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-triage-atomic-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     try {
@@ -524,7 +524,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("rolls an experiment insert back across SQLite reopen after timeline failure", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-experiment-atomic-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-experiment-atomic-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     try {
@@ -564,7 +564,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("rolls an imported run insert back across SQLite reopen after timeline failure", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-import-atomic-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-import-atomic-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     try {
@@ -618,7 +618,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("rolls corroboration back across SQLite reopen after timeline failure", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-corroborate-atomic-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-corroborate-atomic-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     try {
@@ -687,7 +687,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("rolls a first-use human source back across SQLite reopen after contribution timeline failure", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-catalog-atomic-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-catalog-atomic-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     try {
@@ -731,7 +731,7 @@ describe("SQLite local runtime", () => {
   });
 
   it("rolls a first-use human source back across SQLite reopen after evidence timeline failure", async () => {
-    const root = await mkdtemp(join("/tmp", "cd-collab-sqlite-catalog-evidence-atomic-"));
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-catalog-evidence-atomic-"));
     const path = join(root, "collab.sqlite");
     const actor = { id: "local:lead", username: "lead" };
     try {
