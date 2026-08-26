@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { parseTriageJob, type TriageJobV1 } from "@cd-collab/contracts";
 import {
+  activeCaseQueryable,
   overviewVisiblePredicate,
   type OverviewScope,
   type OverviewVisibilityBoundary,
@@ -76,6 +77,16 @@ function cloneJob(job: TriageJobV1): TriageJobV1 {
       unknowns: [...candidate.unknowns],
     })),
   };
+}
+
+/** Later ISO timestamp wins; a missing lease never shortens a live one. */
+export function laterLeaseExpiresAt(
+  existing: string | null | undefined,
+  incoming: string | null | undefined,
+): string | null {
+  if (!existing) return incoming ?? null;
+  if (!incoming) return existing;
+  return Date.parse(existing) >= Date.parse(incoming) ? existing : incoming;
 }
 
 export class MemoryTriageJobStore implements TriageJobStore {
@@ -207,7 +218,11 @@ export class MemoryTriageJobStore implements TriageJobStore {
     if (!leaseAllowsTriageUpdate(existing, job, Date.now())) {
       throw new Error("triage job not found");
     }
-    this.jobs.set(job.id, cloneJob(job));
+    const next = cloneJob(job);
+    if (existing.status === "running" && job.status === "running") {
+      next.leaseExpiresAt = laterLeaseExpiresAt(existing.leaseExpiresAt, job.leaseExpiresAt);
+    }
+    this.jobs.set(job.id, next);
   }
 }
 
@@ -225,6 +240,10 @@ export type Queryable = Pick<Pool, "query">;
 
 export class PgTriageJobStore implements TriageJobStore {
   constructor(private readonly db: Queryable) {}
+
+  private get queryable(): Queryable {
+    return activeCaseQueryable() ?? this.db;
+  }
 
   private static withLease(
     row: { payload?: unknown; lease_owner?: unknown; lease_expires_at?: unknown },
@@ -254,7 +273,7 @@ export class PgTriageJobStore implements TriageJobStore {
   }
 
   async insert(job: TriageJobV1): Promise<void> {
-    await this.db.query(
+    await this.queryable.query(
       `INSERT INTO triage_jobs (
          id, case_id, snapshot_id, snapshot_fingerprint, request_fingerprint,
          status, payload, created_at, updated_at, lease_owner, lease_expires_at
@@ -276,7 +295,7 @@ export class PgTriageJobStore implements TriageJobStore {
   }
 
   async get(id: string): Promise<TriageJobV1 | null> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `SELECT payload, lease_owner, lease_expires_at FROM triage_jobs WHERE id = $1`,
       [id],
     );
@@ -287,7 +306,7 @@ export class PgTriageJobStore implements TriageJobStore {
   }
 
   async listByCase(caseId: string): Promise<TriageJobV1[]> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `SELECT payload, lease_owner, lease_expires_at
        FROM triage_jobs WHERE case_id = $1 ORDER BY created_at ASC, id ASC`,
       [caseId],
@@ -301,7 +320,7 @@ export class PgTriageJobStore implements TriageJobStore {
 
   async listByStatuses(statuses: TriageJobV1["status"][]): Promise<TriageJobV1[]> {
     if (statuses.length === 0) return [];
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `SELECT payload, lease_owner, lease_expires_at FROM triage_jobs
        WHERE status = ANY($1::text[]) ORDER BY created_at ASC, id ASC`,
       [statuses],
@@ -316,7 +335,7 @@ export class PgTriageJobStore implements TriageJobStore {
   async listOverviewJobs(query: OverviewJobQuery): Promise<OverviewListedJob[]> {
     const cap = Math.max(0, Math.trunc(query.limit) || 0);
     if (query.statuses.length === 0 || cap === 0) return [];
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `SELECT j.payload, j.lease_owner, j.lease_expires_at, c.title AS case_title
        FROM triage_jobs j
        INNER JOIN cases c ON c.id = j.case_id
@@ -342,7 +361,7 @@ export class PgTriageJobStore implements TriageJobStore {
     workerId: string,
     leaseExpiresAt: string,
   ): Promise<TriageJobV1 | null> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `UPDATE triage_jobs
        SET status = 'running',
            payload = jsonb_set(
@@ -369,7 +388,7 @@ export class PgTriageJobStore implements TriageJobStore {
   }
 
   async listStaleRunning(now: string): Promise<TriageJobV1[]> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `SELECT payload, lease_owner, lease_expires_at FROM triage_jobs
        WHERE status = 'running'
          AND (lease_expires_at IS NULL OR lease_expires_at <= $1::timestamptz)
@@ -384,7 +403,7 @@ export class PgTriageJobStore implements TriageJobStore {
   }
 
   async renewLease(id: string, workerId: string, leaseExpiresAt: string): Promise<boolean> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `UPDATE triage_jobs
        SET payload = jsonb_set(payload, '{leaseExpiresAt}', to_jsonb($3::text), true),
            lease_expires_at = $3::timestamptz,
@@ -397,7 +416,7 @@ export class PgTriageJobStore implements TriageJobStore {
   }
 
   async recoverStale(job: TriageJobV1, now: string): Promise<boolean> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `UPDATE triage_jobs
        SET status = $2, payload = $3::jsonb, updated_at = $4::timestamptz,
            lease_owner = $6, lease_expires_at = NULL
@@ -410,10 +429,20 @@ export class PgTriageJobStore implements TriageJobStore {
   }
 
   async update(job: TriageJobV1): Promise<void> {
-    const result = await this.db.query(
+    const result = await this.queryable.query(
       `UPDATE triage_jobs
        SET status = $2, payload = $3::jsonb, updated_at = $4::timestamptz,
-           lease_owner = $6, lease_expires_at = $7::timestamptz
+           lease_owner = $6,
+           lease_expires_at = CASE
+             WHEN status = 'running' AND $2::text = 'running' THEN
+               CASE
+                 WHEN lease_expires_at IS NULL THEN $7::timestamptz
+                 WHEN $7::timestamptz IS NULL THEN lease_expires_at
+                 WHEN lease_expires_at >= $7::timestamptz THEN lease_expires_at
+                 ELSE $7::timestamptz
+               END
+             ELSE $7::timestamptz
+           END
        WHERE id = $1 AND case_id = $5
          AND lease_owner IS NOT DISTINCT FROM $6
          AND (

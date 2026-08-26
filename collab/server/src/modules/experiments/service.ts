@@ -23,6 +23,7 @@ import {
   buildStrategyComparison,
   boundExcerpt,
   extractPlainTranscript,
+  formatPortableExperimentTraceTarget,
   projectShareSafeTrace,
   sha256Hex,
   traceFingerprint,
@@ -66,6 +67,7 @@ const UNKNOWN_SNAPSHOT_PROOF: ExperimentSnapshotProof = {
 export class ExperimentConflictError extends Error {
   readonly code:
     | "revision_conflict"
+    | "sequence_conflict"
     | "already_accepted"
     | "stale_revision"
     | "stale_gold"
@@ -86,6 +88,58 @@ export class ExperimentNotFoundError extends Error {
   }
 }
 
+function isDecisionRevisionConflict(error: unknown): boolean {
+  if (
+    error
+    && typeof error === "object"
+    && "code" in error
+    && (error as { code: unknown }).code === "23505"
+  ) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /decision revision already exists|duplicate key.*experiment_decisions/i.test(message);
+}
+
+function isAnnotationSequenceConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /annotation sequence already exists/i.test(message);
+}
+
+function isGoldVersionConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    error
+    && typeof error === "object"
+    && "code" in error
+    && (error as { code: unknown }).code === "23505"
+  ) {
+    const constraint =
+      "constraint" in error && typeof (error as { constraint?: unknown }).constraint === "string"
+        ? (error as { constraint: string }).constraint
+        : "";
+    return /gold_references/i.test(`${constraint} ${message}`);
+  }
+  return /gold_references is insert-only|duplicate key.*gold_references/i.test(message);
+}
+
+function isTraceIdentityConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    error
+    && typeof error === "object"
+    && "code" in error
+    && (error as { code: unknown }).code === "23505"
+  ) {
+    const constraint =
+      "constraint" in error && typeof (error as { constraint?: unknown }).constraint === "string"
+        ? (error as { constraint: string }).constraint
+        : "";
+    return /experiment_traces/i.test(`${constraint} ${message}`);
+  }
+  return /experiment_traces is insert-only|duplicate key.*experiment_traces/i.test(message);
+}
+
 export interface ExperimentView {
   id: string;
   caseId: string;
@@ -95,6 +149,7 @@ export interface ExperimentView {
   snapshotFingerprint: string;
   snapshotProof: ExperimentSnapshotProof;
   createdAt: string;
+  importerId: string;
   importerUsername: string;
   candidates: ReturnType<typeof projectCandidateMatrix>;
   agreement: ExperimentAgreementV1;
@@ -379,6 +434,23 @@ export class ExperimentService {
     this.store = deps.experiments ?? new MemoryExperimentStore();
   }
 
+  private async withExperimentAtomic<T>(operation: () => Promise<T>): Promise<T> {
+    const memory = this.store instanceof MemoryExperimentStore ? this.store : null;
+    return this.deps.cases.withAtomic(async () => {
+      // SQLite wraps every method as async; capture/restore must be awaited
+      // or restore receives a Promise and throws DataCloneError.
+      const snapshot = memory ? await Promise.resolve(memory.capture()) : undefined;
+      try {
+        return await operation();
+      } catch (error) {
+        if (memory && snapshot !== undefined) {
+          await Promise.resolve(memory.restore(snapshot));
+        }
+        throw error;
+      }
+    });
+  }
+
   async importEnvelope(
     caseId: string,
     actor: Actor,
@@ -400,6 +472,7 @@ export class ExperimentService {
       parsed.kind === "strategy"
         ? parsed.package.traces.map((trace) => prepareTraceForStorage(trace))
         : [];
+    return this.withExperimentAtomic(async () => {
     const existing = await this.store.findByPackage(caseId, envelope.packageId);
     if (existing) {
       await this.deps.audit.append({
@@ -470,6 +543,7 @@ export class ExperimentService {
       }
     }
     return this.toView(row);
+    });
   }
 
   async list(caseId: string, actor: Actor, isAdmin: boolean): Promise<ExperimentView[]> {
@@ -669,11 +743,12 @@ export class ExperimentService {
       reviewerUsername: actor.username,
       createdAt: new Date().toISOString(),
     });
+    return this.withExperimentAtomic(async () => {
     await this.store.insertObservation(observation);
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_helpfulness_recorded",
       actor,
-      targetId: experimentId,
+      targetId: observation.id,
       clientTime: null,
       payload: {
         observationId: observation.id,
@@ -689,6 +764,7 @@ export class ExperimentService {
       outcome: "success",
     });
     return observation;
+    });
   }
 
   async proposeDecision(
@@ -707,6 +783,7 @@ export class ExperimentService {
     isAdmin: boolean,
   ): Promise<NormalizedExperimentDecisionV1> {
     const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    return this.withExperimentAtomic(async () => {
     const history = await this.store.listDecisions(experimentId);
     const latest = history.at(-1) ?? null;
     if (latest?.status === "accepted") {
@@ -737,11 +814,18 @@ export class ExperimentService {
           : input.remainingUnknowns,
       createdAt: new Date().toISOString(),
     });
-    await this.store.insertDecision(decision);
+    try {
+      await this.store.insertDecision(decision);
+    } catch (error) {
+      if (isDecisionRevisionConflict(error)) {
+        throw new ExperimentConflictError("revision_conflict", "decision revision already exists");
+      }
+      throw error;
+    }
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_decision_proposed",
       actor,
-      targetId: experimentId,
+      targetId: decision.id,
       clientTime: null,
       payload: { decisionId: decision.id, revision: decision.revision, packageId: row.packageId },
     });
@@ -753,6 +837,7 @@ export class ExperimentService {
       outcome: "success",
     });
     return decision;
+    });
   }
 
   async acceptDecision(
@@ -764,6 +849,7 @@ export class ExperimentService {
     isAdmin: boolean,
   ): Promise<NormalizedExperimentDecisionV1> {
     const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    return this.withExperimentAtomic(async () => {
     const history = await this.store.listDecisions(experimentId);
     const latest = history.at(-1) ?? null;
     if (!latest) throw new Error("no proposed decision");
@@ -786,11 +872,18 @@ export class ExperimentService {
       createdAt: new Date().toISOString(),
       packageId: row.packageId,
     });
-    await this.store.insertDecision(accepted);
+    try {
+      await this.store.insertDecision(accepted);
+    } catch (error) {
+      if (isDecisionRevisionConflict(error)) {
+        throw new ExperimentConflictError("revision_conflict", "decision revision already exists");
+      }
+      throw error;
+    }
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_decision_accepted",
       actor,
-      targetId: experimentId,
+      targetId: accepted.id,
       clientTime: null,
       payload: {
         decisionId: accepted.id,
@@ -807,6 +900,7 @@ export class ExperimentService {
       outcome: "success",
     });
     return accepted;
+    });
   }
 
   async exportShareSafe(
@@ -829,6 +923,7 @@ export class ExperimentService {
     isAdmin: boolean,
   ): Promise<InteractionTraceV1> {
     const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    return this.withExperimentAtomic(async () => {
     if (
       raw &&
       typeof raw === "object" &&
@@ -855,6 +950,7 @@ export class ExperimentService {
       return this.attachParsedTrace(row, actor, trace, origin);
     }
     throw new Error("expected interaction trace or plain transcript");
+    });
   }
 
   async annotateTrace(
@@ -870,32 +966,45 @@ export class ExperimentService {
       throw new Error("unknown candidateId");
     }
     if (!input.text.trim()) throw new Error("annotation text is required");
-    const traces = await this.store.listTraces(row.id);
-    const current = traces.find((trace) => trace.candidateId === input.candidateId);
-    if (!current) throw new Error("import a trace before annotating");
-    const nextSeq = (current.events.at(-1)?.sequence ?? 0) + 1;
     const annotationId = randomUUID();
-    await this.store.insertAnnotation({
-      id: annotationId,
-      experimentId: row.id,
-      candidateId: input.candidateId,
-      event: {
-        eventId: `ann-${annotationId}`,
-        sequence: nextSeq,
-        kind: "human_annotation",
-        actor: "human",
-        role: null,
-        parentEventId: input.parentEventId ?? current?.events.at(-1)?.eventId ?? null,
-        evidenceRefs: input.evidenceRefs ?? [],
-        observedAt: { status: "unknown" },
-        excerpt: input.text.trim().slice(0, 240),
-        excerptHash: null,
-        unknowns: ["timestamp"],
-      },
-      authorId: actor.id,
-      authorUsername: actor.username,
-      createdAt: new Date().toISOString(),
-    });
+    return this.withExperimentAtomic(async () => {
+    await this.store.lockExperiment(row.id);
+    const current = await this.store.findTrace(row.id, input.candidateId);
+    if (!current) throw new Error("import a trace before annotating");
+    const annotations = await this.store.listAnnotations(row.id);
+    const merged = mergeAnnotations(current, annotations);
+    const nextSeq = (merged.events.at(-1)?.sequence ?? 0) + 1;
+    try {
+      await this.store.insertAnnotation({
+        id: annotationId,
+        experimentId: row.id,
+        candidateId: input.candidateId,
+        event: {
+          eventId: `ann-${annotationId}`,
+          sequence: nextSeq,
+          kind: "human_annotation",
+          actor: "human",
+          role: null,
+          parentEventId: input.parentEventId ?? merged.events.at(-1)?.eventId ?? null,
+          evidenceRefs: input.evidenceRefs ?? [],
+          observedAt: { status: "unknown" },
+          excerpt: input.text.trim().slice(0, 240),
+          excerptHash: null,
+          unknowns: ["timestamp"],
+        },
+        authorId: actor.id,
+        authorUsername: actor.username,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (isAnnotationSequenceConflict(error)) {
+        throw new ExperimentConflictError(
+          "sequence_conflict",
+          "annotation sequence already exists",
+        );
+      }
+      throw error;
+    }
     await this.deps.audit.append({
       identity: actor.id,
       action: "experiment_trace_annotate",
@@ -907,6 +1016,7 @@ export class ExperimentService {
     const trace = view.traces.find((item) => item.candidateId === input.candidateId);
     if (!trace) throw new Error("trace not found after annotation");
     return trace;
+    });
   }
 
   private async attachParsedTrace(
@@ -917,6 +1027,7 @@ export class ExperimentService {
   ): Promise<InteractionTraceV1> {
     const safe = prepareTraceForStorage(incoming);
     const fingerprint = traceFingerprint(safe);
+    await this.store.lockExperiment(row.id);
     const existing = await this.store.findTrace(row.id, safe.candidateId);
     if (existing) {
       if (traceFingerprint(existing) === fingerprint) {
@@ -934,11 +1045,21 @@ export class ExperimentService {
         "candidate already has a different interaction trace",
       );
     }
-    await this.store.insertTrace(row.id, safe, fingerprint);
+    try {
+      await this.store.insertTrace(row.id, safe, fingerprint);
+    } catch (error) {
+      if (isTraceIdentityConflict(error)) {
+        throw new ExperimentConflictError(
+          "trace_conflict",
+          "candidate already has a different interaction trace",
+        );
+      }
+      throw error;
+    }
     await this.deps.cases.appendDomainTimeline(row.caseId, {
       kind: "experiment_trace_imported",
       actor,
-      targetId: row.id,
+      targetId: formatPortableExperimentTraceTarget(row.id, safe.traceId),
       clientTime: null,
       payload: { traceId: safe.traceId, candidateId: safe.candidateId, sourceKind: safe.sourceKind },
     });
@@ -990,6 +1111,8 @@ export class ExperimentService {
       }
     }
 
+    return this.withExperimentAtomic(async () => {
+    await this.store.lockExperiment(row.id);
     const golds = await this.store.listGolds(experimentId);
     const fingerprint = goldPromotionFingerprint({
       acceptedDecisionId: accepted.id,
@@ -1064,11 +1187,18 @@ export class ExperimentService {
       promotedByUsername: actor.username,
       createdAt: new Date().toISOString(),
     });
-    await this.store.insertGold(gold);
+    try {
+      await this.store.insertGold(gold);
+    } catch (error) {
+      if (isGoldVersionConflict(error)) {
+        throw new ExperimentConflictError("stale_gold", "gold version already exists");
+      }
+      throw error;
+    }
     await this.deps.cases.appendDomainTimeline(caseId, {
       kind: "experiment_gold_promoted",
       actor,
-      targetId: experimentId,
+      targetId: gold.goldId,
       clientTime: null,
       payload: {
         goldId: gold.goldId,
@@ -1086,6 +1216,7 @@ export class ExperimentService {
       outcome: "success",
     });
     return gold;
+    });
   }
 
   private assertExpectedRevision(
@@ -1193,6 +1324,7 @@ export class ExperimentService {
       snapshotFingerprint: row.snapshotFingerprint,
       snapshotProof: { ...row.snapshotProof },
       createdAt: row.createdAt,
+      importerId: row.importerId,
       importerUsername: row.importerUsername,
       candidates: projectCandidateMatrix(candidates, Boolean(gold)),
       agreement: row.agreement,
@@ -1210,21 +1342,32 @@ export class ExperimentService {
 function mergeAnnotations(
   trace: InteractionTraceV1,
   annotations: {
+    id?: string;
     candidateId: string;
     event: InteractionTraceV1["events"][number];
     authorUsername: string;
   }[],
 ): InteractionTraceV1 {
-  const extra = annotations.filter((row) => row.candidateId === trace.candidateId);
+  const extra = annotations
+    .filter((row) => row.candidateId === trace.candidateId)
+    .slice()
+    .sort((left, right) => {
+      const bySequence = left.event.sequence - right.event.sequence;
+      if (bySequence !== 0) return bySequence;
+      return (left.id ?? "").localeCompare(right.id ?? "");
+    });
   if (extra.length === 0) return trace;
-  let sequence = trace.events.at(-1)?.sequence ?? 0;
   const events = [...trace.events];
+  const seen = new Set(events.map((event) => event.sequence));
   for (const row of extra) {
-    sequence += 1;
+    if (seen.has(row.event.sequence)) {
+      throw new Error("annotation sequence already exists");
+    }
+    seen.add(row.event.sequence);
     const attributedEvent = {
       ...row.event,
       authorUsername: row.authorUsername,
-      sequence,
+      sequence: row.event.sequence,
       parentEventId: row.event.parentEventId ?? events.at(-1)?.eventId ?? null,
     } as InteractionTraceV1["events"][number] & { authorUsername: string };
     events.push(attributedEvent);

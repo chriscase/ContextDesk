@@ -12,7 +12,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
-import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
+import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import { MapAuthAdapter } from "../auth/index.js";
 import {
@@ -559,6 +559,75 @@ describe("external-run import", () => {
     expect(src.includes("initialCorroborationState()")).toBe(true);
   });
 
+  it("rolls back corroboration when timeline projection fails", async () => {
+    class InjectedFailureStore extends MemoryCaseStore {
+      failTimelineKind: string | null = null;
+      override async appendTimeline(
+        caseId: string,
+        event: Parameters<MemoryCaseStore["appendTimeline"]>[1],
+      ): Promise<Awaited<ReturnType<MemoryCaseStore["appendTimeline"]>>> {
+        if (this.failTimelineKind && event.kind === this.failTimelineKind) {
+          throw new Error(`injected timeline failure:${event.kind}`);
+        }
+        return super.appendTimeline(caseId, event);
+      }
+    }
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-corroborate-boom-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const store = new InjectedFailureStore();
+    const cases = new CaseService(evidence, audit, store, catalog);
+    const runs = new MemoryRunStore();
+    const imports = new ImportService({
+      evidence,
+      audit,
+      cases,
+      catalog,
+      runs,
+    });
+    try {
+      const created = await cases.createCase(actor, { title: "Corroboration atomic fixture" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const imported = await imports.importRun(
+        created.id,
+        actor,
+        {
+          outputText: "synthetic imported timeout transcript",
+          sourceId: source.id,
+          operatorId: "uid=operator,ou=people,dc=example,dc=test",
+          operatorUsername: "operator",
+        },
+        "test",
+        false,
+      );
+      const note = await cases.addContribution(
+        created.id,
+        actor,
+        { kind: "note", body: "Synthetic corroborating observation." },
+        "test",
+      );
+      store.failTimelineKind = "run_corroboration";
+      await expect(
+        imports.corroborate(
+          created.id,
+          imported.id,
+          actor,
+          { state: "corroborated", links: [{ kind: "contribution", id: note.id }] },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/injected timeline failure:run_corroboration/);
+      expect(await runs.listCorroborations(imported.id)).toEqual([]);
+      expect((await cases.listTimeline(created.id)).some((event) => event.kind === "run_corroboration")).toBe(false);
+      expect(await audit.list({ action: "run_corroboration" })).toEqual([]);
+      expect((await imports.getRun(created.id, imported.id, actor, false))?.corroborationState).toBe("unverified");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rolls back the contribution and staged bytes when run insert fails", async () => {
     class BoomRunStore extends MemoryRunStore {
       override async insert(): Promise<void> {
@@ -599,6 +668,55 @@ describe("external-run import", () => {
       expect(await cases.listContributions(created.id, actor, false)).toEqual([]);
       expect(await imports.listRuns(created.id, actor, false)).toEqual([]);
       expect(await evidence.head(sha256Hex(new TextEncoder().encode(outputText)))).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps imported run bytes when recovering unreferenced promote residue", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-import-pending-write-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const caseStore = new MemoryCaseStore();
+    const runs = new MemoryRunStore();
+    evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
+    evidence.addReferencedContentHashSource(() => runs.listReferencedContentHashes());
+    const cases = new CaseService(evidence, audit, caseStore, catalog);
+    const imports = new ImportService({
+      evidence,
+      audit,
+      cases,
+      catalog,
+      runs,
+    });
+    try {
+      const created = await cases.createCase(actor, { title: "Import hash recovery fixture" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const outputText = "synthetic imported mailer timeout transcript";
+      const imported = await imports.importRun(
+        created.id,
+        actor,
+        {
+          outputText,
+          sourceId: source.id,
+          operatorId: "uid=operator,ou=people,dc=example,dc=test",
+          operatorUsername: "operator",
+        },
+        "test",
+        false,
+      );
+      const crashedBytes = new TextEncoder().encode("2026-08-25T00:01:00Z synthetic import crash residue\n");
+      const batch = await evidence.beginWriteBatch();
+      const crashedMeta = await batch.put(crashedBytes, { contentType: "text/plain" });
+      await batch.promote();
+      await abandonWriteBatchForCrashTest(batch);
+      const recovered = await evidence.recoverUnreferencedWrites();
+      expect(recovered.reclaimed).toEqual([crashedMeta.hash]);
+      expect(await evidence.head(crashedMeta.hash)).toBeNull();
+      expect(await evidence.verify(imported.outputHash)).toBe(true);
+      expect(await runs.listReferencedContentHashes()).toEqual(new Set([imported.outputHash]));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

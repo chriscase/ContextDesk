@@ -11,6 +11,7 @@ import {
   safeActorLabel,
   safeInvestigationTitle,
   safeResourceLabel,
+  parsePortableExperimentTraceTarget,
   type InvestigationActivityItemV1,
   type InvestigationActivityKindV1,
   type InvestigationPrivacyVisibilityV1,
@@ -105,7 +106,7 @@ interface Mapped {
   workstreamId: string | null;
 }
 
-function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string, unknown>): Mapped {
+function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string, unknown>): Mapped | null {
   const target = event.targetId ?? caseId;
   const contribution = str(payload, "kind");
   const revision = num(payload, "revision");
@@ -143,7 +144,7 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
     case "run_corroboration":
       return {
         activityKind: "evidence_reviewed",
-        resourceKind: event.kind === "run_corroboration" ? "evidence_context" : "evidence_item",
+        resourceKind: event.kind === "run_corroboration" ? "imported_ai_run" : "evidence_item",
         resourceId: target,
         provenance: event.kind === "run_corroboration" ? "human" : "system",
         summary: event.kind === "run_corroboration" ? "reviewed imported analysis" : "reviewed evidence",
@@ -154,16 +155,20 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
     case "snapshot_frozen":
       return { activityKind: "evidence_frozen", resourceKind: "evidence_context", resourceId: target, provenance: "system", summary: "froze an evidence snapshot", humanFinding: false, revision: null, workstreamId: null };
     case "contribution_tombstoned":
-      return {
-        activityKind: contribution === "upload" ? "evidence_omitted" : "observation_recorded",
-        resourceKind: contribution === "upload" ? "evidence_item" : "observation",
-        resourceId: target,
-        provenance: "human",
-        summary: contribution === "upload" ? "omitted evidence" : "omitted an investigation record",
-        humanFinding: false,
-        revision,
-        workstreamId: null,
-      };
+      if (contribution === "upload") return null;
+      if (contribution === "message") {
+        return { activityKind: "comment_added", resourceKind: "discussion_message", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
+      }
+      if (contribution === "note") {
+        return { activityKind: "observation_recorded", resourceKind: "observation", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
+      }
+      if (contribution === "hypothesis") {
+        return { activityKind: "hypothesis_updated", resourceKind: "hypothesis", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
+      }
+      if (contribution === "action") {
+        return { activityKind: assigned ? "assignment_recorded" : "action_recorded", resourceKind: "action", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
+      }
+      return { activityKind: "observation_recorded", resourceKind: "observation", resourceId: target, provenance: "human", summary: "omitted an investigation record", humanFinding: false, revision, workstreamId: null };
     case "contribution_created":
     case "contribution_revised":
       if (contribution === "message") {
@@ -184,9 +189,7 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
       if (contribution === "action") {
         return { activityKind: assigned ? "assignment_recorded" : "action_recorded", resourceKind: "action", resourceId: target, provenance: "human", summary: assigned ? "recorded an assignment" : "recorded a next action", humanFinding: true, revision, workstreamId: null };
       }
-      if (contribution === "upload") {
-        return { activityKind: "evidence_added", resourceKind: "evidence_item", resourceId: target, provenance: "human", summary: "recorded an evidence upload", humanFinding: false, revision, workstreamId: null };
-      }
+      if (contribution === "upload") return null;
       if (payload.mentions !== undefined || payload.mention === true) {
         return { activityKind: "mention_recorded", resourceKind: "discussion_message", resourceId: target, provenance: "human", summary: "recorded a mention", humanFinding: true, revision, workstreamId: null };
       }
@@ -195,7 +198,7 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
       }
       return { activityKind: "investigation_updated", resourceKind: "observation", resourceId: target, provenance: "human", summary: "updated the investigation record", humanFinding: false, revision, workstreamId: null };
     case "hypothesis_status":
-      return { activityKind: status === "superseded" ? "decision_superseded" : "hypothesis_updated", resourceKind: "hypothesis", resourceId: target, provenance: "human", summary: status === "superseded" ? "superseded a working hypothesis" : "updated a working hypothesis", humanFinding: true, revision, workstreamId: null };
+      return { activityKind: "hypothesis_updated", resourceKind: "hypothesis", resourceId: target, provenance: "human", summary: status === "superseded" ? "superseded a working hypothesis" : "updated a working hypothesis", humanFinding: true, revision, workstreamId: null };
     case "triage_job_created":
       return { activityKind: rerun ? "workstream_rerun" : "workstream_launched", resourceKind: rerun ? "workstream_rerun" : "workstream", resourceId: target, provenance: "system", summary: rerun ? "reran a workstream" : "launched a workstream", humanFinding: false, revision: null, workstreamId: jobId };
     case "triage_job_started":
@@ -228,11 +231,21 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
         workstreamId: jobId,
       };
     case "experiment_imported":
-      return { activityKind: "comparison_unknown", resourceKind: "comparison_finding", resourceId: target, provenance: "imported", summary: "recorded a strategy comparison", humanFinding: false, revision: null, workstreamId: null };
+      return { activityKind: "comparison_unknown", resourceKind: "experiment", resourceId: target, provenance: "imported", summary: "recorded a strategy comparison", humanFinding: false, revision: null, workstreamId: null };
     case "comparison_disagreement":
+      return { activityKind: "comparison_disagreement", resourceKind: "comparison_conflict", resourceId: target, provenance: "human", summary: "recorded a comparison disagreement", humanFinding: false, revision: null, workstreamId: null };
     case "experiment_helpfulness_recorded": {
-      const disagreement = event.kind === "comparison_disagreement" || payload.agreement === "disagree" || payload.disagreement === true;
-      return { activityKind: disagreement ? "comparison_disagreement" : "comparison_unknown", resourceKind: disagreement ? "comparison_conflict" : "comparison_finding", resourceId: target, provenance: "human", summary: disagreement ? "recorded a comparison disagreement" : "recorded a comparison observation", humanFinding: false, revision: null, workstreamId: null };
+      const observationId = str(payload, "observationId") ?? target;
+      return {
+        activityKind: "comparison_unknown",
+        resourceKind: "helpfulness",
+        resourceId: observationId,
+        provenance: "human",
+        summary: "recorded a comparison observation",
+        humanFinding: false,
+        revision: null,
+        workstreamId: null,
+      };
     }
     case "comparison_unknown":
       return { activityKind: "comparison_unknown", resourceKind: "comparison_finding", resourceId: target, provenance: "human", summary: "recorded a comparison unknown", humanFinding: false, revision: null, workstreamId: null };
@@ -242,13 +255,45 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
       return { activityKind: "decision_accepted", resourceKind: "decision_revision", resourceId: decisionId, provenance: "human", summary: "accepted a decision", humanFinding: true, revision: revision ?? 0, workstreamId: null };
     case "experiment_decision_superseded":
       return { activityKind: "decision_superseded", resourceKind: "decision_revision", resourceId: decisionId, provenance: "human", summary: "superseded a decision", humanFinding: true, revision: revision ?? 0, workstreamId: null };
-    case "experiment_gold_promoted":
-      return { activityKind: "decision_accepted", resourceKind: "decision_revision", resourceId: target, provenance: "human", summary: "recorded an accepted outcome benchmark", humanFinding: true, revision: revision ?? 0, workstreamId: null };
+    case "experiment_gold_promoted": {
+      const goldId = str(payload, "goldId") ?? target;
+      const version = num(payload, "version") ?? revision;
+      return {
+        activityKind: "decision_accepted",
+        resourceKind: "gold",
+        resourceId: goldId,
+        provenance: "human",
+        summary: "recorded an accepted outcome benchmark",
+        humanFinding: true,
+        revision: version,
+        workstreamId: null,
+      };
+    }
     case "external_run_imported":
-    case "experiment_trace_imported":
-      return { activityKind: "import_recorded", resourceKind: "evidence_context", resourceId: target, provenance: "ai_generated", summary: "imported analysis was recorded", humanFinding: false, revision: null, workstreamId: null };
+      return { activityKind: "import_recorded", resourceKind: "imported_ai_run", resourceId: target, provenance: "ai_generated", summary: "imported analysis was recorded", humanFinding: false, revision: null, workstreamId: null };
+    case "experiment_trace_imported": {
+      const parsed = parsePortableExperimentTraceTarget(target);
+      const traceId = parsed?.traceId ?? str(payload, "traceId");
+      const experimentId = parsed?.experimentId ?? target;
+      const composed = traceId ? `${experimentId}:${traceId}` : null;
+      const resourceId = parsed
+        ? target
+        : composed && parsePortableExperimentTraceTarget(composed)
+          ? composed
+          : target;
+      return {
+        activityKind: "import_recorded",
+        resourceKind: "interaction_trace",
+        resourceId,
+        provenance: "ai_generated",
+        summary: "imported a comparison trace",
+        humanFinding: false,
+        revision: null,
+        workstreamId: null,
+      };
+    }
     case "corpus_intake_committed":
-      return { activityKind: "import_recorded", resourceKind: "evidence_item", resourceId: target, provenance: "imported", summary: "committed a log intake batch", humanFinding: false, revision: null, workstreamId: null };
+      return { activityKind: "import_recorded", resourceKind: "intake_batch", resourceId: target, provenance: "imported", summary: "committed a log intake batch", humanFinding: false, revision: null, workstreamId: null };
     case "export_recorded":
     case "export_created":
       return { activityKind: "export_recorded", resourceKind: "export_event", resourceId: target, provenance: "system", summary: "recorded an export", humanFinding: false, revision: null, workstreamId: null };
@@ -327,6 +372,7 @@ export function projectTimelineSource(
 ): ProjectedInvestigationActivity | null {
   const payload = payloadOf(input.source.event.payload);
   const mapped = mapEvent(input.source.caseId, input.source.event, payload);
+  if (!mapped) return null;
   const restoredImport = payload.imported === true;
   if (restoredImport) {
     mapped.provenance = "historical_restored";

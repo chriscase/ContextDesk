@@ -66,8 +66,58 @@ filenames do not appear in locators or URLs. Opaque ids remain for machine
 consumers and Technical details views.
 
 Resolution reauthorizes at request time. Cross-investigation substitution,
-dangling resources, wrong revisions, and unauthorized private evidence all
-fail closed as `not_found` so existence is not leaked.
+dangling resources, **kind-confused locators** (for example a note id presented
+as `evidence_item`, a snapshot id presented as `evidence_item`, an intake
+batch id presented as `evidence_item`, an experiment or gold id presented as
+`decision_revision`, a gold snapshot presented as `decision_revision`, or a
+helpfulness observation presented as `comparison_finding`), wrong
+revisions, and unauthorized private evidence all fail closed as `not_found` so
+existence is not leaked. Timeline fallback matches the same projected
+`locator.kind` + `resourceId` (+ revision when supplied) as the activity feed;
+contribution provenance also requires the durable kind (`message`, `note` /
+`handoff`, `hypothesis`, `action`) rather than any row with that id.
+Upload summary contributions are omitted from the activity projection;
+`evidence_registered` is the only `evidence_item` locator and it addresses the
+artifact id, so `evidence_item/{summaryContributionId}` stays `not_found`.
+`corpus_intake_committed` projects `intake_batch` at the batch id and Capture
+`corpus-intake` / `kind=intake-batch`, not Analyze evidence.
+Portable restore remaps investigation and resource ids, including intake-batch
+ids from `targetNamespace=intake_batch`, gold snapshot ids from
+`targetNamespace=gold` (`experiment_gold_promoted`), helpfulness
+observation ids from `targetNamespace=helpfulness`
+(`experiment_helpfulness_recorded`), `${experimentId}:${traceId}`
+composites from `targetNamespace=experiment` (`experiment_trace_imported`),
+and `${jobId}:${candidateId}` composites from `targetNamespace=triage_job`
+(`triage_candidate_*`; persist refuses dropped or bare-job targets), and
+snapshot ids from `targetNamespace=snapshot` (`snapshot_frozen`; persist
+refuses dropped snapshot targets) and Analyze `triage-evidence-board` /
+`kind=snapshot`, and imported-run ids from
+`targetNamespace=imported_ai_run` (`external_run_imported`; persist refuses
+dropped imported-run targets), and contribution ids from
+`targetNamespace=contribution` (`contribution_*` / `hypothesis_status`; persist
+refuses dropped contribution targets), and evidence ids from
+`targetNamespace=evidence` (`evidence_*`; persist refuses dropped evidence
+targets), and job-level workstream ids from `targetNamespace=triage_job`
+(`triage_job_*`; persist refuses dropped or attempt-composite job targets),
+and corroboration imported-run ids from live `targetNamespace=imported_ai_run`
+(`run_corroboration`; portable export, dry-run, and apply refuse corroboration as not exact-applyable);
+resolve is re-run
+against the destination identities after apply and remains `not_found` for
+kind-confused or unauthorized locators. `experiment_gold_promoted` projects
+`gold` at the gold snapshot id and Decide `decision-heading`, not the
+experiment or accepted decision id. `experiment_helpfulness_recorded` projects
+`helpfulness` at the observation id and Compare `cross-exam-heading`, not the
+experiment id. `experiment_trace_imported` projects `interaction_trace` at
+`${experimentId}:${traceId}` and Compare `candidate-comparison-heading`, not
+the experiment id or `evidence_context`. `experiment_imported` projects
+`experiment` at the experiment id and Compare `candidate-comparison-heading`,
+not `comparison_finding`. `external_run_imported` and `run_corroboration`
+project `imported_ai_run` at the imported-run id and Capture `triage-capture`
+/ `kind=imported-run`, not snapshot `evidence_context`. `snapshot_frozen`
+projects `evidence_context` at the snapshot id and Analyze
+`triage-evidence-board` / `kind=snapshot`. Live `contribution_revised`, `contribution_tombstoned`, and `hypothesis_status` writes include `kind` and revision so copy-link stays on the contribution resource (discussion/hypothesis/note/action) instead of defaulting to `observation` and failing kind-strict resolve. A superseded working hypothesis projects `hypothesis_updated`, not `decision_superseded`. Live `experiment_decision_*` writes address the
+decision id (`targetId` = decision id) so activity is not payload-dependent;
+portable persist refuses archives that drop `targetNamespace=decision`.
 
 ## Privacy and authorization
 

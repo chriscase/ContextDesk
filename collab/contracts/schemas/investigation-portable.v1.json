@@ -55,6 +55,93 @@
       "anyOf": [{ "type": "string", "minLength": 2 }, { "type": "null" }]
     },
     "objectHash": { "$ref": "#/$defs/sha256" },
+    "interactionTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "traceId",
+        "candidateId",
+        "sourceKind",
+        "completeness",
+        "privacyClass",
+        "rawHash",
+        "events",
+        "efficiency",
+        "unknowns",
+        "notes",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaId": { "type": "string", "const": "cd-collab.interaction_trace.v1" },
+        "traceId": { "type": "string", "minLength": 1 },
+        "candidateId": { "type": "string", "minLength": 1 },
+        "sourceKind": { "type": "string", "enum": ["programmatic", "plain_text"] },
+        "completeness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+        "privacyClass": { "type": "string", "const": "share_safe" },
+        "rawHash": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "eventId",
+              "sequence",
+              "kind",
+              "actor",
+              "role",
+              "parentEventId",
+              "evidenceRefs",
+              "observedAt",
+              "excerpt",
+              "excerptHash",
+              "unknowns"
+            ],
+            "properties": {
+              "eventId": { "type": "string", "minLength": 1 },
+              "sequence": { "type": "integer", "minimum": 1 },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "question",
+                  "assistant_response",
+                  "tool_call",
+                  "tool_result",
+                  "evidence_anchor",
+                  "hypothesis",
+                  "recommendation",
+                  "human_annotation"
+                ]
+              },
+              "actor": {
+                "type": "string",
+                "enum": ["human", "assistant", "tool", "importer", "unknown"]
+              },
+              "role": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "parentEventId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "evidenceRefs": { "type": "array", "items": { "type": "string" } },
+              "observedAt": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["status"],
+                "properties": {
+                  "status": { "type": "string", "enum": ["unknown", "observed"] },
+                  "timestamp": { "type": "string" }
+                }
+              },
+              "excerpt": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "excerptHash": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "unknowns": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "efficiency": { "type": "object" },
+        "unknowns": { "type": "array", "items": { "type": "string" } },
+        "notes": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "minLength": 1 }
+      }
+    },
     "hashEntry": {
       "type": "object",
       "additionalProperties": false,
@@ -67,6 +154,7 @@
             "actor",
             "contribution",
             "evidence",
+            "intake_batch",
             "content",
             "source",
             "imported_ai_run",
@@ -367,6 +455,22 @@
           "usageStatus": { "$ref": "#/$defs/unknownStatus" },
           "costStatus": { "$ref": "#/$defs/unknownStatus" },
           "outputDigest": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+          "contributionId": { "type": "string", "minLength": 1 },
+          "promptDigest": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+          "promptCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+          "outputCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+          "workflowCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+          "evidenceVisibility": { "type": "string", "enum": ["unknown", "importer_described"] },
+          "snapshotId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+          "privacyClass": { "$ref": "#/$defs/privacy" },
+          "importerId": { "type": "string", "minLength": 1 },
+          "operatorId": { "type": "string", "minLength": 1 },
+          "claimedTraces": { "type": "array", "items": { "type": "string" } },
+          "visibilityNote": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "uncertainty": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "timing": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "cost": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "redacted": { "type": "boolean" },
           "opaquePayloadJson": { "$ref": "#/$defs/opaquePayloadJson" },
           "objectHash": { "$ref": "#/$defs/objectHash" }
         }
@@ -528,6 +632,124 @@
           "taskFingerprint": { "$ref": "#/$defs/fingerprint" },
           "candidateIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
           "createdAt": { "$ref": "#/$defs/timestamp" },
+          "importerId": { "type": "string", "minLength": 1 },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "candidateId",
+                "modelLabel",
+                "role",
+                "runStatus",
+                "observedLatency",
+                "cost",
+                "usage",
+                "helpfulnessState",
+                "goldState"
+              ],
+              "properties": {
+                "candidateId": { "type": "string", "minLength": 1 },
+                "modelLabel": { "type": "string", "minLength": 1 },
+                "role": { "type": "string", "enum": ["contributor", "finalizer", "reviewer", "single"] },
+                "runStatus": { "type": "string", "enum": ["completed", "failed", "partial", "timeout"] },
+                "observedLatency": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["status"],
+                  "properties": {
+                    "status": { "type": "string", "enum": ["unknown", "observed"] },
+                    "milliseconds": { "type": "integer", "minimum": 0 }
+                  }
+                },
+                "cost": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["status"],
+                  "properties": { "status": { "type": "string", "enum": ["unknown"] } }
+                },
+                "usage": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["status"],
+                  "properties": { "status": { "type": "string", "enum": ["unknown"] } }
+                },
+                "helpfulnessState": { "type": "string", "enum": ["unreviewed", "observed"] },
+                "goldState": { "type": "string", "enum": ["unknown", "absent", "present"] }
+              }
+            }
+          },
+          "agreement": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sharedAnchors", "candidateSpecific", "roleConflicts", "notes"],
+            "properties": {
+              "sharedAnchors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["evidenceRef", "role", "candidateIds"],
+                  "properties": {
+                    "evidenceRef": { "type": "string", "minLength": 1 },
+                    "role": { "type": "string", "minLength": 1 },
+                    "candidateIds": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                  }
+                }
+              },
+              "candidateSpecific": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["candidateId", "evidenceRefs"],
+                  "properties": {
+                    "candidateId": { "type": "string", "minLength": 1 },
+                    "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                  }
+                }
+              },
+              "roleConflicts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["evidenceRef", "assignments"],
+                  "properties": {
+                    "evidenceRef": { "type": "string", "minLength": 1 },
+                    "assignments": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["candidateId", "role"],
+                        "properties": {
+                          "candidateId": { "type": "string", "minLength": 1 },
+                          "role": { "type": "string", "minLength": 1 }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "notes": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "snapshotProof": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["basis", "fairnessClass", "lineageClass"],
+            "properties": {
+              "basis": { "type": "string", "enum": ["host_frozen_snapshot", "unknown"] },
+              "fairnessClass": { "type": "string", "enum": ["same_snapshot", "unknown"] },
+              "lineageClass": { "type": "string", "enum": ["root", "derived", "unknown"] }
+            }
+          },
+          "traces": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/interactionTrace" }
+          },
           "objectHash": { "$ref": "#/$defs/objectHash" }
         }
       }

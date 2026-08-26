@@ -184,6 +184,19 @@ describe("corpus intake contract", () => {
     const batch = parseCorpusIntakeBatch(batchBody());
     expect(batch.items).toHaveLength(1);
     expect(batch.rejected[0]?.reason).toBe("unsupported_media");
+    expect(
+      parseCorpusIntakeBatch(
+        batchBody({
+          rejected: [
+            {
+              relativePath: "<invalid-encoding>",
+              reason: "invalid_encoding",
+              detail: "ZIP UTF-8 language bit is set but the name is not valid UTF-8",
+            },
+          ],
+        }),
+      ).rejected[0]?.reason,
+    ).toBe("invalid_encoding");
     expect(() => parseCorpusIntakeBatch(batchBody({ extra: 1 }))).toThrow(/unknown key/);
   });
 

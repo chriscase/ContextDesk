@@ -128,6 +128,15 @@ describe("interaction trace contract", () => {
     expect(traceFingerprint(safe)).toBe(
       traceFingerprint(parseInteractionTrace(load("interaction-trace.programmatic.json"))),
     );
+    const reordered = parseInteractionTrace(load("interaction-trace.programmatic.json"));
+    reordered.efficiency = {
+      providerCalls: reordered.efficiency.providerCalls,
+      cost: reordered.efficiency.cost,
+      latency: reordered.efficiency.latency,
+      evidenceAcquisitionSteps: reordered.efficiency.evidenceAcquisitionSteps,
+      turnCount: reordered.efficiency.turnCount,
+    };
+    expect(traceFingerprint(reordered)).toBe(traceFingerprint(safe));
   });
 
   it("lab import accepts a strategy package idempotently at the contract layer", () => {

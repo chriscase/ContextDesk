@@ -285,11 +285,15 @@ function compareOverviewOpenCases(left: OverviewOpenCaseRow, right: OverviewOpen
   return byCreated !== 0 ? byCreated : left.id.localeCompare(right.id);
 }
 
+function addReferencedHash(into: Set<string>, value: string | null | undefined): void {
+  if (value && /^[0-9a-f]{64}$/.test(value)) into.add(value);
+}
+
 /**
  * Destination keys this module owns, addressed one batch at a time. Portable
  * apply probes these to decide collisions without enumerating the corpus.
  */
-export const CASE_PROBE_KINDS = ["case", "contribution", "artifact", "snapshot"] as const;
+export const CASE_PROBE_KINDS = ["case", "contribution", "artifact", "snapshot", "intake_batch"] as const;
 export type CaseProbeKind = (typeof CASE_PROBE_KINDS)[number];
 
 export interface ParticipantIdentityRow {
@@ -307,7 +311,7 @@ export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
   insertCase(row: CaseRow): Promise<void>;
-  updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void>;
+  updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void>;
   updateOccurredAt(
     id: string,
     occurrence: {
@@ -338,6 +342,8 @@ export interface CaseStore {
   insertRevision(rev: RevisionRow): Promise<void>;
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
   listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
+  listReferencedContentHashes(): Promise<ReadonlySet<string>>;
+  listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   insertArtifact(row: ArtifactRow): Promise<void>;
   withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T>;
   lockIntakeIdempotency(caseId: string, key: string): Promise<void>;
@@ -444,11 +450,14 @@ export class MemoryCaseStore implements CaseStore {
     this.timeline.set(row.id, []);
   }
 
-  async updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void> {
+  async updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void> {
     const existing = this.cases.get(row.id);
     if (!existing) throw new Error("case not found");
-    existing.status = row.status;
-    existing.legalHold = row.legalHold;
+    if (row.status === undefined && row.legalHold === undefined) {
+      throw new Error("case meta update requires status or legalHold");
+    }
+    if (row.status !== undefined) existing.status = row.status;
+    if (row.legalHold !== undefined) existing.legalHold = row.legalHold;
   }
 
   async updateOccurredAt(
@@ -683,6 +692,21 @@ export class MemoryCaseStore implements CaseStore {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
+    const hashes = new Set<string>();
+    for (const row of this.artifacts.values()) {
+      addReferencedHash(hashes, row.contentHash);
+      addReferencedHash(hashes, row.expectedHash);
+    }
+    for (const snapshot of this.snapshots.values()) {
+      for (const item of snapshot.evidence) {
+        addReferencedHash(hashes, item.contentHash);
+        addReferencedHash(hashes, item.expectedHash);
+      }
+    }
+    return hashes;
+  }
+
   async insertArtifact(row: ArtifactRow): Promise<void> {
     if (row.intakeBatchId) {
       const batch = this.intakeBatches.get(row.intakeBatchId);
@@ -694,21 +718,21 @@ export class MemoryCaseStore implements CaseStore {
   }
 
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
-    return this.atomicBoundary(async () => {
+    const run = async (): Promise<T> => {
       const snapshot = await Promise.resolve(this.capture());
-      const auditSnapshot = audit instanceof MemoryAuditStore
-        ? await Promise.resolve(audit.capture())
-        : null;
       try {
         return await operation();
       } catch (error) {
         await Promise.resolve(this.restore(snapshot));
-        if (audit instanceof MemoryAuditStore && auditSnapshot) {
-          await Promise.resolve(audit.restore(auditSnapshot));
+        if (audit instanceof MemoryAuditStore) {
+          await Promise.resolve(audit.rollbackTracked());
         }
         throw error;
       }
-    });
+    };
+    return this.atomicBoundary(() =>
+      (audit instanceof MemoryAuditStore ? audit.runTracked(run) : run()),
+    );
   }
 
   async lockIntakeIdempotency(_caseId: string, _key: string): Promise<void> {
@@ -773,7 +797,9 @@ export class MemoryCaseStore implements CaseStore {
           ? this.revisions.keys()
           : kind === "artifact"
             ? this.artifacts.keys()
-            : this.snapshots.keys();
+            : kind === "snapshot"
+              ? this.snapshots.keys()
+              : this.intakeBatches.keys();
     const hits: string[] = [];
     for (const key of keys) {
       if (wanted.has(key)) hits.push(key);
@@ -843,6 +869,7 @@ const CASE_PROBE_TABLES: Readonly<Record<CaseProbeKind, { table: string; column:
     contribution: { table: "contributions", column: "id" },
     artifact: { table: "evidence_artifacts", column: "id" },
     snapshot: { table: "snapshots", column: "id" },
+    intake_batch: { table: "evidence_intake_batches", column: "id" },
   });
 
 export class PgCaseStore implements CaseStore {
@@ -902,12 +929,32 @@ export class PgCaseStore implements CaseStore {
     }
   }
 
-  async updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void> {
-    const result = await this.db.query(
-      `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
-      [row.id, row.status, row.legalHold],
-    );
-    if (result.rowCount === 0) throw new Error("case not found");
+  async updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void> {
+    if (row.status !== undefined && row.legalHold !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
+        [row.id, row.status, row.legalHold],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    if (row.status !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET status = $2 WHERE id = $1`,
+        [row.id, row.status],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    if (row.legalHold !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET legal_hold = $2 WHERE id = $1`,
+        [row.id, row.legalHold],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    throw new Error("case meta update requires status or legalHold");
   }
 
   async updateOccurredAt(
@@ -1214,6 +1261,26 @@ export class PgCaseStore implements CaseStore {
       [caseId],
     );
     return result.rows.map((row) => asArtifact(row as Record<string, unknown>));
+  }
+
+  async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
+    const result = await this.db.query<{ hash: string | null }>(
+      `SELECT hash FROM (
+         SELECT content_hash AS hash FROM evidence_artifacts
+         UNION
+         SELECT expected_hash FROM evidence_artifacts
+         UNION
+         SELECT item->>'contentHash'
+         FROM snapshots, LATERAL jsonb_array_elements(evidence) AS item
+         UNION
+         SELECT item->>'expectedHash'
+         FROM snapshots, LATERAL jsonb_array_elements(evidence) AS item
+       ) hashes
+       WHERE hash ~ '^[0-9a-f]{64}$'`,
+    );
+    const hashes = new Set<string>();
+    for (const row of result.rows) addReferencedHash(hashes, row.hash);
+    return hashes;
   }
 
   async insertArtifact(row: ArtifactRow): Promise<void> {

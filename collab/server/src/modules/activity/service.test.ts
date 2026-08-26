@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   formatCompactInvestigationLocator,
   formatInvestigationActivityCursor,
+  formatInvestigationResourceLocator,
   investigationActivityFilterFingerprint,
   parseInvestigationActivityPage,
 } from "@cd-collab/contracts";
@@ -97,6 +98,30 @@ describe("investigation activity projection", () => {
     expect(imported.every((item) => item.provenanceClass === "ai_generated")).toBe(true);
     expect(JSON.stringify(page)).not.toContain("PLANTED_MODEL_OUTPUT");
     expect(JSON.stringify(page)).not.toContain("pkg-should-not-leak");
+  });
+
+  it("does not mark failed, canceled, timed-out, or partial workstreams as human findings", async () => {
+    const { cases, activity } = await harness();
+    const created = await cases.createCase(ALICE, { title: "Synthetic workstream terminals" }, "test");
+    const jobId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    for (const status of ["failed", "cancelled", "timed_out", "partial"] as const) {
+      await cases.appendDomainTimeline(created.id, {
+        kind: "triage_job_finished",
+        actor: ALICE,
+        targetId: jobId,
+        clientTime: null,
+        payload: { status, jobId },
+      });
+    }
+    const page = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const finished = page.items.filter((item) =>
+      item.activityKind === "workstream_failed"
+      || item.activityKind === "workstream_canceled"
+      || item.activityKind === "workstream_partially_completed"
+    );
+    expect(finished.length).toBeGreaterThanOrEqual(4);
+    expect(finished.every((item) => item.humanFinding === false)).toBe(true);
+    expect(JSON.stringify(finished)).not.toMatch(/humanFinding":true/);
   });
 
   it("keeps a restored decision historical after its actor is mapped to a current identity", async () => {
@@ -415,5 +440,114 @@ describe("investigation activity projection", () => {
     await expect(
       activity.resolve(EVE, false, formatCompactInvestigationLocator(comment!.locator)),
     ).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("reauthorizes locators by resource kind and hides kind-confused existence", async () => {
+    const { cases, activity } = await harness();
+    const created = await cases.createCase(ALICE, { title: "Synthetic kind isolation" }, "test");
+    const note = await cases.addContribution(created.id, ALICE, {
+      kind: "note",
+      body: "Synthetic queue-depth observation.",
+    }, "test");
+    const comment = await cases.addContribution(created.id, ALICE, {
+      kind: "message",
+      body: "Synthetic discussion comment.",
+      privacyClass: "share_safe",
+    }, "test");
+    const uploaded = await cases.addEvidence(created.id, ALICE, {
+      kind: "log",
+      filename: "mailer.log",
+      mediaType: "text/plain",
+      bytes: new TextEncoder().encode("synthetic mailer timeout\n"),
+      summary: "Synthetic mailer timeout.",
+      privacyClass: "owner_only",
+    }, "test");
+    const snapshot = await cases.createSnapshot(
+      created.id,
+      ALICE,
+      { evidenceIds: [uploaded.artifact.id], visibility: "owner_only" },
+      "test",
+    );
+    const page = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const observation = page.items.find((item) => item.activityKind === "observation_recorded");
+    const discussion = page.items.find((item) => item.activityKind === "comment_added");
+    const evidence = page.items.find((item) => item.activityKind === "evidence_added");
+    const frozen = page.items.find((item) => item.activityKind === "evidence_frozen");
+    expect(observation?.locator.kind).toBe("observation");
+    expect(observation?.locator.resourceId).toBe(note.id);
+    expect(discussion?.locator.kind).toBe("discussion_message");
+    expect(discussion?.locator.resourceId).toBe(comment.id);
+    expect(evidence?.locator.kind).toBe("evidence_item");
+    expect(evidence?.locator.resourceId).toBe(uploaded.artifact.id);
+    expect(frozen?.locator.kind).toBe("evidence_context");
+    expect(frozen?.locator.resourceId).toBe(snapshot.id);
+    expect(frozen?.resolvedRoute).toContain("kind=snapshot");
+
+    const intakeBytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic intake timeout\n");
+    const intakeSeed = {
+      origin: "files" as const,
+      sourceLabel: "Synthetic intake batch",
+      privacyClass: "share_safe" as const,
+      idempotencyKey: "batch-synthetic-activity-1",
+      files: [{
+        relativePath: "mailer/intake.log",
+        mediaType: "text/plain",
+        contentBase64: Buffer.from(intakeBytes).toString("base64"),
+      }],
+      archiveBase64: null,
+    };
+    const preview = await cases.previewCorpusIntake(created.id, ALICE, {
+      schemaId: "cd-collab.corpus_intake_preview.v1",
+      ...intakeSeed,
+    });
+    const batch = await cases.commitCorpusIntake(
+      created.id,
+      ALICE,
+      {
+        schemaId: "cd-collab.corpus_intake_commit.v1",
+        ...intakeSeed,
+        previewToken: preview.previewToken,
+      },
+      "test",
+    );
+    const intakePage = await activity.listPage({ actor: ALICE, isAdmin: false, caseId: created.id });
+    const intake = intakePage.items.find((item) => item.summary === "committed a log intake batch");
+    expect(intake?.locator.kind).toBe("intake_batch");
+    expect(intake?.locator.resourceId).toBe(batch.id);
+    expect(intake?.humanFinding).toBe(false);
+    await expect(
+      activity.resolve(ALICE, false, formatCompactInvestigationLocator(intake!.locator)),
+    ).resolves.toMatchObject({ authorized: true, resourceLabel: "Intake batch" });
+    await expect(
+      activity.resolve(EVE, false, formatCompactInvestigationLocator(intake!.locator)),
+    ).rejects.toMatchObject({ code: "not_found" });
+
+    const confused = [
+      { kind: "evidence_item" as const, resourceId: note.id },
+      { kind: "discussion_message" as const, resourceId: note.id },
+      { kind: "observation" as const, resourceId: comment.id },
+      { kind: "discussion_message" as const, resourceId: uploaded.artifact.id },
+      { kind: "evidence_item" as const, resourceId: snapshot.id },
+      { kind: "evidence_item" as const, resourceId: batch.id },
+      { kind: "intake_batch" as const, resourceId: uploaded.artifact.id },
+    ].map((row) => formatCompactInvestigationLocator(formatInvestigationResourceLocator({
+      installationId: INSTALLATION,
+      investigationId: created.id,
+      kind: row.kind,
+      resourceId: row.resourceId,
+    })));
+    for (const locator of confused) {
+      await expect(activity.resolve(ALICE, false, locator)).rejects.toMatchObject({ code: "not_found" });
+      await expect(activity.resolve(EVE, false, locator)).rejects.toMatchObject({ code: "not_found" });
+    }
+
+    await expect(activity.resolve(ALICE, false, formatCompactInvestigationLocator(observation!.locator)))
+      .resolves.toMatchObject({ authorized: true, resourceLabel: "Observation" });
+    await expect(activity.resolve(ALICE, false, formatCompactInvestigationLocator(discussion!.locator)))
+      .resolves.toMatchObject({ authorized: true, resourceLabel: "Discussion message" });
+    await expect(activity.resolve(ALICE, false, formatCompactInvestigationLocator(evidence!.locator)))
+      .resolves.toMatchObject({ authorized: true, resourceLabel: "Evidence item" });
+    await expect(activity.resolve(ALICE, false, formatCompactInvestigationLocator(frozen!.locator)))
+      .resolves.toMatchObject({ authorized: true, resourceLabel: "Evidence context" });
   });
 });

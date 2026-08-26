@@ -12,7 +12,7 @@ import {
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { migrateUp } from "../../db/migrate.js";
-import { FilesystemEvidenceStore } from "../../evidence/store.js";
+import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest } from "../../evidence/store.js";
 import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
 import { MemoryAuditStore, PgAuditStore, type AuditStore } from "../audit/index.js";
 import { CatalogService, PgCatalogStore } from "../catalog/index.js";
@@ -369,6 +369,120 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
         };
         await expect(cases.commitCorpusIntake(created.id, actor, changed, "test"))
           .rejects.toThrow(/idempotency key already belongs/);
+      } finally {
+        await pool.end();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("classifies concurrent distinct-key corpus commits sharing a digest after the digest lock", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 4 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-corpus-digest-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(pool), catalog);
+      const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      try {
+        const created = await cases.createCase(actor, { title: "Concurrent digest fixture" }, "test");
+        const bytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic digest race\n");
+        const makeRequest = (key: string, relativePath: string) => {
+          const files = [{ relativePath, mediaType: "text/plain", bytes }];
+          return {
+            schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+            origin: "files" as const,
+            sourceLabel: "synthetic concurrent digest source",
+            privacyClass: "owner_only" as const,
+            idempotencyKey: key,
+            files: [{
+              relativePath,
+              mediaType: "text/plain",
+              contentBase64: Buffer.from(bytes).toString("base64"),
+            }],
+            archiveBase64: null,
+            previewToken: corpusIntakeRequestDigest({
+              caseId: created.id,
+              actorId: actor.id,
+              origin: "files",
+              sourceLabel: "synthetic concurrent digest source",
+              privacyClass: "owner_only",
+              idempotencyKey: key,
+              files,
+              archive: null,
+            }),
+          };
+        };
+        const batches = await Promise.all([
+          cases.commitCorpusIntake(
+            created.id,
+            actor,
+            makeRequest("batch-synthetic-digest-alice", "mailer/alice.log"),
+            "test",
+          ),
+          cases.commitCorpusIntake(
+            created.id,
+            actor,
+            makeRequest("batch-synthetic-digest-bob", "mailer/bob.log"),
+            "test",
+          ),
+        ]);
+        expect(
+          batches.map((batch) => parseCorpusIntakeBatch(batch).items[0]?.duplicateDigest).sort(),
+        ).toEqual([false, true]);
+        expect((await pool.query("SELECT id FROM evidence_intake_batches")).rows).toHaveLength(2);
+        expect((await pool.query("SELECT id FROM evidence_artifacts")).rows).toHaveLength(2);
+        expect((await pool.query("SELECT DISTINCT content_hash FROM evidence_artifacts")).rows).toHaveLength(1);
+      } finally {
+        await pool.end();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("reclaims unreferenced PostgreSQL promote residue after a crash before COMMIT", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 4 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-pending-write-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const caseStore = new PgCaseStore(pool);
+      evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, caseStore, catalog);
+      const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      try {
+        const created = await cases.createCase(actor, { title: "PG promote crash fixture" }, "test");
+        const keptBytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic pg kept stall\n");
+        const kept = await cases.addEvidence(
+          created.id,
+          actor,
+          {
+            kind: "log",
+            filename: "kept-pg.log",
+            mediaType: "text/plain",
+            bytes: keptBytes,
+            summary: "Synthetic PostgreSQL kept stall.",
+            privacyClass: "share_safe",
+          },
+          "test",
+        );
+        const crashedBytes = new TextEncoder().encode("2026-08-25T00:01:00Z synthetic pg crash residue\n");
+        const batch = await evidence.beginWriteBatch();
+        const crashedMeta = await batch.put(crashedBytes, { contentType: "text/plain" });
+        await batch.promote();
+        await abandonWriteBatchForCrashTest(batch);
+        expect((await pool.query("SELECT id FROM evidence_artifacts")).rows).toHaveLength(1);
+        const recovered = await evidence.recoverUnreferencedWrites();
+        expect(recovered.reclaimed).toEqual([crashedMeta.hash]);
+        expect(await evidence.head(crashedMeta.hash)).toBeNull();
+        expect(await evidence.verify(kept.artifact.contentHash ?? "")).toBe(true);
+        expect(await caseStore.listReferencedContentHashes()).toEqual(
+          new Set([kept.artifact.contentHash]),
+        );
       } finally {
         await pool.end();
         await rm(root, { recursive: true, force: true });

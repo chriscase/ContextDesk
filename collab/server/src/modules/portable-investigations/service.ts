@@ -14,6 +14,8 @@ import {
   destinationCatalogDigest,
   identityMapDigest,
   parsePortableArchive,
+  parsePortableExperimentTraceTarget,
+  parsePortableTriageAttemptTarget,
   portableApplyDeepLink,
   portableSnapshotFingerprint,
   preflightPortableArchive,
@@ -67,7 +69,8 @@ export const PORTABLE_CONTRACT_UNSUPPORTED = [
   "triage_worker_leases_and_cancellation_capabilities",
   "experiment_agreement_and_interaction_traces",
   "source_membership_and_source_identity_ownership",
-  "imported_prompt_and_opaque_run_details",
+  "imported_opaque_run_details",
+  "imported_run_corroboration",
   "imported_content_privacy_is_not_contract_bound",
   "discussion_containers_presence_and_live_chat_state",
   "derived_alignment_details_and_interaction_traces",
@@ -309,6 +312,71 @@ function objectCount(bundle: PortableInvestigationUnsigned): number {
   );
 }
 
+function timelinePayload(row: TimelineRow): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(row.payload);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function portableTimelineTarget(
+  row: TimelineRow,
+  namespaces: Map<string, Set<PortableObjectKind>>,
+): { targetId: string; namespace: PortableObjectKind } | null {
+  if (row.targetId === null) return null;
+  const payload = timelinePayload(row);
+  if (/^experiment_decision_/.test(row.kind)) {
+    const decisionId = typeof payload.decisionId === "string" ? payload.decisionId : row.targetId;
+    if (decisionId && namespaces.get(decisionId)?.has("decision")) {
+      return { targetId: decisionId, namespace: "decision" };
+    }
+    return null;
+  }
+  if (row.kind === "experiment_gold_promoted") {
+    const goldId = typeof payload.goldId === "string" ? payload.goldId : row.targetId;
+    if (goldId && namespaces.get(goldId)?.has("gold")) {
+      return { targetId: goldId, namespace: "gold" };
+    }
+    return null;
+  }
+  if (row.kind === "experiment_helpfulness_recorded") {
+    const observationId = typeof payload.observationId === "string" ? payload.observationId : row.targetId;
+    if (observationId && namespaces.get(observationId)?.has("helpfulness")) {
+      return { targetId: observationId, namespace: "helpfulness" };
+    }
+    return null;
+  }
+  if (row.kind === "experiment_trace_imported") {
+    const parsed = parsePortableExperimentTraceTarget(row.targetId);
+    const traceId = parsed?.traceId
+      ?? (typeof payload.traceId === "string" && payload.traceId.trim() ? payload.traceId : null);
+    const experimentId = parsed?.experimentId ?? row.targetId;
+    if (traceId && namespaces.get(experimentId)?.has("experiment")) {
+      return { targetId: `${experimentId}:${traceId}`, namespace: "experiment" };
+    }
+    return null;
+  }
+  if (/^triage_candidate_/.test(row.kind)) {
+    const attempt = parsePortableTriageAttemptTarget(row.targetId);
+    if (attempt && namespaces.get(attempt.jobId)?.has("triage_job")) {
+      return { targetId: row.targetId, namespace: "triage_job" };
+    }
+    return null;
+  }
+  if (row.kind === "corpus_intake_committed") {
+    if (namespaces.get(row.targetId)?.has("intake_batch")) {
+      return { targetId: row.targetId, namespace: "intake_batch" };
+    }
+    return null;
+  }
+  const namespace = targetNamespace(row, namespaces);
+  return namespace ? { targetId: row.targetId, namespace } : null;
+}
+
 function targetNamespace(
   row: TimelineRow,
   namespaces: Map<string, Set<PortableObjectKind>>,
@@ -448,6 +516,11 @@ function applySupportReasons(
     bundle.investigation.createdBy,
     ...bundle.contributions.map((row) => row.authorId),
     ...bundle.evidence.map((row) => row.createdBy),
+    ...bundle.importedAiRuns.flatMap((row) => [
+      ...(row.importerId ? [row.importerId] : []),
+      ...(row.operatorId ? [row.operatorId] : []),
+    ]),
+    ...bundle.experiments.flatMap((row) => (row.importerId ? [row.importerId] : [])),
     ...bundle.triageJobs.map((row) => row.requestedBy),
     ...bundle.helpfulnessObservations.map((row) => row.reviewerId),
     ...bundle.decisions.flatMap((row) => [row.authorId, ...(row.ownerId ? [row.ownerId] : [])]),
@@ -584,6 +657,12 @@ function applySupportReasons(
   if (bundle.discussions.length > 0) {
     block("$.investigation.discussions", "discussion containers are unsupported");
   }
+  if (bundle.timeline.some((row) => row.kind === "run_corroboration")) {
+    block(
+      "$.investigation.timeline",
+      "imported-run corroboration is not exact-applyable",
+    );
+  }
   if (bundle.timeline.some((row, index) => row.seq !== index + 1)) {
     block("$.investigation.timeline", "timeline sequence must be contiguous from one");
   }
@@ -673,6 +752,7 @@ export class PortableInvestigationService {
     for (const row of snapshots) addActor(actors, { id: row.createdBy });
     for (const row of jobs) addActor(actors, { id: row.requestedBy, username: row.requestedByUsername });
     for (const row of experiments) {
+      addActor(actors, { id: row.importerId, username: row.importerUsername });
       for (const observation of row.observations) {
         addActor(actors, { id: observation.reviewerId, username: observation.reviewerUsername });
       }
@@ -689,6 +769,10 @@ export class PortableInvestigationService {
     }
     for (const row of sources) {
       addActor(actors, { id: row.createdBy });
+    }
+    for (const row of importedRuns) {
+      addActor(actors, { id: row.importerId, username: row.importerUsername });
+      addActor(actors, { id: row.operatorId, username: row.operatorUsername });
     }
 
     const contents = new Map<string, ProjectedContent>();
@@ -760,10 +844,20 @@ export class PortableInvestigationService {
     }
 
     for (const run of importedRuns) {
+      if (run.corroborationState !== "unverified") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "imported-run corroboration is not exact-applyable",
+        );
+      }
       const output = new TextEncoder().encode(run.outputText);
       addContent(run.outputHash, output, "text/plain", output.byteLength);
       if ((run.promptHash === null) !== (run.promptText === null)) {
         throw new PortableServerError("integrity_failure", "imported prompt hash and bytes disagree");
+      }
+      if (run.promptHash && run.promptText) {
+        const prompt = new TextEncoder().encode(run.promptText);
+        addContent(run.promptHash, prompt, "text/plain", prompt.byteLength);
       }
     }
 
@@ -900,6 +994,79 @@ export class PortableInvestigationService {
         taskFingerprint: portableFingerprint(experiment.taskFingerprint, "task"),
         candidateIds: experiment.candidates.map((candidate) => candidate.candidateId),
         createdAt: experiment.createdAt,
+        importerId: experiment.importerId,
+        candidates: experiment.candidates.map((candidate) => ({
+          candidateId: candidate.candidateId,
+          modelLabel: candidate.modelLabel,
+          role: candidate.role,
+          runStatus: candidate.runStatus,
+          observedLatency:
+            candidate.observedLatency.status === "observed"
+              ? {
+                  status: "observed" as const,
+                  milliseconds: candidate.observedLatency.milliseconds,
+                }
+              : { status: "unknown" as const },
+          cost: { status: "unknown" as const },
+          usage: { status: "unknown" as const },
+          helpfulnessState: candidate.helpfulnessState,
+          goldState: candidate.goldState,
+        })),
+        agreement: {
+          sharedAnchors: experiment.agreement.sharedAnchors.map((anchor) => ({
+            evidenceRef: anchor.evidenceRef,
+            role: anchor.role,
+            candidateIds: [...anchor.candidateIds],
+          })),
+          candidateSpecific: experiment.agreement.candidateSpecific.map((row) => ({
+            candidateId: row.candidateId,
+            evidenceRefs: [...row.evidenceRefs],
+          })),
+          roleConflicts: experiment.agreement.roleConflicts.map((conflict) => ({
+            evidenceRef: conflict.evidenceRef,
+            assignments: conflict.assignments.map((assignment) => ({
+              candidateId: assignment.candidateId,
+              role: assignment.role,
+            })),
+          })),
+          notes: [...experiment.agreement.notes],
+        },
+        snapshotProof: { ...experiment.snapshotProof },
+        traces: experiment.traces.map((trace) => ({
+          schemaId: trace.schemaId,
+          traceId: trace.traceId,
+          candidateId: trace.candidateId,
+          sourceKind: trace.sourceKind,
+          completeness: trace.completeness,
+          privacyClass: "share_safe" as const,
+          rawHash: trace.rawHash,
+          events: trace.events.map((event) => ({
+            eventId: event.eventId,
+            sequence: event.sequence,
+            kind: event.kind,
+            actor: event.actor,
+            role: event.role,
+            parentEventId: event.parentEventId,
+            evidenceRefs: [...event.evidenceRefs],
+            observedAt:
+              event.observedAt.status === "observed"
+                ? { status: "observed" as const, timestamp: event.observedAt.timestamp }
+                : { status: "unknown" as const },
+            excerpt: event.excerpt,
+            excerptHash: event.excerptHash,
+            unknowns: [...event.unknowns],
+          })),
+          efficiency: {
+            turnCount: { ...trace.efficiency.turnCount },
+            evidenceAcquisitionSteps: { ...trace.efficiency.evidenceAcquisitionSteps },
+            latency: { ...trace.efficiency.latency },
+            cost: { ...trace.efficiency.cost },
+            providerCalls: { ...trace.efficiency.providerCalls },
+          },
+          unknowns: [...trace.unknowns],
+          notes: [...trace.notes],
+          createdAt: trace.createdAt,
+        })),
         objectHash: "",
       };
     });
@@ -983,6 +1150,7 @@ export class PortableInvestigationService {
     registerNamespace("contribution", contributions.map((row) => row.id));
     registerNamespace("evidence", evidence.map((row) => row.id));
     registerNamespace("content", [...contents.keys()]);
+    registerNamespace("intake_batch", intakeBatches.map((row) => row.id));
     registerNamespace("source", sources.map((row) => row.id));
     registerNamespace("imported_ai_run", importedRuns.map((row) => row.id));
     registerNamespace("snapshot", portableSnapshots.map((row) => row.id));
@@ -996,13 +1164,102 @@ export class PortableInvestigationService {
     registerNamespace("attachment", attachments.map((row) => row.id));
 
     const portableTimeline = historicalTimeline.map((row) => {
-      const namespace = targetNamespace(row, namespaceById);
+      const addressed = portableTimelineTarget(row, namespaceById);
+      if (/^experiment_decision_/.test(row.kind) && addressed?.namespace !== "decision") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment decision timeline is missing a portable decision target",
+        );
+      }
+      if (row.kind === "experiment_gold_promoted" && addressed?.namespace !== "gold") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment gold timeline is missing a portable gold target",
+        );
+      }
+      if (row.kind === "experiment_helpfulness_recorded" && addressed?.namespace !== "helpfulness") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment helpfulness timeline is missing a portable helpfulness target",
+        );
+      }
+      if (row.kind === "experiment_imported" && addressed?.namespace !== "experiment") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment import timeline is missing a portable experiment target",
+        );
+      }
+      if (row.kind === "experiment_trace_imported") {
+        const parsed = addressed?.targetId
+          ? parsePortableExperimentTraceTarget(addressed.targetId)
+          : null;
+        if (addressed?.namespace !== "experiment" || !parsed) {
+          throw new PortableServerError(
+            "unsupported_state",
+            "experiment trace timeline is missing a portable experiment+trace target",
+          );
+        }
+      }
+      if (/^triage_candidate_/.test(row.kind) && addressed?.namespace !== "triage_job") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "workstream attempt timeline is missing a portable job target",
+        );
+      }
+      if (row.kind === "snapshot_frozen" && addressed?.namespace !== "snapshot") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "snapshot timeline is missing a portable snapshot target",
+        );
+      }
+      if (row.kind === "external_run_imported" && addressed?.namespace !== "imported_ai_run") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "imported-run timeline is missing a portable imported-run target",
+        );
+      }
+      if (row.kind === "run_corroboration") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "imported-run corroboration is not exact-applyable",
+        );
+      }
+      if (
+        (/^contribution_/.test(row.kind) || row.kind === "hypothesis_status")
+        && addressed?.namespace !== "contribution"
+      ) {
+        throw new PortableServerError(
+          "unsupported_state",
+          "contribution timeline is missing a portable contribution target",
+        );
+      }
+      if (/^evidence_/.test(row.kind) && addressed?.namespace !== "evidence") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "evidence timeline is missing a portable evidence target",
+        );
+      }
+      if (/^triage_job_/.test(row.kind)) {
+        const parsed = addressed?.targetId ? parsePortableTriageAttemptTarget(addressed.targetId) : null;
+        if (addressed?.namespace !== "triage_job" || parsed) {
+          throw new PortableServerError(
+            "unsupported_state",
+            "workstream job timeline is missing a portable job target",
+          );
+        }
+      }
+      if (row.kind === "corpus_intake_committed" && addressed?.namespace !== "intake_batch") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "corpus intake timeline is missing a portable intake-batch target",
+        );
+      }
       return {
         seq: row.seq,
         kind: row.kind,
         actorId: row.actorId,
-        targetId: namespace ? row.targetId : null,
-        targetNamespace: namespace,
+        targetId: addressed?.targetId ?? null,
+        targetNamespace: addressed?.namespace ?? null,
         serverTime: row.serverTime,
         objectHash: "",
       };
@@ -1063,6 +1320,9 @@ export class PortableInvestigationService {
         sourceId: row.sourceId,
         createdAt: row.createdAt,
         hypothesisStatus: row.hypothesisStatus,
+        hypothesisLinks: [...(row.hypothesisLinks ?? [])].sort((left, right) =>
+          `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`),
+        ),
         objectHash: "",
       })),
       evidence,
@@ -1089,20 +1349,45 @@ export class PortableInvestigationService {
         createdBy: row.createdBy,
         objectHash: "",
       })),
-      importedAiRuns: importedRuns.map((row) => ({
-        id: row.id,
-        sourceId: row.sourceId,
-        importedAt: row.createdAt,
-        providerKind: providerKind(row.provider),
-        model: row.model ?? "unknown",
-        version: row.version,
-        profileId: null,
-        usageStatus: "unknown",
-        costStatus: "unknown",
-        outputDigest: row.outputHash,
-        opaquePayloadJson: null,
-        objectHash: "",
-      })),
+      importedAiRuns: importedRuns.map((row) => {
+        const boundSnapshot = snapshots.find((snap) => snap.fingerprint === row.snapshotBinding);
+        if (row.snapshotBinding && !boundSnapshot) {
+          throw new PortableServerError(
+            "integrity_failure",
+            "imported run snapshot binding is missing from the portable archive",
+          );
+        }
+        return {
+          id: row.id,
+          sourceId: row.sourceId,
+          importedAt: row.createdAt,
+          providerKind: providerKind(row.provider),
+          model: row.model ?? "unknown",
+          version: row.version,
+          profileId: null,
+          usageStatus: "unknown" as const,
+          costStatus: "unknown" as const,
+          outputDigest: row.outputHash,
+          contributionId: row.contributionId,
+          promptDigest: row.promptHash,
+          promptCompleteness: row.promptCompleteness,
+          outputCompleteness: row.outputCompleteness,
+          workflowCompleteness: row.workflowCompleteness,
+          evidenceVisibility: row.evidenceVisibility,
+          snapshotId: boundSnapshot?.id ?? null,
+          privacyClass: row.privacyClass,
+          importerId: row.importerId,
+          operatorId: row.operatorId,
+          claimedTraces: [...row.claimedTraces],
+          visibilityNote: row.visibilityNote,
+          uncertainty: row.uncertainty,
+          timing: row.timing,
+          cost: row.cost,
+          redacted: row.redacted,
+          opaquePayloadJson: null,
+          objectHash: "",
+        };
+      }),
       snapshots: portableSnapshots,
       triageJobs: portableJobs,
       experiments: portableExperiments,
