@@ -646,6 +646,139 @@
   display: grid;
 }
 
+/* ---------------------------------------------------------------------------
+   Corpus intake preflight and progress
+
+   Both blocks are read while the operator is deciding whether to wait, so they
+   stay compact and reflow to a single column early: a preflight that needs a
+   wide window is a preflight nobody reads before starting a long upload.
+   --------------------------------------------------------------------------- */
+
+.corpus-preflight {
+  margin-top: 0.7rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  display: grid;
+  gap: 0.4rem;
+}
+
+.corpus-preflight__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.45rem 0.9rem;
+  margin: 0;
+}
+
+.corpus-preflight__facts div {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.corpus-preflight__facts dt {
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.corpus-preflight__facts dd {
+  margin: 0;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.corpus-preflight__stages summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.corpus-preflight__stages ol {
+  margin: 0.35rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.78rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.corpus-progress {
+  margin-top: 0.7rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.corpus-progress__stage {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.corpus-progress__bar {
+  inline-size: 100%;
+  block-size: 0.45rem;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+  overflow: hidden;
+}
+
+.corpus-progress__bar::-webkit-progress-bar {
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 999px;
+}
+
+.corpus-progress__bar::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.corpus-progress__bar::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+/* An indeterminate bar must not read as "nearly finished". */
+.corpus-progress__bar:indeterminate {
+  background: repeating-linear-gradient(
+    115deg,
+    color-mix(in srgb, var(--accent) 55%, transparent) 0 0.6rem,
+    transparent 0.6rem 1.2rem
+  );
+}
+
+.corpus-intake__resume {
+  margin-top: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 0.5rem;
+  display: grid;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+}
+
+.corpus-intake__resume p {
+  margin: 0;
+}
+
+.corpus-intake__resume .login__submit,
+.corpus-intake__cancel {
+  justify-self: start;
+}
+
+@media (max-width: 40rem) {
+  .corpus-preflight__facts {
+    grid-template-columns: 1fr;
+  }
+
+  .corpus-intake__actions .login__submit {
+    inline-size: 100%;
+  }
+}
+
 .corpus-intake__deeplink {
   color: var(--accent);
   font-size: 0.78rem;

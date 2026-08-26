@@ -21,7 +21,7 @@ function reasons(result: ReturnType<typeof extractZip>): string[] {
 }
 
 describe("normalizeIntakePath", () => {
-  it("rejects zip-slip, absolute, drive, UNC, NUL, depth, and length", () => {
+  it("rejects zip-slip, absolute, drive, UNC, NUL, depth, and length", async () => {
     expect(normalizeIntakePath("../etc/passwd").reason).toBe("path_traversal");
     expect(normalizeIntakePath("mailer/./secret.log").reason).toBe("path_traversal");
     expect(normalizeIntakePath("/var/log/mailer.log").reason).toBe("absolute_path");
@@ -35,7 +35,7 @@ describe("normalizeIntakePath", () => {
     expect(normalizeIntakePath(`${"a".repeat(241)}.log`).reason).toBe("path_too_long");
   });
 
-  it("normalizes Unicode to NFC while keeping a readable relative path", () => {
+  it("normalizes Unicode to NFC while keeping a readable relative path", async () => {
     const nfd = "cafe\u0301/mailer.log";
     const nfc = "café/mailer.log";
     const a = normalizeIntakePath(nfd);
@@ -46,18 +46,18 @@ describe("normalizeIntakePath", () => {
 });
 
 describe("extractZip adversarial matrix", () => {
-  it("accepts a synthetic stored log and a deflated log", () => {
+  it("accepts a synthetic stored log and a deflated log", async () => {
     const archive = buildTestZip([
       { name: "mailer/shared-timeout.log", data: LOG, method: 0 },
       { name: "mailer/worker.log", data: LOG, method: 8 },
     ]);
-    const extracted = extractZip(archive);
+    const extracted = await extractZip(archive);
     expect(names(extracted).sort()).toEqual(["mailer/shared-timeout.log", "mailer/worker.log"]);
     expect(extracted.rejected).toEqual([]);
   });
 
-  it("ignores macOS transport metadata instead of presenting it as evidence noise", () => {
-    const result = extractZip(buildTestZip([
+  it("ignores macOS transport metadata instead of presenting it as evidence noise", async () => {
+    const result = await extractZip(buildTestZip([
       { name: "incident/service.log", data: LOG },
       { name: "incident/.DS_Store", data: LOG },
       { name: "__MACOSX/incident/._service.log", data: LOG },
@@ -66,12 +66,12 @@ describe("extractZip adversarial matrix", () => {
     expect(result.rejected).toEqual([]);
   });
 
-  it("does not count bounded macOS transport metadata against the evidence-file cap", () => {
+  it("does not count bounded macOS transport metadata against the evidence-file cap", async () => {
     const metadata = Array.from({ length: CORPUS_INTAKE_LIMITS.maxFileCount }, (_, index) => ({
       name: `__MACOSX/incident/._metadata-${index}`,
       data: LOG,
     }));
-    const result = extractZip(buildTestZip([
+    const result = await extractZip(buildTestZip([
       ...metadata,
       { name: "incident/service.log", data: LOG },
     ]));
@@ -79,7 +79,7 @@ describe("extractZip adversarial matrix", () => {
     expect(result.rejected).toEqual([]);
   });
 
-  it("rejects zip-slip variants without writing outside the archive", () => {
+  it("rejects zip-slip variants without writing outside the archive", async () => {
     const archive = buildTestZip([
       { name: "../../../etc/passwd", data: LOG },
       { name: "/tmp/mailer.log", data: LOG },
@@ -87,14 +87,14 @@ describe("extractZip adversarial matrix", () => {
       { name: "//unc/share/mailer.log", data: LOG },
       { name: "mailer/shared-timeout.log", data: LOG },
     ]);
-    const extracted = extractZip(archive);
+    const extracted = await extractZip(archive);
     expect(names(extracted)).toEqual(["mailer/shared-timeout.log"]);
     expect(reasons(extracted)).toEqual(
       expect.arrayContaining(["path_traversal", "absolute_path", "drive_or_unc_path"]),
     );
   });
 
-  it("rejects Unicode and case-fold path collisions", () => {
+  it("rejects Unicode and case-fold path collisions", async () => {
     const nfc = buildTestZip([
       { name: "café/mailer.log", data: LOG },
       { name: "cafe\u0301/mailer.log", data: new TextEncoder().encode("other\n") },
@@ -103,18 +103,18 @@ describe("extractZip adversarial matrix", () => {
       { name: "Mailer/App.LOG", data: LOG },
       { name: "mailer/app.log", data: new TextEncoder().encode("other\n") },
     ]);
-    expect(reasons(extractZip(nfc))).toContain("duplicate_normalized_path");
-    expect(reasons(extractZip(folded))).toContain("duplicate_normalized_path");
+    expect(reasons(await extractZip(nfc))).toContain("duplicate_normalized_path");
+    expect(reasons(await extractZip(folded))).toContain("duplicate_normalized_path");
   });
 
-  it("rejects symlink, device, and hardlink-like duplicate offsets", () => {
-    const symlink = extractZip(
+  it("rejects symlink, device, and hardlink-like duplicate offsets", async () => {
+    const symlink = await extractZip(
       buildTestZip([{ name: "mailer.link", data: LOG, unixMode: S_IFLNK | 0o777 }]),
     );
-    const device = extractZip(
+    const device = await extractZip(
       buildTestZip([{ name: "mailer.dev", data: LOG, unixMode: S_IFCHR | 0o666 }]),
     );
-    const volume = extractZip(buildTestZip([{ name: "MAILER", data: LOG, dosAttr: 0x08 }]));
+    const volume = await extractZip(buildTestZip([{ name: "MAILER", data: LOG, dosAttr: 0x08 }]));
     expect(reasons(symlink)).toContain("symlink_or_hardlink");
     expect(reasons(device)).toContain("device_entry");
     expect(reasons(volume)).toContain("device_entry");
@@ -126,31 +126,93 @@ describe("extractZip adversarial matrix", () => {
     const patched = Buffer.from(first);
     const secondName = Buffer.byteLength("mailer/b.log");
     patched.writeUInt32LE(0, patched.length - 22 - (46 + secondName) + 42);
-    expect(reasons(extractZip(patched))).toContain("symlink_or_hardlink");
+    expect(reasons(await extractZip(patched))).toContain("symlink_or_hardlink");
   });
 
-  it("rejects nested archives, encrypted entries, and zip64 extra fields", () => {
-    const nested = extractZip(buildTestZip([{ name: "mailer/inner.zip", data: LOG }]));
+  it("rejects nested archives and encrypted entries", async () => {
+    const nested = await extractZip(buildTestZip([{ name: "mailer/inner.zip", data: LOG }]));
     expect(reasons(nested)).toContain("nested_archive");
-    const encrypted = extractZip(
+    const encrypted = await extractZip(
       buildTestZip([{ name: "mailer/secret.log", data: LOG, encrypted: true }]),
     );
     expect(reasons(encrypted)).toContain("encrypted_archive");
-    const extra = Buffer.alloc(8);
-    extra.writeUInt16LE(0x0001, 0);
-    extra.writeUInt16LE(4, 2);
-    expect(() =>
-      extractZip(buildTestZip([{ name: "mailer/huge.log", data: LOG, extra }])),
-    ).toThrow(ZipError);
   });
 
-  it("rejects extreme ratios, too many files, and truncated archives", () => {
+  it("reads ZIP64 sizes and directories instead of refusing the archive", async () => {
+    // Modern archivers emit ZIP64 for ordinary archives. Refusing the format
+    // outright rejected legitimate evidence without narrowing any limit, since
+    // the caps below are enforced identically either way.
+    const perEntry = await extractZip(
+      buildTestZip([{ name: "mailer/shared-timeout.log", data: LOG, zip64: true }]),
+    );
+    expect(perEntry.rejected).toEqual([]);
+    expect(perEntry.members.map((row) => row.relativePath)).toEqual([
+      "mailer/shared-timeout.log",
+    ]);
+    expect(Buffer.from(perEntry.members[0]!.bytes).toString("utf8"))
+      .toBe(Buffer.from(LOG).toString("utf8"));
+
+    const zip64Directory = await extractZip(
+      buildTestZip(
+        [
+          { name: "mailer/a.log", data: LOG, zip64: true },
+          { name: "mailer/b.log", data: LOG, method: 8, zip64: true },
+        ],
+        { zip64Directory: true },
+      ),
+    );
+    expect(zip64Directory.rejected).toEqual([]);
+    expect(zip64Directory.members.map((row) => row.relativePath)).toEqual([
+      "mailer/a.log",
+      "mailer/b.log",
+    ]);
+  });
+
+  it("still enforces every cap on a ZIP64 archive", async () => {
     const zeros = new Uint8Array(80_000);
-    const bomb = extractZip(
+    const bomb = await extractZip(
+      buildTestZip(
+        [{ name: "mailer/bomb.log", data: zeros, method: 8, zip64: true }],
+        { zip64Directory: true },
+      ),
+    );
+    expect(reasons(bomb)).toContain("extreme_ratio");
+    const traversal = await extractZip(
+      buildTestZip(
+        [{ name: "../escape.log", data: LOG, zip64: true }],
+        { zip64Directory: true },
+      ),
+    );
+    expect(reasons(traversal)).toContain("path_traversal");
+  });
+
+  it("refuses a truncated ZIP64 extra rather than reading past it", async () => {
+    // A short extra that carries no ZIP64 placeholder is inert metadata and
+    // must not fail an otherwise ordinary archive.
+    const inert = Buffer.alloc(8);
+    inert.writeUInt16LE(0x0001, 0);
+    inert.writeUInt16LE(4, 2);
+    const ignored = await extractZip(
+      buildTestZip([{ name: "mailer/huge.log", data: LOG, extra: inert }]),
+    );
+    expect(ignored.members.map((row) => row.relativePath)).toEqual(["mailer/huge.log"]);
+
+    // A ZIP64-flagged entry whose extra stops short of the sizes it promised is
+    // malformed; reading past it would take whatever bytes followed.
+    await expect(
+      extractZip(buildTestZip([
+        { name: "mailer/short.log", data: LOG, zip64: true, zip64TruncatedExtra: true },
+      ])),
+    ).rejects.toThrow(/ZIP64 extra field is truncated/);
+  });
+
+  it("rejects extreme ratios, too many files, and truncated archives", async () => {
+    const zeros = new Uint8Array(80_000);
+    const bomb = await extractZip(
       buildTestZip([{ name: "mailer/bomb.log", data: zeros, method: 8 }]),
     );
     expect(reasons(bomb)).toContain("extreme_ratio");
-    expect(() =>
+    await expect(
       extractZip(
         buildTestZip(
           Array.from({ length: CORPUS_INTAKE_LIMITS.maxFileCount + 1 }, (_, index) => ({
@@ -158,39 +220,39 @@ describe("extractZip adversarial matrix", () => {
             data: LOG,
           })),
         ),
-      ),
-    ).toThrow(/file count exceeds cap/);
+      )
+    ).rejects.toThrow(/file count exceeds cap/);
     const truncated = buildTestZip([{ name: "mailer/shared-timeout.log", data: LOG }]).subarray(0, 12);
-    expect(() => extractZip(truncated)).toThrow(ZipError);
+    await expect(extractZip(truncated)).rejects.toThrow(ZipError);
   });
 
-  it("rejects invalid encodings and ZIP names that omit the UTF-8 language bit", () => {
+  it("rejects invalid encodings and ZIP names that omit the UTF-8 language bit", async () => {
     const invalidUtf8 = Buffer.concat([
       Buffer.from("mailer/"),
       Buffer.from([0xff, 0xfe]),
       Buffer.from(".log"),
     ]);
-    const invalid = extractZip(
+    const invalid = await extractZip(
       buildTestZip([{ name: "mailer/placeholder.log", data: LOG, nameBytes: invalidUtf8, flags: 0x0800 }]),
     );
     expect(reasons(invalid)).toContain("invalid_encoding");
     expect(names(invalid)).toEqual([]);
     expect(invalid.rejected.every((row) => !row.detail.includes("\uFFFD"))).toBe(true);
 
-    const unmarked = extractZip(
+    const unmarked = await extractZip(
       buildTestZip([{ name: "café/mailer.log", data: LOG, flags: 0 }]),
     );
     expect(reasons(unmarked)).toContain("invalid_encoding");
     expect(names(unmarked)).toEqual([]);
 
-    const marked = extractZip(buildTestZip([{ name: "café/mailer.log", data: LOG, flags: 0x0800 }]));
+    const marked = await extractZip(buildTestZip([{ name: "café/mailer.log", data: LOG, flags: 0x0800 }]));
     expect(names(marked)).toEqual(["café/mailer.log"]);
     expect(marked.rejected).toEqual([]);
 
-    const ascii = extractZip(buildTestZip([{ name: "mailer/shared-timeout.log", data: LOG, flags: 0 }]));
+    const ascii = await extractZip(buildTestZip([{ name: "mailer/shared-timeout.log", data: LOG, flags: 0 }]));
     expect(names(ascii)).toEqual(["mailer/shared-timeout.log"]);
 
-    const mixed = extractZip(
+    const mixed = await extractZip(
       buildTestZip([
         { name: "mailer/shared-timeout.log", data: LOG },
         { name: "mailer/placeholder.log", data: LOG, nameBytes: invalidUtf8, flags: 0x0800 },
@@ -201,12 +263,12 @@ describe("extractZip adversarial matrix", () => {
 
     const disagreed = Buffer.from(buildTestZip([{ name: "café/mailer.log", data: LOG, flags: 0x0800 }]));
     disagreed.writeUInt16LE(0, 6);
-    expect(() => extractZip(disagreed)).toThrow(/encoding does not match/);
+    await expect(extractZip(disagreed)).rejects.toThrow(/encoding does not match/);
   });
 
-  it("honors Info-ZIP Unicode Path extra 0x7075 fail-closed", () => {
+  it("honors Info-ZIP Unicode Path extra 0x7075 fail-closed", async () => {
     const asciiName = "mailer/notes.log";
-    const traversal = extractZip(
+    const traversal = await extractZip(
       buildTestZip([
         {
           name: asciiName,
@@ -219,7 +281,7 @@ describe("extractZip adversarial matrix", () => {
     expect(reasons(traversal)).toContain("path_traversal");
     expect(names(traversal)).toEqual([]);
 
-    const renamed = extractZip(
+    const renamed = await extractZip(
       buildTestZip([
         {
           name: "mailer/cafe.log",
@@ -234,13 +296,13 @@ describe("extractZip adversarial matrix", () => {
 
     const badCrc = Buffer.from(buildUnicodePathExtra(asciiName, "mailer/other.log"));
     badCrc.writeUInt32LE(0, 5);
-    expect(() =>
-      extractZip(buildTestZip([{ name: asciiName, data: LOG, flags: 0, extra: badCrc }])),
-    ).toThrow(/Unicode Path extra CRC/);
+    await expect(
+      extractZip(buildTestZip([{ name: asciiName, data: LOG, flags: 0, extra: badCrc }]))
+    ).rejects.toThrow(/Unicode Path extra CRC/);
 
     const invalidUtf8Extra = Buffer.from(buildUnicodePathExtra(asciiName, "mailer/x.log"));
     invalidUtf8Extra.writeUInt8(0xff, invalidUtf8Extra.length - 5);
-    const undecodable = extractZip(
+    const undecodable = await extractZip(
       buildTestZip([{ name: asciiName, data: LOG, flags: 0, extra: invalidUtf8Extra }]),
     );
     expect(reasons(undecodable)).toContain("invalid_encoding");
@@ -248,7 +310,7 @@ describe("extractZip adversarial matrix", () => {
     expect(undecodable.rejected.every((row) => !row.detail.includes("\uFFFD"))).toBe(true);
 
     const unmarkedBytes = Buffer.from("café/mailer.log", "utf8");
-    const recovered = extractZip(
+    const recovered = await extractZip(
       buildTestZip([
         {
           name: "placeholder.log",
@@ -262,7 +324,7 @@ describe("extractZip adversarial matrix", () => {
     expect(names(recovered)).toEqual(["café/mailer.log"]);
     expect(recovered.rejected).toEqual([]);
 
-    expect(() =>
+    await expect(
       extractZip(
         buildTestZip([
           {
@@ -273,14 +335,14 @@ describe("extractZip adversarial matrix", () => {
             localExtra: buildUnicodePathExtra("mailer/cafe.log", "../../etc/passwd"),
           },
         ]),
-      ),
-    ).toThrow(/Unicode Path extra does not match/);
+      )
+    ).rejects.toThrow(/Unicode Path extra does not match/);
   });
 
-  it("does not leak file bytes in ZipError messages", () => {
+  it("does not leak file bytes in ZipError messages", async () => {
     const secret = "SYNTHETIC_FIXTURE_TOKEN_NOT_A_SECRET";
     try {
-      extractZip(new TextEncoder().encode(`PK\x03\x04${secret}`));
+      await extractZip(new TextEncoder().encode(`PK\x03\x04${secret}`));
       throw new Error("expected ZipError");
     } catch (error) {
       expect(error).toBeInstanceOf(ZipError);

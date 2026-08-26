@@ -24,6 +24,10 @@
       "types": "./dist/investigation-corpus-intake.d.ts",
       "import": "./dist/investigation-corpus-intake.js"
     },
+    "./corpus-stream": {
+      "types": "./dist/investigation-corpus-stream.d.ts",
+      "import": "./dist/investigation-corpus-stream.js"
+    },
     "./model-purpose-policy-shared": {
       "types": "./dist/model-purpose-policy-shared.d.ts",
       "import": "./dist/model-purpose-policy-shared.js"

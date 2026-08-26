@@ -252,4 +252,318 @@ describe("CorpusIntakePanel", () => {
     expect(bodies[1]?.sourceLabel).toBe("changed synthetic source");
     expect(bodies[1]?.idempotencyKey).not.toBe(firstKey);
   });
+  it("states the preflight facts and the unknowns before an upload starts", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    render(
+      <CorpusIntakePanel
+        caseId="11111111-1111-4111-8111-111111111111"
+        canWrite
+        readOnly={false}
+      />,
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "ZIP archive" }));
+    const archive = new File([new Uint8Array(2 * 1024 * 1024)], "diagnostics.zip", {
+      type: "application/zip",
+    });
+    fireEvent.change(screen.getByLabelText("ZIP file to upload"), { target: { files: [archive] } });
+
+    expect(screen.getByText("Before this upload starts")).toBeTruthy();
+    expect(screen.getByText("Archives selected")).toBeTruthy();
+    expect(screen.getByText("2 MiB")).toBeTruthy();
+    expect(screen.getByText("64 MiB")).toBeTruthy();
+    expect(screen.getByText("What will be checked (8 stages)")).toBeTruthy();
+    expect(screen.getByText("Read the archive index")).toBeTruthy();
+    // An archive's expanded size is not knowable from a file picker, and the
+    // preflight says so rather than implying a total it does not have.
+    expect(
+      screen.getByText(/how large the archive is once expanded/),
+    ).toBeTruthy();
+  });
+
+  it("blocks a selection the configured limits already refuse", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    render(
+      <CorpusIntakePanel
+        caseId="11111111-1111-4111-8111-111111111111"
+        canWrite
+        readOnly={false}
+      />,
+    );
+    const oversized = new File(["x"], "huge.log", { type: "text/plain" });
+    Object.defineProperty(oversized, "size", {
+      value: CORPUS_INTAKE_LIMITS.maxFileBytes + 1,
+    });
+    fireEvent.change(screen.getByLabelText("Evidence files"), { target: { files: [oversized] } });
+    expect(screen.getByRole("alert").textContent).toMatch(/larger than 64 MiB/);
+    expect(
+      (screen.getByRole("button", { name: "Preview intake" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("streams a large selection as binary parts and shows determinate progress", async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    const selected = Array.from({ length: 40 }, (_, index) =>
+      new File([`line ${index}\n`], `part-${index}.log`, { type: "text/plain" }));
+    const declared = selected.reduce((total, file) => total + file.size, 0);
+    const session = (receivedParts: number) => ({
+      schemaId: "cd-collab.corpus_intake_session.v1",
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      caseId: "11111111-1111-4111-8111-111111111111",
+      origin: "files",
+      sourceLabel: "investigation upload",
+      privacyClass: "owner_only",
+      idempotencyKey: "batch-web-000002",
+      state: "awaiting_bytes",
+      createdAt: "2026-08-25T00:00:00.000Z",
+      expiresAt: "2026-08-25T06:00:00.000Z",
+      limits: CORPUS_INTAKE_LIMITS,
+      selection: {
+        partCount: selected.length,
+        declaredBytes: declared,
+        compressedBytes: null,
+        expandedBytes: declared,
+      },
+      stages: ["preflight", "upload", "classify", "privacy_scan", "stage_evidence", "commit"],
+      unknowns: ["member_encodings", "duplicate_digests"],
+      parts: selected.map((file, index) => ({
+        index,
+        relativePath: file.name,
+        declaredBytes: file.size,
+        declaredMediaType: "text/plain",
+        receivedBytes: index < receivedParts ? file.size : 0,
+        complete: index < receivedParts,
+        digest: index < receivedParts ? "a".repeat(64) : null,
+      })),
+      progress: {
+        stage: "upload",
+        determinate: true,
+        uploadedBytes: selected.slice(0, receivedParts).reduce((t, f) => t + f.size, 0),
+        declaredBytes: declared,
+        expandedBytes: 0,
+        expectedExpandedBytes: null,
+        filesSeen: 0,
+        filesAccepted: 0,
+        filesRejected: 0,
+        updatedAt: "2026-08-25T00:00:00.000Z",
+      },
+      previewToken: null,
+      batchId: null,
+      failure: null,
+    });
+    let landed = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, method: String(init?.method ?? "GET"), body: init?.body });
+      if (url.endsWith("/corpus-intake/sessions") && init?.method === "POST") {
+        return { ok: true, status: 201, json: async () => session(0) };
+      }
+      if (url.includes("/parts/")) {
+        landed += 1;
+        return { ok: true, status: 200, json: async () => session(landed) };
+      }
+      if (url.endsWith("/preview")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            previewToken: "d".repeat(64),
+            accepted: [{
+              relativePath: "part-0.log",
+              mediaType: "text/x-log",
+              byteLength: 8,
+              digest: "e".repeat(64),
+              duplicateDigest: false,
+              encodingStatus: "utf8",
+            }],
+            rejected: [],
+          }),
+        };
+      }
+      if (url.endsWith("/commit")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "batch-streamed",
+            caseId: "11111111-1111-4111-8111-111111111111",
+            origin: "files",
+            replayed: false,
+            items: [{
+              artifactId: "art-1",
+              relativePath: "part-0.log",
+              digest: "e".repeat(64),
+              duplicateDigest: false,
+            }],
+            rejected: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => session(landed) };
+    }));
+
+    render(
+      <CorpusIntakePanel
+        caseId="11111111-1111-4111-8111-111111111111"
+        canWrite
+        readOnly={false}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Evidence files"), { target: { files: selected } });
+    expect(screen.getByText("Resumable chunks of 8 MiB")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Preview intake" }));
+    expect(await screen.findByText("part-0.log")).toBeTruthy();
+
+    const parts = requests.filter((row) => row.url.includes("/parts/"));
+    expect(parts).toHaveLength(selected.length);
+    for (const part of parts) {
+      expect(part.method).toBe("PUT");
+      // Binary slices, not base64 the tab has to hold.
+      expect(typeof part.body).not.toBe("string");
+    }
+    expect(requests.some((row) => row.url.endsWith("/corpus-intake/preview"))).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Commit accepted files" }));
+    expect(await screen.findByText("Committed batch")).toBeTruthy();
+    const commit = requests.find((row) => row.url.endsWith("/commit"));
+    expect(JSON.parse(String(commit?.body)).previewToken).toBe("d".repeat(64));
+  });
+
+  it("shows the server's named refusal rather than a generic failure", async () => {
+    const selected = Array.from({ length: 40 }, (_, index) =>
+      new File([`line ${index}\n`], `part-${index}.log`, { type: "text/plain" }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        schemaId: "cd-collab.corpus_intake_error.v1",
+        error: "file_count_exceeded",
+        code: "file_count_exceeded",
+        message: "This selection holds more files than one intake accepts. Split it into smaller batches.",
+        detail: "file count exceeds cap",
+        limit: 4096,
+        observed: null,
+        path: null,
+        retryable: false,
+      }),
+    })));
+    render(
+      <CorpusIntakePanel
+        caseId="11111111-1111-4111-8111-111111111111"
+        canWrite
+        readOnly={false}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Evidence files"), { target: { files: selected } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview intake" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe(
+      "This selection holds more files than one intake accepts. Split it into smaller batches.",
+    );
+    expect(alert.textContent).not.toBe("invalid");
+  });
+
+  it("offers to continue an upload that a reload interrupted", async () => {
+    globalThis.sessionStorage.setItem(
+      "contextdesk:corpus-intake-session",
+      JSON.stringify({
+        caseId: "11111111-1111-4111-8111-111111111111",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+      }),
+    );
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        state: "awaiting_bytes",
+        selection: { partCount: 2, declaredBytes: 4 * 1024 * 1024, compressedBytes: null, expandedBytes: 4 * 1024 * 1024 },
+        progress: { uploadedBytes: 1024 * 1024 },
+        parts: [],
+      }),
+    })));
+    render(
+      <CorpusIntakePanel
+        caseId="11111111-1111-4111-8111-111111111111"
+        canWrite
+        readOnly={false}
+      />,
+    );
+    const banner = await screen.findByText(/An upload to this investigation was interrupted/);
+    expect(banner.textContent).toContain("1 MiB of 4 MiB is already here");
+    expect(screen.getByRole("button", { name: "Discard the interrupted upload" })).toBeTruthy();
+    globalThis.sessionStorage.clear();
+  });
+  it("keeps a dropped upload resumable instead of orphaning it", async () => {
+    const selected = Array.from({ length: 40 }, (_, index) =>
+      new File([`line ${index}\n`], `part-${index}.log`, { type: "text/plain" }));
+    const declared = selected.reduce((total, file) => total + file.size, 0);
+    const awaiting = {
+      sessionId: "44444444-4444-4444-8444-444444444444",
+      state: "awaiting_bytes",
+      limits: CORPUS_INTAKE_LIMITS,
+      selection: {
+        partCount: selected.length,
+        declaredBytes: declared,
+        compressedBytes: null,
+        expandedBytes: declared,
+      },
+      parts: selected.map((file, index) => ({
+        index,
+        relativePath: file.name,
+        declaredBytes: file.size,
+        declaredMediaType: "text/plain",
+        receivedBytes: index === 0 ? file.size : 0,
+        complete: index === 0,
+        digest: index === 0 ? "a".repeat(64) : null,
+      })),
+      progress: { uploadedBytes: selected[0]!.size },
+    };
+    let parts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/corpus-intake/sessions") && init?.method === "POST") {
+        return { ok: true, status: 201, json: async () => ({ ...awaiting, parts: awaiting.parts.map((p) => ({ ...p, receivedBytes: 0, complete: false, digest: null })) }) };
+      }
+      if (url.includes("/parts/")) {
+        parts += 1;
+        // The connection drops partway through the selection.
+        if (parts > 1) {
+          return {
+            ok: false,
+            status: 503,
+            json: async () => ({
+              schemaId: "cd-collab.corpus_intake_error.v1",
+              error: "storage_unavailable",
+              code: "storage_unavailable",
+              message: "The intake could not be completed.",
+              detail: "upstream unavailable",
+              limit: null,
+              observed: null,
+              path: null,
+              retryable: true,
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => awaiting };
+      }
+      return { ok: true, status: 200, json: async () => awaiting };
+    }));
+
+    render(
+      <CorpusIntakePanel
+        caseId="11111111-1111-4111-8111-111111111111"
+        canWrite
+        readOnly={false}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Evidence files"), { target: { files: selected } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview intake" }));
+    expect((await screen.findByRole("alert")).textContent)
+      .toBe("The intake could not be completed.");
+    // The bytes the server already holds stay claimed, so the next attempt
+    // continues rather than starting the whole upload again.
+    const banner = await screen.findByText(/An upload to this investigation was interrupted/);
+    expect(banner.textContent).toContain("is already here");
+    expect(screen.getByRole("button", { name: "Discard the interrupted upload" })).toBeTruthy();
+  });
 });

@@ -1,6 +1,7 @@
 import {
   CORPUS_INTAKE_LIMITS,
   CORPUS_INTAKE_REPORT_SCHEMA_ID,
+  type CorpusIntakeLimitsV1,
   type CorpusAcceptedFileV1,
   type CorpusIntakeOrigin,
   type CorpusIntakePreviewReportV1,
@@ -29,6 +30,8 @@ export interface PreviewInput {
   archive?: Uint8Array | null;
   knownDigests?: Set<string>;
   startedAt?: number;
+  /** Owner-local limits; defaults to the conservative built-in set. */
+  limits?: CorpusIntakeLimitsV1;
 }
 
 export interface PreviewOutcome {
@@ -80,12 +83,16 @@ export function corpusIntakeRequestDigest(input: PreviewInput): string {
   return hash.digest("hex");
 }
 
-function decodeArchive(archive: Uint8Array, startedAt: number): {
+async function decodeArchive(
+  archive: Uint8Array,
+  startedAt: number,
+  limits: CorpusIntakeLimitsV1,
+): Promise<{
   files: Array<{ relativePath: string; bytes: Uint8Array }>;
   rejected: CorpusRejectedFileV1[];
-} {
+}> {
   try {
-    const extracted = extractZip(archive, startedAt);
+    const extracted = await extractZip(archive, startedAt, limits);
     return {
       files: extracted.members.map((row) => ({ relativePath: row.relativePath, bytes: row.bytes })),
       rejected: extracted.rejected,
@@ -101,20 +108,21 @@ function decodeArchive(archive: Uint8Array, startedAt: number): {
   }
 }
 
-export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
+export async function previewCorpusBytes(input: PreviewInput): Promise<PreviewOutcome> {
   const startedAt = input.startedAt ?? Date.now();
+  const limits = input.limits ?? CORPUS_INTAKE_LIMITS;
   const previewToken = corpusIntakeRequestDigest(input);
   const rejected: CorpusRejectedFileV1[] = [];
   const incoming: Array<{ relativePath: string; mediaType?: string; bytes: Uint8Array }> = [];
   if (input.archive && input.archive.byteLength > 0) {
-    if (archiveExceedsLimit(input.archive.byteLength)) {
+    if (archiveExceedsLimit(input.archive.byteLength, limits)) {
       rejected.push({
         relativePath: "",
         reason: "oversized_archive",
         detail: "archive exceeds byte cap",
       });
     } else {
-      const unpacked = decodeArchive(input.archive, startedAt);
+      const unpacked = await decodeArchive(input.archive, startedAt, limits);
       rejected.push(...unpacked.rejected);
       incoming.push(...unpacked.files);
     }
@@ -138,7 +146,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
           reason: "redaction_failed",
           detail: "share-safe privacy gate rejected intake metadata",
         }],
-        limits: CORPUS_INTAKE_LIMITS,
+        limits,
       },
     };
   }
@@ -148,7 +156,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
   const known = input.knownDigests ?? new Set<string>();
   const accepted: CorpusAcceptedFileV1[] = [];
 
-  if (fileCountExceedsLimit(incoming.length)) {
+  if (fileCountExceedsLimit(incoming.length, limits)) {
     return {
       classified: [],
       report: {
@@ -164,14 +172,14 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
             detail: "file count exceeds cap",
           },
         ],
-        limits: CORPUS_INTAKE_LIMITS,
+        limits,
       },
     };
   }
 
   let expandedBytes = 0;
   for (const file of incoming) {
-    if (expandedBytesExceedLimit(expandedBytes, file.bytes.byteLength)) {
+    if (expandedBytesExceedLimit(expandedBytes, file.bytes.byteLength, limits)) {
       return {
         classified: [],
         report: {
@@ -185,7 +193,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
             reason: "oversized_expanded",
             detail: "expanded size exceeds cap",
           }],
-          limits: CORPUS_INTAKE_LIMITS,
+          limits,
         },
       };
     }
@@ -193,7 +201,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
   }
 
   for (const file of incoming) {
-    if (processingExceedsLimit(startedAt)) {
+    if (processingExceedsLimit(startedAt, Date.now(), limits)) {
       rejected.push({
         relativePath: file.relativePath,
         reason: "processing_timeout",
@@ -201,7 +209,13 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
       });
       continue;
     }
-    const result = classifyBytes(file.relativePath, file.bytes, file.mediaType, input.privacyClass);
+    const result = await classifyBytes(
+      file.relativePath,
+      file.bytes,
+      file.mediaType,
+      input.privacyClass,
+      limits,
+    );
     if ("reason" in result) {
       rejected.push(result);
       continue;
@@ -245,7 +259,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
       previewToken,
       accepted,
       rejected,
-      limits: CORPUS_INTAKE_LIMITS,
+      limits,
     },
   };
 }

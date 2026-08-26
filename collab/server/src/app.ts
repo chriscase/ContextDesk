@@ -39,7 +39,12 @@ import {
 } from "./modules/component-health/index.js";
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
-import { registerCorpusIntakeRoutes } from "./modules/corpus-intake/index.js";
+import {
+  CorpusIntakeSessionService,
+  CorpusIntakeSpool,
+  registerCorpusIntakeRoutes,
+  registerCorpusIntakeSessionRoutes,
+} from "./modules/corpus-intake/index.js";
 import { registerLogTimeRoutes, type LogTimeService } from "./modules/log-time/index.js";
 import { registerWorkbenchRoutes, type WorkbenchService } from "./modules/workbench/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
@@ -296,10 +301,28 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         installationId: deps.installationId ?? "inst-unconfigured000000",
         publicIdentities: publicIdentities!,
       });
+      deps.domain.bindCorpusIntakeLimits(deps.config.corpusIntakeLimits);
       await registerCorpusIntakeRoutes(app, {
         sessionAuth,
         audit: security.audit,
         domain: deps.domain,
+        limits: deps.config.corpusIntakeLimits,
+      });
+      // Large corpora never travel as one JSON body. The session lane spools
+      // bounded binary parts, expands them on disk, and commits one member at a
+      // time; recovery at boot reclaims whatever a crash or an abandoned tab
+      // left behind.
+      const intakeSpool = new CorpusIntakeSpool(deps.config.corpusIntakeSpoolRoot);
+      await intakeSpool.recover();
+      await registerCorpusIntakeSessionRoutes(app, {
+        sessionAuth,
+        audit: security.audit,
+        domain: deps.domain,
+        sessions: new CorpusIntakeSessionService({
+          spool: intakeSpool,
+          limits: deps.config.corpusIntakeLimits,
+          domain: deps.domain,
+        }),
       });
       if (deps.entities) {
         const domain = deps.domain;

@@ -17,6 +17,10 @@ import {
   parseCorpusIntakePreviewReport,
   parseCorpusIntakePreviewRequest,
   base64LengthForBytes,
+  corpusIntakeJsonBodyLimitBytes,
+  corpusIntakePeakResidentBytes,
+  resolveCorpusIntakeLimits,
+  V8_MAX_STRING_LENGTH,
   corpusAllowedExtension,
 } from "./investigation-corpus-intake.js";
 
@@ -138,20 +142,80 @@ describe("corpus intake contract", () => {
 
   it("publishes the bounded limits used by preview and commit", () => {
     expect(CORPUS_INTAKE_LIMITS).toEqual({
+      maxRequestBytes: 8_388_608,
       maxArchiveBytes: 67_108_864,
       maxExpandedBytes: 536_870_912,
       maxCompressionRatio: 256,
       maxFileCount: 4_096,
       maxPathDepth: 8,
+      maxArchiveDepth: 0,
       maxPathLength: 240,
       maxFileBytes: 67_108_864,
       maxProcessingMs: 60_000,
+      maxExpansionMs: 600_000,
+      maxLineBytes: 8_388_608,
+      maxStructuredParseBytes: 16_777_216,
+      supportedEncodings: ["utf-8", "us-ascii", "utf-8-lossy"],
     });
-    expect(CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES).toBe(
+  });
+
+  it("advertises a JSON body limit the runtime can actually materialize", () => {
+    // The pre-streaming ceiling was derived from the whole expanded allowance
+    // (4 * ceil(512 MiB / 3) + per-file JSON metadata = 723,827,372 bytes) and
+    // handed straight to Fastify, which parses JSON from a string. V8 cannot
+    // build a string that long, so every body between the string ceiling and
+    // the advertised limit failed with an allocation error rather than a
+    // reviewable intake decision.
+    const preStreamingCeiling =
       base64LengthForBytes(CORPUS_INTAKE_LIMITS.maxExpandedBytes)
       + CORPUS_INTAKE_LIMITS.maxFileCount * (CORPUS_INTAKE_LIMITS.maxPathLength * 6 + 512)
-      + 4_096,
-    );
+      + 4_096;
+    expect(preStreamingCeiling).toBe(723_827_372);
+    expect(preStreamingCeiling).toBeGreaterThan(V8_MAX_STRING_LENGTH);
+    expect(CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES).toBe(CORPUS_INTAKE_LIMITS.maxRequestBytes);
+    expect(CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES).toBeLessThan(V8_MAX_STRING_LENGTH);
+    expect(() => Buffer.alloc(CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES).toString("latin1"))
+      .not.toThrow();
+  });
+
+  it("resolves owner-local limit overrides and refuses ones the runtime cannot keep", () => {
+    const narrowed = resolveCorpusIntakeLimits({
+      maxExpandedBytes: 128 * 1024 * 1024,
+      maxFileCount: 512,
+      supportedEncodings: ["utf-8"],
+    });
+    expect(narrowed.maxExpandedBytes).toBe(134_217_728);
+    expect(narrowed.maxFileCount).toBe(512);
+    expect(narrowed.supportedEncodings).toEqual(["utf-8"]);
+    expect(narrowed.maxArchiveBytes).toBe(CORPUS_INTAKE_LIMITS.maxArchiveBytes);
+
+    const widened = resolveCorpusIntakeLimits({
+      maxRequestBytes: 32 * 1024 * 1024,
+      maxArchiveDepth: 1,
+      supportedEncodings: ["utf-8", "utf-16le"],
+    });
+    expect(corpusIntakeJsonBodyLimitBytes(widened)).toBe(33_554_432);
+    expect(corpusIntakeJsonBodyLimitBytes(widened)).toBeLessThan(V8_MAX_STRING_LENGTH);
+
+    expect(() => resolveCorpusIntakeLimits({ maxRequestBytes: 600_000_000 }))
+      .toThrow(/maxRequestBytes exceeds the ceiling/);
+    expect(() => resolveCorpusIntakeLimits({ maxArchiveDepth: 3 }))
+      .toThrow(/maxArchiveDepth exceeds the ceiling/);
+    expect(() => resolveCorpusIntakeLimits({ maxFileBytes: 0 }))
+      .toThrow(/maxFileBytes must be at least 1/);
+    expect(() => resolveCorpusIntakeLimits({
+      maxFileBytes: 4 * 1024 * 1024,
+      maxStructuredParseBytes: 1024,
+    })).toThrow(/maxLineBytes cannot exceed maxFileBytes/);
+    expect(() => resolveCorpusIntakeLimits({ supportedEncodings: ["us-ascii"] }))
+      .toThrow(/must include utf-8/);
+  });
+
+  it("states a peak resident bound that does not grow with the corpus", () => {
+    const small = resolveCorpusIntakeLimits({ maxExpandedBytes: 64 * 1024 * 1024 });
+    const large = resolveCorpusIntakeLimits({ maxExpandedBytes: 4 * 1024 * 1024 * 1024 });
+    expect(corpusIntakePeakResidentBytes(small)).toBe(corpusIntakePeakResidentBytes(large));
+    expect(corpusIntakePeakResidentBytes(CORPUS_INTAKE_LIMITS)).toBeLessThan(64 * 1024 * 1024);
   });
 
   it("accepts the exact file-count boundary and rejects one file over it", () => {
@@ -211,9 +275,13 @@ describe("corpus intake contract", () => {
   it("parses preview reports and committed batches without unknown fields", () => {
     const report = parseCorpusIntakePreviewReport(reportBody());
     expect(report.accepted[0]?.relativePath).toBe("mailer/shared-timeout.log");
-    expect(() => parseCorpusIntakePreviewReport(reportBody({
+    // An owner-local override is readable; an unresolvable one is not.
+    expect(parseCorpusIntakePreviewReport(reportBody({
       limits: { ...CORPUS_INTAKE_LIMITS, maxFileCount: CORPUS_INTAKE_LIMITS.maxFileCount - 1 },
-    }))).toThrow(/does not match the corpus intake contract/);
+    })).limits.maxFileCount).toBe(CORPUS_INTAKE_LIMITS.maxFileCount - 1);
+    expect(() => parseCorpusIntakePreviewReport(reportBody({
+      limits: { ...CORPUS_INTAKE_LIMITS, maxRequestBytes: 600_000_000 },
+    }))).toThrow(/exceeds the ceiling/);
     expect(() => parseCorpusIntakePreviewReport(reportBody({ leaked: "nope" }))).toThrow(/unknown key/);
     const batch = parseCorpusIntakeBatch(batchBody());
     expect(batch.items).toHaveLength(1);

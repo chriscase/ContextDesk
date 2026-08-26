@@ -265,8 +265,17 @@ export {
   CORPUS_INTAKE_BATCH_SCHEMA_ID,
   CORPUS_INTAKE_COMMIT_SCHEMA_ID,
   CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES,
+  CORPUS_INTAKE_EXPANSION_WINDOW_BYTES,
+  CORPUS_INTAKE_LIMIT_CEILINGS,
   CORPUS_INTAKE_LIMITS,
   CORPUS_INTAKE_ORIGINS,
+  CORPUS_TEXT_ENCODINGS,
+  CorpusIntakeLimitError,
+  V8_MAX_STRING_LENGTH,
+  corpusIntakeInlineDecodedBytes,
+  corpusIntakeJsonBodyLimitBytes,
+  corpusIntakePeakResidentBytes,
+  resolveCorpusIntakeLimits,
   CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
   CORPUS_INTAKE_REPORT_SCHEMA_ID,
   CORPUS_REJECTION_REASONS,
@@ -280,6 +289,8 @@ export {
 } from "./investigation-corpus-intake.js";
 export type {
   CorpusAcceptedFileV1,
+  CorpusIntakeLimitsV1,
+  CorpusTextEncoding,
   CorpusAllowedMedia,
   CorpusAllowedExtension,
   CorpusTextEncodingStatus,
@@ -796,3 +807,35 @@ export * from "./admin-people.js";
 export * from "./admin-audit.js";
 
 export * from "./investigation-lifecycle.js";
+
+export {
+  CORPUS_INTAKE_ERROR_CODES,
+  CORPUS_INTAKE_ERROR_SCHEMA_ID,
+  CORPUS_INTAKE_SESSION_STATES,
+  CORPUS_INTAKE_STAGES,
+  CORPUS_INTAKE_UNKNOWNS,
+  CORPUS_STREAM_COMMIT_SCHEMA_ID,
+  CORPUS_STREAM_PREFLIGHT_SCHEMA_ID,
+  CORPUS_STREAM_SESSION_SCHEMA_ID,
+  corpusIntakeError,
+  corpusIntakeStagesFor,
+  corpusIntakeUnknownsFor,
+  parseCorpusIntakeError,
+  parseCorpusIntakePreflightRequest,
+  parseCorpusIntakeSession,
+  parseCorpusIntakeSessionCommitRequest,
+} from "./investigation-corpus-stream.js";
+export type {
+  CorpusIntakeErrorCode,
+  CorpusIntakeErrorV1,
+  CorpusIntakePartDeclarationV1,
+  CorpusIntakePartStatusV1,
+  CorpusIntakePreflightRequestV1,
+  CorpusIntakeProgressV1,
+  CorpusIntakeSelectionV1,
+  CorpusIntakeSessionCommitRequestV1,
+  CorpusIntakeSessionState,
+  CorpusIntakeSessionV1,
+  CorpusIntakeStage,
+  CorpusIntakeUnknown,
+} from "./investigation-corpus-stream.js";

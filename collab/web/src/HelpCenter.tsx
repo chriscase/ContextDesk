@@ -45,7 +45,15 @@ const CORPUS_CAPACITY_COPY =
   + `path length ${CORPUS_INTAKE_LIMITS.maxPathLength}, `
   + `${asMiB(CORPUS_INTAKE_LIMITS.maxFileBytes)} MiB per file, `
   + `compression ratio ${CORPUS_INTAKE_LIMITS.maxCompressionRatio}, and `
-  + `${CORPUS_INTAKE_LIMITS.maxProcessingMs / 1_000} seconds of processing.`;
+  + `${CORPUS_INTAKE_LIMITS.maxProcessingMs / 1_000} seconds of processing. `
+  // A selection above one request's ceiling is not refused: it is carried by the
+  // streamed session lane instead. Saying so here keeps the shipped copy true
+  // about what happens rather than implying the request limit is the corpus one.
+  + `A single request carries at most ${asMiB(CORPUS_INTAKE_LIMITS.maxRequestBytes)} MiB; `
+  + "larger selections upload as resumable chunks you can cancel, and continue "
+  + "from where they stopped if the connection drops. "
+  + `Text must be one of: ${CORPUS_INTAKE_LIMITS.supportedEncodings.join(", ")}. `
+  + "An owner can change these limits for this installation.";
 
 /**
  * All help content is plain structured data: no markdown runtime, no fetch.

@@ -1,6 +1,8 @@
 import {
   ContractViolation,
-  CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES,
+  CORPUS_INTAKE_LIMITS,
+  corpusIntakeJsonBodyLimitBytes,
+  type CorpusIntakeLimitsV1,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
@@ -34,6 +36,8 @@ function publicIntakeError(err: unknown): string {
 export interface CorpusIntakeRouteDeps {
   sessionAuth: SessionAuthorizationDeps;
   audit: AuditStore;
+  /** Owner-local limits; the inline body ceiling is derived from them. */
+  limits?: CorpusIntakeLimitsV1;
   domain: Pick<
     CaseService,
     | "previewCorpusIntake"
@@ -48,6 +52,9 @@ export async function registerCorpusIntakeRoutes(
   app: FastifyInstance,
   deps: CorpusIntakeRouteDeps,
 ): Promise<void> {
+  // Derived from `maxRequestBytes`, so the number Fastify enforces is one the
+  // JSON parser can actually materialize into a string.
+  const bodyLimit = corpusIntakeJsonBodyLimitBytes(deps.limits ?? CORPUS_INTAKE_LIMITS);
   const sessionOf = async (
     request: FastifyRequest,
     reply: { code: (status: number) => unknown },
@@ -91,7 +98,7 @@ export async function registerCorpusIntakeRoutes(
 
   app.post(
     "/api/cases/:id/corpus-intake/preview",
-    { bodyLimit: CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES },
+    { bodyLimit },
     async (request, reply) => {
       const id = (request.params as { id: string }).id;
       const loaded = await sessionOf(request, reply);
@@ -121,7 +128,7 @@ export async function registerCorpusIntakeRoutes(
 
   app.post(
     "/api/cases/:id/corpus-intake",
-    { bodyLimit: CORPUS_INTAKE_HTTP_BODY_LIMIT_BYTES },
+    { bodyLimit },
     async (request, reply) => {
       const id = (request.params as { id: string }).id;
       const loaded = await sessionOf(request, reply);

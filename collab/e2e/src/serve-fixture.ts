@@ -296,6 +296,9 @@ async function main(): Promise<void> {
   const app = await buildApp({
     config: testConfig({
       evidenceRoot: root,
+      // Spooled intake bytes are scratch, not evidence: keep them out of the
+      // fixture's evidence tree so a run's leftovers cannot look like content.
+      corpusIntakeSpoolRoot: join(root, "..", "intake-spool"),
       staticDir: webDist,
       host: "127.0.0.1",
       port,

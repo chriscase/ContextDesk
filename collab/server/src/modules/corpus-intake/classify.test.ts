@@ -11,24 +11,24 @@ const JSON_LINES = new TextEncoder().encode([
 ].join("\n"));
 
 describe("classifyBytes", () => {
-  it("accepts allowlisted text/log/json/csv/xml/eml and rejects binaries", () => {
-    const log = classifyBytes("mailer/shared-timeout.log", LOG, "text/plain", "owner_only");
+  it("accepts allowlisted text/log/json/csv/xml/eml and rejects binaries", async () => {
+    const log = await classifyBytes("mailer/shared-timeout.log", LOG, "text/plain", "owner_only");
     expect("digest" in log).toBe(true);
-    const json = classifyBytes(
+    const json = await classifyBytes(
       "mailer/event.json",
       new TextEncoder().encode('{"id":"syn-1","event":"timeout"}'),
       "application/json",
       "owner_only",
     );
     expect("mediaType" in json && json.mediaType).toBe("application/json");
-    const binary = classifyBytes(
+    const binary = await classifyBytes(
       "mailer/payload.bin",
       new Uint8Array([0, 1, 2, 3, 255]),
       "application/octet-stream",
       "owner_only",
     );
     expect("reason" in binary && binary.reason).toBe("unsupported_media");
-    const nulLog = classifyBytes(
+    const nulLog = await classifyBytes(
       "mailer/binary.log",
       new Uint8Array([0x41, 0x00, 0x42]),
       "text/plain",
@@ -37,17 +37,17 @@ describe("classifyBytes", () => {
     expect("reason" in nulLog && nulLog.reason).toBe("binary_or_unknown");
   });
 
-  it("accepts common rotated log names while still classifying their bytes", () => {
+  it("accepts common rotated log names while still classifying their bytes", async () => {
     for (const path of [
       "mailer/service.log.1",
       "mailer/service.log-2026-08-25",
       "mailer/service.log.previous",
     ]) {
-      const accepted = classifyBytes(path, LOG, "text/plain", "owner_only");
+      const accepted = await classifyBytes(path, LOG, "text/plain", "owner_only");
       expect("mediaType" in accepted && accepted.mediaType).toBe("text/x-log");
     }
 
-    const binary = classifyBytes(
+    const binary = await classifyBytes(
       "mailer/service.log.2",
       new Uint8Array([0x41, 0x00, 0x42]),
       "text/plain",
@@ -55,21 +55,21 @@ describe("classifyBytes", () => {
     );
     expect("reason" in binary && binary.reason).toBe("binary_or_unknown");
 
-    const disguised = classifyBytes("mailer/service.log.exe", LOG, "text/plain", "owner_only");
+    const disguised = await classifyBytes("mailer/service.log.exe", LOG, "text/plain", "owner_only");
     expect("reason" in disguised && disguised.reason).toBe("unsupported_media");
   });
 
-  it("accepts valid JSON Lines as text logs with extension-scoped media aliases", () => {
+  it("accepts valid JSON Lines as text logs with extension-scoped media aliases", async () => {
     for (const [path, claimedMedia] of [
       ["api/events.jsonl", "application/json"],
       ["api/events.ndjson", "application/x-ndjson"],
     ] as const) {
-      const accepted = classifyBytes(path, JSON_LINES, claimedMedia, "owner_only");
+      const accepted = await classifyBytes(path, JSON_LINES, claimedMedia, "owner_only");
       expect("mediaType" in accepted && accepted.mediaType).toBe("text/x-log");
       expect("artifactKind" in accepted && accepted.artifactKind).toBe("log");
     }
 
-    const ordinaryLogClaimingJson = classifyBytes(
+    const ordinaryLogClaimingJson = await classifyBytes(
       "api/events.log",
       JSON_LINES,
       "application/json",
@@ -79,8 +79,8 @@ describe("classifyBytes", () => {
       .toBe("unsupported_media");
   });
 
-  it("keeps JSON Lines validation, binary rejection, and share-safe privacy gates intact", () => {
-    const malformed = classifyBytes(
+  it("keeps JSON Lines validation, binary rejection, and share-safe privacy gates intact", async () => {
+    const malformed = await classifyBytes(
       "api/malformed.jsonl",
       new TextEncoder().encode('{"event":"ok"}\n{"event":\n'),
       "application/json",
@@ -88,7 +88,7 @@ describe("classifyBytes", () => {
     );
     expect("reason" in malformed && malformed.reason).toBe("unsupported_media");
 
-    const binary = classifyBytes(
+    const binary = await classifyBytes(
       "api/binary.jsonl",
       new Uint8Array([0x7b, 0x00, 0x7d]),
       "application/json",
@@ -96,7 +96,7 @@ describe("classifyBytes", () => {
     );
     expect("reason" in binary && binary.reason).toBe("binary_or_unknown");
 
-    const privateStructuredKey = classifyBytes(
+    const privateStructuredKey = await classifyBytes(
       "api/private.jsonl",
       new TextEncoder().encode('{"authorization":"fixture-not-a-real-secret"}\n'),
       "application/json",
@@ -108,9 +108,9 @@ describe("classifyBytes", () => {
     }
   });
 
-  it("fail-closes share_safe on privacy findings without echoing the payload", () => {
+  it("fail-closes share_safe on privacy findings without echoing the payload", async () => {
     const secret = "password: fixture-not-a-real-secret";
-    const blocked = classifyBytes(
+    const blocked = await classifyBytes(
       "mailer/leaky.log",
       new TextEncoder().encode(`timeout\n${secret}\n`),
       "text/plain",
@@ -121,7 +121,7 @@ describe("classifyBytes", () => {
       expect(blocked.detail).not.toContain("fixture-not-a-real-secret");
       expect(blocked.detail).not.toContain(secret);
     }
-    const allowed = classifyBytes(
+    const allowed = await classifyBytes(
       "mailer/leaky.log",
       new TextEncoder().encode(`timeout\n${secret}\n`),
       "text/plain",
@@ -130,16 +130,16 @@ describe("classifyBytes", () => {
     expect("digest" in allowed).toBe(true);
   });
 
-  it("accepts sparse non-UTF-8 private text but rejects binary markers and dense invalid bytes", () => {
+  it("accepts sparse non-UTF-8 private text but rejects binary markers and dense invalid bytes", async () => {
     const invalidUtf8 = new Uint8Array(2_050).fill(0x41);
     invalidUtf8.set([0xc3, 0x28], 2_048);
-    const invalid = classifyBytes("mailer/invalid-tail.log", invalidUtf8, "text/plain", "owner_only");
+    const invalid = await classifyBytes("mailer/invalid-tail.log", invalidUtf8, "text/plain", "owner_only");
     expect("encodingStatus" in invalid && invalid.encodingStatus).toBe("normalized_non_utf8");
 
-    const shareSafe = classifyBytes("mailer/invalid-tail.log", invalidUtf8, "text/plain", "share_safe");
+    const shareSafe = await classifyBytes("mailer/invalid-tail.log", invalidUtf8, "text/plain", "share_safe");
     expect("reason" in shareSafe && shareSafe.reason).toBe("binary_or_unknown");
 
-    const denseInvalid = classifyBytes(
+    const denseInvalid = await classifyBytes(
       "mailer/dense-invalid.log",
       new Uint8Array(80).fill(0xff),
       "text/plain",
@@ -149,12 +149,12 @@ describe("classifyBytes", () => {
 
     const binaryTail = new Uint8Array(2_049).fill(0x41);
     binaryTail[2_048] = 0;
-    const binary = classifyBytes("mailer/binary-tail.log", binaryTail, "text/plain", "owner_only");
+    const binary = await classifyBytes("mailer/binary-tail.log", binaryTail, "text/plain", "owner_only");
     expect("reason" in binary && binary.reason).toBe("binary_or_unknown");
   });
 
-  it("parses structured JSON and scans keys, values, paths, and source metadata", () => {
-    const forbiddenJson = classifyBytes(
+  it("parses structured JSON and scans keys, values, paths, and source metadata", async () => {
+    const forbiddenJson = await classifyBytes(
       "mailer/event.json",
       new TextEncoder().encode('{"nested":{"authorization":"synthetic-value"}}'),
       "application/json",
@@ -162,7 +162,7 @@ describe("classifyBytes", () => {
     );
     expect("reason" in forbiddenJson && forbiddenJson.reason).toBe("redaction_failed");
 
-    const malformedJson = classifyBytes(
+    const malformedJson = await classifyBytes(
       "mailer/event.json",
       new TextEncoder().encode('{"event":'),
       "application/json",
@@ -170,7 +170,7 @@ describe("classifyBytes", () => {
     );
     expect("reason" in malformedJson && malformedJson.reason).toBe("unsupported_media");
 
-    const privatePath = classifyBytes(
+    const privatePath = await classifyBytes(
       "host.internal/event.log",
       LOG,
       "text/plain",
@@ -178,7 +178,7 @@ describe("classifyBytes", () => {
     );
     expect("reason" in privatePath && privatePath.reason).toBe("redaction_failed");
 
-    const metadata = previewCorpusBytes({
+    const metadata = await previewCorpusBytes({
       caseId: "case-1",
       actorId: "actor-1",
       origin: "files",
@@ -192,8 +192,8 @@ describe("classifyBytes", () => {
     expect(metadata.report.rejected[0]?.detail).not.toContain("host.internal");
   });
 
-  it("uses a strict media policy for share-safe and declared formats", () => {
-    const xml = classifyBytes(
+  it("uses a strict media policy for share-safe and declared formats", async () => {
+    const xml = await classifyBytes(
       "mailer/event.xml",
       new TextEncoder().encode("<event>synthetic</event>"),
       "application/xml",
@@ -201,7 +201,7 @@ describe("classifyBytes", () => {
     );
     expect("reason" in xml && xml.reason).toBe("redaction_failed");
 
-    const mismatched = classifyBytes(
+    const mismatched = await classifyBytes(
       "mailer/event.json",
       new TextEncoder().encode('{"event":"synthetic"}'),
       "text/csv",
@@ -210,7 +210,7 @@ describe("classifyBytes", () => {
     expect("reason" in mismatched && mismatched.reason).toBe("unsupported_media");
   });
 
-  it("accepts only canonical base64", () => {
+  it("accepts only canonical base64", async () => {
     expect(Buffer.from(decodeBase64("file", "c3ludGhldGljCg==")).toString("utf8")).toBe(
       "synthetic\n",
     );
@@ -221,11 +221,11 @@ describe("classifyBytes", () => {
 });
 
 describe("previewCorpusBytes", () => {
-  it("accepts all six logs in the synthetic checkout-cascade ZIP", () => {
+  it("accepts all six logs in the synthetic checkout-cascade ZIP", async () => {
     const archive = readFileSync(
       new URL("../../../../../fixtures/log-lab/archives/checkout-cascade.zip", import.meta.url),
     );
-    const preview = previewCorpusBytes({
+    const preview = await previewCorpusBytes({
       caseId: "case-checkout-cascade",
       actorId: "actor-synthetic-1",
       origin: "zip",
@@ -251,8 +251,8 @@ describe("previewCorpusBytes", () => {
     expect(preview.report.rejected).toEqual([]);
   });
 
-  it("keeps mixed accepted and rejected files visible without decoding rejected bytes as text", () => {
-    const preview = previewCorpusBytes({
+  it("keeps mixed accepted and rejected files visible without decoding rejected bytes as text", async () => {
+    const preview = await previewCorpusBytes({
       caseId: "case-1",
       actorId: "actor-1",
       origin: "files",
@@ -275,8 +275,8 @@ describe("previewCorpusBytes", () => {
     expect(preview.classified).toHaveLength(1);
   });
 
-  it("marks duplicate digests in the same batch", () => {
-    const preview = previewCorpusBytes({
+  it("marks duplicate digests in the same batch", async () => {
+    const preview = await previewCorpusBytes({
       caseId: "case-1",
       actorId: "actor-1",
       origin: "directory",
@@ -293,7 +293,7 @@ describe("previewCorpusBytes", () => {
 });
 
 describe("duplicateDigestFlags", () => {
-  it("marks live known digests and within-batch repeats without weakening uniqueness", () => {
+  it("marks live known digests and within-batch repeats without weakening uniqueness", async () => {
     const original = "ab".repeat(32);
     const other = "cd".repeat(32);
     expect(duplicateDigestFlags([original, other], new Set())).toEqual([false, false]);

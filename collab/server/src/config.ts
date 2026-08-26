@@ -3,6 +3,12 @@
  * secret-bearing URLs are secret-store-sourced (see collab/deploy/.env.example).
  */
 
+import {
+  corpusIntakeSpoolRoot,
+  loadCorpusIntakeLimits,
+} from "./modules/corpus-intake/index.js";
+import { CORPUS_INTAKE_LIMITS, type CorpusIntakeLimitsV1 } from "@cd-collab/contracts";
+
 export interface Config {
   host: string;
   port: number;
@@ -17,6 +23,14 @@ export interface Config {
   /** Required only for SQLite local/single-node mode. */
   sqlitePath: string | null;
   evidenceRoot: string;
+  /**
+   * Scratch space for in-flight corpus intake. Separate from `evidenceRoot`
+   * because spooled bytes are not evidence and a recovery sweep must be free to
+   * delete them.
+   */
+  corpusIntakeSpoolRoot: string;
+  /** Owner-local corpus intake limits, already validated against the ceilings. */
+  corpusIntakeLimits: CorpusIntakeLimitsV1;
   /** Built UI assets; null skips static serving (API-only). */
   staticDir: string | null;
   authMode: "ldap" | "local";
@@ -124,6 +138,11 @@ export function loadRuntimeConfig(
     migrateDatabaseUrl,
     sqlitePath,
     evidenceRoot: env.COLLAB_EVIDENCE_ROOT ?? ".data/evidence",
+    corpusIntakeSpoolRoot: corpusIntakeSpoolRoot(
+      env,
+      env.COLLAB_EVIDENCE_ROOT ?? ".data/evidence",
+    ),
+    corpusIntakeLimits: loadCorpusIntakeLimits(env),
     staticDir: env.COLLAB_STATIC_DIR?.trim() || null,
     authMode: authMode(env),
     trustProxy: parseTrustProxy(env.COLLAB_TRUST_PROXY),
@@ -143,6 +162,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     migrateDatabaseUrl: "postgres://collab_migrator@127.0.0.1:5432/collab",
     sqlitePath: null,
     evidenceRoot: ".data/evidence",
+    corpusIntakeSpoolRoot: ".data/intake-spool",
+    corpusIntakeLimits: CORPUS_INTAKE_LIMITS,
     staticDir: null,
     authMode: "ldap",
     trustProxy: null,

@@ -41,6 +41,7 @@ import { assertFilenameAllowed, assertUploadAllowed } from "../evidence/index.js
 import {
   decodeBase64,
   corpusIntakeRequestDigest,
+  type StagedCorpusIntake,
   duplicateDigestFlags,
   previewCorpusBytes,
 } from "../corpus-intake/index.js";
@@ -50,11 +51,13 @@ import {
   evaluateArchive,
   evaluateRestore,
   isLifecycleTransition,
+  CORPUS_INTAKE_LIMITS,
   parseCorpusIntakeBatch,
   parseCorpusIntakeCommitRequest,
   parseCorpusIntakePreviewRequest,
   restoreTarget,
   type CorpusIntakeBatchV1,
+  type CorpusIntakeLimitsV1,
   type CorpusIntakePreviewReportV1,
   type LifecycleRefusal,
   type LifecycleVerdict,
@@ -336,6 +339,8 @@ export class CaseService {
     | ((caseId: string) => Promise<number | null>)
     | null = null;
 
+  private corpusIntakeLimits: CorpusIntakeLimitsV1 = CORPUS_INTAKE_LIMITS;
+
   constructor(
     private readonly evidence: EvidenceStore,
     private readonly audit: AuditStore,
@@ -348,6 +353,17 @@ export class CaseService {
     lookup: (caseId: string) => Promise<number | null>,
   ): void {
     this.normalizationRevisionFor = lookup;
+  }
+
+  /**
+   * Adopt this installation's corpus-intake limits.
+   *
+   * Bound rather than constructed so both intake lanes read one configuration:
+   * an owner who narrows the expanded budget must see the inline lane narrow
+   * with it, or the advertised limit is only true for large uploads.
+   */
+  bindCorpusIntakeLimits(limits: CorpusIntakeLimitsV1): void {
+    this.corpusIntakeLimits = limits;
   }
 
   async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
@@ -1489,7 +1505,7 @@ export class CaseService {
     raw: unknown,
   ): Promise<CorpusIntakePreviewReportV1> {
     await this.requireCase(caseId);
-    const request = parseCorpusIntakePreviewRequest(raw);
+    const request = parseCorpusIntakePreviewRequest(raw, this.corpusIntakeLimits);
     const artifacts = await this.store.listArtifactsByCase(caseId);
     const knownDigests = new Set(
       artifacts.map((row) => row.contentHash).filter((hash): hash is string => Boolean(hash)),
@@ -1502,7 +1518,7 @@ export class CaseService {
     const archive = request.archiveBase64
       ? decodeBase64("archive", request.archiveBase64)
       : null;
-    return previewCorpusBytes({
+    return (await previewCorpusBytes({
       caseId,
       actorId: actor.id,
       origin: request.origin,
@@ -1512,9 +1528,15 @@ export class CaseService {
       files,
       archive,
       knownDigests,
-    }).report;
+      limits: this.corpusIntakeLimits,
+    })).report;
   }
 
+  /**
+   * Commit an inline selection: the bytes arrived in one bounded JSON request
+   * and are already resident, so the shared persistence path can read them
+   * straight out of the preview.
+   */
   async commitCorpusIntake(
     caseId: string,
     actor: Actor,
@@ -1522,7 +1544,7 @@ export class CaseService {
     origin: string,
   ): Promise<CorpusIntakeBatchV1> {
     await this.requireCase(caseId);
-    const request = parseCorpusIntakeCommitRequest(raw);
+    const request = parseCorpusIntakeCommitRequest(raw, this.corpusIntakeLimits);
     const artifacts = await this.store.listArtifactsByCase(caseId);
     const knownDigests = new Set(
       artifacts.map((row) => row.contentHash).filter((hash): hash is string => Boolean(hash)),
@@ -1535,7 +1557,7 @@ export class CaseService {
     const archive = request.archiveBase64
       ? decodeBase64("archive", request.archiveBase64)
       : null;
-    const preview = previewCorpusBytes({
+    const preview = await previewCorpusBytes({
       caseId,
       actorId: actor.id,
       origin: request.origin,
@@ -1545,6 +1567,7 @@ export class CaseService {
       files,
       archive,
       knownDigests,
+      limits: this.corpusIntakeLimits,
     });
     const requestDigest = corpusIntakeRequestDigest({
       caseId,
@@ -1559,6 +1582,52 @@ export class CaseService {
     if (request.previewToken !== requestDigest || preview.report.previewToken !== requestDigest) {
       throw new CorpusIntakeConflictError("preview token does not match commit input");
     }
+    const resident = new Map(preview.classified.map((file) => [file.digest, file.bytes]));
+    return this.persistCorpusIntakeBatch(caseId, actor, origin, {
+      origin: request.origin,
+      sourceLabel: request.sourceLabel,
+      privacyClass: request.privacyClass,
+      idempotencyKey: request.idempotencyKey,
+      requestDigest,
+      entries: preview.classified.map((file) => ({
+        relativePath: file.relativePath,
+        mediaType: file.mediaType,
+        artifactKind: file.artifactKind,
+        digest: file.digest,
+        byteLength: file.bytes.byteLength,
+        encodingStatus: file.encodingStatus,
+      })),
+      rejected: preview.report.rejected,
+      loadBytes: async (digest) => {
+        const bytes = resident.get(digest);
+        if (!bytes) throw new Error("intake bytes are missing for a previewed member");
+        return bytes;
+      },
+    });
+  }
+
+  /**
+   * Commit a streamed session: the corpus lives on the intake spool, and
+   * `loadBytes` reads exactly one member at a time. Peak resident bytes are one
+   * member, not one corpus, which is what lets an accepted corpus be far larger
+   * than the process's memory.
+   */
+  async commitStagedCorpusIntake(
+    caseId: string,
+    actor: Actor,
+    origin: string,
+    input: StagedCorpusIntake,
+  ): Promise<CorpusIntakeBatchV1> {
+    await this.requireCase(caseId);
+    return this.persistCorpusIntakeBatch(caseId, actor, origin, input);
+  }
+
+  private async persistCorpusIntakeBatch(
+    caseId: string,
+    actor: Actor,
+    origin: string,
+    input: StagedCorpusIntake,
+  ): Promise<CorpusIntakeBatchV1> {
     const batchId = randomUUID();
     const createdAt = new Date().toISOString();
     const stages: EvidenceStage[] = [];
@@ -1566,10 +1635,10 @@ export class CaseService {
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
       const result = await this.withAtomic(async () => {
-        await this.store.lockIntakeIdempotency(caseId, request.idempotencyKey);
-        const replay = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
+        await this.store.lockIntakeIdempotency(caseId, input.idempotencyKey);
+        const replay = await this.store.getIntakeBatchByIdempotency(caseId, input.idempotencyKey);
         if (replay) {
-          if (replay.requestDigest !== requestDigest) {
+          if (replay.requestDigest !== input.requestDigest) {
             throw new CorpusIntakeConflictError("idempotency key already belongs to another request");
           }
           return { ...parseCorpusIntakeBatch(JSON.parse(replay.payloadJson)), replayed: true };
@@ -1577,17 +1646,18 @@ export class CaseService {
         const sourceId = await this.resolveSourceId(actor);
 
         const metaByDigest = new Map<string, { hash: string; byteLength: number }>();
-        const uniqueFiles = [...new Map(
-          preview.classified.map((file) => [file.digest, file]),
+        const uniqueEntries = [...new Map(
+          input.entries.map((entry) => [entry.digest, entry]),
         ).values()].sort((left, right) => left.digest.localeCompare(right.digest));
-        for (const file of uniqueFiles) {
-          await this.store.lockEvidenceDigest(file.digest);
+        for (const entry of uniqueEntries) {
+          await this.store.lockEvidenceDigest(entry.digest);
+          const bytes = await input.loadBytes(entry.digest);
           if (evidenceBatch) {
-            const meta = await evidenceBatch.put(file.bytes, { contentType: file.mediaType });
-            metaByDigest.set(file.digest, meta);
+            const meta = await evidenceBatch.put(bytes, { contentType: entry.mediaType });
+            metaByDigest.set(entry.digest, meta);
           } else {
-            const stage = await this.evidence.stage(file.bytes, { contentType: file.mediaType });
-            metaByDigest.set(file.digest, stage.meta);
+            const stage = await this.evidence.stage(bytes, { contentType: entry.mediaType });
+            metaByDigest.set(entry.digest, stage.meta);
             stages.push(stage);
           }
         }
@@ -1598,60 +1668,60 @@ export class CaseService {
             .filter((hash): hash is string => Boolean(hash)),
         );
         const duplicateFlags = duplicateDigestFlags(
-          preview.classified.map((file) => file.digest),
+          input.entries.map((entry) => entry.digest),
           liveKnown,
         );
-        const items: CorpusIntakeBatchV1["items"] = preview.classified.map((file, index) => ({
+        const items: CorpusIntakeBatchV1["items"] = input.entries.map((entry, index) => ({
           artifactId: randomUUID(),
-          relativePath: file.relativePath,
-          digest: file.digest,
-          byteLength: file.bytes.byteLength,
-          mediaType: file.mediaType,
-          privacyClass: request.privacyClass,
+          relativePath: entry.relativePath,
+          digest: entry.digest,
+          byteLength: entry.byteLength,
+          mediaType: entry.mediaType,
+          privacyClass: input.privacyClass,
           sourceId,
           duplicateDigest: duplicateFlags[index] ?? false,
-          encodingStatus: file.encodingStatus,
+          encodingStatus: entry.encodingStatus,
         }));
         const batch: CorpusIntakeBatchV1 = {
           schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,
           id: batchId,
           caseId,
-          origin: request.origin,
-          sourceLabel: request.sourceLabel,
-          privacyClass: request.privacyClass,
-          idempotencyKey: request.idempotencyKey,
-          requestDigest,
+          origin: input.origin,
+          sourceLabel: input.sourceLabel,
+          privacyClass: input.privacyClass,
+          idempotencyKey: input.idempotencyKey,
+          requestDigest: input.requestDigest,
           replayed: false,
           createdAt,
           createdBy: actor.id,
           items,
-          rejected: preview.report.rejected,
+          rejected: input.rejected,
         };
         await this.store.insertIntakeBatch({
           id: batchId,
           caseId,
-          idempotencyKey: request.idempotencyKey,
-          requestDigest,
-          origin: request.origin,
-          sourceLabel: request.sourceLabel,
-          privacyClass: request.privacyClass,
+          idempotencyKey: input.idempotencyKey,
+          requestDigest: input.requestDigest,
+          origin: input.origin,
+          sourceLabel: input.sourceLabel,
+          privacyClass: input.privacyClass,
           createdAt,
           createdBy: actor.id,
           payloadJson: JSON.stringify(batch),
         });
 
-        for (const [index, file] of preview.classified.entries()) {
+        for (const [index, entry] of input.entries.entries()) {
           const item = items[index];
           if (!item) throw new Error("intake item materialization failed");
-          const meta = metaByDigest.get(file.digest);
+          const meta = metaByDigest.get(entry.digest);
           if (!meta) throw new Error("evidence stage is missing");
           const summary = await this.persistContribution(
             caseId,
             actor,
             {
               kind: "upload",
-              body: `Corpus intake ${file.relativePath}`,
-              privacyClass: request.privacyClass,
+              body: `Corpus intake ${entry.relativePath}`,
+              privacyClass: input.privacyClass,
               sourceId,
             },
             origin,
@@ -1659,21 +1729,21 @@ export class CaseService {
           await this.store.insertArtifact({
             id: item.artifactId,
             caseId,
-            kind: file.artifactKind,
-            filename: file.relativePath,
+            kind: entry.artifactKind,
+            filename: entry.relativePath,
             uri: null,
-            mediaType: file.mediaType,
+            mediaType: entry.mediaType,
             byteLength: meta.byteLength,
             contentHash: meta.hash,
             expectedHash: meta.hash,
             verificationStatus: "verified",
             refId: null,
-            privacyClass: request.privacyClass,
+            privacyClass: input.privacyClass,
             summaryContributionId: summary.id,
             uploaderId: actor.id,
             uploaderUsername: actor.username,
             sourceId,
-            relativePath: file.relativePath,
+            relativePath: entry.relativePath,
             intakeBatchId: batchId,
           });
           await this.store.appendTimeline(caseId, {
@@ -1682,11 +1752,11 @@ export class CaseService {
             targetId: item.artifactId,
             clientTime: null,
             payload: {
-              artifactKind: file.artifactKind,
+              artifactKind: entry.artifactKind,
               contentHash: meta.hash,
-              privacyClass: request.privacyClass,
+              privacyClass: input.privacyClass,
               summaryId: summary.id,
-              relativePath: file.relativePath,
+              relativePath: entry.relativePath,
               intakeBatchId: batchId,
             },
           });
@@ -1706,7 +1776,11 @@ export class CaseService {
           actor,
           targetId: batchId,
           clientTime: null,
-          payload: { accepted: items.length, rejected: preview.report.rejected.length, origin: request.origin },
+          payload: {
+            accepted: items.length,
+            rejected: input.rejected.length,
+            origin: input.origin,
+          },
         });
         await this.audit.append({
           identity: actor.id,
@@ -1729,6 +1803,20 @@ export class CaseService {
     } finally {
       for (const stage of stages) stage.release();
     }
+  }
+
+
+  /**
+   * Content digests this investigation already holds.
+   *
+   * The streamed intake lane needs these to mark duplicates honestly without
+   * reading a single stored byte back.
+   */
+  async listCorpusDigests(caseId: string): Promise<Set<string>> {
+    const artifacts = await this.store.listArtifactsByCase(caseId);
+    return new Set(
+      artifacts.map((row) => row.contentHash).filter((hash): hash is string => Boolean(hash)),
+    );
   }
 
   async getCorpusIntakeBatch(caseId: string, batchId: string): Promise<CorpusIntakeBatchV1 | null> {

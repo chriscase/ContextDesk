@@ -2,8 +2,24 @@ import {
   CORPUS_INTAKE_LIMITS,
   corpusAllowedExtension,
 } from "@cd-collab/contracts/corpus-intake";
+import type { CorpusIntakeSessionV1 } from "@cd-collab/contracts/corpus-stream";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { pathFor, type WorkFocus } from "./app-location.js";
+import {
+  CORPUS_STAGE_COPY,
+  CORPUS_UNKNOWN_COPY,
+  CorpusIntakeTransferError,
+  cancelStreamedIntake,
+  commitStreamedIntake,
+  forgetIntakeSession,
+  formatBytes,
+  loadStreamedIntake,
+  recallIntakeSession,
+  rememberIntakeSession,
+  runStreamedIntake,
+  summarizeCorpusSelection,
+  type CorpusTransferProgress,
+} from "./corpus-intake-session.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { useRouteFocus } from "./route-focus.js";
 
@@ -78,6 +94,42 @@ const REJECTION_COPY: Record<string, { label: string; guidance: string }> = {
     label: "Preview did not finish in time",
     guidance: "Divide the corpus into smaller batches and retry.",
   },
+  unsupported_encoding: {
+    label: "Text encoding this investigation does not accept",
+    guidance: "Convert these files to UTF-8, or ask an owner to widen the accepted encodings.",
+  },
+  line_too_long: {
+    label: "A single line is too long to read safely",
+    guidance: "Split the file, or export it as JSON Lines with one record per line.",
+  },
+  structured_too_large: {
+    label: "Structured document is too large to validate",
+    guidance: "Export it as JSON Lines so it can be checked one record at a time.",
+  },
+  archive_depth_exceeded: {
+    label: "Archive nested deeper than this investigation allows",
+    guidance: "Unpack the inner archives yourself and add the files that matter.",
+  },
+  unsafe_archive_path: {
+    label: "Archive member points outside the investigation",
+    guidance: "Rebuild the archive with plain relative paths and no links.",
+  },
+  path_traversal: {
+    label: "Archive member points outside the investigation",
+    guidance: "Rebuild the archive with plain relative paths and no links.",
+  },
+  absolute_path: {
+    label: "Archive member uses an absolute path",
+    guidance: "Rebuild the archive with paths relative to its own root.",
+  },
+  symlink_or_hardlink: {
+    label: "Link rather than a file",
+    guidance: "Add the files the links point at, not the links themselves.",
+  },
+  duplicate_normalized_path: {
+    label: "Two files claim the same path",
+    guidance: "Rename one of them so each file has a distinct path.",
+  },
 };
 
 export interface CorpusRejectionSummary {
@@ -102,34 +154,17 @@ export function summarizeCorpusRejections(
     .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
 }
 
-function mib(byteLength: number): string {
-  return `${byteLength / (1024 * 1024)} MiB`;
-}
-
+/**
+ * Selection problems the browser can name without asking the server.
+ *
+ * Kept as its own export because the same judgement drives both the disabled
+ * state on the buttons and the preflight card's blocking line.
+ */
 export function corpusSelectionLimitError(
   origin: Origin,
   selected: ReadonlyArray<{ relativePath: string; size: number }>,
 ): string | null {
-  if (origin === "zip") {
-    const archive = selected[0];
-    return archive && archive.size > CORPUS_INTAKE_LIMITS.maxArchiveBytes
-      ? `ZIP archives must be ${mib(CORPUS_INTAKE_LIMITS.maxArchiveBytes)} or smaller.`
-      : null;
-  }
-  if (selected.length > CORPUS_INTAKE_LIMITS.maxFileCount) {
-    return `A batch may include at most ${CORPUS_INTAKE_LIMITS.maxFileCount.toLocaleString("en-US")} files.`;
-  }
-  let expandedBytes = 0;
-  for (const row of selected) {
-    if (row.size > CORPUS_INTAKE_LIMITS.maxFileBytes) {
-      return `${row.relativePath} is larger than ${mib(CORPUS_INTAKE_LIMITS.maxFileBytes)}.`;
-    }
-    if (row.size > CORPUS_INTAKE_LIMITS.maxExpandedBytes - expandedBytes) {
-      return `The selected files total more than ${mib(CORPUS_INTAKE_LIMITS.maxExpandedBytes)}.`;
-    }
-    expandedBytes += row.size;
-  }
-  return null;
+  return summarizeCorpusSelection(origin, selected, CORPUS_INTAKE_LIMITS).blocking;
 }
 
 function boundedError(message: string, fallback: string): string {
@@ -193,10 +228,45 @@ export function CorpusIntakePanel(props: {
   const [batch, setBatch] = useState<CommittedBatch | null>(null);
   const [busy, setBusy] = useState<"preview" | "commit" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<CorpusTransferProgress | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [interrupted, setInterrupted] = useState<CorpusIntakeSessionV1 | null>(null);
   const idempotencyKey = useRef(newIdempotencyKey());
   const inputVersion = useRef(0);
   const directoryRef = useRef<HTMLInputElement | null>(null);
+  const abort = useRef<AbortController | null>(null);
+  // The state copy drives rendering; the ref is what an async handler reads,
+  // because a handler created in an earlier render would otherwise decide what
+  // to clean up from a session id that has since changed.
+  const openSession = useRef<string | null>(null);
   useRouteFocus(props.routeFocus, true);
+
+  function noteSession(id: string | null): void {
+    openSession.current = id;
+    setSessionId(id);
+    if (id) rememberIntakeSession(props.caseId, id);
+    else forgetIntakeSession();
+  }
+
+  // A reload cannot keep the picked files, but the server still holds the bytes
+  // it already received. Surfacing that is the difference between resuming a
+  // large upload and starting it over.
+  useEffect(() => {
+    const remembered = recallIntakeSession(props.caseId);
+    if (!remembered) return;
+    let cancelled = false;
+    void loadStreamedIntake(props.caseId, remembered).then((session) => {
+      if (cancelled) return;
+      if (!session || session.state === "committed" || session.state === "cancelled") {
+        forgetIntakeSession();
+        return;
+      }
+      setInterrupted(session);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.caseId]);
 
   useEffect(() => {
     const batchId =
@@ -217,6 +287,15 @@ export function CorpusIntakePanel(props: {
         relativePath: relativeOf(file).replace(/\\/g, "/"),
       })),
     [files],
+  );
+
+  const selection = useMemo(
+    () =>
+      summarizeCorpusSelection(
+        origin,
+        payloadFiles.map((row) => ({ relativePath: row.relativePath, size: row.file.size })),
+      ),
+    [origin, payloadFiles],
   );
 
   function invalidatePreview(): void {
@@ -270,13 +349,46 @@ export function CorpusIntakePanel(props: {
     };
   }
 
+  async function runStreamedPreview(version: number): Promise<void> {
+    const controller = new AbortController();
+    abort.current = controller;
+    try {
+      const outcome = await runStreamedIntake({
+        caseId: props.caseId,
+        origin,
+        sourceLabel: sourceLabel.trim() || "investigation upload",
+        privacyClass,
+        idempotencyKey: idempotencyKey.current,
+        files: payloadFiles.map((row) => ({ relativePath: row.relativePath, file: row.file })),
+        resumeSession: interrupted,
+        signal: controller.signal,
+        onSession: (session) => noteSession(session.sessionId),
+        onProgress: setProgress,
+      });
+      setInterrupted(null);
+      if (inputVersion.current === version) {
+        noteSession(outcome.sessionId);
+        setPreview(outcome.report as unknown as PreviewReport);
+      }
+    } finally {
+      abort.current = null;
+    }
+  }
+
   async function runPreview() {
     if (props.readOnly || !props.canWrite || busy) return;
     setError(null);
     setBatch(null);
+    setProgress(null);
     setBusy("preview");
     const version = inputVersion.current;
     try {
+      if (selection.blocking) throw new Error(selection.blocking);
+      if (selection.lane === "streamed") {
+        if (payloadFiles.length === 0) throw new Error("Choose at least one file.");
+        await runStreamedPreview(version);
+        return;
+      }
       const body = await buildBody("cd-collab.corpus_intake_preview.v1");
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/corpus-intake/preview`, {
         method: "POST",
@@ -290,14 +402,62 @@ export function CorpusIntakePanel(props: {
       const report = (await response.json()) as PreviewReport;
       if (inputVersion.current === version) setPreview(report);
     } catch (cause) {
-      setError(
-        cause instanceof Error
-          ? boundedError(cause.message, "Preview could not be created.")
-          : "Preview could not be created.",
-      );
+      if (cause instanceof DOMException && cause.name === "AbortError") {
+        setError("Upload cancelled. Nothing was added to this investigation.");
+      } else {
+        setError(
+          cause instanceof CorpusIntakeTransferError
+            ? boundedError(cause.payload.message, "Preview could not be created.")
+            : cause instanceof Error
+              ? boundedError(cause.message, "Preview could not be created.")
+              : "Preview could not be created.",
+        );
+        // A session that is still waiting for bytes survives a dropped
+        // connection. Holding onto it means the next attempt continues from
+        // what the server already has instead of orphaning it and starting the
+        // whole upload again.
+        await keepResumableSession();
+      }
     } finally {
       setBusy(null);
+      setProgress(null);
     }
+  }
+
+  async function keepResumableSession(): Promise<void> {
+    const open = openSession.current;
+    if (!open) return;
+    const live = await loadStreamedIntake(props.caseId, open);
+    if (live?.state === "awaiting_bytes") {
+      setInterrupted(live);
+      return;
+    }
+    noteSession(null);
+  }
+
+  /**
+   * Stop an upload or expansion in flight.
+   *
+   * The server drops the session's spooled bytes as it unwinds, so a cancelled
+   * intake leaves no half-corpus behind for someone to wonder about later.
+   */
+  async function cancelIntake() {
+    abort.current?.abort();
+    const open = openSession.current;
+    if (open) await cancelStreamedIntake(props.caseId, open);
+    noteSession(null);
+    setInterrupted(null);
+    setProgress(null);
+    setPreview(null);
+    setBusy(null);
+    setError("Upload cancelled. Nothing was added to this investigation.");
+  }
+
+  function discardInterrupted() {
+    const open = interrupted?.sessionId;
+    if (open) void cancelStreamedIntake(props.caseId, open);
+    noteSession(null);
+    setInterrupted(null);
   }
 
   async function runCommit() {
@@ -306,6 +466,22 @@ export function CorpusIntakePanel(props: {
     setBusy("commit");
     const version = inputVersion.current;
     try {
+      if (sessionId) {
+        const committed = await commitStreamedIntake(
+          props.caseId,
+          sessionId,
+          preview.previewToken,
+          idempotencyKey.current,
+        ) as CommittedBatch;
+        noteSession(null);
+        if (inputVersion.current === version) setBatch(committed);
+        window.dispatchEvent(
+          new CustomEvent("contextdesk:corpus-intake-committed", {
+            detail: { caseId: props.caseId, batchId: committed.id },
+          }),
+        );
+        return;
+      }
       const body = await buildBody("cd-collab.corpus_intake_commit.v1", preview.previewToken);
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/corpus-intake`, {
         method: "POST",
@@ -325,9 +501,11 @@ export function CorpusIntakePanel(props: {
       );
     } catch (cause) {
       setError(
-        cause instanceof Error
-          ? boundedError(cause.message, "Intake could not be committed.")
-          : "Intake could not be committed.",
+        cause instanceof CorpusIntakeTransferError
+          ? boundedError(cause.payload.message, "Intake could not be committed.")
+          : cause instanceof Error
+            ? boundedError(cause.message, "Intake could not be committed.")
+            : "Intake could not be committed.",
       );
     } finally {
       setBusy(null);
@@ -336,11 +514,12 @@ export function CorpusIntakePanel(props: {
 
   function resetSelection(next: File[]) {
     inputVersion.current += 1;
-    idempotencyKey.current = newIdempotencyKey();
+    if (!interrupted) idempotencyKey.current = newIdempotencyKey();
     setFiles(next);
     setPreview(null);
     setBatch(null);
     setError(null);
+    setProgress(null);
   }
 
   const batchCard = batch ? (
@@ -448,6 +627,19 @@ export function CorpusIntakePanel(props: {
         Add files, a ZIP, or a browser directory. Preview the selection before saving it. Repeating
         the same upload will not create duplicate evidence.
       </p>
+      {interrupted ? (
+        <div className="corpus-intake__resume" role="status">
+          <p>
+            An upload to this investigation was interrupted.{" "}
+            {formatBytes(interrupted.progress.uploadedBytes)} of{" "}
+            {formatBytes(interrupted.selection.declaredBytes)} is already here. Choose the same
+            files again to continue from where it stopped.
+          </p>
+          <button className="login__submit" type="button" onClick={discardInterrupted}>
+            Discard the interrupted upload
+          </button>
+        </div>
+      ) : null}
       <fieldset className="corpus-intake__origin" aria-label="Intake origin">
         {(["files", "zip", "directory"] as const).map((value) => (
           <label key={value}>
@@ -535,22 +727,116 @@ export function CorpusIntakePanel(props: {
         </label>
       )}
       {payloadFiles.length > 0 ? (
-        <p className="corpus-intake__meta">
-          {payloadFiles.length} selected
+        <section className="corpus-preflight" aria-labelledby="corpus-preflight-heading">
+          <h5 id="corpus-preflight-heading">Before this upload starts</h5>
+          <dl className="corpus-preflight__facts">
+            <div>
+              <dt>{origin === "zip" ? "Archives selected" : "Files selected"}</dt>
+              <dd>{selection.fileCount.toLocaleString("en-US")}</dd>
+            </div>
+            <div>
+              <dt>{origin === "zip" ? "Compressed bytes" : "Selected bytes"}</dt>
+              <dd>{formatBytes(selection.selectedBytes)}</dd>
+            </div>
+            <div>
+              <dt>{origin === "zip" ? "Archive limit" : "Corpus limit"}</dt>
+              <dd>
+                {formatBytes(
+                  origin === "zip"
+                    ? selection.limits.maxArchiveBytes
+                    : selection.limits.maxExpandedBytes,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>How it is sent</dt>
+              <dd>
+                {selection.lane === "streamed"
+                  ? `Resumable chunks of ${formatBytes(selection.limits.maxRequestBytes)}`
+                  : "One request"}
+              </dd>
+            </div>
+          </dl>
+          <details className="corpus-preflight__stages">
+            <summary>What will be checked ({selection.stages.length} stages)</summary>
+            <ol>
+              {selection.stages.map((stage) => (
+                <li key={stage}>{CORPUS_STAGE_COPY[stage]}</li>
+              ))}
+            </ol>
+          </details>
+          {selection.unknowns.length > 0 ? (
+            <p className="corpus-intake__meta">
+              Not knowable yet:{" "}
+              {selection.unknowns.map((unknown) => CORPUS_UNKNOWN_COPY[unknown]).join("; ")}.
+            </p>
+          ) : null}
           {payloadFiles
             .filter((row) => corpusAllowedExtension(row.relativePath) === null && origin !== "zip")
             .length > 0
-            ? " · some extensions are outside the allowlist and will be rejected"
-            : ""}
-        </p>
+            ? (
+              <p className="corpus-intake__meta">
+                Some extensions are outside the allowlist and will be rejected.
+              </p>
+            )
+            : null}
+          {selection.blocking ? (
+            <p className="case-memory__error" role="alert">{selection.blocking}</p>
+          ) : null}
+        </section>
       ) : null}
       {error ? (
         <p className="case-memory__error" role="alert">
           {error}
         </p>
       ) : null}
+      {progress ? (
+        <div className="corpus-progress" role="status" aria-live="polite">
+          <p className="corpus-progress__stage">{CORPUS_STAGE_COPY[progress.stage]}</p>
+          {progress.stage === "upload" && progress.totalBytes !== null ? (
+            <>
+              <progress
+                className="corpus-progress__bar"
+                aria-label="Upload progress"
+                value={progress.uploadedBytes}
+                max={progress.totalBytes}
+              />
+              <p className="corpus-intake__meta">
+                {formatBytes(progress.uploadedBytes)} of {formatBytes(progress.totalBytes)} sent
+              </p>
+            </>
+          ) : progress.expectedExpandedBytes !== null ? (
+            <>
+              <progress
+                className="corpus-progress__bar"
+                aria-label="Expansion progress"
+                value={progress.expandedBytes}
+                max={progress.expectedExpandedBytes}
+              />
+              <p className="corpus-intake__meta">
+                {formatBytes(progress.expandedBytes)} of{" "}
+                {formatBytes(progress.expectedExpandedBytes)} expanded ·{" "}
+                {progress.filesAccepted} accepted · {progress.filesRejected} need attention
+              </p>
+            </>
+          ) : (
+            <>
+              {/* No total is knowable yet, so no bar claims one. */}
+              <progress className="corpus-progress__bar" aria-label="Working" />
+              <p className="corpus-intake__meta">
+                Total size is not known until the archive index is read.
+              </p>
+            </>
+          )}
+        </div>
+      ) : null}
       <div className="corpus-intake__actions">
-        <button className="login__submit" type="button" disabled={Boolean(busy)} onClick={() => void runPreview()}>
+        <button
+          className="login__submit"
+          type="button"
+          disabled={Boolean(busy) || Boolean(selection.blocking)}
+          onClick={() => void runPreview()}
+        >
           {busy === "preview" ? "Previewing…" : "Preview intake"}
         </button>
         <button
@@ -561,6 +847,15 @@ export function CorpusIntakePanel(props: {
         >
           {busy === "commit" ? "Committing…" : batch ? "Committed" : "Commit accepted files"}
         </button>
+        {busy === "preview" && selection.lane === "streamed" ? (
+          <button
+            className="login__submit corpus-intake__cancel"
+            type="button"
+            onClick={() => void cancelIntake()}
+          >
+            Cancel upload
+          </button>
+        ) : null}
       </div>
       {preview ? (
         <div className="corpus-intake__report">

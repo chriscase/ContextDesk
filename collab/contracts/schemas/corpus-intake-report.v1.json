@@ -4,36 +4,140 @@
   "title": "cd-collab Corpus Intake Preview Report v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaId", "caseId", "origin", "previewToken", "accepted", "rejected", "limits"],
+  "required": [
+    "schemaId",
+    "caseId",
+    "origin",
+    "previewToken",
+    "accepted",
+    "rejected",
+    "limits"
+  ],
   "properties": {
-    "schemaId": { "type": "string", "const": "cd-collab.corpus_intake_report.v1" },
-    "caseId": { "type": "string" },
-    "origin": { "type": "string", "enum": ["files", "zip", "directory"] },
-    "previewToken": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "accepted": { "type": "array" },
-    "rejected": { "type": "array" },
+    "schemaId": {
+      "type": "string",
+      "const": "cd-collab.corpus_intake_report.v1"
+    },
+    "caseId": {
+      "type": "string"
+    },
+    "origin": {
+      "type": "string",
+      "enum": [
+        "files",
+        "zip",
+        "directory"
+      ]
+    },
+    "previewToken": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "accepted": {
+      "type": "array"
+    },
+    "rejected": {
+      "type": "array"
+    },
     "limits": {
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "maxRequestBytes",
         "maxArchiveBytes",
         "maxExpandedBytes",
         "maxCompressionRatio",
         "maxFileCount",
         "maxPathDepth",
+        "maxArchiveDepth",
         "maxPathLength",
         "maxFileBytes",
-        "maxProcessingMs"
+        "maxProcessingMs",
+        "maxExpansionMs",
+        "maxLineBytes",
+        "maxStructuredParseBytes",
+        "supportedEncodings"
       ],
       "properties": {
-        "maxArchiveBytes": { "type": "integer", "const": 67108864 },
-        "maxExpandedBytes": { "type": "integer", "const": 536870912 },
-        "maxCompressionRatio": { "type": "integer", "const": 256 },
-        "maxFileCount": { "type": "integer", "const": 4096 },
-        "maxPathDepth": { "type": "integer", "const": 8 },
-        "maxPathLength": { "type": "integer", "const": 240 },
-        "maxFileBytes": { "type": "integer", "const": 67108864 },
-        "maxProcessingMs": { "type": "integer", "const": 60000 }
+        "maxRequestBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        },
+        "maxArchiveBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483648
+        },
+        "maxExpandedBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967296
+        },
+        "maxCompressionRatio": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "maxFileCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "maxPathDepth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "maxArchiveDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "maxPathLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "maxFileBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 134217728
+        },
+        "maxProcessingMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000
+        },
+        "maxExpansionMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "maxLineBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        },
+        "maxStructuredParseBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 134217728
+        },
+        "supportedEncodings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "utf-8",
+              "us-ascii",
+              "utf-8-lossy",
+              "utf-16le",
+              "utf-16be"
+            ]
+          }
+        }
       }
     }
   }
