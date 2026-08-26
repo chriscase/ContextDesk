@@ -1,7 +1,7 @@
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkFocus } from "./app-location.js";
-import { useRouteFocus } from "./route-focus.js";
+import { useRouteFocus, visibleSectionTarget } from "./route-focus.js";
 
 afterEach(cleanup);
 
@@ -106,5 +106,33 @@ describe("route focus restoration", () => {
     const view = render(<CollapsedSurface />);
     expect(view.getByTestId("disclosure")).toHaveProperty("open", true);
     expect(document.activeElement).toBe(view.getByTestId("record"));
+  });
+});
+
+/**
+ * The same panel is legitimately anchored under more than one stage — Timezone
+ * review sits on both Capture and Analyze — and only the stage on screen is a
+ * valid link target. Resolving the first id in the document instead of the
+ * first *visible* one lands a deep link on a hidden copy and focuses nothing.
+ */
+describe("section targets across duplicated stage anchors", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("resolves the visible copy when a hidden stage carries the same anchor", () => {
+    document.body.innerHTML = `
+      <div hidden><section id="triage-log-time" data-copy="capture"></section></div>
+      <div><section id="triage-log-time" data-copy="analyze"></section></div>
+    `;
+    expect(visibleSectionTarget("triage-log-time")?.dataset.copy).toBe("analyze");
+  });
+
+  it("still returns nothing when every copy is hidden", () => {
+    document.body.innerHTML = `
+      <div hidden><section id="triage-log-time"></section></div>
+      <div aria-hidden="true"><section id="triage-log-time"></section></div>
+    `;
+    expect(visibleSectionTarget("triage-log-time")).toBeNull();
   });
 });

@@ -28,6 +28,8 @@ const ROW_HEIGHT = 24;
 const VIEWPORT_HEIGHT = 360;
 const OVERSCAN = 6;
 const MAX_PANES = 4;
+/** Lines of lead-in kept above a revealed match so it has visible context. */
+const PAGE_LEAD_LINES = 10;
 
 interface InventoryItem {
   evidenceId: string;
@@ -38,6 +40,7 @@ interface InventoryItem {
   intakeBatchId: string | null;
   privacyClass: string;
   lineCount: number;
+  fullyRead?: boolean;
 }
 
 interface MatchRow {
@@ -61,6 +64,8 @@ interface SearchResult {
   bounded: boolean;
   atLeast: number;
   nextCursor: number | null;
+  cancelled?: boolean;
+  corpusTruncated?: boolean;
   timeFilterUnknownReason: string | null;
 }
 
@@ -118,6 +123,55 @@ interface ChronologyEvent {
   anchorStatus?: string | null;
 }
 
+/**
+ * One sentence a responder can act on. A partial answer never reads as a
+ * complete one: a stopped scan, a cancelled scan, and a corpus that was too
+ * large to read to the end each say so in plain words.
+ */
+function searchSummary(result: SearchResult, corpusTruncated: boolean): string {
+  const shown = `Showing ${result.returned.toLocaleString()}`;
+  if (result.cancelled) {
+    return `${shown} of at least ${result.atLeast.toLocaleString()} matches. The search stopped early, so later matches were not counted.`;
+  }
+  if (result.corpusTruncated || corpusTruncated) {
+    return `${shown} matches so far. This investigation has more log lines than one search can read, so matches past the read limit were not counted.`;
+  }
+  if (result.bounded) {
+    return `${shown} of at least ${result.atLeast.toLocaleString()} matches. Load more to keep going.`;
+  }
+  return `${result.returned.toLocaleString()} match${result.returned === 1 ? "" : "es"}. That is every match in the read lines.`;
+}
+
+/**
+ * Group keys are machine identities (an intake batch id, an observed request
+ * id). The primary line stays readable; the raw value stays behind technical
+ * details.
+ */
+function groupLabel(grouping: string, groupKey: string): string | null {
+  if (grouping === "none" || !groupKey || groupKey === "ungrouped") return null;
+  if (grouping === "batch") {
+    return groupKey === "no-batch" ? "Not part of an intake batch" : "Same intake batch";
+  }
+  if (grouping === "entity") {
+    return groupKey === "no-observed-id"
+      ? "No observed identifier on this line"
+      : `Observed id ${groupKey}`;
+  }
+  if (grouping === "severity") return `Severity ${groupKey}`;
+  return groupKey;
+}
+
+/** Stable, bounded key: same name and same view content replay as one save. */
+function viewIdempotencyKey(name: string, content: unknown): string {
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40) || "view";
+  const serialized = JSON.stringify(content);
+  let hash = 0;
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash = (Math.imul(hash, 31) + serialized.charCodeAt(index)) | 0;
+  }
+  return `view-${slug}-${(hash >>> 0).toString(36).padStart(7, "0")}`;
+}
+
 function errorText(response: Response, fallback: string): Promise<string> {
   return response
     .json()
@@ -161,6 +215,10 @@ export function LogWorkbench(props: {
   const [unknownBuckets, setUnknownBuckets] = useState<{ category: string; count: number; detail: string }[]>([]);
   const [reviewCount, setReviewCount] = useState<number | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const [corpusTruncated, setCorpusTruncated] = useState(false);
+  const [unreadFiles, setUnreadFiles] = useState<string[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [chronologyBusy, setChronologyBusy] = useState(false);
   const liveRef = useRef<HTMLParagraphElement>(null);
 
   const selectedItems = useMemo(
@@ -185,9 +243,13 @@ export function LogWorkbench(props: {
       const body = (await response.json()) as {
         items?: InventoryItem[];
         normalizationRevision?: number | null;
+        corpusTruncated?: boolean;
+        unreadFiles?: string[];
       };
       setItems(body.items ?? []);
       setRevision(body.normalizationRevision ?? null);
+      setCorpusTruncated(body.corpusTruncated === true);
+      setUnreadFiles(body.unreadFiles ?? []);
       setLoadState("ready");
       try {
         const viewsRes = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/views`);
@@ -266,6 +328,41 @@ export function LogWorkbench(props: {
     for (const id of ids) void loadPane(id);
   }, [panes, items, loadPane]);
 
+  /**
+   * Open the match. A hit list that only highlights rows already on screen is
+   * not navigation: the responder clicks a line at 4,200 and nothing moves.
+   * Selecting a match opens its file, pages to a window containing the line,
+   * and scrolls that pane to it.
+   */
+  const revealMatch = useCallback(
+    async (row: MatchRow) => {
+      if (!panes.includes(row.evidenceId) && panes.length < MAX_PANES) {
+        setPanes((current) =>
+          current.includes(row.evidenceId) ? current : [...current, row.evidenceId],
+        );
+      }
+      const page = pageByPane[row.evidenceId];
+      const inWindow =
+        page && page.rows.some((candidate) => candidate.lineNumber === row.lineNumber);
+      if (!inWindow) {
+        await loadPane(row.evidenceId, Math.max(1, row.lineNumber - PAGE_LEAD_LINES));
+      }
+      setSyncScroll(false);
+      const start = Math.max(1, row.lineNumber - PAGE_LEAD_LINES);
+      setScrollByPane((current) => ({
+        ...current,
+        [row.evidenceId]: Math.max(0, (row.lineNumber - start) * ROW_HEIGHT - VIEWPORT_HEIGHT / 3),
+      }));
+    },
+    [loadPane, pageByPane, panes],
+  );
+
+  function selectMatch(index: number) {
+    setMatchIndex(index);
+    const row = search?.matches[index];
+    if (row) void revealMatch(row);
+  }
+
   function togglePane(evidenceId: string) {
     setPanes((current) => {
       if (current.includes(evidenceId)) return current.filter((id) => id !== evidenceId);
@@ -274,63 +371,89 @@ export function LogWorkbench(props: {
     });
   }
 
-  async function runSearch() {
+  const searchFilters = useCallback(
+    () => ({
+      includeTerms: include.trim() ? [include.trim()] : [],
+      excludeTerms: exclude.trim() ? [exclude.trim()] : [],
+      severity: severity.trim() || null,
+      component: null,
+      file: null,
+      rotationFamily: null,
+      timeFrom: timeFrom.trim() || null,
+      timeTo: timeTo.trim() || null,
+      evidenceIds: panes,
+    }),
+    [include, exclude, severity, timeFrom, timeTo, panes],
+  );
+
+  /**
+   * `cursor` continues the previous page rather than starting over, so a
+   * bounded result is reachable instead of being a dead end.
+   */
+  async function runSearch(cursor = 0) {
     setError(null);
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/search`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        schemaId: "cd-collab.log_workbench_search_request.v1",
-        query,
-        mode,
-        filters: {
-          includeTerms: include.trim() ? [include.trim()] : [],
-          excludeTerms: exclude.trim() ? [exclude.trim()] : [],
-          severity: severity.trim() || null,
-          component: null,
-          file: null,
-          rotationFamily: null,
-          timeFrom: timeFrom.trim() || null,
-          timeTo: timeTo.trim() || null,
-          evidenceIds: panes,
-        },
-        contextBefore: 1,
-        contextAfter: 1,
-        cursor: 0,
-        limit: 50,
-        expectedNormalizationRevision: revision,
-      }),
-    });
-    if (!response.ok) {
-      setError(await errorText(response, "Search could not run."));
-      return;
+    setSearching(true);
+    try {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/search`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          schemaId: "cd-collab.log_workbench_search_request.v1",
+          query,
+          mode,
+          filters: searchFilters(),
+          contextBefore: 1,
+          contextAfter: 1,
+          cursor,
+          limit: 50,
+          expectedNormalizationRevision: revision,
+        }),
+      });
+      if (!response.ok) {
+        setError(await errorText(response, "Search could not run."));
+        return;
+      }
+      const result = (await response.json()) as SearchResult;
+      setSearch((current) =>
+        cursor > 0 && current
+          ? { ...result, matches: [...current.matches, ...result.matches] }
+          : result,
+      );
+      if (cursor === 0) setMatchIndex(0);
+      setNotice(searchSummary(result, corpusTruncated));
+    } finally {
+      setSearching(false);
     }
-    const result = (await response.json()) as SearchResult;
-    setSearch(result);
-    setMatchIndex(0);
-    setNotice(
-      result.bounded
-        ? `At least ${result.atLeast.toLocaleString()} matches; showing ${result.returned}.`
-        : `${result.returned.toLocaleString()} matches.`,
-    );
   }
 
   async function runChronology() {
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/chronology`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grouping, evidenceIds: panes }),
-    });
-    if (!response.ok) {
-      setError(await errorText(response, "The merged chronology could not be built."));
-      return;
+    setChronologyBusy(true);
+    try {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/chronology`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grouping, evidenceIds: panes }),
+      });
+      if (!response.ok) {
+        setError(await errorText(response, "The merged chronology could not be built."));
+        return;
+      }
+      const body = (await response.json()) as {
+        events?: ChronologyEvent[];
+        unknownBuckets?: { category: string; count: number; detail: string }[];
+        bounded?: boolean;
+        atLeast?: number;
+      };
+      setChronology(body.events ?? []);
+      setUnknownBuckets(body.unknownBuckets ?? []);
+      setNotice(
+        body.bounded
+          ? `Showing the first ${(body.events ?? []).length.toLocaleString()} of ${(body.atLeast ?? 0).toLocaleString()} lines in this chronology.`
+          : `Merged chronology built from ${(body.events ?? []).length.toLocaleString()} lines.`,
+      );
+    } finally {
+      setChronologyBusy(false);
     }
-    const body = (await response.json()) as {
-      events?: ChronologyEvent[];
-      unknownBuckets?: { category: string; count: number; detail: string }[];
-    };
-    setChronology(body.events ?? []);
-    setUnknownBuckets(body.unknownBuckets ?? []);
   }
 
   async function pinEvent(event: ChronologyEvent, status: "pinned" | "human_ground_truth") {
@@ -387,14 +510,29 @@ export function LogWorkbench(props: {
         },
         contextBefore: 1,
         contextAfter: 1,
-        idempotencyKey: `view-${viewName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}-0001`,
+        // The key covers the name *and* what the view actually holds, so
+        // re-saving the same view replays instead of erroring, while the same
+        // name over changed filters records a new view rather than a conflict.
+        idempotencyKey: viewIdempotencyKey(viewName, {
+          query,
+          mode,
+          include,
+          exclude,
+          severity,
+          timeFrom,
+          timeTo,
+          panes,
+          sort,
+          grouping,
+          syncScroll,
+        }),
       }),
     });
     if (!response.ok) {
       setError(await errorText(response, "The view could not be saved."));
       return;
     }
-    setNotice("Saved view recorded for this investigation.");
+    setNotice(`Saved view “${viewName.trim() || "Saved view"}” recorded for this investigation.`);
     await load();
   }
 
@@ -450,13 +588,12 @@ export function LogWorkbench(props: {
       setQuery("");
       setSearch(null);
     }
-    if (event.key === "F3" || (event.key === "g" && event.metaKey)) {
+    if (event.key === "F3" || ((event.key === "g" || event.key === "G") && (event.metaKey || event.ctrlKey))) {
       event.preventDefault();
       if (!search || search.matches.length === 0) return;
-      setMatchIndex((index) =>
-        event.shiftKey
-          ? (index - 1 + search.matches.length) % search.matches.length
-          : (index + 1) % search.matches.length,
+      const count = search.matches.length;
+      selectMatch(
+        event.shiftKey ? (matchIndex - 1 + count) % count : (matchIndex + 1) % count,
       );
     }
   }
@@ -528,6 +665,15 @@ export function LogWorkbench(props: {
           freeze and record the call.
         </p>
       </header>
+      {corpusTruncated ? (
+        <p className="log-workbench__notice" role="status">
+          This investigation holds more log lines than one read can cover, so the
+          workbench stopped part-way through
+          {unreadFiles.length > 0 ? ` (${unreadFiles.slice(0, 3).join(", ")}${unreadFiles.length > 3 ? ", and others" : ""})` : ""}
+          . Counts and searches below cover only the lines that were read — select
+          fewer files, or narrow the corpus on Capture, to see the rest.
+        </p>
+      ) : null}
       {reviewCount && reviewCount > 0 ? (
         <p className="log-workbench__notice">
           {reviewCount.toLocaleString()} lines still have a clock but no timezone. Open
@@ -553,7 +699,10 @@ export function LogWorkbench(props: {
               aria-label={`Show ${item.displayLabel} in a pane`}
             />
             <span>{item.displayLabel}</span>
-            <span className="log-workbench__muted">{item.relativePath}</span>
+            <span className="log-workbench__muted">
+              {item.relativePath}
+              {item.fullyRead === false ? " · not fully read" : ""}
+            </span>
             <TechnicalIdentifiers
               record={item.displayLabel}
               items={[
@@ -629,14 +778,15 @@ export function LogWorkbench(props: {
             aria-label="To (UTC)"
           />
         </label>
-        <button type="button" onClick={() => void runSearch()}>
-          Search
+        <button type="button" onClick={() => void runSearch()} disabled={searching}>
+          {searching ? "Searching…" : "Search"}
         </button>
         <button
           type="button"
+          disabled={!search || search.matches.length === 0}
           onClick={() =>
             search && search.matches.length > 0
-              ? setMatchIndex((index) => (index + search.matches.length - 1) % search.matches.length)
+              ? selectMatch((matchIndex + search.matches.length - 1) % search.matches.length)
               : undefined
           }
         >
@@ -644,25 +794,30 @@ export function LogWorkbench(props: {
         </button>
         <button
           type="button"
+          disabled={!search || search.matches.length === 0}
           onClick={() =>
             search && search.matches.length > 0
-              ? setMatchIndex((index) => (index + 1) % search.matches.length)
+              ? selectMatch((matchIndex + 1) % search.matches.length)
               : undefined
           }
         >
           Next match
         </button>
       </div>
+      <p className="log-workbench__hint">
+        A time range needs a full UTC instant, for example
+        {" "}
+        <code>2024-03-10T08:00:00Z</code>. A local time with no zone is refused rather
+        than guessed. Press F3 (or Ctrl/Cmd+G) in Find to step through matches.
+      </p>
       {search?.timeFilterUnknownReason ? (
         <p className="log-workbench__notice">{search.timeFilterUnknownReason}</p>
       ) : null}
       {search ? (
         <div>
           <p>
-            {search.bounded
-              ? `At least ${search.atLeast.toLocaleString()} matches.`
-              : `${search.returned.toLocaleString()} matches.`}
-            {activeMatch ? ` Showing match ${matchIndex + 1}.` : ""}
+            {searchSummary(search, corpusTruncated)}
+            {activeMatch ? ` Showing match ${matchIndex + 1} of ${search.matches.length}.` : ""}
           </p>
           {search.matches.length > 0 ? (
             <ol className="log-workbench__hits" aria-label="Search matches">
@@ -671,7 +826,7 @@ export function LogWorkbench(props: {
                   <button
                     type="button"
                     aria-current={index === matchIndex ? "true" : undefined}
-                    onClick={() => setMatchIndex(index)}
+                    onClick={() => selectMatch(index)}
                   >
                     {row.relativePath}:{row.lineNumber}
                   </button>
@@ -679,6 +834,17 @@ export function LogWorkbench(props: {
                 </li>
               ))}
             </ol>
+          ) : (
+            <p>No line in the read log lines matches this search.</p>
+          )}
+          {search.nextCursor !== null ? (
+            <button
+              type="button"
+              disabled={searching}
+              onClick={() => void runSearch(search.nextCursor ?? 0)}
+            >
+              {searching ? "Loading…" : "Load more matches"}
+            </button>
           ) : null}
         </div>
       ) : null}
@@ -810,8 +976,8 @@ export function LogWorkbench(props: {
             <option value="severity">Severity</option>
           </select>
         </label>
-        <button type="button" onClick={() => void runChronology()}>
-          Show merged chronology
+        <button type="button" onClick={() => void runChronology()} disabled={chronologyBusy}>
+          {chronologyBusy ? "Building chronology…" : "Show merged chronology"}
         </button>
       </div>
 
@@ -821,7 +987,7 @@ export function LogWorkbench(props: {
           {unknownBuckets.length > 0 ? (
             <details>
               <summary>
-                {unknownBuckets.reduce((sum, bucket) => sum + bucket.count, 0)} technical unknowns
+                What this chronology does not know ({unknownBuckets.length})
               </summary>
               <ul>
                 {unknownBuckets.map((bucket) => (
@@ -836,7 +1002,9 @@ export function LogWorkbench(props: {
                 <span>{event.normalizedUtc ?? event.originalTimestamp ?? "order only"}</span>
                 {" · "}
                 <span>{event.relativePath}</span>
-                {event.groupKey ? <small> Group {event.groupKey}</small> : null}
+                {groupLabel(grouping, event.groupKey ?? "") ? (
+                  <small> {groupLabel(grouping, event.groupKey ?? "")}</small>
+                ) : null}
                 {event.anchorStatus ? <small> {event.anchorStatus.replace("_", " ")}</small> : null}
                 <div>{event.excerpt}</div>
                 {props.canWrite && !props.readOnly ? (
@@ -869,14 +1037,43 @@ export function LogWorkbench(props: {
         <section aria-label="Bookmarks">
           <h5>Bookmarks</h5>
           <ul>
-            {bookmarks.map((bookmark) => (
-              <li key={bookmark.id}>
-                {bookmark.note || `Line ${bookmark.locator.lineNumber}`}
-                {bookmark.status !== "resolved" ? (
-                  <span role="status"> {bookmark.staleReason}</span>
-                ) : null}
-              </li>
-            ))}
+            {bookmarks.map((bookmark) => {
+              const owner = items.find(
+                (item) => item.evidenceId === bookmark.locator.evidenceId,
+              );
+              return (
+                <li key={bookmark.id}>
+                  {bookmark.status === "resolved" && owner ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void revealMatch({
+                          evidenceId: bookmark.locator.evidenceId,
+                          relativePath: owner.relativePath,
+                          rotationFamily: owner.rotationFamily,
+                          lineNumber: bookmark.locator.lineNumber,
+                          byteOffset: 0,
+                          text: "",
+                          wrapped: false,
+                          originalTimestamp: null,
+                          normalizedUtc: null,
+                          parseClass: "missing",
+                          contextBefore: [],
+                          contextAfter: [],
+                        })
+                      }
+                    >
+                      {bookmark.note || `Line ${bookmark.locator.lineNumber}`}
+                    </button>
+                  ) : (
+                    <span>{bookmark.note || `Line ${bookmark.locator.lineNumber}`}</span>
+                  )}
+                  {bookmark.status !== "resolved" ? (
+                    <span role="status"> {bookmark.staleReason}</span>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}

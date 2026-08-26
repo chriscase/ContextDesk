@@ -124,6 +124,13 @@ const ISO_OFFSET =
 const LOCAL_DATETIME =
   /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?!\s*(?:Z|[+-]\d{2}))/;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * A time-range bound is only accepted as a full instant with a declared zone.
+ * A bare local calendar time is refused rather than compared, because the
+ * workbench never guesses which zone a responder meant.
+ */
+const RANGE_INSTANT =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const CATASTROPHIC_REGEX =
   /(\([^()]*[+*][^()]*\)[+*])|(\{\s*(?:[6-9]\d|\d{3,})\s*(?:,\s*(?:\d+)?\s*)?\})/;
 
@@ -244,6 +251,26 @@ function requireLabel(path: string, value: string): void {
   }
 }
 
+/**
+ * Parse a time-range bound. Returns the instant in epoch milliseconds, or
+ * throws with copy a responder can act on. Never falls back to a string
+ * comparison: an unparsable bound is a refusal, not a silent filter.
+ */
+export function parseRangeInstant(path: string, value: string): number {
+  const trimmed = value.trim();
+  if (!RANGE_INSTANT.test(trimmed)) {
+    throw new ContractViolation(
+      path,
+      "must be a full UTC instant such as 2024-03-10T08:00:00Z; a local time with no zone is not accepted",
+    );
+  }
+  const instant = Date.parse(trimmed);
+  if (Number.isNaN(instant)) {
+    throw new ContractViolation(path, "is not a real calendar instant");
+  }
+  return instant;
+}
+
 export function truncateLine(text: string): { text: string; wrapped: boolean } {
   if (text.length <= WORKBENCH_LIMITS.maxLineChars) {
     return { text, wrapped: false };
@@ -318,6 +345,8 @@ export interface WorkbenchSearchResultV1 {
   atLeast: number;
   nextCursor: number | null;
   cancelled: boolean;
+  /** True when the host stopped reading the corpus before its last line. */
+  corpusTruncated: boolean;
   timeFilterApplied: boolean;
   timeFilterUnknownReason: string | null;
   expectedNormalizationRevision: number | null;
@@ -610,6 +639,7 @@ const searchResultShape: ObjectShape = {
   atLeast: f.req(f.u64),
   nextCursor: f.nul(f.u64),
   cancelled: f.req(f.bool),
+  corpusTruncated: f.req(f.bool),
   timeFilterApplied: f.req(f.bool),
   timeFilterUnknownReason: f.nul(f.str),
   expectedNormalizationRevision: f.nul(f.u64),
@@ -777,6 +807,27 @@ function assertFilters(path: string, filters: WorkbenchSearchFiltersV1): void {
       throw new ContractViolation(`${path}.excludeTerms[${index}]`, "is too long");
     }
   }
+  assertTimeRange(path, filters.timeFrom, filters.timeTo);
+}
+
+/**
+ * A half-open or closed time range is only usable if both bounds are real
+ * instants and the window is not inverted. Refusing here keeps an unparsable
+ * bound from quietly excluding every line further down.
+ */
+export function assertTimeRange(
+  path: string,
+  timeFrom: string | null,
+  timeTo: string | null,
+): void {
+  const from = timeFrom ? parseRangeInstant(`${path}.timeFrom`, timeFrom) : null;
+  const to = timeTo ? parseRangeInstant(`${path}.timeTo`, timeTo) : null;
+  if (from !== null && to !== null && from > to) {
+    throw new ContractViolation(
+      `${path}.timeTo`,
+      "is earlier than the start of the range",
+    );
+  }
 }
 
 export function parseWorkbenchSearchRequest(raw: unknown): WorkbenchSearchRequestV1 {
@@ -814,6 +865,12 @@ export function parseWorkbenchSearchResult(raw: unknown): WorkbenchSearchResultV
   if (body.bounded && body.atLeast < body.returned) {
     throw new ContractViolation("$.bounded", "bounded results must not under-count");
   }
+  if (body.corpusTruncated && !body.bounded) {
+    throw new ContractViolation(
+      "$.bounded",
+      "a partly read corpus must be reported as bounded",
+    );
+  }
   return body;
 }
 
@@ -829,6 +886,7 @@ export function parseWorkbenchView(raw: unknown): WorkbenchViewV1 {
   }
   if (body.mode === "regex") assertSafeRegex("$.query", body.query);
   assertFilters("$.filters", body.filters);
+  assertTimeRange("$", body.timeFrom, body.timeTo);
   if (body.display.displayTimezone) {
     assertIanaTimezone("$.display.displayTimezone", body.display.displayTimezone);
   }
@@ -1083,37 +1141,50 @@ function compileMatcher(request: WorkbenchSearchRequestV1): (haystack: string) =
   return (haystack) => regex.test(haystack);
 }
 
+/**
+ * Compare a line against the requested window as *instants*. The bounds have
+ * already been refused unless they parse, so no textual comparison and no
+ * guessed zone can reach this point.
+ */
 function applyTimeFilter(
   line: WorkbenchLine,
-  request: WorkbenchSearchRequestV1,
-): { keep: boolean; unknown: string | null } {
-  const { timeFrom, timeTo } = request.filters;
-  if (!timeFrom && !timeTo) return { keep: true, unknown: null };
-  if (!line.normalizedUtc) {
-    return {
-      keep: false,
-      unknown: "time range needs a normalized timestamp; this line has none",
-    };
-  }
-  if (timeFrom && line.normalizedUtc < timeFrom) return { keep: false, unknown: null };
-  if (timeTo && line.normalizedUtc > timeTo) return { keep: false, unknown: null };
-  return { keep: true, unknown: null };
+  window: { from: number | null; to: number | null } | null,
+): { keep: boolean; unresolved: boolean } {
+  if (!window) return { keep: true, unresolved: false };
+  if (!line.normalizedUtc) return { keep: false, unresolved: true };
+  const instant = Date.parse(line.normalizedUtc);
+  if (Number.isNaN(instant)) return { keep: false, unresolved: true };
+  if (window.from !== null && instant < window.from) return { keep: false, unresolved: false };
+  if (window.to !== null && instant > window.to) return { keep: false, unresolved: false };
+  return { keep: true, unresolved: false };
 }
 
 export function searchLogLines(
   lines: readonly WorkbenchLine[],
   request: WorkbenchSearchRequestV1,
-  options: { cancelled?: () => boolean } = {},
+  options: { cancelled?: () => boolean; corpusTruncated?: boolean } = {},
 ): WorkbenchSearchResultV1 {
   parseWorkbenchSearchRequest(request);
   const matcher = compileMatcher(request);
   const matches: WorkbenchMatchV1[] = [];
   let scanned = 0;
   let atLeast = 0;
-  let bounded = false;
+  // A corpus the host could not read to the end already means this answer is
+  // partial, whatever the scan finds.
+  let bounded = options.corpusTruncated === true;
   let cancelled = false;
   const timeFilterApplied = Boolean(request.filters.timeFrom || request.filters.timeTo);
-  let timeFilterUnknownReason: string | null = null;
+  const window = timeFilterApplied
+    ? {
+        from: request.filters.timeFrom
+          ? parseRangeInstant("$.filters.timeFrom", request.filters.timeFrom)
+          : null,
+        to: request.filters.timeTo
+          ? parseRangeInstant("$.filters.timeTo", request.filters.timeTo)
+          : null,
+      }
+    : null;
+  let unresolvedInWindow = 0;
   const start = request.cursor;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -1128,8 +1199,8 @@ export function searchLogLines(
       break;
     }
     const line = lines[index]!;
-    const time = applyTimeFilter(line, request);
-    if (time.unknown && !timeFilterUnknownReason) timeFilterUnknownReason = time.unknown;
+    const time = applyTimeFilter(line, window);
+    if (time.unresolved) unresolvedInWindow += 1;
     if (!time.keep) continue;
     if (!lineMatches(line, request, matcher)) continue;
     atLeast += 1;
@@ -1162,8 +1233,11 @@ export function searchLogLines(
     });
   }
   if (atLeast > matches.length) bounded = true;
+  // A cursor is only offered when advancing it can actually reach a match this
+  // page did not return. Offering one otherwise loops the reader on the same
+  // page forever.
   const nextCursor =
-    bounded && !cancelled ? start + matches.length : null;
+    !cancelled && atLeast > start + matches.length ? start + matches.length : null;
   return parseWorkbenchSearchResult({
     schemaId: WORKBENCH_SEARCH_RESULT_SCHEMA_ID,
     matches,
@@ -1172,8 +1246,14 @@ export function searchLogLines(
     atLeast: Math.max(atLeast, matches.length),
     nextCursor,
     cancelled,
+    corpusTruncated: options.corpusTruncated === true,
     timeFilterApplied,
-    timeFilterUnknownReason,
+    timeFilterUnknownReason:
+      unresolvedInWindow > 0
+        ? unresolvedInWindow === 1
+          ? "1 line was left out of this time range because it has no normalized timestamp yet. Declare a timezone in Timezone review to place it."
+          : `${unresolvedInWindow.toLocaleString()} lines were left out of this time range because they have no normalized timestamp yet. Declare a timezone in Timezone review to place them.`
+        : null,
     expectedNormalizationRevision: request.expectedNormalizationRevision,
   });
 }
@@ -1212,7 +1292,9 @@ export function pageLogLines(
     })),
     wrappedRowCount: slice.filter((line) => line.wrapped).length,
     nextStartLine: more ? last + 1 : null,
-    bounded: owned.length > windowLimit,
+    // `bounded` means "rows follow this window". A final page is not bounded,
+    // so the reader is never warned about more lines that do not exist.
+    bounded: more,
   };
 }
 
@@ -1296,6 +1378,7 @@ export function mergeChronology(
   grouping: WorkbenchGrouping,
   expectedNormalizationRevision: number | null,
   anchors: ReadonlyMap<string, ChronologyAnchorStatus> = new Map(),
+  options: { corpusTruncated?: boolean } = {},
 ): WorkbenchChronologyV1 {
   const sortable = [...lines];
   sortable.sort((left, right) => {
@@ -1313,7 +1396,8 @@ export function mergeChronology(
     }
     return left.lineNumber - right.lineNumber;
   });
-  const bounded = sortable.length > WORKBENCH_LIMITS.maxPageRows;
+  const bounded =
+    sortable.length > WORKBENCH_LIMITS.maxPageRows || options.corpusTruncated === true;
   const window = sortable.slice(0, WORKBENCH_LIMITS.maxPageRows);
   const events: WorkbenchChronologyEventV1[] = window.map((line, index) => {
     const previous = window[index - 1];
@@ -1361,21 +1445,34 @@ export function mergeChronology(
       excerpt: line.text.slice(0, 240),
     };
   });
-  const missing = lines.filter((line) => !line.normalizedUtc).length;
+  // The buckets are disjoint so their counts can be added without counting the
+  // same line twice: an ambiguous local time is a timezone unknown, not also a
+  // missing-timestamp unknown.
   const ambiguous = lines.filter((line) => line.parseClass === "local_ambiguous").length;
+  const missing = lines.filter(
+    (line) => !line.normalizedUtc && line.parseClass !== "local_ambiguous",
+  ).length;
   const unknownBuckets: WorkbenchUnknownBucketV1[] = [];
   if (missing > 0) {
     unknownBuckets.push({
       category: "timestamps",
       count: missing,
-      detail: `${missing} lines have no usable timestamp and stay in ingest order.`,
+      detail: `${missing} line${missing === 1 ? " has" : "s have"} no recognizable timestamp and stay in the order they arrived.`,
     });
   }
   if (ambiguous > 0) {
     unknownBuckets.push({
       category: "timezone",
       count: ambiguous,
-      detail: `${ambiguous} lines have local times with no declared zone.`,
+      detail: `${ambiguous} line${ambiguous === 1 ? " has a local time" : "s have local times"} with no declared zone. Declare one in Timezone review; nothing here guesses.`,
+    });
+  }
+  if (options.corpusTruncated) {
+    unknownBuckets.push({
+      category: "corpus",
+      count: 1,
+      detail:
+        "This investigation has more log lines than one chronology can read, so lines past the read limit are not represented here. Narrow the selected files to see the rest.",
     });
   }
   return parseWorkbenchChronology({
@@ -1400,6 +1497,10 @@ export function splitLogText(
   const rows: WorkbenchLine[] = [];
   let offset = 0;
   const parts = text.split(/\r?\n/);
+  // A file that ends with a newline has no extra line after it. Keeping the
+  // trailing empty split would add a phantom blank row to every pane and
+  // report every line count one too high.
+  if (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
   for (let index = 0; index < parts.length; index += 1) {
     const raw = parts[index] ?? "";
     const truncated = truncateLine(raw);

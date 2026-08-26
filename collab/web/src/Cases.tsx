@@ -3,6 +3,7 @@ import { CaseDiscussion } from "./CaseDiscussion.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
+import { LogChronologyPanel } from "./LogChronologyPanel.js";
 import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
 import { LogWorkbench } from "./LogWorkbench.js";
 import { TriageRunPanel } from "./TriageRunPanel.js";
@@ -2450,6 +2451,15 @@ export function Cases(props: {
                   canWrite={canWrite}
                   readOnly={readOnly}
                 />
+              </div>
+            </TriageAnchor>
+            {/* The normalized chronology is where a responder reads one merged
+                order across sources, with every line the host could not place
+                still named as order-only. It renders nothing when this
+                investigation has no normalized corpus. */}
+            <TriageAnchor id="triage-log-chronology" label="Normalized log chronology">
+              <div hidden={workstreamFocused}>
+                <LogChronologyPanel caseId={current.id} />
               </div>
             </TriageAnchor>
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">

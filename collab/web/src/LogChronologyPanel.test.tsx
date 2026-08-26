@@ -148,3 +148,38 @@ describe("LogChronologyPanel", () => {
     expect(await screen.findByText("fresh chronology after timezone change")).toBeTruthy();
   });
 });
+
+/**
+ * The panel now renders inside the investigation workspace, so a reply it
+ * cannot read must degrade to an error rather than throwing during render and
+ * taking the whole stage down with it.
+ */
+describe("LogChronologyPanel resilience", () => {
+  it("reports a reply it cannot read instead of crashing the stage", async () => {
+    stubFetch([{ rows: [], corpusRevision: 2 }]);
+    render(<LogChronologyPanel caseId={CASE_ID} />);
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toMatch(/could not be read/);
+  });
+
+  it("does not query the corpus once per keystroke while a filter is typed", async () => {
+    vi.useFakeTimers();
+    try {
+      const urls = stubFetch([page()]);
+      render(<LogChronologyPanel caseId={CASE_ID} />);
+      await vi.advanceTimersByTimeAsync(300);
+      const afterFirstLoad = urls.length;
+      const search = screen.getByLabelText("Search log messages");
+      for (const value of ["t", "ti", "tim", "time", "timeo"]) {
+        fireEvent.change(search, { target: { value } });
+        await vi.advanceTimersByTimeAsync(40);
+      }
+      expect(urls.length).toBe(afterFirstLoad);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(urls.length).toBe(afterFirstLoad + 1);
+      expect(urls.at(-1)).toContain("search=timeo");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

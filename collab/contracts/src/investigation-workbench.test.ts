@@ -482,3 +482,183 @@ describe("workbench limits", () => {
     expect(WORKBENCH_LIMITS.maxPanes).toBe(4);
   });
 });
+
+/**
+ * Regressions for the honesty defects found in triage review: a partial answer
+ * must never read as a complete one, and a time bound is refused rather than
+ * compared as text.
+ */
+describe("bounded answers stay honest", () => {
+  const utc = (line: number) =>
+    `2024-03-10T0${line}:00:00Z INFO edge request rid-000${line}`;
+  const three = splitLogText(
+    EVIDENCE_A,
+    "gateway/edge.log",
+    DIGEST,
+    `${utc(1)}\n${utc(2)}\n${utc(3)}\n`,
+    null,
+  );
+
+  it("does not add a phantom row for the newline that ends a file", () => {
+    expect(three).toHaveLength(3);
+    expect(three.every((line) => line.text.trim().length > 0)).toBe(true);
+    // A file with a genuinely blank last line still keeps it.
+    expect(
+      splitLogText(EVIDENCE_A, "gateway/edge.log", DIGEST, "one\n\n", null),
+    ).toHaveLength(2);
+  });
+
+  it("reports a corpus the host could not read to the end as bounded", () => {
+    const result = searchLogLines(three, searchRequest({ query: "edge" }), {
+      corpusTruncated: true,
+    });
+    expect(result.corpusTruncated).toBe(true);
+    expect(result.bounded).toBe(true);
+  });
+
+  it("refuses a result that claims a partial corpus was a complete answer", () => {
+    expect(() =>
+      parseWorkbenchSearchResult({
+        schemaId: "cd-collab.log_workbench_search_result.v1",
+        matches: [],
+        returned: 0,
+        bounded: false,
+        atLeast: 0,
+        nextCursor: null,
+        cancelled: false,
+        corpusTruncated: true,
+        timeFilterApplied: false,
+        timeFilterUnknownReason: null,
+        expectedNormalizationRevision: 3,
+      }),
+    ).toThrow(/partly read corpus/);
+  });
+
+  it("only offers a cursor when advancing it can reach an uncounted match", () => {
+    const complete = searchLogLines(three, searchRequest({ query: "edge" }));
+    expect(complete.nextCursor).toBeNull();
+    const firstPage = searchLogLines(three, searchRequest({ query: "edge", limit: 2 }));
+    expect(firstPage.nextCursor).toBe(2);
+    const lastPage = searchLogLines(
+      three,
+      searchRequest({ query: "edge", limit: 2, cursor: 2 }),
+    );
+    expect(lastPage.returned).toBe(1);
+    expect(lastPage.nextCursor).toBeNull();
+  });
+
+  it("does not warn about more lines on a final page", () => {
+    const page = pageLogLines(three, EVIDENCE_A, 3, 2);
+    expect(page.rows).toHaveLength(1);
+    expect(page.nextStartLine).toBeNull();
+    expect(page.bounded).toBe(false);
+    expect(pageLogLines(three, EVIDENCE_A, 1, 2).bounded).toBe(true);
+  });
+});
+
+describe("time range bounds are instants, never text", () => {
+  const lines = splitLogText(
+    EVIDENCE_A,
+    "gateway/edge.log",
+    DIGEST,
+    "2024-03-10T07:30:00Z INFO edge early\n2024-03-10T08:30:00Z INFO edge late\n",
+    null,
+  );
+
+  it("refuses a bound that is not a real instant instead of filtering by it", () => {
+    for (const bad of ["yesterday", "2024-03-10 08:00", "2024-03-10", "08:00Z"]) {
+      expect(() =>
+        parseWorkbenchSearchRequest(
+          searchRequest({ filters: { ...emptyFilters(), timeFrom: bad } }),
+        ),
+      ).toThrow(/full UTC instant/);
+    }
+  });
+
+  it("refuses an inverted window rather than returning nothing", () => {
+    expect(() =>
+      parseWorkbenchSearchRequest(
+        searchRequest({
+          filters: {
+            ...emptyFilters(),
+            timeFrom: "2024-03-10T09:00:00Z",
+            timeTo: "2024-03-10T08:00:00Z",
+          },
+        }),
+      ),
+    ).toThrow(/earlier than the start/);
+  });
+
+  it("compares instants, so an equivalent bound spelling filters the same way", () => {
+    const zulu = searchLogLines(
+      lines,
+      searchRequest({ query: "edge", filters: { ...emptyFilters(), timeFrom: "2024-03-10T08:00:00Z" } }),
+    );
+    const offset = searchLogLines(
+      lines,
+      searchRequest({
+        query: "edge",
+        filters: { ...emptyFilters(), timeFrom: "2024-03-10T09:00:00+01:00" },
+      }),
+    );
+    expect(zulu.returned).toBe(1);
+    expect(zulu.matches[0]?.text).toMatch(/late/);
+    expect(offset.returned).toBe(1);
+    expect(offset.matches[0]?.text).toMatch(/late/);
+  });
+
+  it("counts the lines a window could not place instead of naming only the first", () => {
+    const mixed = splitLogText(
+      EVIDENCE_B,
+      "worker/batch.log",
+      DIGEST,
+      "2024-03-10 01:30:00 INFO sweep one\n2024-03-10 02:30:00 INFO sweep two\n",
+      null,
+    );
+    const result = searchLogLines(
+      mixed,
+      searchRequest({
+        query: "sweep",
+        filters: {
+          ...emptyFilters(),
+          timeFrom: "2024-03-10T07:00:00Z",
+          timeTo: "2024-03-10T09:00:00Z",
+        },
+      }),
+    );
+    expect(result.returned).toBe(0);
+    expect(result.timeFilterUnknownReason).toMatch(/^2 lines were left out/);
+    expect(result.timeFilterUnknownReason).toMatch(/Timezone review/);
+  });
+
+  it("holds a saved view to the same bound rule", () => {
+    const view = load("fixtures", "log-workbench-view.valid.json") as Record<string, unknown>;
+    expect(() => parseWorkbenchView({ ...view, timeFrom: "sometime tuesday" })).toThrow(
+      /full UTC instant/,
+    );
+  });
+});
+
+describe("chronology unknowns are countable", () => {
+  it("counts each line in exactly one unknown bucket", () => {
+    const lines = splitLogText(
+      EVIDENCE_B,
+      "worker/batch.log",
+      DIGEST,
+      "2024-03-10 02:30:00 WARN heartbeat late\nno timestamp at all here\n",
+      null,
+    );
+    const chronology = mergeChronology(lines, "none", 3);
+    const total = chronology.unknownBuckets.reduce((sum, bucket) => sum + bucket.count, 0);
+    expect(total).toBe(2);
+    expect(chronology.unknownBuckets.find((b) => b.category === "timezone")?.count).toBe(1);
+    expect(chronology.unknownBuckets.find((b) => b.category === "timestamps")?.count).toBe(1);
+  });
+
+  it("names the lines a truncated corpus left out of the chronology", () => {
+    const lines = splitLogText(EVIDENCE_A, "gateway/edge.log", DIGEST, "2024-03-10T07:30:00Z INFO edge\n", null);
+    const chronology = mergeChronology(lines, "none", 3, new Map(), { corpusTruncated: true });
+    expect(chronology.bounded).toBe(true);
+    expect(chronology.unknownBuckets.some((bucket) => bucket.category === "corpus")).toBe(true);
+  });
+});

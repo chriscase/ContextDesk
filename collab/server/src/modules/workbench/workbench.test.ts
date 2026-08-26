@@ -432,3 +432,99 @@ describe("chronology and review queue", () => {
     expect(page.rows.every((row) => row.evidenceId === EVIDENCE_A)).toBe(true);
   });
 });
+
+/**
+ * The read limit is real. A responder must never be told "no matches" about a
+ * corpus the workbench stopped reading part-way through: that is a confident
+ * false negative on exactly the question they opened the workbench to answer.
+ */
+describe("a corpus larger than one read admits what it did not read", () => {
+  const filler = (count: number, from = 0) =>
+    Array.from({ length: count }, (_, index) => `line ${from + index} filler`).join("\n");
+
+  it("reports a search over a truncated corpus as bounded, not as zero matches", async () => {
+    const oversized = `${filler(50_000)}\nthe needle is here\n`;
+    const { service } = harness({
+      files: [file(EVIDENCE_A, "big/app.log", oversized)],
+    });
+    const result = await service.search(CASE_ID, ACTOR, false, {
+      ...SEARCH,
+      query: "needle",
+    });
+    expect(result.returned).toBe(0);
+    expect(result.corpusTruncated).toBe(true);
+    expect(result.bounded).toBe(true);
+  });
+
+  it("names the files the read limit never reached instead of listing them as empty", async () => {
+    const { service } = harness({
+      files: [
+        file(EVIDENCE_A, "a-big/app.log", filler(50_000)),
+        file(EVIDENCE_B, "b-small/app.log", "the needle is here\n"),
+      ],
+    });
+    const inventory = await service.inventory(CASE_ID, ACTOR, false);
+    expect(inventory.corpusTruncated).toBe(true);
+    expect(inventory.unreadFiles).toContain("app.log");
+    expect(inventory.items.find((item) => item.evidenceId === EVIDENCE_B)?.fullyRead).toBe(
+      false,
+    );
+    expect(inventory.items.find((item) => item.evidenceId === EVIDENCE_A)?.fullyRead).toBe(
+      true,
+    );
+  });
+
+  it("explains an unreached file instead of reporting it as missing", async () => {
+    const { service } = harness({
+      files: [
+        file(EVIDENCE_A, "a-big/app.log", filler(50_000)),
+        file(EVIDENCE_B, "b-small/app.log", "the needle is here\n"),
+      ],
+    });
+    await expect(
+      service.page(CASE_ID, ACTOR, false, EVIDENCE_B, 1, 80),
+    ).rejects.toThrow(/more log lines than one read can cover/);
+  });
+
+  it("still reports an ordinary corpus as a complete answer", async () => {
+    const { service } = harness();
+    const inventory = await service.inventory(CASE_ID, ACTOR, false);
+    expect(inventory.corpusTruncated).toBe(false);
+    expect(inventory.unreadFiles).toEqual([]);
+    expect(inventory.items.every((item) => item.fullyRead)).toBe(true);
+    const result = await service.search(CASE_ID, ACTOR, false, SEARCH);
+    expect(result.corpusTruncated).toBe(false);
+    expect(result.bounded).toBe(false);
+  });
+
+  it("counts only the lines a file really has", async () => {
+    const { service } = harness();
+    // The gateway fixture ends with a newline; that is three lines, not four.
+    const inventory = await service.inventory(CASE_ID, ACTOR, false);
+    expect(inventory.items.find((item) => item.evidenceId === EVIDENCE_A)?.lineCount).toBe(3);
+  });
+});
+
+describe("a time window is refused rather than compared as text", () => {
+  it("rejects a bound that is not a full instant", async () => {
+    const { service } = harness();
+    await expect(
+      service.search(CASE_ID, ACTOR, false, {
+        ...SEARCH,
+        query: "edge",
+        filters: { ...SEARCH.filters, timeFrom: "2024-03-10 08:00" },
+      }),
+    ).rejects.toThrow(/full UTC instant/);
+  });
+
+  it("keeps a line the window really contains", async () => {
+    const { service } = harness();
+    const result = await service.search(CASE_ID, ACTOR, false, {
+      ...SEARCH,
+      query: "edge",
+      filters: { ...SEARCH.filters, timeFrom: "2024-03-10T08:00:00Z" },
+    });
+    expect(result.returned).toBe(1);
+    expect(result.matches[0]?.text).toMatch(/upstream timeout/);
+  });
+});

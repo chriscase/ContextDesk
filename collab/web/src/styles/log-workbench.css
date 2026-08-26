@@ -16,9 +16,28 @@
 
 .log-workbench__lede,
 .log-workbench__muted,
+.log-workbench__hint,
 .log-workbench__notice {
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+.log-workbench__hint {
+  margin: 0;
+}
+
+.log-workbench__hint code {
+  font-size: 0.8rem;
+}
+
+.log-workbench button[disabled] {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.log-workbench__pane:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .log-workbench__error {

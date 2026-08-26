@@ -90,6 +90,17 @@ export interface WorkbenchCasePort {
   ): Promise<unknown>;
 }
 
+/** Bounded read of an investigation's intake bytes, with what it left unread. */
+export interface WorkbenchCorpus {
+  lines: WorkbenchLine[];
+  /** True when the read limit stopped before the corpus ended. */
+  truncated: boolean;
+  /** Evidence ids whose every line was read. */
+  fullyRead: Set<string>;
+  /** Paths that were cut short or never reached, in intake order. */
+  partiallyRead: string[];
+}
+
 export interface WorkbenchServiceDeps {
   store: WorkbenchStore;
   cases: WorkbenchCasePort;
@@ -116,11 +127,26 @@ export class WorkbenchService {
     if (!found) throw new WorkbenchNotFoundError();
   }
 
-  async loadLines(caseId: string): Promise<WorkbenchLine[]> {
+  /**
+   * Read the investigation's intake bytes up to the bounded work limit.
+   *
+   * The limit is real, so the result says where it stopped. Callers must carry
+   * `truncated` into whatever they return: a search that silently dropped the
+   * tail of a corpus and then reports "no matches" is worse than one that
+   * admits it did not read to the end.
+   */
+  async loadCorpus(caseId: string): Promise<WorkbenchCorpus> {
     const files = await this.deps.cases.listEvidenceFiles(caseId);
     const lines: WorkbenchLine[] = [];
+    const fullyRead = new Set<string>();
+    const partiallyRead: string[] = [];
     let work = 0;
+    let truncated = false;
     for (const file of files) {
+      if (truncated) {
+        partiallyRead.push(file.relativePath);
+        continue;
+      }
       const rows = splitLogText(
         file.evidenceId,
         file.relativePath,
@@ -128,16 +154,31 @@ export class WorkbenchService {
         decodeText(file.text),
         file.intakeBatchId,
       );
+      let taken = 0;
       for (const row of rows) {
+        if (work >= WORKBENCH_LIMITS.maxSearchWorkLines) {
+          truncated = true;
+          break;
+        }
         work += 1;
-        if (work > WORKBENCH_LIMITS.maxSearchWorkLines) break;
+        taken += 1;
         lines.push(row);
       }
-      if (work > WORKBENCH_LIMITS.maxSearchWorkLines) break;
+      if (taken < rows.length) {
+        truncated = true;
+        partiallyRead.push(file.relativePath);
+      } else {
+        fullyRead.add(file.evidenceId);
+      }
     }
     const stamps = await this.deps.cases.listHostEventStamps?.(caseId);
-    if (!stamps || stamps.length === 0) return lines;
-    return applyHostTimestamps(lines, stamps);
+    const stamped =
+      !stamps || stamps.length === 0 ? lines : applyHostTimestamps(lines, stamps);
+    return { lines: stamped, truncated, fullyRead, partiallyRead };
+  }
+
+  async loadLines(caseId: string): Promise<WorkbenchLine[]> {
+    return (await this.loadCorpus(caseId)).lines;
   }
 
   async inventory(caseId: string, actor: Actor, isAdmin: boolean): Promise<{
@@ -150,14 +191,20 @@ export class WorkbenchService {
       intakeBatchId: string | null;
       privacyClass: PrivacyClass;
       lineCount: number;
+      /** False when the read limit stopped before this file's last line. */
+      fullyRead: boolean;
     }[];
     normalizationRevision: number | null;
+    /** True when this investigation has more lines than one read can cover. */
+    corpusTruncated: boolean;
+    /** Files the read limit cut short or never reached, by display name. */
+    unreadFiles: string[];
   }> {
     await this.assertReadable(caseId, actor, isAdmin);
     const files = await this.deps.cases.listEvidenceFiles(caseId);
-    const lines = await this.loadLines(caseId);
+    const corpus = await this.loadCorpus(caseId);
     const counts = new Map<string, number>();
-    for (const line of lines) {
+    for (const line of corpus.lines) {
       counts.set(line.evidenceId, (counts.get(line.evidenceId) ?? 0) + 1);
     }
     return {
@@ -170,8 +217,11 @@ export class WorkbenchService {
         intakeBatchId: file.intakeBatchId,
         privacyClass: file.privacyClass,
         lineCount: counts.get(file.evidenceId) ?? 0,
+        fullyRead: corpus.fullyRead.has(file.evidenceId),
       })),
       normalizationRevision: await this.deps.cases.currentNormalizationRevision(caseId),
+      corpusTruncated: corpus.truncated,
+      unreadFiles: corpus.partiallyRead.map((path) => path.split("/").pop() || path),
     };
   }
 
@@ -196,11 +246,12 @@ export class WorkbenchService {
         `stale normalization revision: expected ${request.expectedNormalizationRevision}, current ${current ?? "none"}`,
       );
     }
-    const lines = await this.loadLines(caseId);
-    return searchLogLines(lines, {
-      ...request,
-      expectedNormalizationRevision: current,
-    });
+    const corpus = await this.loadCorpus(caseId);
+    return searchLogLines(
+      corpus.lines,
+      { ...request, expectedNormalizationRevision: current },
+      { corpusTruncated: corpus.truncated },
+    );
   }
 
   async page(
@@ -212,9 +263,16 @@ export class WorkbenchService {
     limit: number,
   ): Promise<WorkbenchPageV1> {
     await this.assertReadable(caseId, actor, isAdmin);
-    const lines = await this.loadLines(caseId);
-    const owned = lines.filter((line) => line.evidenceId === evidenceId);
-    if (owned.length === 0) throw new WorkbenchNotFoundError();
+    const corpus = await this.loadCorpus(caseId);
+    const owned = corpus.lines.filter((line) => line.evidenceId === evidenceId);
+    if (owned.length === 0) {
+      if (corpus.truncated) {
+        throw new WorkbenchConflictError(
+          "This investigation holds more log lines than one read can cover, so this file was not reached. Narrow the selected files and try again.",
+        );
+      }
+      throw new WorkbenchNotFoundError();
+    }
     return pageLogLines(owned, evidenceId, startLine, limit);
   }
 
@@ -227,7 +285,8 @@ export class WorkbenchService {
   ): Promise<WorkbenchChronologyV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const current = await this.deps.cases.currentNormalizationRevision(caseId);
-    let lines = await this.loadLines(caseId);
+    const corpus = await this.loadCorpus(caseId);
+    let lines = corpus.lines;
     if (evidenceIds.length > 0) {
       lines = lines.filter((line) => evidenceIds.includes(line.evidenceId));
     }
@@ -237,7 +296,9 @@ export class WorkbenchService {
         row.status,
       ]),
     );
-    return mergeChronology(lines, grouping, current, anchors);
+    return mergeChronology(lines, grouping, current, anchors, {
+      corpusTruncated: corpus.truncated,
+    });
   }
 
   async pinChronologyAnchor(

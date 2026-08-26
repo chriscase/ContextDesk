@@ -184,7 +184,8 @@ describe("Log workbench", () => {
       target: { value: "timeout" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
-    await waitFor(() => expect(screen.getAllByText(/1 matches/).length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText(/1 match\b/).length).toBeGreaterThan(0));
+    expect(screen.getAllByText(/every match in the read lines/).length).toBeGreaterThan(0);
     expect(screen.getByRole("list", { name: "Search matches" }).textContent).toMatch(
       /upstream timeout/,
     );
@@ -259,5 +260,197 @@ describe("Log workbench", () => {
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+});
+
+/**
+ * Regressions for the triage-usability defects: a partial read must be visible,
+ * a hit list must actually navigate, and re-saving a view under one name must
+ * not collide.
+ */
+describe("Log workbench honesty and navigation", () => {
+  it("says so on Analyze when the corpus was only read part-way", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/workbench")) {
+          return jsonResponse({
+            ...inventory(),
+            corpusTruncated: true,
+            unreadFiles: ["batch.log"],
+          });
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    expect(await screen.findByText(/more log lines than one read can cover/)).toBeTruthy();
+    expect(screen.getByText(/batch\.log/)).toBeTruthy();
+  });
+
+  it("does not describe a bounded search as a complete count", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        if (url.includes("/workbench/search")) {
+          return jsonResponse({
+            matches: [],
+            returned: 0,
+            bounded: true,
+            atLeast: 0,
+            nextCursor: null,
+            cancelled: false,
+            corpusTruncated: true,
+            timeFilterApplied: false,
+            timeFilterUnknownReason: null,
+            expectedNormalizationRevision: 3,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "needle" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/matches past the read limit were not counted/).length)
+        .toBeGreaterThan(0),
+    );
+    expect(screen.queryByText(/^0 matches\./)).toBeNull();
+  });
+
+  it("opens the matched file at the matched line when a hit is chosen", async () => {
+    const pageRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        if (url.includes("/workbench/search")) {
+          return jsonResponse({
+            matches: [
+              {
+                evidenceId: EVIDENCE_A,
+                relativePath: "gateway/edge.log",
+                rotationFamily: "gateway/edge.log",
+                lineNumber: 4200,
+                byteOffset: 91_000,
+                text: "ERROR edge upstream timeout rid-0003",
+                wrapped: false,
+                originalTimestamp: null,
+                normalizedUtc: null,
+                parseClass: "missing",
+                contextBefore: [],
+                contextAfter: [],
+              },
+            ],
+            returned: 1,
+            bounded: false,
+            atLeast: 1,
+            nextCursor: null,
+            cancelled: false,
+            corpusTruncated: false,
+            timeFilterApplied: false,
+            timeFilterUnknownReason: null,
+            expectedNormalizationRevision: 3,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "timeout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByRole("list", { name: "Search matches" });
+    pageRequests.length = 0;
+    fireEvent.click(screen.getByRole("button", { name: "gateway/edge.log:4200" }));
+    // The pane is paged to a window that contains line 4200 rather than left
+    // sitting on line 1 where the match cannot be seen.
+    await waitFor(() =>
+      expect(pageRequests.some((url) => /startLine=419\d/.test(url))).toBe(true),
+    );
+  });
+
+  it("saves a changed view under the same name instead of colliding on the key", async () => {
+    const saved: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { idempotencyKey: string };
+          saved.push(body.idempotencyKey);
+          return jsonResponse({ id: "33333333-3333-4333-8333-333333333333" });
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "timeout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save view" }));
+    await waitFor(() => expect(saved).toHaveLength(1));
+    fireEvent.change(screen.getByLabelText("Find in logs"), {
+      target: { value: "timeout rid-0003" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save view" }));
+    await waitFor(() => expect(saved).toHaveLength(2));
+    expect(saved[0]).not.toBe(saved[1]);
+    // The same view saved twice still replays under one key.
+    fireEvent.click(screen.getByRole("button", { name: "Save view" }));
+    await waitFor(() => expect(saved).toHaveLength(3));
+    expect(saved[2]).toBe(saved[1]);
   });
 });

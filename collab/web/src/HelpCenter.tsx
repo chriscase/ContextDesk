@@ -293,14 +293,16 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         steps: [
           "Open Analyze and find Log workbench.",
           "Tick two or more files to open them side by side.",
-          "Search. If the count is bounded, it says “at least N”.",
+          "Search, then choose a hit to open that file at the matching line.",
+          "Read the count: an exact count says so, a bounded one says “at least N”, and a corpus too large to read to the end says that matches past the read limit were not counted.",
+          "Narrow by time with a full UTC instant such as 2024-03-10T08:00:00Z; a local time with no zone is refused rather than guessed.",
           "Save a view or bookmark a line. Those records are not permission tokens.",
-          "Declare timezones in Timezone review when local clocks have no offset.",
+          "Declare timezones in Timezone review when local clocks have no offset, then read Normalized log chronology for one merged order.",
         ],
         recorded:
           "Saved views and bookmarks stay with the investigation. A stale bookmark explains that the file bytes moved; it does not silently jump to another line.",
         limits:
-          "Search and paging are bounded. Regex that would run unbounded is refused. Share-safe locator tokens re-check authorization and do not reveal a private filename to someone who cannot open the investigation.",
+          "Search and paging are bounded, and a bounded answer says so rather than reading as a complete one. An investigation with more log lines than one read can cover reports which files it did not finish. Regex that would run unbounded is refused. Share-safe locator tokens re-check authorization and do not reveal a private filename to someone who cannot open the investigation.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
