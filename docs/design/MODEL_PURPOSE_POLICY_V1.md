@@ -150,4 +150,3 @@ Required tests:
   admission journey;
 - privacy scan proving no endpoint, credential, prompt, raw evidence, or model
   response enters the policy API or browser payload.
-

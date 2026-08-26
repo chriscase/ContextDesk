@@ -29,7 +29,6 @@ export class MemoryModelPurposePolicyStore implements ModelPurposePolicyStore {
     this.current = parseModelPurposePolicy(policy);
   }
 }
-
 export class PgModelPurposePolicyStore implements ModelPurposePolicyStore {
   constructor(private readonly pool: Pick<Pool, "query">) {}
 
@@ -55,4 +54,3 @@ export class PgModelPurposePolicyStore implements ModelPurposePolicyStore {
     );
   }
 }
-

@@ -12,4 +12,3 @@ BEGIN
     GRANT SELECT, INSERT, UPDATE ON TABLE model_purpose_policy_state TO collab_app;
   END IF;
 END $$;
-

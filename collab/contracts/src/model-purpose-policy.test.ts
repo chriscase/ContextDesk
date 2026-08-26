@@ -43,4 +43,3 @@ describe("model-purpose policy contracts", () => {
     })).toThrow(/exactly the supported purposes/);
   });
 });
-
