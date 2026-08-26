@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { ImportedRun } from "./ImportedRun.js";
 import type { WorkFocus } from "./app-location.js";
 import { CorpusIntakePanel } from "./CorpusIntakePanel.js";
+import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
 import { useRouteFocus } from "./route-focus.js";
 
 export interface TimelineEvent {
@@ -493,12 +494,21 @@ export function TriageWorkspace(props: {
           </p>
         )}
         {props.caseId ? (
-          <CorpusIntakePanel
-            caseId={props.caseId}
-            canWrite={props.canWrite}
-            readOnly={props.readOnly}
-            {...(props.routeFocus ? { routeFocus: props.routeFocus } : {})}
-          />
+          <>
+            <CorpusIntakePanel
+              caseId={props.caseId}
+              canWrite={props.canWrite}
+              readOnly={props.readOnly}
+              {...(props.routeFocus ? { routeFocus: props.routeFocus } : {})}
+            />
+            <TriageAnchor id="triage-log-time" label="Timezone review">
+              <LogTimeReviewPanel
+                caseId={props.caseId}
+                canWrite={props.canWrite}
+                readOnly={props.readOnly}
+              />
+            </TriageAnchor>
+          </>
         ) : null}
         <section className="triage-record" aria-labelledby="triage-record-title">
           <header className="triage-record__head">

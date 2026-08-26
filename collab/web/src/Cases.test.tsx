@@ -1329,6 +1329,139 @@ describe("focused investigation view", () => {
     expect(screen.queryByRole("heading", { name: "Experiment lab" })).toBeNull();
   });
 
+  it("reviews unresolved log time beside Capture intake and applies only the exact preview", async () => {
+    const fingerprint = "a".repeat(64);
+    const mutations: Array<{ url: string; body: Record<string, unknown> }> = [];
+    stubCaseFetch({
+      onRequest: (url, init) => {
+        if (url === "/api/cases/c1/log-time" && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              state: {
+                caseId: "c1",
+                corpusId: "corpus-c1",
+                corpusRevision: 7,
+                builtAt: "2026-08-25T12:00:00Z",
+                privacyClass: "owner_only",
+                sources: [{
+                  source: "mailer/offsetless.log",
+                  unresolvedLocalRecords: 2,
+                  resolvedLocalRecords: 0,
+                  explicitWallClockRecords: 0,
+                  otherOrderOnlyRecords: 0,
+                  declaration: null,
+                }],
+                reviewOutstanding: true,
+                undoableRevision: null,
+              },
+              dependents: [],
+            }),
+          });
+        }
+        if (url === "/api/cases/c1/log-time/preview" && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          mutations.push({ url, body });
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              corpusRevision: 7,
+              declarationFingerprint: fingerprint,
+              source: "mailer/offsetless.log",
+              ianaTimezone: "America/Chicago",
+              affectedRecords: 2,
+              existingWallClockRecords: 0,
+              unchangedOrderOnlyRecords: 0,
+              firstResolvedInstant: "2026-08-25T14:00:00Z",
+              lastResolvedInstant: "2026-08-25T14:01:00Z",
+              dstGapCount: 0,
+              dstFoldCount: 0,
+              unsupportedTimestampCount: 0,
+              zoneAbbreviationMismatchCount: 0,
+              outOfRangeCount: 0,
+              samples: [],
+            }),
+          });
+        }
+        if (url === "/api/cases/c1/log-time/apply" && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          mutations.push({ url, body });
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ schemaId: "cd-collab.log_time_outcome.v1" }),
+          });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["case-lead"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+
+    const stageNav = screen.getByRole("navigation", { name: "Investigation stages" });
+    fireEvent.click(within(stageNav).getByRole("button", { name: /Capture/ }));
+    const capture = screen.getByRole("region", { name: "Capture" });
+    const review = await within(capture).findByRole("region", { name: "Timezone review" });
+    const intakeHeading = within(capture).getByRole("heading", {
+      name: "Logs and files for this investigation",
+    });
+
+    expect(
+      (intakeHeading.closest("section") as HTMLElement).compareDocumentPosition(review)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(review.textContent).toContain(
+      "One log file records a clock time but not which timezone it was in.",
+    );
+    expect(review.textContent).toContain(
+      "Until someone says which zone each was written in, those lines stay in file order and carry no exact time. ContextDesk will not guess.",
+    );
+    expect(mutations).toEqual([]);
+
+    fireEvent.click(within(review).getByRole("button", { name: "Declare a timezone" }));
+    const zone = within(review).getByLabelText("Which timezone was this file written in?");
+    expect((zone as HTMLInputElement).value).toBe("");
+    expect(
+      within(review).getByRole("button", { name: "Show me what this would do" }),
+    ).toHaveProperty("disabled", true);
+
+    fireEvent.change(zone, { target: { value: "America/Chicago" } });
+    fireEvent.click(within(review).getByRole("button", { name: "Show me what this would do" }));
+    expect(
+      await within(review).findByRole("group", { name: "Preview of this timezone" }),
+    ).toBeTruthy();
+    expect(mutations).toEqual([{
+      url: "/api/cases/c1/log-time/preview",
+      body: {
+        schemaId: "cd-collab.log_time_preview_request.v1",
+        source: "mailer/offsetless.log",
+        ianaTimezone: "America/Chicago",
+        expectedRevision: 7,
+      },
+    }]);
+
+    fireEvent.click(
+      within(review).getByRole("button", {
+        name: "Apply America/Chicago to this file",
+      }),
+    );
+    await waitFor(() => expect(mutations).toHaveLength(2));
+    expect(mutations[1]?.url).toBe("/api/cases/c1/log-time/apply");
+    expect(mutations[1]?.body).toEqual({
+      schemaId: "cd-collab.log_time_apply_request.v1",
+      source: "mailer/offsetless.log",
+      ianaTimezone: "America/Chicago",
+      expectedRevision: 7,
+      declarationFingerprint: fingerprint,
+      idempotencyKey: expect.stringMatching(/^logtime-/),
+    });
+
+    fireEvent.click(within(stageNav).getByRole("button", { name: /Analyze/ }));
+    expect(screen.queryByRole("region", { name: "Timezone review" })).toBeNull();
+  });
+
   it("keeps the stable triage anchors mounted for deep links", async () => {
     stubCaseFetch();
     render(<Cases roles={["case-lead"]} />);
