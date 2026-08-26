@@ -24,6 +24,28 @@ function corpusPort(fileCount: number) {
 }
 
 describe("log corpus builder capacity", () => {
+  it("keeps accepted rotated logs in analysis and excludes arbitrary suffixes", async () => {
+    const port = createLogTimeCasePort({
+      cases: {
+        listArtifactsByCase: async () => [
+          { relativePath: "logs/service.log.1", contentHash: "rotated" },
+          { relativePath: "logs/service.log-2026-08-25", contentHash: "dated" },
+          { relativePath: "logs/service.log.exe", contentHash: "disguised" },
+        ],
+      } as unknown as CaseStore,
+      domain: {} as Pick<CaseService, "getCase">,
+      evidence: {
+        get: async () => new Uint8Array([0x78]),
+      } as unknown as EvidenceStore,
+      jobs: {} as TriageJobStore,
+    });
+
+    await expect(port.listCorpusFilesForCase("case-1")).resolves.toEqual([
+      { relativePath: "logs/service.log-2026-08-25", contentBase64: "eA==" },
+      { relativePath: "logs/service.log.1", contentBase64: "eA==" },
+    ]);
+  });
+
   it("shares exact intake byte boundaries without allocating capacity-sized fixtures", () => {
     expect(corpusBuilderCapacityError(
       CORPUS_INTAKE_LIMITS.maxFileCount,

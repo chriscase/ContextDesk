@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { scanShareSafePrivacy } from "@cd-collab/contracts";
 import type { ArtifactKind, CorpusAllowedMedia, CorpusRejectionReason, PrivacyClass } from "@cd-collab/contracts";
 import {
-  CORPUS_ALLOWED_EXTENSIONS,
   CORPUS_ALLOWED_MEDIA,
+  corpusAllowedExtension,
 } from "@cd-collab/contracts";
 import { isNestedArchive, normalizeIntakePath } from "./zip.js";
 import { fileExceedsLimit } from "./limits.js";
@@ -76,14 +76,6 @@ export interface ClassifiedRejection {
   detail: string;
 }
 
-function extensionOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  const base = slash >= 0 ? path.slice(slash + 1) : path;
-  const dot = base.lastIndexOf(".");
-  if (dot <= 0) return "";
-  return base.slice(dot).toLowerCase();
-}
-
 function looksBinary(bytes: Uint8Array): boolean {
   if (bytes.includes(0)) return true;
   let odd = 0;
@@ -138,8 +130,8 @@ export function classifyBytes(
       detail: "nested archives are unsupported",
     };
   }
-  const ext = extensionOf(normalized.path);
-  if (!(CORPUS_ALLOWED_EXTENSIONS as readonly string[]).includes(ext)) {
+  const ext = corpusAllowedExtension(normalized.path);
+  if (ext === null) {
     return {
       relativePath: normalized.path,
       reason: "unsupported_media",

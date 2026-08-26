@@ -1,7 +1,7 @@
 import {
-  CORPUS_ALLOWED_EXTENSIONS,
   CORPUS_INTAKE_LIMITS,
-} from "@cd-collab/contracts";
+  corpusAllowedExtension,
+} from "@cd-collab/contracts/corpus-intake";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { pathFor, type WorkFocus } from "./app-location.js";
 import { protectedApiFetch } from "./protected-api.js";
@@ -9,7 +9,6 @@ import { useRouteFocus } from "./route-focus.js";
 
 const MAX_ERROR_LENGTH = 240;
 const INITIAL_REPORT_ROWS = 12;
-const ALLOWED_EXTENSIONS = new Set<string>(CORPUS_ALLOWED_EXTENSIONS);
 
 interface PreviewReport {
   previewToken: string;
@@ -82,12 +81,6 @@ function errorText(response: Response, fallback: string): Promise<string> {
       return fallback;
     })
     .catch(() => fallback);
-}
-
-function extensionOf(path: string): string {
-  const base = path.split("/").pop() ?? path;
-  const dot = base.lastIndexOf(".");
-  return dot > 0 ? base.slice(dot).toLowerCase() : "";
 }
 
 function relativeOf(file: File): string {
@@ -476,7 +469,7 @@ export function CorpusIntakePanel(props: {
         <p className="corpus-intake__meta">
           {payloadFiles.length} selected
           {payloadFiles
-            .filter((row) => !ALLOWED_EXTENSIONS.has(extensionOf(row.relativePath)) && origin !== "zip")
+            .filter((row) => corpusAllowedExtension(row.relativePath) === null && origin !== "zip")
             .length > 0
             ? " · some extensions are outside the allowlist and will be rejected"
             : ""}

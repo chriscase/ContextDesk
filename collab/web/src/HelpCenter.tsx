@@ -1,4 +1,4 @@
-import { CORPUS_INTAKE_LIMITS } from "@cd-collab/contracts";
+import { CORPUS_INTAKE_LIMITS } from "@cd-collab/contracts/corpus-intake";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { StageId } from "./Cases.js";
 
@@ -264,7 +264,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each accepted file gets its own evidence identity and records relative path, media type, digest, byte length, privacy class, uploader identity, import time, source attribution, and intake batch id. Equal digests reuse the same content-addressed bytes without collapsing those distinct evidence records. Deep links exist for the batch on Capture and each evidence item on Analyze.",
         limits:
-          `${CORPUS_CAPACITY_COPY} These are hard resource bounds, not a promise that every member is accepted. Building the investigation's log corpus uses the same file-count, per-file, and expanded-byte bounds and rejects overflow instead of silently dropping files. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .csv, .xml, .eml, and .md; declared media must match and JSON must parse. Binary, unknown, and invalid UTF-8 content is rejected. share_safe accepts plain text, logs, CSV, Markdown, and valid JSON only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.`,
+          `${CORPUS_CAPACITY_COPY} These are hard resource bounds, not a promise that every member is accepted. Building the investigation's log corpus uses the same file-count, per-file, and expanded-byte bounds and rejects overflow instead of silently dropping files. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .csv, .xml, .eml, and .md; common rotated log names such as service.log.1 and service.log-2026-08-25 are also recognized. Declared media must match and JSON must parse. Binary, unknown, and invalid UTF-8 content is rejected. share_safe accepts plain text, logs, CSV, Markdown, and valid JSON only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.`,
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
     ],

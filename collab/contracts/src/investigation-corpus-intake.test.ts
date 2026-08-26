@@ -17,6 +17,7 @@ import {
   parseCorpusIntakePreviewReport,
   parseCorpusIntakePreviewRequest,
   base64LengthForBytes,
+  corpusAllowedExtension,
 } from "./investigation-corpus-intake.js";
 
 const Ajv2020 =
@@ -120,6 +121,15 @@ function batchBody(overrides: Record<string, unknown> = {}): Record<string, unkn
 }
 
 describe("corpus intake contract", () => {
+  it("recognizes bounded rotated log names without treating arbitrary suffixes as logs", () => {
+    expect(corpusAllowedExtension("logs/service.log")).toBe(".log");
+    expect(corpusAllowedExtension("logs/service.log.1")).toBe(".log");
+    expect(corpusAllowedExtension("logs/service.log-2026-08-25")).toBe(".log");
+    expect(corpusAllowedExtension("logs/service.log.previous")).toBe(".log");
+    expect(corpusAllowedExtension("logs/service.log.exe")).toBeNull();
+    expect(corpusAllowedExtension("logs/service.log.1.gz")).toBeNull();
+  });
+
   it("publishes the bounded limits used by preview and commit", () => {
     expect(CORPUS_INTAKE_LIMITS).toEqual({
       maxArchiveBytes: 67_108_864,

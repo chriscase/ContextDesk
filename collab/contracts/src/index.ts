@@ -251,6 +251,7 @@ export {
   CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
   CORPUS_INTAKE_REPORT_SCHEMA_ID,
   CORPUS_REJECTION_REASONS,
+  corpusAllowedExtension,
   parseCorpusIntakeBatch,
   parseCorpusIntakeCommitRequest,
   parseCorpusIntakePreviewReport,
@@ -260,6 +261,7 @@ export {
 export type {
   CorpusAcceptedFileV1,
   CorpusAllowedMedia,
+  CorpusAllowedExtension,
   CorpusIntakeBatchV1,
   CorpusIntakeCommitRequestV1,
   CorpusIntakeCommittedItemV1,

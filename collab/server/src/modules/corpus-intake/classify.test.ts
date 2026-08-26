@@ -31,6 +31,28 @@ describe("classifyBytes", () => {
     expect("reason" in nulLog && nulLog.reason).toBe("binary_or_unknown");
   });
 
+  it("accepts common rotated log names while still classifying their bytes", () => {
+    for (const path of [
+      "mailer/service.log.1",
+      "mailer/service.log-2026-08-25",
+      "mailer/service.log.previous",
+    ]) {
+      const accepted = classifyBytes(path, LOG, "text/plain", "owner_only");
+      expect("mediaType" in accepted && accepted.mediaType).toBe("text/x-log");
+    }
+
+    const binary = classifyBytes(
+      "mailer/service.log.2",
+      new Uint8Array([0x41, 0x00, 0x42]),
+      "text/plain",
+      "owner_only",
+    );
+    expect("reason" in binary && binary.reason).toBe("binary_or_unknown");
+
+    const disguised = classifyBytes("mailer/service.log.exe", LOG, "text/plain", "owner_only");
+    expect("reason" in disguised && disguised.reason).toBe("unsupported_media");
+  });
+
   it("fail-closes share_safe on privacy findings without echoing the payload", () => {
     const secret = "password: fixture-not-a-real-secret";
     const blocked = classifyBytes(

@@ -1,4 +1,4 @@
-import { CORPUS_INTAKE_LIMITS } from "@cd-collab/contracts";
+import { CORPUS_INTAKE_LIMITS } from "@cd-collab/contracts/corpus-intake";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CorpusIntakePanel, corpusSelectionLimitError } from "./CorpusIntakePanel.js";

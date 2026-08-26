@@ -95,6 +95,22 @@ export const CORPUS_ALLOWED_EXTENSIONS = [
   ".eml",
   ".md",
 ] as const;
+export type CorpusAllowedExtension = (typeof CORPUS_ALLOWED_EXTENSIONS)[number];
+
+/**
+ * Return the allowlisted content extension represented by a corpus path.
+ * Log rotation commonly appends a generation or date after `.log` instead of
+ * before it (`service.log.1`, `service.log-2026-08-25`). Byte classification
+ * remains authoritative and still rejects binary or archive data.
+ */
+export function corpusAllowedExtension(path: string): CorpusAllowedExtension | null {
+  const base = (path.split(/[\\/]/).pop() ?? path).toLowerCase();
+  for (const extension of CORPUS_ALLOWED_EXTENSIONS) {
+    if (base.endsWith(extension)) return extension;
+  }
+  if (/\.log(?:[.-](?:\d[\d._-]*|old|previous|bak))$/.test(base)) return ".log";
+  return null;
+}
 
 const fileEntryShape: ObjectShape = {
   relativePath: f.req(f.str),

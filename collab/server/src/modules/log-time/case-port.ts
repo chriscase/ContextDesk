@@ -4,8 +4,8 @@
  * named questions rather than on three whole store interfaces.
  */
 import {
-  CORPUS_ALLOWED_EXTENSIONS,
   CORPUS_INTAKE_LIMITS,
+  corpusAllowedExtension,
   type PrivacyClass,
 } from "@cd-collab/contracts";
 import type { EvidenceStore } from "../../evidence/store.js";
@@ -79,8 +79,7 @@ export function createLogTimeCasePort(deps: LogTimeCasePortDeps): LogTimeCasePor
         .filter((artifact) => {
           const path = artifact.relativePath;
           if (!path || !artifact.contentHash) return false;
-          const lower = path.toLowerCase();
-          return CORPUS_ALLOWED_EXTENSIONS.some((extension) => lower.endsWith(extension));
+          return corpusAllowedExtension(path) !== null;
         })
         .sort((left, right) =>
           (left.relativePath ?? "").localeCompare(right.relativePath ?? ""),
