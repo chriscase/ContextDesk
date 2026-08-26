@@ -326,6 +326,20 @@ describe("help for behavior this build ships", () => {
     expect(screen.getByText(/Open the Analyze stage/)).toBeTruthy();
   });
 
+  it("explains what a slow or unanswered gateway run shows and refuses", () => {
+    renderHelp({ onOpenStage: vi.fn() });
+    fireEvent.click(
+      screen.getByRole("button", { name: "When a gateway run is slow or does not answer" }),
+    );
+    // Configured is never presented as executed.
+    expect(screen.getByText(/configured — no lane executed/)).toBeTruthy();
+    // The host owns the deadline; cancellation keeps what already settled.
+    expect(screen.getByText(/The host owns the run deadline/)).toBeTruthy();
+    expect(screen.getByText(/lanes that already settled keep their recorded results/)).toBeTruthy();
+    // One question is not billed twice to a slow gateway.
+    expect(screen.getByText(/is refused, naming the run already running/)).toBeTruthy();
+  });
+
   it("explains the Situation briefing without promising more than it shows", () => {
     renderHelp();
     fireEvent.click(screen.getByRole("button", { name: "Pick an investigation back up" }));

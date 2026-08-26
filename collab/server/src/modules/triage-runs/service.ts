@@ -6,6 +6,7 @@ import {
   snapshotFingerprint,
   snapshotFingerprintDigest,
   snapshotItemContentHash,
+  resolveTriageJobStatus,
   type CaseV1,
   type TriageJobMode,
   type TriageJobCapabilitiesV1,
@@ -185,6 +186,34 @@ function isTerminal(status: TriageJobStatus): boolean {
   return status === "completed" || status === "partial" || status === "failed" || status === "timed_out" || status === "cancelled";
 }
 
+/**
+ * An in-flight attempt that is indistinguishable from this one, if any.
+ *
+ * A slow gateway gives the operator no visible progress for minutes, so the
+ * natural reaction — reload, launch again — silently doubles the provider work
+ * against the same frozen snapshot and leaves two records competing to answer
+ * one question.
+ *
+ * Attempt identity is the request fingerprint *and* the declared lineage, not
+ * the fingerprint alone. An explicit rerun names its parent, which makes it an
+ * informed second attempt rather than an accidental repeat; two submissions
+ * that declare the same lineage (or none) are the accident this guards. A job
+ * whose worker lease has already expired is excluded: that one is headed for
+ * stale-run recovery and must not block a genuine retry.
+ */
+function activeDuplicateJob(
+  jobs: readonly TriageJobV1[],
+  attempt: { requestFingerprint: string; parentJobId: string | null },
+  nowMs: number,
+): TriageJobV1 | null {
+  return jobs.find((job) =>
+    job.requestFingerprint === attempt.requestFingerprint
+    && (job.parentJobId ?? null) === attempt.parentJobId
+    && !isTerminal(job.status)
+    && !triageRunningLeaseExpired(job, nowMs),
+  ) ?? null;
+}
+
 function snapshotRequiresPrivateRead(snapshot: SnapshotV1): boolean {
   return snapshot.visibility === "owner_only"
     || snapshot.evidence.some((item) => item.privacyClass === "owner_only");
@@ -226,21 +255,16 @@ function recoveryRefusalCopy(reason: RecoveryRefusalReason): { unknown: string }
   }
 }
 
+/**
+ * One lifecycle rule, shared with the contracts package and the web reader.
+ *
+ * The rule this delegation replaced reported `partial` for a run in which no
+ * lane produced anything — a slow or unreliable gateway that timed one lane out
+ * and errored another read as "partial results", and the reader was offered a
+ * review of results that did not exist.
+ */
 function terminalStatus(candidates: TriageCandidateRunV1[], cancelled: boolean): TriageJobStatus {
-  const statuses = candidates.map((candidate) => candidate.status);
-  const completed = statuses.filter((status) => status === "completed").length;
-  const partial = statuses.filter((status) => status === "partial").length;
-  const failed = statuses.filter((status) => status === "failed").length;
-  const timedOut = statuses.filter((status) => status === "timed_out").length;
-  const cancelledCount = statuses.filter((status) => status === "cancelled").length;
-  if (cancelled && completed === 0 && partial === 0 && failed === 0 && timedOut === 0) return "cancelled";
-  if (cancelled) return "partial";
-  if (completed === statuses.length) return "completed";
-  if (partial > 0 || completed > 0 || failed > 0 && timedOut > 0) return "partial";
-  if (timedOut === statuses.length) return "timed_out";
-  if (failed === statuses.length) return "failed";
-  if (cancelledCount === statuses.length) return "cancelled";
-  return "partial";
+  return resolveTriageJobStatus(candidates, cancelled);
 }
 
 function waitFor(milliseconds: number, signal: AbortSignal): Promise<void> {
@@ -737,6 +761,18 @@ export class TriageRunService {
       stoppedReason: null,
     };
     await this.withJobAtomic(async () => {
+      // Checked inside the same atomic section as the insert so two launches
+      // racing on a slow gateway cannot both pass the check and both spend.
+      const duplicate = activeDuplicateJob(
+        await this.deps.jobs.listByCase(caseId),
+        { requestFingerprint: job.requestFingerprint, parentJobId: job.parentJobId ?? null },
+        Date.now(),
+      );
+      if (duplicate) {
+        throw new TriageRunConflictError(
+          `an identical run is already ${duplicate.status} on this snapshot (run ${duplicate.id}); open or cancel it instead of starting a second one`,
+        );
+      }
       await this.deps.jobs.insert(job);
       await this.deps.cases.appendDomainTimeline(caseId, {
         kind: "triage_job_created",

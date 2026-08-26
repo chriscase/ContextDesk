@@ -1911,6 +1911,32 @@
   cursor: pointer;
 }
 
+/* Wait state for an unfinished run: readable at a glance without competing
+   with the lane results below it. */
+.triage-runs__waiting {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.55rem 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 0.4rem;
+  color: var(--fg);
+  font-size: 0.75rem;
+}
+
+.triage-runs__waiting small {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.triage-runs__no-result {
+  margin: 0.55rem 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: 0.4rem;
+}
+
 .triage-runs__progress {
   display: flex;
   align-items: center;

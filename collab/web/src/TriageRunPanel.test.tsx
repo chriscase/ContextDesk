@@ -13,6 +13,37 @@ function response(body: unknown, ok = true) {
   return { ok, json: async () => body };
 }
 
+/** One lane as the API returns it, so a stub cannot assert a shape the server never sends. */
+function laneFixture(
+  candidateId: string,
+  status: string,
+  overrides: Partial<{
+    startedAt: string | null;
+    outputHash: string | null;
+    summary: string | null;
+    errorCode: string | null;
+  }> = {},
+) {
+  return {
+    candidateId,
+    role: "reviewer",
+    provider: "synthetic",
+    profileId: null,
+    model: `${candidateId}-model`,
+    version: null,
+    status,
+    benchmarkRunId: null,
+    outputHash: null,
+    summary: null,
+    evidenceRefs: [],
+    unknowns: [],
+    errorCode: null,
+    privacyClass: "owner_only",
+    startedAt: "2026-08-20T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 describe("TriageRunPanel", () => {
   it("does not let a stale polling response roll back a newer lane state", async () => {
     vi.useFakeTimers();
@@ -735,6 +766,217 @@ describe("TriageRunPanel", () => {
     expect(screen.getByText("challenger · settled")).toBeTruthy();
   });
 
+  it("does not present a run that never started as one that started on time", async () => {
+    // A gateway that has not admitted the job leaves startedAt null. Showing the
+    // creation time here made a stuck run read as a punctual one.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) return response({ snapshots: [] });
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        return response({
+          jobs: [{
+            id: "job-queued",
+            snapshotId: "snapshot-1",
+            snapshotFingerprint: "a".repeat(64),
+            requestFingerprint: "b".repeat(64),
+            request: {
+              strategyId: "contextdesk.standard",
+              question: "What happened?",
+              taskFingerprint: "task-1",
+              mode: "gateway",
+              candidates: [],
+            },
+            status: "queued",
+            candidates: [laneFixture("waiting-lane", "queued", { startedAt: null })],
+            sameSnapshot: null,
+            agreementNotice: "Agreement is not proof of correctness.",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            startedAt: null,
+            finishedAt: null,
+            cancelRequestedAt: null,
+          }],
+        });
+      }),
+    );
+
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    const header = await screen.findByText(/Gateway run · configured — no lane executed/);
+    expect(header.textContent).toContain("not started yet");
+    expect(header.textContent).not.toContain("started 8/");
+    const wait = screen.getByLabelText("contextdesk.standard wait state");
+    expect(wait.textContent).toContain("no lane has started yet");
+    expect(wait.textContent).toContain("Nothing has been sent for you to read.");
+  });
+
+  it("breaks a slow run's lanes into queued, running, and settled counts", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) return response({ snapshots: [] });
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        return response({
+          jobs: [{
+            id: "job-slow",
+            snapshotId: "snapshot-1",
+            snapshotFingerprint: "a".repeat(64),
+            requestFingerprint: "b".repeat(64),
+            request: {
+              strategyId: "contextdesk.standard",
+              question: "What happened?",
+              taskFingerprint: "task-1",
+              mode: "gateway",
+              candidates: [],
+            },
+            status: "running",
+            candidates: [
+              laneFixture("queued-lane", "queued", { startedAt: null }),
+              laneFixture("running-lane", "running"),
+              laneFixture("done-lane", "completed", { outputHash: "c".repeat(64) }),
+            ],
+            sameSnapshot: null,
+            agreementNotice: "Agreement is not proof of correctness.",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            startedAt: "2026-08-20T00:00:00.000Z",
+            finishedAt: null,
+            cancelRequestedAt: null,
+          }],
+        });
+      }),
+    );
+
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    const progress = await screen.findByLabelText("job-slow lane progress");
+    expect(progress.textContent).toContain("1/3 lanes settled");
+    expect(progress.textContent).toContain("1 running");
+    expect(progress.textContent).toContain("1 queued");
+    expect(progress.textContent).toContain("1 produced a result");
+    // A run mid-flight is executing, never already executed.
+    expect(screen.getByText(/Gateway run · executing/)).toBeTruthy();
+  });
+
+  it("says a run produced nothing instead of offering it for review", async () => {
+    // The shape a slow, unreliable gateway leaves behind: one lane past the
+    // deadline, one errored, nothing to read.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) return response({ snapshots: [] });
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        return response({
+          jobs: [{
+            id: "job-empty",
+            snapshotId: "snapshot-1",
+            snapshotFingerprint: "a".repeat(64),
+            requestFingerprint: "b".repeat(64),
+            request: {
+              strategyId: "contextdesk.standard",
+              question: "What happened?",
+              taskFingerprint: "task-1",
+              mode: "gateway",
+              candidates: [],
+            },
+            // A record stored before the lifecycle rule was shared can still
+            // claim partial with nothing in it; the reader must not be misled.
+            status: "partial",
+            candidates: [
+              laneFixture("slow-lane", "timed_out", { errorCode: "deadline_exceeded" }),
+              laneFixture("broken-lane", "failed", { errorCode: "gateway_runner_error" }),
+            ],
+            sameSnapshot: true,
+            agreementNotice: "Agreement is not proof of correctness.",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            startedAt: "2026-08-20T00:00:00.000Z",
+            finishedAt: "2026-08-20T00:00:10.000Z",
+            cancelRequestedAt: null,
+          }],
+        });
+      }),
+    );
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    expect(await screen.findByText(/No lane produced a result on this run/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Review in Experiment Lab" })).toBeNull();
+  });
+
+  it("widens the poll gap for a long wait instead of asking twice a second forever", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.endsWith("/snapshots")) return response({ snapshots: [] });
+      if (url.endsWith("/evidence")) return response({ artifacts: [] });
+      if (url.endsWith("/imports")) return response({ runs: [] });
+      if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
+      if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+      return response({
+        jobs: [{
+          id: "job-long",
+          snapshotId: "snapshot-1",
+          snapshotFingerprint: "a".repeat(64),
+          requestFingerprint: "b".repeat(64),
+          request: {
+            strategyId: "contextdesk.standard",
+            question: "What happened?",
+            taskFingerprint: "task-1",
+            mode: "gateway",
+            candidates: [],
+          },
+          status: "running",
+          candidates: [laneFixture("running-lane", "running")],
+          sameSnapshot: null,
+          agreementNotice: "Agreement is not proof of correctness.",
+          createdAt: "2026-08-20T00:00:00.000Z",
+          startedAt: "2026-08-20T00:00:00.000Z",
+          finishedAt: null,
+          cancelRequestedAt: null,
+        }],
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const view = render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const jobRequests = () =>
+      fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/triage-runs")).length;
+
+    // The fast tier stays responsive for the common case.
+    const afterMount = jobRequests();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(jobRequests()).toBe(afterMount + 1);
+
+    // Over the next minute a fixed half-second cadence would cost 120 polls.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    const widened = jobRequests() - afterMount;
+    expect(widened).toBeGreaterThan(1);
+    expect(widened).toBeLessThan(60);
+
+    // Unmount while the fake clock still runs so the self-rescheduling poll
+    // chain is torn down inside this test rather than during the next one.
+    await act(async () => {
+      view.unmount();
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(jobRequests()).toBe(afterMount + widened);
+  });
+
   it("shows when gateway execution is unavailable instead of offering a doomed launch", async () => {
     vi.stubGlobal(
       "fetch",
@@ -802,7 +1044,46 @@ describe("TriageRunPanel", () => {
               candidates: [],
             },
             status: "partial",
-            candidates: [],
+            // A partial run always has lanes: the server refuses a request with
+            // none, and `partial` asserts that at least one of them produced a
+            // result. The stub used to carry an empty array, which is a shape
+            // the API cannot return.
+            candidates: [
+              {
+                candidateId: "qwen-reviewer",
+                role: "reviewer",
+                provider: "synthetic",
+                profileId: null,
+                model: "qwen-3.6-27b",
+                version: null,
+                status: "completed",
+                benchmarkRunId: null,
+                outputHash: "c".repeat(64),
+                summary: "Produced a reviewable result.",
+                evidenceRefs: [],
+                unknowns: [],
+                errorCode: null,
+                privacyClass: "owner_only",
+                startedAt: "2026-08-20T00:00:00.000Z",
+              },
+              {
+                candidateId: "gpt-oss-contributor",
+                role: "contributor",
+                provider: "synthetic",
+                profileId: null,
+                model: "gpt-oss-120b",
+                version: null,
+                status: "timed_out",
+                benchmarkRunId: null,
+                outputHash: null,
+                summary: null,
+                evidenceRefs: [],
+                unknowns: ["result"],
+                errorCode: "deadline_exceeded",
+                privacyClass: "owner_only",
+                startedAt: "2026-08-20T00:00:00.000Z",
+              },
+            ],
             sameSnapshot: true,
             agreementNotice: "Agreement is not proof of correctness.",
             createdAt: "2026-08-20T00:00:00.000Z",

@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  isTriageProducingStatus,
+  triageJobExecutionState,
+  triageLanePhaseCounts,
+  type TriageCandidateStatus,
+} from "@cd-collab/contracts/triage-lifecycle";
 import { EvidenceSnapshotCockpit } from "./EvidenceSnapshotCockpit.js";
 import { protectedApiFetch } from "./protected-api.js";
 import { TechnicalIdentifiers, recordNickname } from "./technical-identity.js";
@@ -77,6 +83,12 @@ interface CandidateView {
   unknowns: string[];
   errorCode: string | null;
   privacyClass: string;
+  /**
+   * When the host admitted this lane. Optional here because a stored job from
+   * an older record may omit it; absent stays absent rather than becoming a
+   * guessed start time.
+   */
+  startedAt?: string | null;
 }
 
 interface CandidateOption {
@@ -127,6 +139,20 @@ const DEFAULT_CANDIDATES: CandidateOption[] = [
 const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const GATEWAY_CONCURRENCY_OPTIONS = [1, 2, 3, 4] as const;
 const INITIAL_EVIDENCE_REFS = 8;
+// A slow gateway can hold a run for minutes. Polling twice a second for all of
+// it is load without information, so the gap widens as the wait lengthens while
+// staying responsive for the fast, common case.
+//
+// The tier counts this panel's own consecutive polls rather than the job's
+// timestamp age: the browser clock and the server clock need not agree, and a
+// skewed comparison would either hammer a long wait or throttle a fresh launch.
+const BASE_POLL_MS = 500;
+const POLL_TIERS = [
+  { afterPolls: 30, everyMs: 5_000 },
+  { afterPolls: 20, everyMs: 2_000 },
+] as const;
+/** How long a run may wait before the panel says so in words. */
+const SLOW_WAIT_MS = 60_000;
 const MAX_ERROR_LENGTH = 240;
 // Synthetic fixture labels; suggestions only — the operator may type any
 // non-DeepSeek model id their configured gateway connection actually serves.
@@ -182,18 +208,97 @@ function modeLabel(mode: JobView["request"]["mode"]): string {
   return mode === "gateway" ? "Gateway run" : "Built-in synthetic run";
 }
 
+function localTimestamp(stamp: string | null | undefined): string | null {
+  if (!stamp) return null;
+  const parsed = new Date(stamp);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toLocaleString();
+}
+
 /**
  * When a comparison started, in local time.
  *
  * Run history is read to answer "which of these is the current one", so the
  * ordering fact has to be on the row rather than implied by its position.
+ *
+ * A run that has not started has no start time. Falling back to the creation
+ * time made a run still waiting on a slow gateway read as one that had already
+ * begun, which is the reading a reader most needs to be able to trust here.
  */
 function startedAtLabel(job: JobView): string {
-  const stamp = job.startedAt ?? job.createdAt;
-  if (!stamp) return "start time not recorded";
-  const parsed = new Date(stamp);
-  if (Number.isNaN(parsed.getTime())) return "start time not recorded";
-  return parsed.toLocaleString();
+  const started = localTimestamp(job.startedAt);
+  if (started) return `started ${started}`;
+  const created = localTimestamp(job.createdAt);
+  return created ? `created ${created}, not started yet` : "start time not recorded";
+}
+
+function laneCounts(job: JobView) {
+  return triageLanePhaseCounts(
+    job.candidates.map((candidate) => ({ status: candidate.status as TriageCandidateStatus })),
+  );
+}
+
+/** Lanes that actually produced something a reader can review. */
+function producedLaneCount(job: JobView): number {
+  return job.candidates.filter((candidate) =>
+    isTriageProducingStatus(candidate.status as TriageCandidateStatus),
+  ).length;
+}
+
+/**
+ * What the host actually did, as distinct from what was configured.
+ *
+ * Selecting gateway mode is a request, never proof that a provider was reached;
+ * a gateway that never admitted a lane must not leave a row that reads like a
+ * run which happened.
+ */
+function executionStateLabel(job: JobView): string {
+  const state = triageJobExecutionState({
+    candidates: job.candidates.map((candidate) => ({
+      status: candidate.status as TriageCandidateStatus,
+      startedAt: candidate.startedAt ?? null,
+    })),
+  });
+  if (state === "configured") return "configured — no lane executed";
+  return state === "executing" ? "executing" : "executed";
+}
+
+function elapsedLabel(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function waitedMs(job: JobView, nowMs: number): number | null {
+  const since = Date.parse(job.startedAt ?? job.createdAt);
+  return Number.isFinite(since) ? nowMs - since : null;
+}
+
+/** How long the panel should wait before asking the server again. */
+function pollDelayMs(pollsSoFar: number): number {
+  for (const tier of POLL_TIERS) if (pollsSoFar >= tier.afterPolls) return tier.everyMs;
+  return BASE_POLL_MS;
+}
+
+/**
+ * Plain words for an unfinished run, including how long it has been waiting.
+ *
+ * A slow gateway otherwise leaves the reader with a status word and no way to
+ * tell a run that is progressing from one that is stuck.
+ */
+function waitingText(job: JobView, nowMs: number): string {
+  const counts = laneCounts(job);
+  const waited = waitedMs(job, nowMs);
+  const elapsed = waited === null ? null : elapsedLabel(waited);
+  if (job.status === "queued" || counts.running === 0) {
+    const opening = elapsed
+      ? `Queued for ${elapsed}; no lane has started yet.`
+      : "Queued; no lane has started yet.";
+    return `${opening} Nothing has been sent for you to read.`;
+  }
+  const running = `${counts.running} lane${counts.running === 1 ? "" : "s"} running`;
+  const opening = elapsed ? `Running for ${elapsed}` : "Running";
+  return `${opening} · ${running} · ${counts.queued} queued · ${counts.settled}/${counts.total} settled.`;
 }
 
 function statusLabel(status: string): string {
@@ -204,8 +309,15 @@ function isTerminal(status: string): boolean {
   return ["completed", "partial", "failed", "timed_out", "cancelled"].includes(status);
 }
 
-function isReviewable(status: string): boolean {
-  return status === "completed" || status === "partial";
+/**
+ * A run is reviewable only when a lane actually produced something.
+ *
+ * A stored `partial` from before the lifecycle rule was shared could mean every
+ * lane failed or timed out, and offering a review of a run with nothing in it
+ * invites a reader to treat an absence of output as a result.
+ */
+function isReviewable(job: JobView): boolean {
+  return (job.status === "completed" || job.status === "partial") && producedLaneCount(job) > 0;
 }
 
 function laneLifecycleLabel(status: string): string {
@@ -297,6 +409,9 @@ export function TriageRunPanel(props: {
   const [benchImportBusy, setBenchImportBusy] = useState(false);
   const [benchImportExperimentId, setBenchImportExperimentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Advanced only by the poll tick, so the wait a reader sees is the wait the
+  // panel last actually confirmed with the server.
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const loadRequestToken = useRef(0);
   const launchFocusApplied = useRef<string | null>(null);
   useRouteFocus(props.routeFocus, !loading);
@@ -472,8 +587,23 @@ export function TriageRunPanel(props: {
 
   useEffect(() => {
     if (!hasActiveJob) return undefined;
-    const timer = window.setInterval(() => void load(), 500);
-    return () => window.clearInterval(timer);
+    let stopped = false;
+    let polls = 0;
+    let timer = 0;
+    const schedule = () => {
+      timer = window.setTimeout(() => {
+        if (stopped) return;
+        polls += 1;
+        setNowMs(Date.now());
+        void load();
+        schedule();
+      }, pollDelayMs(polls));
+    };
+    schedule();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
   }, [hasActiveJob, load]);
 
   useEffect(() => {
@@ -1062,7 +1192,7 @@ export function TriageRunPanel(props: {
             </>
           ) : (
             <>
-              {completedJobs.some((job) => isReviewable(job.status)) ? (
+              {completedJobs.some((job) => isReviewable(job)) ? (
                 <section className="triage-runs__handoff" aria-labelledby="triage-runs-handoff-heading">
                   <div>
                     <p className="case-memory__eyebrow">Unified comparison handoff</p>
@@ -1187,7 +1317,8 @@ export function TriageRunPanel(props: {
                     <div>
                       <h4>{job.request.strategyId}</h4>
                       <p className="case-memory__note">
-                        {modeLabel(job.request.mode)} · {job.candidates.length} lane
+                        {modeLabel(job.request.mode)} · {executionStateLabel(job)} ·{" "}
+                        {job.candidates.length} lane
                         {job.candidates.length === 1 ? "" : "s"} · {startedAtLabel(job)}
                       </p>
                       {job.parentJobId ? (
@@ -1228,6 +1359,30 @@ export function TriageRunPanel(props: {
                       { label: "Rerun of", value: job.parentJobId },
                     ]}
                   />
+                  {!isTerminal(job.status) ? (
+                    <div
+                      className="triage-runs__waiting"
+                      role="status"
+                      aria-live="polite"
+                      aria-label={`${job.request.strategyId} wait state`}
+                    >
+                      <span>{waitingText(job, nowMs)}</span>
+                      {(waitedMs(job, nowMs) ?? 0) >= SLOW_WAIT_MS ? (
+                        <small>
+                          The host owns this run&apos;s deadline and will stop it on its own. You
+                          can request cancellation now; lanes that already settled keep their
+                          recorded results, and starting the same run again is refused while this
+                          one is still in flight.
+                        </small>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {isTerminal(job.status) && producedLaneCount(job) === 0 ? (
+                    <p className="case-memory__note triage-runs__no-result" role="status">
+                      No lane produced a result on this run. There is nothing here to review or
+                      compare — rerun it or read the per-lane reasons below.
+                    </p>
+                  ) : null}
                   <p className="case-memory__note">Lanes settle independently; final same-snapshot proof waits for all lanes.</p>
                   <div className="triage-runs__results">
                     {job.candidates.map((candidate) => (
@@ -1280,12 +1435,11 @@ export function TriageRunPanel(props: {
                     <div>
                       <small>{job.agreementNotice}</small>
                       <div className="triage-runs__progress" aria-label={`${job.id} lane progress`}>
-                        <progress
-                          max={job.candidates.length}
-                          value={job.candidates.filter((candidate) => isTerminal(candidate.status)).length}
-                        />
+                        <progress max={laneCounts(job).total} value={laneCounts(job).settled} />
                         <small>
-                          {job.candidates.filter((candidate) => isTerminal(candidate.status)).length}/{job.candidates.length} lanes settled
+                          {laneCounts(job).settled}/{laneCounts(job).total} lanes settled ·{" "}
+                          {laneCounts(job).running} running · {laneCounts(job).queued} queued ·{" "}
+                          {laneCounts(job).produced} produced a result
                         </small>
                       </div>
                     </div>
@@ -1294,7 +1448,7 @@ export function TriageRunPanel(props: {
                         Use this setup again
                       </button>
                     ) : null}
-                    {!props.readOnly && props.canLead && isReviewable(job.status) ? (
+                    {!props.readOnly && props.canLead && isReviewable(job) ? (
                       <button
                         className="case-memory__secondary-button triage-runs__handoff-button"
                         type="button"
