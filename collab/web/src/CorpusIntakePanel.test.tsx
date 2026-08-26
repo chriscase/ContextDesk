@@ -1,6 +1,11 @@
+import { CORPUS_INTAKE_LIMITS } from "@cd-collab/contracts/corpus-intake";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CorpusIntakePanel } from "./CorpusIntakePanel.js";
+import {
+  CorpusIntakePanel,
+  corpusSelectionLimitError,
+  summarizeCorpusRejections,
+} from "./CorpusIntakePanel.js";
 
 afterEach(() => {
   cleanup();
@@ -8,6 +13,70 @@ afterEach(() => {
 });
 
 describe("CorpusIntakePanel", () => {
+  it("condenses rejection reasons into human-readable action groups", () => {
+    expect(summarizeCorpusRejections([
+      { reason: "binary_or_unknown" },
+      { reason: "unsupported_media" },
+      { reason: "binary_or_unknown" },
+      { reason: "nested_archive" },
+    ])).toEqual([
+      {
+        reason: "binary_or_unknown",
+        count: 2,
+        label: "Not safely readable as text",
+        guidance: "Inspect these files outside the War Room before deciding whether they belong in the investigation.",
+      },
+      {
+        reason: "nested_archive",
+        count: 1,
+        label: "Nested ZIP archive",
+        guidance: "Open and review nested archives separately before adding their relevant files.",
+      },
+      {
+        reason: "unsupported_media",
+        count: 1,
+        label: "Unrecognized file type",
+        guidance: "Rename genuine text logs to a recognized log or text extension, then preview again.",
+      },
+    ]);
+  });
+  it("accepts exact browser capacity boundaries and rejects one unit over", () => {
+    expect(corpusSelectionLimitError("zip", [{
+      relativePath: "incident.zip",
+      size: CORPUS_INTAKE_LIMITS.maxArchiveBytes,
+    }])).toBeNull();
+    expect(corpusSelectionLimitError("zip", [{
+      relativePath: "incident.zip",
+      size: CORPUS_INTAKE_LIMITS.maxArchiveBytes + 1,
+    }])).toMatch(/64 MiB/);
+    expect(corpusSelectionLimitError("files", [{
+      relativePath: "incident.log",
+      size: CORPUS_INTAKE_LIMITS.maxFileBytes,
+    }])).toBeNull();
+    expect(corpusSelectionLimitError("files", [{
+      relativePath: "incident.log",
+      size: CORPUS_INTAKE_LIMITS.maxFileBytes + 1,
+    }])).toMatch(/64 MiB/);
+    const exactCount = Array.from(
+      { length: CORPUS_INTAKE_LIMITS.maxFileCount },
+      (_, index) => ({ relativePath: `${index}.log`, size: 0 }),
+    );
+    expect(corpusSelectionLimitError("directory", exactCount)).toBeNull();
+    expect(corpusSelectionLimitError("directory", [
+      ...exactCount,
+      { relativePath: "overflow.log", size: 0 },
+    ])).toMatch(/4,096 files/);
+    const fullCapacity = Array.from({ length: 8 }, (_, index) => ({
+      relativePath: `capacity-${index}.log`,
+      size: CORPUS_INTAKE_LIMITS.maxFileBytes,
+    }));
+    expect(corpusSelectionLimitError("files", fullCapacity)).toBeNull();
+    expect(corpusSelectionLimitError("files", [
+      ...fullCapacity,
+      { relativePath: "one-byte-over.log", size: 1 },
+    ])).toMatch(/512 MiB/);
+  });
+
   it("previews then commits files without duplicating on retry", async () => {
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal(
@@ -28,6 +97,7 @@ describe("CorpusIntakePanel", () => {
                   byteLength: 44,
                   digest: "a".repeat(64),
                   duplicateDigest: false,
+                  encodingStatus: "utf8",
                 },
               ],
               rejected: [
@@ -54,6 +124,7 @@ describe("CorpusIntakePanel", () => {
                   relativePath: "mailer/shared-timeout.log",
                   digest: "a".repeat(64),
                   duplicateDigest: false,
+                  encodingStatus: "utf8",
                 },
               ],
               rejected: [],
@@ -78,7 +149,7 @@ describe("CorpusIntakePanel", () => {
     fireEvent.change(fileInput, { target: { files: [file] } });
     fireEvent.click(screen.getByRole("button", { name: "Preview intake" }));
     expect(await screen.findByText("mailer/shared-timeout.log")).toBeTruthy();
-    expect(screen.getByText(/unsupported_media/)).toBeTruthy();
+    expect(screen.getByText("1 · Unrecognized file type")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Commit accepted files" }));
     expect(await screen.findByText("Committed batch")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Deep link to this batch" }).getAttribute("href")).toContain(
@@ -148,6 +219,7 @@ describe("CorpusIntakePanel", () => {
                 byteLength: 10,
                 digest: "c".repeat(64),
                 duplicateDigest: false,
+                encodingStatus: "utf8",
               },
             ],
             rejected: [],

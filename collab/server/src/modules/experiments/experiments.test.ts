@@ -335,7 +335,7 @@ describe("experiment lab review loop", () => {
       };
       expect(proposal.status).toBe("proposed");
       expect(proposal.revision).toBe(1);
-      expect(proposal.ownerId).toBe("uid=alice,ou=people,dc=example,dc=test");
+      expect(proposal.ownerId).toMatch(/^usr-[a-f0-9]{32}$/);
       expect(proposal.ownerUsername).toBe("alice");
       expect(proposal.remainingUnknowns).toEqual([
         "Does the synthetic timeout reproduce after the cache is warmed?",
@@ -358,7 +358,7 @@ describe("experiment lab review loop", () => {
       expect(accepted.statusCode).toBe(200);
       const acceptedDecision = JSON.parse(accepted.body) as typeof proposal;
       expect(acceptedDecision.status).toBe("accepted");
-      expect(acceptedDecision.ownerId).toBe("uid=alice,ou=people,dc=example,dc=test");
+      expect(acceptedDecision.ownerId).toBe(proposal.ownerId);
       expect(acceptedDecision.remainingUnknowns).toEqual(proposal.remainingUnknowns);
 
       const persisted = await app.inject({
@@ -368,7 +368,7 @@ describe("experiment lab review loop", () => {
       });
       expect(persisted.statusCode).toBe(200);
       expect(JSON.parse(persisted.body).decisions.at(-1)).toMatchObject({
-        ownerId: "uid=alice,ou=people,dc=example,dc=test",
+        ownerId: proposal.ownerId,
         ownerUsername: "alice",
         remainingUnknowns: proposal.remainingUnknowns,
       });
@@ -467,12 +467,18 @@ describe("experiment lab review loop", () => {
         },
       });
       expect(legacyRevision.statusCode).toBe(200);
-      expect(JSON.parse(legacyRevision.body)).toMatchObject({
+      const legacyDecision = JSON.parse(legacyRevision.body) as {
+        revision: number;
+        ownerId: string;
+        ownerUsername: string;
+        remainingUnknowns: string[];
+      };
+      expect(legacyDecision).toMatchObject({
         revision: 2,
-        ownerId: "uid=alice,ou=people,dc=example,dc=test",
         ownerUsername: "alice",
         remainingUnknowns: ["Does the timeout still reproduce?"],
       });
+      expect(legacyDecision.ownerId).toMatch(/^usr-[a-f0-9]{32}$/);
 
       const cleared = await app.inject({
         method: "POST",

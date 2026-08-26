@@ -10,7 +10,11 @@ import {
   snapshotFingerprint,
   type ArtifactKind,
   type ArtifactV1,
+  normalizeOccurredAt,
+  statusRequiresResolution,
   type CaseSeverity,
+  type OccurredAtPrecision,
+  type OccurredAtZone,
   type CaseStatus,
   type CaseV1,
   type ContributionV1,
@@ -24,8 +28,9 @@ import {
   type EvidenceStore,
   type EvidenceWriteBatch,
 } from "../../evidence/store.js";
+import { ResolutionRequiredError } from "../resolutions/index.js";
 import type { AuditStore } from "../audit/index.js";
-import { CatalogService } from "../catalog/index.js";
+import { CatalogService, withCatalogCaseMutation } from "../catalog/index.js";
 import {
   assertSupportedLinks,
   defaultPrivacy,
@@ -36,6 +41,7 @@ import { assertFilenameAllowed, assertUploadAllowed } from "../evidence/index.js
 import {
   decodeBase64,
   corpusIntakeRequestDigest,
+  duplicateDigestFlags,
   previewCorpusBytes,
 } from "../corpus-intake/index.js";
 import {
@@ -273,16 +279,51 @@ function cleanSituation(input: CaseSituationInput): CaseSituationInput {
   };
 }
 
+/**
+ * Gate consulted before every status transition.
+ *
+ * A status that claims the question was answered must have a record behind it.
+ * The check lives on the service rather than the route so it cannot be skipped
+ * by calling the status endpoint directly; the implementation lives in the
+ * resolutions module, which owns what a valid record is.
+ */
+export interface StatusResolutionGuard {
+  authorizeStatus(input: {
+    caseId: string;
+    status: CaseStatus;
+    previousStatus: CaseStatus;
+    actor: Actor;
+    origin: string;
+    resolution?: unknown;
+    expectedResolutionRevision?: number;
+  }): Promise<void>;
+}
+
+export interface StatusChangeOptions {
+  clientTime?: string;
+  /** Recorded atomically with the transition when the caller supplies one. */
+  resolution?: unknown;
+  expectedResolutionRevision?: number;
+}
+
 export class CaseService {
   constructor(
     private readonly evidence: EvidenceStore,
     private readonly audit: AuditStore,
     private readonly store: CaseStore = new MemoryCaseStore(),
     private readonly catalog: CatalogService = new CatalogService(),
+    private readonly resolutionGuard?: StatusResolutionGuard,
   ) {}
 
   async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
-    return this.store.withAtomic(operation, this.audit);
+    return withCatalogCaseMutation(async () => {
+      try {
+        return await this.store.withAtomic(operation, this.audit);
+      } catch (error) {
+        await this.catalog.rollbackCaseInserts();
+        throw error;
+      }
+    });
   }
 
   async appendDomainTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
@@ -435,12 +476,19 @@ export class CaseService {
       impact?: string;
       scope?: string;
       openQuestions?: string[];
+      occurredAt?: unknown;
+      occurredAtPrecision?: unknown;
+      occurredAtZone?: unknown;
     },
     origin: string,
   ): Promise<CaseV1> {
     const clientTime = canonicalClientTime(input.clientTime);
     const id = randomUUID();
     const now = new Date().toISOString();
+    // Two clocks from the first moment: `now` records when this row was
+    // written, the occurrence records when the work happened. A historical
+    // investigation opened today is ordinary, not an anomaly to correct.
+    const occurrence = normalizeOccurredAt(input, { path: "$" });
     const situation = cleanSituation({
       problemStatement: input.problemStatement ?? "",
       affectedParties: input.affectedParties ?? "",
@@ -453,6 +501,9 @@ export class CaseService {
       title: input.title,
       ...situation,
       situationVersion: 0,
+      occurredAt: occurrence.occurredAt,
+      occurredAtPrecision: occurrence.occurredAtPrecision,
+      occurredAtZone: occurrence.occurredAtZone,
       severity: input.severity ?? "medium",
       status: "open" as const,
       legalHold: false,
@@ -462,13 +513,17 @@ export class CaseService {
       createdByUsername: actor.username,
       participants: [{ identityId: actor.id, username: actor.username }],
     };
+    return this.store.withAtomic(async () => {
     await this.store.insertCase(row);
     await this.store.appendTimeline(id, {
       kind: "case_created",
       actor,
       targetId: id,
       clientTime,
-      payload: { title: row.title },
+      payload: {
+        title: row.title,
+        ...(occurrence.occurredAt === null ? {} : { occurredAt: occurrence.occurredAt }),
+      },
     });
     await this.audit.append({
       identity: actor.id,
@@ -478,6 +533,50 @@ export class CaseService {
       outcome: "success",
     });
     return this.toCase(row);
+    }, this.audit);
+  }
+
+  /**
+   * Backfills when the investigated work happened.
+   *
+   * Moves the occurrence only. `createdAt`, the audit trail, and the timeline
+   * sequence keep saying when each record was written, so describing something
+   * that predates this tool never requires rewriting history. Clearing it back
+   * to unrecorded is allowed and is itself recorded.
+   */
+  async setOccurredAt(
+    caseId: string,
+    actor: Actor,
+    input: { occurredAt?: unknown; occurredAtPrecision?: unknown; occurredAtZone?: unknown },
+    origin: string,
+    clientTime?: string,
+  ): Promise<CaseV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
+    const row = await this.requireCase(caseId);
+    const occurrence = normalizeOccurredAt(input, { path: "$" });
+    const previous = row.occurredAt ?? null;
+    await this.store.updateOccurredAt(caseId, occurrence);
+    await this.store.appendTimeline(caseId, {
+      kind: "case_occurred_at",
+      actor,
+      targetId: caseId,
+      clientTime: canonicalTime,
+      payload: {
+        occurredAt: occurrence.occurredAt,
+        occurredAtPrecision: occurrence.occurredAtPrecision,
+        occurredAtZone: occurrence.occurredAtZone,
+        previousOccurredAt: previous,
+      },
+    });
+    await this.audit.append({
+      identity: actor.id,
+      action: "case_occurred_at",
+      target: `${caseId}:${occurrence.occurredAt ?? "unrecorded"}`,
+      origin,
+      outcome: "success",
+    });
+    const updated = await this.requireCase(caseId);
+    return this.toCase(updated);
   }
 
   async updateSituation(
@@ -551,27 +650,55 @@ export class CaseService {
     actor: Actor,
     status: CaseStatus,
     origin: string,
-    clientTime?: string,
+    clientTimeOrOptions?: string | StatusChangeOptions,
   ): Promise<CaseV1> {
-    const canonicalTime = canonicalClientTime(clientTime);
+    const options: StatusChangeOptions =
+      typeof clientTimeOrOptions === "string"
+        ? { clientTime: clientTimeOrOptions }
+        : (clientTimeOrOptions ?? {});
+    const canonicalTime = canonicalClientTime(options.clientTime);
     const row = await this.requireCase(caseId);
-    row.status = status;
-    await this.store.updateCaseMeta(row);
-    await this.store.appendTimeline(caseId, {
-      kind: "case_status",
-      actor,
-      targetId: caseId,
-      clientTime: canonicalTime,
-      payload: { status },
-    });
-    await this.audit.append({
-      identity: actor.id,
-      action: "case_status",
-      target: `${caseId}:${status}`,
-      origin,
-      outcome: "success",
-    });
-    return this.toCase(row);
+    const previousStatus = row.status;
+    // Fail closed rather than fail open. An installation wired without a
+    // resolution guard cannot reach a status that claims the question was
+    // answered — the absence of a guard is treated as "nothing authorises
+    // this", never as "no check applies".
+    if (!this.resolutionGuard && statusRequiresResolution(status)) {
+      throw new ResolutionRequiredError(status);
+    }
+    // Runs before anything is written: a refused transition must leave the
+    // investigation exactly as it was, with nothing half-recorded.
+    if (this.resolutionGuard) {
+      await this.resolutionGuard.authorizeStatus({
+        caseId,
+        status,
+        previousStatus,
+        actor,
+        origin,
+        ...(options.resolution !== undefined ? { resolution: options.resolution } : {}),
+        ...(options.expectedResolutionRevision !== undefined
+          ? { expectedResolutionRevision: options.expectedResolutionRevision }
+          : {}),
+      });
+    }
+    return this.store.withAtomic(async () => {
+      await this.store.updateCaseMeta({ id: caseId, status });
+      await this.store.appendTimeline(caseId, {
+        kind: "case_status",
+        actor,
+        targetId: caseId,
+        clientTime: canonicalTime,
+        payload: { status },
+      });
+      await this.audit.append({
+        identity: actor.id,
+        action: "case_status",
+        target: `${caseId}:${status}`,
+        origin,
+        outcome: "success",
+      });
+      return this.toCase(await this.requireCase(caseId));
+    }, this.audit);
   }
 
   async addParticipant(
@@ -581,6 +708,7 @@ export class CaseService {
     origin: string,
   ): Promise<CaseV1> {
     await this.requireCase(caseId);
+    return this.store.withAtomic(async () => {
     await this.store.addParticipant(caseId, participant, actor.id);
     await this.store.appendTimeline(caseId, {
       kind: "membership",
@@ -598,6 +726,7 @@ export class CaseService {
     });
     const updated = await this.requireCase(caseId);
     return this.toCase(updated);
+    }, this.audit);
   }
 
   async setLegalHold(
@@ -606,9 +735,9 @@ export class CaseService {
     legalHold: boolean,
     origin: string,
   ): Promise<CaseV1> {
-    const row = await this.requireCase(caseId);
-    row.legalHold = legalHold;
-    await this.store.updateCaseMeta(row);
+    return this.store.withAtomic(async () => {
+    await this.requireCase(caseId);
+    await this.store.updateCaseMeta({ id: caseId, legalHold });
     await this.store.appendTimeline(caseId, {
       kind: "legal_hold",
       actor,
@@ -623,7 +752,8 @@ export class CaseService {
       origin,
       outcome: "success",
     });
-    return this.toCase(row);
+    return this.toCase(await this.requireCase(caseId));
+    }, this.audit);
   }
 
   async listTimeline(caseId: string): Promise<TimelineRow[]> {
@@ -785,9 +915,8 @@ export class CaseService {
     origin: string,
   ): Promise<ContributionV1> {
     try {
-      return await this.store.withAtomic(
+      return await this.withAtomic(
         () => this.persistContribution(caseId, actor, input, origin),
-        this.audit,
       );
     } catch (error) {
       if (input.idempotencyKey && isUniqueViolation(error)) {
@@ -943,6 +1072,7 @@ export class CaseService {
           targetId: contributionId,
           clientTime: canonicalTime,
           payload: {
+            kind: next.kind,
             revision: next.revision,
             predecessor: latest.revision,
             contentHash: next.contentHash,
@@ -996,7 +1126,7 @@ export class CaseService {
           actor,
           targetId: contributionId,
           clientTime: null,
-          payload: { revision: next.revision },
+          payload: { kind: latest.kind, revision: next.revision, tombstone: true },
         });
         await this.audit.append({
           identity: actor.id,
@@ -1064,7 +1194,7 @@ export class CaseService {
           actor,
           targetId: contributionId,
           clientTime: canonicalTime,
-          payload: { status, links },
+          payload: { kind: next.kind, revision: next.revision, status, links },
         });
         await this.audit.append({
           identity: actor.id,
@@ -1106,7 +1236,6 @@ export class CaseService {
     await this.requireCase(caseId);
     const privacy = defaultPrivacy(input.privacyClass);
     if (input.filename !== undefined) assertFilenameAllowed(input.filename);
-    const sourceId = await this.resolveSourceId(actor, input.sourceId);
     const id = randomUUID();
     const uri: string | null = input.uri ?? null;
     let mediaType = input.mediaType ?? null;
@@ -1114,26 +1243,35 @@ export class CaseService {
 
     if (input.kind === "file_server_ref") {
       if (!input.uri) throw new Error("file-server reference requires a URI");
-      const ref = await this.evidence.putFileServerReference({
-        uri: input.uri,
-        expectedHash,
-        verificationStatus: "unverified",
-      });
-      return this.persistEvidenceMetadata(caseId, actor, origin, clientTime, {
-        id,
-        kind: input.kind,
-        filename: input.filename ?? null,
-        uri,
-        mediaType,
-        byteLength: null,
-        contentHash: null,
-        expectedHash: ref.expectedHash,
-        verificationStatus: ref.verificationStatus,
-        refId: ref.id,
-        privacyClass: privacy,
-        sourceId,
-        summary: input.summary,
-      });
+      let refId: string | null = null;
+      try {
+        const ref = await this.evidence.putFileServerReference({
+          uri: input.uri,
+          expectedHash,
+          verificationStatus: "unverified",
+        });
+        refId = ref.id;
+        return await this.persistEvidenceMetadata(caseId, actor, origin, clientTime, {
+          id,
+          kind: input.kind,
+          filename: input.filename ?? null,
+          uri,
+          mediaType,
+          byteLength: null,
+          contentHash: null,
+          expectedHash: ref.expectedHash,
+          verificationStatus: ref.verificationStatus,
+          refId: ref.id,
+          privacyClass: privacy,
+          sourceId: input.sourceId,
+          summary: input.summary,
+        });
+      } catch (error) {
+        if (refId) {
+          await this.evidence.abandonFileServerReference(refId);
+        }
+        throw error;
+      }
     }
 
     if (!input.bytes) throw new Error("held artifact requires bytes");
@@ -1146,7 +1284,8 @@ export class CaseService {
     let evidenceBatch: EvidenceWriteBatch | null = null;
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
-      const result = await this.store.withAtomic(async () => {
+      const result = await this.withAtomic(async () => {
+        const sourceId = await this.resolveSourceId(actor, input.sourceId);
         let meta: { hash: string; byteLength: number };
         if (evidenceBatch) {
           meta = await evidenceBatch.put(input.bytes!, { contentType: mediaType ?? undefined });
@@ -1213,7 +1352,7 @@ export class CaseService {
           throw new Error("hash verification failed after storage");
         }
         return { artifact: this.toArtifact(row), summary };
-      }, this.audit);
+      });
       await evidenceBatch?.finalize();
       return result;
     } catch (error) {
@@ -1304,14 +1443,13 @@ export class CaseService {
     if (request.previewToken !== requestDigest || preview.report.previewToken !== requestDigest) {
       throw new CorpusIntakeConflictError("preview token does not match commit input");
     }
-    const sourceId = await this.resolveSourceId(actor);
     const batchId = randomUUID();
     const createdAt = new Date().toISOString();
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
-      const result = await this.store.withAtomic(async () => {
+      const result = await this.withAtomic(async () => {
         await this.store.lockIntakeIdempotency(caseId, request.idempotencyKey);
         const replay = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
         if (replay) {
@@ -1320,6 +1458,7 @@ export class CaseService {
           }
           return { ...parseCorpusIntakeBatch(JSON.parse(replay.payloadJson)), replayed: true };
         }
+        const sourceId = await this.resolveSourceId(actor);
 
         const metaByDigest = new Map<string, { hash: string; byteLength: number }>();
         const uniqueFiles = [...new Map(
@@ -1336,6 +1475,16 @@ export class CaseService {
             stages.push(stage);
           }
         }
+        const liveArtifacts = await this.store.listArtifactsByCase(caseId);
+        const liveKnown = new Set(
+          liveArtifacts
+            .map((row) => row.contentHash)
+            .filter((hash): hash is string => Boolean(hash)),
+        );
+        const duplicateFlags = duplicateDigestFlags(
+          preview.classified.map((file) => file.digest),
+          liveKnown,
+        );
         const items: CorpusIntakeBatchV1["items"] = preview.classified.map((file, index) => ({
           artifactId: randomUUID(),
           relativePath: file.relativePath,
@@ -1344,7 +1493,8 @@ export class CaseService {
           mediaType: file.mediaType,
           privacyClass: request.privacyClass,
           sourceId,
-          duplicateDigest: preview.report.accepted[index]?.duplicateDigest ?? false,
+          duplicateDigest: duplicateFlags[index] ?? false,
+          encodingStatus: file.encodingStatus,
         }));
         const batch: CorpusIntakeBatchV1 = {
           schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,
@@ -1450,7 +1600,7 @@ export class CaseService {
           outcome: "success",
         });
         return batch;
-      }, this.audit);
+      });
       await evidenceBatch?.finalize();
       return result;
     } catch (error) {
@@ -1505,25 +1655,34 @@ export class CaseService {
       throw new Error("file-server reference not found");
     }
     const snapshot = { ...row };
-    const checked = await this.evidence.verifyFileServerReference(row.refId);
-    await this.store.appendTimeline(caseId, {
-      kind: "evidence_recheck",
-      actor,
-      targetId: artifactId,
-      clientTime: null,
-      payload: {
-        verificationStatus: checked.verificationStatus,
-        originalVerificationStatus: snapshot.verificationStatus,
-      },
-    });
-    await this.audit.append({
-      identity: actor.id,
-      action: "evidence_recheck",
-      target: artifactId,
-      origin,
-      outcome: checked.verificationStatus === "verified" ? "success" : "failure",
-    });
-    return { artifact: this.toArtifact(snapshot), status: checked.verificationStatus };
+    const previous = await this.evidence.getFileServerReference(row.refId);
+    if (!previous) throw new Error("file-server reference not found");
+    try {
+      const checked = await this.evidence.verifyFileServerReference(row.refId);
+      await this.store.withAtomic(async () => {
+        await this.store.appendTimeline(caseId, {
+          kind: "evidence_recheck",
+          actor,
+          targetId: artifactId,
+          clientTime: null,
+          payload: {
+            verificationStatus: checked.verificationStatus,
+            originalVerificationStatus: snapshot.verificationStatus,
+          },
+        });
+        await this.audit.append({
+          identity: actor.id,
+          action: "evidence_recheck",
+          target: artifactId,
+          origin,
+          outcome: checked.verificationStatus === "verified" ? "success" : "failure",
+        });
+      }, this.audit);
+      return { artifact: this.toArtifact(snapshot), status: checked.verificationStatus };
+    } catch (error) {
+      await this.evidence.restoreFileServerReference(previous);
+      throw error;
+    }
   }
 
   async isMemberOf(caseId: string, identityId: string): Promise<boolean> {
@@ -1552,16 +1711,17 @@ export class CaseService {
       verificationStatus: string | null;
       refId: string | null;
       privacyClass: PrivacyClass;
-      sourceId: string;
+      sourceId: string | undefined;
       summary: string;
     },
   ): Promise<{ artifact: ArtifactV1; summary: ContributionV1 }> {
-    return this.store.withAtomic(async () => {
+    return this.withAtomic(async () => {
+      const sourceId = await this.resolveSourceId(actor, input.sourceId);
       const summaryInput: ContributionWriteInput = {
         kind: "upload",
         body: input.summary,
         privacyClass: input.privacyClass,
-        sourceId: input.sourceId,
+        sourceId,
       };
       if (clientTime !== null) summaryInput.clientTime = clientTime;
       const summary = await this.persistContribution(caseId, actor, summaryInput, origin);
@@ -1581,7 +1741,7 @@ export class CaseService {
         summaryContributionId: summary.id,
         uploaderId: actor.id,
         uploaderUsername: actor.username,
-        sourceId: input.sourceId,
+        sourceId,
       };
       await this.store.insertArtifact(row);
       await this.store.appendTimeline(caseId, {
@@ -1604,7 +1764,7 @@ export class CaseService {
         outcome: "success",
       });
       return { artifact: this.toArtifact(row), summary };
-    }, this.audit);
+    });
   }
 
   private async replayContributionWrite(
@@ -1654,6 +1814,9 @@ export class CaseService {
     scope?: string;
     openQuestions?: string[];
     situationVersion?: number;
+    occurredAt?: string | null;
+    occurredAtPrecision?: OccurredAtPrecision;
+    occurredAtZone?: OccurredAtZone;
     severity: CaseSeverity;
     status: CaseStatus;
     legalHold: boolean;
@@ -1672,6 +1835,9 @@ export class CaseService {
       scope: row.scope ?? "",
       openQuestions: row.openQuestions ? [...row.openQuestions] : [],
       situationVersion: row.situationVersion ?? 0,
+      occurredAt: row.occurredAt ?? null,
+      occurredAtPrecision: row.occurredAtPrecision ?? "unknown",
+      occurredAtZone: row.occurredAtZone ?? "unspecified",
       severity: row.severity,
       status: row.status,
       legalHold: row.legalHold,

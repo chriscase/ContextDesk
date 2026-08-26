@@ -197,6 +197,10 @@ async fn run_state_free(cli: &mut Cli) -> Option<i32> {
         }
         Command::Triage { action } => commands::triage::state_free(action)
             .map(|result| emit_triage_run(format, color, result)),
+        Command::CollabLogTime(args) => {
+            let result = commands::collab_log_time::run(args);
+            Some(emit(format, color, "collab_log_time", result))
+        }
         _ => None,
     }
 }
@@ -231,7 +235,10 @@ async fn dispatch(
             }
             emit(format, resolved.color.value, "import", result)
         }
-        Command::Normalize(_) | Command::Normalized { .. } | Command::Eval { .. } => {
+        Command::Normalize(_)
+        | Command::Normalized { .. }
+        | Command::Eval { .. }
+        | Command::CollabLogTime(_) => {
             unreachable!("state-free commands return before stateful dispatch")
         }
         Command::TriagePolicy {

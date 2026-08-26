@@ -1,0 +1,39 @@
+{
+  "schemaId": "cd-collab.log_time_preview.v1",
+  "caseId": "case-synthetic-0001",
+  "corpusId": "corpus-synthetic-0001",
+  "corpusRevision": 3,
+  "declarationFingerprint": "3f2a1b6c4d5e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708",
+  "source": "worker/batch.log",
+  "ianaTimezone": "America/Chicago",
+  "affectedRecords": 15,
+  "existingWallClockRecords": 0,
+  "unchangedOrderOnlyRecords": 4,
+  "firstResolvedInstant": "2024-03-10T07:30:00Z",
+  "lastResolvedInstant": "2024-03-10T09:15:00Z",
+  "dstGapCount": 1,
+  "dstFoldCount": 1,
+  "unsupportedTimestampCount": 0,
+  "zoneAbbreviationMismatchCount": 0,
+  "outOfRangeCount": 0,
+  "samples": [
+    {
+      "ordinal": 0,
+      "outcome": "resolved",
+      "rawTimestamp": "2024-03-10 01:30:00",
+      "normalizedInstant": "2024-03-10T07:30:00Z",
+      "utcOffsetSeconds": -21600,
+      "unresolvedReason": null,
+      "excerpt": "batch worker starting scheduled sweep"
+    },
+    {
+      "ordinal": 1,
+      "outcome": "unresolved",
+      "rawTimestamp": "2024-03-10 02:30:00",
+      "normalizedInstant": null,
+      "utcOffsetSeconds": null,
+      "unresolvedReason": "nonexistent_dst_gap",
+      "excerpt": "batch worker heartbeat"
+    }
+  ]
+}

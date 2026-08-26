@@ -1,11 +1,19 @@
+import { createHash } from "node:crypto";
 import {
   BRIEF_SCHEMA_ID,
+  SHARE_SAFE_ENTITY_HANDLE_PREFIX,
   IMPORTED_RESPONSE_PRESENTATION,
   PACKAGE_DEFAULT_EXCLUSIONS,
   PACKAGE_MANIFEST_SCHEMA_ID,
   PACKAGE_SCHEMA_ID,
   type ArtifactV1,
+  type BriefInvolvementV1,
   type BriefMemorySummaryV1,
+  type BriefReferenceV1,
+  type BriefResolutionV1,
+  type InvestigationInvolvementV1,
+  type InvestigationReferenceV1,
+  type InvestigationResolutionV1,
   type BriefV1,
   type ContributionV1,
   type ExternalRunV1,
@@ -20,6 +28,91 @@ import type { ExportPrivacyConfig } from "./config.js";
 import { shareSafeLabel } from "./redact.js";
 
 export const PACKAGE_EXCLUDED_CONTRIBUTION_KINDS = new Set(["external_run"]);
+
+/**
+ * A stable pseudonym for an entity whose label may not leave the tool.
+ *
+ * Derived from the entity id alone, so the same party gets the same handle in
+ * every share-safe export and a downstream reader can still see that two
+ * investigations concern one party — without learning who. It is one-way: the
+ * handle discloses nothing about the label it stands in for.
+ */
+export function shareSafeEntityHandle(entityId: string): string {
+  const digest = createHash("sha256").update(`cd-collab.entity.v1:${entityId}`, "utf8").digest("hex");
+  return `${SHARE_SAFE_ENTITY_HANDLE_PREFIX}${digest.slice(0, 12)}`;
+}
+
+/**
+ * Involvement as it leaves the tool. Ordering is by entity identity so a
+ * re-export of an unchanged investigation stays byte-identical.
+ */
+export function projectInvolvement(
+  involvement: readonly InvestigationInvolvementV1[],
+  entityPrivacy: ReadonlyMap<string, PrivacyClass>,
+  variant: PrivacyClass,
+): BriefInvolvementV1[] {
+  return [...involvement]
+    .sort((a, b) => a.entityId.localeCompare(b.entityId) || a.id.localeCompare(b.id))
+    .map((row) => {
+      const disclosed =
+        variant === "owner_only" || entityPrivacy.get(row.entityId) === "share_safe";
+      return {
+        // The recorded label, not the current one: an export of this
+        // investigation says what this investigation wrote down.
+        entityRef: disclosed ? row.recordedLabel : shareSafeEntityHandle(row.entityId),
+        labelDisclosed: disclosed,
+        kind: row.recordedKind,
+        relationship: row.relationship,
+        state: row.state,
+        occurredAt: row.occurredAt,
+        occurredAtPrecision: row.occurredAtPrecision,
+        occurredAtZone: row.occurredAtZone,
+      };
+    });
+}
+
+export function projectReferences(
+  references: readonly InvestigationReferenceV1[],
+  variant: PrivacyClass,
+): BriefReferenceV1[] {
+  return [...references]
+    .sort((a, b) => a.toInvestigationId.localeCompare(b.toInvestigationId) || a.id.localeCompare(b.id))
+    .map((row) => ({
+      toInvestigationId: row.toInvestigationId,
+      resourceKind: row.resourceKind,
+      locator: row.locator,
+      // Another investigation's title is that investigation's content. The
+      // pointer travels either way; the name only inside the tool.
+      citedTitle: variant === "owner_only" ? row.recordedTitle : null,
+      note: row.note,
+      state: row.state,
+    }));
+}
+
+export function projectResolution(
+  resolution: InvestigationResolutionV1 | null,
+  variant: PrivacyClass,
+  label: (raw: string) => string,
+): BriefResolutionV1 | null {
+  if (!resolution) return null;
+  const includeReasoning = variant === "owner_only";
+  return {
+    basis: resolution.basis,
+    provenance: resolution.provenance,
+    revision: resolution.revision,
+    actorLabel: label(resolution.recordedByUsername),
+    rationale: includeReasoning ? resolution.rationale : null,
+    rationaleIncluded: includeReasoning,
+    // The count travels even when the reasoning does not, so a share-safe
+    // brief cannot make a conclusion look more complete than it was.
+    unknownCount: resolution.unknowns.length,
+    unknowns: includeReasoning ? [...resolution.unknowns] : null,
+    occurredAt: resolution.occurredAt,
+    occurredAtPrecision: resolution.occurredAtPrecision,
+    occurredAtZone: resolution.occurredAtZone,
+    recordedAt: resolution.recordedAt,
+  };
+}
 
 export function sourceLabelOf(
   sources: ReadonlyMap<string, SourceV1>,
@@ -61,6 +154,10 @@ export function projectBrief(input: {
   artifactContent: ReadonlyMap<string, string | null>;
   privacy: ExportPrivacyConfig;
   memory?: BriefMemorySummaryV1;
+  involvement?: readonly InvestigationInvolvementV1[];
+  entityPrivacy?: ReadonlyMap<string, PrivacyClass>;
+  references?: readonly InvestigationReferenceV1[];
+  resolution?: InvestigationResolutionV1 | null;
 }): BriefV1 {
   const { variant } = input;
   const label = (raw: string) => shareSafeLabel(raw, input.privacy, variant, "identity");
@@ -162,6 +259,13 @@ export function projectBrief(input: {
     evidence,
     attributions,
     importedRuns,
+    involvement: projectInvolvement(
+      input.involvement ?? [],
+      input.entityPrivacy ?? new Map(),
+      variant,
+    ),
+    references: projectReferences(input.references ?? [], variant),
+    resolution: projectResolution(input.resolution ?? null, variant, label),
     ...(input.memory === undefined ? {} : { memory: input.memory }),
   };
 }

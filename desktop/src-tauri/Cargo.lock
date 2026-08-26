@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "cd-core"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "cd-triage-runtime"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "cd-triage-sdk",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "cd-triage-sdk"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "cd-workflow"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "cd-core",
@@ -816,7 +816,7 @@ checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "contextdesk"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "cd-core",

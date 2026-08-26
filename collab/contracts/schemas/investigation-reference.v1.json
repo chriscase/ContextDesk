@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/investigation-reference.v1.json",
+  "title": "cd-collab Investigation Reference v1",
+  "description": "An authorized citation of another investigation or a resource inside it. Copies nothing; the locator is the canonical in-app deep link. A restricted reference never carries the cited title.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "fromInvestigationId",
+    "toInvestigationId",
+    "resourceKind",
+    "resourceId",
+    "locator",
+    "note",
+    "recordedTitle",
+    "currentTitle",
+    "visibility",
+    "state",
+    "occurredAt",
+    "occurredAtPrecision",
+    "occurredAtZone",
+    "recordedAt",
+    "recordedBy",
+    "recordedByUsername",
+    "withdrawnAt"
+  ],
+  "properties": {
+    "schemaId": {
+      "type": "string",
+      "const": "cd-collab.investigation_reference.v1"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fromInvestigationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "toInvestigationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resourceKind": {
+      "type": "string",
+      "enum": [
+        "investigation",
+        "investigation_stage",
+        "evidence_item",
+        "evidence_context",
+        "workstream",
+        "workstream_attempt",
+        "workstream_rerun",
+        "comparison_finding",
+        "comparison_conflict",
+        "discussion_message",
+        "timeline_event",
+        "hypothesis",
+        "action",
+        "observation",
+        "decision_revision",
+        "export_event",
+        "portable_archive_event"
+      ]
+    },
+    "resourceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "locator": {
+      "type": "string",
+      "minLength": 1
+    },
+    "note": {
+      "type": "string",
+      "maxLength": 600
+    },
+    "recordedTitle": {
+      "type": "string",
+      "minLength": 1
+    },
+    "currentTitle": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "visibility": {
+      "type": "string",
+      "enum": [
+        "resolved",
+        "restricted"
+      ]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "active",
+        "withdrawn"
+      ]
+    },
+    "occurredAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occurredAtPrecision": {
+      "type": "string",
+      "enum": [
+        "year",
+        "month",
+        "day",
+        "minute",
+        "second",
+        "unknown"
+      ]
+    },
+    "recordedAt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recordedBy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recordedByUsername": {
+      "type": "string",
+      "minLength": 1
+    },
+    "withdrawnAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occurredAtZone": {
+      "type": "string",
+      "enum": [
+        "explicit",
+        "unspecified"
+      ]
+    }
+  }
+}

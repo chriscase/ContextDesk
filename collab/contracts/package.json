@@ -16,6 +16,10 @@
       "types": "./dist/admin-web.d.ts",
       "import": "./dist/admin-web.js"
     },
+    "./corpus-intake": {
+      "types": "./dist/investigation-corpus-intake.d.ts",
+      "import": "./dist/investigation-corpus-intake.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

@@ -3,6 +3,14 @@ import { buildApp } from "./app.js";
 import { createSqliteRuntime } from "./db/sqlite.js";
 import { loadRuntimeConfig } from "./config.js";
 import { FilesystemEvidenceStore } from "./evidence/store.js";
+import {
+  LogTimeService,
+  MemoryLogTimeStore,
+  PgLogTimeStore,
+  ProcessLogTimeBridge,
+  createLogTimeCasePort,
+  logTimeBridgeOptions,
+} from "./modules/log-time/index.js";
 import { PgAuditStore, type AuditStore } from "./modules/audit/index.js";
 import {
   LdapAuthAdapter,
@@ -13,6 +21,7 @@ import {
   defaultSessionPolicy,
   loadLocalAuthAdapter,
   loadLdapConfig,
+  loadPublicIdentityCodec,
   type SessionStore,
 } from "./modules/auth/index.js";
 import {
@@ -42,6 +51,13 @@ import {
   type LocalGrantStore,
   type UserProfileStore,
 } from "./modules/people/index.js";
+import { EntityService, PgEntityStore, type EntityStore } from "./modules/entities/index.js";
+import { ReferenceService, PgReferenceStore, type ReferenceStore } from "./modules/references/index.js";
+import {
+  ResolutionService,
+  PgResolutionStore,
+  type ResolutionStore,
+} from "./modules/resolutions/index.js";
 import {
   loadPortableInstallationId,
   memoryApplyBoundary,
@@ -65,6 +81,9 @@ interface StorageRuntime {
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
+  entities: EntityStore;
+  references: ReferenceStore;
+  resolutions: ResolutionStore;
   runPortableTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
   presence: PresenceService;
 }
@@ -87,6 +106,9 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       applyState: runtime.applyState,
       profiles: runtime.profiles,
       grants: runtime.grants,
+      entities: runtime.entities,
+      references: runtime.references,
+      resolutions: runtime.resolutions,
       runPortableTransaction: runtime.runPortableTransaction,
       presence: new PresenceService(),
     };
@@ -108,6 +130,9 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     applyState: new PgPortableApplyStateStore(pool),
     profiles: new PgUserProfileStore(pool),
     grants: new PgLocalGrantStore(pool),
+    entities: new PgEntityStore(pool),
+    references: new PgReferenceStore(pool),
+    resolutions: new PgResolutionStore(pool),
     presence: new PresenceService(new PgPresenceBackend(pool)),
   };
 }
@@ -143,14 +168,55 @@ async function main(): Promise<void> {
       : {}),
   });
   await store.ping();
+  const publicIdentities = await loadPublicIdentityCodec(
+    config.evidenceRoot,
+    process.env.COLLAB_PUBLIC_IDENTITY_KEY,
+  );
+  store.addReferencedContentHashSource(() => storage.cases.listReferencedContentHashes());
+  store.addReferencedContentHashSource(() => storage.runs.listReferencedContentHashes());
+  await store.recoverUnreferencedWrites();
   const log = createAuthLog();
-  const adapter = config.authMode === "local"
-    ? loadLocalAuthAdapter()
-    : new LdapAuthAdapter(loadLdapConfig(), log);
+  const ldapConfig = config.authMode === "ldap" ? loadLdapConfig() : null;
+  const adapter = ldapConfig
+    ? new LdapAuthAdapter(ldapConfig, log)
+    : loadLocalAuthAdapter();
   const roles = new MutableGroupRoleMap(await storage.roleStore.load());
   const audit = storage.audit;
   const catalog = new CatalogService(storage.catalog, audit);
-  const domain = new CaseService(store, audit, storage.cases, catalog);
+  // The resolution service is constructed first so it can guard status
+  // transitions on the case service, and is then given the case service back
+  // as its investigation gateway. The dependency is genuinely mutual: the
+  // guard needs to read investigations, and the transition needs the guard.
+  const resolutions = new ResolutionService({
+    store: storage.resolutions,
+    audit,
+  });
+  const domain = new CaseService(store, audit, storage.cases, catalog, resolutions);
+  const investigations = {
+    getCase: (id: string, actor: { id: string; username: string }, isAdmin: boolean) =>
+      domain.getCase(id, actor, isAdmin),
+    appendDomainTimeline: (
+      caseId: string,
+      event: {
+        kind: string;
+        actor: { id: string; username: string };
+        targetId: string | null;
+        clientTime: string | null;
+        payload: unknown;
+      },
+    ) => domain.appendDomainTimeline(caseId, event),
+  };
+  resolutions.bindInvestigations(investigations);
+  const entities = new EntityService({
+    store: storage.entities,
+    audit,
+    investigations,
+  });
+  const references = new ReferenceService({
+    store: storage.references,
+    audit,
+    investigations,
+  });
   const imports = new ImportService({
     evidence: store,
     audit,
@@ -163,6 +229,26 @@ async function main(): Promise<void> {
     audit,
     experiments: storage.experiments,
   });
+  // Log-time review needs the shipped host pipeline. With no host binary or
+  // no corpus root configured, the routes stay unregistered rather than
+  // offering a review surface that cannot answer.
+  const logTimeBridge = logTimeBridgeOptions();
+  const logTime = logTimeBridge
+    ? new LogTimeService({
+        store:
+          storage.pool === null
+            ? new MemoryLogTimeStore()
+            : new PgLogTimeStore(storage.pool),
+        bridge: new ProcessLogTimeBridge(logTimeBridge),
+        cases: createLogTimeCasePort({
+          cases: storage.cases,
+          domain,
+          evidence: store,
+          jobs: storage.jobs,
+        }),
+        audit,
+      })
+    : null;
   const bridge = triageBridgeOptions();
   const triageRuns = new TriageRunService({
     cases: domain,
@@ -191,6 +277,12 @@ async function main(): Promise<void> {
     imports,
     audit,
     privacy: loadExportPrivacyConfig(),
+    record: {
+      involvementFor: (caseId) => entities.involvementsForExport(caseId),
+      entityPrivacy: () => entities.entityPrivacyMap(),
+      referencesFor: (caseId) => references.exportProjection(caseId),
+      activeResolutionFor: (caseId) => resolutions.active(caseId),
+    },
   });
   const persistPorts = {
     cases: storage.cases,
@@ -217,6 +309,7 @@ async function main(): Promise<void> {
   );
   const portable = new PortableInvestigationService({
     installationId,
+    publicIdentities,
     cases: domain,
     catalog,
     imports,
@@ -224,6 +317,13 @@ async function main(): Promise<void> {
     experiments,
     audit,
     applyState: storage.applyState,
+    probe: {
+      cases: storage.cases,
+      catalog: storage.catalog,
+      experiments: storage.experiments,
+      runs: storage.runs,
+      jobs: storage.jobs,
+    },
     applyCoordination: storage.pool === null ? "single_instance" : "postgres_transactional",
     confirmationRestartDurable: storage.pool !== null || config.storage === "sqlite",
     ...(memoryBoundary
@@ -238,6 +338,7 @@ async function main(): Promise<void> {
     pool: storage.pool,
     ...(storage.databaseProbe ? { databaseProbe: storage.databaseProbe } : {}),
     store,
+    ...(logTime ? { logTime } : {}),
     domain,
     catalog,
     imports,
@@ -246,7 +347,11 @@ async function main(): Promise<void> {
     experiments,
     exporter,
     portable,
+    entities,
+    references,
+    resolutions,
     installationId,
+    publicIdentities,
     profiles: storage.profiles,
     grants: storage.grants,
     security: {
@@ -263,6 +368,7 @@ async function main(): Promise<void> {
       roles,
       roleStore: storage.roleStore,
       audit,
+      ldapConfig,
     },
   });
   await app.listen({ host: config.host, port: config.port });

@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { protectedApiFetch } from "./protected-api.js";
 import type { WorkFocus } from "./app-location.js";
 import { useRouteFocus } from "./route-focus.js";
+import { TechnicalIdentifiers } from "./technical-identity.js";
 
 const ARTIFACT_KINDS = ["log", "email", "attachment", "file_server_ref"] as const;
 const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
 const MAX_UPLOAD_BYTES = 1_000_000;
 const MAX_ERROR_LENGTH = 240;
 const INITIAL_FINDINGS = 12;
+const INITIAL_EVIDENCE = 25;
 
 interface ArtifactView {
   id: string;
@@ -87,9 +89,6 @@ const BUCKET_DETAILS: Record<
   },
 };
 
-function shortHash(value: string | null): string {
-  return value ? `${value.slice(0, 12)}…` : "not available";
-}
 
 function participantLabel(identityId: string, participants: readonly ParticipantLabel[]): string {
   const username = participants
@@ -196,6 +195,7 @@ export function CaseBoardPanel(props: {
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
   const [selectedEvidence, setSelectedEvidence] = useState<string[]>([]);
   const [evidenceFilter, setEvidenceFilter] = useState("");
+  const [evidenceLimit, setEvidenceLimit] = useState(INITIAL_EVIDENCE);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -222,7 +222,9 @@ export function CaseBoardPanel(props: {
     if (handledEvidenceRoute.current === evidenceRouteKey) return;
     handledEvidenceRoute.current = evidenceRouteKey;
     if (evidenceFilter) setEvidenceFilter("");
-  }, [evidenceFilter, evidenceRouteKey]);
+    const routeIndex = artifacts.findIndex((artifact) => artifact.id === evidenceRouteKey);
+    if (routeIndex >= evidenceLimit) setEvidenceLimit(routeIndex + 1);
+  }, [artifacts, evidenceFilter, evidenceLimit, evidenceRouteKey]);
   useRouteFocus(props.routeFocus, !loading && !evidenceRouteNeedsFilterReset);
 
   const load = useCallback(async (snapshotId?: string | null) => {
@@ -420,6 +422,8 @@ export function CaseBoardPanel(props: {
           .some((value) => value.toLocaleLowerCase().includes(normalizedEvidenceFilter)),
       )
     : artifacts;
+  const renderedArtifacts = visibleArtifacts.slice(0, evidenceLimit);
+  const hiddenArtifactCount = Math.max(0, visibleArtifacts.length - renderedArtifacts.length);
 
   function selectVisibleEvidence() {
     const visibleIds = visibleArtifacts.map((artifact) => artifact.id);
@@ -453,7 +457,10 @@ export function CaseBoardPanel(props: {
                       id="case-evidence-filter"
                       type="search"
                       value={evidenceFilter}
-                      onChange={(event) => setEvidenceFilter(event.target.value)}
+                      onChange={(event) => {
+                        setEvidenceFilter(event.target.value);
+                        setEvidenceLimit(INITIAL_EVIDENCE);
+                      }}
                       placeholder="Filename, path, or kind"
                     />
                   </label>
@@ -473,7 +480,7 @@ export function CaseBoardPanel(props: {
                 </div>
               ) : null}
               <ul className="case-memory__list">
-                {visibleArtifacts.map((artifact) => (
+                {renderedArtifacts.map((artifact) => (
                   <li
                     key={artifact.id}
                     className="case-memory__item"
@@ -500,7 +507,24 @@ export function CaseBoardPanel(props: {
                       <span className="case-memory__meta">
                         {artifact.kind} · {artifact.verificationStatus ?? "verification unknown"} · uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}
                       </span>
-                      <span className="case-memory__meta">hash {shortHash(artifact.contentHash)} · {artifact.privacyClass}</span>
+                      {/* The privacy class is a decision a reader acts on; the
+                          content digest is how the record is addressed. Leading
+                          with a truncated digest spent the first line of every
+                          card on a value nobody can act on — it is too short to
+                          match against another system and means nothing on its
+                          own. It stays available in full, one disclosure away. */}
+                      <span className="case-memory__meta">{artifact.privacyClass}</span>
+                      <TechnicalIdentifiers
+                        record={artifact.filename ?? artifact.kind}
+                        items={[
+                          {
+                            label: "Content hash",
+                            value: artifact.contentHash,
+                            hint: "matches this exact evidence against another system",
+                          },
+                          { label: "Evidence id", value: artifact.id },
+                        ]}
+                      />
                       <button
                         type="button"
                         className="case-memory__inspect"
@@ -521,6 +545,19 @@ export function CaseBoardPanel(props: {
                   </li>
                 ))}
               </ul>
+              {hiddenArtifactCount > 0 ? (
+                <div className="case-memory__more">
+                  <p>
+                    Showing {renderedArtifacts.length.toLocaleString()} of {visibleArtifacts.length.toLocaleString()} matching items.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setEvidenceLimit((current) => current + INITIAL_EVIDENCE)}
+                  >
+                    Show {Math.min(INITIAL_EVIDENCE, hiddenArtifactCount).toLocaleString()} more
+                  </button>
+                </div>
+              ) : null}
               {artifacts.length > 0 && visibleArtifacts.length === 0 ? (
                 <p className="case-memory__empty">No evidence matches this filter.</p>
               ) : null}
@@ -616,7 +653,11 @@ export function CaseBoardPanel(props: {
                   >
                     <strong>S{index}</strong>
                     <span>{snapshot.evidence.length} items · frozen by {participantLabel(snapshot.createdBy, props.participants ?? [])}</span>
-                    <small>{shortHash(snapshot.fingerprint)}</small>
+                    {/* No truncated fingerprint: a picker is where snapshots are
+                        told apart, and twelve characters of a digest cannot do
+                        that job — the snapshot's own number, size, and author
+                        can. The exact fingerprint is shown in full, with a copy
+                        control, once a snapshot is inspected. */}
                   </button>
                 ))}
               </div>

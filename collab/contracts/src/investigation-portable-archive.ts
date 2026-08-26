@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import {
   COLLISION_POLICIES,
+  MAX_DETERMINISTIC_REMAP_ATTEMPTS,
   PORTABLE_HISTORY_CAVEAT,
   PORTABLE_OBJECT_KINDS,
   PORTABLE_PERMISSION_CAVEAT,
@@ -14,8 +15,11 @@ import {
   canonicalJson,
   destinationCatalogDigest,
   evaluatePortableReconstruction,
+  isRfc4122Uuid,
   parsePortableInvestigation,
   portableDestinationUuid,
+  portableIdMintingMode,
+  portableMintsDestinationId,
   portableSemanticFingerprint,
   preflightPortableInvestigation,
   sha256Text,
@@ -207,7 +211,6 @@ const archivePreflightRequestShape: ObjectShape = {
 
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
-const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
 function requireSha256(path: string, value: string): void {
   if (!SHA256_HEX.test(value)) {
     throw new ContractViolation(path, "expected a lowercase SHA-256 hex digest");
@@ -479,9 +482,26 @@ function uuidIdRemap(
     const sourceIds = v1Report.idRemap
       .filter((row) => row.namespace === kind)
       .map((row) => row.sourceId);
-    const occupied = new Set(destination.objectIds[kind] ?? []);
+    // Occupied destination UUID space only. A raw source id echoed back by the
+    // destination catalog is not a destination key and must not narrow the
+    // deterministic ladder.
+    const occupied = new Set(
+      (destination.objectIds[kind] ?? []).filter((id) => isRfc4122Uuid(id)),
+    );
     for (const sourceId of sourceIds) {
-      const first = portableDestinationUuid(investigation.sourceInstallationId, kind, sourceId, 0);
+      const first =
+        portableIdMintingMode(kind) === "content_addressed"
+          ? sourceId
+          : portableDestinationUuid(investigation.sourceInstallationId, kind, sourceId, 0);
+      if (!portableMintsDestinationId(kind)) {
+        // Content digests deduplicate and timeline sequences are reassigned by
+        // the destination; neither keys a destination row, so neither can
+        // collide and neither consumes deterministic ladder space. Content
+        // keeps its digest as the destination identity.
+        idRemap.push({ namespace: kind, sourceId, destinationId: first });
+        create += 1;
+        continue;
+      }
       if (occupied.has(first) && collisionPolicy === "fail") {
         conflict += 1;
         blocked += 1;

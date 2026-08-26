@@ -9,6 +9,12 @@ import {
   type SetupSecretReferenceV1,
   type SetupStatusV1,
 } from "@cd-collab/contracts/setup";
+import type { LdapProbeReportV1 } from "@cd-collab/contracts";
+import {
+  ldapConfigFromSetup,
+  probeLdap,
+  type LdapSessionFactory,
+} from "../auth/index.js";
 import {
   SetupClaimError,
   claimSetupOwner,
@@ -53,6 +59,7 @@ export class SetupHttpError extends Error {
 export interface SetupSecretHandleStore {
   issue(purpose: SetupSecretPurpose, value: string): SetupSecretReferenceV1;
   has(reference: SetupSecretReferenceV1): boolean;
+  resolve(reference: SetupSecretReferenceV1): string | undefined;
 }
 
 interface StoredSecret {
@@ -88,6 +95,13 @@ export class MemorySetupSecretHandleStore implements SetupSecretHandleStore {
     if (reference.kind !== "handle" || reference.handle === null) return false;
     const stored = this.values.get(reference.handle);
     return stored?.purpose === reference.purpose;
+  }
+
+  resolve(reference: SetupSecretReferenceV1): string | undefined {
+    if (reference.kind !== "handle" || reference.handle === null) return undefined;
+    const stored = this.values.get(reference.handle);
+    if (!stored || stored.purpose !== reference.purpose) return undefined;
+    return stored.value;
   }
 }
 
@@ -143,6 +157,7 @@ export interface SetupServiceOptions {
   store: SetupStateStore;
   referencePolicy: SetupReferencePolicy;
   secrets?: SetupSecretHandleStore;
+  ldapSessions?: LdapSessionFactory;
 }
 
 function currentRevision(state: ReturnType<typeof parsePersistedSetupState>): number {
@@ -207,6 +222,7 @@ export class SetupService {
   private readonly store: SetupStateStore;
   private readonly referencePolicy: SetupReferencePolicy;
   private readonly secrets: SetupSecretHandleStore;
+  private readonly ldapSessions: LdapSessionFactory | undefined;
   private staged: StagedDraft | null = null;
   private queue: Promise<void> = Promise.resolve();
 
@@ -214,6 +230,7 @@ export class SetupService {
     this.store = options.store;
     this.referencePolicy = options.referencePolicy;
     this.secrets = options.secrets ?? new MemorySetupSecretHandleStore();
+    this.ldapSessions = options.ldapSessions;
   }
 
   private async serialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -380,6 +397,56 @@ export class SetupService {
         restartAvailable: false,
         unavailableReason: "atomic_commit_and_restart_unavailable",
       };
+    });
+  }
+
+  async probeDirectory(
+    ownerToken: string,
+    expectedRevision: number,
+    probeUsername: string | null,
+    probePassword: string | null,
+  ): Promise<LdapProbeReportV1> {
+    return this.serialized(async () => {
+      const state = await this.loadState();
+      if (configured(state)) throw new SetupHttpError("setup_unavailable", 404);
+      assertOwnerToken(state, ownerToken);
+      if (!Number.isSafeInteger(expectedRevision) || currentRevision(state) !== expectedRevision) {
+        throw new SetupHttpError("stale_revision", 409);
+      }
+      if (!this.staged || this.staged.stateRevision !== expectedRevision) {
+        throw new SetupHttpError("draft_unavailable", 409);
+      }
+      const draft = this.staged.prepared.draft;
+      if (draft.authentication.kind !== "ldap" || draft.authentication.ldap === null) {
+        return probeLdap({
+          config: null,
+          authMode: "local",
+          probeUsername,
+          probePassword,
+          resolveRoles: () => [],
+          roleMapConfigured: false,
+        });
+      }
+      const ldap = draft.authentication.ldap;
+      let bindSecret: string | undefined;
+      if (ldap.bindPasswordRef) {
+        bindSecret = this.secrets.resolve(ldap.bindPasswordRef);
+        if (!bindSecret) throw new SetupHttpError("secret_reference_unavailable", 422);
+      }
+      const config = ldapConfigFromSetup(ldap, bindSecret);
+      const report = await probeLdap({
+        config,
+        authMode: "ldap",
+        probeUsername,
+        probePassword,
+        resolveRoles: (groups) =>
+          groups.some((group) => group.toLowerCase() === ldap.adminGroup.toLowerCase())
+            ? ["admin"]
+            : [],
+        roleMapConfigured: Boolean(ldap.adminGroup),
+        ...(this.ldapSessions ? { sessions: this.ldapSessions } : {}),
+      });
+      return report;
     });
   }
 }

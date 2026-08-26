@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type {
   AdminDirectoryGroupV1,
   AdminDirectoryIdentityV1,
+  DirectoryMappedField,
   IdentityV1,
 } from "@cd-collab/contracts";
 
@@ -10,6 +11,7 @@ export type AuthIdentity = IdentityV1;
 export interface AuthSuccess {
   identity: AuthIdentity;
   groups: string[];
+  directoryFields?: Partial<Record<DirectoryMappedField, string>>;
 }
 
 export interface DirectorySearchOptions {

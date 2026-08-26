@@ -1,0 +1,21 @@
+{
+  "schemaId": "cd-collab.investigation_involvement.v1",
+  "id": "0d9c8b7a-6543-4210-9fed-cba987654321",
+  "investigationId": "11111111-1111-4111-8111-111111111111",
+  "entityId": "8f1d0c2a-5b47-4d3e-9a10-6c2e7b4f0a91",
+  "relationship": "affected",
+  "state": "active",
+  "note": "Named in the synthetic intake summary.",
+  "recordedLabel": "Synthetic checkout service",
+  "recordedKind": "service",
+  "currentLabel": "Synthetic checkout service (retired platform)",
+  "currentKind": "service",
+  "currentLifecycle": "retired",
+  "occurredAt": "2019-06-04",
+  "occurredAtPrecision": "day",
+  "recordedAt": "2024-02-11T09:20:00.000Z",
+  "recordedBy": "synthetic-operator",
+  "recordedByUsername": "synthetic-operator",
+  "releasedAt": null,
+  "occurredAtZone": "unspecified"
+}

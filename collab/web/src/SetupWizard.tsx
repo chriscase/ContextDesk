@@ -1,3 +1,4 @@
+import { parseLdapProbeReport } from "@cd-collab/contracts/admin";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import "./styles/setup-wizard.css";
 
@@ -63,10 +64,20 @@ export function SetupWizard(props: { apiBase?: string; onUnavailable?: () => voi
   const [adminPassword, setAdminPassword] = useState("");
   const [ldapUrl, setLdapUrl] = useState("");
   const [ldapUserSearchBase, setLdapUserSearchBase] = useState("");
+  const [ldapUserSearchFilter, setLdapUserSearchFilter] = useState(
+    "(&(objectClass=person)(uid={username}))",
+  );
+  const [ldapUserDnTemplate, setLdapUserDnTemplate] = useState("");
   const [ldapGroupSearchBase, setLdapGroupSearchBase] = useState("");
   const [ldapBindDn, setLdapBindDn] = useState("");
   const [ldapBindPassword, setLdapBindPassword] = useState("");
   const [ldapAdminGroup, setLdapAdminGroup] = useState("");
+  const [ldapUpnSuffix, setLdapUpnSuffix] = useState("");
+  const [ldapNetbiosDomain, setLdapNetbiosDomain] = useState("");
+  const [ldapMemberAttribute, setLdapMemberAttribute] = useState("memberOf");
+  const [ldapProbeUsername, setLdapProbeUsername] = useState("");
+  const [ldapProbePassword, setLdapProbePassword] = useState("");
+  const [ldapProbeReport, setLdapProbeReport] = useState<string | null>(null);
   const [gatewayEnabled, setGatewayEnabled] = useState(false);
   const [gatewayLabel, setGatewayLabel] = useState("");
   const [gatewayBaseUrl, setGatewayBaseUrl] = useState("");
@@ -225,19 +236,28 @@ export function SetupWizard(props: { apiBase?: string; onUnavailable?: () => voi
                 kind: "ldap",
                 local: null,
                 ldap: {
-                  url: ldapUrl,
-                  starttls: ldapUrl.startsWith("ldap:"),
+                  url: ldapUrl.trim(),
+                  starttls: ldapUrl.trim().startsWith("ldap://"),
                   caCertificateRef: null,
-                  userDnTemplate: null,
-                  userSearchBase: ldapUserSearchBase,
-                  userSearchFilter: "(&(objectClass=person)(uid={username}))",
-                  groupSearchBase: ldapGroupSearchBase,
+                  userDnTemplate: ldapUserDnTemplate.trim() || null,
+                  userSearchBase: ldapUserSearchBase.trim() || null,
+                  userSearchFilter: ldapUserSearchFilter.trim(),
+                  groupSearchBase: ldapGroupSearchBase.trim(),
                   groupSearchFilter: "(&(objectClass=groupOfNames)(member={dn}))",
-                  bindDn: ldapBindDn || null,
+                  bindDn: ldapBindDn.trim() || null,
                   bindPasswordRef: ldapBindPassword
                     ? reference("ldap_bind_password", handles.get("ldap_bind_password") as string)
                     : null,
-                  adminGroup: ldapAdminGroup,
+                  adminGroup: ldapAdminGroup.trim(),
+                  userResolutionModes: [
+                    ...(ldapUserSearchBase.trim() ? (["service_bind_search"] as const) : []),
+                    ...(ldapUserDnTemplate.trim() ? (["dn_template"] as const) : []),
+                    ...(ldapUpnSuffix.trim() ? (["upn"] as const) : []),
+                    ...(ldapNetbiosDomain.trim() ? (["domain_backslash"] as const) : []),
+                  ],
+                  upnSuffix: ldapUpnSuffix.trim() || null,
+                  netbiosDomain: ldapNetbiosDomain.trim() || null,
+                  memberAttribute: ldapMemberAttribute.trim() || null,
                 },
               },
         gateway: gatewayEnabled
@@ -301,6 +321,53 @@ export function SetupWizard(props: { apiBase?: string; onUnavailable?: () => voi
       setVerified(false);
       setMessage(error instanceof Error ? error.message : "Verification could not run.");
     } finally {
+      setPending(false);
+    }
+  }
+
+  async function probeDirectory() {
+    if (!status || !prepared || pending) return;
+    setPending(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`${apiBase}/ldap-probe`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-contextdesk-setup-token": ownerToken,
+        },
+        body: JSON.stringify({
+          expectedRevision: status.revision,
+          probeUsername: ldapProbeUsername.trim() || null,
+          probePassword:
+            ldapProbeUsername.trim() && ldapProbePassword.length > 0 ? ldapProbePassword : null,
+        }),
+      });
+      const body = await responseBody(response);
+      if (!response.ok) throw new Error(errorCopy(response.status, body));
+      const serialized = JSON.stringify(body);
+      if (ldapBindPassword && serialized.includes(ldapBindPassword)) {
+        throw new Error("The directory probe returned a protected value. No result is shown.");
+      }
+      if (ldapProbePassword && serialized.includes(ldapProbePassword)) {
+        throw new Error("The directory probe returned a protected value. No result is shown.");
+      }
+      const report = parseLdapProbeReport(body);
+      setLdapProbeReport(
+        report.stages
+          .map((stage) => `${stage.id}: ${stage.status} — ${stage.detail}`)
+          .join("\n") || (report.ready ? "Directory probe passed." : "Directory probe did not pass."),
+      );
+      setMessage(
+        report.ready
+          ? "Directory probe finished. This is separate from bounded verification and does not install the service."
+          : "Directory probe finished. One or more stages are not ready. Bounded verification still does not contact the directory.",
+      );
+    } catch (error) {
+      setLdapProbeReport(null);
+      setMessage(error instanceof Error ? error.message : "Directory probe could not run.");
+    } finally {
+      setLdapProbePassword("");
       setPending(false);
     }
   }
@@ -415,10 +482,17 @@ export function SetupWizard(props: { apiBase?: string; onUnavailable?: () => voi
                   <div className="setup-wizard__grid">
                     <label>LDAP URL<input value={ldapUrl} onChange={(event) => setLdapUrl(event.target.value)} placeholder="ldaps://directory.example.test" required /></label>
                     <label>User search base<input value={ldapUserSearchBase} onChange={(event) => setLdapUserSearchBase(event.target.value)} required /></label>
+                    <label>User search filter<input value={ldapUserSearchFilter} onChange={(event) => setLdapUserSearchFilter(event.target.value)} required /></label>
+                    <label>User DN template (optional)<input value={ldapUserDnTemplate} onChange={(event) => setLdapUserDnTemplate(event.target.value)} placeholder="uid={username},ou=people,dc=example,dc=test" /></label>
                     <label>Group search base<input value={ldapGroupSearchBase} onChange={(event) => setLdapGroupSearchBase(event.target.value)} required /></label>
-                    <label>Bind DN (optional)<input value={ldapBindDn} onChange={(event) => setLdapBindDn(event.target.value)} /></label>
-                    <label>Bind password<input type="password" value={ldapBindPassword} onChange={(event) => setLdapBindPassword(event.target.value)} required={ldapBindDn.length > 0} /></label>
+                    <label>Member attribute<input value={ldapMemberAttribute} onChange={(event) => setLdapMemberAttribute(event.target.value)} /></label>
+                    <label>Bind DN<input value={ldapBindDn} onChange={(event) => setLdapBindDn(event.target.value)} required /></label>
+                    <label>Bind password<input type="password" value={ldapBindPassword} onChange={(event) => setLdapBindPassword(event.target.value)} required /></label>
+                    <label>UPN suffix (optional)<input value={ldapUpnSuffix} onChange={(event) => setLdapUpnSuffix(event.target.value)} placeholder="example.test" /></label>
+                    <label>NetBIOS domain (optional)<input value={ldapNetbiosDomain} onChange={(event) => setLdapNetbiosDomain(event.target.value)} placeholder="EXAMPLE" /></label>
                     <label>Administrator group<input value={ldapAdminGroup} onChange={(event) => setLdapAdminGroup(event.target.value)} required /></label>
+                    <label>Probe username (optional)<input value={ldapProbeUsername} onChange={(event) => setLdapProbeUsername(event.target.value)} autoComplete="off" /></label>
+                    <label>Probe password (optional, never stored)<input type="password" value={ldapProbePassword} onChange={(event) => setLdapProbePassword(event.target.value)} autoComplete="new-password" /></label>
                   </div>
                 )}
               </fieldset>
@@ -445,7 +519,13 @@ export function SetupWizard(props: { apiBase?: string; onUnavailable?: () => voi
                 <button type="button" className="setup-wizard__secondary" onClick={() => void verify()} disabled={!prepared || pending}>
                   {pending && prepared ? "Checking…" : "Run bounded checks"}
                 </button>
+                {profile === "postgres_ldap" ? (
+                  <button type="button" className="setup-wizard__secondary" onClick={() => void probeDirectory()} disabled={!prepared || pending}>
+                    Test directory
+                  </button>
+                ) : null}
               </div>
+              {ldapProbeReport ? <pre className="setup-wizard__probe-report">{ldapProbeReport}</pre> : null}
             </form>
           )}
 

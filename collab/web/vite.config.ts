@@ -14,6 +14,8 @@ export default defineConfig(({ mode }) => ({
   },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.tsx"],
+    // Pure projection modules carry no JSX; keep them testable as plain .ts
+    // rather than forcing a .tsx extension on a file with no components.
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 }));

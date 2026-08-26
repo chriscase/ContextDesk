@@ -3,6 +3,7 @@ import { CaseDiscussion } from "./CaseDiscussion.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
+import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
 import { TriageRunPanel } from "./TriageRunPanel.js";
 import { WORKSTREAMS_SECTION, Workstreams } from "./Workstreams.js";
 import {
@@ -18,7 +19,12 @@ import { isDiscussionSection, isWorkLocation, parsePathname, type WorkFocus } fr
 import { EmptyState, StageFlowDiagram, StageIcon } from "./graphics.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
 import { focusArrivalCopy } from "./route-focus-copy.js";
+import { useRoutedItemPresence } from "./route-focus.js";
 import { protectedApiFetch } from "./protected-api.js";
+import { InvestigationRecordPanel } from "./InvestigationRecord.js";
+import { ResolutionForm } from "./ResolutionForm.js";
+import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
+import { loadEntities, type EntityRow } from "./Entities.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
 
@@ -36,6 +42,9 @@ interface CaseRow {
   scope?: string;
   openQuestions?: string[];
   situationVersion?: number;
+  occurredAt?: string | null;
+  occurredAtPrecision?: string;
+  occurredAtZone?: string;
   status: string;
   severity: string;
   participants?: CaseParticipantRow[];
@@ -333,7 +342,15 @@ function decisionsAwaitingAcceptance(items: readonly ActivityItem[]): ActivityIt
   return [...latest.values()].filter((item) => DECISION_PENDING_KINDS.has(item.activityKind ?? ""));
 }
 
-function activityLabel(item: ActivityItem | LegacyActivityItem): string {
+/**
+ * How one recorded action reads in the case record and the activity feed.
+ *
+ * Exported so the wording can be pinned directly: these strings are the only
+ * place a reader learns what kind of record they are looking at, and a
+ * mismatch with the server's own summary sends them to a record that does not
+ * match the row they followed.
+ */
+export function activityLabel(item: ActivityItem | LegacyActivityItem): string {
   if ("summary" in item) return item.summary;
   const contributionKind = typeof item.details.kind === "string" ? item.details.kind : null;
   const labels: Record<string, string> = {
@@ -367,7 +384,9 @@ function activityLabel(item: ActivityItem | LegacyActivityItem): string {
   };
   if (item.kind === "contribution_created") {
     if (contributionKind === "message") return "added a discussion comment";
-    if (contributionKind === "note") return "recorded an observation";
+    // Same wording as the investigation record and the server projection:
+    // a note stays a note wherever it is shown.
+    if (contributionKind === "note") return "recorded a note";
     if (contributionKind === "hypothesis") return "proposed a working hypothesis";
     if (contributionKind === "action") return "recorded a next action";
     if (contributionKind === "upload") return "recorded an evidence upload";
@@ -664,6 +683,17 @@ export function Cases(props: {
   const view = props.view ?? "overview";
   const [caseSearch, setCaseSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  // Entity filtering reads a server-scoped index, so choosing an entity can
+  // only ever narrow what this reader could already list.
+  const [entityFilter, setEntityFilter] = useState("all");
+  const [entityOptions, setEntityOptions] = useState<EntityRow[]>([]);
+  const [involvementIndex, setInvolvementIndex] = useState<
+    { investigationId: string; entityId: string }[]
+  >([]);
+  const [newOccurredAt, setNewOccurredAt] = useState("");
+  const [resolutionOpen, setResolutionOpen] = useState(false);
+  const [resolutionPrompted, setResolutionPrompted] = useState(false);
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [contributions, setContributions] = useState<ContributionView[]>([]);
   const [title, setTitle] = useState("");
@@ -729,6 +759,32 @@ export function Cases(props: {
     if (generation !== casesRefreshGeneration.current) return;
     setCases(body.cases ?? []);
     setCasesLoaded(true);
+  }, []);
+
+  /**
+   * Entity labels and the involvement index behind the list filter. Both fail
+   * quietly: an installation without the record graph shows no entity filter
+   * rather than an error where the investigation list should be.
+   */
+  const refreshRecordIndex = useCallback(async () => {
+    try {
+      setEntityOptions(await loadEntities());
+    } catch {
+      setEntityOptions([]);
+    }
+    try {
+      const response = await protectedApiFetch("/api/involvement/index");
+      if (!response.ok) {
+        setInvolvementIndex([]);
+        return;
+      }
+      const parsed = (await response.json()) as {
+        entries?: { investigationId: string; entityId: string }[];
+      };
+      setInvolvementIndex(parsed.entries ?? []);
+    } catch {
+      setInvolvementIndex([]);
+    }
   }, []);
 
   const refreshActivity = useCallback(async () => {
@@ -798,6 +854,12 @@ export function Cases(props: {
   // Re-read the committed projection whenever the overview is put on screen,
   // and whenever a run reports that it changed.
   const showingOverview = view === "overview" && !focusCaseId;
+  // The entity filter and its labels are loaded once the shell is up, so the
+  // investigation list can offer the filter without waiting on a case being
+  // opened first.
+  useEffect(() => {
+    void refreshRecordIndex();
+  }, [refreshRecordIndex]);
   useEffect(() => {
     if (!showingOverview) return undefined;
     void refreshActivity();
@@ -805,6 +867,27 @@ export function Cases(props: {
     window.addEventListener("contextdesk:triage-run-changed", onRunChanged);
     return () => window.removeEventListener("contextdesk:triage-run-changed", onRunChanged);
   }, [showingOverview, refreshActivity]);
+
+  // Situation restates the investigation's own timeline: how much evidence is
+  // registered, whether anything is frozen, whether logs were taken in. That
+  // work happens in other panels, which commit it and announce it, so without
+  // re-reading the timeline Situation kept reporting "no snapshot frozen yet"
+  // after a freeze until the reader reloaded the whole page.
+  useEffect(() => {
+    if (!focusCaseId) return undefined;
+    const caseId = focusCaseId;
+    const reload = () => void loadTimeline(caseId);
+    const events = [
+      "contextdesk:snapshot-frozen",
+      "contextdesk:corpus-intake-committed",
+      "contextdesk:triage-run-changed",
+      "contextdesk:external-run-imported",
+    ] as const;
+    for (const name of events) window.addEventListener(name, reload);
+    return () => {
+      for (const name of events) window.removeEventListener(name, reload);
+    };
+  }, [focusCaseId, loadTimeline]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -861,35 +944,73 @@ export function Cases(props: {
         impact: newSituation.impact,
         scope: newSituation.scope,
         openQuestions: openQuestionsFrom(newSituation.openQuestions),
+        ...(newOccurredAt.trim() ? { occurredAt: newOccurredAt.trim() } : {}),
       }),
     });
     if (!res.ok) {
-      setActionError("The investigation could not be created. You may not have permission to create one.");
+      const detail = (await res.json().catch(() => ({}))) as { detail?: string };
+      setActionError(
+        detail.detail
+          ? `The investigation could not be created. ${detail.detail}`
+          : "The investigation could not be created. You may not have permission to create one.",
+      );
       return;
     }
     const created = (await res.json()) as CaseRow;
     setTitle("");
     setNewSituation(EMPTY_SITUATION);
+    setNewOccurredAt("");
     // Make the server-confirmed investigation available before changing the URL.
     // A list refresh may still be in flight (or fail), but the focused workspace
     // must never momentarily fall back to the inventory for a case we just created.
     setCases((current) => [created, ...current.filter((row) => row.id !== created.id)]);
     openCase(created.id);
-    await Promise.all([refresh(), refreshActivity()]);
+    await Promise.all([refresh(), refreshActivity(), refreshRecordIndex()]);
   }
 
-  async function setStatus(status: string) {
+  /**
+   * Status changes, including the one that concludes an investigation.
+   *
+   * The server refuses `resolved` without a resolution record. That refusal is
+   * not an error to apologise for — it is the form asking to be filled in — so
+   * a `resolution_required` answer opens the record form rather than showing a
+   * failure message.
+   */
+  async function setStatus(status: string, resolution?: Record<string, unknown>) {
     if (!focusCaseId) return;
     setActionError(null);
+    setResolutionError(null);
     const response = await protectedApiFetch(`/api/cases/${focusCaseId}/status`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({ status, ...(resolution ? { resolution } : {}) }),
     });
     if (!response.ok) {
-      setActionError("The status could not be updated. You may not have permission to change it.");
+      const detail = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        detail?: string;
+        currentRevision?: number;
+      };
+      if (detail.error === "resolution_required") {
+        setResolutionOpen(true);
+        setResolutionPrompted(true);
+        return;
+      }
+      if (detail.error === "resolution_conflict") {
+        setResolutionError(
+          "Someone else recorded a conclusion while this form was open. Reload the investigation and read theirs before replacing it.",
+        );
+        return;
+      }
+      const message = detail.detail
+        ? `The status could not be updated. ${detail.detail}`
+        : "The status could not be updated. You may not have permission to change it.";
+      if (resolution) setResolutionError(message);
+      else setActionError(message);
       return;
     }
+    setResolutionOpen(false);
+    setResolutionPrompted(false);
     await Promise.all([refresh(), refreshActivity()]);
   }
 
@@ -1015,9 +1136,13 @@ export function Cases(props: {
       props.focus.lane
       || (props.focus.itemKind === "workstream" && props.focus.item),
     );
+  // Whether the record this address named is actually on the page. The
+  // announcement below states what happened, so it must not say a record was
+  // opened when the surface does not show it.
+  const routedItemPresence = useRoutedItemPresence(props.focus, Boolean(current));
   const arrivalCopy =
     props.focus && props.focus.navigation !== "preserve"
-      ? focusArrivalCopy(props.focus)
+      ? focusArrivalCopy(props.focus, routedItemPresence)
       : null;
   // Situation briefing inputs. Derived from the same records Capture renders,
   // so the briefing restates the working record instead of forking it.
@@ -1027,8 +1152,15 @@ export function Cases(props: {
     props.onFocusedCaseTitle?.(current?.title ?? null);
   }, [current?.title, props.onFocusedCaseTitle]);
   const normalizedSearch = caseSearch.trim().toLocaleLowerCase();
+  const casesByEntity = new Map<string, Set<string>>();
+  for (const entry of involvementIndex) {
+    const bucket = casesByEntity.get(entry.entityId) ?? new Set<string>();
+    bucket.add(entry.investigationId);
+    casesByEntity.set(entry.entityId, bucket);
+  }
   const visibleCases = cases.filter((c) => {
     if (statusFilter !== "all" && c.status !== statusFilter) return false;
+    if (entityFilter !== "all" && !casesByEntity.get(entityFilter)?.has(c.id)) return false;
     if (!normalizedSearch) return true;
     return [
       c.title,
@@ -1058,13 +1190,23 @@ export function Cases(props: {
       && (row.severity === "critical" || row.severity === "high"),
     )
     .slice(0, 5);
-  const overviewActivities = activities.slice(0, 10);
+  // Grouped before the window is taken, so ten repeats of one imported
+  // analysis cannot fill all ten slots and push the rest of the story out.
+  const groupedActivities = groupRepeatedActivity(activities);
+  const overviewActivities = groupedActivities.slice(0, 10);
   // Both panels below read the same committed activity window the feed reads.
+  // Restored history records work that already happened somewhere else. It
+  // belongs in the feed, where its provenance is stated, but it is not open
+  // work: a successful exact restore must not raise an alert for every event
+  // it replayed.
+  const openWorkActivities = groupedActivities.filter(
+    (item) => item.provenanceClass !== "historical_restored",
+  );
   const attentionGroups = ATTENTION_GROUPS.map((group) => ({
     ...group,
-    items: activities.filter((item) => group.kinds.includes(item.activityKind ?? "")),
+    items: openWorkActivities.filter((item) => group.kinds.includes(item.activityKind ?? "")),
   })).filter((group) => group.items.length > 0);
-  const pendingDecisions = decisionsAwaitingAcceptance(activities);
+  const pendingDecisions = decisionsAwaitingAcceptance(openWorkActivities);
   const attentionCount =
     attentionGroups.reduce((total, group) => total + group.items.length, 0) + pendingDecisions.length;
 
@@ -1140,6 +1282,21 @@ export function Cases(props: {
             rows={2}
           />
         </label>
+        <label>
+          <span>When it happened</span>
+          <input
+            className="login__input"
+            value={newOccurredAt}
+            onChange={(event) => setNewOccurredAt(event.target.value)}
+            placeholder="2024-11-04, 2024-11, or leave empty"
+            aria-label="When it happened"
+          />
+          <small>
+            For work that happened before today. A date on its own is fine and is kept exactly as
+            typed; the time zone is recorded as not known rather than guessed. When this was
+            written down is recorded separately and never changes.
+          </small>
+        </label>
         <label className="case-form__wide">
           <span>Open questions</span>
           <textarea
@@ -1170,6 +1327,24 @@ export function Cases(props: {
             aria-label="Search investigations by title, ID, participant, or creator"
           />
         </label>
+        {entityOptions.length > 0 ? (
+          <label className="case-list__filter">
+            <span className="case-list__control-label">Entity</span>
+            <select
+              className="login__input"
+              aria-label="Filter investigations by involved entity"
+              value={entityFilter}
+              onChange={(e) => setEntityFilter(e.target.value)}
+            >
+              <option value="all">All entities</option>
+              {entityOptions.map((entity) => (
+                <option key={entity.id} value={entity.id}>
+                  {entity.label} ({casesByEntity.get(entity.id)?.size ?? 0})
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         <label className="case-list__filter">
           <span className="case-list__control-label">Status</span>
           <select
@@ -1358,6 +1533,12 @@ export function Cases(props: {
                             <span className="activity-feed__case">{item.investigationTitle}</span>
                             <span className="activity-feed__meta">
                               <time dateTime={item.occurredAt}>{activityTime(item.occurredAt)}</time>
+                              {/* A repeat is stated, never silently dropped:
+                                  the row opens the newest of them and says how
+                                  many times the same record was written. */}
+                              {repeatLabel(item) ? (
+                                <span className="activity-feed__repeat">{repeatLabel(item)}</span>
+                              ) : null}
                               {/* The committed projection names the stage this
                                   event belongs to; showing it saves opening the
                                   investigation to find out where work happened. */}
@@ -1398,9 +1579,14 @@ export function Cases(props: {
                     })}
                   </ol>
                 )}
-                {activities.length > overviewActivities.length ? (
+                {groupedActivities.length > overviewActivities.length ? (
                   <p className="activity-feed__limit">
-                    Showing the 10 most recent of {activities.length} recorded events.
+                    Showing the {overviewActivities.length} most recent of{" "}
+                    {groupedActivities.length} recorded activities
+                    {groupedActivities.length === activities.length
+                      ? ""
+                      : ` (${activities.length} events, repeats grouped)`}
+                    .
                   </p>
                 ) : null}
               </section>
@@ -2029,6 +2215,22 @@ export function Cases(props: {
               <dd>{openedLine(current)?.replace(/^Opened /, "") ?? "Not recorded"}</dd>
             </div>
           </dl>
+          <InvestigationRecordPanel
+            caseId={current.id}
+            canWrite={canWrite}
+            occurrence={{
+              occurredAt: current.occurredAt ?? null,
+              occurredAtPrecision: current.occurredAtPrecision ?? "unknown",
+              occurredAtZone: current.occurredAtZone ?? "unspecified",
+            }}
+            createdAt={current.createdAt ?? null}
+            investigations={cases.map((row) => ({ id: row.id, title: row.title }))}
+            onOccurrenceSaved={async () => {
+              await Promise.all([refresh(), refreshActivity()]);
+            }}
+            onInvolvementChanged={refreshRecordIndex}
+            onOpenInvestigation={(id) => openCase(id)}
+          />
           <section className="situation__activity" aria-label="Recorded activity">
             <h4>Recorded activity</h4>
             <ul>
@@ -2148,6 +2350,7 @@ export function Cases(props: {
             <TriageAnchor id={WORKSTREAMS_SECTION} label="Workstreams">
               <Workstreams
                 caseId={current.id}
+                importedRunCount={runs.length}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
                 {...(props.onDeepNavigate
                   ? {
@@ -2162,6 +2365,15 @@ export function Cases(props: {
                 workstream's own record is the page. They also stop receiving
                 the route focus while hidden, so only the workstream record
                 claims keyboard focus for that address. */}
+            <TriageAnchor id="triage-log-time" label="Timezone review">
+              <div hidden={workstreamFocused}>
+                <LogTimeReviewPanel
+                  caseId={current.id}
+                  canWrite={canWrite}
+                  readOnly={readOnly}
+                />
+              </div>
+            </TriageAnchor>
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
               <div hidden={workstreamFocused}>
                 <CaseBoardPanel
@@ -2182,6 +2394,17 @@ export function Cases(props: {
                   readOnly={readOnly}
                   {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}
+                  onOpenComparison={(experimentId) => {
+                    const focus: WorkFocus = {
+                      section: "triage-comparison-lab",
+                      item: null,
+                      itemKind: null,
+                      lane: null,
+                      experiment: experimentId,
+                    };
+                    if (props.onDeepNavigate) props.onDeepNavigate("compare", focus);
+                    else selectStage("compare");
+                  }}
                 />
               </div>
             </TriageAnchor>
@@ -2210,6 +2433,9 @@ export function Cases(props: {
                 caseTitle={current.title}
                 caseStatus={current.status}
                 caseSeverity={current.severity}
+                {...(current.openQuestions?.length
+                  ? { caseOpenQuestions: current.openQuestions }
+                  : {})}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
                 {...(props.onDeepNavigate
                   ? { onDeepNavigate: (focus: WorkFocus) => props.onDeepNavigate?.("compare", focus) }
@@ -2254,12 +2480,27 @@ export function Cases(props: {
                 caseTitle={current.title}
                 caseStatus={current.status}
                 caseSeverity={current.severity}
+                {...(current.openQuestions?.length
+                  ? { caseOpenQuestions: current.openQuestions }
+                  : {})}
                 {...(props.focus ? { routeFocus: props.focus } : {})}
                 {...(props.onDeepNavigate
                   ? { onDeepNavigate: (focus: WorkFocus) => props.onDeepNavigate?.("decide", focus) }
                   : {})}
                 {...(props.participant ? { participant: props.participant } : {})}
               />
+              {canLead && resolutionOpen ? (
+                <ResolutionForm
+                  prompted={resolutionPrompted}
+                  error={resolutionError}
+                  onSubmit={(payload) => setStatus("resolved", payload)}
+                  onCancel={() => {
+                    setResolutionOpen(false);
+                    setResolutionPrompted(false);
+                    setResolutionError(null);
+                  }}
+                />
+              ) : null}
               {canLead ? (
                 <form
                   key={current.id}
@@ -2267,6 +2508,15 @@ export function Cases(props: {
                   onSubmit={(e) => {
                     e.preventDefault();
                     const next = String(new FormData(e.currentTarget).get("status") ?? "");
+                    if (next === "resolved") {
+                      // The record comes first. Opening the form here rather
+                      // than posting and waiting for a refusal keeps the
+                      // conclusion and the status one action, not two.
+                      setResolutionOpen(true);
+                      setResolutionPrompted(false);
+                      setResolutionError(null);
+                      return;
+                    }
                     void setStatus(next);
                   }}
                 >

@@ -51,5 +51,8 @@ export function interpolate(template: string, vars: Record<string, string>): str
   for (const [key, value] of Object.entries(vars)) {
     out = out.replaceAll(`{${key}}`, value);
   }
+  if (vars.username !== undefined) {
+    out = out.replaceAll("{0}", vars.username);
+  }
   return out;
 }

@@ -11,6 +11,7 @@ import {
   type SessionAuthorizationDeps,
 } from "../authz/index.js";
 import type { Config } from "../../config.js";
+import { latestMigrationVersion } from "../../db/migrate.js";
 
 export type ComponentHealthProvider = () =>
   | ComponentHealthProjectorInputV1
@@ -46,6 +47,7 @@ export function runtimeComponentHealth(
 }
 
 export function syntheticComponentHealth(): ComponentHealthProjectorInputV1 {
+  const head = latestMigrationVersion();
   return {
     generatedAt: "2026-08-24T12:00:00.000Z",
     dataMode: "synthetic_fixture",
@@ -56,9 +58,11 @@ export function syntheticComponentHealth(): ComponentHealthProjectorInputV1 {
         version: "0.0.1-fixture",
         commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         protocol: { name: "cd", version: "v1" },
-        // Authoritative collab storage head is 016_contribution_write_intents.
-        // 015_user_profiles remains in lineage as the profile/grants schema only.
-        storageMigration: { state: "current", current: "016_contribution_write_intents", target: "016_contribution_write_intents" },
+        // The head is read from the migration directory rather than written
+        // out here. A slice that lands a migration used to leave this literal
+        // behind, and a fixture that names a superseded head is a false
+        // statement about the schema, not a stale string.
+        storageMigration: { state: "current", current: head, target: head },
         compatibility: {
           status: "compatible",
           scope: "component_health_contract",

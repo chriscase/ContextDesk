@@ -154,10 +154,18 @@
 }
 
 .activity-feed__stage,
+.activity-feed__repeat,
 .activity-feed__restricted {
   padding: 0.05rem 0.4rem;
   border: 1px solid var(--border);
   border-radius: 0.35rem;
+}
+
+/* A grouped row says how many times the same record was written. It reads as
+   a count, not as an alert: repetition is a fact about the record, not a
+   problem with it. */
+.activity-feed__repeat {
+  border-style: dashed;
 }
 
 .activity-feed__restricted {
@@ -1275,6 +1283,31 @@
 .case-memory__selection-actions button:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.case-memory__more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  margin: 0.55rem 0 0.85rem;
+}
+
+.case-memory__more p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.case-memory__more button {
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
 }
 
 .case-memory__list {

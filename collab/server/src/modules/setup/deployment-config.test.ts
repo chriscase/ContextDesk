@@ -275,6 +275,32 @@ describe("first-run deployment configuration", () => {
     expect(JSON.stringify(first.publicSummary)).not.toContain("directory");
   });
 
+  it("accepts a search-base AD-shaped user filter without treating conjunction as invalid", async () => {
+    const root = await temporaryRoot();
+    const request = await postgresLdapDraft(root);
+    if (request.authentication.ldap === null) throw new Error("fixture error");
+    const prepared = await prepareDraft(root, setupState(), {
+      ...request,
+      authentication: {
+        kind: "ldap",
+        local: null,
+        ldap: {
+          ...request.authentication.ldap,
+          userDnTemplate: null,
+          userSearchBase: "ou=people,dc=example,dc=test",
+          userSearchFilter: "(&(objectClass=user)(sAMAccountName={0}))",
+          userResolutionModes: ["service_bind_search", "upn"],
+          upnSuffix: "example.test",
+          memberAttribute: "memberOf",
+        },
+      },
+    });
+    expect(prepared.draft.authentication.ldap?.userSearchFilter).toBe(
+      "(&(objectClass=user)(sAMAccountName={0}))",
+    );
+    expect(JSON.stringify(prepared.publicSummary)).not.toContain("sAMAccountName");
+  });
+
   it("enforces revisions and permits an explicit failed-state replacement", async () => {
     const root = await temporaryRoot();
     const request = await singleNodeDraft(root);
@@ -505,10 +531,6 @@ describe("first-run deployment configuration", () => {
       { ...ldap, userSearchFilter: "(uid={username}*)" },
       { ...ldap, userSearchFilter: "(uid={dn})" },
       { ...ldap, userSearchFilter: "(|(uid={username})(mail={username}))" },
-      {
-        ...ldap,
-        userSearchFilter: "(&(objectClass=person)(uid={username}))",
-      },
       { ...ldap, userSearchFilter: "(uid=prefix-{username})" },
       { ...ldap, userSearchFilter: "(uid=bad\\ZZ)" },
       { ...ldap, groupSearchFilter: "(objectClass=groupOfNames)" },

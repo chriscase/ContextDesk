@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parseLdapProbeReport } from "@cd-collab/contracts";
 import {
   SETUP_CLAIM_REQUEST_SCHEMA_ID,
   SETUP_DEPLOYMENT_DRAFT_REQUEST_SCHEMA_ID,
@@ -9,6 +10,12 @@ import {
 } from "@cd-collab/contracts/setup";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
+import {
+  createSyntheticLdapFactory,
+  exampleSyntheticDirectory,
+  loadLdapConfig,
+  type LdapSessionFactory,
+} from "../auth/index.js";
 import { initializeSetupState } from "./claim.js";
 import { SetupService, setupReferencePolicy } from "./service.js";
 import {
@@ -54,7 +61,7 @@ class MemorySetupStore implements SetupStateStore {
   }
 }
 
-async function setupApp() {
+async function setupApp(options: { ldapSessions?: LdapSessionFactory } = {}) {
   const store = new MemorySetupStore();
   await initializeSetupState(store, OWNER_TOKEN, {
     nowUnixMs: () => 1_000,
@@ -67,7 +74,11 @@ async function setupApp() {
     config: testConfig(),
     pool: null,
     store: { ping() {} },
-    setup: new SetupService({ store, referencePolicy: setupReferencePolicy() }),
+    setup: new SetupService({
+      store,
+      referencePolicy: setupReferencePolicy(),
+      ...(options.ldapSessions ? { ldapSessions: options.ldapSessions } : {}),
+    }),
     serveStatic: false,
   });
   return { app, store };
@@ -113,6 +124,15 @@ describe("first-run setup HTTP boundary", () => {
     });
     expect(status.body).not.toContain(OWNER_TOKEN);
     expect(status.body).not.toContain("Digest");
+
+    const capabilities = await app.inject({ method: "GET", url: "/api/setup/capabilities" });
+    expect(capabilities.statusCode).toBe(200);
+    expect(capabilities.json()).toMatchObject({
+      directoryProbe: true,
+      externalConnectivityVerification: false,
+      commit: false,
+      restart: false,
+    });
 
     const claimed = await claim(app);
     expect(claimed.statusCode).toBe(200);
@@ -321,6 +341,106 @@ describe("first-run setup HTTP boundary", () => {
     ]) {
       expect(staged.body).not.toContain(privateValue);
     }
+    await app.close();
+  });
+
+  it("probes a staged directory draft through synthetic sessions without leaking secrets", async () => {
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      COLLAB_LDAP_USER_SEARCH_BASE: "ou=people,dc=example,dc=test",
+      COLLAB_LDAP_GROUP_SEARCH_BASE: "ou=groups,dc=example,dc=test",
+      COLLAB_LDAP_BIND_DN: "cn=svc,ou=services,dc=example,dc=test",
+      COLLAB_LDAP_BIND_PASSWORD: "fixture-service-secret",
+      COLLAB_LDAP_MEMBER_ATTR: "memberOf",
+    });
+    const { app } = await setupApp({
+      ldapSessions: createSyntheticLdapFactory(cfg, exampleSyntheticDirectory()),
+    });
+    await claim(app);
+    const deploymentPaths = syntheticDeploymentPaths("ldap-probe");
+    const values = {
+      database_url: "postgres://app:synthetic@db.example.test/contextdesk",
+      migrate_database_url: "postgres://migrator:synthetic@db.example.test/contextdesk",
+      ldap_bind_password: "fixture-service-secret",
+    } as const;
+    const handles = Object.fromEntries(
+      await Promise.all(
+        Object.entries(values).map(async ([purpose, value]) => {
+          const issued = await secret(app, purpose, value);
+          expect(issued.response.statusCode).toBe(200);
+          return [purpose, issued.body.handle];
+        }),
+      ),
+    );
+    const ref = (purpose: keyof typeof values) => ({
+      kind: "handle",
+      purpose,
+      fileRef: null,
+      handle: handles[purpose],
+    });
+    const draft = {
+      schemaId: SETUP_DEPLOYMENT_DRAFT_REQUEST_SCHEMA_ID,
+      basedOnRevision: 1,
+      draftRevision: 2,
+      deploymentProfile: "postgres_ldap",
+      dataRoot: deploymentPaths.dataRoot,
+      evidenceRoot: deploymentPaths.evidenceRoot,
+      storage: {
+        kind: "postgres",
+        sqlitePath: null,
+        databaseUrlRef: ref("database_url"),
+        migrateDatabaseUrlRef: ref("migrate_database_url"),
+      },
+      authentication: {
+        kind: "ldap",
+        local: null,
+        ldap: {
+          url: "ldaps://directory.example.test:636",
+          starttls: false,
+          caCertificateRef: null,
+          userDnTemplate: null,
+          userSearchBase: "ou=people,dc=example,dc=test",
+          userSearchFilter: "(uid={username})",
+          groupSearchBase: "ou=groups,dc=example,dc=test",
+          groupSearchFilter: "(&(objectClass=groupOfNames)(member={dn}))",
+          bindDn: "cn=svc,ou=services,dc=example,dc=test",
+          bindPasswordRef: ref("ldap_bind_password"),
+          adminGroup: "cn=contributors,ou=groups,dc=example,dc=test",
+          userResolutionModes: ["service_bind_search"],
+          memberAttribute: "memberOf",
+        },
+      },
+      gateway: null,
+    };
+    const staged = await app.inject({
+      method: "PUT",
+      url: "/api/setup/draft",
+      headers: { "x-contextdesk-setup-token": OWNER_TOKEN },
+      payload: { expectedRevision: 1, deploymentLabel: "Synthetic team room", draft },
+    });
+    expect(staged.statusCode).toBe(200);
+    const probe = await app.inject({
+      method: "POST",
+      url: "/api/setup/ldap-probe",
+      headers: { "x-contextdesk-setup-token": OWNER_TOKEN },
+      payload: {
+        expectedRevision: 2,
+        probeUsername: "alice",
+        probePassword: "fixture-alice-secret",
+      },
+    });
+    expect(probe.statusCode).toBe(200);
+    const report = parseLdapProbeReport(JSON.parse(probe.body));
+    expect(report.ready).toBe(true);
+    expect(report.stages.map((stage) => stage.id)).toEqual([
+      "transport",
+      "service_bind",
+      "user_search",
+      "group_lookup",
+      "role_map",
+    ]);
+    expect(probe.body).not.toContain("fixture-alice-secret");
+    expect(probe.body).not.toContain("fixture-service-secret");
     await app.close();
   });
 

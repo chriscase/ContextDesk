@@ -14,6 +14,8 @@ import {
   type OverviewOpenStatus,
   type OverviewSeverityCountsV1,
   type OverviewStatusCountsV1,
+  type OccurredAtPrecision,
+  type OccurredAtZone,
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
@@ -52,6 +54,14 @@ export interface CaseRow {
   scope?: string;
   openQuestions?: string[];
   situationVersion?: number;
+  /**
+   * When the investigated work actually happened, as recorded. Literal text,
+   * so an unknown time zone is never guessed into UTC. `createdAt` keeps
+   * saying when the row was written and is never rewritten by a backfill.
+   */
+  occurredAt?: string | null;
+  occurredAtPrecision?: OccurredAtPrecision;
+  occurredAtZone?: OccurredAtZone;
   severity: CaseSeverity;
   status: CaseStatus;
   legalHold: boolean;
@@ -275,11 +285,41 @@ function compareOverviewOpenCases(left: OverviewOpenCaseRow, right: OverviewOpen
   return byCreated !== 0 ? byCreated : left.id.localeCompare(right.id);
 }
 
+function addReferencedHash(into: Set<string>, value: string | null | undefined): void {
+  if (value && /^[0-9a-f]{64}$/.test(value)) into.add(value);
+}
+
+/**
+ * Destination keys this module owns, addressed one batch at a time. Portable
+ * apply probes these to decide collisions without enumerating the corpus.
+ */
+export const CASE_PROBE_KINDS = ["case", "contribution", "artifact", "snapshot", "intake_batch"] as const;
+export type CaseProbeKind = (typeof CASE_PROBE_KINDS)[number];
+
+export interface ParticipantIdentityRow {
+  identityId: string;
+  username: string;
+}
+
+/** Whose view a participant probe is answered from. */
+export interface ParticipantVisibilityScope {
+  actorId: string;
+  isAdmin: boolean;
+}
+
 export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
   insertCase(row: CaseRow): Promise<void>;
-  updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void>;
+  updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void>;
+  updateOccurredAt(
+    id: string,
+    occurrence: {
+      occurredAt: string | null;
+      occurredAtPrecision: OccurredAtPrecision;
+      occurredAtZone: OccurredAtZone;
+    },
+  ): Promise<void>;
   updateSituationAtomic(
     input: AtomicSituationUpdate,
     audit: AuditStore,
@@ -302,6 +342,8 @@ export interface CaseStore {
   insertRevision(rev: RevisionRow): Promise<void>;
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
   listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
+  listReferencedContentHashes(): Promise<ReadonlySet<string>>;
+  listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   insertArtifact(row: ArtifactRow): Promise<void>;
   withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T>;
   lockIntakeIdempotency(caseId: string, key: string): Promise<void>;
@@ -319,6 +361,25 @@ export interface CaseStore {
   listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]>;
   getSnapshot(snapshotId: string): Promise<SnapshotRow | null>;
   insertSnapshot(row: SnapshotRow): Promise<void>;
+  /**
+   * Returns the subset of `ids` that already key a row of `kind`. Host-owned
+   * and batched: one round trip per kind, and cost follows the probed id count
+   * rather than the size of the destination corpus. Never filtered by actor
+   * visibility — an invisible row still occupies the key.
+   */
+  probeExistingIds(kind: CaseProbeKind, ids: readonly string[]): Promise<string[]>;
+  /**
+   * Distinct participant identities matching any supplied id or username,
+   * restricted to what `scope` may already see: every case for an admin, and
+   * otherwise only cases the scoped actor participates in. Targeted lookup for
+   * identity mapping; never an enumeration of people, and never wider than the
+   * caller's existing view.
+   */
+  probeParticipants(input: {
+    scope: ParticipantVisibilityScope;
+    identityIds?: readonly string[];
+    usernames?: readonly string[];
+  }): Promise<ParticipantIdentityRow[]>;
 }
 
 export type Queryable = Pick<Pool, "query">;
@@ -389,11 +450,29 @@ export class MemoryCaseStore implements CaseStore {
     this.timeline.set(row.id, []);
   }
 
-  async updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void> {
+  async updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void> {
     const existing = this.cases.get(row.id);
     if (!existing) throw new Error("case not found");
-    existing.status = row.status;
-    existing.legalHold = row.legalHold;
+    if (row.status === undefined && row.legalHold === undefined) {
+      throw new Error("case meta update requires status or legalHold");
+    }
+    if (row.status !== undefined) existing.status = row.status;
+    if (row.legalHold !== undefined) existing.legalHold = row.legalHold;
+  }
+
+  async updateOccurredAt(
+    id: string,
+    occurrence: {
+      occurredAt: string | null;
+      occurredAtPrecision: OccurredAtPrecision;
+      occurredAtZone: OccurredAtZone;
+    },
+  ): Promise<void> {
+    const existing = this.cases.get(id);
+    if (!existing) throw new Error("case not found");
+    existing.occurredAt = occurrence.occurredAt;
+    existing.occurredAtPrecision = occurrence.occurredAtPrecision;
+    existing.occurredAtZone = occurrence.occurredAtZone;
   }
 
   async updateSituationAtomic(
@@ -613,6 +692,21 @@ export class MemoryCaseStore implements CaseStore {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
+    const hashes = new Set<string>();
+    for (const row of this.artifacts.values()) {
+      addReferencedHash(hashes, row.contentHash);
+      addReferencedHash(hashes, row.expectedHash);
+    }
+    for (const snapshot of this.snapshots.values()) {
+      for (const item of snapshot.evidence) {
+        addReferencedHash(hashes, item.contentHash);
+        addReferencedHash(hashes, item.expectedHash);
+      }
+    }
+    return hashes;
+  }
+
   async insertArtifact(row: ArtifactRow): Promise<void> {
     if (row.intakeBatchId) {
       const batch = this.intakeBatches.get(row.intakeBatchId);
@@ -624,21 +718,21 @@ export class MemoryCaseStore implements CaseStore {
   }
 
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
-    return this.atomicBoundary(async () => {
+    const run = async (): Promise<T> => {
       const snapshot = await Promise.resolve(this.capture());
-      const auditSnapshot = audit instanceof MemoryAuditStore
-        ? await Promise.resolve(audit.capture())
-        : null;
       try {
         return await operation();
       } catch (error) {
         await Promise.resolve(this.restore(snapshot));
-        if (audit instanceof MemoryAuditStore && auditSnapshot) {
-          await Promise.resolve(audit.restore(auditSnapshot));
+        if (audit instanceof MemoryAuditStore) {
+          await Promise.resolve(audit.rollbackTracked());
         }
         throw error;
       }
-    });
+    };
+    return this.atomicBoundary(() =>
+      (audit instanceof MemoryAuditStore ? audit.runTracked(run) : run()),
+    );
   }
 
   async lockIntakeIdempotency(_caseId: string, _key: string): Promise<void> {
@@ -693,6 +787,55 @@ export class MemoryCaseStore implements CaseStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   }
 
+  async probeExistingIds(kind: CaseProbeKind, ids: readonly string[]): Promise<string[]> {
+    const wanted = new Set(ids);
+    if (wanted.size === 0) return [];
+    const keys =
+      kind === "case"
+        ? this.cases.keys()
+        : kind === "contribution"
+          ? this.revisions.keys()
+          : kind === "artifact"
+            ? this.artifacts.keys()
+            : kind === "snapshot"
+              ? this.snapshots.keys()
+              : this.intakeBatches.keys();
+    const hits: string[] = [];
+    for (const key of keys) {
+      if (wanted.has(key)) hits.push(key);
+    }
+    return hits.sort();
+  }
+
+  async probeParticipants(input: {
+    scope: ParticipantVisibilityScope;
+    identityIds?: readonly string[];
+    usernames?: readonly string[];
+  }): Promise<ParticipantIdentityRow[]> {
+    const identityIds = new Set(input.identityIds ?? []);
+    const usernames = new Set(input.usernames ?? []);
+    if (identityIds.size === 0 && usernames.size === 0) return [];
+    const found = new Map<string, ParticipantIdentityRow>();
+    for (const row of this.cases.values()) {
+      const visible =
+        input.scope.isAdmin ||
+        row.participants.some((item) => item.identityId === input.scope.actorId);
+      if (!visible) continue;
+      for (const participant of row.participants) {
+        if (
+          identityIds.has(participant.identityId) ||
+          usernames.has(participant.username)
+        ) {
+          found.set(participant.identityId, {
+            identityId: participant.identityId,
+            username: participant.username,
+          });
+        }
+      }
+    }
+    return [...found.values()].sort((a, b) => a.identityId.localeCompare(b.identityId));
+  }
+
   async getSnapshot(snapshotId: string): Promise<SnapshotRow | null> {
     const row = this.snapshots.get(snapshotId);
     return row ? persistedSnapshot(row) : null;
@@ -718,6 +861,16 @@ const pgCaseTx = new AsyncLocalStorage<Queryable>();
 export function activeCaseQueryable(): Queryable | undefined {
   return pgCaseTx.getStore();
 }
+
+/** Destination key column backing each probe kind. */
+const CASE_PROBE_TABLES: Readonly<Record<CaseProbeKind, { table: string; column: string }>> =
+  Object.freeze({
+    case: { table: "cases", column: "id" },
+    contribution: { table: "contributions", column: "id" },
+    artifact: { table: "evidence_artifacts", column: "id" },
+    snapshot: { table: "snapshots", column: "id" },
+    intake_batch: { table: "evidence_intake_batches", column: "id" },
+  });
 
 export class PgCaseStore implements CaseStore {
   private readonly pool: Queryable;
@@ -745,10 +898,11 @@ export class PgCaseStore implements CaseStore {
     await this.db.query(
       `INSERT INTO cases (
          id, title, problem_statement, affected_parties, impact, situation_scope, open_questions,
-         situation_version,
+         situation_version, occurred_at, occurred_at_precision, occurred_at_zone,
          severity, status, legal_hold, retention_class,
          created_at, created_by, created_by_username, last_seq
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, 0)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15,
+                 $16, $17, $18, 0)`,
       [
         row.id,
         row.title,
@@ -758,6 +912,9 @@ export class PgCaseStore implements CaseStore {
         row.scope ?? "",
         JSON.stringify(row.openQuestions ?? []),
         row.situationVersion ?? 0,
+        row.occurredAt ?? null,
+        row.occurredAtPrecision ?? "unknown",
+        row.occurredAtZone ?? "unspecified",
         row.severity,
         row.status,
         row.legalHold,
@@ -772,10 +929,47 @@ export class PgCaseStore implements CaseStore {
     }
   }
 
-  async updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void> {
+  async updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void> {
+    if (row.status !== undefined && row.legalHold !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
+        [row.id, row.status, row.legalHold],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    if (row.status !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET status = $2 WHERE id = $1`,
+        [row.id, row.status],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    if (row.legalHold !== undefined) {
+      const result = await this.db.query(
+        `UPDATE cases SET legal_hold = $2 WHERE id = $1`,
+        [row.id, row.legalHold],
+      );
+      if (result.rowCount === 0) throw new Error("case not found");
+      return;
+    }
+    throw new Error("case meta update requires status or legalHold");
+  }
+
+  async updateOccurredAt(
+    id: string,
+    occurrence: {
+      occurredAt: string | null;
+      occurredAtPrecision: OccurredAtPrecision;
+      occurredAtZone: OccurredAtZone;
+    },
+  ): Promise<void> {
     const result = await this.db.query(
-      `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
-      [row.id, row.status, row.legalHold],
+      `UPDATE cases
+       SET occurred_at = $2, occurred_at_precision = $3, occurred_at_zone = $4
+       WHERE id = $1`,
+      [id, occurrence.occurredAt, occurrence.occurredAtPrecision, occurrence.occurredAtZone],
     );
     if (result.rowCount === 0) throw new Error("case not found");
   }
@@ -1069,6 +1263,26 @@ export class PgCaseStore implements CaseStore {
     return result.rows.map((row) => asArtifact(row as Record<string, unknown>));
   }
 
+  async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
+    const result = await this.db.query<{ hash: string | null }>(
+      `SELECT hash FROM (
+         SELECT content_hash AS hash FROM evidence_artifacts
+         UNION
+         SELECT expected_hash FROM evidence_artifacts
+         UNION
+         SELECT item->>'contentHash'
+         FROM snapshots, LATERAL jsonb_array_elements(evidence) AS item
+         UNION
+         SELECT item->>'expectedHash'
+         FROM snapshots, LATERAL jsonb_array_elements(evidence) AS item
+       ) hashes
+       WHERE hash ~ '^[0-9a-f]{64}$'`,
+    );
+    const hashes = new Set<string>();
+    for (const row of result.rows) addReferencedHash(hashes, row.hash);
+    return hashes;
+  }
+
   async insertArtifact(row: ArtifactRow): Promise<void> {
     await this.db.query(
       `INSERT INTO evidence_artifacts (
@@ -1214,6 +1428,45 @@ export class PgCaseStore implements CaseStore {
     return result.rows.map((row) => asSnapshot(row as Record<string, unknown>));
   }
 
+  async probeExistingIds(kind: CaseProbeKind, ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const probe = CASE_PROBE_TABLES[kind];
+    const result = await this.db.query(
+      `SELECT ${probe.column} AS id FROM ${probe.table} WHERE ${probe.column} = ANY($1::uuid[])`,
+      [[...new Set(ids)]],
+    );
+    return result.rows
+      .map((row) => String((row as Record<string, unknown>).id))
+      .sort();
+  }
+
+  async probeParticipants(input: {
+    scope: ParticipantVisibilityScope;
+    identityIds?: readonly string[];
+    usernames?: readonly string[];
+  }): Promise<ParticipantIdentityRow[]> {
+    const identityIds = [...new Set(input.identityIds ?? [])];
+    const usernames = [...new Set(input.usernames ?? [])];
+    if (identityIds.length === 0 && usernames.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT DISTINCT p.identity_id, p.username
+         FROM case_participants p
+        WHERE (p.identity_id = ANY($1::text[]) OR p.username = ANY($2::text[]))
+          AND ($3::boolean OR EXISTS (
+                SELECT 1 FROM case_participants viewer
+                 WHERE viewer.case_id = p.case_id AND viewer.identity_id = $4))
+        ORDER BY p.identity_id ASC`,
+      [identityIds, usernames, input.scope.isAdmin, input.scope.actorId],
+    );
+    return result.rows.map((row) => {
+      const value = row as Record<string, unknown>;
+      return {
+        identityId: String(value.identity_id),
+        username: String(value.username),
+      };
+    });
+  }
+
   async getSnapshot(snapshotId: string): Promise<SnapshotRow | null> {
     const result = await this.db.query(
       `SELECT id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
@@ -1251,7 +1504,9 @@ export class PgCaseStore implements CaseStore {
 
 const CASE_SELECT = `
   SELECT c.id, c.title, c.problem_statement, c.affected_parties, c.impact, c.situation_scope,
-         c.open_questions, c.situation_version, c.severity, c.status, c.legal_hold,
+         c.open_questions, c.situation_version,
+         c.occurred_at, c.occurred_at_precision, c.occurred_at_zone,
+         c.severity, c.status, c.legal_hold,
          c.retention_class,
          c.created_at, c.created_by, c.created_by_username,
          COALESCE(
@@ -1273,6 +1528,9 @@ function cloneCase(row: CaseRow): CaseRow {
     scope: row.scope ?? "",
     openQuestions: caseOpenQuestions(row.openQuestions, "case.openQuestions"),
     situationVersion: caseSituationVersion(row.situationVersion),
+    occurredAt: row.occurredAt ?? null,
+    occurredAtPrecision: row.occurredAtPrecision ?? "unknown",
+    occurredAtZone: row.occurredAtZone ?? "unspecified",
     participants: row.participants.map((p) => ({ ...p })),
   };
 }
@@ -1320,6 +1578,10 @@ function asCase(row: Record<string, unknown>): CaseRow {
       : String(row.situation_scope),
     openQuestions: caseOpenQuestions(row.open_questions, "cases.open_questions"),
     situationVersion: caseSituationVersion(row.situation_version),
+    occurredAt:
+      row.occurred_at === null || row.occurred_at === undefined ? null : String(row.occurred_at),
+    occurredAtPrecision: (row.occurred_at_precision as OccurredAtPrecision | undefined) ?? "unknown",
+    occurredAtZone: (row.occurred_at_zone as OccurredAtZone | undefined) ?? "unspecified",
     severity: row.severity as CaseSeverity,
     status: row.status as CaseStatus,
     legalHold: Boolean(row.legal_hold),

@@ -16,7 +16,11 @@ import type { EvidenceStore } from "./evidence/store.js";
 import {
   registerAuthRoutes,
   registerBrowserMutationCsrfGuard,
+  createEphemeralPublicIdentityCodec,
   type AuthRouteDeps,
+  type LdapConfig,
+  type LdapSessionFactory,
+  type PublicIdentityCodec,
 } from "./modules/auth/index.js";
 import {
   MemoryGroupRoleStore,
@@ -27,7 +31,7 @@ import {
 } from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
 import { registerAdminAuditRoutes } from "./modules/audit/index.js";
-import { registerAdminDirectoryRoutes } from "./modules/admin/index.js";
+import { registerAdminDirectoryRoutes, registerLdapAdminRoutes } from "./modules/admin/index.js";
 import {
   registerComponentHealthRoutes,
   runtimeComponentHealth,
@@ -36,6 +40,7 @@ import {
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerCorpusIntakeRoutes } from "./modules/corpus-intake/index.js";
+import { registerLogTimeRoutes, type LogTimeService } from "./modules/log-time/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
 import { registerTriageRunRoutes, type TriageRunService } from "./modules/triage-runs/index.js";
@@ -59,12 +64,35 @@ import {
   type UserProfileStore,
 } from "./modules/people/index.js";
 import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js";
+import { registerEntityRoutes, type EntityService } from "./modules/entities/index.js";
+import { registerReferenceRoutes, type ReferenceService } from "./modules/references/index.js";
+import { registerResolutionRoutes, type ResolutionService } from "./modules/resolutions/index.js";
+
+function requestPath(url: string): string {
+  return url.split("?", 1)[0] ?? url;
+}
+
+const ADMIN_DIRECTORY_DIAGNOSTIC_PATHS = new Set([
+  "/api/admin/directory/groups/search",
+  "/api/admin/directory/identities/search",
+  "/api/admin/directory/mapping/preview",
+  "/api/admin/ldap/config",
+  "/api/admin/ldap/test",
+  "/api/authz/group-role-map",
+]);
+
+function mayExposeAdminDiagnostic(url: string, statusCode: number): boolean {
+  if (statusCode < 200 || statusCode >= 300) return false;
+  return ADMIN_DIRECTORY_DIAGNOSTIC_PATHS.has(requestPath(url));
+}
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
   roles: MutableGroupRoleMap;
   roleStore?: GroupRoleStore;
   audit: AuditStore;
+  ldapConfig?: LdapConfig | null;
+  ldapSessions?: LdapSessionFactory;
 }
 
 export interface AppDeps {
@@ -78,19 +106,32 @@ export interface AppDeps {
   imports?: ImportService;
   triageRuns?: TriageRunService;
   presence?: PresenceService;
+  logTime?: LogTimeService;
   experiments?: ExperimentService;
   exporter?: ExportService;
   portable?: PortableInvestigationService;
   setup?: SetupService;
+  /** Reusable investigation entities and their per-investigation involvement. */
+  entities?: EntityService;
+  /** Authorized cross-investigation references. */
+  references?: ReferenceService;
+  /** Resolution records behind conclusive status transitions. */
+  resolutions?: ResolutionService;
   /** Canonical user profile store. Also wires login-time profile sync onto security.auth. */
   profiles?: UserProfileStore;
   grants?: LocalGrantStore;
   componentHealth?: ComponentHealthProvider;
   serveStatic?: boolean;
   installationId?: string;
+  publicIdentities?: PublicIdentityCodec;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
+  const publicIdentities = deps.publicIdentities
+    ?? (process.env.NODE_ENV === "test" ? createEphemeralPublicIdentityCodec() : null);
+  if (deps.security && !publicIdentities) {
+    throw new Error("a durable public identity codec is required when authentication is enabled");
+  }
   const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
   registerBrowserMutationCsrfGuard(app);
   const requiredMigrationVersion = latestMigrationVersion();
@@ -150,6 +191,24 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   if (deps.security) {
     const security = deps.security;
+    app.addHook("preSerialization", async (request, reply, payload) => {
+      if (!requestPath(request.url).startsWith("/api/")
+        || mayExposeAdminDiagnostic(request.url, reply.statusCode)) return payload;
+      return publicIdentities!.sanitizePayload(payload);
+    });
+    app.addHook("onSend", async (request, reply, payload) => {
+      if (!requestPath(request.url).startsWith("/api/")
+        || mayExposeAdminDiagnostic(request.url, reply.statusCode)
+        || typeof payload !== "string") {
+        return payload;
+      }
+      const sanitized = publicIdentities!.sanitizeText(payload);
+      if (publicIdentities!.containsDirectoryDn(sanitized)) {
+        void reply.code(500);
+        return JSON.stringify({ error: "identity_projection_failed" });
+      }
+      return sanitized;
+    });
     const roleStore = security.roleStore ?? new MemoryGroupRoleStore(security.roles);
     const profiles = deps.profiles ?? new MemoryUserProfileStore();
     const grants = deps.grants ?? new MemoryLocalGrantStore();
@@ -173,6 +232,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       sessionAuth,
       audit: security.audit,
       profiles,
+      publicIdentities: publicIdentities!,
     });
     await registerAdminPeopleRoutes(app, {
       sessionAuth,
@@ -189,6 +249,12 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await registerAdminDirectoryRoutes(app, {
       sessionAuth,
       audit: security.audit,
+    });
+    await registerLdapAdminRoutes(app, {
+      sessionAuth,
+      audit: security.audit,
+      ldapConfig: security.ldapConfig ?? null,
+      ...(security.ldapSessions ? { sessions: security.ldapSessions } : {}),
     });
     await registerComponentHealthRoutes(app, {
       sessionAuth,
@@ -209,12 +275,47 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         sessionAuth,
         domain: deps.domain,
         installationId: deps.installationId ?? "inst-unconfigured000000",
+        publicIdentities: publicIdentities!,
       });
       await registerCorpusIntakeRoutes(app, {
         sessionAuth,
         audit: security.audit,
         domain: deps.domain,
       });
+      if (deps.entities) {
+        const domain = deps.domain;
+        await registerEntityRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          entities: deps.entities,
+          // Filtering by entity must never widen what a reader can see, so the
+          // index is built from the investigations they could already list.
+          visibleInvestigationIds: async (actor, isAdmin) =>
+            (await domain.listCases(actor, isAdmin)).map((row) => row.id),
+        });
+      }
+      if (deps.references) {
+        await registerReferenceRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          references: deps.references,
+        });
+      }
+      if (deps.resolutions) {
+        await registerResolutionRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          resolutions: deps.resolutions,
+        });
+      }
+      if (deps.logTime) {
+        await registerLogTimeRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          logTime: deps.logTime,
+          cases: deps.domain,
+        });
+      }
     }
     if (deps.catalog) {
       await registerCatalogRoutes(app, {

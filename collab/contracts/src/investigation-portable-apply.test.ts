@@ -84,6 +84,15 @@ describe("portable apply contract", () => {
     );
   });
 
+  it("does not mistake random server-minted token bytes for embedded credentials", () => {
+    const tokenWithCredentialLikeEntropy = "pit1.synthetic-sk-abcdefgh-tail";
+    expect(
+      parsePortableApplyRequest(
+        validRequest({ confirmationToken: tokenWithCredentialLikeEntropy }),
+      ).confirmationToken,
+    ).toBe(tokenWithCredentialLikeEntropy);
+  });
+
   it("rejects malformed supplied blob inventories instead of ignoring them", () => {
     expect(() => parsePortableApplyRequest(validRequest({ suppliedBlobs: {} }))).toThrow(
       /suppliedBlobs/,

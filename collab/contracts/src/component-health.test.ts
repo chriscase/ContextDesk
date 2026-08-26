@@ -26,8 +26,8 @@ describe("component health contract", () => {
     ]);
     expect(parsed.components[0]?.storageMigration).toEqual({
       state: "current",
-      current: "016_contribution_write_intents",
-      target: "016_contribution_write_intents",
+      current: "018_log_time",
+      target: "018_log_time",
     });
     expect(parsed.components[0]?.update.state).toBe("available");
     expect(parsed.components[2]?.reportStatus).toBe("not_reported");

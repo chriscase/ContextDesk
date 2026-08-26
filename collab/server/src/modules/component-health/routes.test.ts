@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseComponentHealthResponse } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
+import { latestMigrationVersion } from "../../db/migrate.js";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
@@ -70,11 +71,15 @@ describe("component health route", () => {
       expect(response.statusCode).toBe(200);
       const body = parseComponentHealthResponse(JSON.parse(response.body));
       expect(body.dataMode).toBe("synthetic_fixture");
+      // Asserted against the migration directory, not a literal: the fixture's
+      // job is to report the real head, so a new migration must not be able to
+      // leave this route claiming a superseded one.
       expect(body.components[0]?.storageMigration).toEqual({
         state: "current",
-        current: "016_contribution_write_intents",
-        target: "016_contribution_write_intents",
+        current: latestMigrationVersion(),
+        target: latestMigrationVersion(),
       });
+      expect(body.components[0]?.storageMigration.current).toBe(latestMigrationVersion());
       expect(body.components[2]?.reportStatus).toBe("not_reported");
       expect(response.body).not.toMatch(/password|secret|email|directory|customer/i);
     } finally {

@@ -1,11 +1,19 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FilesystemEvidenceStore, sha256Hex } from "../evidence/store.js";
+import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../evidence/store.js";
 import { CatalogService } from "../modules/catalog/index.js";
 import { CaseService } from "../modules/cases/index.js";
+import { ExperimentService } from "../modules/experiments/index.js";
+import { ImportService } from "../modules/import/index.js";
+import { TriageRunService } from "../modules/triage-runs/index.js";
 import { createSqliteRuntime } from "./sqlite.js";
+
+const EXPERIMENT_SUMMARY = JSON.parse(
+  readFileSync(new URL("../../../contracts/fixtures/experiment-summary.valid.json", import.meta.url), "utf8"),
+) as unknown;
 
 describe("SQLite local runtime", () => {
   it("persists the collaboration stores across a process reopen", async () => {
@@ -378,6 +386,395 @@ describe("SQLite local runtime", () => {
       expect(await reopened.cases.listArtifactsByCase(created.id)).toEqual([]);
       expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
       expect(await reopened.audit.list({ action: "evidence_register" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reclaims unreferenced CAS bytes after a promote crash across SQLite reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-pending-write-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    const evidenceRoot = join(root, "evidence");
+    try {
+      const first = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: evidenceRoot });
+      evidence.addReferencedContentHashSource(() => first.cases.listReferencedContentHashes());
+      const catalog = new CatalogService(first.catalog, first.audit);
+      const cases = new CaseService(evidence, first.audit, first.cases, catalog);
+      const created = await cases.createCase(actor, { title: "SQLite promote crash fixture" }, "test");
+      const keptBytes = new TextEncoder().encode("2026-08-25T00:00:00Z synthetic sqlite kept stall\n");
+      const kept = await cases.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "kept-sqlite.log",
+          mediaType: "text/plain",
+          bytes: keptBytes,
+          summary: "Synthetic SQLite kept stall.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const crashedBytes = new TextEncoder().encode("2026-08-25T00:01:00Z synthetic sqlite crash residue\n");
+      const batch = await evidence.beginWriteBatch();
+      const crashedMeta = await batch.put(crashedBytes, { contentType: "text/plain" });
+      await batch.promote();
+      await abandonWriteBatchForCrashTest(batch);
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      const recoveredStore = new FilesystemEvidenceStore({ rootDir: evidenceRoot });
+      recoveredStore.addReferencedContentHashSource(() => second.cases.listReferencedContentHashes());
+      const recovered = await recoveredStore.recoverUnreferencedWrites();
+      expect(recovered.reclaimed).toEqual([crashedMeta.hash]);
+      expect(await recoveredStore.head(crashedMeta.hash)).toBeNull();
+      expect(await recoveredStore.verify(kept.artifact.contentHash ?? "")).toBe(true);
+      expect(await second.cases.listArtifactsByCase(created.id)).toHaveLength(1);
+      expect((await second.cases.listTimeline(created.id)).filter((event) => event.kind === "evidence_registered"))
+        .toHaveLength(1);
+      second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls a triage job insert back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-triage-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "triage_job_created") {
+          throw new Error("injected timeline failure:triage_job_created");
+        }
+        return originalAppend(caseId, event);
+      };
+      const service = new TriageRunService({
+        cases,
+        audit: runtime.audit,
+        jobs: runtime.jobs,
+      });
+      const created = await cases.createCase(actor, { title: "SQLite triage rollback" }, "test");
+      const artifact = await cases.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "checkout.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("checkout timeout"),
+          summary: "Synthetic checkout timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const snapshot = await cases.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      await expect(
+        service.create(
+          created.id,
+          actor,
+          {
+            schemaId: "cd-collab.triage_job_request.v1",
+            snapshotId: snapshot.id,
+            mode: "deterministic_mock",
+            strategyId: "contextdesk.standard",
+            question: "What happened and what should we inspect next?",
+            policyFingerprint: null,
+            taskFingerprint: "task-fingerprint",
+            candidates: [{
+              candidateId: "candidate-1",
+              role: "reviewer",
+              provider: "synthetic",
+              profileId: null,
+              model: "qwen-3.6-27b",
+              version: null,
+            }],
+          },
+          "test",
+          false,
+          true,
+        ),
+      ).rejects.toThrow(/injected timeline failure:triage_job_created/);
+      expect(await runtime.jobs.listByCase(created.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "triage_job_created")).toBe(false);
+      expect(await runtime.audit.list({ action: "triage_job_create" })).toEqual([]);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.jobs.listByCase(created.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "triage_job_created")).toBe(false);
+      expect(await reopened.audit.list({ action: "triage_job_create" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls an experiment insert back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-experiment-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "experiment_imported") {
+          throw new Error("injected timeline failure:experiment_imported");
+        }
+        return originalAppend(caseId, event);
+      };
+      const service = new ExperimentService({
+        cases,
+        audit: runtime.audit,
+        experiments: runtime.experiments,
+      });
+      const created = await cases.createCase(actor, { title: "SQLite experiment rollback" }, "test");
+      await expect(
+        service.importEnvelope(created.id, actor, EXPERIMENT_SUMMARY, "test", false),
+      ).rejects.toThrow(/injected timeline failure:experiment_imported/);
+      expect(await runtime.experiments.listByCase(created.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "experiment_imported")).toBe(false);
+      expect(await runtime.audit.list({ action: "experiment_import" })).toEqual([]);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.experiments.listByCase(created.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "experiment_imported")).toBe(false);
+      expect(await reopened.audit.list({ action: "experiment_import" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls an imported run insert back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-import-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "external_run_imported") {
+          throw new Error("injected timeline failure:external_run_imported");
+        }
+        return originalAppend(caseId, event);
+      };
+      const imports = new ImportService({
+        evidence,
+        audit: runtime.audit,
+        cases,
+        catalog,
+        runs: runtime.runs,
+      });
+      const created = await cases.createCase(actor, { title: "SQLite import rollback" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      await expect(
+        imports.importRun(
+          created.id,
+          actor,
+          {
+            outputText: "synthetic sqlite imported timeout transcript",
+            sourceId: source.id,
+            operatorId: "local:operator",
+            operatorUsername: "operator",
+          },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/injected timeline failure:external_run_imported/);
+      expect(await runtime.runs.listByCase(created.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "external_run_imported")).toBe(false);
+      expect(await runtime.audit.list({ action: "external_run_import" })).toEqual([]);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.runs.listByCase(created.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "external_run_imported")).toBe(false);
+      expect(await reopened.audit.list({ action: "external_run_import" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls corroboration back across SQLite reopen after timeline failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-corroborate-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const imports = new ImportService({
+        evidence,
+        audit: runtime.audit,
+        cases,
+        catalog,
+        runs: runtime.runs,
+      });
+      const created = await cases.createCase(actor, { title: "SQLite corroboration rollback" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const imported = await imports.importRun(
+        created.id,
+        actor,
+        {
+          outputText: "synthetic sqlite imported timeout transcript",
+          sourceId: source.id,
+          operatorId: "local:operator",
+          operatorUsername: "operator",
+        },
+        "test",
+        false,
+      );
+      const note = await cases.addContribution(
+        created.id,
+        actor,
+        { kind: "note", body: "Synthetic corroborating observation." },
+        "test",
+      );
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "run_corroboration") {
+          throw new Error("injected timeline failure:run_corroboration");
+        }
+        return originalAppend(caseId, event);
+      };
+      await expect(
+        imports.corroborate(
+          created.id,
+          imported.id,
+          actor,
+          { state: "corroborated", links: [{ kind: "contribution", id: note.id }] },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/injected timeline failure:run_corroboration/);
+      expect(await runtime.runs.listCorroborations(imported.id)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "run_corroboration")).toBe(false);
+      expect(await runtime.audit.list({ action: "run_corroboration" })).toEqual([]);
+      expect((await imports.getRun(created.id, imported.id, actor, false))?.corroborationState).toBe("unverified");
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.runs.listCorroborations(imported.id)).toEqual([]);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "run_corroboration")).toBe(false);
+      expect(await reopened.audit.list({ action: "run_corroboration" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls a first-use human source back across SQLite reopen after contribution timeline failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-catalog-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "contribution_created") {
+          throw new Error("injected timeline failure:contribution_created");
+        }
+        return originalAppend(caseId, event);
+      };
+      const created = await cases.createCase(actor, { title: "SQLite catalog rollback" }, "test");
+      expect((await catalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      await expect(
+        cases.addContribution(
+          created.id,
+          actor,
+          { kind: "note", body: "Synthetic sqlite timeout observation before catalog mint." },
+          "test",
+        ),
+      ).rejects.toThrow(/injected timeline failure:contribution_created/);
+      expect(await cases.listContributions(created.id, actor, true)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "contribution_created")).toBe(false);
+      expect(await runtime.audit.list({ action: "contribution_create" })).toEqual([]);
+      expect(await runtime.audit.list({ action: "catalog_create" })).toEqual([]);
+      expect((await catalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      const reopenedCatalog = new CatalogService(reopened.catalog, reopened.audit);
+      expect((await reopenedCatalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "contribution_created")).toBe(false);
+      expect(await reopened.audit.list({ action: "catalog_create" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls a first-use human source back across SQLite reopen after evidence timeline failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-catalog-evidence-atomic-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const originalAppend = runtime.cases.appendTimeline.bind(runtime.cases);
+      runtime.cases.appendTimeline = async (caseId, event) => {
+        if (event.kind === "evidence_registered") {
+          throw new Error("injected timeline failure:evidence_registered");
+        }
+        return originalAppend(caseId, event);
+      };
+      const created = await cases.createCase(actor, { title: "SQLite catalog evidence rollback" }, "test");
+      expect((await catalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      await expect(
+        cases.addEvidence(
+          created.id,
+          actor,
+          {
+            kind: "log",
+            filename: "mailer.log",
+            mediaType: "text/plain",
+            bytes: new TextEncoder().encode("2026-08-25T00:00:00Z synthetic mailer timeout\n"),
+            summary: "Synthetic mailer timeout.",
+            privacyClass: "share_safe",
+          },
+          "test",
+        ),
+      ).rejects.toThrow(/injected timeline failure:evidence_registered/);
+      expect(await cases.listArtifacts(created.id, actor, true)).toEqual([]);
+      expect((await runtime.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
+      expect(await runtime.audit.list({ action: "evidence_register" })).toEqual([]);
+      expect(await runtime.audit.list({ action: "catalog_create" })).toEqual([]);
+      expect((await catalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      const reopenedCatalog = new CatalogService(reopened.catalog, reopened.audit);
+      expect((await reopenedCatalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
+      expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
+      expect(await reopened.audit.list({ action: "catalog_create" })).toEqual([]);
       reopened.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });

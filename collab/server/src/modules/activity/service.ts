@@ -30,9 +30,10 @@ import {
   type InvestigationResourceResolveV1,
   type InvestigationStageV1,
 } from "@cd-collab/contracts";
-import type { Actor, CaseService } from "../cases/index.js";
+import type { Actor, CaseService, TimelineRow } from "../cases/index.js";
 import {
   INVESTIGATION_ACTIVITY_SOURCE_WINDOW,
+  dedupeProjectedActivity,
   projectTimelineSource,
   resourceLabelForKind,
   type ProjectedInvestigationActivity,
@@ -67,6 +68,7 @@ export interface InvestigationActivityListInput {
 export interface InvestigationActivityServiceDeps {
   cases: CaseService;
   installationId: string;
+  publicIdentityId?: (raw: string) => string;
 }
 
 const ACTIVITY_KINDS = new Set<string>([
@@ -206,13 +208,26 @@ export class InvestigationActivityService {
     }
     const projected = sources
       .flatMap((source) => {
-        const item = projectTimelineSource({ installationId: this.deps.installationId, source });
+        const item = projectTimelineSource({
+          installationId: this.deps.installationId,
+          source,
+          ...(this.deps.publicIdentityId
+            ? { publicIdentityId: this.deps.publicIdentityId }
+            : {}),
+        });
         return item ? [item] : [];
       })
-      .filter((item) => matchesFilter(item, filter, input.actor.id))
+      .filter((item) => matchesFilter(
+        item,
+        filter,
+        this.deps.publicIdentityId?.(input.actor.id) ?? input.actor.id,
+      ))
       .sort((left, right) => compareInvestigationActivityItems(left.item, right.item));
+    // Collapse rows that describe the same recorded work before paging, so a
+    // cursor is built from the same list a reader sees.
+    const deduped = dedupeProjectedActivity(projected);
     if (cursor) {
-      const found = projected.some((row) =>
+      const found = deduped.some((row) =>
         row.item.activityId === cursor.activityId
         && row.item.occurredAt === cursor.occurredAt
         && row.item.investigationId === cursor.investigationId
@@ -221,8 +236,8 @@ export class InvestigationActivityService {
       if (!found) throw new InvestigationActivityError("stale_cursor");
     }
     const following = cursor
-      ? projected.filter((row) => activityItemIsAfterCursor(row.item, cursor))
-      : projected;
+      ? deduped.filter((row) => activityItemIsAfterCursor(row.item, cursor))
+      : deduped;
     const pageItems = following.slice(0, limit).map((row) => row.item);
     const last = pageItems[pageItems.length - 1];
     const nextCursor = last && following.length > limit
@@ -287,11 +302,10 @@ export class InvestigationActivityService {
     const caseId = locator.investigationId;
     switch (locator.kind) {
       case "investigation":
-        return { label: resourceLabelForKind("investigation") };
+        return locator.resourceId === caseId ? { label: resourceLabelForKind("investigation") } : null;
       case "investigation_stage":
         return { label: resourceLabelForKind("investigation_stage") };
-      case "evidence_item":
-      case "evidence_context": {
+      case "evidence_item": {
         const artifact = await this.deps.cases.getArtifact(caseId, locator.resourceId);
         if (artifact) {
           return {
@@ -301,6 +315,14 @@ export class InvestigationActivityService {
             ),
           };
         }
+        return this.authorizeViaTimeline(caseId, locator);
+      }
+      case "intake_batch": {
+        const batch = await this.deps.cases.getCorpusIntakeBatch(caseId, locator.resourceId);
+        if (batch) return { label: resourceLabelForKind("intake_batch") };
+        return this.authorizeViaTimeline(caseId, locator);
+      }
+      case "evidence_context": {
         const snapshots = await this.deps.cases.listSnapshots(caseId, actor, isAdmin);
         if (snapshots.some((row) => row.id === locator.resourceId)) {
           return { label: resourceLabelForKind(locator.kind) };
@@ -318,6 +340,7 @@ export class InvestigationActivityService {
           }
           const latest = chain[chain.length - 1];
           if (!latest || latest.caseId !== caseId) return null;
+          if (!contributionKindMatchesLocator(latest.kind, locator.kind)) return null;
           return { label: resourceLabelForKind(locator.kind) };
         } catch {
           return this.authorizeViaTimeline(caseId, locator);
@@ -340,22 +363,9 @@ export class InvestigationActivityService {
     locator: InvestigationResourceLocatorV1,
   ): Promise<{ label: string } | null> {
     const events = await this.deps.cases.listTimeline(caseId);
-    const match = events.find((event) => {
-      if (event.targetId === locator.resourceId) {
-        if (locator.revision === undefined) return true;
-        try {
-          return (JSON.parse(event.payload) as { revision?: unknown }).revision === locator.revision;
-        } catch {
-          return false;
-        }
-      }
-      if (locator.kind === "timeline_event" && String(event.seq) === locator.resourceId) return true;
-      if (locator.kind === "investigation" && locator.resourceId === caseId) return true;
-      if (locator.kind === "portable_archive_event" && event.kind === "portable_archive_applied") {
-        return event.targetId === locator.resourceId || locator.resourceId === caseId;
-      }
-      return false;
-    });
+    const match = events.some((event) =>
+      projectedLocatorMatches(this.deps.installationId, caseId, event, locator),
+    );
     if (!match) return null;
     return {
       label: resourceLabelForKind(
@@ -365,4 +375,41 @@ export class InvestigationActivityService {
       ),
     };
   }
+}
+
+function contributionKindMatchesLocator(
+  contributionKind: string,
+  locatorKind: InvestigationResourceLocatorV1["kind"],
+): boolean {
+  switch (locatorKind) {
+    case "discussion_message":
+      return contributionKind === "message";
+    case "hypothesis":
+      return contributionKind === "hypothesis";
+    case "action":
+      return contributionKind === "action";
+    case "observation":
+      return contributionKind === "note" || contributionKind === "handoff";
+    default:
+      return false;
+  }
+}
+
+function projectedLocatorMatches(
+  installationId: string,
+  caseId: string,
+  event: TimelineRow,
+  locator: InvestigationResourceLocatorV1,
+): boolean {
+  const projected = projectTimelineSource({
+    installationId,
+    source: { caseId, title: "Investigation", event: { ...event, caseId } },
+  });
+  if (!projected) return false;
+  if (projected.item.locator.kind !== locator.kind) return false;
+  if (projected.item.locator.resourceId !== locator.resourceId) return false;
+  if (locator.revision !== undefined && projected.item.locator.revision !== locator.revision) {
+    return false;
+  }
+  return true;
 }

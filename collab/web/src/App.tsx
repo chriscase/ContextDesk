@@ -10,10 +10,12 @@ import {
 import {
   ADMINISTRATION,
   HOME,
+  LDAP_ADMIN,
   PEOPLE,
   PROFILE,
   SIGN_IN,
   historyUrl,
+  isLdapAdminLocation,
   isPeopleLocation,
   isProfileLocation,
   isShellLocation,
@@ -31,6 +33,7 @@ import {
 } from "./app-location.js";
 import { Cases } from "./Cases.js";
 import { Catalog } from "./Catalog.js";
+import { Entities } from "./Entities.js";
 import { Administration } from "./Administration.js";
 import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
@@ -97,6 +100,7 @@ declare global {
 const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
   { area: "overview", label: "Overview" },
   { area: "investigations", label: "Investigations" },
+  { area: "entities", label: "Entities" },
   { area: "sources", label: "Attribution" },
   { area: "administration", label: "Administration" },
   { area: "help", label: "Help" },
@@ -718,6 +722,13 @@ export function App() {
             </section>
             <section
               className="app__area"
+              aria-label="Entities"
+              hidden={work.area !== "entities"}
+            >
+              <Entities canWrite={canWrite} canLead={canLeadCatalog} />
+            </section>
+            <section
+              className="app__area"
               aria-label="Attribution"
               hidden={work.area !== "sources"}
             >
@@ -762,9 +773,17 @@ export function App() {
               canAdmin ? (
                 <section className="app__area" aria-label="Administration">
                   <Administration
-                    tab={isPeopleLocation(work) ? "people" : "roles"}
+                    tab={
+                      isPeopleLocation(work)
+                        ? "people"
+                        : isLdapAdminLocation(work)
+                          ? "ldap"
+                          : "roles"
+                    }
                     onSelectTab={(tab) =>
-                      guardedNavigate(tab === "people" ? PEOPLE : ADMINISTRATION)
+                      guardedNavigate(
+                        tab === "people" ? PEOPLE : tab === "ldap" ? LDAP_ADMIN : ADMINISTRATION,
+                      )
                     }
                   />
                 </section>

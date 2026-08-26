@@ -20,6 +20,7 @@ import {
   parseExperimentDecision,
 } from "@cd-collab/contracts";
 import {
+  activeCaseQueryable,
   overviewVisiblePredicate,
   type OverviewScope,
   type OverviewVisibilityBoundary,
@@ -71,6 +72,13 @@ export interface ListOverviewProposedQuery extends OverviewScope {
   visibility: OverviewVisibilityBoundary | null;
 }
 
+/**
+ * Destination keys this module owns, addressed one batch at a time. Portable
+ * apply probes these to decide collisions without enumerating the corpus.
+ */
+export const EXPERIMENT_PROBE_KINDS = ["experiment", "helpfulness", "gold"] as const;
+export type ExperimentProbeKind = (typeof EXPERIMENT_PROBE_KINDS)[number];
+
 export interface ExperimentStore {
   insert(row: ExperimentRow): Promise<void>;
   get(id: string): Promise<ExperimentRow | null>;
@@ -86,8 +94,14 @@ export interface ExperimentStore {
   listTraces(experimentId: string): Promise<InteractionTraceV1[]>;
   findTrace(experimentId: string, candidateId: string): Promise<InteractionTraceV1 | null>;
   insertTrace(experimentId: string, row: InteractionTraceV1, fingerprint: string): Promise<void>;
+  lockExperiment(experimentId: string): Promise<void>;
   listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]>;
   insertAnnotation(row: TraceAnnotationRow): Promise<void>;
+  /**
+   * Returns the subset of `ids` that already key a row of `kind`. Host-owned
+   * and batched: cost follows the probed id count, never the corpus size.
+   */
+  probeExistingIds(kind: ExperimentProbeKind, ids: readonly string[]): Promise<string[]>;
 }
 
 const UNKNOWN_SNAPSHOT_PROOF: ExperimentSnapshotProof = {
@@ -302,6 +316,25 @@ export class MemoryExperimentStore implements ExperimentStore {
     for (const [id, value] of row.annotations) this.annotations.set(id, value);
   }
 
+  async probeExistingIds(kind: ExperimentProbeKind, ids: readonly string[]): Promise<string[]> {
+    const wanted = new Set(ids);
+    if (wanted.size === 0) return [];
+    if (kind === "experiment") {
+      return [...this.experiments.keys()].filter((id) => wanted.has(id)).sort();
+    }
+    const hits = new Set<string>();
+    if (kind === "helpfulness") {
+      for (const rows of this.observations.values()) {
+        for (const row of rows) if (wanted.has(row.id)) hits.add(row.id);
+      }
+    } else {
+      for (const rows of this.golds.values()) {
+        for (const row of rows) if (wanted.has(row.goldId)) hits.add(row.goldId);
+      }
+    }
+    return [...hits].sort();
+  }
+
   async insert(row: ExperimentRow): Promise<void> {
     this.experiments.set(row.id, {
       ...row,
@@ -396,7 +429,7 @@ export class MemoryExperimentStore implements ExperimentStore {
 
   async insertDecision(row: NormalizedExperimentDecisionV1): Promise<void> {
     const list = this.decisions.get(row.experimentId) ?? [];
-    if (list.some((d) => d.revision === row.revision && d.id === row.id)) {
+    if (list.some((d) => d.revision === row.revision)) {
       throw new Error("decision revision already exists");
     }
     list.push({ ...row, evidenceRefs: [...row.evidenceRefs] });
@@ -443,6 +476,10 @@ export class MemoryExperimentStore implements ExperimentStore {
     this.traces.set(experimentId, traces);
   }
 
+  async lockExperiment(_experimentId: string): Promise<void> {
+    // Memory transactions are serialized by CaseStore.atomicBoundary.
+  }
+
   async listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]> {
     return [...(this.annotations.get(experimentId) ?? [])].map((row) => ({
       ...row,
@@ -457,6 +494,14 @@ export class MemoryExperimentStore implements ExperimentStore {
 
   async insertAnnotation(row: TraceAnnotationRow): Promise<void> {
     const list = this.annotations.get(row.experimentId) ?? [];
+    if (
+      list.some(
+        (existing) =>
+          existing.candidateId === row.candidateId && existing.event.sequence === row.event.sequence,
+      )
+    ) {
+      throw new Error("annotation sequence already exists");
+    }
     list.push({
       ...row,
       event: {
@@ -472,11 +517,34 @@ export class MemoryExperimentStore implements ExperimentStore {
 
 export type Queryable = Pick<Pool, "query">;
 
+/** Destination key column backing each experiment probe kind. */
+const EXPERIMENT_PROBE_TABLES: Readonly<
+  Record<ExperimentProbeKind, { table: string; column: string }>
+> = Object.freeze({
+  experiment: { table: "experiment_packages", column: "id" },
+  helpfulness: { table: "experiment_helpfulness", column: "id" },
+  gold: { table: "gold_references", column: "gold_id" },
+});
+
 export class PgExperimentStore implements ExperimentStore {
   constructor(private readonly db: Queryable) {}
 
+  private get queryable(): Queryable {
+    return activeCaseQueryable() ?? this.db;
+  }
+
+  async probeExistingIds(kind: ExperimentProbeKind, ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const probe = EXPERIMENT_PROBE_TABLES[kind];
+    const result = await this.db.query(
+      `SELECT ${probe.column} AS id FROM ${probe.table} WHERE ${probe.column} = ANY($1::uuid[])`,
+      [[...new Set(ids)]],
+    );
+    return result.rows.map((row) => String((row as Record<string, unknown>).id)).sort();
+  }
+
   async insert(row: ExperimentRow): Promise<void> {
-    await this.db.query(
+    await this.queryable.query(
       `INSERT INTO experiment_packages (
         id, case_id, package_id, source_schema_id, task_fingerprint, snapshot_fingerprint,
         candidates, agreement, created_at, importer_id, importer_username
@@ -498,13 +566,13 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async get(id: string): Promise<ExperimentRow | null> {
-    const res = await this.db.query(`SELECT * FROM experiment_packages WHERE id = $1`, [id]);
+    const res = await this.queryable.query(`SELECT * FROM experiment_packages WHERE id = $1`, [id]);
     const raw = res.rows[0] as Record<string, unknown> | undefined;
     return raw ? fromPgExperiment(raw) : null;
   }
 
   async findByPackage(caseId: string, packageId: string): Promise<ExperimentRow | null> {
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT * FROM experiment_packages WHERE case_id = $1 AND package_id = $2`,
       [caseId, packageId],
     );
@@ -513,7 +581,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async listByCase(caseId: string): Promise<ExperimentRow[]> {
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT * FROM experiment_packages WHERE case_id = $1 ORDER BY created_at, id`,
       [caseId],
     );
@@ -525,7 +593,7 @@ export class PgExperimentStore implements ExperimentStore {
   ): Promise<LatestProposedDecisionRow[]> {
     const cap = Math.max(0, Math.trunc(query.limit) || 0);
     if (cap === 0) return [];
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT e.case_id, c.title AS case_title, e.id AS experiment_id, e.package_id, d.payload
        FROM experiment_decisions d
        INNER JOIN experiment_packages e ON e.id = d.experiment_id
@@ -566,7 +634,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async listObservations(experimentId: string): Promise<HelpfulnessObservationV1[]> {
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT payload FROM experiment_helpfulness WHERE experiment_id = $1 ORDER BY created_at, id`,
       [experimentId],
     );
@@ -574,7 +642,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async insertObservation(row: HelpfulnessObservationV1): Promise<void> {
-    await this.db.query(
+    await this.queryable.query(
       `INSERT INTO experiment_helpfulness (id, experiment_id, created_at, payload)
        VALUES ($1,$2,$3,$4::jsonb)`,
       [row.id, row.experimentId, row.createdAt, JSON.stringify(row)],
@@ -582,7 +650,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async listDecisions(experimentId: string): Promise<NormalizedExperimentDecisionV1[]> {
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT payload FROM experiment_decisions WHERE experiment_id = $1 ORDER BY revision, id`,
       [experimentId],
     );
@@ -592,7 +660,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async insertDecision(row: NormalizedExperimentDecisionV1): Promise<void> {
-    await this.db.query(
+    await this.queryable.query(
       `INSERT INTO experiment_decisions (id, experiment_id, revision, created_at, payload)
        VALUES ($1,$2,$3,$4,$5::jsonb)`,
       [row.id, row.experimentId, row.revision, row.createdAt, JSON.stringify(row)],
@@ -600,7 +668,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async listGolds(experimentId: string): Promise<GoldReferenceV1[]> {
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT payload FROM gold_references WHERE experiment_id = $1 ORDER BY version, gold_id`,
       [experimentId],
     );
@@ -608,7 +676,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async insertGold(row: GoldReferenceV1): Promise<void> {
-    await this.db.query(
+    await this.queryable.query(
       `INSERT INTO gold_references (gold_id, experiment_id, version, created_at, payload)
        VALUES ($1,$2,$3,$4,$5::jsonb)`,
       [row.goldId, row.experimentId, row.version, row.createdAt, JSON.stringify(row)],
@@ -616,7 +684,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async listTraces(experimentId: string): Promise<InteractionTraceV1[]> {
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT payload FROM experiment_traces WHERE experiment_id = $1 ORDER BY candidate_id`,
       [experimentId],
     );
@@ -624,7 +692,7 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async findTrace(experimentId: string, candidateId: string): Promise<InteractionTraceV1 | null> {
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT payload FROM experiment_traces WHERE experiment_id = $1 AND candidate_id = $2`,
       [experimentId, candidateId],
     );
@@ -636,15 +704,23 @@ export class PgExperimentStore implements ExperimentStore {
     row: InteractionTraceV1,
     fingerprint: string,
   ): Promise<void> {
-    await this.db.query(
+    await this.queryable.query(
       `INSERT INTO experiment_traces (id, experiment_id, candidate_id, fingerprint, created_at, payload)
        VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
       [randomUUID(), experimentId, row.candidateId, fingerprint, row.createdAt, JSON.stringify(row)],
     );
   }
 
+  async lockExperiment(experimentId: string): Promise<void> {
+    const res = await this.queryable.query(
+      `SELECT id FROM experiment_packages WHERE id = $1 FOR UPDATE`,
+      [experimentId],
+    );
+    if (res.rowCount !== 1) throw new Error("experiment not found");
+  }
+
   async listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]> {
-    const res = await this.db.query(
+    const res = await this.queryable.query(
       `SELECT payload FROM experiment_trace_annotations WHERE experiment_id = $1 ORDER BY created_at, id`,
       [experimentId],
     );
@@ -652,7 +728,16 @@ export class PgExperimentStore implements ExperimentStore {
   }
 
   async insertAnnotation(row: TraceAnnotationRow): Promise<void> {
-    await this.db.query(
+    await this.lockExperiment(row.experimentId);
+    const existing = await this.listAnnotations(row.experimentId);
+    if (
+      existing.some(
+        (item) => item.candidateId === row.candidateId && item.event.sequence === row.event.sequence,
+      )
+    ) {
+      throw new Error("annotation sequence already exists");
+    }
+    await this.queryable.query(
       `INSERT INTO experiment_trace_annotations (id, experiment_id, candidate_id, created_at, payload)
        VALUES ($1,$2,$3,$4,$5::jsonb)`,
       [row.id, row.experimentId, row.candidateId, row.createdAt, JSON.stringify(row)],

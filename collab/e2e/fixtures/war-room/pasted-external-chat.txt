@@ -1,0 +1,22 @@
+Synthetic transcript pasted in from an external assistant of unknown
+configuration. Reproduced here exactly as it was pasted, including the part
+where it is asked for evidence and does not produce any.
+
+user: our order confirmation emails stopped going out early saturday morning.
+what happened?
+
+assistant: Based on the symptoms you describe, this is most likely an SMTP
+upstream timeout. The mailer worker would have abandoned its batch and entered
+a backoff loop. I would look at a deploy around that time as the trigger.
+
+user: which log line are you basing that on?
+
+assistant: I do not have access to your logs in this conversation. The
+explanation above is inferred from the symptom description you gave me and from
+common failure patterns for this kind of outage.
+
+user: so you have not read anything from our system?
+
+assistant: Correct. I have not read any of your logs, configuration, or
+metrics. Please verify the SMTP timeout hypothesis against your own mailer logs
+before acting on it.

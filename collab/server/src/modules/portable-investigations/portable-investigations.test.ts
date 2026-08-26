@@ -26,7 +26,7 @@ import {
   sha256Hex,
   type EvidenceWriteBatch,
 } from "../../evidence/store.js";
-import { MemoryAuditStore } from "../audit/index.js";
+import { MemoryAuditStore, PgAuditStore } from "../audit/index.js";
 import {
   MapAuthAdapter,
   MemorySessionStore,
@@ -35,20 +35,22 @@ import {
   defaultSessionPolicy,
 } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
-import { CatalogService, MemoryCatalogStore } from "../catalog/index.js";
+import { CatalogService, MemoryCatalogStore, PgCatalogStore } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
-import { ExperimentService, MemoryExperimentStore } from "../experiments/index.js";
-import { ImportService, MemoryRunStore } from "../import/index.js";
-import { MemoryTriageJobStore, TriageRunService } from "../triage-runs/index.js";
+import { ExperimentService, MemoryExperimentStore, PgExperimentStore } from "../experiments/index.js";
+import { ImportService, MemoryRunStore, PgRunStore } from "../import/index.js";
+import { MemoryTriageJobStore, PgTriageJobStore, TriageRunService } from "../triage-runs/index.js";
 import { loadPortableInstallationId } from "./installation.js";
 import {
   memoryApplyBoundary,
   MemoryPortableApplyStateStore,
+  PgPortableApplyStateStore,
   persistPortableArchive,
   PortableCommitOutcomeUnknownError,
   withPgApplyTransaction,
   type MemoryApplyBoundary,
 } from "./persist.js";
+import { type PortableCollisionProbePorts } from "./collision-probe.js";
 import {
   MAX_PORTABLE_ARCHIVE_BYTES,
   PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
@@ -78,6 +80,7 @@ interface Fixture {
   jobStore: MemoryTriageJobStore;
   experiments: ExperimentService;
   portable: PortableInvestigationService;
+  probe: PortableCollisionProbePorts;
   applyBoundary: MemoryApplyBoundary;
   applyState: MemoryPortableApplyStateStore;
   caseId: string;
@@ -159,6 +162,13 @@ async function fixture(): Promise<Fixture> {
     experiments,
     audit,
     applyState,
+    probe: {
+      cases: caseStore,
+      catalog: catalogStore,
+      experiments: experimentStore,
+      runs: runStore,
+      jobs: jobStore,
+    },
     withTransaction: applyBoundary.withTransaction,
     applyCoordination: "single_instance",
     confirmationRestartDurable: false,
@@ -345,12 +355,44 @@ async function fixture(): Promise<Fixture> {
     jobStore,
     experiments,
     portable,
+    probe: {
+      cases: caseStore,
+      catalog: catalogStore,
+      experiments: experimentStore,
+      runs: runStore,
+      jobs: jobStore,
+    },
     applyBoundary,
     applyState,
     caseId: caseRow.id,
     evidenceId: uploaded.artifact.id,
     evidenceHash: uploaded.artifact.contentHash as string,
   };
+}
+
+/**
+ * A probe that reports a fixed set of destination ids as already occupied.
+ * Every other id probes clean, so a test can name the exact collision it means.
+ */
+function occupyingProbe(
+  occupied: Map<string, string[]>,
+): PortableCollisionProbePorts {
+  const hits = (kind: string, ids: readonly string[]): string[] => {
+    const taken = new Set(occupied.get(kind) ?? []);
+    return ids.filter((id) => taken.has(id)).sort();
+  };
+  return {
+    cases: {
+      probeExistingIds: async (kind: string, ids: readonly string[]) => hits(kind, ids),
+      probeParticipants: async () => [],
+    },
+    catalog: { probeExistingIds: async (ids: readonly string[]) => hits("source", ids) },
+    experiments: {
+      probeExistingIds: async (kind: string, ids: readonly string[]) => hits(kind, ids),
+    },
+    runs: { probeExistingIds: async (ids: readonly string[]) => hits("imported_ai_run", ids) },
+    jobs: { probeExistingIds: async (ids: readonly string[]) => hits("triage_job", ids) },
+  } as unknown as PortableCollisionProbePorts;
 }
 
 function users() {
@@ -410,6 +452,23 @@ function resealArchive(
     investigation: attachPortableIntegrity(unsigned as PortableInvestigationUnsigned),
     exportedAt: archive.exportedAt,
   });
+}
+
+function archiveWithContentTimelineTarget(
+  archive: PortableArchiveV1,
+  digest: string,
+): { archive: PortableArchiveV1; sourceSeq: number } {
+  const sourceSeq = archive.investigation.timeline[0]?.seq;
+  if (sourceSeq === undefined) throw new Error("synthetic timeline is missing");
+  return {
+    sourceSeq,
+    archive: resealArchive(archive, (investigation) => {
+      const event = investigation.timeline.find((row) => row.seq === sourceSeq);
+      if (!event) throw new Error("synthetic timeline event is missing");
+      event.targetNamespace = "content";
+      event.targetId = digest;
+    }),
+  };
 }
 
 function detachedArchiveFor(
@@ -733,7 +792,7 @@ describe("portable investigation service", () => {
     expect(response.privacy.inlineByteLength).toBeGreaterThan(LOG_BYTES.byteLength);
     expect(response.privacy.unclassifiedContentObjects).toBeGreaterThan(0);
     expect(response.report.idRemap.length).toBeGreaterThan(0);
-    expect(response.authorization.destinationCatalogSource).toBe("host_visible_catalog");
+    expect(response.authorization.destinationCatalogSource).toBe("host_owned_targeted_probe");
     expect(response.authorization.sourceRolesTrusted).toBe(false);
     expect(response.authorization.destinationMembershipGranted).toBe(false);
     expect(response.apply.available).toBe(true);
@@ -810,6 +869,7 @@ describe("portable investigation service", () => {
       triageRuns: row.triageRuns,
       experiments: row.experiments,
       audit: row.audit,
+      probe: row.probe,
       now: () => "2042-03-04T12:00:00.000Z",
     });
 
@@ -827,29 +887,11 @@ describe("portable investigation service", () => {
       archive.investigation.investigation.id,
       0,
     );
-    const collisionCases = {
-      ...row.cases,
-      listCases: async () => [
-        {
-          ...archive.investigation.investigation,
-          schemaId: "cd-collab.case.v1" as const,
-          id: collisionId,
-          problemStatement: "",
-          affectedParties: "",
-          impact: "",
-          scope: "",
-          openQuestions: [],
-          participants: [{ identityId: ACTOR.id, username: ACTOR.username }],
-        },
-      ],
-      listContributions: async () => [],
-      listArtifacts: async () => [],
-      listSnapshots: async () => [],
-      listTimeline: async () => [],
-    } as unknown as CaseService;
+    // The destination already holds the exact id this archive would mint.
+    const occupiedProbe = occupyingProbe(new Map([["case", [collisionId]]]));
     const collisionService = new PortableInvestigationService({
       installationId: "inst-destinationwest",
-      cases: collisionCases,
+      cases: row.cases,
       catalog: row.catalog,
       imports: {
         listRuns: async () => [],
@@ -862,6 +904,7 @@ describe("portable investigation service", () => {
         list: async () => [],
       } as unknown as ExperimentService,
       audit: row.audit,
+      probe: occupiedProbe,
     });
     const response = await collisionService.preflight(
       archive,
@@ -1188,6 +1231,95 @@ describe("portable investigation apply", () => {
     expect(listed).toHaveLength(2);
   });
 
+  it("preserves a content-addressed timeline target through preflight, apply, and export", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const targeted = archiveWithContentTimelineTarget(original, row.evidenceHash);
+    const identityMap = identityMapFor(targeted.archive);
+    const preview = await row.portable.preflight(
+      targeted.archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+
+    expect(preview.report.exactReconstruction).toBe(true);
+    expect(preview.report.idRemap).toContainEqual({
+      namespace: "content",
+      sourceId: row.evidenceHash,
+      destinationId: row.evidenceHash,
+    });
+
+    const applied = await row.portable.apply(
+      targeted.archive,
+      applyInput(preview.apply.confirmationToken as string, identityMap),
+      ACTOR,
+      false,
+    );
+    const persisted = (await row.caseStore.listTimeline(applied.investigationId)).find((event) => {
+      const payload = JSON.parse(event.payload) as { sourceSeq?: number };
+      return payload.sourceSeq === targeted.sourceSeq;
+    });
+    expect(persisted?.targetId).toBe(row.evidenceHash);
+
+    const reopened = parsePortableArchive(
+      await row.portable.exportArchive(applied.investigationId, ACTOR, false, true),
+    );
+    expect(
+      reopened.investigation.timeline.find((event) => event.seq === targeted.sourceSeq),
+    ).toMatchObject({
+      targetNamespace: "content",
+      targetId: row.evidenceHash,
+    });
+  });
+
+  it("fails closed and rolls back if a forged report remaps a content digest", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const targeted = archiveWithContentTimelineTarget(original, row.evidenceHash);
+    const identityMap = identityMapFor(targeted.archive);
+    const preview = await row.portable.preflight(
+      targeted.archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const forged = structuredClone(preview.report);
+    const content = forged.idRemap.find(
+      (entry) => entry.namespace === "content" && entry.sourceId === row.evidenceHash,
+    );
+    if (!content) throw new Error("synthetic content remap is missing");
+    content.destinationId = portableDestinationUuid(
+      targeted.archive.investigation.sourceInstallationId,
+      "content",
+      row.evidenceHash,
+      0,
+    );
+    const before = await row.caseStore.listCases();
+
+    await expect(
+      row.applyBoundary.withTransaction((ports) =>
+        persistPortableArchive({
+          archive: targeted.archive,
+          report: forged,
+          identityMap,
+          actor: ACTOR,
+          destinationUsernames: new Map([[ACTOR.id, ACTOR.username]]),
+          contentBytes: new Map(
+            targeted.archive.investigation.contentObjects.flatMap((item) =>
+              item.payloadBase64 === null
+                ? []
+                : [[item.digest, new Uint8Array(Buffer.from(item.payloadBase64, "base64"))] as const],
+            ),
+          ),
+          ports,
+          now: "2042-03-04T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(/content-addressed destination identity must equal its digest/);
+    expect(await row.caseStore.listCases()).toEqual(before);
+  });
+
   it("rejects resealed nonterminal history and blocks legacy incomplete candidate state", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
@@ -1422,6 +1554,7 @@ describe("portable investigation apply", () => {
       experiments: row.experiments,
       audit: row.audit,
       applyState: row.applyState,
+      probe: row.probe,
       withTransaction: row.applyBoundary.withTransaction,
       applyCoordination: "single_instance",
       confirmationRestartDurable: false,
@@ -1549,11 +1682,44 @@ describe("portable investigation apply", () => {
       ),
     ).rejects.toMatchObject({ code: "identity_map_mismatch" });
 
+    // Unrelated corpus growth is not destination state this archive depends
+    // on, so it must not burn a confirmation. Only state the archive-scoped
+    // probe actually looked at can make an intent stale.
     await row.cases.createCase(
       ACTOR,
       { title: "Synthetic catalog mutation", severity: "low" },
       "fixture",
     );
+    const unrelatedPreview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(unrelatedPreview.report.destinationCatalogDigest).toBe(
+      preview.report.destinationCatalogDigest,
+    );
+
+    // Destination state the probe *did* look at: someone takes the exact
+    // deterministic id this archive would mint for its investigation.
+    const stolen = portableDestinationUuid(
+      archive.investigation.sourceInstallationId,
+      "investigation",
+      archive.investigation.investigation.id,
+      0,
+    );
+    await row.caseStore.insertCase({
+      id: stolen,
+      title: "Synthetic concurrent claim",
+      severity: "low",
+      status: "open",
+      legalHold: false,
+      retentionClass: "standard",
+      createdAt: "2042-03-04T11:59:00.000Z",
+      createdBy: ACTOR.id,
+      createdByUsername: ACTOR.username,
+      participants: [{ identityId: ACTOR.id, username: ACTOR.username }],
+    });
     await expect(
       row.portable.apply(
         archive,
@@ -1568,7 +1734,7 @@ describe("portable investigation apply", () => {
       ),
     ).rejects.toMatchObject({ code: "stale_destination_catalog" });
 
-    expect((await row.cases.listCases(ACTOR, true)).length).toBe(before + 1);
+    expect((await row.cases.listCases(ACTOR, true)).length).toBe(before + 2);
   });
 
   it("binds confirmation to the minting actor and lead authorization", async () => {
@@ -1744,9 +1910,152 @@ describe("portable investigation apply", () => {
       ),
     ).rejects.toThrow(/externally coordinated evidence writes/);
   });
+
+  it("encodes PostgreSQL apply lock tuples without NULs or boundary collisions", async () => {
+    const lockKeys: string[] = [];
+    const db = {
+      query: async (_sql: string, params?: unknown[]) => {
+        lockKeys.push(String(params?.[0]));
+        return { rows: [], rowCount: 1 };
+      },
+    } as unknown as ConstructorParameters<typeof PgPortableApplyStateStore>[0];
+    const store = new PgPortableApplyStateStore(db);
+
+    await store.lockApply({
+      actorId: "actor-north\u0000installation-north",
+      installationId: "archive-north",
+      transportHash: "hash-north",
+    });
+    await store.lockApply({
+      actorId: "actor-north",
+      installationId: "installation-north\u0000archive-north",
+      transportHash: "hash-north",
+    });
+
+    expect(lockKeys).toHaveLength(2);
+    expect(lockKeys.every((key) => !key.includes("\u0000"))).toBe(true);
+    expect(lockKeys[0]).not.toBe(lockKeys[1]);
+    expect(JSON.parse(lockKeys[0] as string)).toEqual([
+      "contextdesk-portable-apply-v1",
+      "actor-north\u0000installation-north",
+      "archive-north",
+      "hash-north",
+    ]);
+  });
 });
 
 describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", () => {
+  it("matches memory content-target reconstruction through PostgreSQL apply and reopen", async () => {
+    const row = await fixture();
+    const original = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    const targeted = archiveWithContentTimelineTarget(original, row.evidenceHash);
+    const identityMap = identityMapFor(targeted.archive);
+
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const audit = new PgAuditStore(client);
+      const caseStore = new PgCaseStore(client);
+      const catalogStore = new PgCatalogStore(client);
+      const runStore = new PgRunStore(client);
+      const experimentStore = new PgExperimentStore(client);
+      const jobStore = new PgTriageJobStore(client);
+      const applyState = new PgPortableApplyStateStore(client);
+      const evidence = new FilesystemEvidenceStore({
+        rootDir: row.root,
+        acquireWriteLease: async () => () => undefined,
+      });
+      const catalog = new CatalogService(catalogStore, audit);
+      const cases = new CaseService(evidence, audit, caseStore, catalog);
+      const imports = new ImportService({ evidence, audit, cases, catalog, runs: runStore });
+      const triageRuns = new TriageRunService({
+        cases,
+        audit,
+        jobs: jobStore,
+        profiles: [
+          { id: "profile-qwen", label: "Synthetic Qwen", provider: "openai-compatible" },
+          { id: "profile-oss", label: "Synthetic OSS", provider: "openai-compatible" },
+        ],
+      });
+      const experiments = new ExperimentService({ cases, audit, experiments: experimentStore });
+
+      await caseStore.insertCase({
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title: "Synthetic identity anchor",
+        problemStatement: "",
+        affectedParties: "",
+        impact: "",
+        scope: "",
+        openQuestions: [],
+        situationVersion: 0,
+        severity: "low",
+        status: "open",
+        legalHold: false,
+        retentionClass: "standard",
+        createdAt: "2042-03-04T11:00:00.000Z",
+        createdBy: ACTOR.id,
+        createdByUsername: ACTOR.username,
+        participants: [{ identityId: ACTOR.id, username: ACTOR.username }],
+      });
+
+      const portable = new PortableInvestigationService({
+        installationId: "inst-syntheticpg0001",
+        cases,
+        catalog,
+        imports,
+        triageRuns,
+        experiments,
+        audit,
+        applyState,
+        probe: {
+          cases: caseStore,
+          catalog: catalogStore,
+          experiments: experimentStore,
+          runs: runStore,
+          jobs: jobStore,
+        },
+        withTransaction: (operation) => withPgApplyTransaction(client, evidence, operation),
+        applyCoordination: "postgres_transactional",
+        confirmationRestartDurable: true,
+        now: () => "2042-03-04T12:00:00.000Z",
+      });
+
+      const preview = await portable.preflight(
+        targeted.archive,
+        { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+        ACTOR,
+        false,
+      );
+      expect(preview.report.exactReconstruction).toBe(true);
+      expect(preview.report.idRemap).toContainEqual({
+        namespace: "content",
+        sourceId: row.evidenceHash,
+        destinationId: row.evidenceHash,
+      });
+
+      const applied = await portable.apply(
+        targeted.archive,
+        applyInput(preview.apply.confirmationToken as string, identityMap),
+        ACTOR,
+        false,
+      );
+      const persisted = (await caseStore.listTimeline(applied.investigationId)).find((event) => {
+        const payload = JSON.parse(event.payload) as { sourceSeq?: number };
+        return payload.sourceSeq === targeted.sourceSeq;
+      });
+      expect(persisted?.targetId).toBe(row.evidenceHash);
+
+      const reopened = parsePortableArchive(
+        await portable.exportArchive(applied.investigationId, ACTOR, false, true),
+      );
+      expect(
+        reopened.investigation.timeline.find((event) => event.seq === targeted.sourceSeq),
+      ).toMatchObject({
+        targetNamespace: "content",
+        targetId: row.evidenceHash,
+      });
+    });
+  });
+
   it("rolls back a partial PostgreSQL apply", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);

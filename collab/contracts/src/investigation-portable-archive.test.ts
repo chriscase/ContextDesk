@@ -176,7 +176,7 @@ describe("portable investigation archive contract", () => {
     expect(restored.reconstructionStatus).toBe("metadata_only");
   });
 
-  it("emits RFC 4122 UUID destination ids that are stable, namespaced, and collision-aware", () => {
+  it("emits stable, namespaced, and collision-aware destination identities", () => {
     const investigation = valid();
     const archive = sealPortableArchive({ investigation });
     const first = preflightPortableArchive(archive, archiveDryRun(investigation));
@@ -191,6 +191,11 @@ describe("portable investigation archive contract", () => {
     );
     expect(first.idRemap.length).toBeGreaterThan(10);
     for (const row of first.idRemap) {
+      if (row.namespace === "content") {
+        expect(row.destinationId).toBe(row.sourceId);
+        expect(row.destinationId).toMatch(/^[a-f0-9]{64}$/);
+        continue;
+      }
       expect(isRfc4122Uuid(row.destinationId)).toBe(true);
       expect(row.destinationId).toMatch(RFC4122_UUID_RE);
       expect(row.sourceId).not.toBe(row.destinationId);
@@ -367,6 +372,7 @@ describe("portable investigation archive contract", () => {
     const first = sealPortableArchive({ investigation: valid() });
     const mutated = unsignedOf(valid());
     const present = mutated.contentObjects.find((row) => row.inclusion === "present")!;
+    const oldDigest = present.digest;
     const bytes = Buffer.from("synth-public-bytes-v2", "utf8");
     present.payloadBase64 = bytes.toString("base64");
     present.byteLength = bytes.byteLength;
@@ -374,6 +380,10 @@ describe("portable investigation archive contract", () => {
     const evidence = mutated.evidence.find((row) => row.inclusion === "present")!;
     evidence.digest = present.digest;
     evidence.byteLength = present.byteLength;
+    for (const run of mutated.importedAiRuns) {
+      if (run.outputDigest === oldDigest) run.outputDigest = present.digest;
+      if (run.promptDigest === oldDigest) run.promptDigest = present.digest;
+    }
     for (const snap of mutated.snapshots) {
       for (const item of snap.evidence) {
         if (item.evidenceId === evidence.id) {

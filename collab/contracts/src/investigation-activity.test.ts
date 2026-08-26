@@ -208,8 +208,22 @@ describe("investigation resource locator", () => {
 describe("human-readable presentation boundary", () => {
   it("never invents a label and uses bounded honest fallbacks", () => {
     expect(safeResourceLabel("evidence_item", null)).toBe("Evidence item");
+    expect(safeResourceLabel("intake_batch", null)).toBe("Intake batch");
+    expect(safeResourceLabel("gold", null)).toBe("Outcome benchmark");
+    expect(safeResourceLabel("helpfulness", null)).toBe("Comparison observation");
+    expect(safeResourceLabel("interaction_trace", null)).toBe("Imported comparison trace");
+    expect(safeResourceLabel("experiment", null)).toBe("Strategy comparison");
     expect(safeResourceLabel("workstream_attempt", CASE_A)).toBe("Workstream attempt");
     expect(safeResourceLabel("evidence_item", "ab".repeat(32))).toBe("Evidence item");
+    // A shortened hash is still an identifier — and worse than the whole one:
+    // it names nothing to a reader and no longer matches another system either.
+    expect(safeResourceLabel("workstream", "befd483ad67c")).toBe("Workstream");
+    expect(safeResourceLabel("workstream", "befd483ad67c\u2026")).toBe("Workstream");
+    expect(safeResourceLabel("evidence_item", "0a1b2c3d")).toBe("Evidence item");
+    // Ordinary labels that merely happen to use those letters are kept.
+    expect(safeResourceLabel("workstream", "checkout-timeout.log")).toBe("checkout-timeout.log");
+    expect(safeResourceLabel("workstream", "decade")).toBe("decade");
+    expect(safeResourceLabel("evidence_item", "Payment retry log")).toBe("Payment retry log");
     expect(safeResourceLabel("evidence_item", "case_created")).toBe("Evidence item");
     expect(safeResourceLabel("evidence_item", "Synthetic timeout log")).toBe("Synthetic timeout log");
     expect(safeResourceLabel("timeline_event", null, "12")).toBe("Timeline event 12");
@@ -399,18 +413,24 @@ describe("routed locator focus against shipped War Room sections", () => {
       investigation: { stage: "situation", section: "stage-situation", itemKind: null },
       investigation_stage: { stage: "analyze", section: null, itemKind: null },
       evidence_item: { stage: "analyze", section: "triage-evidence-board", itemKind: "evidence" },
-      evidence_context: { stage: "analyze", section: "triage-evidence-board", itemKind: null },
+      intake_batch: { stage: "capture", section: "corpus-intake", itemKind: "intake-batch" },
+      evidence_context: { stage: "analyze", section: "triage-evidence-board", itemKind: "snapshot" },
+      imported_ai_run: { stage: "capture", section: "triage-capture", itemKind: "imported-run" },
       workstream: { stage: "analyze", section: "triage-lane-runner", itemKind: "triage-run" },
       workstream_attempt: { stage: "analyze", section: "workstreams", itemKind: "workstream", hasLane: true },
       workstream_rerun: { stage: "analyze", section: "triage-lane-runner", itemKind: "triage-run" },
       comparison_finding: { stage: "compare", section: "cross-exam-heading", itemKind: null },
       comparison_conflict: { stage: "compare", section: "cross-exam-heading", itemKind: null },
+      helpfulness: { stage: "compare", section: "cross-exam-heading", itemKind: null },
+      interaction_trace: { stage: "compare", section: "candidate-comparison-heading", itemKind: null },
+      experiment: { stage: "compare", section: "candidate-comparison-heading", itemKind: null },
       discussion_message: { stage: "situation", section: "discussion", itemKind: "comment" },
       timeline_event: { stage: "capture", section: "triage-capture", itemKind: "timeline" },
       hypothesis: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
       action: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
       observation: { stage: "capture", section: "triage-capture", itemKind: "contribution" },
       decision_revision: { stage: "decide", section: "decision-heading", itemKind: null },
+      gold: { stage: "decide", section: "decision-heading", itemKind: null },
       export_event: { stage: "decide", section: "export-heading", itemKind: null },
       portable_archive_event: { stage: "decide", section: "export-heading", itemKind: null },
     };
@@ -425,7 +445,9 @@ describe("routed locator focus against shipped War Room sections", () => {
             ? "12"
             : kind === "workstream_attempt"
               ? attempt
-              : kind === "discussion_message"
+              : kind === "interaction_trace"
+                ? `${job}:trace-synthetic-v1`
+                : kind === "discussion_message"
                 ? "message-synthetic-1"
                 : job;
       const locator = formatInvestigationResourceLocator({

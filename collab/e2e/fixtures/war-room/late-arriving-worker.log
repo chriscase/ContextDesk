@@ -1,0 +1,6 @@
+# Synthetic fixture representing evidence that arrives after a first comparison
+# has already been run. It names a different subsystem than the mailer log.
+2026-03-14T09:12:35+00:00 INFO  config.reload  worker=smtp-relay-2 applying release=syn-2026.03.14-a
+2026-03-14T09:12:35+00:00 ERROR config.reload  worker=smtp-relay-2 rejected key=smtp.timeout_ms value=<unset>
+2026-03-14T09:12:36+00:00 WARN  config.reload  worker=smtp-relay-2 falling back to built-in default timeout_ms=1000
+2026-03-14T09:13:01+00:00 ERROR smtp.relay     worker=smtp-relay-2 upstream deadline exceeded after 1000ms peer=192.0.2.24

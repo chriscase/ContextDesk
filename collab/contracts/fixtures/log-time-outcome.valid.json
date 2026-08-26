@@ -1,0 +1,41 @@
+{
+  "schemaId": "cd-collab.log_time_outcome.v1",
+  "caseId": "case-synthetic-0001",
+  "corpusId": "corpus-synthetic-0001",
+  "operation": "apply",
+  "source": "worker/batch.log",
+  "previousRevision": 3,
+  "appliedRevision": 4,
+  "restoredRevision": null,
+  "changedRecords": 15,
+  "replayed": false,
+  "declarations": [
+    {
+      "source": "worker/batch.log",
+      "ianaTimezone": "America/Chicago",
+      "basis": "user_declared",
+      "declaredAt": 1710093600,
+      "appliedRevision": 4,
+      "declarationFingerprint": "3f2a1b6c4d5e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708",
+      "declaredBy": "analyst-synthetic-01"
+    }
+  ],
+  "dependents": [
+    {
+      "kind": "snapshot",
+      "id": "snapshot-synthetic-0001",
+      "disposition": "revised",
+      "reason": "This frozen evidence set was created while the corpus read time differently. The files are unchanged; timings read from it need a fresh look.",
+      "observedRevision": 3
+    },
+    {
+      "kind": "triage_run",
+      "id": "run-synthetic-0001",
+      "disposition": "invalidated",
+      "reason": "This run answered against a snapshot whose time basis has since moved, so its conclusions are no longer current.",
+      "observedRevision": 3
+    }
+  ],
+  "createdAt": "2024-03-10T18:00:00Z",
+  "createdBy": "analyst-synthetic-01"
+}

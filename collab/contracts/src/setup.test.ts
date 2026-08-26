@@ -409,6 +409,77 @@ describe("first-run deployment configuration contracts", () => {
     );
   });
 
+  it("accepts AD-shaped search filters, {0} aliases, and explicit resolution modes", () => {
+    const ldap = postgresLdapDraft();
+    const ldapConfig = ldap.authentication.ldap;
+    if (ldapConfig === null) throw new Error("fixture error");
+    const adShaped = {
+      ...ldap,
+      authentication: {
+        ...ldap.authentication,
+        ldap: {
+          ...ldapConfig,
+          userDnTemplate: null,
+          userSearchBase: "ou=people,dc=example,dc=test",
+          userSearchFilter: "(&(objectClass=person)(uid={username}))",
+          userResolutionModes: ["service_bind_search", "upn", "domain_backslash"],
+          upnSuffix: "example.test",
+          netbiosDomain: "EXAMPLE",
+          memberAttribute: "memberOf",
+          displayNameAttr: "cn",
+          roleTitleAttr: "title",
+          teamAttr: "departmentNumber",
+          emailAttr: "mail",
+        },
+      },
+    };
+    expect(parseSetupDeploymentDraftRequest(adShaped)).toMatchObject({
+      authentication: {
+        ldap: {
+          userSearchFilter: "(&(objectClass=person)(uid={username}))",
+          upnSuffix: "example.test",
+          netbiosDomain: "EXAMPLE",
+        },
+      },
+    });
+    const zeroAlias = {
+      ...adShaped,
+      authentication: {
+        ...adShaped.authentication,
+        ldap: {
+          ...adShaped.authentication.ldap,
+          userSearchFilter: "(sAMAccountName={0})",
+        },
+      },
+    };
+    expect(
+      parseSetupDeploymentDraftRequest(zeroAlias).authentication.ldap?.userSearchFilter,
+    ).toBe("(sAMAccountName={0})");
+    const zeroDn = {
+      ...zeroAlias,
+      authentication: {
+        ...zeroAlias.authentication,
+        ldap: {
+          ...zeroAlias.authentication.ldap,
+          userDnTemplate: "uid={0},ou=people,dc=example,dc=test",
+          userResolutionModes: ["dn_template", "service_bind_search", "upn", "domain_backslash"],
+        },
+      },
+    };
+    expect(parseSetupDeploymentDraftRequest(zeroDn).authentication.ldap?.userDnTemplate).toBe(
+      "uid={0},ou=people,dc=example,dc=test",
+    );
+    expect(() =>
+      parseSetupDeploymentDraftRequest({
+        ...adShaped,
+        authentication: {
+          ...adShaped.authentication,
+          ldap: { ...adShaped.authentication.ldap, userResolutionModes: [] },
+        },
+      }),
+    ).toThrow(/at least one resolution mode/);
+  });
+
   it("rejects unknown fields, inline secrets, and ambiguous secret references", () => {
     const draft = singleNodeDraft();
     expect(() =>
@@ -835,7 +906,6 @@ describe("first-run deployment configuration contracts", () => {
       "(&(uid={username})",
       "(uid={dn})",
       "(|(uid={username})(mail={username}))",
-      "(&(objectClass=person)(uid={username}))",
       "(uid=prefix-{username})",
       "(uid=bad\\ZZ)",
     ]) {

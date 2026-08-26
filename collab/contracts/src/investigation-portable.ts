@@ -12,16 +12,29 @@ import {
   type CorpusIntakeOrigin,
 } from "./investigation-corpus-intake.js";
 import { GOLD_ALIGNMENT_NOT_CORRECTNESS, GOLD_ALIGNMENT_STATUSES, GOLD_IS_HUMAN_BENCHMARK } from "./gold.js";
+import { COMPLETENESS, EVIDENCE_VISIBILITY } from "./run.js";
 import {
+  CANDIDATE_ROLES,
   DECISION_STATUSES,
+  GOLD_STATES,
   HELPFULNESS_DIMENSIONS,
+  HELPFULNESS_STATES,
+  RUN_STATUSES,
   SNAPSHOT_LINEAGE_CLASSES,
+  SNAPSHOT_PROOF_BASES,
+  type ExperimentAgreementV1,
+  type ExperimentCandidateV1,
 } from "./experiment.js";
 import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import { assertShareSafeFingerprint, assertShareSafeTimestamp } from "./privacy.js";
 import { SNAPSHOT_FAIRNESS_CLASSES } from "./snapshot.js";
 import { SOURCE_KINDS, SOURCE_LIFECYCLES } from "./source.js";
 import { TRIAGE_JOB_MODES } from "./triage-job.js";
+import {
+  interactionTraceShape,
+  parseInteractionTrace,
+  type InteractionTraceV1,
+} from "./trace.js";
 
 export const PORTABLE_SCHEMA_ID = "cd-collab.investigation_portable.v1" as const;
 export const PORTABLE_PREFLIGHT_SCHEMA_ID =
@@ -103,6 +116,7 @@ export const PORTABLE_OBJECT_KINDS = [
   "actor",
   "contribution",
   "evidence",
+  "intake_batch",
   "content",
   "source",
   "imported_ai_run",
@@ -119,6 +133,18 @@ export const PORTABLE_OBJECT_KINDS = [
   "attachment",
 ] as const;
 export type PortableObjectKind = (typeof PORTABLE_OBJECT_KINDS)[number];
+
+/** Workstream attempts are `${jobId}:${candidateId}`; job-level events are a bare job id. */
+export function parsePortableTriageAttemptTarget(
+  targetId: string,
+): { jobId: string; candidateId: string } | null {
+  const separator = targetId.indexOf(":");
+  if (separator <= 0 || separator === targetId.length - 1) return null;
+  return {
+    jobId: targetId.slice(0, separator),
+    candidateId: targetId.slice(separator + 1),
+  };
+}
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const INSTALLATION_ID = /^inst-[a-z0-9]{8,64}$/;
@@ -141,6 +167,26 @@ export function sha256Text(text: string): string {
 /** RFC 4122 UUID (version 1-8, variant 10xx). Acceptable as a PostgreSQL UUID. */
 export const RFC4122_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Imported comparison traces are `${experimentId}:${traceId}`; experiment-level events are a bare experiment id. */
+export function parsePortableExperimentTraceTarget(
+  targetId: string,
+): { experimentId: string; traceId: string } | null {
+  const separator = targetId.indexOf(":");
+  if (separator <= 0 || separator === targetId.length - 1) return null;
+  return {
+    experimentId: targetId.slice(0, separator),
+    traceId: targetId.slice(separator + 1),
+  };
+}
+
+export function formatPortableExperimentTraceTarget(experimentId: string, traceId: string): string {
+  const target = `${experimentId}:${traceId}`;
+  if (!RFC4122_UUID_RE.test(experimentId) || !parsePortableExperimentTraceTarget(target)) {
+    throw new ContractViolation("$", "malformed experiment trace target");
+  }
+  return target;
+}
 
 const RFC4122_DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
@@ -189,6 +235,89 @@ export function portableDestinationUuid(
   return uuidV5(
     PORTABLE_REMAP_NAMESPACE_UUID,
     `${sourceInstallationId}:${namespace}:${sourceId}:${collisionCounter}`,
+  );
+}
+
+/**
+ * How a namespace obtains its destination identifier. Collision scope follows
+ * directly from this: only a `minted` namespace can collide at the destination,
+ * and only against the exact deterministic UUID it would mint.
+ *
+ * - `minted` — the destination row is keyed by `portableDestinationUuid(...)`.
+ *   The raw source id is never written as a destination key, so a raw source id
+ *   that also appears at the destination is not a collision.
+ * - `content_addressed` — the destination key is the content digest itself.
+ *   Equal digests mean the destination already stores those exact bytes, which
+ *   is deduplication, not a collision, and never blocks reconstruction.
+ * - `destination_sequenced` — the destination assigns a fresh per-case sequence
+ *   on write. The source sequence survives only as provenance, so two
+ *   installations both numbering their own timelines from 1 never collide.
+ */
+/** Bounded deterministic remap ladder depth. Exhausting it fails closed. */
+export const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
+
+export const PORTABLE_ID_MINTING_MODES = [
+  "minted",
+  "content_addressed",
+  "destination_sequenced",
+] as const;
+export type PortableIdMintingMode = (typeof PORTABLE_ID_MINTING_MODES)[number];
+
+const PORTABLE_NAMESPACE_MINTING: Readonly<Record<PortableObjectKind, PortableIdMintingMode>> =
+  Object.freeze({
+    investigation: "minted",
+    actor: "minted",
+    contribution: "minted",
+    evidence: "minted",
+    intake_batch: "minted",
+    content: "content_addressed",
+    source: "minted",
+    imported_ai_run: "minted",
+    snapshot: "minted",
+    triage_job: "minted",
+    experiment: "minted",
+    helpfulness: "minted",
+    decision: "minted",
+    gold: "minted",
+    alignment: "minted",
+    discussion: "minted",
+    timeline: "destination_sequenced",
+    audit: "minted",
+    attachment: "minted",
+  });
+
+export function portableIdMintingMode(namespace: PortableObjectKind): PortableIdMintingMode {
+  return PORTABLE_NAMESPACE_MINTING[namespace];
+}
+
+/** True when the destination key for `namespace` is a deterministic minted UUID. */
+export function portableMintsDestinationId(namespace: PortableObjectKind): boolean {
+  return PORTABLE_NAMESPACE_MINTING[namespace] === "minted";
+}
+
+export const PORTABLE_RAW_SOURCE_ID_IS_NOT_A_DESTINATION_KEY =
+  "A raw source id, a per-case timeline sequence, and a content digest are never destination keys for a minted namespace. Only the deterministic destination UUID can collide." as const;
+
+export const PORTABLE_DESTINATION_PROBE_IS_ARCHIVE_SCOPED =
+  "Destination collision evidence is an archive-scoped probe of the deterministic UUIDs this archive would mint. It is never an enumeration of the destination corpus, and it is never authorization." as const;
+
+/**
+ * The bounded, archive-scoped candidate set a host must probe to decide
+ * collisions fail-closed. Ladder depth is capped by
+ * `MAX_DETERMINISTIC_REMAP_ATTEMPTS`; a host probes rung 0 for every minted
+ * source id and escalates a rung only for an id whose previous rung came back
+ * occupied. Cost is a function of archive size, never of destination size.
+ */
+export function portableDestinationIdCandidates(
+  sourceInstallationId: string,
+  namespace: PortableObjectKind,
+  sourceId: string,
+  attempts: number,
+): string[] {
+  if (!portableMintsDestinationId(namespace)) return [];
+  const depth = Math.max(0, Math.min(attempts, MAX_DETERMINISTIC_REMAP_ATTEMPTS));
+  return Array.from({ length: depth }, (_unused, counter) =>
+    portableDestinationUuid(sourceInstallationId, namespace, sourceId, counter),
   );
 }
 
@@ -286,6 +415,22 @@ function assertSafeIdentifiers(value: unknown, path = "$."): void {
 function requireSha256(path: string, value: string): void {
   if (!SHA256_HEX.test(value)) {
     throw new ContractViolation(path, "expected a lowercase SHA-256 hex digest");
+  }
+}
+
+function requireContentDigest(
+  contents: readonly { digest: string; inclusion: string }[],
+  digest: string,
+  path: string,
+  requirePresent: boolean,
+): void {
+  requireSha256(path, digest);
+  const content = contents.find((item) => item.digest === digest);
+  if (!content) {
+    throw new ContractViolation(path, "dangling content digest");
+  }
+  if (requirePresent && content.inclusion !== "present") {
+    throw new ContractViolation(path, "missing required content");
   }
 }
 
@@ -400,6 +545,14 @@ function uniqueIds(path: string, ids: string[]): void {
   }
 }
 
+function rethrowContractAt(path: string, error: unknown): never {
+  if (error instanceof ContractViolation) {
+    const suffix = error.path.startsWith("$") ? error.path.slice(1) : `.${error.path}`;
+    throw new ContractViolation(`${path}${suffix}`, error.detail);
+  }
+  throw error;
+}
+
 function sortBy<T>(rows: readonly T[], key: (row: T) => string): T[] {
   return [...rows].sort((a, b) => compareCodeUnits(key(a), key(b)));
 }
@@ -460,6 +613,10 @@ const contributionShape: ObjectShape = {
   sourceId: f.req(f.str),
   createdAt: f.req(f.str),
   hypothesisStatus: f.nul(f.en(...HYPOTHESIS_STATUSES)),
+  hypothesisLinks: f.opt(f.arr(f.obj({
+    kind: f.req(f.en("artifact", "contribution")),
+    id: f.req(f.str),
+  }))),
   objectHash: f.req(f.str),
 };
 
@@ -525,6 +682,22 @@ const importedRunShape: ObjectShape = {
   usageStatus: f.req(f.en(UNKNOWN_STATUS)),
   costStatus: f.req(f.en(UNKNOWN_STATUS)),
   outputDigest: f.nul(f.str),
+  contributionId: f.opt(f.str),
+  promptDigest: f.optNul(f.str),
+  promptCompleteness: f.opt(f.en(...COMPLETENESS)),
+  outputCompleteness: f.opt(f.en(...COMPLETENESS)),
+  workflowCompleteness: f.opt(f.en(...COMPLETENESS)),
+  evidenceVisibility: f.opt(f.en(...EVIDENCE_VISIBILITY)),
+  snapshotId: f.optNul(f.str),
+  privacyClass: f.opt(f.en(...PRIVACY_CLASSES)),
+  importerId: f.opt(f.str),
+  operatorId: f.opt(f.str),
+  claimedTraces: f.opt(f.arr(f.str)),
+  visibilityNote: f.optNul(f.str),
+  uncertainty: f.optNul(f.str),
+  timing: f.optNul(f.str),
+  cost: f.optNul(f.str),
+  redacted: f.opt(f.bool),
   opaquePayloadJson: f.nul(f.str),
   objectHash: f.req(f.str),
 };
@@ -597,6 +770,65 @@ const triageJobShape: ObjectShape = {
   objectHash: f.req(f.str),
 };
 
+const experimentCandidateShape: ObjectShape = {
+  candidateId: f.req(f.str),
+  modelLabel: f.req(f.str),
+  role: f.req(f.en(...CANDIDATE_ROLES)),
+  runStatus: f.req(f.en(...RUN_STATUSES)),
+  observedLatency: f.req(
+    f.obj({
+      status: f.req(f.en("unknown", "observed")),
+      milliseconds: f.opt(f.u64),
+    }),
+  ),
+  cost: f.req(f.obj({ status: f.req(f.en("unknown")) })),
+  usage: f.req(f.obj({ status: f.req(f.en("unknown")) })),
+  helpfulnessState: f.req(f.en(...HELPFULNESS_STATES)),
+  goldState: f.req(f.en(...GOLD_STATES)),
+};
+
+const experimentAgreementShape: ObjectShape = {
+  sharedAnchors: f.req(
+    f.arr(
+      f.obj({
+        evidenceRef: f.req(f.str),
+        role: f.req(f.str),
+        candidateIds: f.req(f.arr(f.str)),
+      }),
+    ),
+  ),
+  candidateSpecific: f.req(
+    f.arr(
+      f.obj({
+        candidateId: f.req(f.str),
+        evidenceRefs: f.req(f.arr(f.str)),
+      }),
+    ),
+  ),
+  roleConflicts: f.req(
+    f.arr(
+      f.obj({
+        evidenceRef: f.req(f.str),
+        assignments: f.req(
+          f.arr(
+            f.obj({
+              candidateId: f.req(f.str),
+              role: f.req(f.str),
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
+  notes: f.req(f.arr(f.str)),
+};
+
+const experimentSnapshotProofShape: ObjectShape = {
+  basis: f.req(f.en(...SNAPSHOT_PROOF_BASES)),
+  fairnessClass: f.req(f.en(...SNAPSHOT_FAIRNESS_CLASSES)),
+  lineageClass: f.req(f.en(...SNAPSHOT_LINEAGE_CLASSES)),
+};
+
 const experimentShape: ObjectShape = {
   id: f.req(f.str),
   packageId: f.req(f.str),
@@ -604,6 +836,11 @@ const experimentShape: ObjectShape = {
   taskFingerprint: f.req(f.str),
   candidateIds: f.req(f.arr(f.str)),
   createdAt: f.req(f.str),
+  importerId: f.opt(f.str),
+  candidates: f.opt(f.arr(f.obj(experimentCandidateShape))),
+  agreement: f.opt(f.obj(experimentAgreementShape)),
+  snapshotProof: f.opt(f.obj(experimentSnapshotProofShape)),
+  traces: f.opt(f.arr(f.obj(interactionTraceShape))),
   objectHash: f.req(f.str),
 };
 
@@ -782,6 +1019,7 @@ export interface PortableContributionV1 {
   sourceId: string;
   createdAt: string;
   hypothesisStatus: (typeof HYPOTHESIS_STATUSES)[number] | null;
+  hypothesisLinks?: { kind: "artifact" | "contribution"; id: string }[];
   objectHash: string;
 }
 
@@ -847,6 +1085,22 @@ export interface PortableImportedAiRunV1 {
   usageStatus: "unknown";
   costStatus: "unknown";
   outputDigest: string | null;
+  contributionId?: string;
+  promptDigest?: string | null;
+  promptCompleteness?: (typeof COMPLETENESS)[number];
+  outputCompleteness?: (typeof COMPLETENESS)[number];
+  workflowCompleteness?: (typeof COMPLETENESS)[number];
+  evidenceVisibility?: (typeof EVIDENCE_VISIBILITY)[number];
+  snapshotId?: string | null;
+  privacyClass?: (typeof PRIVACY_CLASSES)[number];
+  importerId?: string;
+  operatorId?: string;
+  claimedTraces?: string[];
+  visibilityNote?: string | null;
+  uncertainty?: string | null;
+  timing?: string | null;
+  cost?: string | null;
+  redacted?: boolean;
   opaquePayloadJson: string | null;
   objectHash: string;
 }
@@ -928,6 +1182,15 @@ export interface PortableExperimentV1 {
   taskFingerprint: string;
   candidateIds: string[];
   createdAt: string;
+  importerId?: string;
+  candidates?: ExperimentCandidateV1[];
+  agreement?: ExperimentAgreementV1;
+  snapshotProof?: {
+    basis: (typeof SNAPSHOT_PROOF_BASES)[number];
+    fairnessClass: (typeof SNAPSHOT_FAIRNESS_CLASSES)[number];
+    lineageClass: (typeof SNAPSHOT_LINEAGE_CLASSES)[number];
+  };
+  traces?: InteractionTraceV1[];
   objectHash: string;
 }
 
@@ -1095,7 +1358,12 @@ function sortPortableBags(bundle: PortableInvestigationUnsigned): PortableInvest
       ...job,
       candidates: sortBy(job.candidates, (item) => item.candidateId),
     })),
-    experiments: sortBy(bundle.experiments, (row) => row.id),
+    experiments: sortBy(bundle.experiments, (row) => row.id).map((experiment) => ({
+      ...experiment,
+      ...(experiment.traces
+        ? { traces: sortBy(experiment.traces, (item) => item.traceId) }
+        : {}),
+    })),
     helpfulnessObservations: sortBy(bundle.helpfulnessObservations, (row) => row.id),
     decisions: sortBy(bundle.decisions, (row) => `${row.id}:${row.revision}`),
     gold: sortBy(bundle.gold, (row) => `${row.goldId}:${row.version}`),
@@ -1433,6 +1701,24 @@ function validateContent(
   }
 }
 
+function portableTimelineTargetExists(
+  bundle: PortableInvestigationV1,
+  namespaceIds: Record<PortableObjectKind, Set<string>>,
+  namespace: PortableObjectKind,
+  targetId: string,
+): boolean {
+  if (namespaceIds[namespace].has(targetId)) return true;
+  if (namespace === "experiment") {
+    const parsed = parsePortableExperimentTraceTarget(targetId);
+    return Boolean(parsed && namespaceIds.experiment.has(parsed.experimentId));
+  }
+  if (namespace !== "triage_job") return false;
+  const attempt = parsePortableTriageAttemptTarget(targetId);
+  if (!attempt) return false;
+  const job = bundle.triageJobs.find((row) => row.id === attempt.jobId);
+  return Boolean(job?.candidates.some((row) => row.candidateId === attempt.candidateId));
+}
+
 function portableNamespaceIds(
   bundle: PortableInvestigationV1,
 ): Record<PortableObjectKind, Set<string>> {
@@ -1441,6 +1727,7 @@ function portableNamespaceIds(
     actor: new Set(bundle.actors.map((row) => row.sourceActorId)),
     contribution: new Set(bundle.contributions.map((row) => row.id)),
     evidence: new Set(bundle.evidence.map((row) => row.id)),
+    intake_batch: new Set((bundle.intakeBatches ?? []).map((row) => row.id)),
     content: new Set(bundle.contentObjects.map((row) => row.digest)),
     source: new Set(bundle.sources.map((row) => row.id)),
     imported_ai_run: new Set(bundle.importedAiRuns.map((row) => row.id)),
@@ -1681,6 +1968,24 @@ export function parsePortableInvestigation(
       );
     }
   }
+  const portableContributionIds = new Set(bundle.contributions.map((row) => row.id));
+  for (const [i, row] of bundle.contributions.entries()) {
+    const links = row.hypothesisLinks ?? [];
+    for (const [j, link] of links.entries()) {
+      if (link.kind === "artifact" && !evidence.has(link.id)) {
+        throw new ContractViolation(
+          `$.contributions[${i}].hypothesisLinks[${j}].id`,
+          "dangling evidence reference",
+        );
+      }
+      if (link.kind === "contribution" && !portableContributionIds.has(link.id)) {
+        throw new ContractViolation(
+          `$.contributions[${i}].hypothesisLinks[${j}].id`,
+          "dangling contribution reference",
+        );
+      }
+    }
+  }
   validateContent(bundle, options);
 
   const intakeBatches = bundle.intakeBatches ?? [];
@@ -1776,14 +2081,71 @@ export function parsePortableInvestigation(
         "opaquePayloadJson must be canonical JSON",
       );
     }
-    if (row.outputDigest !== null) requireSha256(`$.importedAiRuns[${i}].outputDigest`, row.outputDigest);
+    if (row.outputDigest !== null) {
+      requireContentDigest(
+        bundle.contentObjects,
+        row.outputDigest,
+        `$.importedAiRuns[${i}].outputDigest`,
+        row.outputCompleteness === "exact",
+      );
+    }
+    if (row.outputCompleteness === "exact" && !row.outputDigest) {
+      throw new ContractViolation(
+        `$.importedAiRuns[${i}].outputDigest`,
+        "exact output completeness requires an output digest",
+      );
+    }
+    if (row.promptDigest) {
+      requireContentDigest(
+        bundle.contentObjects,
+        row.promptDigest,
+        `$.importedAiRuns[${i}].promptDigest`,
+        row.promptCompleteness === "exact",
+      );
+    }
+    if (row.promptCompleteness === "exact" && !row.promptDigest) {
+      throw new ContractViolation(
+        `$.importedAiRuns[${i}].promptDigest`,
+        "exact prompt completeness requires a prompt digest",
+      );
+    }
+    if (row.operatorId) {
+      requireActor(actors, row.operatorId, `$.importedAiRuns[${i}].operatorId`);
+    }
+    if (row.importerId) {
+      requireActor(actors, row.importerId, `$.importedAiRuns[${i}].importerId`);
+    }
+    if (row.contributionId) {
+      const bound = bundle.contributions.find((item) => item.id === row.contributionId);
+      if (!bound) {
+        throw new ContractViolation(
+          `$.importedAiRuns[${i}].contributionId`,
+          "dangling contribution reference",
+        );
+      }
+      if (bound.kind !== "external_run") {
+        throw new ContractViolation(
+          `$.importedAiRuns[${i}].contributionId`,
+          "imported run must bind an external-run contribution",
+        );
+      }
+    }
   }
+  uniqueIds(
+    "$.importedAiRuns.contributionId",
+    bundle.importedAiRuns.flatMap((row) => row.contributionId ? [row.contributionId] : []),
+  );
 
   uniqueIds(
     "$.snapshots.id",
     bundle.snapshots.map((row) => row.id),
   );
   const snapshots = byId(bundle.snapshots);
+  for (const [i, row] of bundle.importedAiRuns.entries()) {
+    if (row.snapshotId && !snapshots.has(row.snapshotId)) {
+      throw new ContractViolation(`$.importedAiRuns[${i}].snapshotId`, "dangling snapshot reference");
+    }
+  }
   for (const [i, snap] of bundle.snapshots.entries()) {
     requireActor(actors, snap.createdBy, `$.snapshots[${i}].createdBy`);
     assertShareSafeTimestamp(`$.snapshots[${i}].createdAt`, snap.createdAt);
@@ -1916,6 +2278,147 @@ export function parsePortableInvestigation(
         throw new ContractViolation(
           `$.experiments[${i}].candidateIds[${j}]`,
           "experiment candidate is not backed by a triage job or imported AI run",
+        );
+      }
+    }
+    if (exp.candidates) {
+      const fromCandidates = exp.candidates.map((row) => row.candidateId);
+      uniqueIds(`$.experiments[${i}].candidates.candidateId`, fromCandidates);
+      if (canonicalJson([...fromCandidates].sort()) !== canonicalJson([...exp.candidateIds].sort())) {
+        throw new ContractViolation(
+          `$.experiments[${i}].candidates`,
+          "candidate ids must match candidateIds",
+        );
+      }
+      for (const [j, candidate] of exp.candidates.entries()) {
+        const milliseconds =
+          "milliseconds" in candidate.observedLatency
+            ? candidate.observedLatency.milliseconds
+            : undefined;
+        if (candidate.observedLatency.status === "observed") {
+          if (typeof milliseconds !== "number") {
+            throw new ContractViolation(
+              `$.experiments[${i}].candidates[${j}].observedLatency.milliseconds`,
+              "observed latency requires milliseconds",
+            );
+          }
+        } else if (typeof milliseconds === "number") {
+          throw new ContractViolation(
+            `$.experiments[${i}].candidates[${j}].observedLatency.milliseconds`,
+            "unknown latency must not include milliseconds",
+          );
+        }
+      }
+    }
+    if (exp.agreement) {
+      const candidateSet = new Set(exp.candidateIds);
+      const evidenceIds = new Set(bundle.evidence.map((row) => row.id));
+      const requireAgreementCandidate = (candidateId: string, path: string): void => {
+        if (!candidateSet.has(candidateId)) {
+          throw new ContractViolation(path, "dangling experiment candidate");
+        }
+      };
+      const requireAgreementEvidence = (evidenceId: string, path: string): void => {
+        if (!evidenceIds.has(evidenceId)) {
+          throw new ContractViolation(path, "dangling evidence reference");
+        }
+      };
+      for (const [j, anchor] of exp.agreement.sharedAnchors.entries()) {
+        requireAgreementEvidence(
+          anchor.evidenceRef,
+          `$.experiments[${i}].agreement.sharedAnchors[${j}].evidenceRef`,
+        );
+        uniqueIds(
+          `$.experiments[${i}].agreement.sharedAnchors[${j}].candidateIds`,
+          anchor.candidateIds,
+        );
+        for (const [k, candidateId] of anchor.candidateIds.entries()) {
+          requireAgreementCandidate(
+            candidateId,
+            `$.experiments[${i}].agreement.sharedAnchors[${j}].candidateIds[${k}]`,
+          );
+        }
+      }
+      for (const [j, row] of exp.agreement.candidateSpecific.entries()) {
+        requireAgreementCandidate(
+          row.candidateId,
+          `$.experiments[${i}].agreement.candidateSpecific[${j}].candidateId`,
+        );
+        uniqueIds(
+          `$.experiments[${i}].agreement.candidateSpecific[${j}].evidenceRefs`,
+          row.evidenceRefs,
+        );
+        for (const [k, evidenceId] of row.evidenceRefs.entries()) {
+          requireAgreementEvidence(
+            evidenceId,
+            `$.experiments[${i}].agreement.candidateSpecific[${j}].evidenceRefs[${k}]`,
+          );
+        }
+      }
+      for (const [j, conflict] of exp.agreement.roleConflicts.entries()) {
+        requireAgreementEvidence(
+          conflict.evidenceRef,
+          `$.experiments[${i}].agreement.roleConflicts[${j}].evidenceRef`,
+        );
+        for (const [k, assignment] of conflict.assignments.entries()) {
+          requireAgreementCandidate(
+            assignment.candidateId,
+            `$.experiments[${i}].agreement.roleConflicts[${j}].assignments[${k}].candidateId`,
+          );
+        }
+      }
+    }
+    if (exp.importerId) {
+      requireActor(actors, exp.importerId, `$.experiments[${i}].importerId`);
+    }
+    if (exp.traces) {
+      const candidateSet = new Set(exp.candidateIds);
+      const evidenceIds = new Set(bundle.evidence.map((row) => row.id));
+      uniqueIds(
+        `$.experiments[${i}].traces.traceId`,
+        exp.traces.map((row) => row.traceId),
+      );
+      uniqueIds(
+        `$.experiments[${i}].traces.candidateId`,
+        exp.traces.map((row) => row.candidateId),
+      );
+      for (const [j, rawTrace] of exp.traces.entries()) {
+        const path = `$.experiments[${i}].traces[${j}]`;
+        try {
+          parseInteractionTrace(rawTrace);
+        } catch (error) {
+          rethrowContractAt(path, error);
+        }
+        if (!candidateSet.has(rawTrace.candidateId)) {
+          throw new ContractViolation(`${path}.candidateId`, "dangling experiment candidate");
+        }
+        for (const [k, event] of rawTrace.events.entries()) {
+          uniqueIds(`${path}.events[${k}].evidenceRefs`, event.evidenceRefs);
+          for (const [n, evidenceId] of event.evidenceRefs.entries()) {
+            if (!evidenceIds.has(evidenceId)) {
+              throw new ContractViolation(
+                `${path}.events[${k}].evidenceRefs[${n}]`,
+                "dangling evidence reference",
+              );
+            }
+          }
+        }
+      }
+      const expectedTargets = exp.traces
+        .map((row) => `${exp.id}:${row.traceId}`)
+        .sort();
+      const actualTargets = bundle.timeline
+        .filter((row) => row.kind === "experiment_trace_imported")
+        .map((row) => row.targetId)
+        .filter((targetId): targetId is string => {
+          const parsed = targetId ? parsePortableExperimentTraceTarget(targetId) : null;
+          return Boolean(parsed && parsed.experimentId === exp.id);
+        })
+        .sort();
+      if (canonicalJson(expectedTargets) !== canonicalJson(actualTargets)) {
+        throw new ContractViolation(
+          `$.experiments[${i}].traces`,
+          "experiment traces must match experiment_trace_imported timeline targets",
         );
       }
     }
@@ -2086,7 +2589,7 @@ export function parsePortableInvestigation(
         "unknown timeline target namespace",
       );
     }
-    if (!namespaceIds[row.targetNamespace].has(row.targetId)) {
+    if (!portableTimelineTargetExists(bundle, namespaceIds, row.targetNamespace, row.targetId)) {
       throw new ContractViolation(`$.timeline[${i}].targetId`, "dangling timeline target");
     }
   }
@@ -2291,7 +2794,6 @@ const preflightRequestShape: ObjectShape = {
   ),
 };
 
-const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
 
 function chooseDeterministicRemap(
   installationId: string,
@@ -2656,20 +3158,32 @@ export function preflightPortableInvestigation(
     }));
 
   for (const { kind, ids } of namespaces) {
-    const existing = new Set(request.destination.objectIds[kind] ?? []);
-    const occupied = new Set(existing);
+    // Only the deterministic UUID this bundle would mint can occupy a
+    // destination key. A raw source id present at the destination is not a
+    // collision, so it never seeds the occupied set: it would otherwise make
+    // every id the destination happens to reuse look like a conflict.
+    const occupied = new Set(
+      (request.destination.objectIds[kind] ?? []).filter((id) => isRfc4122Uuid(id)),
+    );
     const seenRaw = new Set<string>();
     for (const sourceId of ids) {
       if (seenRaw.has(sourceId)) continue;
       seenRaw.add(sourceId);
-      const destinationId = portableDestinationUuid(
-        bundle.sourceInstallationId,
-        kind,
-        sourceId,
-        0,
-      );
-      const collides = occupied.has(destinationId) || occupied.has(sourceId);
-      if (!collides) {
+      const destinationId =
+        portableIdMintingMode(kind) === "content_addressed"
+          ? sourceId
+          : portableDestinationUuid(bundle.sourceInstallationId, kind, sourceId, 0);
+      if (!portableMintsDestinationId(kind)) {
+        // Content is addressed by digest and timeline events are sequenced by
+        // the destination, so neither namespace can collide. A content remap
+        // must preserve the digest because that digest is the destination
+        // identity referenced by evidence and timeline events. Timeline rows
+        // retain a stable non-persisted projection for report shape parity.
+        idRemap.push({ namespace: kind, sourceId, destinationId });
+        create += 1;
+        continue;
+      }
+      if (!occupied.has(destinationId)) {
         idRemap.push({ namespace: kind, sourceId, destinationId });
         occupied.add(destinationId);
         create += 1;
@@ -2682,7 +3196,7 @@ export function preflightPortableInvestigation(
         referential.push({
           code: "id_collision",
           path: `${kind}:${sourceId}`,
-          detail: "same raw id already exists at the destination",
+          detail: "deterministic destination id already exists at the destination",
         });
       } else {
         const remapped = chooseDeterministicRemap(

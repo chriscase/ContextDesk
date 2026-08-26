@@ -9,6 +9,7 @@
  */
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { MemoryAuditStore, type AuditStore } from "../modules/audit/index.js";
 import { MemorySessionStore, type SessionStore } from "../modules/auth/index.js";
@@ -34,6 +35,9 @@ import {
   MemoryPortableApplyStateStore,
   type PortableApplyStateStore,
 } from "../modules/portable-investigations/index.js";
+import { MemoryEntityStore, type EntityStore } from "../modules/entities/index.js";
+import { MemoryReferenceStore, type ReferenceStore } from "../modules/references/index.js";
+import { MemoryResolutionStore, type ResolutionStore } from "../modules/resolutions/index.js";
 
 const SQLITE_SCHEMA_VERSION = "sqlite-current-v1";
 const TAG = "__cd_collab_state_type";
@@ -42,6 +46,7 @@ const TAG = "__cd_collab_state_type";
 export const CASE_SQLITE_MUTATORS: ReadonlySet<string> = new Set([
   "insertCase",
   "updateCaseMeta",
+  "updateOccurredAt",
   "updateSituationAtomic",
   "addParticipant",
   "appendTimeline",
@@ -101,6 +106,10 @@ function restoreStore(store: object, state: unknown): void {
     throw new Error("invalid persisted SQLite store state");
   }
   for (const [key, value] of Object.entries(state)) {
+    // Transaction/audit context is process-local infrastructure, not domain
+    // state. Older SQLite documents may contain an encoded empty object for
+    // it; never replace the live AsyncLocalStorage instance on reopen.
+    if (Reflect.get(store, key) instanceof AsyncLocalStorage) continue;
     // SqliteState.read has already revived dates and maps.
     Reflect.set(store, key, value);
   }
@@ -108,7 +117,9 @@ function restoreStore(store: object, state: unknown): void {
 
 function storeState(store: object): JsonValue {
   return Object.fromEntries(
-    Object.entries(store).filter(([, value]) => typeof value !== "function"),
+    Object.entries(store).filter(
+      ([, value]) => typeof value !== "function" && !(value instanceof AsyncLocalStorage),
+    ),
   ) as JsonValue;
 }
 
@@ -208,6 +219,9 @@ function persistentMemoryStore<T extends object>(
   for (const name of methodNames(store)) {
     const original = Reflect.get(store, name);
     if (typeof original !== "function") continue;
+    // Every method becomes async, including capture()/restore(). Callers must
+    // await Promise.resolve(...) or restore receives a Promise and throws
+    // DataCloneError without rolling the SQLite document back.
     Reflect.set(store, name, async (...args: unknown[]) => {
       const result = await Reflect.apply(original, store, args);
       if (mutatingMethods.has(name)) state.write(key, storeState(store));
@@ -274,6 +288,9 @@ export interface SqliteRuntime {
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
+  entities: EntityStore;
+  references: ReferenceStore;
+  resolutions: ResolutionStore;
   runPortableTransaction: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
@@ -284,6 +301,13 @@ export function createSqliteRuntime(
   const state = new SqliteState(path);
   const rawAudit = new MemoryAuditStore();
   const audit = persistentMemoryStore(state, "audit", rawAudit, new Set(["append", "restore"]));
+  const rawCatalog = new MemoryCatalogStore();
+  const catalog = persistentMemoryStore(
+    state,
+    "catalog",
+    rawCatalog,
+    new Set(["insert", "remove", "updateMeta", "setLifecycle", "restore"]),
+  );
   const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
     state.transaction(
       [
@@ -297,13 +321,6 @@ export function createSqliteRuntime(
     "cases",
     rawCases,
     CASE_SQLITE_MUTATORS,
-  );
-  const rawCatalog = new MemoryCatalogStore();
-  const catalog = persistentMemoryStore(
-    state,
-    "catalog",
-    rawCatalog,
-    new Set(["insert", "updateMeta", "setLifecycle", "restore"]),
   );
   const rawRuns = new MemoryRunStore();
   const runs = persistentMemoryStore(
@@ -353,6 +370,37 @@ export function createSqliteRuntime(
     new MemoryLocalGrantStore(),
     new Set(["grant", "revoke"]),
   );
+  // The investigation record graph persists on the same terms as everything
+  // else here: a restart must not lose who an investigation involved, what it
+  // cited, or why it was resolved.
+  const rawEntities = new MemoryEntityStore();
+  const entities = persistentMemoryStore(
+    state,
+    "investigation_entities",
+    rawEntities,
+    new Set([
+      "insertEntity",
+      "updateEntity",
+      "setEntityLifecycle",
+      "insertInvolvement",
+      "releaseInvolvement",
+      "restore",
+    ]),
+  );
+  const rawReferences = new MemoryReferenceStore();
+  const references = persistentMemoryStore(
+    state,
+    "investigation_references",
+    rawReferences,
+    new Set(["insert", "withdraw", "restore"]),
+  );
+  const rawResolutions = new MemoryResolutionStore();
+  const resolutions = persistentMemoryStore(
+    state,
+    "investigation_resolutions",
+    rawResolutions,
+    new Set(["insert", "supersede", "restore"]),
+  );
   const portableStores = [
     { key: "audit", store: rawAudit },
     { key: "cases", store: rawCases },
@@ -361,6 +409,9 @@ export function createSqliteRuntime(
     { key: "experiments", store: rawExperiments },
     { key: "jobs", store: rawJobs },
     { key: "portable_apply_state", store: rawApplyState },
+    { key: "investigation_entities", store: rawEntities },
+    { key: "investigation_references", store: rawReferences },
+    { key: "investigation_resolutions", store: rawResolutions },
   ];
   return {
     state,
@@ -381,6 +432,9 @@ export function createSqliteRuntime(
     applyState,
     profiles,
     grants,
+    entities,
+    references,
+    resolutions,
     runPortableTransaction: (operation) => state.transaction(portableStores, operation),
   };
 }

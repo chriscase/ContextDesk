@@ -190,6 +190,9 @@ describe("CaseBoardPanel", () => {
       <CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />,
     );
     expect(await screen.findByText("80 of 80 shown · 0 selected")).toBeTruthy();
+    expect(screen.queryByText("note-49.txt")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show 25 more" }));
+    expect(screen.getByText("note-49.txt")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "node-a" } });
     expect(screen.getByText("5 of 80 shown · 0 selected")).toBeTruthy();
@@ -202,7 +205,7 @@ describe("CaseBoardPanel", () => {
         readOnly={false}
         routeFocus={{
           section: "triage-evidence-board",
-          item: "artifact-12",
+          item: "artifact-79",
           itemKind: "evidence",
           lane: null,
           experiment: null,
@@ -212,7 +215,7 @@ describe("CaseBoardPanel", () => {
     await waitFor(() =>
       expect((screen.getByLabelText("Filter evidence") as HTMLInputElement).value).toBe(""),
     );
-    const routedEvidence = screen.getByText("note-12.txt").closest("li") as HTMLElement;
+    const routedEvidence = screen.getByText("note-79.txt").closest("li") as HTMLElement;
     await waitFor(() => expect(document.activeElement).toBe(routedEvidence));
     fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "node-a" } });
     fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
@@ -404,5 +407,74 @@ describe("CaseBoardPanel", () => {
       "Selected file is too large. Files must be 1 MB or smaller.",
     );
     expect(fetchMock.mock.calls.some((call) => call[1]?.method === "POST")).toBe(false);
+  });
+});
+
+describe("evidence card identifiers", () => {
+  const HASH = "a".repeat(64);
+
+  function stub() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) {
+          return {
+            ok: true,
+            json: async () => ({
+              artifacts: [{
+                id: "artifact-1",
+                kind: "log",
+                filename: "checkout.log",
+                contentHash: HASH,
+                verificationStatus: "verified",
+                privacyClass: "share_safe",
+                uploaderId: "alice",
+              }],
+            }),
+          };
+        }
+        if (url.endsWith("/snapshots")) {
+          return {
+            ok: true,
+            json: async () => ({
+              snapshots: [{
+                id: "snapshot-1",
+                fingerprint: "b".repeat(64),
+                parentSnapshotId: null,
+                evidence: [{ evidenceId: "artifact-1", ordinal: 0 }],
+                visibility: "share_safe",
+                createdAt: "2026-08-20T00:00:00.000Z",
+                createdBy: "alice",
+              }],
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ snapshotId: "snapshot-1", notice: "", findings: [] }) };
+      }),
+    );
+  }
+
+  it("does not lead the card with a truncated digest", async () => {
+    stub();
+    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    expect(await screen.findByText("checkout.log")).toBeTruthy();
+    // The privacy class is a decision a reader acts on and stays on the card.
+    expect(screen.getByText("share_safe")).toBeTruthy();
+    // The truncated digest that used to open the card is gone — from the card
+    // and from the snapshot picker, where twelve characters told nothing apart.
+    expect(screen.queryByText(/hash [0-9a-f]{12}…/)).toBeNull();
+    expect(screen.queryByText(`${HASH.slice(0, 12)}…`)).toBeNull();
+    expect(screen.queryByText(`${"b".repeat(12)}…`)).toBeNull();
+  });
+
+  it("keeps the exact digest available, in full, one disclosure away", async () => {
+    stub();
+    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    expect(await screen.findByText("checkout.log")).toBeTruthy();
+    // Complete, never truncated, and addressable by a name that says which
+    // record it belongs to.
+    expect(screen.getByText(HASH)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy content hash for checkout.log" })).toBeTruthy();
   });
 });

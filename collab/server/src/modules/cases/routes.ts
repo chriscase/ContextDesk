@@ -1,6 +1,7 @@
 import {
   ARTIFACT_KINDS,
   AUTH_ERROR_SCHEMA_ID,
+  ContractViolation,
   CASE_LIST_SCHEMA_ID,
   CASE_SEVERITIES,
   CASE_STATUSES,
@@ -25,6 +26,10 @@ import {
   type AuthorizedSession,
   type SessionAuthorizationDeps,
 } from "../authz/index.js";
+import {
+  resolutionDomainError,
+  resolutionInputFrom,
+} from "../resolutions/index.js";
 import {
   ContributionConflictError,
   LegalHoldError,
@@ -57,6 +62,28 @@ function clientTimeInput(body: Record<string, unknown>):
   return typeof body.clientTime === "string"
     ? { valid: true, value: body.clientTime }
     : { valid: false };
+}
+
+/**
+ * Occurrence fields as supplied. They are passed through verbatim; the
+ * contract derives precision and zone from the text so the route cannot
+ * become a second, laxer definition of a valid date.
+ */
+function occurrenceInput(body: Record<string, unknown>): {
+  occurredAt?: unknown;
+  occurredAtPrecision?: unknown;
+  occurredAtZone?: unknown;
+} {
+  const input: { occurredAt?: unknown; occurredAtPrecision?: unknown; occurredAtZone?: unknown } =
+    {};
+  if (Object.prototype.hasOwnProperty.call(body, "occurredAt")) input.occurredAt = body.occurredAt;
+  if (Object.prototype.hasOwnProperty.call(body, "occurredAtPrecision")) {
+    input.occurredAtPrecision = body.occurredAtPrecision;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "occurredAtZone")) {
+    input.occurredAtZone = body.occurredAtZone;
+  }
+  return input;
 }
 
 const SITUATION_KEYS = [
@@ -92,7 +119,7 @@ function situationInput(body: Record<string, unknown>):
 function domainError(
   reply: { code: (status: number) => unknown },
   err: unknown,
-): { error: string; currentVersion?: number; currentRevision?: number } {
+): { error: string; detail?: string; currentVersion?: number; currentRevision?: number } {
   if (err instanceof LegalHoldError) {
     void reply.code(409);
     return { error: "legal_hold" };
@@ -106,6 +133,10 @@ function domainError(
     return err.currentRevision === undefined
       ? { error: "contribution_conflict" }
       : { error: "contribution_conflict", currentRevision: err.currentRevision };
+  }
+  if (err instanceof ContractViolation) {
+    void reply.code(400);
+    return { error: "invalid", detail: `${err.path}: ${err.detail}` };
   }
   const message = err instanceof Error ? err.message : "invalid";
   if (
@@ -235,7 +266,10 @@ export async function registerCaseRoutes(
       impact?: string;
       scope?: string;
       openQuestions?: string[];
-    } = { title, ...situation.value };
+      occurredAt?: unknown;
+      occurredAtPrecision?: unknown;
+      occurredAtZone?: unknown;
+    } = { title, ...situation.value, ...occurrenceInput(body) };
     const severity = str(body.severity);
     if (severity && (CASE_SEVERITIES as readonly string[]).includes(severity)) {
       input.severity = severity as CaseSeverity;
@@ -284,11 +318,58 @@ export async function registerCaseRoutes(
       void reply.code(400);
       return { error: "clientTime must be a string" };
     }
+    let resolution: unknown;
     try {
-      return await deps.domain.setStatus(
+      resolution = resolutionInputFrom(body.resolution);
+    } catch (err) {
+      void reply.code(400);
+      return { error: "invalid", detail: err instanceof Error ? err.message : "invalid" };
+    }
+    const options: {
+      clientTime?: string;
+      resolution?: unknown;
+      expectedResolutionRevision?: number;
+    } = {};
+    if (suppliedClientTime.value !== undefined) options.clientTime = suppliedClientTime.value;
+    if (resolution !== undefined) options.resolution = resolution;
+    if (typeof body.expectedResolutionRevision === "number") {
+      options.expectedResolutionRevision = body.expectedResolutionRevision;
+    }
+    try {
+      return await deps.domain.setStatus(id, ctx.actor, status as CaseStatus, request.ip, options);
+    } catch (err) {
+      // A refused conclusive transition is not a generic 400: the caller needs
+      // to know a resolution record is what is missing, so the UI can open the
+      // right form instead of showing an unexplained failure.
+      const mapped = resolutionDomainError(reply, err);
+      if (mapped) return mapped;
+      return domainError(reply, err);
+    }
+  });
+
+  app.post("/api/cases/:id/occurred-at", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
+    const body = asRecord(request.body);
+    const suppliedClientTime = clientTimeInput(body);
+    if (!suppliedClientTime.valid) {
+      void reply.code(400);
+      return { error: "clientTime must be a string" };
+    }
+    try {
+      return await deps.domain.setOccurredAt(
         id,
         ctx.actor,
-        status as CaseStatus,
+        occurrenceInput(body),
         request.ip,
         suppliedClientTime.value,
       );

@@ -103,12 +103,45 @@ decision.
   uses the insecure fixture; a separate test proves verification fail-closed
   against that same cert. `COLLAB_REQUIRE_LDAP=1` makes a missing live URL a
   failure, not a skip.
-- Optional service-bind (`COLLAB_LDAP_BIND_DN` / `COLLAB_LDAP_BIND_PASSWORD`) is
-  secret-store-sourced and never written to the DB, logs, or audit. After a
-  successful user bind it is reused to read group membership when the
-  directory hides group OUs from the user (osixia returns LDAP 0x20).
+- Optional service-bind (`COLLAB_LDAP_BIND_DN` / bind-password secret
+  reference) is secret-store-sourced and never written to the DB, logs, or
+  audit. After a successful user bind it is reused to read group membership
+  when the directory hides group OUs from the user (osixia returns LDAP 0x20).
   `lookupGroups` repeats that service-bind search on each request so directory
   group removal does not wait for the 8h/30m session TTL.
+- Compatible user-resolution modes, when explicitly configured, run in listed
+  order: service-bind search, DN template, AD UPN, and `DOMAIN\user`. ContextDesk
+  never derives a UPN suffix or NetBIOS name from `DC=` components of a search
+  base. `{0}` is an alias for `{username}` after the matching escape.
+- Group membership unions a configured member attribute (commonly `memberOf`)
+  with optional group search, then normalizes, deduplicates, and bounds the
+  result. Role mapping stays exact and default-deny.
+- Login fetches configured display name, work email, role title, and team
+  attributes and passes them through `mapDirectoryClaimsToProfileFields`.
+  Missing attributes skip; unsafe attributes fail closed; identity collisions
+  revoke the new session and return 403.
+- Directory administration (`/admin/ldap`) and first-run `POST /api/setup/ldap-probe`
+  report staged connectivity (transport, service bind, user search, group lookup,
+  role-map readiness) without returning stored secrets.
+
+#### RepoSync LDAP field translation (generic values only)
+
+| RepoSync / typical LDAP admin field | ContextDesk configuration |
+| --- | --- |
+| `url` | `COLLAB_LDAP_URL` (`ldaps://directory.example.test:636` or `ldap://` + `COLLAB_LDAP_STARTTLS=1`) |
+| `base_dn` | `COLLAB_LDAP_USER_SEARCH_BASE=ou=people,dc=example,dc=test` |
+| `search_filter` with `{0}` | `COLLAB_LDAP_USER_SEARCH_FILTER=(sAMAccountName={0})` |
+| `display_name_attr` | `COLLAB_LDAP_ATTR_DISPLAY_NAME` (default `cn`) |
+| `email_attr` | `COLLAB_LDAP_ATTR_EMAIL` (default `mail`) |
+| `group_attr` | `COLLAB_LDAP_MEMBER_ATTR=memberOf` plus optional `COLLAB_LDAP_GROUP_SEARCH_*` |
+| `bind_dn` | `COLLAB_LDAP_BIND_DN` |
+| `bind_password` | bind-password environment, `COLLAB_LDAP_BIND_PASSWORD_FILE`, or `file:` reference — exactly one |
+| `tls_verify` | verified TLS default; fixture-only disable requires `COLLAB_LDAP_TLS_INSECURE=1` and `COLLAB_LDAP_DEV_MODE=1` |
+| Silent UPN/NetBIOS from `DC=` | **Not copied.** Set `COLLAB_LDAP_UPN_SUFFIX=example.test` and `COLLAB_LDAP_NETBIOS_DOMAIN=EXAMPLE` |
+
+This table is a configuration translation. It is not evidence that any live
+company directory works with ContextDesk.
+
 - Sessions: opaque `HttpOnly` `SameSite=Lax` cookies; server-side store;
   TTL + idle timeout; revocation is immediate. No JWTs.
 - Group→role map is persisted (`authz_group_role_map`) and reloaded on every
@@ -169,6 +202,78 @@ decision.
   completeness `unknown`.
 - Catalog administration is case-lead/admin and audited. Retiring a source
   keeps historical attributions.
+
+### Investigation record graph
+
+Three modules sit beside cases and hold the record *around* an investigation:
+what it is about, what it cites, and why it ended.
+
+- **Entities** (`server/src/modules/entities`) is a global registry of reusable
+  labels — organization, customer, person, service, system, other — plus the
+  per-investigation involvement links that use them. It is a different
+  vocabulary from the Attribution source catalog: Attribution records where a
+  piece of information came from, entities record who or what an investigation
+  is about. A vendor is routinely both and stays two rows with two lifecycles.
+  Neither registry holds evidence, logs, email, chat, or notes; those stay in
+  the investigation where they were captured, and the descriptor columns are
+  bounded and single-line so the boundary holds by construction rather than by
+  convention.
+- Involvement carries immutable historical attribution. A link records the
+  label and kind the entity had at link time; renaming or retiring the entity
+  never rewrites what an older investigation said. A database trigger enforces
+  it. Involvement ends by being released, never deleted.
+- The entity → investigation index behind the list filter is built from the
+  investigations the reader could already list, so filtering by entity can
+  narrow visibility but never widen it.
+
+- **References** (`server/src/modules/references`) are authorized citations of
+  another investigation, or of one resource inside it. A citation copies
+  nothing, writes nothing into the cited investigation, and never becomes
+  evidence or a contribution. Authorization is checked when the citation is
+  written *and* re-checked for every reader: an unresolvable counterpart
+  projects as `restricted` with no title, and the refusal for an unreadable
+  target is indistinguishable from the refusal for one that does not exist.
+  The stored locator is derived from the shared activity locator, so a citation
+  can never point somewhere the app would not resolve.
+
+- **Resolutions** (`server/src/modules/resolutions`) back the `resolved`
+  status. Reaching it requires an active resolution record, supplied
+  beforehand or atomically with the transition; a case service wired without
+  the guard refuses the transition outright rather than allowing a silent one.
+  Human-only reasoning is a first-class basis — most historical and manual
+  investigations end that way and are not routed through a comparison that
+  never happened — alongside an accepted experiment decision and an explicit
+  reasoned exception. Rationale is required, open unknowns are recorded,
+  revisions are insert-only, and leaving `resolved` supersedes the record
+  rather than deleting it.
+
+### Occurred-at versus recorded-at
+
+Every investigation, involvement link, citation, and resolution carries two
+clocks. `recordedAt` (and `cases.created_at`) is the server clock at write
+time: the audit clock, never caller-supplied and never rewritten. `occurredAt`
+is when the described work actually happened, is caller-supplied, may be
+absent, and may sit far in the past. Backfilling an older investigation moves
+only the second one, so describing work that predates the tool never requires
+rewriting audit history.
+
+The recorded time zone is preserved rather than guessed. `2024-11-04` is stored
+and displayed as typed and reports `occurredAtZone: "unspecified"`; only text
+carrying an explicit offset is normalized to a UTC instant. Precision and zone
+are both derived from the text, so a half-stated occurrence cannot exist, and
+the ordering key for a zone-unspecified value is documented as an ordering
+convention that is never displayed.
+
+### Share-safe boundary for the record graph
+
+A share-safe brief carries the shape of the record and not the names. An entity
+label leaves the tool only when the registry marked it `share_safe`; otherwise
+it travels as a stable pseudonym derived from the entity id, so two
+investigations can be seen to concern the same party without disclosing who.
+Another investigation's title never leaves in a share-safe brief. Resolution
+reasoning is owner-only, but the count of open unknowns always travels, so a
+share-safe conclusion cannot be made to look more complete than it was. The
+brief parser enforces all three rules rather than trusting the projection.
 
 ### Portable export (#888)
 

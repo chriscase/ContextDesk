@@ -1,6 +1,11 @@
 export const AREA_IDS = [
   "overview",
   "investigations",
+  // The reusable registry of what investigations are about. Deliberately its
+  // own area rather than a tab inside Attribution: Attribution answers where
+  // information came from, Entities answers who or what the work concerns, and
+  // collapsing them would blur the boundary this area exists to make visible.
+  "entities",
   "sources",
   "administration",
   "help",
@@ -28,6 +33,10 @@ export const ROUTE_ITEM_KINDS = [
   "triage-candidate",
   "intake-batch",
   "workstream",
+  // One comparison lane. Review-queue entries are about a lane far more often
+  // than about a section, and a link that lands on the section leaves the
+  // reader to find the row themselves.
+  "lane",
 ] as const;
 export type RouteItemKind = (typeof ROUTE_ITEM_KINDS)[number];
 
@@ -87,6 +96,21 @@ export const PEOPLE: WorkLocation = {
   },
 };
 
+/** Canonical Directory (LDAP) administration tab. */
+export const LDAP_SECTION = "ldap";
+export const LDAP_ADMIN: WorkLocation = {
+  area: "administration",
+  caseId: null,
+  stage: "situation",
+  focus: {
+    section: LDAP_SECTION,
+    item: null,
+    itemKind: null,
+    lane: null,
+    experiment: null,
+  },
+};
+
 export const SIGN_IN: SignInLocation = { kind: "sign-in" };
 
 export const DISCUSSION_SECTION = "discussion";
@@ -110,6 +134,14 @@ export function isPeopleLocation(value: unknown): value is WorkLocation {
     isWorkLocation(value)
     && value.area === "administration"
     && value.focus?.section === PEOPLE_SECTION
+  );
+}
+
+export function isLdapAdminLocation(value: unknown): value is WorkLocation {
+  return (
+    isWorkLocation(value)
+    && value.area === "administration"
+    && value.focus?.section === LDAP_SECTION
   );
 }
 
@@ -301,6 +333,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/investigations") {
     return { area: "investigations", caseId: null, stage: "situation" };
   }
+  if (path === "/entities") {
+    return { area: "entities", caseId: null, stage: "situation" };
+  }
   if (path === "/sources") {
     return { area: "sources", caseId: null, stage: "situation" };
   }
@@ -312,6 +347,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   }
   if (path === "/admin/people") {
     return { ...PEOPLE };
+  }
+  if (path === "/admin/ldap") {
+    return { ...LDAP_ADMIN };
   }
   if (path === "/administration") {
     return { ...ADMINISTRATION };
@@ -341,6 +379,9 @@ export function areaPathFor(location: WorkLocation): string {
   if (location.area === "overview") {
     return "/";
   }
+  if (location.area === "entities") {
+    return "/entities";
+  }
   if (location.area === "sources") {
     return "/sources";
   }
@@ -351,7 +392,9 @@ export function areaPathFor(location: WorkLocation): string {
     return "/profile";
   }
   if (location.area === "administration") {
-    return isPeopleLocation(location) ? "/admin/people" : "/administration";
+    if (isPeopleLocation(location)) return "/admin/people";
+    if (isLdapAdminLocation(location)) return "/admin/ldap";
+    return "/administration";
   }
   return "/investigations";
 }
@@ -397,6 +440,9 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
   if (isUnknownLocation(location)) {
     return "Page not found · ContextDesk War Room";
   }
+  if (location.area === "entities") {
+    return "Entities · ContextDesk War Room";
+  }
   if (location.area === "sources") {
     return "Attribution · ContextDesk War Room";
   }
@@ -409,7 +455,9 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
   if (location.area === "administration") {
     return isPeopleLocation(location)
       ? "People · Administration · ContextDesk War Room"
-      : "Administration · ContextDesk War Room";
+      : isLdapAdminLocation(location)
+        ? "Directory · Administration · ContextDesk War Room"
+        : "Administration · ContextDesk War Room";
   }
   if (location.area === "investigations" && location.caseId) {
     const stage = location.stage.slice(0, 1).toUpperCase() + location.stage.slice(1);

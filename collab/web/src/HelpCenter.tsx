@@ -1,8 +1,9 @@
+import { CORPUS_INTAKE_LIMITS } from "@cd-collab/contracts/corpus-intake";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { StageId } from "./Cases.js";
 
 /** Areas the shell can genuinely navigate to from a help article. */
-export type HelpAreaTarget = "overview" | "investigations" | "sources" | "profile";
+export type HelpAreaTarget = "overview" | "investigations" | "entities" | "sources" | "profile";
 
 type HelpActionTarget = { area: HelpAreaTarget } | { stage: StageId };
 
@@ -34,6 +35,17 @@ interface GlossaryEntry {
   term: string;
   definition: string;
 }
+
+const asMiB = (bytes: number) => bytes / (1024 * 1024);
+const CORPUS_CAPACITY_COPY =
+  `Archives are capped at ${asMiB(CORPUS_INTAKE_LIMITS.maxArchiveBytes)} MiB, `
+  + `expanded bytes at ${asMiB(CORPUS_INTAKE_LIMITS.maxExpandedBytes)} MiB, `
+  + `${CORPUS_INTAKE_LIMITS.maxFileCount.toLocaleString("en-US")} files, `
+  + `path depth ${CORPUS_INTAKE_LIMITS.maxPathDepth}, `
+  + `path length ${CORPUS_INTAKE_LIMITS.maxPathLength}, `
+  + `${asMiB(CORPUS_INTAKE_LIMITS.maxFileBytes)} MiB per file, `
+  + `compression ratio ${CORPUS_INTAKE_LIMITS.maxCompressionRatio}, and `
+  + `${CORPUS_INTAKE_LIMITS.maxProcessingMs / 1_000} seconds of processing.`;
 
 /**
  * All help content is plain structured data: no markdown runtime, no fetch.
@@ -252,7 +264,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each accepted file gets its own evidence identity and records relative path, media type, digest, byte length, privacy class, uploader identity, import time, source attribution, and intake batch id. Equal digests reuse the same content-addressed bytes without collapsing those distinct evidence records. Deep links exist for the batch on Capture and each evidence item on Analyze.",
         limits:
-          "Archives are capped at 8 MiB, expanded bytes at 64 MiB, 1,024 files, path depth 8, path length 240, 9 MB per file, compression ratio 128, and 15 seconds of processing. These are hard resource bounds, not a promise that every member is accepted. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .csv, .xml, .eml, and .md; declared media must match and JSON must parse. Binary, unknown, and invalid UTF-8 content is rejected. share_safe accepts plain text, logs, CSV, Markdown, and valid JSON only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.",
+          `${CORPUS_CAPACITY_COPY} These are hard resource bounds, not a promise that every member is accepted. Building the investigation's log corpus uses the same file-count, per-file, and expanded-byte bounds and rejects overflow instead of silently dropping files. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .csv, .xml, .eml, and .md; common rotated log names such as service.log.1 and service.log-2026-08-25 are also recognized. Declared media must match and JSON must parse. Private line-oriented text with sparse legacy encoding bytes keeps its original bytes and digest while text views and log analysis replace unreadable bytes explicitly; dense invalid data and binary content are rejected. Non-UTF-8 content cannot enter through share_safe intake. share_safe accepts plain text, logs, CSV, Markdown, and valid JSON only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.`,
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
     ],
@@ -548,6 +560,138 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
     ],
   },
   {
+    id: "entities",
+    title: "Entities",
+    articles: [
+      {
+        id: "entity-registry",
+        title: "Who and what an investigation is about",
+        summary:
+          "Reusable labels name the organizations, customers, people, services, and systems investigations concern, so the same party is findable years later.",
+        keywords: [
+          "entity",
+          "entities",
+          "organization",
+          "customer",
+          "person",
+          "service",
+          "system",
+          "stakeholder",
+          "involved",
+          "party",
+          "affected",
+        ],
+        what:
+          "The Entities area stores reusable labels for what investigations are about: an organization, a customer, a person, a service, a system, or something that fits none of those. It is a different list from Attribution next door. Attribution answers where a piece of information came from; Entities answers who or what the work concerns. A vendor is often both, and stays two separate rows. Neither area stores logs, files, email, chat, or notes — those stay in the investigation where they were captured.",
+        when:
+          "Name the entities an investigation involves when you open it, or add them later. Use the entity filter on the investigation list to find every investigation that concerned the same party.",
+        steps: [
+          "Open Entities from the primary navigation to add or review a label.",
+          "In an investigation’s Situation stage, add the entities it involves and say how each one is involved.",
+          "End an involvement when it stops being true. The record keeps showing that it was once involved.",
+        ],
+        recorded:
+          "An involvement records the label and kind the entity had at the moment it was linked. Renaming or retiring the entity later never rewrites what an older investigation said; the current name is shown beside the recorded one so the difference is visible.",
+        limits:
+          "A label is not an account and creates no connection to the named party. A name stays inside the tool unless someone marks it as safe to leave in a share-safe export; otherwise an export shows the kind and a stable stand-in instead. Retiring needs the case-lead role.",
+        actions: [{ label: "Go to Entities", go: { area: "entities" } }],
+      },
+      {
+        id: "occurred-at",
+        title: "Work that happened before it was written down",
+        summary:
+          "An investigation records when something happened separately from when it was entered, and never guesses a time zone that was not recorded.",
+        keywords: [
+          "occurred",
+          "backfill",
+          "historical",
+          "old",
+          "date",
+          "when",
+          "time zone",
+          "timezone",
+          "recorded",
+        ],
+        what:
+          "Every investigation carries two dates. When it happened is what you type, and may be a year, a month, a date, or a full timestamp. When it was recorded here is set by the server and never changes. Backfilling an old investigation moves only the first one, so nothing in the audit history has to be rewritten to describe work that predates this tool.",
+        when:
+          "Use it whenever you open an investigation about something that already happened, or when you learn the date of one that was recorded without it.",
+        steps: [
+          "Enter a date in the creation form, or use “Record when it happened” in the Situation stage later.",
+          "Type only what you know: 2024, 2024-11, or 2024-11-04 are all complete answers.",
+          "Add a time zone only if you actually know it.",
+        ],
+        recorded:
+          "A date typed without a time zone is stored exactly as typed and shown that way, labelled as not recorded rather than read as UTC or as your local time. Changing it appends a timeline entry; it never edits the earlier record.",
+        limits:
+          "A date in the future is refused, as is a date that does not exist. This area sets no reminders and drives no scheduling.",
+        actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
+      },
+      {
+        id: "cross-investigation-references",
+        title: "Citing another investigation",
+        summary:
+          "A reference links to earlier work and says why. It copies nothing, changes nothing, and does not become evidence.",
+        keywords: [
+          "reference",
+          "cite",
+          "citation",
+          "link",
+          "related",
+          "prior",
+          "duplicate",
+          "cross-investigation",
+        ],
+        what:
+          "A reference points from this investigation to another one, or to one record inside it, together with the reason it is relevant. The link is the same address the activity feed uses, so it lands on a visible record.",
+        when:
+          "Cite an earlier investigation when this one repeats it, depends on it, or was caused by the same thing.",
+        steps: [
+          "Open the Situation stage and choose an investigation under “Other investigations this one cites”.",
+          "Say what connects the two.",
+          "Withdraw a reference that stops being relevant. The record still shows it was made.",
+        ],
+        recorded:
+          "A citation records the cited investigation’s title at the time it was made, who made it, and when. Nothing is written into the cited investigation.",
+        limits:
+          "You can only cite an investigation you can read, and reading a citation grants nothing: someone without access sees that a citation exists and where it points, and does not see its title. A citation never becomes supporting evidence for a hypothesis on its own.",
+        actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
+      },
+      {
+        id: "human-resolution",
+        title: "Resolving without a model run",
+        summary:
+          "People can conclude an investigation by reading the record. What is required is the reason, not a comparison.",
+        keywords: [
+          "resolve",
+          "resolved",
+          "decision",
+          "conclusion",
+          "rationale",
+          "unknowns",
+          "manual",
+          "human",
+          "exception",
+          "duplicate",
+        ],
+        what:
+          "Setting an investigation to resolved records a conclusion, so it asks for one. Reasoning it out from the notes and evidence is a first-class answer and needs no experiment. Closing a case without answering its question — a duplicate, withdrawn, or overtaken by events — is recorded explicitly as an exception rather than left as an unexplained status change.",
+        when:
+          "Use it when the work is finished, however it was finished.",
+        steps: [
+          "In the Decide stage, choose resolved and update the status.",
+          "Say how the conclusion was reached, why, and what is still unknown.",
+          "Save. The conclusion and the status are recorded together.",
+        ],
+        recorded:
+          "A resolution records the basis, who wrote it, the reasoning, and the open unknowns. Reopening an investigation withdraws the conclusion without deleting it, and resolving again needs a fresh one.",
+        limits:
+          "Resolving needs the case-lead role. The reasoning stays inside the tool: a share-safe export carries the basis and the number of open unknowns, not the text.",
+        actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
+      },
+    ],
+  },
+  {
     id: "sources",
     title: "Attribution",
     articles: [
@@ -558,7 +702,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Reusable labels show which person or tool supplied material. The material itself stays inside its investigation.",
         keywords: ["source", "catalog", "library", "register", "retire", "attribution", "external tool", "unknown"],
         what:
-          "The Attribution area stores reusable labels for the people and tools that supplied information. It does not store the logs, files, email, chat, or notes themselves; those stay in the investigation where they were captured. Labels can identify a person, an external tool, an internal system, ContextDesk, or an honestly unknown origin.",
+          "The Attribution area stores reusable labels for the people and tools that supplied information. It does not store the logs, files, email, chat, or notes themselves; those stay in the investigation where they were captured. Labels can identify a person, an external tool, an internal system, ContextDesk, or an honestly unknown origin. It is a separate list from Entities, which names who or what an investigation is about rather than where its information came from.",
         when:
           "Add a label when an investigation needs to credit a person or tool that is not listed yet. Browse the library to understand where recorded material came from.",
         steps: [
@@ -628,24 +772,25 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         id: "administration",
         title: "Administration and setup",
         summary:
-          "Administrators can discover directory references and manage persistent group-to-role mappings; deployment setup remains operator work.",
+          "Administrators can discover directory references, manage group-to-role mappings, and test directory connectivity; durable secrets stay operator-owned.",
         keywords: ["admin", "directory", "group", "role", "grant", "revoke", "ldap", "setup", "configuration", "wizard", "operator", "doctor", "static", "read-only", "sample data", "people"],
         what:
-          "The Administration page is visible only with the admin:users capability, not merely because a person holds the admin role title. Group role mappings live at /administration. People is a first-class page at /admin/people — a copied link, reload, or sign-in restore returns to that tab rather than collapsing to role mappings. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin, or from a local capability grant.",
+          "The Administration page is visible only with the admin:users capability, not merely because a person holds the admin role title. Group role mappings live at /administration. People is a first-class page at /admin/people. Directory connectivity review lives at /admin/ldap and requires admin:system_config in addition to seeing Administration. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin, or from a local capability grant.",
         when:
-          "Use this when a directory group needs workspace access, a group's role changes, or a stale mapping must be revoked. Open People when you need to search, suspend, or grant a capability to a person already known to this workspace. Use operator tooling instead for first deployment, gateways, database settings, directory connection settings, backups, and health checks.",
+          "Use this when a directory group needs workspace access, a group's role changes, or a stale mapping must be revoked. Open People when you need to search, suspend, or grant a capability to a person already known to this workspace. Open Directory when you need to review the share-safe LDAP configuration or run a staged connectivity test. Use operator tooling for durable environment files, gateways, database settings, backups, and health checks.",
         steps: [
-          "Open Administration from the primary navigation, or go directly to /admin/people for the People tab. Accounts without admin:users cannot see the destination, and a direct route does not request protected administration data.",
+          "Open Administration from the primary navigation, or go directly to /admin/people for the People tab or /admin/ldap for Directory. Accounts without admin:users cannot see the destination, and a direct route does not request protected administration data.",
           "Search for a group or identity. Results are capped at twenty; refine the term rather than assuming the result is the full directory.",
           "Select or enter the exact group reference, choose one workspace role, and grant it. Existing-role changes, revocation, and every administrator grant require an explicit confirmation.",
           "Refresh Current group permissions to verify the destination state. The server also refreshes its live authorization map from persistent storage on each API request.",
-          "For gateway or profile configuration, the operator sets host-side configuration; the launcher only reports availability.",
+          "On Directory, review the share-safe configuration and optionally run Test directory. Stages distinguish transport, service bind, user search, group lookup, and role-map readiness. Probe passwords are used once and never stored.",
+          "A first-run setup wizard can claim the host, prepare a process-local draft, run bounded checks, and optionally probe the directory. Atomic install, restart, and live company-directory qualification remain operator-owned.",
           "In sample-data mode, expect local sample state to reset when its service stops.",
         ],
         recorded:
-          "A mapping list is returned only after its successful read is audited. Updates and revocations submit success, failure, or denial audit records, and their server response separately records whether that audit write succeeded. Directory searches record only the search category and outcome — not the search term or returned directory data. The console refreshes from the persistent mapping store after a confirmed change.",
+          "A mapping list is returned only after its successful read is audited. Updates and revocations submit success, failure, or denial audit records, and their server response separately records whether that audit write succeeded. Directory searches record only the search category and outcome — not the search term or returned directory data. Directory tests record only whether the probe was ready, never bind secrets or probe passwords. The console refreshes from the persistent mapping store after a confirmed change.",
         limits:
-          "There is still no graphical first-run setup wizard, directory-user editor, group-membership editor, gateway configuration screen, or backup and retention control in this build. Deployment-state and secret-reference foundations are not exposed here because the end-to-end setup flow is not yet shipped. The console never displays or accepts directory credentials and never trusts imported roles. Administrators manage other people; each signed-in person edits their own profile from My profile, not from this console.",
+          "The first-run wizard prepares and checks a draft; it does not complete installation or restart the service. Directory testing never displays stored bind secrets and never returns a probe password. There is still no directory-user editor, group-membership editor, gateway configuration screen, or backup and retention control in this build. The console never trusts imported roles. Administrators manage other people; each signed-in person edits their own profile from My profile, not from this console.",
       },
       {
         id: "my-profile",

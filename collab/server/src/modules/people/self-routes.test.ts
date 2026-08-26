@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { IdentityV1 } from "@cd-collab/contracts";
+import { REDACTED_DIRECTORY_SUBJECT, type IdentityV1, type UserProfileV1 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
@@ -229,6 +229,64 @@ describe("self profile routes", () => {
       expect(allowed.statusCode).toBe(200);
       expect((allowed.json() as { team: string }).team).toBe("Directory Team");
       expect((allowed.json() as { contactOther: string }).contactOther).toBe("Pager: dana");
+    });
+  });
+
+  it("never ships the raw directory subject to the profile owner on GET or PATCH", async () => {
+    await withApp(async ({ app, profiles, sessions }) => {
+      // A DN whose every component is distinctive, so a substring assertion
+      // cannot pass by accident.
+      const directorySubject = "uid=erin,ou=eastwing,ou=people,dc=example,dc=test";
+      const created = await profiles.touchOnLogin({
+        id: directorySubject,
+        username: "erin",
+        displayName: "Erin",
+        provenance: "ldap",
+        directorySubject,
+        directoryFields: { displayName: "Erin Directory" },
+      });
+      if (created.outcome !== "ok") throw new Error("setup failed");
+
+      const { token } = await sessions.create({
+        identity: { id: directorySubject, username: "erin", displayName: "Erin Directory" },
+        groups: ["local:viewers"],
+        ttlMs: defaultSessionPolicy.ttlMs,
+      });
+      const cookie = `${SESSION_COOKIE}=${encodeURIComponent(token)}`;
+
+      const read = await app.inject({ method: "GET", url: "/api/profile/me", headers: { cookie } });
+      expect(read.statusCode).toBe(200);
+      for (const fragment of ["ou=eastwing", "ou=people", "dc=example", "uid=erin"]) {
+        expect(read.body).not.toContain(fragment);
+      }
+      const readBody = read.json() as UserProfileV1;
+      expect(readBody.directorySubject).toBe(REDACTED_DIRECTORY_SUBJECT);
+      // The linkage indicator, the display fields, and the sync state survive.
+      expect(readBody.provenance).toBe("ldap");
+      expect(readBody.displayName).toBe("Erin Directory");
+      expect(readBody.username).toBe("erin");
+      expect(readBody.directorySyncStatus).toBe("synced");
+
+      const patch = await app.inject({
+        method: "PATCH",
+        url: "/api/profile/me",
+        headers: { cookie, [CSRF_HEADER]: CSRF_HEADER_VALUE },
+        payload: {
+          schemaId: "cd-collab.user_profile_update_request.v1",
+          expectedRevision: readBody.revision,
+          contactOther: "Pager: erin",
+        },
+      });
+      expect(patch.statusCode).toBe(200);
+      for (const fragment of ["ou=eastwing", "ou=people", "dc=example", "uid=erin"]) {
+        expect(patch.body).not.toContain(fragment);
+      }
+      expect((patch.json() as UserProfileV1).directorySubject).toBe(REDACTED_DIRECTORY_SUBJECT);
+
+      // Redaction is a response projection only - the store still holds the
+      // real subject for the admin surfaces that need it.
+      const stored = await profiles.getByUsername("erin");
+      expect(stored?.directorySubject).toBe(directorySubject);
     });
   });
 });

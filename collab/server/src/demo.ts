@@ -12,6 +12,7 @@ import { MemoryAuditStore } from "./modules/audit/index.js";
 import {
   createAuthLog,
   createRateLimiter,
+  HmacPublicIdentityCodec,
   MapAuthAdapter,
   MemorySessionStore,
   defaultSessionPolicy,
@@ -22,6 +23,14 @@ import { CaseService, MemoryCaseStore } from "./modules/cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "./modules/experiments/index.js";
 import { ExportService, testExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
+import {
+  createLogTimeCasePort,
+  logTimeBridgeOptions,
+  LogTimeService,
+  MemoryLogTimeStore,
+  ProcessLogTimeBridge,
+  type LogTimeBridge,
+} from "./modules/log-time/index.js";
 import {
   memoryApplyBoundary,
   MemoryPortableApplyStateStore,
@@ -61,6 +70,8 @@ interface DemoAppOptions {
   gatewayRunner?: RustBridgeTriageExecutorOptions;
   /** Deterministic test seam for the same gateway orchestration path. */
   gatewayExecutor?: TriageBatchRunExecutor;
+  /** Optional trusted local timestamp pipeline; never contacts a provider. */
+  logTimeBridge?: LogTimeBridge;
   /** Safe profile metadata paired with a test gateway executor. */
   triageProfiles?: TriageProfileOption[];
   /** Test seam for proving construction-failure cleanup; production uses buildApp. */
@@ -312,24 +323,6 @@ async function seed(app: FastifyInstance): Promise<string> {
       description: "Fixture transcript standing in for a pasted external chat",
     },
   });
-  await okJson(app, {
-    method: "POST",
-    url: `/api/cases/${created.id}/imports`,
-    cookie,
-    payload: {
-      outputText:
-        "The checkout log and inventory timeout point to inventory-client exhaustion; verify pool pressure before changing timeouts.",
-      promptText: "What timed out in checkout, and what should we inspect next?",
-      sourceId: source.id,
-      operatorId: "synthetic-operator",
-      operatorUsername: "demo-operator",
-      evidenceVisibility: "importer_described",
-      visibilityNote: "Synthetic fixture; no private or live-provider data.",
-      snapshotBinding: "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb",
-      redacted: true,
-      privacyClass: "share_safe",
-    },
-  });
 
   const checkoutEvidence = await okJson<{ artifact: { id: string } }>(app, {
     method: "POST",
@@ -418,6 +411,24 @@ async function seed(app: FastifyInstance): Promise<string> {
       ],
       visibility: "owner_only",
       protocolVersion: "synthetic-demo-v1",
+    },
+  });
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/imports`,
+    cookie,
+    payload: {
+      outputText:
+        "The checkout log and inventory timeout point to inventory-client exhaustion; verify pool pressure before changing timeouts.",
+      promptText: "What timed out in checkout, and what should we inspect next?",
+      sourceId: source.id,
+      operatorId: "synthetic-operator",
+      operatorUsername: "demo-operator",
+      evidenceVisibility: "importer_described",
+      visibilityNote: "Synthetic fixture; no private or live-provider data.",
+      snapshotBinding: demoSnapshot.fingerprint,
+      redacted: true,
+      privacyClass: "share_safe",
     },
   });
   await okJson(app, {
@@ -596,6 +607,9 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   const applyState = new MemoryPortableApplyStateStore();
   const catalog = new CatalogService(catalogStore, audit);
   const cases = new CaseService(evidence, audit, caseStore, catalog);
+  evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
+  evidence.addReferencedContentHashSource(() => runStore.listReferencedContentHashes());
+  await evidence.recoverUnreferencedWrites();
   const imports = new ImportService({
     evidence,
     audit,
@@ -619,6 +633,19 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
         : {}),
     profiles: options.triageProfiles ?? loadConfiguredTriageProfileCatalog(),
   });
+  const logTime = options.logTimeBridge
+    ? new LogTimeService({
+        store: new MemoryLogTimeStore(),
+        bridge: options.logTimeBridge,
+        cases: createLogTimeCasePort({
+          cases: caseStore,
+          domain: cases,
+          evidence,
+          jobs: jobStore,
+        }),
+        audit,
+      })
+    : null;
   const presence = new PresenceService();
   const exporter = new ExportService({
     cases,
@@ -644,6 +671,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   });
   const portable = new PortableInvestigationService({
     installationId: "inst-syntheticdemo",
+    publicIdentities: new HmacPublicIdentityCodec(Buffer.alloc(32, 0x42)),
     cases,
     catalog,
     imports,
@@ -651,6 +679,13 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     experiments,
     audit,
     applyState,
+    probe: {
+      cases: caseStore,
+      catalog: catalogStore,
+      experiments: experimentStore,
+      runs: runStore,
+      jobs: jobStore,
+    },
     withTransaction: applyBoundary.withTransaction,
     applyCoordination: "single_instance",
     confirmationRestartDurable: false,
@@ -676,10 +711,12 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       catalog,
       imports,
       triageRuns,
+      ...(logTime ? { logTime } : {}),
       presence,
       experiments,
       exporter,
       portable,
+      publicIdentities: new HmacPublicIdentityCodec(Buffer.alloc(32, 0x42)),
       ...(options.setup ? { setup: options.setup } : {}),
       componentHealth: () => options.componentHealth ?? syntheticComponentHealth(),
       serveStatic: staticDir !== null,
@@ -746,7 +783,11 @@ function demoGatewayRunner(): RustBridgeTriageExecutorOptions | undefined {
 
 async function main(): Promise<void> {
   const gatewayRunner = demoGatewayRunner();
-  const { app } = await buildDemoApp(gatewayRunner ? { gatewayRunner } : {});
+  const localLogTime = logTimeBridgeOptions();
+  const { app } = await buildDemoApp({
+    ...(gatewayRunner ? { gatewayRunner } : {}),
+    ...(localLogTime ? { logTimeBridge: new ProcessLogTimeBridge(localLogTime) } : {}),
+  });
   const close = () => {
     void app.close().catch((error: unknown) => {
       process.stderr.write(
@@ -767,6 +808,9 @@ async function main(): Promise<void> {
         gatewayRunner
           ? "Case state is synthetic and memory-backed; gateway runs are explicitly enabled through the host bridge."
           : "All state is synthetic, memory-backed, and removed when the server stops.",
+        localLogTime
+          ? "Local log chronology and timezone review are enabled through the trusted ContextDesk host."
+          : "Local log chronology is hidden until COLLAB_BRIDGE_BIN and COLLAB_LOG_CORPUS_ROOT are configured.",
         "Use /health for a smoke check; /ready intentionally reports no production database.",
       ].join("\n") + "\n",
     );

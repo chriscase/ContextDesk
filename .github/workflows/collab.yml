@@ -158,7 +158,19 @@ jobs:
         run: npx playwright install --with-deps chromium
         working-directory: collab/e2e
       - run: npm run typecheck -w @cd-collab/e2e
+      # The scenario catalog is the source of truth for the War Room journeys,
+      # the acceptance reports, and docs/WAR_ROOM_SCENARIO_MATRIX.md. Fail the
+      # lane when the committed matrix no longer matches the catalog.
+      - run: npm run scenarios:check -w @cd-collab/e2e
+      - name: War Room fixture privacy scan
+        run: node ../scripts/check_war_room_fixtures.mjs
       - run: npm run test -w @cd-collab/e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collab-e2e-war-room-acceptance
+          path: collab/e2e/test-results/war-room-acceptance
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -200,6 +212,44 @@ jobs:
         if: always()
         with:
           name: collab-e2e-bridge-playwright
+          path: |
+            collab/e2e/playwright-report
+            collab/e2e/test-results
+          if-no-files-found: ignore
+
+  # A clean three-lane run is the easy case. This lane drives the same UI
+  # through a bridge fixture that reports one completed, one partial, and one
+  # failed lane, so the War Room is qualified against a comparison that is
+  # missing most of itself. It contacts no provider and asserts no model
+  # quality; usage and cost stay unknown throughout.
+  collab-browser-degraded-lanes:
+    name: collab war-room degraded lane qualification
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: collab
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - run: npm ci
+      - run: npm run build -w @cd-collab/contracts
+      - run: npm run build -w @cd-collab/web
+      - name: install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+        working-directory: collab/e2e
+      - run: npm run typecheck -w @cd-collab/e2e
+      - name: run degraded lane scenario journey
+        env:
+          COLLAB_E2E_BRIDGE: degraded
+        run: npm run test -w @cd-collab/e2e -- specs/21-war-room-lanes-and-deployment.spec.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collab-e2e-degraded-lanes
           path: |
             collab/e2e/playwright-report
             collab/e2e/test-results

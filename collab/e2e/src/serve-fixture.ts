@@ -19,14 +19,24 @@ import {
   createAuthLog,
   createRateLimiter,
   defaultSessionPolicy,
+  loadPublicIdentityCodec,
 } from "../../server/src/modules/auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../../server/src/modules/authz/index.js";
 import { CatalogService, MemoryCatalogStore } from "../../server/src/modules/catalog/index.js";
 import { CaseService, MemoryCaseStore } from "../../server/src/modules/cases/index.js";
 import { ExportService, testExportPrivacyConfig } from "../../server/src/modules/export/index.js";
+import { EntityService } from "../../server/src/modules/entities/index.js";
+import { ReferenceService } from "../../server/src/modules/references/index.js";
+import { ResolutionService } from "../../server/src/modules/resolutions/index.js";
 import { ImportService, MemoryRunStore } from "../../server/src/modules/import/index.js";
 import { ExperimentService, MemoryExperimentStore } from "../../server/src/modules/experiments/index.js";
 import { PresenceService } from "../../server/src/modules/presence/index.js";
+import {
+  LogTimeService,
+  MemoryLogTimeStore,
+  ProcessLogTimeBridge,
+  createLogTimeCasePort,
+} from "../../server/src/modules/log-time/index.js";
 import {
   MemoryLocalGrantStore,
   MemoryUserProfileStore,
@@ -49,6 +59,24 @@ const here = dirname(fileURLToPath(import.meta.url));
 const webDistEnv = process.env.COLLAB_E2E_STATIC_DIR?.trim();
 const webDist = webDistEnv ? webDistEnv : join(here, "..", "..", "web", "dist");
 const bridgeFixture = join(here, "..", "fixtures", "triage-bridge-runner.mjs");
+const degradedBridgeFixture = join(here, "..", "fixtures", "triage-bridge-degraded-runner.mjs");
+
+/**
+ * Bridge selection for browser qualification.
+ *
+ * `1` runs the clean-lane fixture. `degraded` runs the mixed completed/partial/
+ * failed fixture the War Room scenario catalog needs, so the shell can be
+ * qualified against a run that did not go well. Anything else stays on the
+ * provider-free synthetic executor.
+ */
+type BridgeMode = "off" | "clean" | "degraded";
+
+function bridgeModeFrom(raw: string | undefined): BridgeMode {
+  const value = raw?.trim().toLowerCase();
+  if (value === "1" || value === "clean") return "clean";
+  if (value === "degraded") return "degraded";
+  return "off";
+}
 
 function parsePort(raw: string | undefined): number {
   const port = Number.parseInt(raw ?? "8788", 10);
@@ -65,6 +93,10 @@ async function main(): Promise<void> {
     );
   }
   const root = await mkdtemp(join(tmpdir(), "cd-collab-e2e-"));
+  // Exercise the production identity boundary explicitly. The fixture root is
+  // synthetic and disposable, but its installation key remains durable for
+  // this server process instead of relying on NODE_ENV-based test fallback.
+  const publicIdentities = await loadPublicIdentityCodec(root);
   const store = new FilesystemEvidenceStore({ rootDir: root });
   await store.ping();
   const audit = new MemoryAuditStore();
@@ -77,7 +109,28 @@ async function main(): Promise<void> {
   const profiles = new MemoryUserProfileStore();
   const grants = new MemoryLocalGrantStore();
   const catalog = new CatalogService(catalogStore, audit);
-  const domain = new CaseService(store, audit, caseStore, catalog);
+  // Same construction order as production: the resolution guard exists before
+  // the case service, so a resolved status can never be reached without a
+  // record even in the browser fixture.
+  const resolutions = new ResolutionService({ audit });
+  const domain = new CaseService(store, audit, caseStore, catalog, resolutions);
+  const investigations = {
+    getCase: (id: string, who: { id: string; username: string }, isAdmin: boolean) =>
+      domain.getCase(id, who, isAdmin),
+    appendDomainTimeline: (
+      caseId: string,
+      event: {
+        kind: string;
+        actor: { id: string; username: string };
+        targetId: string | null;
+        clientTime: string | null;
+        payload: unknown;
+      },
+    ) => domain.appendDomainTimeline(caseId, event),
+  };
+  resolutions.bindInvestigations(investigations);
+  const entities = new EntityService({ audit, investigations });
+  const references = new ReferenceService({ audit, investigations });
   const imports = new ImportService({
     evidence: store,
     audit,
@@ -86,20 +139,20 @@ async function main(): Promise<void> {
     catalog,
     runs: runStore,
   });
-  const bridgeMode = process.env.COLLAB_E2E_BRIDGE === "1";
+  const bridgeMode = bridgeModeFrom(process.env.COLLAB_E2E_BRIDGE);
   const triageRuns = new TriageRunService({
     cases: domain,
     audit,
     jobs: jobStore,
-    ...(bridgeMode
+    ...(bridgeMode !== "off"
       ? {
           gatewayExecutor: new RustBridgeTriageExecutor({
-            command: bridgeFixture,
+            command: bridgeMode === "degraded" ? degradedBridgeFixture : bridgeFixture,
             timeoutMs: 30_000,
           }),
         }
       : { executor: new DeterministicMockTriageExecutor() }),
-    ...(bridgeMode
+    ...(bridgeMode !== "off"
       ? {
           profiles: [
             { id: "profile:fixture-qwen", label: "Fixture Qwen", provider: "openai-compatible" },
@@ -133,10 +186,40 @@ async function main(): Promise<void> {
     experiments,
     audit,
     applyState,
+    publicIdentities,
+    probe: {
+      cases: caseStore,
+      catalog: catalogStore,
+      experiments: experimentStore,
+      runs: runStore,
+      jobs: jobStore,
+    },
     withTransaction: applyBoundary.withTransaction,
     applyCoordination: "single_instance",
     confirmationRestartDurable: false,
   });
+  // Log-time review runs against the real `contextdesk` host binary when one
+  // is configured, so the browser suite exercises the shipped pipeline rather
+  // than a stand-in. Without it the routes stay unregistered and the spec
+  // skips, which is honest: there is nothing to review without the pipeline.
+  const logTimeBin = process.env.COLLAB_E2E_LOG_TIME_BIN?.trim();
+  const logTime = logTimeBin
+    ? new LogTimeService({
+        store: new MemoryLogTimeStore(),
+        bridge: new ProcessLogTimeBridge({
+          command: logTimeBin,
+          cacheRoot: join(root, "log-corpora"),
+          timeoutMs: 60_000,
+        }),
+        cases: createLogTimeCasePort({
+          cases: caseStore,
+          domain,
+          evidence: store,
+          jobs: jobStore,
+        }),
+        audit,
+      })
+    : null;
   const presence = new PresenceService();
   const exporter = new ExportService({
     cases: domain,
@@ -144,6 +227,12 @@ async function main(): Promise<void> {
     imports,
     audit,
     privacy: testExportPrivacyConfig(),
+    record: {
+      involvementFor: (caseId) => entities.involvementsForExport(caseId),
+      entityPrivacy: () => entities.entityPrivacyMap(),
+      referencesFor: (caseId) => references.exportProjection(caseId),
+      activeResolutionFor: (caseId) => resolutions.active(caseId),
+    },
   });
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(FIXTURE_ROLE_MAP));
   const actor = { id: "fixture-seed", username: "fixture" };
@@ -181,9 +270,14 @@ async function main(): Promise<void> {
     imports,
     triageRuns,
     presence,
+    ...(logTime ? { logTime } : {}),
     experiments,
     exporter,
     portable,
+    entities,
+    references,
+    resolutions,
+    publicIdentities,
     profiles,
     grants,
     security: {
@@ -214,7 +308,7 @@ async function main(): Promise<void> {
 
   const address = await app.listen({ host: "127.0.0.1", port });
   process.stdout.write(
-    `cd-collab fixture server listening ${address} (MapAuthAdapter test-only; LDAP unused; /ready expects Postgres; bridge=${bridgeMode ? "fixture" : "synthetic"})\n`,
+    `cd-collab fixture server listening ${address} (MapAuthAdapter test-only; LDAP unused; /ready expects Postgres; bridge=${bridgeMode === "off" ? "synthetic" : bridgeMode})\n`,
   );
 }
 

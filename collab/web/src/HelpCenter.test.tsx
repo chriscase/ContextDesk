@@ -132,7 +132,10 @@ describe("help search", () => {
     renderHelp();
     searchFor("idempotency key");
     fireEvent.click(within(resultsList()).getAllByRole("button")[0] as HTMLElement);
-    expect(screen.getByText(/8 MiB/)).toBeTruthy();
+    expect(screen.getByText(/Archives are capped at 64 MiB/)).toBeTruthy();
+    expect(screen.getByText(/expanded bytes at 512 MiB, 4,096 files/)).toBeTruthy();
+    expect(screen.getByText(/64 MiB per file, compression ratio 256, and 60 seconds/)).toBeTruthy();
+    expect(screen.getByText(/rejects overflow instead of silently dropping files/)).toBeTruthy();
     expect(screen.getByText(/share_safe accepts plain text/)).toBeTruthy();
     expect(screen.getByText(/qwen-3.6-27b, gpt-oss-120b, and ministral/)).toBeTruthy();
     expect(screen.getByText(/global source catalog is not the intake path/)).toBeTruthy();
@@ -264,8 +267,8 @@ describe("honest limitation copy", () => {
     fireEvent.click(screen.getByRole("button", { name: "Administration and setup" }));
     expect(screen.getByText(/visible only with the admin:users capability/)).toBeTruthy();
     expect(screen.getByText(/finding an identity or group grants nothing/)).toBeTruthy();
-    expect(screen.getByText(/never displays or accepts directory credentials/)).toBeTruthy();
-    expect(screen.getByText(/no graphical first-run setup wizard/)).toBeTruthy();
+    expect(screen.getByText(/never displays stored bind secrets/)).toBeTruthy();
+    expect(screen.getByText(/does not complete installation or restart the service/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Lane qualification and host profiles" }));
     expect(screen.getAllByText(/passed, failed, skipped, or partial/).length).toBeGreaterThan(0);
     expect(

@@ -638,3 +638,354 @@
   color: var(--accent);
   font-size: 0.78rem;
 }
+
+/* ---------------------------------------------------------------------------
+   Log-time review — "when did these log lines happen?"
+
+   The layout leans on one idea: an unresolved line is not an error, it is
+   evidence with a missing fact. Waiting sources are marked, never alarmed;
+   only a genuinely superseded run gets the danger colour.
+   --------------------------------------------------------------------------- */
+
+.log-time {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 0.9rem 1rem;
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.log-time__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.log-time__head h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.log-time__badge {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-time__copy {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.log-time__copy--warn {
+  color: var(--fg);
+  border-left: 3px solid var(--warning);
+  padding-left: 0.6rem;
+}
+
+.log-time__notice {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--success);
+}
+
+.log-time__error {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--danger);
+}
+
+.log-time__hint {
+  margin: 0.3rem 0 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.log-time__sources {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.log-time__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin: 0.75rem 0;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-deep);
+}
+
+.log-time__tools label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.log-time__tools input {
+  min-width: min(24rem, 70vw);
+}
+
+.log-time__tools p,
+.log-time__more p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.log-time__more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
+.log-time__source {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  background: var(--surface-deep);
+  display: grid;
+  gap: 0.35rem;
+}
+
+.log-time__source[data-unresolved="true"] {
+  border-left: 3px solid var(--warning);
+}
+
+.log-time__source-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.log-time__source-name {
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+  font-size: 0.8rem;
+}
+
+.log-time__chip {
+  font-size: 0.68rem;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.log-time__chip--declared {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.log-time__chip--waiting {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.log-time__chip--revised {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.log-time__chip--invalidated {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.log-time__chip--unknown_basis {
+  border-color: var(--muted);
+  color: var(--muted);
+}
+
+.log-time__counts {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-time__provenance,
+.log-time__samples,
+.log-time__dependents {
+  font-size: 0.78rem;
+}
+
+.log-time__provenance summary,
+.log-time__samples summary,
+.log-time__dependents summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.log-time__provenance dl {
+  margin: 0.4rem 0 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.75rem;
+  font-size: 0.75rem;
+}
+
+.log-time__provenance dt {
+  color: var(--muted);
+}
+
+.log-time__provenance dd {
+  margin: 0;
+}
+
+.log-time__actions,
+.log-time__undo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.2rem;
+}
+
+.log-time__declare {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+}
+
+.log-time__declare label {
+  font-size: 0.78rem;
+}
+
+.log-time__declare input {
+  background: var(--surface-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  max-width: 22rem;
+}
+
+.log-time__preview {
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  display: grid;
+  gap: 0.45rem;
+}
+
+.log-time__preview h5 {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.log-time__problems {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  display: grid;
+  gap: 0.3rem;
+  line-height: 1.45;
+}
+
+.log-time__problems strong {
+  color: var(--fg);
+}
+
+.log-time__table-scroll {
+  overflow-x: auto;
+  margin-top: 0.4rem;
+}
+
+.log-time__table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.74rem;
+}
+
+.log-time__table th,
+.log-time__table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.log-time__table th {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.log-time__table code {
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.log-time__row--unresolved {
+  background: rgb(240 180 41 / 0.07);
+}
+
+.log-time__offset {
+  color: var(--muted);
+}
+
+.log-time__unresolved {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.log-time__excerpt {
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+  color: var(--muted);
+  max-width: 32rem;
+}
+
+.log-time__dependents ul {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.log-time__dependent-id {
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+  font-size: 0.74rem;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .log-time__preview {
+    animation: log-time-reveal 160ms ease-out;
+  }
+}
+
+@keyframes log-time-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

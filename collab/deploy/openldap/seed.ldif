@@ -13,6 +13,9 @@ objectClass: person
 cn: Alice
 sn: Fixture
 uid: alice
+mail: alice@example.test
+title: Contributor
+departmentNumber: Blue team
 userPassword: fixture-alice-secret
 
 dn: uid=bob,ou=people,dc=example,dc=test
@@ -61,3 +64,11 @@ dn: cn=unmapped,ou=groups,dc=example,dc=test
 objectClass: groupOfNames
 cn: unmapped
 member: uid=bob,ou=people,dc=example,dc=test
+
+# Nested group: member is another group DN, not a person DN. Present so the
+# hosted-fixture tests can pin that group resolution is direct-membership only
+# and never silently walks a group-of-groups chain.
+dn: cn=engineering,ou=groups,dc=example,dc=test
+objectClass: groupOfNames
+cn: engineering
+member: cn=contributors,ou=groups,dc=example,dc=test

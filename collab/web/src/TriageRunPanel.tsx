@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { EvidenceSnapshotCockpit } from "./EvidenceSnapshotCockpit.js";
 import { protectedApiFetch } from "./protected-api.js";
+import { TechnicalIdentifiers, recordNickname } from "./technical-identity.js";
 import type { WorkFocus } from "./app-location.js";
 import { useRouteFocus } from "./route-focus.js";
 
@@ -133,8 +134,13 @@ const LANE_ROLES = ["reviewer", "contributor", "challenger", "single"] as const;
 const DEEPSEEK_PATTERN = /deepseek/i;
 const DEEPSEEK_REJECTION = "DeepSeek lanes are not permitted in this deployment.";
 
-function shortHash(value: string | null): string {
-  return value ? `${value.slice(0, 12)}…` : "not available";
+function externalChatRunLabel(run: ExternalChatRunView, index: number): string {
+  const operator = run.operatorUsername || run.importerUsername || "unknown participant";
+  const normalizedPrompt = run.promptText?.trim().replace(/\s+/g, " ") ?? "";
+  const prompt = normalizedPrompt
+    ? `“${normalizedPrompt.length > 72 ? `${normalizedPrompt.slice(0, 71)}…` : normalizedPrompt}”`
+    : "prompt not recorded";
+  return `Pasted chat ${index + 1} · ${operator} · ${prompt}`;
 }
 
 function boundedError(message: string, fallback: string): string {
@@ -164,6 +170,25 @@ function errorText(response: Response, fallback: string): Promise<string> {
       return fallback;
     })
     .catch(() => fallback);
+}
+
+/** Plain words for how a comparison was executed. */
+function modeLabel(mode: JobView["request"]["mode"]): string {
+  return mode === "gateway" ? "Gateway run" : "Built-in synthetic run";
+}
+
+/**
+ * When a comparison started, in local time.
+ *
+ * Run history is read to answer "which of these is the current one", so the
+ * ordering fact has to be on the row rather than implied by its position.
+ */
+function startedAtLabel(job: JobView): string {
+  const stamp = job.startedAt ?? job.createdAt;
+  if (!stamp) return "start time not recorded";
+  const parsed = new Date(stamp);
+  if (Number.isNaN(parsed.getTime())) return "start time not recorded";
+  return parsed.toLocaleString();
 }
 
 function statusLabel(status: string): string {
@@ -218,6 +243,13 @@ export function TriageRunPanel(props: {
   readOnly: boolean;
   participants?: { identityId?: string; username?: string }[];
   routeFocus?: WorkFocus;
+  /**
+   * Opens the comparison workspace on a freshly created comparison.
+   *
+   * Creating one and announcing it "ready" somewhere else left the reader to
+   * find that somewhere themselves; clicking again only created another.
+   */
+  onOpenComparison?: (experimentId: string) => void;
 }) {
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
@@ -241,8 +273,11 @@ export function TriageRunPanel(props: {
     ),
   );
   const [parentJobId, setParentJobId] = useState<string | null>(null);
-  const [taskFingerprint, setTaskFingerprint] = useState("demo-checkout-v1");
-  const [question, setQuestion] = useState("What caused the checkout timeout and what should we inspect next?");
+  // A new investigation starts with its own question. Prefilling one from an
+  // unrelated demo made every launch look pre-answered and put a foreign
+  // fingerprint on the run record.
+  const [taskFingerprint, setTaskFingerprint] = useState("");
+  const [question, setQuestion] = useState("");
   const [strategyId, setStrategyId] = useState("contextdesk.standard");
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
@@ -594,6 +629,7 @@ export function TriageRunPanel(props: {
           detail: { experimentId: experiment.id },
         }),
       );
+      props.onOpenComparison?.(experiment.id);
     } catch (cause) {
       setHandoffError(cause instanceof Error ? boundedError(cause.message, "Experiment review could not be created.") : "Experiment review could not be created.");
     } finally {
@@ -636,6 +672,7 @@ export function TriageRunPanel(props: {
           detail: { experimentId: experiment.id },
         }),
       );
+      props.onOpenComparison?.(experiment.id);
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -718,7 +755,8 @@ export function TriageRunPanel(props: {
                     <select value={selectedSnapshotId} onChange={(event) => setSelectedSnapshotId(event.target.value)}>
                       {snapshots.map((snapshot, index) => (
                         <option key={snapshot.id} value={snapshot.id}>
-                          S{index} · {snapshot.evidence.length} evidence · {shortHash(snapshot.fingerprint)}
+                          Snapshot {index} · {snapshot.evidence.length} evidence item
+                          {snapshot.evidence.length === 1 ? "" : "s"}
                         </option>
                       ))}
                     </select>
@@ -750,11 +788,22 @@ export function TriageRunPanel(props: {
                   ) : null}
                   <label className="triage-runs__field">
                     Question
-                    <textarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={3} />
+                    <textarea
+                      value={question}
+                      onChange={(event) => setQuestion(event.target.value)}
+                      rows={3}
+                      required
+                      placeholder="What do you want each lane to answer about this investigation?"
+                    />
                   </label>
                   <label className="triage-runs__field">
                     Task fingerprint
-                    <input value={taskFingerprint} onChange={(event) => setTaskFingerprint(event.target.value)} />
+                    <input
+                      value={taskFingerprint}
+                      onChange={(event) => setTaskFingerprint(event.target.value)}
+                      required
+                      placeholder="A short label reruns of this same question will share"
+                    />
                   </label>
                   <label className="triage-runs__field">
                     Strategy
@@ -907,12 +956,16 @@ export function TriageRunPanel(props: {
                     {running ? "Starting…" : mode === "gateway" ? "Run gateway comparison" : "Run synthetic comparison"}
                   </button>
                   {launchReceipt ? (
-                    <div className="triage-runs__launch-receipt" role="status" aria-live="polite">
+                    <div
+                    className="triage-runs__launch-receipt"
+                    role="status"
+                    aria-live="polite"
+                    aria-label="Launch receipt"
+                  >
                       <strong>Last run recorded on the selected snapshot.</strong>
                       <span>
                         {launchReceipt.evidenceCount} frozen evidence item{launchReceipt.evidenceCount === 1 ? "" : "s"}
-                        {" · snapshot "}{shortHash(launchReceipt.snapshotFingerprint)}
-                        {" · run "}{shortHash(launchReceipt.jobId)}
+                        {" · "}{recordNickname("run", launchReceipt.jobId)}
                       </span>
                       <button
                         className="case-memory__secondary-button"
@@ -962,8 +1015,13 @@ export function TriageRunPanel(props: {
                 {benchImportBusy ? "Importing…" : "Import into Experiment Lab"}
               </button>
               {benchImportExperimentId ? (
-                <p className="triage-runs__handoff-success" role="status">
-                  Experiment {shortHash(benchImportExperimentId)} imported from the bench artifact.
+                <p
+                  className="triage-runs__handoff-success"
+                  role="status"
+                  aria-label="Recorded artifact import"
+                >
+                  Recorded artifact imported as a comparison. It is now the newest comparison on
+                  this investigation and is selected in Compare.
                 </p>
               ) : null}
             </section>
@@ -992,17 +1050,22 @@ export function TriageRunPanel(props: {
                       onChange={(event) => setSelectedExternalRunId(event.target.value)}
                     >
                       <option value="">No external chat — review connected lanes only</option>
-                      {externalChatRuns.map((run) => (
+                      {externalChatRuns.map((run, index) => (
                         <option key={run.id} value={run.id}>
-                          {run.operatorUsername || run.importerUsername} · {run.promptCompleteness} prompt · {run.id.slice(0, 12)}
+                          {externalChatRunLabel(run, index)}
                         </option>
                       ))}
                     </select>
                   </label>
                   {handoffError ? <p className="case-memory__error" role="alert">{handoffError}</p> : null}
                   {handoffExperimentId ? (
-                    <p className="triage-runs__handoff-success" role="status">
-                      Experiment {shortHash(handoffExperimentId)} is ready in Experiment Lab.
+                    <p
+                      className="triage-runs__handoff-success"
+                      role="status"
+                      aria-label="Comparison handoff"
+                    >
+                      This run is ready in Compare, opened as the newest comparison on this
+                      investigation.
                     </p>
                   ) : null}
                 </section>
@@ -1028,7 +1091,7 @@ export function TriageRunPanel(props: {
                               : current.filter((id) => id !== job.id),
                           )}
                         />
-                        {job.request.strategyId} · {statusLabel(job.status)} · {shortHash(job.snapshotFingerprint)}
+                        {job.request.strategyId} · {statusLabel(job.status)} · {startedAtLabel(job)}
                       </label>
                     ))}
                   </div>
@@ -1045,7 +1108,7 @@ export function TriageRunPanel(props: {
                         {comparedJobs.map((job) => (
                           <article className="triage-runs__comparison-card" key={job.id}>
                             <strong>{job.request.strategyId}</strong>
-                            <span>{statusLabel(job.status)} · {shortHash(job.snapshotFingerprint)}</span>
+                            <span>{statusLabel(job.status)} · {startedAtLabel(job)}</span>
                             <ul>
                               {job.candidates.map((candidate) => (
                                 <li key={candidate.candidateId}>
@@ -1095,10 +1158,13 @@ export function TriageRunPanel(props: {
                     <div>
                       <h4>{job.request.strategyId}</h4>
                       <p className="case-memory__note">
-                        {job.request.mode} · task {shortHash(job.request.taskFingerprint)} · snapshot {shortHash(job.snapshotFingerprint)}
+                        {modeLabel(job.request.mode)} · {job.candidates.length} lane
+                        {job.candidates.length === 1 ? "" : "s"} · {startedAtLabel(job)}
                       </p>
                       {job.parentJobId ? (
-                        <p className="case-memory__note">Rerun of {shortHash(job.parentJobId)}</p>
+                        <p className="case-memory__note">
+                          Rerun of an earlier comparison on this investigation
+                        </p>
                       ) : null}
                     </div>
                     <span className={`triage-runs__status triage-runs__status--${job.status}`}>
@@ -1110,10 +1176,29 @@ export function TriageRunPanel(props: {
                       ? "Same frozen snapshot"
                       : job.sameSnapshot === false
                         ? "Snapshot mismatch"
-                        : "Snapshot proof pending"} · request {shortHash(job.requestFingerprint)}
+                        : "Snapshot proof pending"}
                     {job.cancelRequestedAt ? " · cancellation requested" : ""}
                     {job.requestedByUsername ? ` · requested by ${job.requestedByUsername}` : ""}
                   </p>
+                  <TechnicalIdentifiers
+                    className="triage-runs__identifiers"
+                    record={recordNickname("run", job.id)}
+                    items={[
+                      { label: "Run id", value: job.id, hint: "addresses this comparison" },
+                      {
+                        label: "Task fingerprint",
+                        value: job.request.taskFingerprint,
+                        hint: "binds reruns to the same question",
+                      },
+                      {
+                        label: "Snapshot fingerprint",
+                        value: job.snapshotFingerprint,
+                        hint: "binds every lane to the same frozen evidence",
+                      },
+                      { label: "Request fingerprint", value: job.requestFingerprint },
+                      { label: "Rerun of", value: job.parentJobId },
+                    ]}
+                  />
                   <p className="case-memory__note">Lanes settle independently; final same-snapshot proof waits for all lanes.</p>
                   <div className="triage-runs__results">
                     {job.candidates.map((candidate) => (
@@ -1130,7 +1215,12 @@ export function TriageRunPanel(props: {
                                 </div>
                                 {candidate.profileId ? <p className="case-memory__note">Gateway model {profileLabelFor(candidate)}</p> : null}
                                 {candidate.summary ? <p>{candidate.summary}</p> : null}
-                        {candidate.benchmarkRunId ? <p className="case-memory__note">Experiment Lab run {shortHash(candidate.benchmarkRunId)}</p> : null}
+                        {candidate.benchmarkRunId ? (
+                          <p className="case-memory__note">
+                            Recorded in the comparison workspace as{" "}
+                            {recordNickname("run", candidate.benchmarkRunId)}
+                          </p>
+                        ) : null}
                         {candidate.evidenceRefs.length > 0 ? (
                           <div className="triage-runs__evidence-group">
                             <ul className="triage-runs__evidence" aria-label={`${candidate.model} evidence`}>

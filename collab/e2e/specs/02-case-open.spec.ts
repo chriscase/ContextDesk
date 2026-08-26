@@ -44,12 +44,29 @@ test.describe("create and open an investigation", () => {
     const statusForm = page.locator("form.composer").filter({
       has: page.getByRole("button", { name: "Update status" }),
     });
-    for (const status of ["monitoring", "resolved", "archived"] as const) {
+
+    // monitoring and archived claim nothing about the question, so they stay
+    // plain transitions.
+    for (const status of ["monitoring", "archived"] as const) {
       await statusForm.locator('select[name="status"]').selectOption(status);
       await statusForm.getByRole("button", { name: "Update status" }).click();
       await expect(page.locator(".focus-head .status-pill")).toHaveText(status);
     }
-    await screenshot(page, "02-case-status-archived");
+
+    // resolved claims the question was answered, so it needs a record. The
+    // status does not move until one is written.
+    await statusForm.locator('select[name="status"]').selectOption("resolved");
+    await statusForm.getByRole("button", { name: "Update status" }).click();
+    const resolutionForm = page.getByRole("form", { name: "Record why this is resolved" });
+    await expect(resolutionForm).toBeVisible();
+    await expect(page.locator(".focus-head .status-pill")).toHaveText("archived");
+
+    await resolutionForm
+      .getByLabel("Why")
+      .fill("Synthetic fixture conclusion reached from the recorded notes.");
+    await resolutionForm.getByRole("button", { name: "Resolve with this record" }).click();
+    await expect(page.locator(".focus-head .status-pill")).toHaveText("resolved");
+    await screenshot(page, "02-case-status-resolved");
   });
 
   test("viewer gets the overview without any creation entry points", async ({ page }) => {

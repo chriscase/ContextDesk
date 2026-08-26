@@ -48,6 +48,10 @@ export interface SourceOption {
 
 const HUMAN_CONTRIBUTION_KINDS = new Set(["message", "note", "hypothesis", "action", "upload"]);
 
+function isCorpusFileContribution(row: ContributionView): boolean {
+  return row.kind === "upload" && (row.body ?? "").startsWith("Corpus intake ");
+}
+
 /**
  * Provenance chip for a timeline contribution. Human-authored only for kinds a
  * person writes directly; the server mirrors imported runs as `external_run`
@@ -190,10 +194,23 @@ export function TriageWorkspace(props: {
   // so retired sources keep their recorded name and kind on existing imports.
   const activeSources = props.sources.filter((source) => source.lifecycle !== "retired");
   const humanEntries = props.contributions.filter(
-    (row) => !row.tombstoned && HUMAN_CONTRIBUTION_KINDS.has(row.kind),
+    (row) =>
+      !row.tombstoned
+      && HUMAN_CONTRIBUTION_KINDS.has(row.kind)
+      && !isCorpusFileContribution(row),
   ).length;
+  const corpusIntakeEvents = props.events.filter((event) => event.kind === "corpus_intake_committed");
+  const corpusFileCount = corpusIntakeEvents.reduce((total, event) => {
+    const accepted = parsedTimelinePayload(event.payload)?.accepted;
+    return total + (typeof accepted === "number" && Number.isFinite(accepted) ? accepted : 0);
+  }, 0);
   const reviewLinks = props.contributions
-    .filter((row) => !row.tombstoned && HUMAN_CONTRIBUTION_KINDS.has(row.kind))
+    .filter(
+      (row) =>
+        !row.tombstoned
+        && HUMAN_CONTRIBUTION_KINDS.has(row.kind)
+        && !isCorpusFileContribution(row),
+    )
     .map((row) => ({
       id: row.id,
       label: `${row.kind === "upload" ? "Evidence" : row.kind === "hypothesis" ? "Possible explanation" : row.kind === "action" ? "Next step" : row.kind === "message" ? "Observation" : "Note"}: ${(row.body ?? "Recorded item").slice(0, 100)}`,
@@ -201,6 +218,13 @@ export function TriageWorkspace(props: {
   const exactTimelineRoute = props.routeFocus?.section === "triage-capture"
     && Boolean(props.routeFocus.item);
   const exactTimelineRouteSeen = useRef(exactTimelineRoute);
+  // The source picker used to rely on the browser's own `required` handling,
+  // which blocks submission, focuses the control, and says why in a tooltip
+  // that disappears. With "Choose a label" still showing, the control looks
+  // filled and the button looks broken. The requirement is stated here
+  // instead, in the page, where it stays until it is met.
+  const [importSourceMissing, setImportSourceMissing] = useState(false);
+  const importSourceRef = useRef<HTMLSelectElement | null>(null);
   const [timelineOpen, setTimelineOpen] = useState(
     props.events.length <= 5 || exactTimelineRoute,
   );
@@ -309,7 +333,21 @@ export function TriageWorkspace(props: {
                   {props.importError}
                 </p>
               ) : null}
-              <form className="composer" onSubmit={props.onImportRun}>
+              <form
+                className="composer"
+                onSubmit={(event) => {
+                  // Checked before the parent runs, so an unlabelled import
+                  // never reaches the server and never looks like a no-op.
+                  if (!importSourceRef.current?.value) {
+                    event.preventDefault();
+                    setImportSourceMissing(true);
+                    importSourceRef.current?.focus();
+                    return;
+                  }
+                  setImportSourceMissing(false);
+                  props.onImportRun(event);
+                }}
+              >
                 <textarea
                   className="login__input"
                   name="outputText"
@@ -331,8 +369,14 @@ export function TriageWorkspace(props: {
                     className="login__input"
                     name="sourceId"
                     aria-label="External run source"
-                    required
+                    ref={importSourceRef}
+                    // Not `required`: native validation suppresses the submit
+                    // event entirely, so the message below could never run.
+                    aria-invalid={importSourceMissing || undefined}
+                    aria-describedby={importSourceMissing ? "import-source-required" : undefined}
                     defaultValue=""
+                    onChange={() => setImportSourceMissing(false)}
+                    disabled={activeSources.length === 0}
                   >
                     <option value="" disabled>
                       Choose a label
@@ -344,6 +388,12 @@ export function TriageWorkspace(props: {
                     ))}
                   </select>
                 </label>
+                {importSourceMissing && activeSources.length > 0 ? (
+                  <p className="case-memory__error" id="import-source-required" role="alert">
+                    Choose where this analysis came from before importing it. An imported run is
+                    only readable later if it says what produced it, so this one is not guessed.
+                  </p>
+                ) : null}
                 {activeSources.length === 0 ? (
                   <p className="triage-capture__hint">
                     {props.sources.length === 0
@@ -415,7 +465,13 @@ export function TriageWorkspace(props: {
                     unknown rather than being guessed.
                   </p>
                 </details>
-                <button className="login__submit" type="submit">
+                <button
+                  className="login__submit"
+                  type="submit"
+                  // Truthful rather than hopeful: with no available label there
+                  // is nothing this button could record the import against.
+                  disabled={activeSources.length === 0}
+                >
                   Import external run
                 </button>
               </form>
@@ -450,6 +506,9 @@ export function TriageWorkspace(props: {
             <span className="case-memory__badge">
               {humanEntries} human {humanEntries === 1 ? "entry" : "entries"} · {props.runs.length}{" "}
               imported {props.runs.length === 1 ? "run" : "runs"}
+              {corpusIntakeEvents.length > 0
+                ? ` · ${corpusFileCount.toLocaleString()} files in ${corpusIntakeEvents.length} corpus ${corpusIntakeEvents.length === 1 ? "upload" : "uploads"}`
+                : ""}
             </span>
           </header>
           <ul className="triage-legend" aria-label="Provenance classes">

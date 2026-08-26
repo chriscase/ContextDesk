@@ -117,9 +117,11 @@ export function parsePortableApplyRequest(raw: unknown): PortableApplyRequestV1 
   if (typeof row.confirmationToken !== "string" || !row.confirmationToken.trim()) {
     throw new ContractViolation("$.confirmationToken", "must not be empty");
   }
+  // `confirmationToken` is an opaque, server-minted capability. Its random
+  // base64url bytes can coincidentally resemble a credential prefix; validate
+  // its required shape above, but scan only operator-controlled metadata here.
   assertNoCredentialLeakage({
     schemaId: row.schemaId,
-    confirmationToken: row.confirmationToken,
     typedConfirmation: row.typedConfirmation,
     collisionPolicy: row.collisionPolicy,
     identityMap: row.identityMap,

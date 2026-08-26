@@ -1,0 +1,13 @@
+{
+  "schemaId": "cd-collab.investigation_entity.v1",
+  "id": "8f1d0c2a-5b47-4d3e-9a10-6c2e7b4f0a91",
+  "kind": "service",
+  "label": "Synthetic checkout service",
+  "profile": null,
+  "privacyClass": "owner_only",
+  "lifecycle": "active",
+  "createdAt": "2024-02-11T09:15:00.000Z",
+  "createdBy": "synthetic-operator",
+  "updatedAt": "2024-02-11T09:15:00.000Z",
+  "contactEmail": "not-a-contract-field"
+}

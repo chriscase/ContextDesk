@@ -255,16 +255,23 @@ async function normalizeStorage(
   };
 }
 
+function filterHasUsernamePlaceholder(filter: string): boolean {
+  return filter.includes("{username}") || filter.includes("{0}");
+}
+
 function assertLdapSemantics(ldap: SetupLdapAuthenticationV1): void {
+  const modes = ldap.userResolutionModes ?? [];
   const hasTemplate = ldap.userDnTemplate !== null;
   const hasSearch = ldap.userSearchBase !== null;
-  if (hasTemplate === hasSearch) {
+  if (modes.length === 0 && hasTemplate === hasSearch) {
     throw new SetupDeploymentConfigError("invalid_ldap_configuration");
   }
   if (
     (ldap.bindDn === null) !== (ldap.bindPasswordRef === null) ||
-    (hasTemplate && !ldap.userDnTemplate?.includes("{username}")) ||
-    (hasSearch && !ldap.userSearchFilter.includes("{username}")) ||
+    (hasTemplate &&
+      !ldap.userDnTemplate?.includes("{username}") &&
+      !ldap.userDnTemplate?.includes("{0}")) ||
+    (hasSearch && !filterHasUsernamePlaceholder(ldap.userSearchFilter)) ||
     !ldap.groupSearchFilter.includes("{dn}")
   ) {
     throw new SetupDeploymentConfigError("invalid_ldap_configuration");

@@ -110,6 +110,23 @@ export interface DirectoryClaimMappingResultV1 {
  * control/invisible characters): callers must treat that as a failed sync
  * for the whole record rather than accept a partially-unsafe profile.
  */
+function directoryClaimValue(
+  claims: Readonly<Record<string, string>>,
+  attributeName: string,
+): string | undefined {
+  const needle = attributeName.toLowerCase();
+  const matches = Object.entries(claims).filter(([key]) => key.toLowerCase() === needle);
+  if (matches.length === 0) return undefined;
+  const values = new Set(matches.map(([, value]) => value));
+  if (values.size > 1) {
+    throw new ContractViolation(
+      `$.claims.${attributeName}`,
+      "directory value for this attribute is ambiguous across claim-name casing",
+    );
+  }
+  return matches[0]?.[1];
+}
+
 export function mapDirectoryClaimsToProfileFields(
   claims: Readonly<Record<string, string>>,
   map: DirectoryAttributeMapV1,
@@ -118,7 +135,7 @@ export function mapDirectoryClaimsToProfileFields(
   const skipped: DirectoryMappedField[] = [];
   for (const field of DIRECTORY_MAPPED_FIELDS) {
     const attributeName = map.attributes[field];
-    const raw = claims[attributeName];
+    const raw = directoryClaimValue(claims, attributeName);
     if (raw === undefined) {
       skipped.push(field);
       continue;

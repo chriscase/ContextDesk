@@ -39,18 +39,24 @@ export const INVESTIGATION_RESOURCE_KINDS = [
   "investigation",
   "investigation_stage",
   "evidence_item",
+  "intake_batch",
   "evidence_context",
+  "imported_ai_run",
   "workstream",
   "workstream_attempt",
   "workstream_rerun",
   "comparison_finding",
   "comparison_conflict",
+  "helpfulness",
+  "interaction_trace",
+  "experiment",
   "discussion_message",
   "timeline_event",
   "hypothesis",
   "action",
   "observation",
   "decision_revision",
+  "gold",
   "export_event",
   "portable_archive_event",
 ] as const;
@@ -377,14 +383,29 @@ export function routedInvestigationFocus(
         itemKind: "evidence",
         lane: null,
       };
+    case "intake_batch":
+      return {
+        stage: "capture",
+        section: "corpus-intake",
+        item: resourceId,
+        itemKind: "intake-batch",
+        lane: null,
+      };
     case "evidence_context":
-      // Snapshots, corroboration, and imported-run context share this kind.
-      // Omit itemKind so the visible element with this id can match.
+      // Frozen snapshots. Imported analysis uses imported_ai_run.
       return {
         stage: "analyze",
         section: "triage-evidence-board",
         item: resourceId,
-        itemKind: null,
+        itemKind: "snapshot",
+        lane: null,
+      };
+    case "imported_ai_run":
+      return {
+        stage: "capture",
+        section: "triage-capture",
+        item: resourceId,
+        itemKind: "imported-run",
         lane: null,
       };
     case "workstream":
@@ -393,9 +414,26 @@ export function routedInvestigationFocus(
       return workstreamRoute(resourceId);
     case "comparison_finding":
     case "comparison_conflict":
+    case "helpfulness":
       return {
         stage: "compare",
         section: "cross-exam-heading",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
+    case "interaction_trace":
+      return {
+        stage: "compare",
+        section: "candidate-comparison-heading",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
+    case "experiment":
+      return {
+        stage: "compare",
+        section: "candidate-comparison-heading",
         item: resourceId,
         itemKind: null,
         lane: null,
@@ -427,6 +465,14 @@ export function routedInvestigationFocus(
         lane: null,
       };
     case "decision_revision":
+      return {
+        stage: "decide",
+        section: "decision-heading",
+        item: resourceId,
+        itemKind: null,
+        lane: null,
+      };
+    case "gold":
       return {
         stage: "decide",
         section: "decision-heading",
@@ -570,6 +616,11 @@ export function looksLikeOpaqueIdentifier(value: string): boolean {
   if (INVESTIGATION_INSTALLATION_ID_RE.test(trimmed)) return true;
   if (/^(?:pkg|package|fp|fingerprint|hash|sha256)[-_:]/i.test(trimmed)) return true;
   if (/^[0-9a-f]{32,}$/i.test(trimmed)) return true;
+  // A truncated hash is still an identifier, and a shortened one is worse than
+  // the whole: it names nothing to a reader and cannot be matched exactly
+  // against another system either. Eight hex characters is past the length any
+  // ordinary label reaches by accident, with or without a trailing ellipsis.
+  if (/^[0-9a-f]{8,}(?:\u2026|\.{3})?$/i.test(trimmed)) return true;
   if (OPAQUE_EVENT_NAME_RE.test(trimmed) && trimmed.includes("_")) return true;
   return false;
 }
@@ -578,18 +629,24 @@ const RESOURCE_KIND_FALLBACK: Record<InvestigationResourceKindV1, string> = {
   investigation: "Investigation",
   investigation_stage: "Investigation stage",
   evidence_item: "Evidence item",
+  intake_batch: "Intake batch",
   evidence_context: "Evidence context",
+  imported_ai_run: "Imported analysis",
   workstream: "Workstream",
   workstream_attempt: "Workstream attempt",
   workstream_rerun: "Workstream rerun",
   comparison_finding: "Comparison finding",
   comparison_conflict: "Comparison conflict",
+  helpfulness: "Comparison observation",
+  interaction_trace: "Imported comparison trace",
+  experiment: "Strategy comparison",
   discussion_message: "Discussion message",
   timeline_event: "Timeline event",
   hypothesis: "Hypothesis",
   action: "Action",
   observation: "Observation",
   decision_revision: "Decision",
+  gold: "Outcome benchmark",
   export_event: "Export",
   portable_archive_event: "Portable archive event",
 };

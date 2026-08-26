@@ -374,3 +374,127 @@
     align-self: start;
   }
 }
+
+.admin-ldap {
+  display: grid;
+  gap: 1rem;
+}
+
+.admin-ldap__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 0.85rem;
+  margin: 0.9rem 0 0;
+}
+
+.admin-ldap__hint {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  flex: 1 1 18rem;
+}
+
+.admin-ldap__facts {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0.9rem 0 0;
+}
+
+.admin-ldap__facts > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.admin-ldap__facts dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.admin-ldap__facts dd {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.admin-ldap__facts code {
+  overflow-wrap: anywhere;
+}
+
+.admin-ldap__probe {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.9rem;
+  align-items: end;
+}
+
+.admin-ldap__probe label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.admin-ldap__probe input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.admin-ldap__probe button {
+  justify-self: start;
+}
+
+.admin-ldap__stages {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.9rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-ldap__stage {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+}
+
+.admin-ldap__stage span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: capitalize;
+}
+
+.admin-ldap__stage p {
+  margin: 0.15rem 0 0;
+}
+
+.admin-ldap__stage--passed {
+  border-color: color-mix(in srgb, var(--success, #60d394) 50%, var(--border));
+}
+
+.admin-ldap__stage--failed {
+  border-color: color-mix(in srgb, var(--danger, #fb7185) 55%, var(--border));
+}
+
+.admin-ldap__stage--skipped,
+.admin-ldap__stage--not_run {
+  opacity: 0.86;
+}
+
+@media (max-width: 720px) {
+  .admin-ldap__probe {
+    grid-template-columns: 1fr;
+  }
+}

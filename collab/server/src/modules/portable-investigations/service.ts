@@ -14,6 +14,8 @@ import {
   destinationCatalogDigest,
   identityMapDigest,
   parsePortableArchive,
+  parsePortableExperimentTraceTarget,
+  parsePortableTriageAttemptTarget,
   portableApplyDeepLink,
   portableSnapshotFingerprint,
   preflightPortableArchive,
@@ -24,6 +26,7 @@ import {
   type ArchivePreflightReportV1,
   type CollisionPolicy,
   type DestinationCatalogV1,
+  type DestinationIdentityV1,
   type IdentityMapEntryV1,
   type PortableApplyResponseV1,
   type PortableArchiveV1,
@@ -35,6 +38,12 @@ import {
   type ProviderKind,
 } from "@cd-collab/contracts";
 import {
+  assertDestinationIdsUnoccupied,
+  PortableDestinationOccupiedError,
+  probePortableCollisions,
+  type PortableCollisionProbePorts,
+} from "./collision-probe.js";
+import {
   persistPortableArchive,
   PortableCommitOutcomeUnknownError,
   type PortableApplyStateStore,
@@ -42,6 +51,7 @@ import {
   type StoredPortableApplyIntent,
 } from "./persist.js";
 import type { AuditStore } from "../audit/index.js";
+import type { PublicIdentityCodec } from "../auth/index.js";
 import type { CatalogService } from "../catalog/index.js";
 import type { Actor, CaseService, TimelineRow } from "../cases/index.js";
 import type { ExperimentService } from "../experiments/index.js";
@@ -59,7 +69,8 @@ export const PORTABLE_CONTRACT_UNSUPPORTED = [
   "triage_worker_leases_and_cancellation_capabilities",
   "experiment_agreement_and_interaction_traces",
   "source_membership_and_source_identity_ownership",
-  "imported_prompt_and_opaque_run_details",
+  "imported_opaque_run_details",
+  "imported_run_corroboration",
   "imported_content_privacy_is_not_contract_bound",
   "discussion_containers_presence_and_live_chat_state",
   "derived_alignment_details_and_interaction_traces",
@@ -84,6 +95,7 @@ export type PortableServerErrorCode =
   | "confirmation_invalid"
   | "exact_reconstruction_required"
   | "stale_destination_catalog"
+  | "destination_id_occupied"
   | "identity_map_mismatch"
   | "actor_mismatch"
   | "apply_outcome_unknown";
@@ -127,7 +139,7 @@ export interface PortablePreflightResponse {
     requiredRole: "case-lead_or_admin";
     evaluatedRole: "case-lead" | "admin";
     actorId: string;
-    destinationCatalogSource: "host_visible_catalog";
+    destinationCatalogSource: "host_owned_targeted_probe";
     destinationCatalogDigest: string;
     sourceRolesTrusted: false;
     destinationMembershipGranted: false;
@@ -164,6 +176,7 @@ const APPLY_IDENTITY_ACTIONS = new Set(["map_existing", "preserve_historical_ext
 
 interface PortableDeps {
   installationId: string;
+  publicIdentities?: Pick<PublicIdentityCodec, "publicId" | "sanitizeText">;
   cases: CaseService;
   catalog: CatalogService;
   imports: ImportService;
@@ -171,10 +184,51 @@ interface PortableDeps {
   experiments: ExperimentService;
   audit: AuditStore;
   applyState: PortableApplyStateStore;
+  /**
+   * Host-owned stores used only to probe whether a deterministic destination id
+   * is already taken. Never actor-filtered: an object the caller cannot see
+   * still occupies its key, and an occupied key is evidence, not authorization.
+   */
+  probe: PortableCollisionProbePorts;
   withTransaction: <T>(operation: (ports: PortablePersistPorts) => Promise<T>) => Promise<T>;
   applyCoordination: "single_instance" | "postgres_transactional";
   confirmationRestartDurable: boolean;
   now?: () => string;
+}
+
+const PORTABLE_IDENTITY_FIELDS = new Set([
+  "actorId",
+  "authorId",
+  "createdBy",
+  "identityId",
+  "importerId",
+  "operatorId",
+  "ownerId",
+  "promotedById",
+  "requestedBy",
+  "reviewerId",
+  "sourceActorId",
+  "uploaderId",
+]);
+
+function projectPortablePublicIdentities<T>(
+  value: T,
+  codec: Pick<PublicIdentityCodec, "publicId" | "sanitizeText">,
+  field?: string,
+): T {
+  if (typeof value === "string") {
+    if (field && PORTABLE_IDENTITY_FIELDS.has(field)) return codec.publicId(value) as T;
+    if (field === "payloadJson") return codec.sanitizeText(value) as T;
+    return value;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => projectPortablePublicIdentities(item, codec)) as T;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    projectPortablePublicIdentities(item, codec, key),
+  ])) as T;
 }
 
 interface ActorSeed {
@@ -218,20 +272,6 @@ function addActor(actors: Map<string, string>, seed: ActorSeed): void {
   }
 }
 
-function addObjectId(
-  catalog: Partial<Record<PortableObjectKind, Set<string>>>,
-  kind: PortableObjectKind,
-  id: string,
-): void {
-  const set = catalog[kind] ?? new Set<string>();
-  set.add(id);
-  catalog[kind] = set;
-}
-
-function portableDiscussionId(caseId: string): string {
-  return `discussion-${sha256Text(caseId).slice(0, 24)}`;
-}
-
 function ensureSha256(value: string, label: string): void {
   if (!SHA256_RE.test(value)) {
     throw new PortableServerError("unsupported_state", `${label} has no portable SHA-256 identity`);
@@ -272,6 +312,71 @@ function objectCount(bundle: PortableInvestigationUnsigned): number {
     bundle.auditRefs.length +
     bundle.attachments.length
   );
+}
+
+function timelinePayload(row: TimelineRow): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(row.payload);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function portableTimelineTarget(
+  row: TimelineRow,
+  namespaces: Map<string, Set<PortableObjectKind>>,
+): { targetId: string; namespace: PortableObjectKind } | null {
+  if (row.targetId === null) return null;
+  const payload = timelinePayload(row);
+  if (/^experiment_decision_/.test(row.kind)) {
+    const decisionId = typeof payload.decisionId === "string" ? payload.decisionId : row.targetId;
+    if (decisionId && namespaces.get(decisionId)?.has("decision")) {
+      return { targetId: decisionId, namespace: "decision" };
+    }
+    return null;
+  }
+  if (row.kind === "experiment_gold_promoted") {
+    const goldId = typeof payload.goldId === "string" ? payload.goldId : row.targetId;
+    if (goldId && namespaces.get(goldId)?.has("gold")) {
+      return { targetId: goldId, namespace: "gold" };
+    }
+    return null;
+  }
+  if (row.kind === "experiment_helpfulness_recorded") {
+    const observationId = typeof payload.observationId === "string" ? payload.observationId : row.targetId;
+    if (observationId && namespaces.get(observationId)?.has("helpfulness")) {
+      return { targetId: observationId, namespace: "helpfulness" };
+    }
+    return null;
+  }
+  if (row.kind === "experiment_trace_imported") {
+    const parsed = parsePortableExperimentTraceTarget(row.targetId);
+    const traceId = parsed?.traceId
+      ?? (typeof payload.traceId === "string" && payload.traceId.trim() ? payload.traceId : null);
+    const experimentId = parsed?.experimentId ?? row.targetId;
+    if (traceId && namespaces.get(experimentId)?.has("experiment")) {
+      return { targetId: `${experimentId}:${traceId}`, namespace: "experiment" };
+    }
+    return null;
+  }
+  if (/^triage_candidate_/.test(row.kind)) {
+    const attempt = parsePortableTriageAttemptTarget(row.targetId);
+    if (attempt && namespaces.get(attempt.jobId)?.has("triage_job")) {
+      return { targetId: row.targetId, namespace: "triage_job" };
+    }
+    return null;
+  }
+  if (row.kind === "corpus_intake_committed") {
+    if (namespaces.get(row.targetId)?.has("intake_batch")) {
+      return { targetId: row.targetId, namespace: "intake_batch" };
+    }
+    return null;
+  }
+  const namespace = targetNamespace(row, namespaces);
+  return namespace ? { targetId: row.targetId, namespace } : null;
 }
 
 function targetNamespace(
@@ -413,6 +518,11 @@ function applySupportReasons(
     bundle.investigation.createdBy,
     ...bundle.contributions.map((row) => row.authorId),
     ...bundle.evidence.map((row) => row.createdBy),
+    ...bundle.importedAiRuns.flatMap((row) => [
+      ...(row.importerId ? [row.importerId] : []),
+      ...(row.operatorId ? [row.operatorId] : []),
+    ]),
+    ...bundle.experiments.flatMap((row) => (row.importerId ? [row.importerId] : [])),
     ...bundle.triageJobs.map((row) => row.requestedBy),
     ...bundle.helpfulnessObservations.map((row) => row.reviewerId),
     ...bundle.decisions.flatMap((row) => [row.authorId, ...(row.ownerId ? [row.ownerId] : [])]),
@@ -549,6 +659,12 @@ function applySupportReasons(
   if (bundle.discussions.length > 0) {
     block("$.investigation.discussions", "discussion containers are unsupported");
   }
+  if (bundle.timeline.some((row) => row.kind === "run_corroboration")) {
+    block(
+      "$.investigation.timeline",
+      "imported-run corroboration is not exact-applyable",
+    );
+  }
   if (bundle.timeline.some((row, index) => row.seq !== index + 1)) {
     block("$.investigation.timeline", "timeline sequence must be contiguous from one");
   }
@@ -638,6 +754,7 @@ export class PortableInvestigationService {
     for (const row of snapshots) addActor(actors, { id: row.createdBy });
     for (const row of jobs) addActor(actors, { id: row.requestedBy, username: row.requestedByUsername });
     for (const row of experiments) {
+      addActor(actors, { id: row.importerId, username: row.importerUsername });
       for (const observation of row.observations) {
         addActor(actors, { id: observation.reviewerId, username: observation.reviewerUsername });
       }
@@ -654,6 +771,10 @@ export class PortableInvestigationService {
     }
     for (const row of sources) {
       addActor(actors, { id: row.createdBy });
+    }
+    for (const row of importedRuns) {
+      addActor(actors, { id: row.importerId, username: row.importerUsername });
+      addActor(actors, { id: row.operatorId, username: row.operatorUsername });
     }
 
     const contents = new Map<string, ProjectedContent>();
@@ -725,10 +846,20 @@ export class PortableInvestigationService {
     }
 
     for (const run of importedRuns) {
+      if (run.corroborationState !== "unverified") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "imported-run corroboration is not exact-applyable",
+        );
+      }
       const output = new TextEncoder().encode(run.outputText);
       addContent(run.outputHash, output, "text/plain", output.byteLength);
       if ((run.promptHash === null) !== (run.promptText === null)) {
         throw new PortableServerError("integrity_failure", "imported prompt hash and bytes disagree");
+      }
+      if (run.promptHash && run.promptText) {
+        const prompt = new TextEncoder().encode(run.promptText);
+        addContent(run.promptHash, prompt, "text/plain", prompt.byteLength);
       }
     }
 
@@ -865,6 +996,79 @@ export class PortableInvestigationService {
         taskFingerprint: portableFingerprint(experiment.taskFingerprint, "task"),
         candidateIds: experiment.candidates.map((candidate) => candidate.candidateId),
         createdAt: experiment.createdAt,
+        importerId: experiment.importerId,
+        candidates: experiment.candidates.map((candidate) => ({
+          candidateId: candidate.candidateId,
+          modelLabel: candidate.modelLabel,
+          role: candidate.role,
+          runStatus: candidate.runStatus,
+          observedLatency:
+            candidate.observedLatency.status === "observed"
+              ? {
+                  status: "observed" as const,
+                  milliseconds: candidate.observedLatency.milliseconds,
+                }
+              : { status: "unknown" as const },
+          cost: { status: "unknown" as const },
+          usage: { status: "unknown" as const },
+          helpfulnessState: candidate.helpfulnessState,
+          goldState: candidate.goldState,
+        })),
+        agreement: {
+          sharedAnchors: experiment.agreement.sharedAnchors.map((anchor) => ({
+            evidenceRef: anchor.evidenceRef,
+            role: anchor.role,
+            candidateIds: [...anchor.candidateIds],
+          })),
+          candidateSpecific: experiment.agreement.candidateSpecific.map((row) => ({
+            candidateId: row.candidateId,
+            evidenceRefs: [...row.evidenceRefs],
+          })),
+          roleConflicts: experiment.agreement.roleConflicts.map((conflict) => ({
+            evidenceRef: conflict.evidenceRef,
+            assignments: conflict.assignments.map((assignment) => ({
+              candidateId: assignment.candidateId,
+              role: assignment.role,
+            })),
+          })),
+          notes: [...experiment.agreement.notes],
+        },
+        snapshotProof: { ...experiment.snapshotProof },
+        traces: experiment.traces.map((trace) => ({
+          schemaId: trace.schemaId,
+          traceId: trace.traceId,
+          candidateId: trace.candidateId,
+          sourceKind: trace.sourceKind,
+          completeness: trace.completeness,
+          privacyClass: "share_safe" as const,
+          rawHash: trace.rawHash,
+          events: trace.events.map((event) => ({
+            eventId: event.eventId,
+            sequence: event.sequence,
+            kind: event.kind,
+            actor: event.actor,
+            role: event.role,
+            parentEventId: event.parentEventId,
+            evidenceRefs: [...event.evidenceRefs],
+            observedAt:
+              event.observedAt.status === "observed"
+                ? { status: "observed" as const, timestamp: event.observedAt.timestamp }
+                : { status: "unknown" as const },
+            excerpt: event.excerpt,
+            excerptHash: event.excerptHash,
+            unknowns: [...event.unknowns],
+          })),
+          efficiency: {
+            turnCount: { ...trace.efficiency.turnCount },
+            evidenceAcquisitionSteps: { ...trace.efficiency.evidenceAcquisitionSteps },
+            latency: { ...trace.efficiency.latency },
+            cost: { ...trace.efficiency.cost },
+            providerCalls: { ...trace.efficiency.providerCalls },
+          },
+          unknowns: [...trace.unknowns],
+          notes: [...trace.notes],
+          createdAt: trace.createdAt,
+        })),
         objectHash: "",
       };
     });
@@ -947,6 +1151,8 @@ export class PortableInvestigationService {
     registerNamespace("investigation", [caseId]);
     registerNamespace("contribution", contributions.map((row) => row.id));
     registerNamespace("evidence", evidence.map((row) => row.id));
+    registerNamespace("content", [...contents.keys()]);
+    registerNamespace("intake_batch", intakeBatches.map((row) => row.id));
     registerNamespace("source", sources.map((row) => row.id));
     registerNamespace("imported_ai_run", importedRuns.map((row) => row.id));
     registerNamespace("snapshot", portableSnapshots.map((row) => row.id));
@@ -960,13 +1166,102 @@ export class PortableInvestigationService {
     registerNamespace("attachment", attachments.map((row) => row.id));
 
     const portableTimeline = historicalTimeline.map((row) => {
-      const namespace = targetNamespace(row, namespaceById);
+      const addressed = portableTimelineTarget(row, namespaceById);
+      if (/^experiment_decision_/.test(row.kind) && addressed?.namespace !== "decision") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment decision timeline is missing a portable decision target",
+        );
+      }
+      if (row.kind === "experiment_gold_promoted" && addressed?.namespace !== "gold") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment gold timeline is missing a portable gold target",
+        );
+      }
+      if (row.kind === "experiment_helpfulness_recorded" && addressed?.namespace !== "helpfulness") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment helpfulness timeline is missing a portable helpfulness target",
+        );
+      }
+      if (row.kind === "experiment_imported" && addressed?.namespace !== "experiment") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "experiment import timeline is missing a portable experiment target",
+        );
+      }
+      if (row.kind === "experiment_trace_imported") {
+        const parsed = addressed?.targetId
+          ? parsePortableExperimentTraceTarget(addressed.targetId)
+          : null;
+        if (addressed?.namespace !== "experiment" || !parsed) {
+          throw new PortableServerError(
+            "unsupported_state",
+            "experiment trace timeline is missing a portable experiment+trace target",
+          );
+        }
+      }
+      if (/^triage_candidate_/.test(row.kind) && addressed?.namespace !== "triage_job") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "workstream attempt timeline is missing a portable job target",
+        );
+      }
+      if (row.kind === "snapshot_frozen" && addressed?.namespace !== "snapshot") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "snapshot timeline is missing a portable snapshot target",
+        );
+      }
+      if (row.kind === "external_run_imported" && addressed?.namespace !== "imported_ai_run") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "imported-run timeline is missing a portable imported-run target",
+        );
+      }
+      if (row.kind === "run_corroboration") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "imported-run corroboration is not exact-applyable",
+        );
+      }
+      if (
+        (/^contribution_/.test(row.kind) || row.kind === "hypothesis_status")
+        && addressed?.namespace !== "contribution"
+      ) {
+        throw new PortableServerError(
+          "unsupported_state",
+          "contribution timeline is missing a portable contribution target",
+        );
+      }
+      if (/^evidence_/.test(row.kind) && addressed?.namespace !== "evidence") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "evidence timeline is missing a portable evidence target",
+        );
+      }
+      if (/^triage_job_/.test(row.kind)) {
+        const parsed = addressed?.targetId ? parsePortableTriageAttemptTarget(addressed.targetId) : null;
+        if (addressed?.namespace !== "triage_job" || parsed) {
+          throw new PortableServerError(
+            "unsupported_state",
+            "workstream job timeline is missing a portable job target",
+          );
+        }
+      }
+      if (row.kind === "corpus_intake_committed" && addressed?.namespace !== "intake_batch") {
+        throw new PortableServerError(
+          "unsupported_state",
+          "corpus intake timeline is missing a portable intake-batch target",
+        );
+      }
       return {
         seq: row.seq,
         kind: row.kind,
         actorId: row.actorId,
-        targetId: namespace ? row.targetId : null,
-        targetNamespace: namespace,
+        targetId: addressed?.targetId ?? null,
+        targetNamespace: addressed?.namespace ?? null,
         serverTime: row.serverTime,
         objectHash: "",
       };
@@ -1027,6 +1322,9 @@ export class PortableInvestigationService {
         sourceId: row.sourceId,
         createdAt: row.createdAt,
         hypothesisStatus: row.hypothesisStatus,
+        hypothesisLinks: [...(row.hypothesisLinks ?? [])].sort((left, right) =>
+          `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`),
+        ),
         objectHash: "",
       })),
       evidence,
@@ -1053,20 +1351,45 @@ export class PortableInvestigationService {
         createdBy: row.createdBy,
         objectHash: "",
       })),
-      importedAiRuns: importedRuns.map((row) => ({
-        id: row.id,
-        sourceId: row.sourceId,
-        importedAt: row.createdAt,
-        providerKind: providerKind(row.provider),
-        model: row.model ?? "unknown",
-        version: row.version,
-        profileId: null,
-        usageStatus: "unknown",
-        costStatus: "unknown",
-        outputDigest: row.outputHash,
-        opaquePayloadJson: null,
-        objectHash: "",
-      })),
+      importedAiRuns: importedRuns.map((row) => {
+        const boundSnapshot = snapshots.find((snap) => snap.fingerprint === row.snapshotBinding);
+        if (row.snapshotBinding && !boundSnapshot) {
+          throw new PortableServerError(
+            "integrity_failure",
+            "imported run snapshot binding is missing from the portable archive",
+          );
+        }
+        return {
+          id: row.id,
+          sourceId: row.sourceId,
+          importedAt: row.createdAt,
+          providerKind: providerKind(row.provider),
+          model: row.model ?? "unknown",
+          version: row.version,
+          profileId: null,
+          usageStatus: "unknown" as const,
+          costStatus: "unknown" as const,
+          outputDigest: row.outputHash,
+          contributionId: row.contributionId,
+          promptDigest: row.promptHash,
+          promptCompleteness: row.promptCompleteness,
+          outputCompleteness: row.outputCompleteness,
+          workflowCompleteness: row.workflowCompleteness,
+          evidenceVisibility: row.evidenceVisibility,
+          snapshotId: boundSnapshot?.id ?? null,
+          privacyClass: row.privacyClass,
+          importerId: row.importerId,
+          operatorId: row.operatorId,
+          claimedTraces: [...row.claimedTraces],
+          visibilityNote: row.visibilityNote,
+          uncertainty: row.uncertainty,
+          timing: row.timing,
+          cost: row.cost,
+          redacted: row.redacted,
+          opaquePayloadJson: null,
+          objectHash: "",
+        };
+      }),
       snapshots: portableSnapshots,
       triageJobs: portableJobs,
       experiments: portableExperiments,
@@ -1097,7 +1420,10 @@ export class PortableInvestigationService {
       throw new PortableServerError("archive_size_limit", "portable object count exceeds limit");
     }
     try {
-      const investigation = attachPortableIntegrity(unsigned);
+      const publicUnsigned = this.deps.publicIdentities
+        ? projectPortablePublicIdentities(unsigned, this.deps.publicIdentities)
+        : unsigned;
+      const investigation = attachPortableIntegrity(publicUnsigned);
       const archive = sealPortableArchive({ investigation, exportedAt });
       const encodedBytes = Buffer.byteLength(JSON.stringify(archive), "utf8");
       if (encodedBytes > MAX_PORTABLE_ARCHIVE_BYTES) {
@@ -1163,7 +1489,12 @@ export class PortableInvestigationService {
     // Validate every supplied entry even when another missing blob makes the
     // overall archive ineligible for exact apply.
     validateSuppliedBlobs(archive, input.suppliedBlobs ?? []);
-    const catalog = await this.destinationCatalog(actor, isAdmin);
+    const catalog = await this.probedDestinationCatalog(
+      archive,
+      input.identityMap,
+      actor,
+      isAdmin,
+    );
     const catalogDigest = destinationCatalogDigest(catalog);
     let report: ArchivePreflightReportV1;
     try {
@@ -1210,7 +1541,7 @@ export class PortableInvestigationService {
           requiredRole: "case-lead_or_admin",
           evaluatedRole: isAdmin ? "admin" : "case-lead",
           actorId: actor.id,
-          destinationCatalogSource: "host_visible_catalog",
+          destinationCatalogSource: "host_owned_targeted_probe",
           destinationCatalogDigest: report.destinationCatalogDigest,
           sourceRolesTrusted: false,
           destinationMembershipGranted: false,
@@ -1385,6 +1716,19 @@ export class PortableInvestigationService {
             investigationId: prior.appliedInvestigationId,
           };
         }
+        // Last-write guard. The preflight probe settled collisions before the
+        // transaction opened, so a key taken since then belongs to a concurrent
+        // writer. Re-probing the exact destination ids this report will write,
+        // inside the transaction, turns that race into a rollback instead of a
+        // silent overwrite — and keeps the memory boundary refusing what a
+        // PostgreSQL primary key would refuse.
+        await assertDestinationIdsUnoccupied(preview.report, {
+          cases: ports.cases,
+          catalog: ports.catalog,
+          experiments: ports.experiments,
+          runs: ports.runs,
+          jobs: ports.jobs,
+        });
         const investigationId = await persistPortableArchive({
           archive: preview.archive,
           report: preview.report,
@@ -1416,6 +1760,12 @@ export class PortableInvestigationService {
       );
     } catch (error) {
       if (error instanceof PortableServerError) throw error;
+      if (error instanceof PortableDestinationOccupiedError) {
+        throw new PortableServerError(
+          "destination_id_occupied",
+          "a destination id this apply would write was taken concurrently; the apply rolled back",
+        );
+      }
       if (error instanceof PortableCommitOutcomeUnknownError) {
         throw new PortableServerError(
           "apply_outcome_unknown",
@@ -1448,77 +1798,95 @@ export class PortableInvestigationService {
     };
   }
 
-  private async destinationCatalog(actor: Actor, isAdmin: boolean): Promise<DestinationCatalogV1> {
-    const cases = await this.deps.cases.listCases(actor, isAdmin);
-    const identities = new Map<string, { actorId: string; username: string; email: null; displayName: string }>();
+  /**
+   * Archive-scoped, host-owned destination evidence for one preflight.
+   *
+   * This is deliberately *not* an enumeration of the destination corpus. The
+   * only destination keys an archive can collide with are the deterministic
+   * UUIDs it would itself mint, so the host probes exactly those and reports
+   * only the ones it found occupied. Cost is a bounded number of batched store
+   * calls that follows archive size, never the number of cases, contributions,
+   * or timeline events already at the destination.
+   *
+   * Identities are resolved the same way: only the destination actors this
+   * identity map names, plus the usernames the bundle's own actors would
+   * shadow, plus the acting actor. Nothing here is authorization — the caller
+   * must still revalidate, and an occupied key never grants anything.
+   */
+  private async probedDestinationCatalog(
+    archive: PortableArchiveV1,
+    identityMap: IdentityMapEntryV1[],
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<DestinationCatalogV1> {
+    const bundle = archive.investigation;
+    const probe = await probePortableCollisions(bundle, this.deps.probe);
+
+    const identities = new Map<string, DestinationIdentityV1>();
     identities.set(actor.id, {
       actorId: actor.id,
       username: actor.username,
       email: null,
       displayName: actor.username,
     });
-    const ids: Partial<Record<PortableObjectKind, Set<string>>> = {};
-    const sources = await this.deps.catalog.list();
-    for (const source of sources) addObjectId(ids, "source", source.id);
-    for (const caseRow of cases) {
-      addObjectId(ids, "investigation", caseRow.id);
-      for (const participant of caseRow.participants) {
-        identities.set(participant.identityId, {
-          actorId: participant.identityId,
-          username: participant.username,
-          email: null,
-          displayName: participant.username,
-        });
-        addObjectId(ids, "actor", participant.identityId);
-      }
-      const [contributions, artifacts, snapshots, runs, jobs, experiments, timeline] = await Promise.all([
-        this.deps.cases.listContributions(caseRow.id, actor, isAdmin),
-        this.deps.cases.listArtifacts(caseRow.id, actor, isAdmin),
-        this.deps.cases.listSnapshots(caseRow.id, actor, isAdmin),
-        this.deps.imports.listRuns(caseRow.id, actor, isAdmin),
-        this.deps.triageRuns.list(caseRow.id, actor, isAdmin),
-        this.deps.experiments.list(caseRow.id, actor, isAdmin),
-        this.deps.cases.listTimeline(caseRow.id),
-      ]);
-      for (const row of contributions) addObjectId(ids, "contribution", row.id);
-      for (const row of artifacts) {
-        addObjectId(ids, "evidence", row.id);
-        if (row.contentHash) addObjectId(ids, "content", row.contentHash);
-        if (row.kind === "attachment") addObjectId(ids, "attachment", row.id);
-      }
-      for (const row of snapshots) addObjectId(ids, "snapshot", row.id);
-      for (const row of runs) addObjectId(ids, "imported_ai_run", row.id);
-      for (const row of jobs) addObjectId(ids, "triage_job", row.id);
-      for (const row of experiments) {
-        addObjectId(ids, "experiment", row.id);
-        for (const observation of row.observations) addObjectId(ids, "helpfulness", observation.id);
-        for (const decision of row.decisions) addObjectId(ids, "decision", decision.id);
-        for (const gold of row.golds) addObjectId(ids, "gold", gold.goldId);
-        if (row.gold) {
-          for (const alignment of row.alignments) {
-            addObjectId(
-              ids,
-              "alignment",
-              `alignment-${sha256Text(`${row.id}:${row.gold.goldId}:${alignment.candidateId}`).slice(0, 24)}`,
-            );
-          }
-        }
-      }
-      if (contributions.some((row) => row.kind === "message")) {
-        addObjectId(ids, "discussion", portableDiscussionId(caseRow.id));
-      }
-      for (const row of timeline) addObjectId(ids, "timeline", String(row.seq));
+    const wantedIdentityIds = identityMap
+      .map((row) => row.destinationActorId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    // Bundle actor names are probed so the contract can still warn when an
+    // imported display name shadows a destination identity that was not used
+    // as a merge key. Matching a name is never a merge and never a grant.
+    const wantedUsernames = [
+      ...new Set(
+        bundle.actors.flatMap((row) => [row.username, row.displayName].filter((v) => v.length > 0)),
+      ),
+    ];
+    const found = await this.deps.probe.cases.probeParticipants({
+      // Object keys are probed host-wide because a deterministic id occupies
+      // its key whoever owns it. Identities are not: resolving one stays
+      // inside the caller's existing view so a preflight can never become an
+      // oracle for people they cannot already see.
+      scope: { actorId: actor.id, isAdmin },
+      identityIds: wantedIdentityIds,
+      usernames: wantedUsernames,
+    });
+    for (const row of found) {
+      if (identities.has(row.identityId)) continue;
+      identities.set(row.identityId, {
+        actorId: row.identityId,
+        username: row.username,
+        email: null,
+        displayName: row.username,
+      });
     }
-    addObjectId(ids, "actor", actor.id);
+
     const objectIds: DestinationCatalogV1["objectIds"] = {};
     for (const kind of PORTABLE_OBJECT_KINDS) {
-      const values = ids[kind];
-      if (values) objectIds[kind] = [...values];
+      const occupied = probe.occupiedByNamespace[kind];
+      if (occupied && occupied.length > 0) objectIds[kind] = occupied;
     }
+
+    // Only profiles this archive actually references can change the report, so
+    // scoping the known set here keeps the catalog digest archive-scoped
+    // without changing a single `missing_profile` outcome.
+    const referencedProfiles = new Set<string>();
+    for (const job of bundle.triageJobs) {
+      for (const candidate of job.candidates) {
+        if (candidate.profileId) referencedProfiles.add(candidate.profileId);
+      }
+    }
+    for (const run of bundle.importedAiRuns) {
+      if (run.profileId) referencedProfiles.add(run.profileId);
+    }
+    const knownProfileIds = this.deps.triageRuns
+      .listProfiles()
+      .map((row) => row.id)
+      .filter((id) => referencedProfiles.has(id))
+      .sort();
+
     return {
-      identities: [...identities.values()],
+      identities: [...identities.values()].sort((a, b) => (a.actorId < b.actorId ? -1 : a.actorId > b.actorId ? 1 : 0)),
       objectIds,
-      knownProfileIds: this.deps.triageRuns.listProfiles().map((row) => row.id),
+      knownProfileIds,
     };
   }
 }

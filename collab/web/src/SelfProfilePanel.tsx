@@ -607,48 +607,55 @@ export function SelfProfilePanel(props: {
         </p>
       ) : null}
 
-      <dl className="self-profile__facts">
-        <div>
-          <dt>Profile source</dt>
-          <dd>{PROVENANCE_LABELS[saved.provenance]}</dd>
-        </div>
-        <div>
-          <dt>Directory account</dt>
-          <dd>{directoryLinkLabel(saved)}</dd>
-        </div>
-        <div>
-          <dt>Directory sync</dt>
-          <dd>
-            {SYNC_LABELS[saved.directorySyncStatus]}
-            {saved.directorySyncedAt
-              ? ` · last attempt ${formatTimestamp(saved.directorySyncedAt)}`
-              : ""}
-          </dd>
-        </div>
-        <div>
-          <dt>Current revision</dt>
-          <dd>
-            {saved.revision}
-            <span className="self-profile__hint">
-              {" "}Used when saving so two overlapping edits cannot silently overwrite each other.
-            </span>
-          </dd>
-        </div>
-        <div>
-          <dt>Updated</dt>
-          <dd>{formatTimestamp(saved.updatedAt)}</dd>
-        </div>
-        <div>
-          <dt>Last signed in</dt>
-          <dd>{formatTimestamp(saved.lastSeenAt)}</dd>
-        </div>
-        {saved.avatar ? (
+      <details className="self-profile__provenance">
+        <summary>Account and directory details</summary>
+        <p className="self-profile__hint">
+          How this account is sourced and kept in sync. Your name, username, and role above are
+          the parts you and your teammates see; nothing here identifies you inside the directory.
+        </p>
+        <dl className="self-profile__facts">
           <div>
-            <dt>Avatar on file</dt>
-            <dd>{formatAvatar(saved.avatar, "None")}</dd>
+            <dt>Profile source</dt>
+            <dd>{PROVENANCE_LABELS[saved.provenance]}</dd>
           </div>
-        ) : null}
-      </dl>
+          <div>
+            <dt>Directory account</dt>
+            <dd>{directoryLinkLabel(saved)}</dd>
+          </div>
+          <div>
+            <dt>Directory sync</dt>
+            <dd>
+              {SYNC_LABELS[saved.directorySyncStatus]}
+              {saved.directorySyncedAt
+                ? ` · last attempt ${formatTimestamp(saved.directorySyncedAt)}`
+                : ""}
+            </dd>
+          </div>
+          <div>
+            <dt>Current revision</dt>
+            <dd>
+              {saved.revision}
+              <span className="self-profile__hint">
+                {" "}Used when saving so two overlapping edits cannot silently overwrite each other.
+              </span>
+            </dd>
+          </div>
+          <div>
+            <dt>Updated</dt>
+            <dd>{formatTimestamp(saved.updatedAt)}</dd>
+          </div>
+          <div>
+            <dt>Last signed in</dt>
+            <dd>{formatTimestamp(saved.lastSeenAt)}</dd>
+          </div>
+          {saved.avatar ? (
+            <div>
+              <dt>Avatar on file</dt>
+              <dd>{formatAvatar(saved.avatar, "None")}</dd>
+            </div>
+          ) : null}
+        </dl>
+      </details>
 
       {formError ? (
         <p
