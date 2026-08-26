@@ -41,8 +41,24 @@ export function directoryIdentityFilter(term: string): string {
   return `(&(objectClass=person)(|(uid=${escaped}*)(cn=${escaped}*)(displayName=${escaped}*)))`;
 }
 
+/**
+ * Group object classes the administrative directory picker will match.
+ * `groupOfNames` / `groupOfUniqueNames` / `posixGroup` cover the common
+ * OpenLDAP schemas; Active Directory groups are plain `group` and would
+ * otherwise never appear in this list.
+ */
+const DIRECTORY_GROUP_OBJECT_CLASSES = [
+  "groupOfNames",
+  "groupOfUniqueNames",
+  "group",
+  "posixGroup",
+] as const;
+
 export function directoryGroupFilter(term: string): string {
-  return `(&(objectClass=groupOfNames)(cn=${escapeFilter(term)}*))`;
+  const classes = DIRECTORY_GROUP_OBJECT_CLASSES.map(
+    (name) => `(objectClass=${name})`,
+  ).join("");
+  return `(&(|${classes})(cn=${escapeFilter(term)}*))`;
 }
 
 function userFilter(config: LdapConfig, username: string): string {

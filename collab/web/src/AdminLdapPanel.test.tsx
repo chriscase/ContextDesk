@@ -95,6 +95,41 @@ describe("AdminLdapPanel", () => {
     expect(JSON.stringify(readyReport)).not.toContain("fixture-alice-secret");
   });
 
+  it("names the group-refresh mode and CA trust the running configuration implies", async () => {
+    const withServiceBind = vi.fn(async () =>
+      new Response(JSON.stringify(publicConfig), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", withServiceBind);
+    render(<AdminLdapPanel />);
+    expect(
+      await screen.findByText(/live — the service bind re-reads membership on each request/),
+    ).toBeTruthy();
+    expect(screen.getByText("system trust store")).toBeTruthy();
+    cleanup();
+
+    // No service bind: membership is whatever the user bind exposed at login,
+    // and the panel must say so rather than leave it to be inferred.
+    const snapshot = {
+      ...publicConfig,
+      bindDn: null,
+      bindPasswordConfigured: false,
+      caConfigured: true,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(snapshot), { status: 200 })),
+    );
+    render(<AdminLdapPanel />);
+    expect(
+      await screen.findByText(
+        /login-time snapshot — membership changes apply at next sign-in/,
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("operator-supplied CA (replaces the system trust store)"),
+    ).toBeTruthy();
+  });
+
   it("states a bounded error when directory configuration is forbidden", async () => {
     vi.stubGlobal(
       "fetch",

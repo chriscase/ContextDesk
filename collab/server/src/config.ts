@@ -20,6 +20,11 @@ export interface Config {
   /** Built UI assets; null skips static serving (API-only). */
   staticDir: string | null;
   authMode: "ldap" | "local";
+  /**
+   * Ingress hops to trust when deriving the client address. null keeps the
+   * socket peer as the client (no proxy). See {@link parseTrustProxy}.
+   */
+  trustProxy: number | string | null;
 }
 
 function parsePort(raw: string | undefined): number {
@@ -43,6 +48,51 @@ function authMode(env: NodeJS.ProcessEnv): "ldap" | "local" {
     throw new Error(`COLLAB_AUTH_MODE must be ldap or local, got ${mode}`);
   }
   return mode;
+}
+
+/**
+ * How far to trust `X-Forwarded-*` when deriving `request.ip`.
+ *
+ * `request.ip` keys the login rate limiter and is recorded as the audit
+ * `origin`. The documented shared deployment terminates TLS at a reverse proxy
+ * and forwards HTTP, which makes the socket peer that proxy for every request:
+ * left unset there, one user's failed logins rate-limit every other user, and
+ * no audit record can attribute an origin.
+ *
+ * Unset or `0` keeps the socket peer as the client, which is correct for a
+ * directly exposed or loopback deployment. A positive integer trusts that many
+ * hops closest to this server. A comma-separated list trusts those addresses,
+ * CIDR blocks, or the `loopback` / `linklocal` / `uniquelocal` keywords; an
+ * address that is not parsable is refused when the server is built, not at
+ * request time. Trusting every forwarded address is deliberately not
+ * accepted - it would let any client forge `X-Forwarded-For` and evade the
+ * login rate limiter outright.
+ */
+export function parseTrustProxy(raw: string | undefined): number | string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  if (/^(?:true|all|\*)$/i.test(value)) {
+    throw new Error(
+      "COLLAB_TRUST_PROXY must be a hop count or an address list; trusting every forwarded address is refused",
+    );
+  }
+  if (/^(?:false|off)$/i.test(value)) return null;
+  if (/^\d+$/u.test(value)) {
+    const hops = Number.parseInt(value, 10);
+    if (hops === 0) return null;
+    if (hops > 16) {
+      throw new Error(`COLLAB_TRUST_PROXY hop count must be 0..16, got ${value}`);
+    }
+    return hops;
+  }
+  const entries = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (entries.length === 0) {
+    throw new Error("COLLAB_TRUST_PROXY must be a hop count or an address list");
+  }
+  return entries.join(",");
 }
 
 function storageMode(env: NodeJS.ProcessEnv): "postgres" | "sqlite" {
@@ -76,6 +126,7 @@ export function loadRuntimeConfig(
     evidenceRoot: env.COLLAB_EVIDENCE_ROOT ?? ".data/evidence",
     staticDir: env.COLLAB_STATIC_DIR?.trim() || null,
     authMode: authMode(env),
+    trustProxy: parseTrustProxy(env.COLLAB_TRUST_PROXY),
   };
 }
 
@@ -94,6 +145,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     evidenceRoot: ".data/evidence",
     staticDir: null,
     authMode: "ldap",
+    trustProxy: null,
     ...overrides,
   };
 }
