@@ -57,6 +57,62 @@ async function waitForTerminalTriage(
 }
 
 describe("synthetic demo server", () => {
+  it("wires the investigation record services used by the visible demo UI", async () => {
+    const demo = await buildDemoApp({ staticDir: null });
+    apps.push(demo);
+    const login = await demo.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: DEMO_USERNAME, password: DEMO_PASSWORD },
+    });
+    const headers = { cookie: cookie(login) };
+
+    const initialEntities = await demo.app.inject({
+      method: "GET",
+      url: "/api/entities",
+      headers,
+    });
+    expect(initialEntities.statusCode).toBe(200);
+
+    const createdEntity = await demo.app.inject({
+      method: "POST",
+      url: "/api/entities",
+      headers,
+      payload: {
+        kind: "organization",
+        label: "Synthetic Northwind Support",
+        privacyClass: "owner_only",
+      },
+    });
+    expect(createdEntity.statusCode).toBe(201);
+    const entity = JSON.parse(createdEntity.body) as { id: string };
+
+    const involvement = await demo.app.inject({
+      method: "POST",
+      url: `/api/cases/${demo.caseId}/involvement`,
+      headers,
+      payload: {
+        entityId: entity.id,
+        relationship: "affected",
+        occurredAt: "2025-11-02",
+      },
+    });
+    expect(involvement.statusCode).toBe(201);
+
+    const references = await demo.app.inject({
+      method: "GET",
+      url: `/api/cases/${demo.caseId}/references`,
+      headers,
+    });
+    expect(references.statusCode).toBe(200);
+    const resolutions = await demo.app.inject({
+      method: "GET",
+      url: `/api/cases/${demo.caseId}/resolutions`,
+      headers,
+    });
+    expect(resolutions.statusCode).toBe(200);
+  });
+
   it("can expose provider-free log chronology through an explicitly configured local bridge", async () => {
     const demo = await buildDemoApp({
       staticDir: null,

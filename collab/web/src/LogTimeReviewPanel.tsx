@@ -128,6 +128,9 @@ const UNRESOLVED_WORDING: Record<string, string> = {
 function boundedError(message: string, fallback: string): string {
   const trimmed = message.trim();
   if (!trimmed) return fallback;
+  // The server intentionally collapses unclassified host failures to this
+  // sentinel. It is safe, but it is not useful language for an operator.
+  if (trimmed.toLocaleLowerCase() === "invalid") return fallback;
   return trimmed.length > MAX_ERROR_LENGTH
     ? `${trimmed.slice(0, MAX_ERROR_LENGTH - 1)}…`
     : trimmed;
@@ -310,7 +313,10 @@ export function LogTimeReviewPanel(props: {
   }
 
   async function runApply() {
-    if (!preview) return;
+    // A declaration that resolves no timestamps cannot publish an event-time
+    // revision. Keep the honest preview visible, but do not offer a request
+    // which the host must reject as an empty revision.
+    if (!preview || preview.affectedRecords === 0) return;
     const result = await post(
       "apply",
       {
@@ -734,11 +740,19 @@ function PreviewCard(props: {
       </details>
 
       {props.canApply ? (
-        <button type="button" onClick={props.onApply} disabled={props.busy !== null}>
-          {props.busy === "apply"
-            ? "Applying…"
-            : `Apply ${preview.ianaTimezone} to this file`}
-        </button>
+        preview.affectedRecords > 0 ? (
+          <button type="button" onClick={props.onApply} disabled={props.busy !== null}>
+            {props.busy === "apply"
+              ? "Applying…"
+              : `Apply ${preview.ianaTimezone} to this file`}
+          </button>
+        ) : (
+          <p className="log-time__copy" role="note">
+            Nothing can be given an exact time with this choice, so there is no
+            time change to apply. Keep these lines in file order or preview a
+            different timezone.
+          </p>
+        )
       ) : null}
     </div>
   );
