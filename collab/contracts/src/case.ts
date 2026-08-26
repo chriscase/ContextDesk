@@ -1,4 +1,4 @@
-import { checkObject, f, type ObjectShape } from "./parse.js";
+import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import {
   OCCURRED_AT_PRECISIONS,
   OCCURRED_AT_ZONES,
@@ -18,6 +18,73 @@ export type CaseSeverity = (typeof CASE_SEVERITIES)[number];
 
 export const CASE_SCHEMA_ID = "cd-collab.case.v1" as const;
 
+export const INVESTIGATION_CONTEXT_FIELDS = [
+  "productName",
+  "version",
+  "build",
+  "component",
+  "environment",
+  "organization",
+] as const;
+export type InvestigationContextField = (typeof INVESTIGATION_CONTEXT_FIELDS)[number];
+export const INVESTIGATION_CONTEXT_VALUE_MAX_LENGTH = 200;
+
+export interface InvestigationContextV1 {
+  /** Display values are preserved as entered; search normalization is transient. */
+  productName: string;
+  version: string;
+  build: string;
+  component: string;
+  environment: string;
+  organization: string;
+}
+
+// Matching control characters is the point: stored context is single-line
+// display text, so the lint rule is inverted here.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]/;
+
+const investigationContextShape: ObjectShape = {
+  productName: f.opt(f.str),
+  version: f.opt(f.str),
+  build: f.opt(f.str),
+  component: f.opt(f.str),
+  environment: f.opt(f.str),
+  organization: f.opt(f.str),
+};
+
+function normalizeInvestigationContextValue(raw: unknown, path: string): string {
+  if (typeof raw !== "string") throw new ContractViolation(path, "expected string");
+  if (raw.length > INVESTIGATION_CONTEXT_VALUE_MAX_LENGTH) {
+    throw new ContractViolation(
+      path,
+      `exceeds ${INVESTIGATION_CONTEXT_VALUE_MAX_LENGTH} characters`,
+    );
+  }
+  if (CONTROL_CHARACTERS.test(raw)) {
+    throw new ContractViolation(path, "must be a single line of text");
+  }
+  return raw.trim().length === 0 ? "" : raw;
+}
+
+export function normalizeInvestigationContext(
+  raw: unknown,
+  path = "$.investigationContext",
+): InvestigationContextV1 | null {
+  if (raw === undefined || raw === null) return null;
+  checkObject(path, investigationContextShape, raw);
+  const record = raw as Record<string, unknown>;
+  const context = {
+    productName: normalizeInvestigationContextValue(record.productName ?? "", `${path}.productName`),
+    version: normalizeInvestigationContextValue(record.version ?? "", `${path}.version`),
+    build: normalizeInvestigationContextValue(record.build ?? "", `${path}.build`),
+    component: normalizeInvestigationContextValue(record.component ?? "", `${path}.component`),
+    environment: normalizeInvestigationContextValue(record.environment ?? "", `${path}.environment`),
+    organization: normalizeInvestigationContextValue(record.organization ?? "", `${path}.organization`),
+  };
+  return Object.values(context).some((value) => value !== "") ? context : null;
+}
+
 export interface CaseParticipantV1 {
   identityId: string;
   username: string;
@@ -33,6 +100,7 @@ export interface CaseV1 {
   scope: string;
   openQuestions: string[];
   situationVersion: number;
+  investigationContext: InvestigationContextV1 | null;
   /**
    * When the investigated work happened, as recorded — literal text, so an
    * unknown time zone stays unknown. `createdAt` below is the recording clock
@@ -65,6 +133,7 @@ const caseShape: ObjectShape = {
   scope: f.opt(f.str),
   openQuestions: f.opt(f.arr(f.str)),
   situationVersion: f.opt(f.u64),
+  investigationContext: f.optNul(f.obj(investigationContextShape)),
   // Optional on the wire so a case written before the occurred-at clock
   // existed still parses; absent means nobody recorded when it happened.
   occurredAt: f.optNul(f.str),
@@ -100,6 +169,7 @@ export function parseCase(raw: unknown): CaseV1 {
     scope: parsed.scope ?? "",
     openQuestions: parsed.openQuestions ? [...parsed.openQuestions] : [],
     situationVersion: parsed.situationVersion ?? 0,
+    investigationContext: normalizeInvestigationContext(parsed.investigationContext),
     occurredAt: parsed.occurredAt ?? null,
     occurredAtPrecision: parsed.occurredAtPrecision ?? "unknown",
     occurredAtZone: parsed.occurredAtZone ?? "unspecified",
