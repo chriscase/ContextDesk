@@ -66,6 +66,10 @@ import {
 } from "./modules/people/index.js";
 import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js";
 import { registerEntityRoutes, type EntityService } from "./modules/entities/index.js";
+import {
+  registerSoftwareImpactRoutes,
+  type SoftwareImpactService,
+} from "./modules/software-impact/index.js";
 import { registerReferenceRoutes, type ReferenceService } from "./modules/references/index.js";
 import { registerResolutionRoutes, type ResolutionService } from "./modules/resolutions/index.js";
 import { registerModelPurposePolicyRoutes, type ModelPurposePolicyService } from "./modules/model-policy/index.js";
@@ -117,6 +121,8 @@ export interface AppDeps {
   setup?: SetupService;
   /** Reusable investigation entities and their per-investigation involvement. */
   entities?: EntityService;
+  /** Investigation-scoped observed/suspected/confirmed/ruled-out software impact. */
+  softwareImpact?: SoftwareImpactService;
   /** Authorized cross-investigation references. */
   references?: ReferenceService;
   /** Resolution records behind conclusive status transitions. */
@@ -309,6 +315,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
           entities: deps.entities,
           // Filtering by entity must never widen what a reader can see, so the
           // index is built from the investigations they could already list.
+          visibleInvestigationIds: async (actor, isAdmin) =>
+            (await domain.listCases(actor, isAdmin)).map((row) => row.id),
+        });
+      }
+      if (deps.softwareImpact) {
+        const domain = deps.domain;
+        await registerSoftwareImpactRoutes(app, {
+          sessionAuth,
+          audit: security.audit,
+          softwareImpact: deps.softwareImpact,
           visibleInvestigationIds: async (actor, isAdmin) =>
             (await domain.listCases(actor, isAdmin)).map((row) => row.id),
         });

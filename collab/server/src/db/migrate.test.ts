@@ -16,7 +16,8 @@ describe("migration versions", () => {
     expect(versions).toContain("019_experiment_lock_privilege");
     expect(versions).toContain("020_model_purpose_policy");
     expect(versions).toContain("021_workbench");
-    expect(latestMigrationVersion()).toBe("021_workbench");
+    expect(versions).toContain("022_software_impact");
+    expect(latestMigrationVersion()).toBe("022_software_impact");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -26,10 +27,10 @@ describe("migration versions", () => {
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
     expect(versions.slice(-4)).toEqual([
-      "018_log_time",
       "019_experiment_lock_privilege",
       "020_model_purpose_policy",
       "021_workbench",
+      "022_software_impact",
     ]);
   });
 });
@@ -60,6 +61,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("019_experiment_lock_privilege");
       expect(up.applied).toContain("020_model_purpose_policy");
       expect(up.applied).toContain("021_workbench");
+      expect(up.applied).toContain("022_software_impact");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -119,8 +121,10 @@ describe.skipIf(!adminUrl())("migrations", () => {
         `SELECT to_regclass('public.log_corpora') AS to_regclass`,
       );
       expect(logTimeBeforeRollback.rows[0]?.to_regclass).not.toBeNull();
-      // 021 removes the workbench records, then 020 removes the singleton
+      // 022 removes software impact records, then 021 removes the workbench
+      // records, then 020 removes the singleton
       // policy state before 019 narrows the app role's row-lock privilege.
+      expect((await migrateDown(client)).rolledBack).toBe("022_software_impact");
       expect((await migrateDown(client)).rolledBack).toBe("021_workbench");
       expect((await migrateDown(client)).rolledBack).toBe("020_model_purpose_policy");
       expect((await migrateDown(client)).rolledBack).toBe("019_experiment_lock_privilege");
@@ -216,6 +220,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("019_experiment_lock_privilege");
       expect(dry.pending).toContain("020_model_purpose_policy");
       expect(dry.pending).toContain("021_workbench");
+      expect(dry.pending).toContain("022_software_impact");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

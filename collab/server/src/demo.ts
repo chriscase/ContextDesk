@@ -22,6 +22,7 @@ import { CatalogService, MemoryCatalogStore } from "./modules/catalog/index.js";
 import { CaseService, MemoryCaseStore } from "./modules/cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "./modules/experiments/index.js";
 import { EntityService } from "./modules/entities/index.js";
+import { SoftwareImpactService } from "./modules/software-impact/index.js";
 import { ExportService, testExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
 import {
@@ -899,6 +900,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   };
   resolutions.bindInvestigations(investigations);
   const entities = new EntityService({ audit, investigations });
+  const softwareImpact = new SoftwareImpactService({ audit, investigations });
   const references = new ReferenceService({ audit, investigations });
   evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
   evidence.addReferencedContentHashSource(() => runStore.listReferencedContentHashes());
@@ -1073,6 +1075,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       presence,
       experiments,
       entities,
+      softwareImpact,
       references,
       resolutions,
       exporter,

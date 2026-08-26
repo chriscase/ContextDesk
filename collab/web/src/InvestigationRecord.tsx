@@ -11,12 +11,15 @@
  * only a value that arrived with an offset is rendered as a moment in time.
  *
  * The second is that nothing here is content. Entities are reusable labels,
- * citations are pointers with a reason. Evidence, logs, email, chat, and notes
- * stay in the investigation stages where they were captured.
+ * citations are pointers with a reason, and software-impact rows are epistemic
+ * judgments about named product/version/build identities — not a build timeline.
+ * Evidence, logs, email, chat, and notes stay in the investigation stages
+ * where they were captured.
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { ENTITY_KIND_LABELS, loadEntities, type EntityKind, type EntityRow } from "./Entities.js";
 import { protectedApiFetch } from "./protected-api.js";
+import { SoftwareImpactPanel } from "./SoftwareImpact.js";
 
 export const INVOLVEMENT_RELATIONSHIPS = [
   "affected",
@@ -355,6 +358,8 @@ export function InvestigationRecordPanel(props: {
           )
         ) : null}
       </section>
+
+      <SoftwareImpactPanel caseId={caseId} canWrite={props.canWrite} />
 
       <section aria-labelledby="record-entities-title" className="situation__record-group">
         <h5 id="record-entities-title">Who and what is involved</h5>

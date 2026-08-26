@@ -14,6 +14,7 @@ import { FilesystemEvidenceStore } from "../evidence/store.js";
 import { CatalogService } from "../modules/catalog/index.js";
 import { CaseService } from "../modules/cases/index.js";
 import { EntityService } from "../modules/entities/index.js";
+import { SoftwareImpactService } from "../modules/software-impact/index.js";
 import { ReferenceService } from "../modules/references/index.js";
 import { ResolutionService } from "../modules/resolutions/index.js";
 import { createSqliteRuntime } from "./sqlite.js";
@@ -47,6 +48,11 @@ function wire(runtime: ReturnType<typeof createSqliteRuntime>, evidenceRoot: str
     cases,
     resolutions,
     entities: new EntityService({ store: runtime.entities, audit: runtime.audit, investigations }),
+    softwareImpact: new SoftwareImpactService({
+      store: runtime.softwareImpact,
+      audit: runtime.audit,
+      investigations,
+    }),
     references: new ReferenceService({
       store: runtime.references,
       audit: runtime.audit,
@@ -56,7 +62,7 @@ function wire(runtime: ReturnType<typeof createSqliteRuntime>, evidenceRoot: str
 }
 
 describe("SQLite durability for the investigation record graph", () => {
-  it("keeps entities, involvement, citations, occurred-at, and resolutions across a reopen", async () => {
+  it("keeps entities, involvement, citations, occurred-at, software impact, and resolutions across a reopen", async () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-record-sqlite-"));
     const path = join(root, "collab.sqlite");
     const evidenceRoot = join(root, "evidence");
@@ -92,6 +98,20 @@ describe("SQLite durability for the investigation record graph", () => {
         { toInvestigationId: older.id, note: "Synthetic prior signature." },
         "test",
       );
+      const ruledOut = await one.softwareImpact.record(
+        current.id,
+        actor,
+        true,
+        { productName: "Fixture Desk", version: "4.1", status: "ruled_out" },
+        "test",
+      );
+      const confirmed = await one.softwareImpact.record(
+        current.id,
+        actor,
+        true,
+        { productName: "Fixture Desk", version: "4.2", build: "build-007", status: "confirmed" },
+        "test",
+      );
       await one.cases.setStatus(current.id, actor, "resolved", "test", {
         resolution: {
           basis: "human_only",
@@ -120,6 +140,12 @@ describe("SQLite durability for the investigation record graph", () => {
         const references = await two.references.list(current.id, actor, true);
         expect(references.outbound).toHaveLength(1);
         expect(references.outbound[0]?.recordedTitle).toBe("Synthetic prior investigation");
+
+        const impact = await two.softwareImpact.list(current.id, actor, true);
+        expect(impact.ordering).toBe("recorded_at");
+        expect(impact.records.map((row) => row.id)).toEqual([ruledOut.id, confirmed.id]);
+        expect(impact.records.map((row) => row.status)).toEqual(["ruled_out", "confirmed"]);
+        expect(impact.records.map((row) => row.version)).toEqual(["4.1", "4.2"]);
 
         const resolutions = await two.resolutions.list(current.id, actor, true);
         expect(resolutions.resolutions).toHaveLength(1);

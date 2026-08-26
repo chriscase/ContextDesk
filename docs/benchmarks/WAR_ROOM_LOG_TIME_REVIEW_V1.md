@@ -1,8 +1,10 @@
 # War Room case-bound log corpus and time review v1
 
-**Status: Local integration.** Implemented on
-`claude/contextdesk-war-room-logging-2923u4` only. Nothing in this document is
-available on `main`.
+**Status: Partial.** The case-bound corpus and per-source preview → apply →
+clear → undo surface shipped on `main` at
+`bbb8b27cfc21c2fd65ed282f28631f3030c9968a` (PR #1090). Chronology projection,
+JSONL intake, and a War Room log workbench are other open lanes and are not
+claimed here.
 
 ## The question
 
@@ -150,7 +152,8 @@ the surface is absent rather than degraded.
 | Durable record, replay, dependents                 | `collab/server/src/modules/log-time/log-time.test.ts` (22 tests)           |
 | Contract shape and adversarial refusal             | `collab/contracts/src/investigation-log-time*.test.ts` (92 tests)          |
 | Review surface behavior                            | `collab/web/src/LogTimeReviewPanel.test.tsx` (12 tests)                    |
-| Whole journey in a browser against the real pipeline | `collab/e2e/specs/19-log-time-review.spec.ts`                            |
+| Whole journey in a browser against the real pipeline | `collab/e2e/specs/24-log-time-review.spec.ts`                            |
+| Offsetless timestamp scenario in the intake matrix | `collab/e2e/specs/19-war-room-intake.spec.ts` scenario 2               |
 
 ## Residuals
 

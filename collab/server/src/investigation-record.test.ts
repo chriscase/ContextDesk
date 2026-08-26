@@ -18,6 +18,9 @@ import {
   parseInvestigationResolution,
   parseInvestigationResolutionList,
   parseInvolvementIndex,
+  parseSoftwareImpact,
+  parseSoftwareImpactList,
+  parseSoftwareImpactSuggestions,
   parseTimeline,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
@@ -765,6 +768,179 @@ describe("human-only resolution and the resolved-status guard", () => {
         expect(res.statusCode).toBe(200);
         expect(parseCase(body(res)).status).toBe(status);
       }
+    });
+  });
+});
+
+describe("investigation-scoped software impact", () => {
+  it("records several named identities in recording order and never ranks their builds", async () => {
+    await withRecordApp(async ({ app }) => {
+      const alice = await login(app, "alice");
+      const investigation = parseCase(
+        await createInvestigation(app, alice, { title: "Synthetic impact case" }),
+      );
+
+      const firstRes = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/software-impact`,
+        headers: { cookie: alice },
+        payload: { productName: "Fixture Desk", version: "4.1", status: "ruled_out" },
+      });
+      expect(firstRes.statusCode).toBe(201);
+      const first = parseSoftwareImpact(body(firstRes));
+
+      const secondRes = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/software-impact`,
+        headers: { cookie: alice },
+        payload: {
+          productName: "Fixture Desk",
+          version: "4.2",
+          build: "build-007",
+          status: "confirmed",
+          note: "Failing line appears only on this synthetic worker image.",
+        },
+      });
+      expect(secondRes.statusCode).toBe(201);
+      const second = parseSoftwareImpact(body(secondRes));
+
+      const listed = parseSoftwareImpactList(
+        body(
+          await app.inject({
+            method: "GET",
+            url: `/api/cases/${investigation.id}/software-impact`,
+            headers: { cookie: alice },
+          }),
+        ),
+      );
+      expect(listed.ordering).toBe("recorded_at");
+      expect(listed.records.map((row) => row.id)).toEqual([first.id, second.id]);
+      expect(listed.records.map((row) => row.status)).toEqual(["ruled_out", "confirmed"]);
+    });
+  });
+
+  it("refuses a second active claim for the same identity", async () => {
+    await withRecordApp(async ({ app }) => {
+      const alice = await login(app, "alice");
+      const investigation = parseCase(
+        await createInvestigation(app, alice, { title: "Synthetic duplicate impact" }),
+      );
+      const created = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/software-impact`,
+        headers: { cookie: alice },
+        payload: { productName: "Fixture Desk", build: "build-007", status: "suspected" },
+      });
+      expect(created.statusCode).toBe(201);
+      const clash = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/software-impact`,
+        headers: { cookie: alice },
+        payload: { productName: "fixture desk", build: "BUILD-007", status: "confirmed" },
+      });
+      expect(clash.statusCode).toBe(409);
+      expect(body(clash)).toMatchObject({
+        error: "already_recorded",
+        existingId: parseSoftwareImpact(body(created)).id,
+      });
+    });
+  });
+
+  it("offers suggestions only from investigations the reader can already see", async () => {
+    await withRecordApp(async ({ app }) => {
+      const alice = await login(app, "alice");
+      const bob = await login(app, "bob");
+      const aliceCase = parseCase(
+        await createInvestigation(app, alice, { title: "Synthetic alice impact" }),
+      );
+      const bobCase = parseCase(await createInvestigation(app, bob, { title: "Synthetic bob impact" }));
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/api/cases/${aliceCase.id}/software-impact`,
+            headers: { cookie: alice },
+            payload: { environment: "QA / us-central", status: "observed" },
+          })
+        ).statusCode,
+      ).toBe(201);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/api/cases/${bobCase.id}/software-impact`,
+            headers: { cookie: bob },
+            payload: { productName: "Secret Catalog", environment: "prod-west", status: "confirmed" },
+          })
+        ).statusCode,
+      ).toBe(201);
+
+      const suggestions = parseSoftwareImpactSuggestions(
+        body(
+          await app.inject({
+            method: "GET",
+            url: "/api/software-impact/suggestions?field=environment",
+            headers: { cookie: alice },
+          }),
+        ),
+      );
+      expect(suggestions.values).toEqual(["QA / us-central"]);
+
+      const hidden = await app.inject({
+        method: "GET",
+        url: `/api/cases/${bobCase.id}/software-impact`,
+        headers: { cookie: alice },
+      });
+      expect(hidden.statusCode).toBe(404);
+    });
+  });
+
+  it("lets a viewer read and refuses their writes", async () => {
+    await withRecordApp(async ({ app }) => {
+      const alice = await login(app, "alice");
+      const carol = await login(app, "carol");
+      const investigation = parseCase(
+        await createInvestigation(app, alice, { title: "Synthetic viewer impact" }),
+      );
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/api/cases/${investigation.id}/participants`,
+            headers: { cookie: alice },
+            payload: {
+              identityId: "uid=carol,ou=people,dc=example,dc=test",
+              username: "carol",
+            },
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/api/cases/${investigation.id}/software-impact`,
+            headers: { cookie: alice },
+            payload: { component: "queue-worker", status: "observed" },
+          })
+        ).statusCode,
+      ).toBe(201);
+
+      const listed = await app.inject({
+        method: "GET",
+        url: `/api/cases/${investigation.id}/software-impact`,
+        headers: { cookie: carol },
+      });
+      expect(listed.statusCode).toBe(200);
+      expect(parseSoftwareImpactList(body(listed)).records).toHaveLength(1);
+
+      const write = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/software-impact`,
+        headers: { cookie: carol },
+        payload: { component: "queue-worker", status: "confirmed" },
+      });
+      expect(write.statusCode).toBe(403);
     });
   });
 });

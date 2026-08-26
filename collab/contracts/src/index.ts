@@ -785,6 +785,7 @@ export * from "./investigation-strategy-connector.js";
 export * from "./investigation-activity.js";
 export * from "./temporal.js";
 export * from "./investigation-entity.js";
+export * from "./investigation-software-impact.js";
 export * from "./investigation-reference.js";
 export * from "./investigation-resolution.js";
 export * from "./investigation-workbench.js";

@@ -98,6 +98,12 @@ function stubFetch(options?: {
         json: async () => ({ involvements: options?.involvements ?? [] }),
       };
     }
+    if (url.includes("/software-impact/suggestions")) {
+      return { ok: true, json: async () => ({ values: [] }) };
+    }
+    if (url.endsWith("/software-impact")) {
+      return { ok: true, json: async () => ({ records: [] }) };
+    }
     if (url.endsWith("/references")) {
       return {
         ok: true,
@@ -248,6 +254,9 @@ describe("involvement and historical attribution", () => {
     expect(
       await screen.findByText(/No entities are recorded yet\./),
     ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Affected software" })).toBeTruthy();
+    expect(screen.getByText(/No affected software is recorded yet\./)).toBeTruthy();
+    expect(screen.getByText(/builds are not ordered, and a later version is never inferred/i)).toBeTruthy();
   });
 
   it("keeps an ended involvement visible instead of removing it", async () => {

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/investigation-software-impact.v1.json",
+  "title": "cd-collab Software Impact v1",
+  "description": "One human judgment that a named software identity is observed, suspected, confirmed, or ruled out as affected. Labels are not ordered by build lineage.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "investigationId",
+    "productName",
+    "version",
+    "build",
+    "component",
+    "environment",
+    "status",
+    "note",
+    "state",
+    "recordedAt",
+    "recordedBy",
+    "recordedByUsername",
+    "updatedAt",
+    "releasedAt"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.software_impact.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "investigationId": { "type": "string", "minLength": 1 },
+    "productName": { "type": "string", "maxLength": 200 },
+    "version": { "type": "string", "maxLength": 200 },
+    "build": { "type": "string", "maxLength": 200 },
+    "component": { "type": "string", "maxLength": 200 },
+    "environment": { "type": "string", "maxLength": 200 },
+    "status": {
+      "type": "string",
+      "enum": ["observed", "suspected", "confirmed", "ruled_out"]
+    },
+    "note": { "type": "string", "maxLength": 400 },
+    "state": { "type": "string", "enum": ["active", "released"] },
+    "recordedAt": { "type": "string", "minLength": 1 },
+    "recordedBy": { "type": "string", "minLength": 1 },
+    "recordedByUsername": { "type": "string", "minLength": 1 },
+    "updatedAt": { "type": "string", "minLength": 1 },
+    "releasedAt": { "type": ["string", "null"] }
+  }
+}
