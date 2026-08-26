@@ -325,6 +325,19 @@ export function CaseBoardPanel(props: {
     );
   }
 
+  /**
+   * Analyze shows this board and the Log workbench side by side over the same
+   * investigation. A file uploaded here belongs in both, so the upload says so
+   * rather than leaving the workbench listing a stale inventory until reload.
+   */
+  function announceEvidenceChanged() {
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:evidence-changed", {
+        detail: { caseId: props.caseId },
+      }),
+    );
+  }
+
   async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (props.readOnly || !props.canWrite || uploading) return;
@@ -378,6 +391,7 @@ export function CaseBoardPanel(props: {
         if (!artifactId) {
           setError("Upload succeeded but the snapshot was not frozen: the new evidence id was unavailable. Freeze it from the evidence board.");
           await load(null);
+          announceEvidenceChanged();
           return;
         }
         const evidenceIds = [...new Set([...selectedEvidence, artifactId])];
@@ -389,6 +403,7 @@ export function CaseBoardPanel(props: {
         if (!snapshotResponse.ok) {
           setError(await errorText(snapshotResponse, "Upload succeeded but the snapshot could not be frozen."));
           await load(null);
+          announceEvidenceChanged();
           return;
         }
         const snapshot = (await snapshotResponse.json()) as SnapshotView;
@@ -399,9 +414,11 @@ export function CaseBoardPanel(props: {
             detail: { caseId: props.caseId, snapshotId: snapshot.id },
           }),
         );
+        announceEvidenceChanged();
         return;
       }
       await load(null);
+      announceEvidenceChanged();
     } catch (cause) {
       setError(
         cause instanceof Error

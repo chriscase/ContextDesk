@@ -453,6 +453,33 @@ describe("Log workbench honesty and navigation", () => {
     await waitFor(() => expect(saved).toHaveLength(3));
     expect(saved[2]).toBe(saved[1]);
   });
+  it("picks up a log uploaded through the evidence board beside it", async () => {
+    let inventoryCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/workbench")) {
+          inventoryCalls += 1;
+          if (inventoryCalls === 1) {
+            return jsonResponse({ items: [], normalizationRevision: null });
+          }
+          return jsonResponse(inventory());
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    expect(await screen.findByText(/no imported logs yet/)).toBeTruthy();
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }),
+    );
+    expect((await screen.findAllByText("edge.log")).length).toBeGreaterThan(0);
+  });
+
   it("keeps a paged pane where the reader left it when another file is opened", async () => {
     const pageRequests: string[] = [];
     vi.stubGlobal(

@@ -133,7 +133,9 @@ test.describe("complete war-room operator journey", () => {
       page.getByRole("button", { name: "Upload evidence" }).click(),
     ]);
     expect(sharedPosted.ok(), await sharedPosted.text()).toBeTruthy();
-    await expect(page.getByText("shared-timeout.log", { exact: true })).toBeVisible();
+    await expect(
+      page.getByLabel("Evidence and snapshots").getByText("shared-timeout.log", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByText("share_safe", { exact: true }).first()).toBeVisible();
     // Present in the page behind its disclosure; a closed <details> keeps it
     // out of the accessibility tree, so it is addressed by attribute here.
@@ -318,7 +320,11 @@ test.describe("complete war-room operator journey", () => {
     expect(exportedText).not.toContain(humanNote);
     expect(exportedText).not.toContain(acceptedText);
     await gotoStage(page, "Analyze");
-    await expect(page.getByText("unique-worker.log", { exact: true })).toBeVisible();
+    // Scoped for the same reason as the earlier board claim: Analyze names an
+    // imported log in both the evidence board and the Log workbench.
+    await expect(
+      page.getByLabel("Evidence and snapshots").getByText("unique-worker.log", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByText("owner_only", { exact: true }).first()).toBeVisible();
 
     await page.reload();

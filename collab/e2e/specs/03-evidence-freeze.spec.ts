@@ -125,7 +125,11 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
       page.getByRole("button", { name: "Upload evidence" }).click(),
     ]);
     expect(posted.ok(), await posted.text()).toBeTruthy();
-    await expect(page.getByText("ui-upload.log", { exact: true })).toBeVisible();
+    // Scoped to the evidence board: Analyze now also lists an uploaded log in
+    // the Log workbench beside it, so a page-wide match is ambiguous by design.
+    await expect(
+      page.getByLabel("Evidence and snapshots").getByText("ui-upload.log", { exact: true }),
+    ).toBeVisible();
     // The privacy class leads; the digest does not. A truncated hash cannot be
     // matched against another system, so it is not what the card opens with.
     await expect(page.getByText("share_safe", { exact: true }).first()).toBeVisible();

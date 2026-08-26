@@ -304,9 +304,12 @@ export function LogWorkbench(props: {
     };
     window.addEventListener("contextdesk:corpus-intake-committed", reload);
     window.addEventListener("contextdesk:snapshot-frozen", reload);
+    // Evidence can also arrive through the board beside this panel on Analyze.
+    window.addEventListener("contextdesk:evidence-changed", reload);
     return () => {
       window.removeEventListener("contextdesk:corpus-intake-committed", reload);
       window.removeEventListener("contextdesk:snapshot-frozen", reload);
+      window.removeEventListener("contextdesk:evidence-changed", reload);
     };
   }, [load, props.caseId]);
 
