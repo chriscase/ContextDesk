@@ -396,6 +396,20 @@ export {
   parseTriageJobShareSafe,
   projectTriageJobShareSafe,
 } from "./triage-job.js";
+
+export {
+  TRIAGE_PRODUCING_CANDIDATE_STATUSES,
+  TRIAGE_SETTLED_CANDIDATE_STATUSES,
+  isTriageProducingStatus,
+  isTriageSettledStatus,
+  resolveTriageJobStatus,
+  triageJobExecutionState,
+  triageLanePhaseCounts,
+} from "./triage-lifecycle.js";
+export type {
+  TriageJobExecutionState,
+  TriageLanePhaseCountsV1,
+} from "./triage-lifecycle.js";
 export type {
   TriageCandidateRunV1,
   TriageCandidateSpecV1,

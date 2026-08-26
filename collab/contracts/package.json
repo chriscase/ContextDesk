@@ -16,6 +16,10 @@
       "types": "./dist/admin-web.d.ts",
       "import": "./dist/admin-web.js"
     },
+    "./triage-lifecycle": {
+      "types": "./dist/triage-lifecycle.d.ts",
+      "import": "./dist/triage-lifecycle.js"
+    },
     "./corpus-intake": {
       "types": "./dist/investigation-corpus-intake.d.ts",
       "import": "./dist/investigation-corpus-intake.js"

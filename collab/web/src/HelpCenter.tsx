@@ -323,7 +323,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "The server stores the question, task fingerprint, strategy, snapshot fingerprint, requester, lane identities, progress, results, citations, and unknowns. A run remains attributed to the person and evidence set that created it.",
         limits:
-          "Synthetic / offline runs are deterministic plumbing checks: they do not inspect evidence or run a model. Configured gateway runs use the host bridge, not browser credentials; gateway runs require at least two lanes. Usage and cost remain unknown unless the host reports them.",
+          "Synthetic / offline runs are deterministic plumbing checks: they do not inspect evidence or run a model. Configured gateway runs use the host bridge, not browser credentials; gateway runs require at least two lanes. Usage and cost remain unknown unless the host reports them. A slow gateway can leave a run waiting for minutes; launching the identical run again while the first is still in flight is refused rather than run twice.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
@@ -364,9 +364,27 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         title: "Run AI lanes against a snapshot",
         summary:
           "A case lead launches a recorded triage run against one frozen snapshot, then compares lanes when useful.",
-        keywords: ["triage run", "lane", "model", "synthetic", "gateway", "launch", "profile", "runner", "job", "concurrency"],
+        keywords: [
+          "triage run",
+          "lane",
+          "model",
+          "synthetic",
+          "gateway",
+          "launch",
+          "profile",
+          "runner",
+          "job",
+          "concurrency",
+          "slow",
+          "waiting",
+          "timeout",
+          "deadline",
+          "cancel",
+          "duplicate",
+          "retry",
+        ],
         what:
-          "A triage run binds one to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Synthetic / offline is a deterministic, provider-free stand-in. Configured gateway sends the request through the host bridge, which owns provider calls and credentials. Gateway mode requires at least two lanes. Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled.",
+          "A triage run binds one to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Synthetic / offline is a deterministic, provider-free stand-in. Configured gateway sends the request through the host bridge, which owns provider calls and credentials. Gateway mode requires at least two lanes. Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled. A run is partial only when at least one lane actually produced a result; when every lane failed, missed its deadline, or was cancelled, the run says failed, timed out, or cancelled rather than partial, and nothing is offered for review.",
         when:
           "Run lanes after freezing a snapshot, when the team wants a recorded answer over exactly that evidence or wants structured outputs to compare.",
         steps: [
@@ -379,6 +397,41 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Each run records its snapshot binding and fingerprint, request fingerprint, who requested it, per-lane model and profile identity, per-lane output hashes and cited evidence, and timestamps. Usage and cost are always recorded as unknown — the workspace never invents them.",
         limits:
           "Launching requires the case-lead role. Synthetic lanes are placeholders and say so — they make no live-model claims. Gateway availability depends on host configuration this app can only report, not change. Agreement between lanes is not proof of correctness, and the run panel says exactly that.",
+        actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
+      },
+      {
+        id: "slow-gateway-run",
+        title: "When a gateway run is slow or does not answer",
+        summary:
+          "What the panel shows while you wait, who owns the deadline, what cancelling keeps, and why the same run cannot be started twice.",
+        keywords: [
+          "slow",
+          "stuck",
+          "waiting",
+          "hang",
+          "timeout",
+          "deadline",
+          "cancel",
+          "duplicate",
+          "retry",
+          "rerun",
+          "unreliable",
+          "gateway",
+        ],
+        what:
+          "While a run is unfinished the panel reports the wait in plain words: how long it has been queued or running, how many lanes are queued, running, and settled, and how many produced a result. Selecting gateway mode is a request, not proof a provider was reached, so a run whose lanes never started reads as configured — no lane executed, never as a run that happened. A run that has not started shows no start time instead of borrowing the time it was created.",
+        when:
+          "Read this when a run sits without visible progress, when lanes settle without results, or before starting the same run a second time.",
+        steps: [
+          "Read the wait line on the run: queued with no lane started means nothing has been sent for you to read yet.",
+          "Check the lane counts. Lanes settle independently, so some may finish while others are still running.",
+          "Wait for the host deadline, or request cancellation if you no longer need the answer.",
+          "If the run produced nothing, read the per-lane reason, then launch a fresh attempt.",
+        ],
+        recorded:
+          "The run records per-lane start and finish times, the settled outcome and error code for each lane, whether cancellation was requested, and why the run stopped. Missing host timing is recorded as unknown rather than filled in.",
+        limits:
+          "The host owns the run deadline; this app cannot extend or shorten it and does not run its own clock against the provider. Cancellation is a request, and lanes that already settled keep their recorded results. Starting an identical run while one is still in flight is refused, naming the run already running, so a slow gateway is not billed twice for one question — change the question, lanes, or settings, or reuse the earlier setup as an explicit rerun, to launch a genuinely different attempt. Once a run has settled, launching the same one again is always allowed.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
