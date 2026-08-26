@@ -1,11 +1,12 @@
 /**
  * Investigation-scoped software-impact persistence.
  *
- * Memory is the local/demo store. SQLite wraps this object. PostgreSQL is
- * intentionally omitted in this slice so the write set does not race other
- * lanes for migration 020.
+ * Memory is the local/demo store. SQLite wraps this object. PostgreSQL uses
+ * the same row shape and keeps active-identity uniqueness in the database so
+ * two hosted writers cannot record the same claim concurrently.
  */
 import { randomUUID } from "node:crypto";
+import type { Pool } from "pg";
 import type {
   SoftwareImpactIdentityV1,
   SoftwareImpactState,
@@ -41,6 +42,8 @@ export interface SoftwareImpactStore {
   updateStatus(id: string, status: SoftwareImpactStatus, note: string, updatedAt: string): Promise<void>;
   release(id: string, releasedAt: string): Promise<void>;
 }
+
+export type Queryable = Pick<Pool, "query">;
 
 export function newSoftwareImpactId(): string {
   return randomUUID();
@@ -158,5 +161,161 @@ export class MemorySoftwareImpactStore implements SoftwareImpactStore {
     if (!row) throw new SoftwareImpactNotFoundError();
     if (row.state !== "active") throw new SoftwareImpactReleasedError();
     this.rows.set(id, { ...row, state: "released", releasedAt, updatedAt: releasedAt });
+  }
+}
+
+function instant(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function nullableInstant(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function fromPg(row: Record<string, unknown>): SoftwareImpactRow {
+  return {
+    id: String(row.id),
+    caseId: String(row.case_id),
+    productName: String(row.product_name),
+    version: String(row.version),
+    build: String(row.build),
+    component: String(row.component),
+    environment: String(row.environment),
+    status: row.status as SoftwareImpactStatus,
+    note: String(row.note),
+    state: row.state as SoftwareImpactState,
+    recordedAt: instant(row.recorded_at),
+    recordedBy: String(row.recorded_by),
+    recordedByUsername: String(row.recorded_by_username),
+    updatedAt: instant(row.updated_at),
+    releasedAt: nullableInstant(row.released_at),
+  };
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" && error !== null && (error as { code?: string }).code === "23505"
+  );
+}
+
+/** PostgreSQL implementation used by the hosted Linux/server deployment. */
+export class PgSoftwareImpactStore implements SoftwareImpactStore {
+  constructor(private readonly db: Queryable) {}
+
+  async list(caseId: string): Promise<SoftwareImpactRow[]> {
+    const result = await this.db.query(
+      `SELECT * FROM investigation_software_impact
+       WHERE case_id = $1 ORDER BY recorded_at ASC, id ASC`,
+      [caseId],
+    );
+    return result.rows.map((row) => fromPg(row as Record<string, unknown>));
+  }
+
+  async listAll(): Promise<SoftwareImpactRow[]> {
+    const result = await this.db.query(
+      `SELECT * FROM investigation_software_impact
+       ORDER BY recorded_at ASC, id ASC`,
+    );
+    return result.rows.map((row) => fromPg(row as Record<string, unknown>));
+  }
+
+  async get(id: string): Promise<SoftwareImpactRow | null> {
+    const result = await this.db.query(
+      `SELECT * FROM investigation_software_impact WHERE id = $1`,
+      [id],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? fromPg(row) : null;
+  }
+
+  async findActiveIdentity(
+    caseId: string,
+    identity: SoftwareImpactIdentityV1,
+  ): Promise<SoftwareImpactRow | null> {
+    const result = await this.db.query(
+      `SELECT * FROM investigation_software_impact
+       WHERE case_id = $1 AND state = 'active'
+         AND lower(product_name) = lower($2)
+         AND lower(version) = lower($3)
+         AND lower(build) = lower($4)
+         AND lower(component) = lower($5)
+         AND lower(environment) = lower($6)
+       LIMIT 1`,
+      [
+        caseId,
+        identity.productName,
+        identity.version,
+        identity.build,
+        identity.component,
+        identity.environment,
+      ],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? fromPg(row) : null;
+  }
+
+  async insert(row: SoftwareImpactRow): Promise<void> {
+    try {
+      await this.db.query(
+        `INSERT INTO investigation_software_impact (
+           id, case_id, product_name, version, build, component, environment,
+           status, note, state, recorded_at, recorded_by, recorded_by_username,
+           updated_at, released_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        [
+          row.id,
+          row.caseId,
+          row.productName,
+          row.version,
+          row.build,
+          row.component,
+          row.environment,
+          row.status,
+          row.note,
+          row.state,
+          row.recordedAt,
+          row.recordedBy,
+          row.recordedByUsername,
+          row.updatedAt,
+          row.releasedAt,
+        ],
+      );
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const existing = await this.findActiveIdentity(row.caseId, row);
+      throw new DuplicateSoftwareImpactError(existing?.id ?? row.id);
+    }
+  }
+
+  async updateStatus(
+    id: string,
+    status: SoftwareImpactStatus,
+    note: string,
+    updatedAt: string,
+  ): Promise<void> {
+    const result = await this.db.query(
+      `UPDATE investigation_software_impact
+       SET status = $2, note = $3, updated_at = $4
+       WHERE id = $1 AND state = 'active'`,
+      [id, status, note, updatedAt],
+    );
+    if (result.rowCount !== 0) return;
+    const existing = await this.get(id);
+    if (!existing) throw new SoftwareImpactNotFoundError();
+    throw new SoftwareImpactReleasedError();
+  }
+
+  async release(id: string, releasedAt: string): Promise<void> {
+    const result = await this.db.query(
+      `UPDATE investigation_software_impact
+       SET state = 'released', released_at = $2, updated_at = $2
+       WHERE id = $1 AND state = 'active'`,
+      [id, releasedAt],
+    );
+    if (result.rowCount !== 0) return;
+    const existing = await this.get(id);
+    if (!existing) throw new SoftwareImpactNotFoundError();
+    throw new SoftwareImpactReleasedError();
   }
 }

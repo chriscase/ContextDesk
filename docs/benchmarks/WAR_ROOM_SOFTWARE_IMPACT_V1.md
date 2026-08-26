@@ -1,9 +1,9 @@
 # War Room software impact v1
 
-**Status: Local integration.** Contract, memory/SQLite service, HTTP routes, and
-Situation panel exist in this tree. PostgreSQL persistence, portable-archive
-inclusion, activity-kind projection, investigation tags/facets, and Help copy
-are named residuals, not implied behavior.
+**Status: Local integration.** Contract, memory/SQLite/PostgreSQL service, HTTP
+routes, and Situation panel exist in this tree. Portable-archive inclusion,
+activity-kind projection, investigation tags/facets, and Help copy remain named
+residuals, not implied behavior.
 
 ## The question
 
@@ -34,8 +34,9 @@ This slice records **many epistemic rows per investigation**, lists them in
 - Suggestions drawn only from investigations the reader can already list.
 - Situation-stage panel with accessible combo-boxes, free-form values, and
   status as text (not color rank).
-- Memory + SQLite durability. PostgreSQL omits the store, so the panel hides
-  on 404 rather than pretending the rows exist.
+- Memory + SQLite + PostgreSQL durability. Hosted PostgreSQL uses migration
+  `022_software_impact`, with a database-enforced active-identity uniqueness
+  index so concurrent writers cannot record the same claim twice.
 
 ## What this slice does not do
 
@@ -60,7 +61,8 @@ This slice records **many epistemic rows per investigation**, lists them in
 
 ## Residuals
 
-- No PostgreSQL table or migration 021 (avoids racing #1093/#1088 for 020).
+- No portable-archive inclusion yet; archive/apply must add these rows without
+  turning a software-impact label into a build-order claim.
 - Timeline kinds `software_impact_recorded|updated|released` are stored, but
   the activity projection does not yet name them, so Overview will not show a
   dedicated software-impact row.

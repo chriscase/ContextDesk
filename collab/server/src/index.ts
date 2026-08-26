@@ -64,6 +64,7 @@ import {
 } from "./modules/people/index.js";
 import { EntityService, PgEntityStore, type EntityStore } from "./modules/entities/index.js";
 import {
+  PgSoftwareImpactStore,
   SoftwareImpactService,
   type SoftwareImpactStore,
 } from "./modules/software-impact/index.js";
@@ -151,7 +152,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     profiles: new PgUserProfileStore(pool),
     grants: new PgLocalGrantStore(pool),
     entities: new PgEntityStore(pool),
-    softwareImpact: null,
+    softwareImpact: new PgSoftwareImpactStore(pool),
     references: new PgReferenceStore(pool),
     resolutions: new PgResolutionStore(pool),
     presence: new PresenceService(new PgPresenceBackend(pool)),

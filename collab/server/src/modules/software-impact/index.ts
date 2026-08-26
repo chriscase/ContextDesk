@@ -20,6 +20,6 @@ export type {
   SoftwareImpactRow,
   SoftwareImpactStore,
 } from "./service.js";
-export { toSoftwareImpactV1 } from "./store.js";
+export { PgSoftwareImpactStore, toSoftwareImpactV1 } from "./store.js";
 export { registerSoftwareImpactRoutes } from "./routes.js";
 export type { SoftwareImpactRouteDeps } from "./routes.js";

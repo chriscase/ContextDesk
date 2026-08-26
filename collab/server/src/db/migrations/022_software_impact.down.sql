@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS investigation_software_impact_active_identity_idx;
+DROP INDEX IF EXISTS investigation_software_impact_case_idx;
+DROP TABLE IF EXISTS investigation_software_impact;

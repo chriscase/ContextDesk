@@ -2,14 +2,15 @@
 
 Evidence-based architecture and usability review of the ContextDesk War Room
 for real triage engineers, pinned to `origin/main`
-`bbb8b27cfc21c2fd65ed282f28631f3030c9968a` (PR #1090 timezone wiring). This
-lane does not merge or edit protected PRs, does not call providers, LDAP, or
-company gateways, and uses only in-tree synthetic fixtures.
+`2abf5ef602376c97a9390866f35147ea78829711` (the qualified log-workbench
+baseline). This lane does not merge or edit protected PRs, does not call
+providers, LDAP, or company gateways, and uses only in-tree synthetic fixtures.
 
 **Implemented here:** investigation-scoped software-impact records (many named
-identities, four epistemic statuses, no build ordering). Everything else in
-this document is a review of what already ships on that pin, what other open
-lanes already own, and what remains residual.
+identities, four epistemic statuses, no build ordering) with Memory, SQLite,
+and PostgreSQL persistence. Everything else in this document is a review of
+what already ships on that pin, what other open lanes already own, and what
+remains residual.
 
 ```mermaid
 flowchart LR
@@ -91,8 +92,9 @@ abbreviations refused except unambiguous `UTC`. UI: `LogTimeReviewPanel`.
 Routes register only when `COLLAB_BRIDGE_BIN` and `COLLAB_LOG_CORPUS_ROOT` are
 set; otherwise the surface is absent.
 
-**Not on this pin.** Chronology projection is open PR #1092. Snapshot-label /
-preview-copy polish is open PR #1089. This lane does not touch those files.
+**On this pin.** The qualified baseline includes the log-time chronology
+projection, named-timezone evidence preservation, and the workbench’s explicit
+review state. This lane does not duplicate or alter those files.
 
 ### 4. Power-user log exploration
 
@@ -101,8 +103,9 @@ filter/correlation surface. War Room shows per-source raw vs normalized samples
 in timezone review and ordinary evidence viewers, with intake caps (archive
 bytes, file count, path depth, processing time).
 
-**Not on this pin.** Investigation log workbench (side-by-side views, search,
-bookmarks) is draft PR #1088, marked do not merge. This lane does not touch it.
+**On this pin.** Investigation log workbench provides side-by-side views,
+bounded whole-corpus search, bookmarks, saved views, timezone review, and
+normalized chronology. This lane does not duplicate or alter that surface.
 
 ### 5. Structured investigation context
 
@@ -164,7 +167,7 @@ provider cost. This lane does not edit the catalog (that file is in #1088).
 | Situation context blob | PR #1093 | `case.ts`, `Cases.tsx`, migration **020**, `HelpCenter.tsx` |
 | Timezone preview copy / snapshot labels | PR #1089 | `LogTimeReviewPanel`, `TriageRunPanel` |
 | Investigation tags + server facets | deferred by #1093 | would collide with case list/search |
-| PostgreSQL software-impact table | after 020 settles | this slice uses SQLite + memory only |
+| PostgreSQL software-impact table | this integration | migration `022_software_impact`, hosted store, and parity tests |
 
 ### P2 — later, after the P1 races clear
 
@@ -182,9 +185,9 @@ provider cost. This lane does not edit the catalog (that file is in #1088).
 | Schema/fixtures | `collab/contracts/schemas/investigation-software-impact.v1.json`, `fixtures/investigation-software-impact*.json` | `laterThan` fixture must fail |
 | Service | `collab/server/src/modules/software-impact/` | identity key is case-insensitive join of labels, not a comparator |
 | HTTP | `GET/POST /api/cases/:caseId/software-impact`, `POST .../:impactId/status`, `POST .../:impactId/release`, `GET /api/software-impact/suggestions?field=` | Caps: `investigation:read` / `investigation:write` |
-| UI | `collab/web/src/SoftwareImpact.tsx` mounted from `InvestigationRecord.tsx` | Hidden when the host returns 404 (PostgreSQL) |
+| UI | `collab/web/src/SoftwareImpact.tsx` mounted from `InvestigationRecord.tsx` | Served on both SQLite and PostgreSQL; still gated by investigation visibility/capability |
 | SQLite | persist key `investigation_software_impact` | Capture/restore through `persistentMemoryStore` |
-| PostgreSQL | `softwareImpact: null` in `collab/server/src/index.ts` | Routes unregistered |
+| PostgreSQL | `PgSoftwareImpactStore` in `collab/server/src/index.ts` | Routes use migration `022_software_impact`; authorization still applies |
 
 ## 5. Competing open PRs — do not touch
 
@@ -203,10 +206,13 @@ in this lane are new modules, the Situation mount, tests, and these docs.
 
 ## 6. Migration and reliability risks
 
-- **020 collision.** #1093 and #1088 both propose a migration numbered 020.
-  This slice adds **no** SQL migration.
-- **PostgreSQL gap.** Shared/HA hosts will not persist or serve impact rows
-  until a later migration. The UI fails closed (hidden), not empty-and-lying.
+- **Migration ordering.** The current main already uses the 020/021 history;
+  this integration adds the next migration, `022_software_impact`, without
+  rewriting earlier applied versions.
+- **PostgreSQL boundary.** Hosted servers use the database-backed store and
+  its partial active-identity uniqueness index. Timeline/audit writes remain
+  separate service operations and must stay covered by hosted qualification
+  and failure-recovery tests.
 - **Activity kinds.** New timeline kinds are ignored by today’s activity
   allowlist, so Overview will not show them. That is a residual, not a leak.
 - **Archive gap.** Restoring a portable investigation will not restore impact
