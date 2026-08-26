@@ -15,6 +15,18 @@ use std::collections::BTreeMap;
 /// Hard max rows per page (IPC / virtualization).
 pub const MAX_EVENT_PAGE: usize = 500;
 
+/// Default number of normalized chronology rows returned by one host call.
+pub const DEFAULT_CHRONOLOGY_PAGE: usize = 50;
+
+/// Hard chronology page cap shared by the core and Collab contract.
+pub const MAX_CHRONOLOGY_PAGE: usize = 200;
+
+/// Maximum literal chronology search length.
+pub const MAX_CHRONOLOGY_SEARCH_CHARS: usize = 256;
+
+/// Maximum exact source identities in one chronology filter.
+pub const MAX_CHRONOLOGY_SOURCES: usize = 512;
+
 /// Default page size when caller omits limit.
 pub const DEFAULT_EVENT_PAGE: usize = 100;
 
@@ -716,6 +728,104 @@ pub struct EventRowsPage {
     pub time_quality: TimeQuality,
 }
 
+/// Opaque keyset position for the normalized chronology projection.
+///
+/// `group` keeps all rows with a proven instant ahead of all rows that are
+/// order-only. `value` is the active instant axis for group 0 and the stable
+/// ingest sequence for group 1. The filter fingerprint prevents a caller from
+/// accidentally reusing a cursor under different search/source filters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChronologyCursor {
+    /// Event revision the cursor was issued against.
+    pub revision: u64,
+    /// Zero for proven instants; one for order-only rows.
+    pub group: u8,
+    /// Active instant or sequence axis value at the cursor position.
+    pub value: i64,
+    /// Stable final tie-breaker for the cursor position.
+    pub seq: u64,
+    /// Digest of the literal/source filter that issued this cursor.
+    pub filter_fingerprint: String,
+}
+
+/// Read-only filters for one chronology page.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChronologyQuery {
+    /// Case-insensitive literal substring over the already-redacted message.
+    pub search: Option<String>,
+    /// Exact source identities; empty means all sources.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// Zero selects [`DEFAULT_CHRONOLOGY_PAGE`].
+    pub limit: usize,
+    /// Exclusive keyset position from a preceding page.
+    pub after: Option<ChronologyCursor>,
+}
+
+/// One bounded chronology row from the durable event store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChronologyEvent {
+    /// Stable ingest ordinal.
+    pub seq: u64,
+    /// Stored active timestamp value; its meaning is governed by the basis.
+    pub ts: i64,
+    /// Immutable parser timestamp provenance.
+    pub timestamp_provenance: TimestampProvenance,
+    /// Reversible active interpretation of `ts`.
+    pub active_timestamp_basis: ActiveTimestampBasis,
+    /// Parser-retained local timestamp text, when present.
+    pub unresolved_local_timestamp: Option<String>,
+    /// Normalized log level.
+    pub level: String,
+    /// Already-redacted normalized message.
+    pub message: String,
+    /// Portable source identity.
+    pub source: String,
+}
+
+/// One deterministic chronology page and its cursor-independent counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChronologyPage {
+    /// Rows in deterministic normalized chronology order.
+    pub events: Vec<ChronologyEvent>,
+    /// Cursor for a subsequent page, when more rows exist.
+    pub next_cursor: Option<ChronologyCursor>,
+    /// Exact filter match count, independent of the current page.
+    pub total_matched: u64,
+    /// Exact count of matches without a proven active instant.
+    pub order_only_count: u64,
+    /// Honest quality of the complete filtered result.
+    pub time_quality: TimeQuality,
+}
+
+/// Stable digest of the literal/source filter bound into chronology cursors.
+///
+/// The search text itself is never embedded in a cursor. Length-prefixing the
+/// components avoids ambiguous concatenations while keeping the token opaque
+/// to the web boundary.
+pub fn chronology_filter_fingerprint(search: Option<&str>, sources: &[String]) -> String {
+    let normalized_search = search.map(str::trim).filter(|value| !value.is_empty());
+    let mut normalized_sources = sources.to_vec();
+    normalized_sources.sort();
+    normalized_sources.dedup();
+    let mut digest = Sha256::new();
+    digest.update(b"cd-core.log-chronology-filter.v1\0");
+    digest.update([u8::from(normalized_search.is_some())]);
+    if let Some(value) = normalized_search {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update((normalized_sources.len() as u64).to_le_bytes());
+    for value in &normalized_sources {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
 /// Bounded host-computed summary of one parser-true trace spanning sources.
 ///
 /// This deliberately uses only the durable `events.trace_id` column. Request,
@@ -1404,6 +1514,243 @@ pub fn query_event_rows(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventR
 /// and limit. Exact results are boundedly cached by filter on the open corpus.
 pub fn query_event_count(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventCount> {
     query_event_count_with_additional_keyword(corpus, q, None)
+}
+
+/// Query the next bounded page of the normalized War Room chronology.
+///
+/// Proven instants are ordered by `(active instant, seq)` across every source.
+/// All rows whose active basis does not prove an instant are then ordered by
+/// `(seq)` in a separate order-only group. A cursor is bound to both the
+/// corpus revision and the literal/source filter, so a changed corpus or
+/// changed filter cannot silently skip or duplicate evidence.
+pub fn query_chronology(corpus: &LogCorpus, q: &ChronologyQuery) -> CoreResult<ChronologyPage> {
+    let search = q
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if search.is_some_and(|value| {
+        value.chars().count() > MAX_CHRONOLOGY_SEARCH_CHARS || value.contains('\0')
+    }) {
+        return Err(CoreError::Message(
+            "chronology literal search is not bounded".into(),
+        ));
+    }
+
+    let mut sources = q.sources.clone();
+    sources.sort();
+    sources.dedup();
+    if sources.len() > MAX_CHRONOLOGY_SOURCES {
+        return Err(CoreError::Message(
+            "chronology source filter exceeds cap".into(),
+        ));
+    }
+    for source in &sources {
+        validate_chronology_source(source)?;
+    }
+
+    let limit = if q.limit == 0 {
+        DEFAULT_CHRONOLOGY_PAGE
+    } else {
+        q.limit.clamp(1, MAX_CHRONOLOGY_PAGE)
+    };
+    let revision = corpus.revision();
+    let filter_fingerprint = chronology_filter_fingerprint(search, &sources);
+    if let Some(cursor) = &q.after {
+        if cursor.revision != revision {
+            return Err(CoreError::Message(format!(
+                "stale chronology cursor: expected revision {}, current {}",
+                cursor.revision, revision
+            )));
+        }
+        if cursor.filter_fingerprint != filter_fingerprint {
+            return Err(CoreError::Message(
+                "chronology cursor does not match the active filters".into(),
+            ));
+        }
+        if cursor.group > 1 {
+            return Err(CoreError::Message(
+                "chronology cursor group is invalid".into(),
+            ));
+        }
+        if cursor.group == 1 && i64::try_from(cursor.seq).ok() != Some(cursor.value) {
+            return Err(CoreError::Message(
+                "order-only chronology cursor is internally inconsistent".into(),
+            ));
+        }
+    }
+
+    let wall_group = format!(
+        "CASE WHEN active_timestamp_basis IN ('{}', '{}') THEN 0 ELSE 1 END",
+        ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+        ActiveTimestampBasis::ResolvedLocal.as_storage_str()
+    );
+    let axis_value = format!(
+        "CASE WHEN active_timestamp_basis IN ('{}', '{}') THEN ts ELSE seq END",
+        ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+        ActiveTimestampBasis::ResolvedLocal.as_storage_str()
+    );
+    let mut where_sql = String::from("1 = 1");
+    let mut binds = Vec::new();
+    if let Some(search) = search {
+        // `contains` is a literal substring predicate. In particular, `%` and
+        // `_` remain ordinary search characters rather than LIKE wildcards.
+        where_sql.push_str(" AND contains(lower(message), lower(?))");
+        binds.push(Value::Text(search.to_string()));
+    }
+    if !sources.is_empty() {
+        let placeholders = std::iter::repeat_n("?", sources.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        where_sql.push_str(&format!(" AND source IN ({placeholders})"));
+        binds.extend(sources.iter().cloned().map(Value::Text));
+    }
+
+    let (total_matched, order_only_count) = corpus.with_connection(|conn| {
+        let count_sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN {wall_group} = 1 THEN 1 ELSE 0 END), 0) \
+             FROM events WHERE {where_sql}"
+        );
+        let mut statement = conn.prepare(&count_sql).map_err(duck_err)?;
+        statement
+            .query_row(params_ref(&binds).as_slice(), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(duck_err)
+    })?;
+    let total_matched = u64::try_from(total_matched.max(0))
+        .map_err(|_| CoreError::Message("chronology count is invalid".into()))?;
+    let order_only_count = u64::try_from(order_only_count.max(0))
+        .map_err(|_| CoreError::Message("chronology order-only count is invalid".into()))?;
+
+    let mut page_where = where_sql;
+    let mut page_binds = binds;
+    if let Some(cursor) = &q.after {
+        page_where.push_str(&format!(
+            " AND ({wall_group} > ? OR ({wall_group} = ? AND ({axis_value} > ? OR ({axis_value} = ? AND seq > ?))))"
+        ));
+        page_binds.push(Value::BigInt(cursor.group as i64));
+        page_binds.push(Value::BigInt(cursor.group as i64));
+        page_binds.push(Value::BigInt(cursor.value));
+        page_binds.push(Value::BigInt(cursor.value));
+        page_binds.push(Value::BigInt(i64::try_from(cursor.seq).map_err(|_| {
+            CoreError::Message("chronology cursor sequence is invalid".into())
+        })?));
+    }
+
+    let fetch_limit = limit.saturating_add(1);
+    let sql = format!(
+        "SELECT seq, ts, level, message, source, timestamp_provenance, \
+                active_timestamp_basis, unresolved_local_timestamp, {wall_group}, {axis_value} \
+         FROM events WHERE {page_where} \
+         ORDER BY {wall_group} ASC, {axis_value} ASC, seq ASC LIMIT {fetch_limit}"
+    );
+    let mut events = corpus.with_connection(|conn| {
+        let mut statement = conn.prepare(&sql).map_err(duck_err)?;
+        let rows = statement
+            .query_map(params_ref(&page_binds).as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })
+            .map_err(duck_err)?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (
+                seq,
+                ts,
+                level,
+                message,
+                source,
+                stored_provenance,
+                stored_active_basis,
+                unresolved_local_timestamp,
+                group,
+                _axis_value,
+            ) = row.map_err(duck_err)?;
+            let seq = u64::try_from(seq)
+                .map_err(|_| CoreError::Message("chronology event sequence is invalid".into()))?;
+            let timestamp_provenance = TimestampProvenance::from_storage_str(
+                stored_provenance.as_deref(),
+            )
+            .ok_or_else(|| CoreError::Message("event has invalid timestamp provenance".into()))?;
+            let active_timestamp_basis = ActiveTimestampBasis::from_storage_str(
+                stored_active_basis.as_deref(),
+            )
+            .ok_or_else(|| CoreError::Message("event has invalid active timestamp basis".into()))?;
+            let expected_group = i64::from(!active_timestamp_basis.is_wall_clock());
+            if group != expected_group {
+                return Err(CoreError::Message(
+                    "chronology event has an inconsistent time basis".into(),
+                ));
+            }
+            events.push(ChronologyEvent {
+                seq,
+                ts,
+                timestamp_provenance,
+                active_timestamp_basis,
+                unresolved_local_timestamp,
+                level,
+                message,
+                source,
+            });
+        }
+        Ok(events)
+    })?;
+
+    let has_more = events.len() > limit;
+    if has_more {
+        events.truncate(limit);
+    }
+    let next_cursor = if has_more {
+        events.last().map(|event| ChronologyCursor {
+            revision,
+            group: u8::from(!event.active_timestamp_basis.is_wall_clock()),
+            value: if event.active_timestamp_basis.is_wall_clock() {
+                event.ts
+            } else {
+                i64::try_from(event.seq).unwrap_or(i64::MAX)
+            },
+            seq: event.seq,
+            filter_fingerprint: filter_fingerprint.clone(),
+        })
+    } else {
+        None
+    };
+
+    Ok(ChronologyPage {
+        events,
+        next_cursor,
+        total_matched,
+        order_only_count,
+        time_quality: quality_from_counts(
+            total_matched,
+            total_matched.saturating_sub(order_only_count),
+        ),
+    })
+}
+
+fn validate_chronology_source(source: &str) -> CoreResult<()> {
+    if source.is_empty() || source.len() > 4_096 || source.contains('\0') {
+        return Err(CoreError::Message(
+            "chronology source identity is not bounded".into(),
+        ));
+    }
+    if source.starts_with('/') || source.split('/').any(|part| part == "..") {
+        return Err(CoreError::Message(
+            "chronology source identity must stay corpus-relative".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Find bounded parser-true traces that cross source boundaries and contain an
@@ -3423,6 +3770,104 @@ mod tests {
         assert!(empty.buckets.is_empty());
         assert_eq!(empty.span_from, None);
         assert_eq!(empty.span_to, None);
+    }
+
+    #[test]
+    fn chronology_orders_cross_source_instants_before_order_only_rows() {
+        let (dir, id) = multi_source_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let first = query_chronology(
+            &corpus,
+            &ChronologyQuery {
+                limit: 7,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.total_matched, 90);
+        assert_eq!(first.order_only_count, 10);
+        assert_eq!(first.time_quality, TimeQuality::Mixed);
+        assert_eq!(first.events.len(), 7);
+        assert!(first
+            .events
+            .iter()
+            .all(|event| event.active_timestamp_basis.is_wall_clock()));
+        let instants = first
+            .events
+            .iter()
+            .map(|event| event.ts)
+            .collect::<Vec<_>>();
+        assert!(instants.windows(2).all(|pair| pair[0] <= pair[1]));
+
+        let mut after = first.next_cursor.clone();
+        let mut seen = first
+            .events
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>();
+        while let Some(cursor) = after {
+            let page = query_chronology(
+                &corpus,
+                &ChronologyQuery {
+                    limit: 7,
+                    after: Some(cursor),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            seen.extend(page.events.iter().map(|event| event.seq));
+            after = page.next_cursor;
+        }
+        seen.sort_unstable();
+        assert_eq!(seen.len(), 90);
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let order_only = query_chronology(
+            &corpus,
+            &ChronologyQuery {
+                limit: 200,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| !event.active_timestamp_basis.is_wall_clock());
+        assert!(
+            order_only.is_some(),
+            "order-only rows remain visible after wall rows"
+        );
+    }
+
+    #[test]
+    fn chronology_search_is_literal_and_source_filter_is_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("gateway.log"),
+            "{\"ts\":1700000000,\"level\":\"info\",\"message\":\"literal 100% marker\"}\n",
+        )
+        .unwrap();
+        std::fs::write(logs.join("worker.log"), "plain 100% marker\n").unwrap();
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &logs, "chronology-search", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+
+        let page = query_chronology(
+            &corpus,
+            &ChronologyQuery {
+                search: Some("%".into()),
+                sources: vec!["worker.log".into()],
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total_matched, 1);
+        assert_eq!(page.events[0].source, "worker.log");
+        assert!(page.events[0].message.contains("100%"));
     }
 
     #[test]

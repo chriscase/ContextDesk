@@ -24,17 +24,24 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use cd_core::config::AppConfig;
 use cd_core::log_analysis::event_revision::undo_event_revision;
+use cd_core::log_analysis::parse::{LogFormat, ParsedLine, TimestampProvenance};
+use cd_core::log_analysis::query::{
+    query_chronology, ChronologyCursor, ChronologyQuery, TimeQuality, MAX_CHRONOLOGY_PAGE,
+};
 use cd_core::log_analysis::store::LogCorpus;
 use cd_core::log_analysis::timezone_application::{
     apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,
     preview_source_timezone, preview_source_timezone_samples,
 };
 use cd_core::log_analysis::timezone_resolution::{
-    SourceTimezoneDeclaration, TimestampResolution, TimezoneDeclarationBasis,
-    UnresolvedTimestampReason,
+    SourceTimezoneDeclaration, SourceTimezoneResolver, TimestampResolution,
+    TimezoneDeclarationBasis, UnresolvedTimestampReason,
 };
 use cd_core::process_progress::NoopProcessProgress;
 use cd_workflow::import::default_import_with_outcome;
@@ -128,6 +135,14 @@ pub enum CollabLogTimeAction {
         corpus_id: String,
         expected_revision: u64,
     },
+    /// Read one stable normalized chronology page without mutating the corpus.
+    Chronology {
+        corpus_id: String,
+        search: Option<String>,
+        sources: Vec<String>,
+        limit: usize,
+        cursor: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +168,9 @@ pub struct CollabLogTimeResult {
     /// Present for `apply`, `clear`, and `undo`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<RevisionOut>,
+    /// Present for the read-only chronology projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chronology: Option<ChronologyOut>,
     /// Declarations in force after the operation, keyed by source.
     pub declarations: BTreeMap<String, DeclarationOut>,
 }
@@ -234,6 +252,41 @@ pub struct RevisionOut {
     pub event_count: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChronologyOut {
+    pub corpus_revision: u64,
+    pub rows: Vec<ChronologyRowOut>,
+    pub next_cursor: Option<String>,
+    pub total_matched: u64,
+    pub order_only_count: u64,
+    pub time_quality: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChronologyRowOut {
+    pub seq: u64,
+    pub source: String,
+    pub raw_timestamp: Option<String>,
+    pub normalized_instant: Option<String>,
+    pub time_state: &'static str,
+    pub timestamp_provenance: &'static str,
+    pub order_only_reason: Option<&'static str>,
+    pub level: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChronologyCursorToken {
+    revision: u64,
+    group: u8,
+    value: i64,
+    seq: u64,
+    filter_fingerprint: String,
+}
+
 impl Render for CollabLogTimeResult {
     fn render_text(&self) -> String {
         let mut out = format!(
@@ -278,6 +331,14 @@ impl Render for CollabLogTimeResult {
             out.push_str(&format!(
                 "\n  Revision {} -> {} ({} timestamps changed)\n",
                 revision.previous_revision, revision.applied_revision, revision.changed_records
+            ));
+        }
+        if let Some(chronology) = &self.chronology {
+            out.push_str(&format!(
+                "\n  Chronology {} row(s), {} match(es), {} order-only\n",
+                chronology.rows.len(),
+                chronology.total_matched,
+                chronology.order_only_count
             ));
         }
         out.trim_end().to_string()
@@ -354,6 +415,21 @@ pub fn run(args: &CollabLogTimeArgs) -> CliResult<Box<dyn Render>> {
             corpus_id,
             expected_revision,
         } => undo(cache_root, &request.case_id, corpus_id, *expected_revision),
+        CollabLogTimeAction::Chronology {
+            corpus_id,
+            search,
+            sources,
+            limit,
+            cursor,
+        } => chronology(
+            cache_root,
+            &request.case_id,
+            corpus_id,
+            search.as_deref(),
+            sources,
+            *limit,
+            cursor.as_deref(),
+        ),
     }
 }
 
@@ -426,6 +502,7 @@ fn build(
         sources: Some(state.sources.iter().map(source_status_out).collect()),
         preview: None,
         revision: None,
+        chronology: None,
         declarations: declarations_out(&state.declarations),
     }))
 }
@@ -462,6 +539,7 @@ fn status(cache_root: &Path, case_id: &str, corpus_id: &str) -> CliResult<Box<dy
         sources: Some(state.sources.iter().map(source_status_out).collect()),
         preview: None,
         revision: None,
+        chronology: None,
         declarations: declarations_out(&state.declarations),
     }))
 }
@@ -516,6 +594,7 @@ fn preview(
             samples,
         }),
         revision: None,
+        chronology: None,
         declarations: declarations_out(&state.declarations),
     }))
 }
@@ -612,7 +691,194 @@ fn revision_result(
             event_count: report.event_count,
         }),
         declarations: declarations_out(&state.declarations),
+        chronology: None,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Normalized chronology
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn chronology(
+    cache_root: &Path,
+    case_id: &str,
+    corpus_id: &str,
+    search: Option<&str>,
+    sources: &[String],
+    limit: usize,
+    cursor: Option<&str>,
+) -> CliResult<Box<dyn Render>> {
+    let corpus_id = validated_corpus_id(corpus_id)?;
+    if limit > MAX_CHRONOLOGY_PAGE {
+        return Err(CliError::user("chronology page size exceeds cap"));
+    }
+    let after = cursor.map(decode_chronology_cursor).transpose()?;
+    let query = ChronologyQuery {
+        search: search.map(str::to_string),
+        sources: sources.to_vec(),
+        limit,
+        after,
+    };
+    let state = load_state(cache_root, corpus_id)?;
+    let corpus = LogCorpus::open(cache_root, corpus_id).map_err(map_core_error)?;
+    let page = query_chronology(&corpus, &query).map_err(map_core_error)?;
+    let rows = page
+        .events
+        .iter()
+        .map(|event| chronology_row(event, &state.declarations))
+        .collect::<CliResult<Vec<_>>>()?;
+    let next_cursor = page
+        .next_cursor
+        .as_ref()
+        .map(encode_chronology_cursor)
+        .transpose()?;
+
+    Ok(Box::new(CollabLogTimeResult {
+        schema_id: RESULT_SCHEMA_ID,
+        case_id: case_id.to_string(),
+        corpus_id: corpus_id.to_string(),
+        corpus_revision: state.scope.event_revision,
+        build: None,
+        sources: None,
+        preview: None,
+        revision: None,
+        chronology: Some(ChronologyOut {
+            corpus_revision: state.scope.event_revision,
+            rows,
+            next_cursor,
+            total_matched: page.total_matched,
+            order_only_count: page.order_only_count,
+            time_quality: chronology_time_quality(page.time_quality),
+        }),
+        declarations: declarations_out(&state.declarations),
+    }))
+}
+
+fn chronology_row(
+    event: &cd_core::log_analysis::query::ChronologyEvent,
+    declarations: &BTreeMap<String, SourceTimezoneDeclaration>,
+) -> CliResult<ChronologyRowOut> {
+    let resolved = event.active_timestamp_basis.is_wall_clock();
+    let (normalized_instant, order_only_reason) = if resolved {
+        let instant = iso_instant(event.ts).ok_or_else(|| {
+            CliError::internal("chronology wall-clock timestamp is outside the supported range")
+        })?;
+        (Some(instant), None)
+    } else {
+        (None, chronology_order_only_reason(event, declarations)?)
+    };
+    Ok(ChronologyRowOut {
+        seq: event.seq,
+        source: event.source.clone(),
+        raw_timestamp: event.unresolved_local_timestamp.clone(),
+        normalized_instant,
+        time_state: if resolved { "resolved" } else { "order_only" },
+        timestamp_provenance: chronology_provenance(event.timestamp_provenance),
+        order_only_reason,
+        level: event.level.clone(),
+        message: truncate_chars(&event.message, MAX_EXCERPT_CHARS),
+    })
+}
+
+fn chronology_order_only_reason(
+    event: &cd_core::log_analysis::query::ChronologyEvent,
+    declarations: &BTreeMap<String, SourceTimezoneDeclaration>,
+) -> CliResult<Option<&'static str>> {
+    if event.timestamp_provenance != TimestampProvenance::UnresolvedLocal {
+        return Ok(Some("no_recognized_local_timestamp"));
+    }
+    let Some(declaration) = declarations.get(&event.source) else {
+        return Ok(Some("timezone_unresolved"));
+    };
+    let resolver = SourceTimezoneResolver::new(declaration.clone())
+        .map_err(|error| CliError::internal(error.to_string()))?;
+    let parsed = ParsedLine {
+        ts: Some(event.ts),
+        timestamp_provenance: event.timestamp_provenance,
+        active_timestamp_basis: event.active_timestamp_basis,
+        unresolved_local_timestamp: event.unresolved_local_timestamp.clone(),
+        level: event.level.clone(),
+        service: None,
+        host: None,
+        trace_id: None,
+        message: event.message.clone(),
+        raw: String::new(),
+        format: LogFormat::Plain,
+    };
+    match resolver
+        .resolve(&event.source, &parsed)
+        .map_err(|error| CliError::internal(error.to_string()))?
+    {
+        TimestampResolution::Unresolved { reason } => Ok(Some(unresolved_reason(reason))),
+        TimestampResolution::ExistingWallClock { .. } | TimestampResolution::Resolved { .. } => {
+            Err(CliError::internal(
+                "chronology event basis disagrees with its timezone declaration",
+            ))
+        }
+    }
+}
+
+fn chronology_provenance(provenance: TimestampProvenance) -> &'static str {
+    match provenance {
+        TimestampProvenance::ExplicitWallClock => "explicit_wall",
+        TimestampProvenance::UnresolvedLocal => "unresolved_local",
+        TimestampProvenance::OrderOnly => "order_only",
+        TimestampProvenance::LegacyUnknown => "legacy_unknown",
+    }
+}
+
+fn chronology_time_quality(quality: TimeQuality) -> &'static str {
+    match quality {
+        TimeQuality::Wall => "wall",
+        TimeQuality::Mixed => "mixed",
+        TimeQuality::OrderOnly => "order_only",
+    }
+}
+
+fn decode_chronology_cursor(raw: &str) -> CliResult<ChronologyCursor> {
+    if raw.is_empty() || raw.len() > 2_048 {
+        return Err(CliError::user("chronology cursor is not bounded"));
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(raw.as_bytes())
+        .map_err(|_| CliError::user("chronology cursor is invalid"))?;
+    let token: ChronologyCursorToken = serde_json::from_slice(&bytes)
+        .map_err(|_| CliError::user("chronology cursor is invalid"))?;
+    if token.group > 1
+        || token.filter_fingerprint.len() != 64
+        || !token
+            .filter_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || (token.group == 1 && i64::try_from(token.seq).ok() != Some(token.value))
+    {
+        return Err(CliError::user("chronology cursor is invalid"));
+    }
+    Ok(ChronologyCursor {
+        revision: token.revision,
+        group: token.group,
+        value: token.value,
+        seq: token.seq,
+        filter_fingerprint: token.filter_fingerprint,
+    })
+}
+
+fn encode_chronology_cursor(cursor: &ChronologyCursor) -> CliResult<String> {
+    let token = ChronologyCursorToken {
+        revision: cursor.revision,
+        group: cursor.group,
+        value: cursor.value,
+        seq: cursor.seq,
+        filter_fingerprint: cursor.filter_fingerprint.clone(),
+    };
+    let bytes = serde_json::to_vec(&token)
+        .map_err(|_| CliError::internal("chronology cursor could not be encoded"))?;
+    let encoded = URL_SAFE_NO_PAD.encode(bytes);
+    if encoded.len() > 2_048 {
+        return Err(CliError::internal("chronology cursor exceeded its bound"));
+    }
+    Ok(encoded)
 }
 
 // ---------------------------------------------------------------------------

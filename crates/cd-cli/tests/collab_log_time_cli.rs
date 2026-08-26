@@ -30,6 +30,10 @@ const GATEWAY_LOG: &str = "2024-03-10T07:30:00Z INFO  edge accepted request rid-
                            2024-03-10T07:45:00Z INFO  edge accepted request rid-0002\n\
                            2024-03-10T08:10:00Z ERROR edge upstream timeout rid-0003\n";
 
+/// Zone-less local timestamps spanning the 2024-11-03 US fall-back fold.
+const FOLD_LOG: &str = "2024-11-03 01:30:00 WARN  fold worker ambiguous local time\n\
+                        2024-11-03 02:30:00 INFO  fold worker after transition\n";
+
 fn run(cache: &Path, request: &Value) -> Value {
     let output = cli()
         .arg("collab-log-time")
@@ -103,22 +107,55 @@ fn explicit_log_time_requests_ignore_broken_unrelated_application_state() {
 }
 
 fn build(cache: &Path) -> Value {
+    build_case(
+        cache,
+        "case-synthetic-0001",
+        vec![
+            json!({"relativePath": "worker/batch.log", "contentBase64": b64(WORKER_LOG)}),
+            json!({"relativePath": "gateway/edge.log", "contentBase64": b64(GATEWAY_LOG)}),
+        ],
+    )
+}
+
+fn build_case(cache: &Path, case_id: &str, files: Vec<Value>) -> Value {
     let envelope = run(
         cache,
         &request(
-            "case-synthetic-0001",
+            case_id,
             json!({
                 "kind": "build",
                 "corpusName": "synthetic war room case",
-                "files": [
-                    {"relativePath": "worker/batch.log", "contentBase64": b64(WORKER_LOG)},
-                    {"relativePath": "gateway/edge.log", "contentBase64": b64(GATEWAY_LOG)},
-                ],
+                "files": files,
             }),
         ),
     );
     assert_eq!(envelope["ok"], json!(true), "build failed: {envelope}");
     envelope["data"].clone()
+}
+
+fn chronology(
+    cache: &Path,
+    case_id: &str,
+    corpus: &str,
+    search: Option<&str>,
+    sources: &[&str],
+    limit: usize,
+    cursor: Option<&str>,
+) -> Value {
+    run(
+        cache,
+        &request(
+            case_id,
+            json!({
+                "kind": "chronology",
+                "corpusId": corpus,
+                "search": search,
+                "sources": sources,
+                "limit": limit,
+                "cursor": cursor,
+            }),
+        ),
+    )
 }
 
 fn preview(cache: &Path, corpus: &str, revision: u64, zone: &str) -> Value {
@@ -322,6 +359,308 @@ fn applying_preserves_the_unresolvable_line_as_order_only_evidence() {
         json!(1),
         "the DST-gap line must survive as order-only evidence"
     );
+}
+
+#[test]
+fn chronology_orders_cross_source_instants_before_order_only_and_pages_stably() {
+    let cache = tempfile::tempdir().expect("cache");
+    let data = build(cache.path());
+    let corpus = data["corpusId"].as_str().expect("corpus id");
+
+    let first_envelope = chronology(
+        cache.path(),
+        "case-synthetic-0001",
+        corpus,
+        None,
+        &[],
+        3,
+        None,
+    );
+    assert_eq!(
+        first_envelope["ok"],
+        json!(true),
+        "chronology failed: {first_envelope}"
+    );
+    let first = &first_envelope["data"]["chronology"];
+    assert_eq!(first["totalMatched"], json!(8));
+    assert_eq!(first["orderOnlyCount"], json!(5));
+    assert_eq!(first["timeQuality"], json!("mixed"));
+    let first_rows = first["rows"].as_array().expect("first rows");
+    assert_eq!(first_rows.len(), 3);
+    assert!(first_rows
+        .iter()
+        .all(|row| row["source"] == json!("gateway/edge.log")));
+    assert_eq!(
+        first_rows[0]["normalizedInstant"],
+        json!("2024-03-10T07:30:00Z")
+    );
+    assert_eq!(first_rows[0]["rawTimestamp"], json!(null));
+
+    let cursor = first["nextCursor"].as_str().expect("next cursor");
+    let second_envelope = chronology(
+        cache.path(),
+        "case-synthetic-0001",
+        corpus,
+        None,
+        &[],
+        3,
+        Some(cursor),
+    );
+    assert_eq!(
+        second_envelope["ok"],
+        json!(true),
+        "second page failed: {second_envelope}"
+    );
+    let second_rows = second_envelope["data"]["chronology"]["rows"]
+        .as_array()
+        .expect("second rows");
+    let order_only = second_rows
+        .iter()
+        .find(|row| row["timeState"] == json!("order_only"))
+        .expect("order-only worker row");
+    assert_eq!(order_only["source"], json!("worker/batch.log"));
+    assert_eq!(order_only["rawTimestamp"], json!("2024-03-10 01:30:00"));
+    assert_eq!(order_only["normalizedInstant"], json!(null));
+    assert_eq!(order_only["orderOnlyReason"], json!("timezone_unresolved"));
+}
+
+#[test]
+fn chronology_supports_literal_search_and_exact_source_filter() {
+    let cache = tempfile::tempdir().expect("cache");
+    let data = build_case(
+        cache.path(),
+        "case-synthetic-literal",
+        vec![json!({
+            "relativePath": "literal/source.log",
+            "contentBase64": b64("INFO literal 100% marker\n"),
+        })],
+    );
+    let corpus = data["corpusId"].as_str().expect("corpus id");
+    let page = chronology(
+        cache.path(),
+        "case-synthetic-literal",
+        corpus,
+        Some("%"),
+        &["literal/source.log"],
+        10,
+        None,
+    );
+    assert_eq!(page["ok"], json!(true), "literal chronology failed: {page}");
+    let chronology = &page["data"]["chronology"];
+    assert_eq!(chronology["totalMatched"], json!(1));
+    assert_eq!(chronology["rows"][0]["source"], json!("literal/source.log"));
+    assert!(chronology["rows"][0]["message"]
+        .as_str()
+        .expect("message")
+        .contains("100%"));
+}
+
+#[test]
+fn chronology_exposes_fold_and_gap_reasons_without_guessing() {
+    let cache = tempfile::tempdir().expect("cache");
+    let data = build_case(
+        cache.path(),
+        "case-synthetic-fold",
+        vec![json!({
+            "relativePath": "fold/worker.log",
+            "contentBase64": b64(FOLD_LOG),
+        })],
+    );
+    let corpus = data["corpusId"].as_str().expect("corpus id").to_string();
+    let built_revision = data["corpusRevision"].as_u64().expect("revision");
+    let preview = run(
+        cache.path(),
+        &request(
+            "case-synthetic-fold",
+            json!({
+                "kind": "preview",
+                "corpusId": corpus,
+                "expectedRevision": built_revision,
+                "source": "fold/worker.log",
+                "ianaTimezone": "America/Chicago",
+            }),
+        ),
+    );
+    assert_eq!(preview["ok"], json!(true), "fold preview failed: {preview}");
+    assert_eq!(preview["data"]["preview"]["dstFoldCount"], json!(1));
+    let fingerprint = preview["data"]["preview"]["declarationFingerprint"]
+        .as_str()
+        .expect("fingerprint");
+    let applied = run(
+        cache.path(),
+        &request(
+            "case-synthetic-fold",
+            json!({
+                "kind": "apply",
+                "corpusId": corpus,
+                "expectedRevision": built_revision,
+                "source": "fold/worker.log",
+                "ianaTimezone": "America/Chicago",
+                "declarationFingerprint": fingerprint,
+                "declaredAt": 1_730_601_600i64,
+            }),
+        ),
+    );
+    assert_eq!(applied["ok"], json!(true), "fold apply failed: {applied}");
+
+    let page = chronology(
+        cache.path(),
+        "case-synthetic-fold",
+        &corpus,
+        Some("fold"),
+        &["fold/worker.log"],
+        10,
+        None,
+    );
+    assert_eq!(page["ok"], json!(true), "fold chronology failed: {page}");
+    let rows = page["data"]["chronology"]["rows"].as_array().expect("rows");
+    let ambiguous = rows
+        .iter()
+        .find(|row| row["orderOnlyReason"] == json!("ambiguous_dst_fold"))
+        .expect("ambiguous fold row");
+    assert_eq!(ambiguous["rawTimestamp"], json!("2024-11-03 01:30:00"));
+    assert_eq!(ambiguous["normalizedInstant"], json!(null));
+    assert!(rows.iter().any(|row| row["timeState"] == json!("resolved")));
+}
+
+#[test]
+fn chronology_reflects_apply_clear_and_undo_as_new_read_snapshots() {
+    let cache = tempfile::tempdir().expect("cache");
+    let data = build(cache.path());
+    let corpus = data["corpusId"].as_str().expect("corpus id").to_string();
+    let built_revision = data["corpusRevision"].as_u64().expect("revision");
+    let before = chronology(
+        cache.path(),
+        "case-synthetic-0001",
+        &corpus,
+        Some("heartbeat"),
+        &["worker/batch.log"],
+        10,
+        None,
+    );
+    assert_eq!(
+        before["data"]["chronology"]["rows"][0]["orderOnlyReason"],
+        json!("timezone_unresolved")
+    );
+
+    let fingerprint = preview(cache.path(), &corpus, built_revision, "America/Chicago")["data"]
+        ["preview"]["declarationFingerprint"]
+        .as_str()
+        .expect("fingerprint")
+        .to_string();
+    let applied = run(
+        cache.path(),
+        &request(
+            "case-synthetic-0001",
+            json!({
+                "kind": "apply",
+                "corpusId": corpus,
+                "expectedRevision": built_revision,
+                "source": "worker/batch.log",
+                "ianaTimezone": "America/Chicago",
+                "declarationFingerprint": fingerprint,
+                "declaredAt": 1_710_093_600i64,
+            }),
+        ),
+    );
+    let applied_revision = applied["data"]["revision"]["appliedRevision"]
+        .as_u64()
+        .expect("applied revision");
+    let after_apply = chronology(
+        cache.path(),
+        "case-synthetic-0001",
+        &corpus,
+        Some("heartbeat"),
+        &["worker/batch.log"],
+        10,
+        None,
+    );
+    assert_eq!(
+        after_apply["data"]["chronology"]["rows"][0]["orderOnlyReason"],
+        json!("nonexistent_dst_gap")
+    );
+
+    let cleared = run(
+        cache.path(),
+        &request(
+            "case-synthetic-0001",
+            json!({
+                "kind": "clear",
+                "corpusId": corpus,
+                "expectedRevision": applied_revision,
+                "source": "worker/batch.log",
+            }),
+        ),
+    );
+    let cleared_revision = cleared["data"]["revision"]["appliedRevision"]
+        .as_u64()
+        .expect("cleared revision");
+    let after_clear = chronology(
+        cache.path(),
+        "case-synthetic-0001",
+        &corpus,
+        Some("heartbeat"),
+        &["worker/batch.log"],
+        10,
+        None,
+    );
+    assert_eq!(
+        after_clear["data"]["chronology"]["rows"][0]["orderOnlyReason"],
+        json!("timezone_unresolved")
+    );
+
+    let undone = run(
+        cache.path(),
+        &request(
+            "case-synthetic-0001",
+            json!({
+                "kind": "undo",
+                "corpusId": corpus,
+                "expectedRevision": cleared_revision,
+            }),
+        ),
+    );
+    assert_eq!(undone["ok"], json!(true), "undo failed: {undone}");
+    let after_undo = chronology(
+        cache.path(),
+        "case-synthetic-0001",
+        &corpus,
+        Some("heartbeat"),
+        &["worker/batch.log"],
+        10,
+        None,
+    );
+    assert_eq!(
+        after_undo["data"]["chronology"]["rows"][0]["orderOnlyReason"],
+        json!("nonexistent_dst_gap")
+    );
+}
+
+#[test]
+fn chronology_wire_has_no_secret_or_local_path_material() {
+    let cache = tempfile::tempdir().expect("cache");
+    let data = build_case(
+        cache.path(),
+        "case-synthetic-private",
+        vec![json!({
+            "relativePath": "safe/synthetic.log",
+            "contentBase64": b64("ERROR visible synthetic token=sk-abcdefghijklmnop\n"),
+        })],
+    );
+    let corpus = data["corpusId"].as_str().expect("corpus id");
+    let page = chronology(
+        cache.path(),
+        "case-synthetic-private",
+        corpus,
+        Some("visible synthetic"),
+        &["safe/synthetic.log"],
+        10,
+        None,
+    );
+    assert_eq!(page["ok"], json!(true), "private chronology failed: {page}");
+    let wire = page.to_string();
+    assert!(!wire.contains("sk-abcdefghijklmnop"));
+    assert!(!wire.contains("/Users/"));
 }
 
 #[test]
