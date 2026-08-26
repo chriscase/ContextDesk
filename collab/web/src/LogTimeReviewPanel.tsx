@@ -384,7 +384,18 @@ export function LogTimeReviewPanel(props: {
     </header>
   );
 
-  if (unavailable) return null;
+  if (unavailable) {
+    return (
+      <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+        {heading}
+        <p className="log-time__copy" role="status">
+          Timezone review needs the trusted ContextDesk timestamp host on this installation.
+          Until it is configured, log lines with no timezone stay in file order and keep their
+          time unresolved — ContextDesk will not guess.
+        </p>
+      </section>
+    );
+  }
 
   if (!state) {
     return (
