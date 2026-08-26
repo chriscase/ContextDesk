@@ -489,3 +489,34 @@ fn search_returns_the_timeout_line_without_guessing_a_timezone() {
     assert_eq!(stale["ok"], json!(false));
     assert_eq!(stale["error"]["kind"], json!("conflict"));
 }
+
+#[test]
+fn events_list_the_corpus_without_a_search_query() {
+    let cache = tempfile::tempdir().expect("cache");
+    let data = build(cache.path());
+    let corpus = data["corpusId"].as_str().expect("corpusId");
+    let revision = data["corpusRevision"].as_u64().expect("revision");
+    let envelope = run(
+        cache.path(),
+        &request(
+            "case-synthetic-0001",
+            json!({
+                "kind": "events",
+                "corpusId": corpus,
+                "expectedRevision": revision,
+                "sources": [],
+                "k": 50,
+            }),
+        ),
+    );
+    assert_eq!(envelope["ok"], json!(true), "events failed: {envelope}");
+    let hits = envelope["data"]["search"]["hits"].as_array().expect("hits");
+    assert!(!hits.is_empty(), "expected corpus events: {hits:?}");
+    assert!(
+        hits.iter()
+            .any(|hit| hit["source"].as_str().unwrap_or("").contains("edge")
+                || hit["source"].as_str().unwrap_or("").contains("batch")
+                || hit["message"].as_str().is_some()),
+        "expected sourced events: {hits:?}"
+    );
+}

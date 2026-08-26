@@ -106,6 +106,20 @@ class FakeBridge implements LogTimeBridge {
         };
       case "status":
         return base();
+      case "search":
+      case "events":
+        return {
+          ...base(),
+          search: {
+            bounded: false,
+            atLeast: 0,
+            returned: 0,
+            partial: false,
+            cancelled: false,
+            diagnostic: null,
+            hits: [],
+          },
+        };
       case "preview": {
         requireFresh(action.expectedRevision);
         return {
@@ -293,6 +307,15 @@ async function built(options: HarnessOptions = {}) {
   await h.service.buildCorpus(CASE_ID, ACTOR);
   return h;
 }
+
+describe("workbench host events", () => {
+  it("asks the host for corpus events without a search query", async () => {
+    const { service, bridge } = await built();
+    const listed = await service.listWorkbenchEvents(CASE_ID);
+    expect(listed).not.toBeNull();
+    expect(bridge.calls.some((call) => call.kind === "events")).toBe(true);
+  });
+});
 
 function applyRequest(expectedRevision: number, key = "apply-worker-0001") {
   return {

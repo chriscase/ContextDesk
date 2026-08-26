@@ -1,7 +1,11 @@
 /**
  * Adapts case, evidence, and log-time stores to the Log workbench port.
  */
-import { corpusAllowedExtension, type PrivacyClass } from "@cd-collab/contracts";
+import {
+  corpusAllowedExtension,
+  type HostEventStampV1,
+  type PrivacyClass,
+} from "@cd-collab/contracts";
 import type { EvidenceStore } from "../../evidence/store.js";
 import type { Actor, CaseService, CaseStore } from "../cases/index.js";
 import type { WorkbenchCasePort, WorkbenchEvidenceFile } from "./service.js";
@@ -11,6 +15,7 @@ export interface WorkbenchCasePortDeps {
   domain: Pick<CaseService, "getCase" | "appendDomainTimeline">;
   evidence: EvidenceStore;
   currentNormalizationRevision: (caseId: string) => Promise<number | null>;
+  listHostEventStamps?: (caseId: string) => Promise<HostEventStampV1[] | null>;
 }
 
 export function createWorkbenchCasePort(deps: WorkbenchCasePortDeps): WorkbenchCasePort {
@@ -42,6 +47,10 @@ export function createWorkbenchCasePort(deps: WorkbenchCasePortDeps): WorkbenchC
     },
 
     currentNormalizationRevision: deps.currentNormalizationRevision,
+
+    ...(deps.listHostEventStamps
+      ? { listHostEventStamps: deps.listHostEventStamps }
+      : {}),
 
     async casePrivacyClass(caseId: string): Promise<PrivacyClass> {
       const artifacts = await deps.cases.listArtifactsByCase(caseId);

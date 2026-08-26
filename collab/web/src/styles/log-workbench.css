@@ -78,6 +78,11 @@
   padding: 0.4rem;
 }
 
+.log-workbench__spacer {
+  pointer-events: none;
+  flex-shrink: 0;
+}
+
 .log-workbench__lines {
   margin: 0.4rem 0;
   padding: 0;

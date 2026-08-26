@@ -77,7 +77,26 @@ export type LogTimeAction =
       declaredAt: number;
     }
   | { kind: "clear"; corpusId: string; expectedRevision: number; source: string }
-  | { kind: "undo"; corpusId: string; expectedRevision: number };
+  | { kind: "undo"; corpusId: string; expectedRevision: number }
+  | {
+      kind: "search";
+      corpusId: string;
+      expectedRevision: number;
+      query: string;
+      mode: "literal" | "case_insensitive" | "regex";
+      caseSensitive: boolean;
+      k: number;
+      sources?: string[];
+      timeFrom?: number | null;
+      timeTo?: number | null;
+    }
+  | {
+      kind: "events";
+      corpusId: string;
+      expectedRevision: number;
+      sources?: string[];
+      k: number;
+    };
 
 export interface HostSourceStatus {
   source: string;
@@ -139,6 +158,27 @@ export interface HostBuild {
   timezoneAmbiguousSources: string[];
 }
 
+export interface HostSearchHit {
+  seq: number;
+  source: string;
+  message: string;
+  level: string;
+  ts: number;
+  timeQuality: string;
+  unresolvedLocalTimestamp: string | null;
+  excerpt: string | null;
+}
+
+export interface HostSearch {
+  bounded: boolean;
+  atLeast: number;
+  returned: number;
+  partial: boolean;
+  cancelled: boolean;
+  diagnostic: string | null;
+  hits: HostSearchHit[];
+}
+
 export interface HostResult {
   caseId: string;
   corpusId: string;
@@ -147,6 +187,7 @@ export interface HostResult {
   sources?: HostSourceStatus[];
   preview?: HostPreview;
   revision?: HostRevision;
+  search?: HostSearch;
   declarations: Record<string, HostDeclaration>;
 }
 

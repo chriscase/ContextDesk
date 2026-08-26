@@ -65,6 +65,26 @@ CREATE INDEX log_workbench_bookmarks_case_idx
 CREATE INDEX log_workbench_bookmarks_token_idx
   ON log_workbench_bookmarks (share_safe_token);
 
+CREATE TABLE log_workbench_anchors (
+  id UUID PRIMARY KEY,
+  case_id UUID NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  evidence_id UUID NOT NULL,
+  line_number BIGINT NOT NULL,
+  status TEXT NOT NULL,
+  note TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  created_by TEXT NOT NULL,
+  UNIQUE (case_id, idempotency_key),
+  CONSTRAINT log_workbench_anchors_status_check
+    CHECK (status IN ('pinned', 'human_ground_truth')),
+  CONSTRAINT log_workbench_anchors_key_check
+    CHECK (idempotency_key ~ '^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$')
+);
+
+CREATE INDEX log_workbench_anchors_case_idx
+  ON log_workbench_anchors (case_id, created_at, id);
+
 CREATE OR REPLACE FUNCTION log_workbench_records_immutable() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -83,12 +103,19 @@ CREATE TRIGGER log_workbench_bookmarks_no_update
   BEFORE UPDATE OR DELETE ON log_workbench_bookmarks
   FOR EACH ROW EXECUTE FUNCTION log_workbench_records_immutable();
 
+DROP TRIGGER IF EXISTS log_workbench_anchors_no_update ON log_workbench_anchors;
+CREATE TRIGGER log_workbench_anchors_no_update
+  BEFORE UPDATE OR DELETE ON log_workbench_anchors
+  FOR EACH ROW EXECUTE FUNCTION log_workbench_records_immutable();
+
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'collab_app') THEN
     GRANT SELECT, INSERT ON TABLE log_workbench_views TO collab_app;
     GRANT SELECT, INSERT ON TABLE log_workbench_bookmarks TO collab_app;
+    GRANT SELECT, INSERT ON TABLE log_workbench_anchors TO collab_app;
     REVOKE UPDATE, DELETE ON TABLE log_workbench_views FROM collab_app;
     REVOKE UPDATE, DELETE ON TABLE log_workbench_bookmarks FROM collab_app;
+    REVOKE UPDATE, DELETE ON TABLE log_workbench_anchors FROM collab_app;
   END IF;
 END $$;

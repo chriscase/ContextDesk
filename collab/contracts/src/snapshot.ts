@@ -211,6 +211,9 @@ export function parseSnapshot(raw: unknown): SnapshotV1 {
     evidence: row.evidence,
     visibility: row.visibility,
     protocolVersion: row.protocolVersion,
+    ...(typeof row.normalizationRevision === "number"
+      ? { normalizationRevision: row.normalizationRevision }
+      : {}),
   });
   if (row.fingerprint !== expected) {
     throw new ContractViolation("$.fingerprint", "must match the canonical snapshot fingerprint");

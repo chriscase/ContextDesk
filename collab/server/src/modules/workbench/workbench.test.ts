@@ -61,6 +61,13 @@ function harness(options: {
   files?: WorkbenchEvidenceFile[];
   revision?: number | null;
   store?: MemoryWorkbenchStore;
+  hostStamps?: {
+    source: string;
+    message: string;
+    ts: number;
+    timeQuality: string;
+    unresolvedLocalTimestamp: string | null;
+  }[];
 } = {}) {
   const store = options.store ?? new MemoryWorkbenchStore();
   const timeline: { kind: string; targetId: string | null }[] = [];
@@ -80,6 +87,9 @@ function harness(options: {
     },
     async currentNormalizationRevision() {
       return options.revision === undefined ? 3 : options.revision;
+    },
+    async listHostEventStamps() {
+      return options.hostStamps ?? null;
     },
     async casePrivacyClass() {
       return "owner_only";
@@ -118,6 +128,65 @@ const SEARCH = {
   limit: 50,
   expectedNormalizationRevision: 3,
 };
+
+describe("host corpus overlay", () => {
+  it("uses wall-clock host stamps after timezone apply, not Date.parse on local text", async () => {
+    const withoutHost = harness({ revision: 1 });
+    const local = await withoutHost.service.search(CASE_ID, ACTOR, false, {
+      ...SEARCH,
+      query: "heartbeat",
+      expectedNormalizationRevision: 1,
+    });
+    expect(local.matches[0]?.normalizedUtc).toBeNull();
+
+    const applied = harness({
+      revision: 2,
+      hostStamps: [
+        {
+          source: "worker/batch.log",
+          message: "heartbeat late",
+          ts: 1_710_048_600,
+          timeQuality: "wall clock",
+          unresolvedLocalTimestamp: "2024-03-10 02:30:00",
+        },
+      ],
+    });
+    const after = await applied.service.search(CASE_ID, ACTOR, false, {
+      ...SEARCH,
+      query: "heartbeat",
+      expectedNormalizationRevision: 2,
+    });
+    expect(after.matches[0]?.normalizedUtc).toBe(new Date(1_710_048_600 * 1000).toISOString());
+    const chrono = await applied.service.chronology(CASE_ID, ACTOR, false, "file", []);
+    expect(chrono.events.some((event) => event.normalizedUtc?.startsWith("2024-"))).toBe(true);
+  });
+
+  it("pins a chronology line as a benchmark without calling it ground truth", async () => {
+    const { service } = harness();
+    const pin = await service.pinChronologyAnchor(CASE_ID, ACTOR, false, {
+      evidenceId: EVIDENCE_A,
+      lineNumber: 1,
+      status: "pinned",
+      note: "",
+      idempotencyKey: "anchor-edge-1-pinned",
+    });
+    expect(pin.status).toBe("pinned");
+    const chrono = await service.chronology(CASE_ID, ACTOR, false, "file", []);
+    expect(
+      chrono.events.find((event) => event.lineNumber === 1 && event.relativePath.includes("edge"))
+        ?.anchorStatus,
+    ).toBe("pinned");
+    await expect(
+      service.pinChronologyAnchor(CASE_ID, ACTOR, false, {
+        evidenceId: EVIDENCE_A,
+        lineNumber: 1,
+        status: "human_ground_truth",
+        note: "",
+        idempotencyKey: "anchor-edge-1-truth",
+      }),
+    ).rejects.toBeInstanceOf(WorkbenchConflictError);
+  });
+});
 
 describe("workbench search", () => {
   it("returns the expected timeout line with an honest count", async () => {

@@ -267,6 +267,21 @@ async function main(): Promise<void> {
       evidence: store,
       currentNormalizationRevision: async (caseId) =>
         (await logTimeStore.getCorpus(caseId))?.corpusRevision ?? null,
+      ...(logTime
+        ? {
+            listHostEventStamps: async (caseId) => {
+              const listed = await logTime.listWorkbenchEvents(caseId);
+              if (!listed) return null;
+              return listed.search.hits.map((hit) => ({
+                source: hit.source,
+                message: hit.message,
+                ts: hit.ts,
+                timeQuality: hit.timeQuality,
+                unresolvedLocalTimestamp: hit.unresolvedLocalTimestamp,
+              }));
+            },
+          }
+        : {}),
     }),
     audit,
   });

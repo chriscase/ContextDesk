@@ -455,12 +455,96 @@ export interface WorkbenchChronologyEventV1 {
   severity: string | null;
   component: string | null;
   intakeBatchId: string | null;
+  groupKey: string;
   adjacencyReason: string;
   uncertainty: string[];
   correlationKind: ChronologyCorrelationKind;
   correlationId: string | null;
   anchorStatus: ChronologyAnchorStatus | null;
   excerpt: string;
+}
+
+/** Host/cd-core event stamp. `ts` is unix seconds; wall-clock quality only. */
+export interface HostEventStampV1 {
+  source: string;
+  message: string;
+  ts: number;
+  timeQuality: string;
+  unresolvedLocalTimestamp: string | null;
+}
+
+export function chronologyAnchorKey(evidenceId: string, lineNumber: number): string {
+  return `${evidenceId}:${lineNumber}`;
+}
+
+export function groupingKeyOf(
+  line: WorkbenchLine,
+  grouping: WorkbenchGrouping,
+): string {
+  switch (grouping) {
+    case "file":
+      return line.relativePath;
+    case "component":
+      return line.component ?? line.relativePath;
+    case "batch":
+      return line.intakeBatchId ?? "no-batch";
+    case "rotation_family":
+      return line.rotationFamily;
+    case "entity":
+      return observedCorrelationId(line.text) ?? "no-observed-id";
+    case "severity":
+      return line.severity ?? "unspecified";
+    case "none":
+      return "ungrouped";
+  }
+}
+
+/**
+ * Overlay host/cd-core timestamps onto intake lines. Local-ambiguous text
+ * never becomes UTC unless the host reports wall-clock quality after an
+ * explicit timezone apply.
+ */
+export function applyHostTimestamps(
+  lines: readonly WorkbenchLine[],
+  stamps: readonly HostEventStampV1[],
+): WorkbenchLine[] {
+  if (stamps.length === 0) return [...lines];
+  const remaining = [...stamps];
+  return lines.map((line) => {
+    const index = remaining.findIndex((stamp) => stampMatchesLine(stamp, line));
+    if (index < 0) return line;
+    const [stamp] = remaining.splice(index, 1);
+    if (!stamp) return line;
+    const wall = stamp.timeQuality === "wall clock";
+    const normalizedUtc =
+      wall && Number.isFinite(stamp.ts) ? new Date(stamp.ts * 1000).toISOString() : null;
+    return {
+      ...line,
+      originalTimestamp:
+        stamp.unresolvedLocalTimestamp ?? line.originalTimestamp,
+      normalizedUtc,
+    };
+  });
+}
+
+function stampMatchesLine(stamp: HostEventStampV1, line: WorkbenchLine): boolean {
+  const source = stamp.source.replace(/\\/g, "/");
+  const path = line.relativePath.replace(/\\/g, "/");
+  const sourceOk =
+    source === path
+    || path.endsWith(`/${source}`)
+    || source.endsWith(`/${path}`)
+    || source.split("/").pop() === path.split("/").pop();
+  if (!sourceOk) return false;
+  const local = stamp.unresolvedLocalTimestamp?.trim();
+  const original = line.originalTimestamp?.trim();
+  if (local && original && local === original) return true;
+  const message = stamp.message.trim();
+  const text = line.text.trim();
+  if (!message || !text) return false;
+  if (text.includes(message) || message.includes(text)) return true;
+  const fold = (value: string) => value.toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ");
+  return fold(text).includes(fold(message));
 }
 
 export interface WorkbenchUnknownBucketV1 {
@@ -651,6 +735,7 @@ const chronologyEventShape: ObjectShape = {
   severity: f.nul(f.str),
   component: f.nul(f.str),
   intakeBatchId: f.nul(f.str),
+  groupKey: f.req(f.str),
   adjacencyReason: f.req(f.nstr),
   uncertainty: f.req(f.arr(f.str)),
   correlationKind: f.req(f.en(...CHRONOLOGY_CORRELATION_KINDS)),
@@ -1210,9 +1295,13 @@ export function mergeChronology(
   lines: readonly WorkbenchLine[],
   grouping: WorkbenchGrouping,
   expectedNormalizationRevision: number | null,
+  anchors: ReadonlyMap<string, ChronologyAnchorStatus> = new Map(),
 ): WorkbenchChronologyV1 {
   const sortable = [...lines];
   sortable.sort((left, right) => {
+    const leftGroup = groupingKeyOf(left, grouping);
+    const rightGroup = groupingKeyOf(right, grouping);
+    if (leftGroup !== rightGroup) return leftGroup.localeCompare(rightGroup);
     if (left.normalizedUtc && right.normalizedUtc) {
       if (left.normalizedUtc !== right.normalizedUtc) {
         return left.normalizedUtc < right.normalizedUtc ? -1 : 1;
@@ -1228,6 +1317,8 @@ export function mergeChronology(
   const window = sortable.slice(0, WORKBENCH_LIMITS.maxPageRows);
   const events: WorkbenchChronologyEventV1[] = window.map((line, index) => {
     const previous = window[index - 1];
+    const groupKey = groupingKeyOf(line, grouping);
+    const previousKey = previous ? groupingKeyOf(previous, grouping) : null;
     const uncertainty: string[] = [];
     if (!line.normalizedUtc) uncertainty.push("no usable timestamp");
     if (line.parseClass === "local_ambiguous") uncertainty.push("ambiguous local time");
@@ -1235,19 +1326,21 @@ export function mergeChronology(
       previous?.normalizedUtc
       && line.normalizedUtc
       && line.normalizedUtc < previous.normalizedUtc
+      && previousKey === groupKey
     ) {
       uncertainty.push("impossible ordering against the previous row");
     }
     const observed = observedCorrelationId(line.text);
     let adjacencyReason = "Ingest order in the same investigation.";
-    if (previous && previous.normalizedUtc && line.normalizedUtc) {
+    if (previousKey === groupKey && grouping !== "none") {
+      adjacencyReason = `Adjacent in the same ${grouping.replace("_", " ")} group (${groupKey}).`;
+    } else if (previous && previous.normalizedUtc && line.normalizedUtc) {
       adjacencyReason = "Adjacent because their normalized UTC instants are consecutive in this window.";
     } else if (previous && previous.relativePath === line.relativePath) {
       adjacencyReason = "Adjacent because they are neighboring lines in the same file.";
     }
-    if (grouping !== "none") {
-      adjacencyReason += ` Grouped by ${grouping.replace("_", " ")}.`;
-    }
+    const anchorStatus =
+      anchors.get(chronologyAnchorKey(line.evidenceId, line.lineNumber)) ?? null;
     return {
       evidenceId: line.evidenceId,
       relativePath: line.relativePath,
@@ -1259,11 +1352,12 @@ export function mergeChronology(
       severity: line.severity,
       component: line.component,
       intakeBatchId: line.intakeBatchId,
+      groupKey,
       adjacencyReason,
       uncertainty,
       correlationKind: observed ? "observed_identifier" : "none",
       correlationId: observed,
-      anchorStatus: null,
+      anchorStatus,
       excerpt: line.text.slice(0, 240),
     };
   });

@@ -12,6 +12,8 @@ import {
   WORKBENCH_LIMITS,
   WORKBENCH_SEARCH_REQUEST_SCHEMA_ID,
   WORKBENCH_VIEW_SCHEMA_ID,
+  applyHostTimestamps,
+  chronologyAnchorKey,
   extractShapeCandidates,
   groupReviewQueue,
   mergeChronology,
@@ -28,6 +30,8 @@ import {
   searchLogLines,
   splitLogText,
   workbenchShareSafeToken,
+  type ChronologyAnchorStatus,
+  type HostEventStampV1,
   type PrivacyClass,
   type WorkbenchBookmarkV1,
   type WorkbenchChronologyV1,
@@ -73,6 +77,7 @@ export interface WorkbenchCasePort {
   ): Promise<{ id: string } | null>;
   listEvidenceFiles(caseId: string): Promise<WorkbenchEvidenceFile[]>;
   currentNormalizationRevision(caseId: string): Promise<number | null>;
+  listHostEventStamps?(caseId: string): Promise<HostEventStampV1[] | null>;
   casePrivacyClass(caseId: string): Promise<PrivacyClass>;
   appendTimeline(
     caseId: string,
@@ -130,7 +135,9 @@ export class WorkbenchService {
       }
       if (work > WORKBENCH_LIMITS.maxSearchWorkLines) break;
     }
-    return lines;
+    const stamps = await this.deps.cases.listHostEventStamps?.(caseId);
+    if (!stamps || stamps.length === 0) return lines;
+    return applyHostTimestamps(lines, stamps);
   }
 
   async inventory(caseId: string, actor: Actor, isAdmin: boolean): Promise<{
@@ -224,7 +231,59 @@ export class WorkbenchService {
     if (evidenceIds.length > 0) {
       lines = lines.filter((line) => evidenceIds.includes(line.evidenceId));
     }
-    return mergeChronology(lines, grouping, current);
+    const anchors = new Map(
+      (await this.deps.store.listAnchors(caseId)).map((row) => [
+        chronologyAnchorKey(row.evidenceId, row.lineNumber),
+        row.status,
+      ]),
+    );
+    return mergeChronology(lines, grouping, current, anchors);
+  }
+
+  async pinChronologyAnchor(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    input: {
+      evidenceId: string;
+      lineNumber: number;
+      status: ChronologyAnchorStatus;
+      note: string;
+      idempotencyKey: string;
+    },
+  ) {
+    await this.assertReadable(caseId, actor, isAdmin);
+    if (input.status === "human_ground_truth" && !input.note.trim()) {
+      throw new WorkbenchConflictError(
+        "human ground truth requires a recorded note from a person",
+      );
+    }
+    return this.deps.store.withCaseLock(caseId, async () => {
+      const existing = await this.deps.store.getAnchorByIdempotency(
+        caseId,
+        input.idempotencyKey,
+      );
+      if (existing) return existing;
+      const row = {
+        id: randomUUID(),
+        caseId,
+        evidenceId: input.evidenceId,
+        lineNumber: input.lineNumber,
+        status: input.status,
+        note: input.note,
+        idempotencyKey: input.idempotencyKey,
+        createdAt: new Date().toISOString(),
+        createdBy: actor.id,
+      };
+      await this.deps.store.insertAnchor(row);
+      await this.deps.cases.appendTimeline(caseId, {
+        kind: "log_workbench_anchor_pinned",
+        actor,
+        targetId: row.id,
+        payload: { status: input.status, lineNumber: input.lineNumber },
+      });
+      return row;
+    });
   }
 
   async reviewQueue(caseId: string, actor: Actor, isAdmin: boolean) {

@@ -92,6 +92,38 @@ describe.skipIf(!adminUrl())("pg-backed workbench record", () => {
     });
   });
 
+  it("holds the advisory lock so view insert and timeline share one rollback", async () => {
+    await withStore(async (store, pool) => {
+      const cases = new PgCaseStore(pool);
+      const row: WorkbenchViewRow = {
+        id: randomUUID(),
+        caseId: CASE_ID,
+        name: "Timeout window",
+        payloadJson: "{}",
+        idempotencyKey: "view-timeout-lock-0001",
+        requestDigest: DIGEST,
+        privacyClass: "owner_only",
+        createdAt: CREATED_AT,
+        createdBy: "analyst-synthetic-01",
+      };
+      await expect(
+        store.withCaseLock(CASE_ID, async () => {
+          await store.insertView(row);
+          await cases.appendTimeline(CASE_ID, {
+            kind: "log_workbench_view_saved",
+            actor: { id: "analyst-synthetic-01", username: "analyst-synthetic-01" },
+            targetId: row.id,
+            clientTime: null,
+            payload: { name: row.name },
+          });
+          throw new Error("injected post-timeline failure");
+        }),
+      ).rejects.toThrow(/injected post-timeline failure/);
+      expect(await store.listViews(CASE_ID)).toEqual([]);
+      expect(await cases.listTimeline(CASE_ID)).toEqual([]);
+    });
+  });
+
   it("adds a nullable normalization revision on snapshots", async () => {
     await withStore(async (_store, pool) => {
       const result = await pool.query<{ column_name: string }>(

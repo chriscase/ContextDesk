@@ -220,4 +220,128 @@ test.describe("investigation log workbench", () => {
     await expect(workbench.getByRole("status")).toContainText(/matches/);
     await page.keyboard.press("Escape");
   });
+
+  test("filters investigations by involved entity and observed date", async ({ page }) => {
+    const label = `Synthetic workbench party ${Date.now()}`;
+    const title = uniqueTitle("Workbench historical entity");
+    await loginAs(page, FIXTURE_USERS.alice);
+    await page.getByRole("navigation", { name: "Primary" }).getByRole("button", { name: "Entities" }).click();
+    const entityForm = page.getByRole("form", { name: "Add an entity" });
+    await entityForm.getByLabel("Entity kind").selectOption("service");
+    await entityForm.getByLabel("Entity name").fill(label);
+    await entityForm.getByRole("button", { name: "Add entity" }).click();
+    await expect(page.getByText(label)).toBeVisible();
+
+    const field = page.getByPlaceholder("New investigation title");
+    if (!(await field.isVisible())) {
+      await page.getByRole("button", { name: "Start investigation" }).click();
+    }
+    await page.getByLabel("When it happened").fill("2024-03-10");
+    await field.fill(title);
+    await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().endsWith("/api/cases") && res.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: "Create investigation" }).click(),
+    ]);
+
+    await gotoStage(page, "Situation");
+    await expect(page.getByTestId("occurred-at")).toContainText("2024-03-10");
+    const involvementForm = page.getByRole("form", { name: "Add an involved entity" });
+    await involvementForm.getByLabel("Entity").selectOption({ label: `${label} · Service` });
+    await involvementForm.getByLabel("How it is involved").selectOption("affected");
+    await involvementForm.getByLabel("Involved since").fill("2024-03-10");
+    await involvementForm.getByRole("button", { name: "Add involved entity" }).click();
+    await expect(
+      page.locator(".catalog__item").filter({ hasText: label }).first(),
+    ).toBeVisible();
+    const menu = page.getByRole("button", { name: "Menu" });
+    if ((await menu.isVisible()) && (await menu.getAttribute("aria-expanded")) === "false") {
+      await menu.click();
+    }
+    await page
+      .getByRole("navigation", { name: "Primary" })
+      .getByRole("button", { name: "Investigations", exact: true })
+      .click();
+    const filter = page.getByLabel("Filter investigations by involved entity");
+    await expect(filter).toBeVisible();
+    const entityValue = await filter.locator("option").filter({ hasText: label }).first().getAttribute("value");
+    expect(entityValue).toBeTruthy();
+    await filter.selectOption(entityValue as string);
+    await expect(page.getByRole("button", { name: title })).toBeVisible();
+    await page.getByLabel("Filter investigations by observed date").fill("2024-03-10");
+    await expect(page.getByRole("button", { name: title })).toBeVisible();
+  });
+});
+
+const hostConfigured = Boolean(process.env.COLLAB_E2E_LOG_TIME_BIN?.trim());
+
+test.describe("host-backed log workbench chronology", () => {
+  test.skip(
+    !hostConfigured,
+    "set COLLAB_E2E_LOG_TIME_BIN to the contextdesk binary to prove timezone apply changes workbench UTC",
+  );
+
+  test("timezone apply changes workbench UTC then freeze binds that revision", async ({
+    page,
+  }) => {
+    const worker = [
+      "2024-03-10 01:30:00 INFO  batch worker starting scheduled sweep",
+      "2024-03-10 02:30:00 WARN  batch worker heartbeat late",
+      "2024-03-10 03:05:00 ERROR batch worker sweep failed retry 1",
+      "",
+    ].join("\n");
+    const edge = [
+      "2024-03-10T07:30:00Z INFO  edge accepted request rid-0001",
+      "2024-03-10T08:10:00Z ERROR edge upstream timeout rid-0003",
+      "",
+    ].join("\n");
+    const title = uniqueTitle("Workbench host chronology");
+    await loginAs(page, FIXTURE_USERS.dave);
+    await createCase(page, title);
+    await gotoStage(page, "Capture");
+    const zip = syntheticZip([
+      { name: "worker/batch.log", data: Buffer.from(worker) },
+      { name: "gateway/edge.log", data: Buffer.from(edge) },
+    ]);
+    await page.getByRole("radio", { name: "ZIP archive" }).check();
+    await page.getByLabel("ZIP file to upload").setInputFiles({
+      name: "host-workbench.zip",
+      mimeType: "application/zip",
+      buffer: zip,
+    });
+    await page.getByRole("button", { name: "Preview intake" }).click();
+    await page.getByRole("button", { name: "Commit accepted files" }).click();
+    await gotoStage(page, "Analyze");
+    const panel = page.locator("#log-time");
+    await panel.getByRole("button", { name: "Build the log corpus" }).click();
+    await expect(panel.getByText(/timezone not stated/)).toBeVisible();
+    const workerRow = panel.locator('[data-route-item="worker/batch.log"]');
+    await workerRow.getByRole("button", { name: "Declare a timezone" }).click();
+    await panel.getByLabel("Which timezone was this file written in?").fill("America/Chicago");
+    await panel.getByRole("button", { name: "Show me what this would do" }).click();
+    await expect(panel.getByText("2024-03-10T07:30:00Z")).toBeVisible();
+    await panel.getByRole("button", { name: "Apply America/Chicago to this file" }).click();
+    await expect(workerRow.locator(".log-time__chip--declared")).toHaveText("America/Chicago");
+
+    const workbench = page.locator("#log-workbench");
+    await workbench.getByRole("button", { name: "Show merged chronology" }).click();
+    await expect(workbench.getByRole("heading", { name: "Merged chronology" })).toBeVisible();
+    await expect(workbench.getByText(/2024-03-10T07:30:00/)).toBeVisible();
+
+    await page.getByLabel("Include worker/batch.log in snapshot").check();
+    await page.getByRole("button", { name: /Freeze selected evidence/ }).click();
+    await expect(page.getByText(/Frozen evidence set/)).toBeVisible();
+    const caseId = await caseIdForTitle(page, title);
+    const snapshots = await page.request.get(`/api/cases/${caseId}/snapshots`);
+    expect(snapshots.ok()).toBeTruthy();
+    const body = (await snapshots.json()) as {
+      snapshots?: { normalizationRevision?: number | null }[];
+    };
+    expect(body.snapshots?.[0]?.normalizationRevision).toBeGreaterThan(0);
+    await gotoStage(page, "Compare");
+    await expect(page.getByText(/Frozen evidence set/)).toBeVisible();
+    await gotoStage(page, "Decide");
+    await expect(page.getByRole("heading", { name: /Decide/i }).first()).toBeVisible();
+  });
 });

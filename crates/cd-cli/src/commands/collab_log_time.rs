@@ -28,7 +28,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cd_core::config::AppConfig;
 use cd_core::log_analysis::event_revision::undo_event_revision;
 use cd_core::log_analysis::query::{
-    search_events_advanced, EventQuery, EventSearchQuery, SearchMatchMode,
+    query_events, search_events_advanced, EventQuery, EventSearchQuery, SearchMatchMode,
+    MAX_EVENT_PAGE,
 };
 use cd_core::log_analysis::store::LogCorpus;
 use cd_core::log_analysis::timezone_application::{
@@ -138,6 +139,18 @@ pub enum CollabLogTimeAction {
         query: String,
         mode: String,
         case_sensitive: bool,
+        k: u64,
+        #[serde(default)]
+        sources: Vec<String>,
+        time_from: Option<i64>,
+        time_to: Option<i64>,
+    },
+    /// List corpus events (no query) so the workbench can overlay host UTC.
+    Events {
+        corpus_id: String,
+        expected_revision: u64,
+        #[serde(default)]
+        sources: Vec<String>,
         k: u64,
     },
 }
@@ -401,6 +414,9 @@ pub fn run(args: &CollabLogTimeArgs) -> CliResult<Box<dyn Render>> {
             mode,
             case_sensitive,
             k,
+            sources,
+            time_from,
+            time_to,
         } => search(
             cache_root,
             &request.case_id,
@@ -409,6 +425,22 @@ pub fn run(args: &CollabLogTimeArgs) -> CliResult<Box<dyn Render>> {
             query,
             mode,
             *case_sensitive,
+            *k,
+            sources,
+            *time_from,
+            *time_to,
+        ),
+        CollabLogTimeAction::Events {
+            corpus_id,
+            expected_revision,
+            sources,
+            k,
+        } => list_events(
+            cache_root,
+            &request.case_id,
+            corpus_id,
+            *expected_revision,
+            sources,
             *k,
         ),
     }
@@ -658,6 +690,9 @@ fn search(
     mode: &str,
     case_sensitive: bool,
     k: u64,
+    sources: &[String],
+    time_from: Option<i64>,
+    time_to: Option<i64>,
 ) -> CliResult<Box<dyn Render>> {
     let corpus_id = validated_corpus_id(corpus_id)?;
     if query.chars().count() > 512 {
@@ -680,6 +715,7 @@ fn search(
         )));
     }
     let corpus = LogCorpus::open(cache_root, corpus_id).map_err(map_core_error)?;
+    let cap = if query.is_empty() { 2_000 } else { 200 };
     let result = search_events_advanced(
         &corpus,
         &EventSearchQuery {
@@ -688,9 +724,14 @@ fn search(
             } else {
                 Some(query.to_string())
             },
-            filter: EventQuery::default(),
+            filter: EventQuery {
+                time_from,
+                time_to,
+                sources: sources.to_vec(),
+                ..EventQuery::default()
+            },
             semantic: false,
-            k: k.min(200) as usize,
+            k: k.min(cap) as usize,
             match_mode,
             case_sensitive: if mode == "case_insensitive" {
                 false
@@ -732,6 +773,95 @@ fn search(
             partial: result.partial,
             cancelled: result.cancelled,
             diagnostic: result.diagnostic,
+            hits,
+        }),
+        declarations: declarations_out(&state.declarations),
+    }))
+}
+
+fn list_events(
+    cache_root: &Path,
+    case_id: &str,
+    corpus_id: &str,
+    expected_revision: u64,
+    sources: &[String],
+    k: u64,
+) -> CliResult<Box<dyn Render>> {
+    let corpus_id = validated_corpus_id(corpus_id)?;
+    let state = load_state(cache_root, corpus_id)?;
+    if state.scope.event_revision != expected_revision {
+        return Err(CliError::conflict(format!(
+            "stale timezone events: expected revision {expected_revision}, current {}",
+            state.scope.event_revision
+        )));
+    }
+    let corpus = LogCorpus::open(cache_root, corpus_id).map_err(map_core_error)?;
+    let cap = k.clamp(1, 2_000) as usize;
+    let mut hits: Vec<SearchHitOut> = Vec::new();
+    let mut after_seq = None;
+    let mut after_ts = None;
+    let more;
+    loop {
+        let remaining = cap.saturating_sub(hits.len());
+        if remaining == 0 {
+            more = true;
+            break;
+        }
+        let page = query_events(
+            &corpus,
+            &EventQuery {
+                sources: sources.to_vec(),
+                limit: remaining.min(MAX_EVENT_PAGE),
+                after_seq,
+                after_ts,
+                ..EventQuery::default()
+            },
+        )
+        .map_err(map_core_error)?;
+        let exhausted = page.events.is_empty() || page.next_cursor.is_none();
+        for event in page.events {
+            hits.push(SearchHitOut {
+                seq: event.seq,
+                source: event.source,
+                message: event.message,
+                level: event.level,
+                ts: event.ts,
+                time_quality: event.time_quality.label().to_string(),
+                unresolved_local_timestamp: event.unresolved_local_timestamp,
+                excerpt: None,
+            });
+            if hits.len() >= cap {
+                break;
+            }
+        }
+        if hits.len() >= cap {
+            more = page.next_cursor.is_some();
+            break;
+        }
+        if exhausted {
+            more = false;
+            break;
+        }
+        after_seq = page.next_cursor;
+        after_ts = page.next_ts;
+    }
+    let returned = hits.len() as u64;
+    Ok(Box::new(CollabLogTimeResult {
+        schema_id: RESULT_SCHEMA_ID,
+        case_id: case_id.to_string(),
+        corpus_id: corpus_id.to_string(),
+        corpus_revision: state.scope.event_revision,
+        build: None,
+        sources: None,
+        preview: None,
+        revision: None,
+        search: Some(SearchOut {
+            bounded: more,
+            at_least: returned,
+            returned,
+            partial: more,
+            cancelled: false,
+            diagnostic: None,
             hits,
         }),
         declarations: declarations_out(&state.declarations),
