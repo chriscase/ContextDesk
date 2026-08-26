@@ -307,6 +307,10 @@ export interface StatusChangeOptions {
 }
 
 export class CaseService {
+  private normalizationRevisionFor:
+    | ((caseId: string) => Promise<number | null>)
+    | null = null;
+
   constructor(
     private readonly evidence: EvidenceStore,
     private readonly audit: AuditStore,
@@ -314,6 +318,12 @@ export class CaseService {
     private readonly catalog: CatalogService = new CatalogService(),
     private readonly resolutionGuard?: StatusResolutionGuard,
   ) {}
+
+  bindNormalizationRevision(
+    lookup: (caseId: string) => Promise<number | null>,
+  ): void {
+    this.normalizationRevisionFor = lookup;
+  }
 
   async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
     return withCatalogCaseMutation(async () => {
@@ -789,6 +799,7 @@ export class CaseService {
       visibility?: PrivacyClass;
       protocolVersion?: string;
       clientTime?: string;
+      normalizationRevision?: number | null;
     },
     origin: string,
   ): Promise<SnapshotV1> {
@@ -821,11 +832,18 @@ export class CaseService {
       if (visibility === "share_safe" && selected.some((item) => item.privacyClass !== "share_safe")) {
         throw new Error("share-safe snapshot cannot include owner-only evidence");
       }
+      const normalizationRevision =
+        input.normalizationRevision !== undefined
+          ? input.normalizationRevision
+          : (await this.normalizationRevisionFor?.(caseId)) ?? null;
       const fingerprint = snapshotFingerprint({
         parentSnapshotId,
         evidence: selected,
         visibility,
         protocolVersion,
+        ...(typeof normalizationRevision === "number"
+          ? { normalizationRevision }
+          : {}),
       });
       const replay = existing.find((row) => row.fingerprint === fingerprint);
       if (replay) return replay;
@@ -842,6 +860,9 @@ export class CaseService {
         status: "frozen",
         createdAt: new Date().toISOString(),
         createdBy: actor.id,
+        ...(typeof normalizationRevision === "number"
+          ? { normalizationRevision }
+          : { normalizationRevision: null }),
       };
       try {
         await this.store.insertSnapshot(row);

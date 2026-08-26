@@ -862,6 +862,14 @@ export function activeCaseQueryable(): Queryable | undefined {
   return pgCaseTx.getStore();
 }
 
+/** Bind case-store writes (timeline, last_seq) onto an already-open client. */
+export function runWithCaseQueryable<T>(
+  queryable: Queryable,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return pgCaseTx.run(queryable, operation);
+}
+
 /** Destination key column backing each probe kind. */
 const CASE_PROBE_TABLES: Readonly<Record<CaseProbeKind, { table: string; column: string }>> =
   Object.freeze({
@@ -1421,7 +1429,8 @@ export class PgCaseStore implements CaseStore {
   async listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]> {
     const result = await this.db.query(
       `SELECT id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
-              protocol_version, fairness_class, status, created_at, created_by
+              protocol_version, fairness_class, status, created_at, created_by,
+              normalization_revision
        FROM snapshots WHERE case_id = $1 ORDER BY created_at ASC, id ASC`,
       [caseId],
     );
@@ -1470,7 +1479,8 @@ export class PgCaseStore implements CaseStore {
   async getSnapshot(snapshotId: string): Promise<SnapshotRow | null> {
     const result = await this.db.query(
       `SELECT id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
-              protocol_version, fairness_class, status, created_at, created_by
+              protocol_version, fairness_class, status, created_at, created_by,
+              normalization_revision
        FROM snapshots WHERE id = $1`,
       [snapshotId],
     );
@@ -1483,8 +1493,9 @@ export class PgCaseStore implements CaseStore {
     await this.db.query(
       `INSERT INTO snapshots (
          id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
-         protocol_version, fairness_class, status, created_at, created_by
-       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)`,
+         protocol_version, fairness_class, status, created_at, created_by,
+         normalization_revision
+       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12)`,
       [
         snapshot.id,
         snapshot.caseId,
@@ -1497,6 +1508,7 @@ export class PgCaseStore implements CaseStore {
         snapshot.status,
         snapshot.createdAt,
         snapshot.createdBy,
+        snapshot.normalizationRevision ?? null,
       ],
     );
   }
@@ -1808,6 +1820,11 @@ function isolateSnapshot(row: SnapshotV1): SnapshotRow {
     status: row.status,
     createdAt: row.createdAt,
     createdBy: row.createdBy,
+    ...(typeof row.normalizationRevision === "number"
+      ? { normalizationRevision: row.normalizationRevision }
+      : row.normalizationRevision === null
+        ? { normalizationRevision: null }
+        : {}),
   };
 }
 
@@ -1833,5 +1850,9 @@ function asSnapshot(row: Record<string, unknown>): SnapshotRow {
     status: row.status,
     createdAt: timestampColumn(row.created_at),
     createdBy: row.created_by,
+    normalizationRevision:
+      row.normalization_revision === null || row.normalization_revision === undefined
+        ? null
+        : Number(row.normalization_revision),
   });
 }

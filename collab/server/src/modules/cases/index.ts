@@ -31,7 +31,7 @@ export type {
   ParticipantIdentityRow,
 } from "./store.js";
 export { CASE_PROBE_KINDS } from "./store.js";
-export { activityComesAfter, compareActivityDesc, overviewVisiblePredicate, isOverviewVisibleCase, activeCaseQueryable } from "./store.js";
+export { activityComesAfter, compareActivityDesc, overviewVisiblePredicate, isOverviewVisibleCase, activeCaseQueryable, runWithCaseQueryable } from "./store.js";
 export { deriveCaseBoard } from "./board.js";
 export type { AcceptedDecisionBoardInput, CaseBoardInput } from "./board.js";
 export { registerCaseRoutes } from "./routes.js";

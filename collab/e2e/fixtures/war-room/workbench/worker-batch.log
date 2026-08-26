@@ -1,0 +1,5 @@
+2024-03-10 01:30:00 INFO  batch worker starting scheduled sweep
+2024-03-10 01:59:59 INFO  batch worker queue depth 4
+2024-03-10 02:30:00 WARN  batch worker heartbeat late
+2024-03-10 03:05:00 ERROR batch worker sweep failed retry 1 rid-0003
+2024-03-10 03:20:00 INFO  batch worker sweep recovered
