@@ -378,18 +378,23 @@ test.describe("host-backed log workbench chronology", () => {
     await workerRow.getByRole("button", { name: "Declare a timezone" }).click();
     await panel.getByLabel("Which timezone was this file written in?").fill("America/Chicago");
     await panel.getByRole("button", { name: "Show me what this would do" }).click();
-    await expect(panel.getByText("2024-03-10T07:30:00Z")).toBeVisible();
+    await expect(panel.getByText("2024-03-10T07:30:00Z", { exact: true })).toBeVisible();
     await panel.getByRole("button", { name: "Apply America/Chicago to this file" }).click();
     await expect(workerRow.locator(".log-time__chip--declared")).toHaveText("America/Chicago");
 
     const workbench = page.locator("#log-workbench");
     await workbench.getByRole("button", { name: "Show merged chronology" }).click();
     await expect(workbench.getByRole("heading", { name: "Merged chronology" })).toBeVisible();
-    await expect(workbench.getByText(/2024-03-10T07:30:00/)).toBeVisible();
+    const normalizedWorkerEvent = workbench
+      .getByRole("region", { name: "Merged chronology" })
+      .locator("li")
+      .filter({ hasText: "worker/batch.log" })
+      .filter({ hasText: "2024-03-10T07:30:00.000Z" });
+    await expect(normalizedWorkerEvent).toBeVisible();
 
     await page.getByLabel("Include worker/batch.log in snapshot").check();
     await page.getByRole("button", { name: /Freeze selected evidence/ }).click();
-    await expect(page.getByText(/Frozen evidence set/)).toBeVisible();
+    await expect(page.getByRole("button", { name: /S0 1 item/ })).toBeVisible();
     const caseId = await caseIdForTitle(page, title);
     const snapshots = await page.request.get(`/api/cases/${caseId}/snapshots`);
     expect(snapshots.ok()).toBeTruthy();
@@ -398,7 +403,7 @@ test.describe("host-backed log workbench chronology", () => {
     };
     expect(body.snapshots?.[0]?.normalizationRevision).toBeGreaterThan(0);
     await gotoStage(page, "Compare");
-    await expect(page.getByText(/Frozen evidence set/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Experiment lab" })).toBeVisible();
     await gotoStage(page, "Decide");
     await expect(page.getByRole("heading", { name: /Decide/i }).first()).toBeVisible();
   });
