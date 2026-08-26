@@ -1,4 +1,4 @@
-import { Client } from "ldapts";
+import { Client, ResultCodeError } from "ldapts";
 import { ldapClientOptions, ldapTlsOptions } from "./ldap-tls.js";
 import type { LdapConfig } from "./ldap-config.js";
 import {
@@ -57,10 +57,13 @@ export function createLiveLdapFactory(config: LdapConfig): LdapSessionFactory {
             sizeLimit: 1,
           });
         } catch (err) {
-          const message = err instanceof Error ? `${err.name}: ${err.message}` : "";
-          if (/timeout|time.?out|cert|tls|ssl|self-signed|unable to verify|untrusted/i.test(message)) {
-            classifyLdapError(err);
-          }
+          // Transport is proven only when the directory answered over the
+          // established socket: an LDAP result code, or a still-open
+          // connection. Connect refusal, DNS failure, and certificate
+          // rejection never reach that point, so they stay transport
+          // failures instead of being reported as an available directory.
+          if (err instanceof ResultCodeError || client.isConnected) return;
+          classifyLdapError(err);
         }
       },
       async bind(dn, password) {

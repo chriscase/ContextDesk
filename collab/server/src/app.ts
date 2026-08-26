@@ -132,7 +132,15 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   if (deps.security && !publicIdentities) {
     throw new Error("a durable public identity codec is required when authentication is enabled");
   }
-  const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
+  // trustProxy governs request.ip, which keys the login rate limiter and is
+  // recorded as the audit origin. It stays off unless an operator declares the
+  // ingress, so a directly exposed deployment cannot be steered by a forged
+  // X-Forwarded-For. See config.ts parseTrustProxy.
+  const app = Fastify({
+    logger: false,
+    bodyLimit: 2 * 1024 * 1024,
+    ...(deps.config.trustProxy === null ? {} : { trustProxy: deps.config.trustProxy }),
+  });
   registerBrowserMutationCsrfGuard(app);
   const requiredMigrationVersion = latestMigrationVersion();
 

@@ -65,6 +65,11 @@ surfaces.
 ## Current limits
 
 - SQLite mode is single-node and has no PostgreSQL-to-SQLite migration tool.
+- The service does not terminate TLS. Behind an ingress that does, declare it
+  with `COLLAB_TRUST_PROXY`, or every request is attributed to the proxy: one
+  user's failed sign-ins would rate-limit everyone, and audit records could
+  not name an origin. Leave it unset for a loopback or directly exposed
+  deployment.
 - Directory-backed identity is deployment-specific and requires encrypted,
   qualified LDAP configuration. If no service bind is available, login-time
   group membership remains stable for the session; a configured service bind
