@@ -74,8 +74,9 @@ test.describe("war room log-time review", () => {
     ]);
     expect(committed.ok(), await committed.text()).toBeTruthy();
 
-    // Analyze is where time is reviewed, before evidence is frozen.
-    await gotoStage(page, "Analyze");
+    // Capture is where time is reviewed, before evidence is frozen. The
+    // Analyze evidence board offers a direct handoff back to this surface.
+    await gotoStage(page, "Capture");
     const panel = page.locator("#log-time");
     await expect(
       panel.getByRole("heading", { name: "When did these log lines happen?" }),
