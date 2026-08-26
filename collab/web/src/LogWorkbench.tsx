@@ -347,14 +347,17 @@ export function LogWorkbench(props: {
       if (!inWindow) {
         await loadPane(row.evidenceId, Math.max(1, row.lineNumber - PAGE_LEAD_LINES));
       }
-      setSyncScroll(false);
       const start = Math.max(1, row.lineNumber - PAGE_LEAD_LINES);
-      setScrollByPane((current) => ({
-        ...current,
-        [row.evidenceId]: Math.max(0, (row.lineNumber - start) * ROW_HEIGHT - VIEWPORT_HEIGHT / 3),
-      }));
+      const offset = Math.max(
+        0,
+        (row.lineNumber - start) * ROW_HEIGHT - VIEWPORT_HEIGHT / 3,
+      );
+      // Synchronized scrolling is the reader's choice, so revealing a match
+      // moves the shared position rather than quietly switching it off.
+      if (syncScroll) setScrollTop(offset);
+      setScrollByPane((current) => ({ ...current, [row.evidenceId]: offset }));
     },
-    [loadPane, pageByPane, panes],
+    [loadPane, pageByPane, panes, syncScroll],
   );
 
   function selectMatch(index: number) {
