@@ -320,7 +320,14 @@ export function LogWorkbench(props: {
         const response = await protectedApiFetch(
           `/api/cases/${props.caseId}/workbench/page?evidenceId=${encodeURIComponent(evidenceId)}&startLine=${startLine}&limit=80`,
         );
-        if (!response.ok) return;
+        if (!response.ok) {
+          // A file the bounded read never reached explains itself with a 409
+          // rather than rendering as an empty pane with no reason.
+          if (response.status === 409) {
+            setError(await errorText(response, "This log could not be opened."));
+          }
+          return;
+        }
         const page = (await response.json()) as PageResult;
         setPageByPane((current) => ({ ...current, [evidenceId]: page }));
       } catch {

@@ -480,6 +480,34 @@ describe("Log workbench honesty and navigation", () => {
     expect((await screen.findAllByText("edge.log")).length).toBeGreaterThan(0);
   });
 
+  it("explains a file the bounded read never reached instead of an empty pane", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/workbench")) {
+          return jsonResponse({ ...inventory(), corpusTruncated: true, unreadFiles: ["edge.log"] });
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          return jsonResponse(
+            {
+              error:
+                "This investigation holds more log lines than one read can cover, so this file was not reached. Narrow the selected files and try again.",
+            },
+            409,
+          );
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    expect(await screen.findByText(/this file was not reached/)).toBeTruthy();
+  });
+
   it("keeps a paged pane where the reader left it when another file is opened", async () => {
     const pageRequests: string[] = [];
     vi.stubGlobal(
