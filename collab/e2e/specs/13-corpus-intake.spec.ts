@@ -44,7 +44,9 @@ test.describe("investigation-scoped corpus intake", () => {
     ]);
     expect(previewed.ok(), await previewed.text()).toBeTruthy();
     await expect(page.getByText("mailer/shared-timeout.log")).toBeVisible();
-    await expect(page.getByText(/unsupported_media/)).toBeVisible();
+    await expect(page.getByText("1 · Unrecognized file type")).toBeVisible();
+    await page.getByText("Review rejected file details").click();
+    await expect(page.getByText("mailer/payload.bin", { exact: true })).toBeVisible();
     const [committed] = await Promise.all([
       page.waitForResponse(
         (res) =>

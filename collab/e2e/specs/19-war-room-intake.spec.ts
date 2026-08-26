@@ -35,6 +35,12 @@ import { SCENARIO_IDS, WAR_ROOM_SCENARIOS } from "../src/war-room/scenarios.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+const REJECTION_LABELS: Readonly<Record<string, string>> = {
+  unsupported_media: "Unrecognized file type",
+  binary_or_unknown: "Not safely readable as text",
+  nested_archive: "Nested ZIP archive",
+};
+
 /**
  * War Room acceptance journeys 1–4: getting messy real-world material into an
  * investigation without losing what is unknown about it.
@@ -84,6 +90,7 @@ test.describe("War Room intake journeys", () => {
 
     await record.check("zip-preview-names-every-entry", async () => {
       const capture = page.locator("#stage-capture");
+      await capture.getByText("Review rejected file details").click();
       for (const row of [...NOISY_BUNDLE_ACCEPTED, ...NOISY_BUNDLE_REJECTED]) {
         await expect(
           capture.getByText(row.path, { exact: true }),
@@ -97,11 +104,13 @@ test.describe("War Room intake journeys", () => {
       const capture = page.locator("#stage-capture");
       for (const row of NOISY_BUNDLE_REJECTED) {
         await expect(
-          capture.getByText(row.reason, { exact: false }).first(),
+          capture.getByText(`1 · ${REJECTION_LABELS[row.reason] ?? "Could not be accepted"}`, {
+            exact: true,
+          }),
           `refused entry ${row.path} shows no reason`,
         ).toBeVisible();
       }
-      return `refusal reasons shown: ${NOISY_BUNDLE_REJECTED.map((row) => row.reason).join(", ")}`;
+      return `refusal reasons shown: ${NOISY_BUNDLE_REJECTED.map((row) => REJECTION_LABELS[row.reason]).join(", ")}`;
     });
 
     const [committed] = await Promise.all([

@@ -18,12 +18,19 @@ describe("CorpusIntakePanel", () => {
       { reason: "binary_or_unknown" },
       { reason: "unsupported_media" },
       { reason: "binary_or_unknown" },
+      { reason: "nested_archive" },
     ])).toEqual([
       {
         reason: "binary_or_unknown",
         count: 2,
         label: "Not safely readable as text",
         guidance: "Inspect these files outside the War Room before deciding whether they belong in the investigation.",
+      },
+      {
+        reason: "nested_archive",
+        count: 1,
+        label: "Nested ZIP archive",
+        guidance: "Open and review nested archives separately before adding their relevant files.",
       },
       {
         reason: "unsupported_media",
