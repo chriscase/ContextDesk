@@ -80,6 +80,18 @@ interface SavedView {
   selectedPanes: string[];
   query: string;
   mode: string;
+  filters?: {
+    includeTerms?: string[];
+    excludeTerms?: string[];
+    severity?: string | null;
+    timeFrom?: string | null;
+    timeTo?: string | null;
+  };
+  timeFrom?: string | null;
+  timeTo?: string | null;
+  sort?: string;
+  grouping?: string;
+  display?: { syncScroll?: boolean; wrap?: boolean; displayTimezone?: string | null };
 }
 
 interface BookmarkRow {
@@ -92,6 +104,7 @@ interface BookmarkRow {
 }
 
 interface ChronologyEvent {
+  evidenceId?: string;
   relativePath: string;
   lineNumber: number;
   excerpt: string;
@@ -101,6 +114,8 @@ interface ChronologyEvent {
   correlationId: string | null;
   originalTimestamp: string | null;
   normalizedUtc: string | null;
+  groupKey?: string;
+  anchorStatus?: string | null;
 }
 
 function errorText(response: Response, fallback: string): Promise<string> {
@@ -133,7 +148,10 @@ export function LogWorkbench(props: {
   const [timeTo, setTimeTo] = useState("");
   const [panes, setPanes] = useState<string[]>([]);
   const [syncScroll, setSyncScroll] = useState(true);
+  const [grouping, setGrouping] = useState("file");
+  const [sort, setSort] = useState("time_asc");
   const [pageByPane, setPageByPane] = useState<Record<string, PageResult>>({});
+  const [scrollByPane, setScrollByPane] = useState<Record<string, number>>({});
   const [search, setSearch] = useState<SearchResult | null>(null);
   const [matchIndex, setMatchIndex] = useState(0);
   const [views, setViews] = useState<SavedView[]>([]);
@@ -301,7 +319,7 @@ export function LogWorkbench(props: {
     const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/chronology`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ grouping: "file", evidenceIds: panes }),
+      body: JSON.stringify({ grouping, evidenceIds: panes }),
     });
     if (!response.ok) {
       setError(await errorText(response, "The merged chronology could not be built."));
@@ -313,6 +331,27 @@ export function LogWorkbench(props: {
     };
     setChronology(body.events ?? []);
     setUnknownBuckets(body.unknownBuckets ?? []);
+  }
+
+  async function pinEvent(event: ChronologyEvent, status: "pinned" | "human_ground_truth") {
+    if (props.readOnly || !props.canWrite || !event.evidenceId) return;
+    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/anchors`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        evidenceId: event.evidenceId,
+        lineNumber: event.lineNumber,
+        status,
+        note: status === "human_ground_truth" ? "Recorded as human ground truth." : "",
+        idempotencyKey: `anchor-${event.evidenceId.slice(0, 8)}-${event.lineNumber}-${status}`,
+      }),
+    });
+    if (!response.ok) {
+      setError(await errorText(response, "The chronology pin could not be saved."));
+      return;
+    }
+    setNotice(status === "human_ground_truth" ? "Ground truth recorded." : "Benchmark pin recorded.");
+    await runChronology();
   }
 
   async function saveView() {
@@ -338,8 +377,8 @@ export function LogWorkbench(props: {
         selectedPanes: panes.length > 0 ? panes : items.slice(0, 2).map((item) => item.evidenceId),
         timeFrom: timeFrom.trim() || null,
         timeTo: timeTo.trim() || null,
-        sort: "time_asc",
-        grouping: "file",
+        sort,
+        grouping,
         display: {
           syncScroll,
           wrap: false,
@@ -391,6 +430,14 @@ export function LogWorkbench(props: {
     setPanes(view.selectedPanes.slice(0, MAX_PANES));
     setQuery(view.query);
     setMode((view.mode as typeof mode) || "case_insensitive");
+    setInclude(view.filters?.includeTerms?.[0] ?? "");
+    setExclude(view.filters?.excludeTerms?.[0] ?? "");
+    setSeverity(view.filters?.severity ?? "");
+    setTimeFrom(view.timeFrom ?? view.filters?.timeFrom ?? "");
+    setTimeTo(view.timeTo ?? view.filters?.timeTo ?? "");
+    setSort(view.sort || "time_asc");
+    setGrouping(view.grouping || "file");
+    setSyncScroll(view.display?.syncScroll ?? true);
     setNotice(`Applied saved view “${view.name}”.`);
   }
 
@@ -415,7 +462,11 @@ export function LogWorkbench(props: {
   }
 
   function onScroll(event: { currentTarget: HTMLDivElement }) {
+    const paneId = event.currentTarget.getAttribute("data-workbench-pane");
     const next = event.currentTarget.scrollTop;
+    if (paneId) {
+      setScrollByPane((current) => ({ ...current, [paneId]: next }));
+    }
     setScrollTop(next);
     if (syncScroll) {
       const panesEl = event.currentTarget.parentElement?.querySelectorAll("[data-workbench-pane]");
@@ -466,16 +517,6 @@ export function LogWorkbench(props: {
   }
 
   const activeMatch = search?.matches[matchIndex] ?? null;
-  const firstPaneRows = selectedItems[0]
-    ? (pageByPane[selectedItems[0].evidenceId]?.rows ?? [])
-    : [];
-  const paneWindow = virtualizedWindow({
-    totalRows: firstPaneRows.length,
-    scrollTop,
-    rowHeight: ROW_HEIGHT,
-    viewportHeight: VIEWPORT_HEIGHT,
-    overscan: OVERSCAN,
-  });
 
   return (
     <section className="log-workbench" id="log-workbench" aria-labelledby="log-workbench-heading">
@@ -550,23 +591,43 @@ export function LogWorkbench(props: {
         </label>
         <label>
           <span>Include</span>
-          <input value={include} onChange={(event) => setInclude(event.target.value)} />
+          <input
+            value={include}
+            onChange={(event) => setInclude(event.target.value)}
+            aria-label="Include terms"
+          />
         </label>
         <label>
           <span>Exclude</span>
-          <input value={exclude} onChange={(event) => setExclude(event.target.value)} />
+          <input
+            value={exclude}
+            onChange={(event) => setExclude(event.target.value)}
+            aria-label="Exclude terms"
+          />
         </label>
         <label>
           <span>Severity</span>
-          <input value={severity} onChange={(event) => setSeverity(event.target.value)} />
+          <input
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value)}
+            aria-label="Severity"
+          />
         </label>
         <label>
           <span>From (UTC)</span>
-          <input value={timeFrom} onChange={(event) => setTimeFrom(event.target.value)} />
+          <input
+            value={timeFrom}
+            onChange={(event) => setTimeFrom(event.target.value)}
+            aria-label="From (UTC)"
+          />
         </label>
         <label>
           <span>To (UTC)</span>
-          <input value={timeTo} onChange={(event) => setTimeTo(event.target.value)} />
+          <input
+            value={timeTo}
+            onChange={(event) => setTimeTo(event.target.value)}
+            aria-label="To (UTC)"
+          />
         </label>
         <button type="button" onClick={() => void runSearch()}>
           Search
@@ -635,6 +696,14 @@ export function LogWorkbench(props: {
         {(selectedItems.length > 0 ? selectedItems : items.slice(0, 1)).map((item) => {
           const page = pageByPane[item.evidenceId];
           const rows = page?.rows ?? [];
+          const paneScroll = syncScroll ? scrollTop : (scrollByPane[item.evidenceId] ?? 0);
+          const paneWindow = virtualizedWindow({
+            totalRows: rows.length,
+            scrollTop: paneScroll,
+            rowHeight: ROW_HEIGHT,
+            viewportHeight: VIEWPORT_HEIGHT,
+            overscan: OVERSCAN,
+          });
           const slice = rows.slice(paneWindow.start, paneWindow.end);
           return (
             <div
@@ -652,6 +721,11 @@ export function LogWorkbench(props: {
                   <span> {page.wrappedRowCount} wrapped long lines</span>
                 ) : null}
               </header>
+              <div
+                className="log-workbench__spacer"
+                aria-hidden="true"
+                style={{ height: `${paneWindow.start * ROW_HEIGHT}px` }}
+              />
               <ol
                 className="log-workbench__lines"
                 style={{ ["--row-height" as string]: `${ROW_HEIGHT}px` }}
@@ -680,6 +754,13 @@ export function LogWorkbench(props: {
                   </li>
                 ))}
               </ol>
+              <div
+                className="log-workbench__spacer"
+                aria-hidden="true"
+                style={{
+                  height: `${Math.max(0, rows.length - paneWindow.end) * ROW_HEIGHT}px`,
+                }}
+              />
               {page?.nextStartLine ? (
                 <button type="button" onClick={() => void loadPane(item.evidenceId, page.nextStartLine ?? 1)}>
                   Load next lines
@@ -713,6 +794,22 @@ export function LogWorkbench(props: {
             ))}
           </ul>
         ) : null}
+        <label>
+          <span>Chronology grouping</span>
+          <select
+            value={grouping}
+            onChange={(event) => setGrouping(event.target.value)}
+            aria-label="Chronology grouping"
+          >
+            <option value="none">None</option>
+            <option value="file">File</option>
+            <option value="component">Component</option>
+            <option value="batch">Batch</option>
+            <option value="rotation_family">Rotation family</option>
+            <option value="entity">Observed identifier</option>
+            <option value="severity">Severity</option>
+          </select>
+        </label>
         <button type="button" onClick={() => void runChronology()}>
           Show merged chronology
         </button>
@@ -739,7 +836,22 @@ export function LogWorkbench(props: {
                 <span>{event.normalizedUtc ?? event.originalTimestamp ?? "order only"}</span>
                 {" · "}
                 <span>{event.relativePath}</span>
+                {event.groupKey ? <small> Group {event.groupKey}</small> : null}
+                {event.anchorStatus ? <small> {event.anchorStatus.replace("_", " ")}</small> : null}
                 <div>{event.excerpt}</div>
+                {props.canWrite && !props.readOnly ? (
+                  <div>
+                    <button type="button" onClick={() => void pinEvent(event, "pinned")}>
+                      Pin as benchmark
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void pinEvent(event, "human_ground_truth")}
+                    >
+                      Record as ground truth
+                    </button>
+                  </div>
+                ) : null}
                 <small>{event.adjacencyReason}</small>
                 {event.uncertainty.length > 0 ? (
                   <small> Uncertainty: {event.uncertainty.join("; ")}</small>

@@ -8,6 +8,7 @@ import {
   TIMESTAMP_SHAPE_PARSER_ID,
   WORKBENCH_LIMITS,
   classifyTimestampShape,
+  applyHostTimestamps,
   extractShapeCandidates,
   mergeChronology,
   pageLogLines,
@@ -356,6 +357,92 @@ describe("chronology", () => {
     drifted.events[0]!.correlationKind = "heuristic_similarity";
     drifted.events[0]!.adjacencyReason = "These look similar so they are ground truth.";
     expect(() => parseWorkbenchChronology(drifted)).toThrow(/cannot claim ground truth/);
+  });
+
+  it("clusters events by the requested grouping key", () => {
+    const edge = splitLogText(
+      EVIDENCE_A,
+      "gateway/edge.log",
+      DIGEST,
+      [
+        "2024-03-10T07:30:00Z INFO edge accepted request rid-0001",
+        "2024-03-10T08:10:00Z ERROR edge upstream timeout rid-0003",
+      ].join("\n"),
+      "batch-a",
+    );
+    const worker = splitLogText(
+      EVIDENCE_B,
+      "worker/batch.log",
+      DIGEST,
+      "2024-03-10 01:30:00 INFO sweep",
+      "batch-b",
+    );
+    const byFile = mergeChronology([...worker, ...edge], "file", 1);
+    expect(byFile.events.map((event) => event.groupKey)).toEqual([
+      "gateway/edge.log",
+      "gateway/edge.log",
+      "worker/batch.log",
+    ]);
+    expect(byFile.events[1]?.adjacencyReason).toMatch(/file group \(gateway\/edge\.log\)/);
+    const byEntity = mergeChronology([...worker, ...edge], "entity", 1);
+    expect(byEntity.events.map((event) => event.groupKey).sort()).toEqual([
+      "0001",
+      "0003",
+      "no-observed-id",
+    ]);
+    const byComponent = mergeChronology([...worker, ...edge], "component", 1);
+    expect(new Set(byComponent.events.map((event) => event.groupKey))).toEqual(
+      new Set(["edge.log", "batch.log"]),
+    );
+    const pinned = mergeChronology(edge, "none", 1, new Map([
+      [`${EVIDENCE_A}:1`, "pinned"],
+    ]));
+    expect(pinned.events[0]?.anchorStatus).toBe("pinned");
+    const ground = mergeChronology(edge, "none", 1, new Map([
+      [`${EVIDENCE_A}:1`, "human_ground_truth"],
+    ]));
+    expect(ground.events[0]?.anchorStatus).toBe("human_ground_truth");
+  });
+
+  it("takes wall-clock UTC from the host corpus, not Date.parse on local text", () => {
+    const lines = splitLogText(
+      EVIDENCE_A,
+      "worker/batch.log",
+      DIGEST,
+      "2024-03-10 01:30:00 INFO sweep\n",
+      null,
+    );
+    expect(lines[0]?.normalizedUtc).toBeNull();
+    const overlaid = applyHostTimestamps(lines, [
+      {
+        source: "worker/batch.log",
+        message: "sweep",
+        ts: 1_710_045_000,
+        timeQuality: "wall clock",
+        unresolvedLocalTimestamp: "2024-03-10 01:30:00",
+      },
+    ]);
+    expect(overlaid[0]?.normalizedUtc).toBe(new Date(1_710_045_000 * 1000).toISOString());
+    const orderOnly = applyHostTimestamps(lines, [
+      {
+        source: "worker/batch.log",
+        message: "sweep",
+        ts: 3,
+        timeQuality: "order only (not calendar time)",
+        unresolvedLocalTimestamp: "2024-03-10 01:30:00",
+      },
+    ]);
+    expect(orderOnly[0]?.normalizedUtc).toBeNull();
+    const redacted = applyHostTimestamps(lines, [
+      {
+        source: "worker/batch.log",
+        message: "sweep <*>",
+        ts: 1_710_045_000,
+        timeQuality: "wall clock",
+        unresolvedLocalTimestamp: "2024-03-10 01:30:00",
+      },
+    ]);
+    expect(redacted[0]?.normalizedUtc).toBe(new Date(1_710_045_000 * 1000).toISOString());
   });
 
   it("marks files with no usable timestamps instead of inventing a clock", () => {

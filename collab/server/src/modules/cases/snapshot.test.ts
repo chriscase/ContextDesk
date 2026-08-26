@@ -80,6 +80,14 @@ describe("case snapshots", () => {
         service.createSnapshot(
           created.id,
           actor,
+          { evidenceIds: ["missing"], visibility: "owner_only" },
+          "test",
+        ),
+      ).rejects.toThrow(/evidence not found/);
+      await expect(
+        service.createSnapshot(
+          created.id,
+          actor,
           { evidenceIds: [uploaded.artifact.id, uploaded.artifact.id] },
           "test",
         ),
@@ -92,6 +100,57 @@ describe("case snapshots", () => {
           "test",
         ),
       ).rejects.toThrow("owner-only");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds freeze to the live log-time corpus revision and does not mutate later", async () => {
+    const root = await mkdtemp(join(tmpdir(), "contextdesk-snapshot-revision-"));
+    try {
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const service = new CaseService(
+        evidence,
+        new MemoryAuditStore(),
+        new MemoryCaseStore(),
+        new CatalogService(),
+      );
+      let liveRevision: number | null = 3;
+      service.bindNormalizationRevision(async () => liveRevision);
+      const actor = { id: "alice", username: "alice" };
+      const created = await service.createCase(actor, { title: "Revision bind" }, "test");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "checkout.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("checkout timed out"),
+          summary: "Checkout timed out.",
+          privacyClass: "owner_only",
+        },
+        "test",
+      );
+      const frozen = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [uploaded.artifact.id], visibility: "owner_only" },
+        "test",
+      );
+      expect(frozen.normalizationRevision).toBe(3);
+      liveRevision = 4;
+      const listed = await service.listSnapshots(created.id, actor, true);
+      const still = listed.find((row) => row.id === frozen.id);
+      expect(still?.normalizationRevision).toBe(3);
+      const later = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [uploaded.artifact.id], visibility: "owner_only" },
+        "test",
+      );
+      expect(later.id).not.toBe(frozen.id);
+      expect(later.normalizationRevision).toBe(4);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

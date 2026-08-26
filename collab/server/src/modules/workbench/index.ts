@@ -3,6 +3,7 @@ export const MODULE_ID = "workbench" as const;
 
 export { MemoryWorkbenchStore, PgWorkbenchStore } from "./store.js";
 export type {
+  WorkbenchAnchorRow,
   WorkbenchBookmarkRow,
   WorkbenchStore,
   WorkbenchViewRow,

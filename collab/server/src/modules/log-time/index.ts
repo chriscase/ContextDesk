@@ -16,6 +16,8 @@ export type {
   HostResult,
   HostRevision,
   HostSample,
+  HostSearch,
+  HostSearchHit,
   HostSourceStatus,
   LogTimeAction,
   LogTimeBridge,

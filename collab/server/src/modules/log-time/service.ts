@@ -42,6 +42,7 @@ import {
   LogTimeRequestError,
   type HostChronologyRow,
   type HostResult,
+  type HostSearch,
   type LogTimeBridge,
 } from "./bridge.js";
 import type {
@@ -138,6 +139,37 @@ export class LogTimeService {
    * declaration provenance comes from the durable record, because the host
    * corpus does not know who declared a zone or which preview they saw.
    */
+  /**
+   * Bounded corpus events for the Log workbench overlay. Returns null when
+   * this case has no host corpus yet — callers must keep intake-byte UTC
+   * empty for local-ambiguous lines rather than inventing a zone.
+   */
+  async listWorkbenchEvents(
+    caseId: string,
+    sources: string[] = [],
+    k = 2_000,
+  ): Promise<{ corpusRevision: number; search: HostSearch } | null> {
+    const corpus = await this.deps.store.getCorpus(caseId);
+    if (!corpus) return null;
+    const host = await this.deps.bridge.run(caseId, {
+      kind: "events",
+      corpusId: corpus.corpusId,
+      expectedRevision: corpus.corpusRevision,
+      sources,
+      k,
+    });
+    if (!host.search) return { corpusRevision: host.corpusRevision, search: {
+      bounded: false,
+      atLeast: 0,
+      returned: 0,
+      partial: false,
+      cancelled: false,
+      diagnostic: null,
+      hits: [],
+    } };
+    return { corpusRevision: host.corpusRevision, search: host.search };
+  }
+
   async getState(caseId: string): Promise<LogCorpusStateV1> {
     const corpus = await this.deps.store.getCorpus(caseId);
     if (!corpus) {

@@ -157,6 +157,40 @@ export async function registerWorkbenchRoutes(
     }
   });
 
+  app.post("/api/cases/:id/workbench/anchors", { bodyLimit: 8 * 1024 }, async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    if (!loaded.ctx.has("investigation:write")) return capabilityForbidden(reply);
+    if (!(await requireRead(loaded.ctx, id, reply, "log_workbench_anchor_pin", request.ip))) {
+      return { error: "not_found" };
+    }
+    const body = (request.body ?? {}) as {
+      evidenceId?: string;
+      lineNumber?: number;
+      status?: "pinned" | "human_ground_truth";
+      note?: string;
+      idempotencyKey?: string;
+    };
+    try {
+      return await deps.workbench.pinChronologyAnchor(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        {
+          evidenceId: body.evidenceId ?? "",
+          lineNumber: body.lineNumber ?? 0,
+          status: body.status ?? "pinned",
+          note: body.note ?? "",
+          idempotencyKey: body.idempotencyKey ?? `anchor-${body.evidenceId}-${body.lineNumber}`,
+        },
+      );
+    } catch (err) {
+      void reply.code(statusFor(err));
+      return { error: publicError(err) };
+    }
+  });
+
   app.get("/api/cases/:id/workbench/review-queue", async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const loaded = await sessionOf(request, reply);

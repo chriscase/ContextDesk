@@ -227,6 +227,7 @@ describe("correlation honesty", () => {
             severity: null,
             component: null,
             intakeBatchId: null,
+            groupKey: "ungrouped",
             adjacencyReason: "Text looks similar.",
             uncertainty: [],
             correlationKind: "heuristic_similarity",

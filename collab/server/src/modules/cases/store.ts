@@ -862,6 +862,14 @@ export function activeCaseQueryable(): Queryable | undefined {
   return pgCaseTx.getStore();
 }
 
+/** Bind case-store writes (timeline, last_seq) onto an already-open client. */
+export function runWithCaseQueryable<T>(
+  queryable: Queryable,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return pgCaseTx.run(queryable, operation);
+}
+
 /** Destination key column backing each probe kind. */
 const CASE_PROBE_TABLES: Readonly<Record<CaseProbeKind, { table: string; column: string }>> =
   Object.freeze({

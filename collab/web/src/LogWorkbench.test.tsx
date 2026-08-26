@@ -61,9 +61,47 @@ function stubFetch() {
           id: "33333333-3333-4333-8333-333333333333",
           name: "Timeout window",
           selectedPanes: [EVIDENCE_A],
+          query: "timeout",
+          mode: "literal",
+          filters: {
+            includeTerms: ["edge"],
+            excludeTerms: [],
+            severity: "error",
+            timeFrom: "2024-03-10T07:00:00.000Z",
+            timeTo: "2024-03-10T09:00:00.000Z",
+          },
+          timeFrom: "2024-03-10T07:00:00.000Z",
+          timeTo: "2024-03-10T09:00:00.000Z",
+          sort: "time_asc",
+          grouping: "component",
+          display: { syncScroll: false },
         });
       }
-      if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+      if (url.includes("/workbench/views")) {
+        return jsonResponse({
+          views: [
+            {
+              id: "33333333-3333-4333-8333-333333333333",
+              name: "Timeout window",
+              selectedPanes: [EVIDENCE_A],
+              query: "timeout",
+              mode: "literal",
+              filters: {
+                includeTerms: ["edge"],
+                excludeTerms: [],
+                severity: "error",
+                timeFrom: "2024-03-10T07:00:00.000Z",
+                timeTo: "2024-03-10T09:00:00.000Z",
+              },
+              timeFrom: "2024-03-10T07:00:00.000Z",
+              timeTo: "2024-03-10T09:00:00.000Z",
+              sort: "time_asc",
+              grouping: "component",
+              display: { syncScroll: false },
+            },
+          ],
+        });
+      }
       if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
       if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 2 });
       if (url.includes("/workbench/page")) {
@@ -149,6 +187,29 @@ describe("Log workbench", () => {
     await waitFor(() => expect(screen.getAllByText(/1 matches/).length).toBeGreaterThan(0));
     expect(screen.getByRole("list", { name: "Search matches" }).textContent).toMatch(
       /upstream timeout/,
+    );
+  });
+
+  it("restores filters, time window, grouping, and display from a saved view", async () => {
+    stubFetch();
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.click(screen.getByRole("button", { name: "Timeout window" }));
+    expect((screen.getByLabelText("Find in logs") as HTMLInputElement).value).toBe("timeout");
+    expect((screen.getByLabelText("Match mode") as HTMLSelectElement).value).toBe("literal");
+    expect((screen.getByLabelText("Include terms") as HTMLInputElement).value).toBe("edge");
+    expect((screen.getByLabelText("Severity") as HTMLInputElement).value).toBe("error");
+    expect((screen.getByLabelText("From (UTC)") as HTMLInputElement).value).toBe(
+      "2024-03-10T07:00:00.000Z",
+    );
+    expect((screen.getByLabelText("To (UTC)") as HTMLInputElement).value).toBe(
+      "2024-03-10T09:00:00.000Z",
+    );
+    expect((screen.getByLabelText("Chronology grouping") as HTMLSelectElement).value).toBe(
+      "component",
+    );
+    expect((screen.getByLabelText("Synchronize pane scrolling") as HTMLInputElement).checked).toBe(
+      false,
     );
   });
 
