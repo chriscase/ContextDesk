@@ -98,6 +98,32 @@ describe("help search", () => {
     expect(screen.getByRole("status").textContent).toBe("");
   });
 
+  it("answers \"can I delete this?\" with the archive topic", () => {
+    // The question people actually ask is about deletion; the answer the
+    // product has is archiving. Search has to bridge the two words, or the
+    // honest answer stays unfindable.
+    renderHelp();
+    searchFor("delete");
+    const titles = within(resultsList())
+      .getAllByRole("button")
+      .map((result) => result.querySelector(".help-result__title")?.textContent);
+    expect(titles).toContain("Archive an investigation, and bring it back");
+  });
+
+  it("finds the archive topic by the words people use for it", () => {
+    for (const term of ["archive", "unarchive", "hide", "legal hold"]) {
+      renderHelp();
+      searchFor(term);
+      const titles = within(resultsList())
+        .getAllByRole("button")
+        .map((result) => result.querySelector(".help-result__title")?.textContent);
+      expect(titles, `searching “${term}”`).toContain(
+        "Archive an investigation, and bring it back",
+      );
+      cleanup();
+    }
+  });
+
   it("states an honest no-results outcome and what search does not cover", () => {
     renderHelp();
     searchFor("zzzunfindable");

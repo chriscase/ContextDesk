@@ -523,6 +523,39 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
       },
       {
+        id: "archive-or-restore-investigation",
+        title: "Archive an investigation, and bring it back",
+        summary:
+          "Archiving takes an investigation out of the working list and deletes nothing. Restoring returns it to the status it held before. A legal hold refuses an archive; it never refuses a restore.",
+        keywords: [
+          "archive",
+          "unarchive",
+          "restore",
+          "delete",
+          "remove",
+          "close",
+          "file away",
+          "hide",
+          "legal hold",
+          "working list",
+        ],
+        what:
+          "Archiving is how a finished, duplicate, or superseded investigation stops competing for attention without leaving the record. Every contribution, evidence file, timeline row, and audit entry survives it unchanged. This is a different thing from the portable investigation archive, which is a file you download to move a case to another installation — same word, unrelated mechanism. Restoring reads the status the investigation held before it was archived and returns it there, so an investigation archived out of monitoring comes back as monitoring rather than being flattened to open.",
+        when:
+          "Read this when an investigation is finished or duplicated and you want it out of the way, when you cannot find an investigation you know exists, or when someone asks whether an investigation can be deleted.",
+        steps: [
+          "Open the investigation and use Archive investigation at the Decide stage. It asks once to confirm; the first click never writes anything.",
+          "Archived investigations are withheld from the inventory. The list says how many it is withholding and offers to show them; Include archived, or choosing the archived status directly, brings them back into view.",
+          "To bring one back, open it and use Restore investigation. The control names the status it will return to before you commit.",
+          "An investigation under legal hold cannot be archived. Clear the hold first if it genuinely should be archived — the refusal names the hold so you know which control to open.",
+        ],
+        recorded:
+          "Both directions write a status change to the investigation timeline and an audit entry naming the actor and the origin. A refused archive writes nothing at all: the investigation is left exactly as it was, with nothing half-recorded.",
+        limits:
+          "There is no delete. Investigations are archived, never removed, and no route, control, or export path deletes one. If something needs to leave the workspace, export a share-safe copy instead — that produces a disclosable record without destroying the original. Archiving requires no resolution record, because it claims no conclusion; only resolving an investigation does. Restore falls back to open when the recorded history cannot say where the investigation came from, and never to resolved.",
+        actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
+      },
+      {
         id: "move-or-restore-investigation",
         title: "Move or restore a portable investigation",
         summary:
