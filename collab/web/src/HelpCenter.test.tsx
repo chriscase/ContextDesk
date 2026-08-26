@@ -136,6 +136,8 @@ describe("help search", () => {
     expect(screen.getByText(/expanded bytes at 512 MiB, 4,096 files/)).toBeTruthy();
     expect(screen.getByText(/64 MiB per file, compression ratio 256, and 60 seconds/)).toBeTruthy();
     expect(screen.getByText(/rejects overflow instead of silently dropping files/)).toBeTruthy();
+    expect(screen.getByText(/\.jsonl, \.ndjson/)).toBeTruthy();
+    expect(screen.getByText(/every non-empty JSON Lines record must parse/)).toBeTruthy();
     expect(screen.getByText(/share_safe accepts plain text/)).toBeTruthy();
     expect(screen.getByText(/qwen-3.6-27b, gpt-oss-120b, and ministral/)).toBeTruthy();
     expect(screen.getByText(/global source catalog is not the intake path/)).toBeTruthy();

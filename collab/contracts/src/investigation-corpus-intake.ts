@@ -93,6 +93,8 @@ export const CORPUS_ALLOWED_EXTENSIONS = [
   ".log",
   ".txt",
   ".json",
+  ".jsonl",
+  ".ndjson",
   ".csv",
   ".xml",
   ".eml",
