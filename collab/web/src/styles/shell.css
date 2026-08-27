@@ -780,6 +780,50 @@
   line-height: 1.55;
 }
 
+.help-article__section--illustrations {
+  margin: 1.25rem 0 1.35rem;
+  padding: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+}
+
+.help-article__visual-intro {
+  margin-bottom: 0.8rem !important;
+  color: var(--muted);
+  font-size: 0.84rem !important;
+}
+
+.help-illustrations {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.help-illustration {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+}
+
+.help-illustration img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1.44;
+  object-fit: cover;
+  background: var(--bg);
+}
+
+.help-illustration figcaption {
+  padding: 0.55rem 0.6rem 0.6rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
 .help-article__section {
   margin: 0 0 1rem;
 }
@@ -837,6 +881,12 @@
 .help-article__action:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .help-illustrations {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* — Glossary — */

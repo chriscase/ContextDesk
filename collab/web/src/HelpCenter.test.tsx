@@ -81,6 +81,13 @@ describe("help landing", () => {
     expect(screen.getByText(/Review the intake preview before committing it/)).toBeTruthy();
     expect(screen.getByText(/record the human conclusion with its reason/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Start from Investigations" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "See the path" })).toBeTruthy();
+    expect(screen.getAllByRole("img")).toHaveLength(4);
+    expect(
+      screen.getByRole("img", {
+        name: "Investigations page with the Start Investigation button and sample cases",
+      }),
+    ).toBeTruthy();
   });
 });
 

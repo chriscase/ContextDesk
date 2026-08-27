@@ -12,6 +12,12 @@ interface HelpAction {
   go: HelpActionTarget;
 }
 
+interface HelpIllustration {
+  src: string;
+  alt: string;
+  caption: string;
+}
+
 interface HelpArticle {
   id: string;
   title: string;
@@ -22,6 +28,7 @@ interface HelpArticle {
   steps: readonly string[];
   recorded: string;
   limits: string;
+  illustrations?: readonly HelpIllustration[];
   actions?: readonly HelpAction[];
 }
 
@@ -96,7 +103,29 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "The case records its creator, Situation, notes and imports, evidence provenance, frozen snapshot and fingerprint, triage question and strategy, lane results, citations, unknowns, decision history, and exports. Each item remains attributable to the person or system that supplied it.",
         limits:
-          "Creating, freezing, launching lanes, deciding, and exporting are role-gated. Synthetic mode checks the workflow but does not read your evidence or call a model. Gateway mode requires at least two lanes and a configured host. A snapshot is fixed: later uploads require a new snapshot and a new run. This walkthrough does not configure LDAP, a gateway, retention, or backups.",
+          "Creating, freezing, launching lanes, deciding, and exporting are role-gated. Synthetic mode checks the workflow but does not read your evidence or call a model. A focused gateway triage can use one lane; comparisons use two or more lanes, and both require a configured host. A snapshot is fixed: later uploads require a new snapshot and a new run. This walkthrough does not configure LDAP, a gateway, retention, or backups.",
+        illustrations: [
+          {
+            src: "/help/war-room/war-room-investigations.png",
+            alt: "Investigations page with the Start Investigation button and sample cases",
+            caption: "Start with an investigation and give it a specific title.",
+          },
+          {
+            src: "/help/war-room/war-room-situation.png",
+            alt: "Situation page showing recorded context, affected systems, impact, and open questions",
+            caption: "Write down what happened, who is affected, and what is still unknown.",
+          },
+          {
+            src: "/help/war-room/war-room-evidence-deep-link.png",
+            alt: "Analyze page showing evidence cards and an evidence cross-examination table",
+            caption: "Inspect the evidence and follow citations before you run or compare lanes.",
+          },
+          {
+            src: "/help/war-room/war-room-compare.png",
+            alt: "Compare and Decide page showing candidate lanes, evidence, unknowns, and a human decision",
+            caption: "Compare what the lanes agree on, then record the human decision.",
+          },
+        ],
         actions: [{ label: "Start from Investigations", go: { area: "investigations" } }],
       },
       {
@@ -481,7 +510,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "retry",
         ],
         what:
-          "A triage run binds one to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Synthetic / offline is a deterministic, provider-free stand-in. Configured gateway sends the request through the host bridge, which owns provider calls and credentials. Gateway mode requires at least two lanes. Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled. A run is partial only when at least one lane actually produced a result; when every lane failed, missed its deadline, or was cancelled, the run says failed, timed out, or cancelled rather than partial, and nothing is offered for review.",
+          "A triage run binds one to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Synthetic / offline is a deterministic, provider-free stand-in. Configured gateway sends the request through the host bridge, which owns provider calls and credentials. A focused gateway triage can use one lane; comparisons use two or more lanes. Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled. A run is partial only when at least one lane actually produced a result; when every lane failed, missed its deadline, or was cancelled, the run says failed, timed out, or cancelled rather than partial, and nothing is offered for review.",
         when:
           "Run lanes after freezing a snapshot, when the team wants a recorded answer over exactly that evidence or wants structured outputs to compare.",
         steps: [
@@ -1482,6 +1511,28 @@ export function HelpCenter(props: {
                 {selectedArticle.article.title}
               </h3>
               <p className="help-article__summary">{selectedArticle.article.summary}</p>
+              {selectedArticle.article.illustrations ? (
+                <section className="help-article__section help-article__section--illustrations">
+                  <h4>See the path</h4>
+                  <p className="help-article__visual-intro">
+                    These synthetic screens show where the main steps happen. Your labels and
+                    recorded data will be different.
+                  </p>
+                  <div className="help-illustrations">
+                    {selectedArticle.article.illustrations.map((illustration) => (
+                      <figure className="help-illustration" key={illustration.src}>
+                        <img
+                          src={illustration.src}
+                          alt={illustration.alt}
+                          loading="lazy"
+                          decoding="async"
+                        />
+                        <figcaption>{illustration.caption}</figcaption>
+                      </figure>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
               <section className="help-article__section">
                 <h4>What this is</h4>
                 <p>{selectedArticle.article.what}</p>
