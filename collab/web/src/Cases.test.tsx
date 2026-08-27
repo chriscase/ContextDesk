@@ -169,7 +169,7 @@ describe("war room overview", () => {
       ],
     });
     render(<Cases roles={["contributor"]} view="investigations" />);
-    const product = await screen.findByRole("combobox", { name: "Software or product" });
+    const product = await screen.findByRole("combobox", { name: "Investigation context: Software or product" });
     const list = document.getElementById("investigation-context-options-productName");
     expect(list?.querySelector('option[value="Fixture Desk"]')).toBeTruthy();
 
@@ -177,7 +177,7 @@ describe("war room overview", () => {
     expect((product as HTMLInputElement).value).toBe("A brand-new product label");
 
     const search = screen.getByRole("searchbox", {
-      name: "Search investigations by title, ID, participant, creator, or structured context",
+      name: "Search investigations by title, situation text, people, context, or ID",
     });
     fireEvent.change(search, { target: { value: "qa / US-CENTRAL" } });
     expect(screen.getByRole("button", { name: "Fixture incident" })).toBeTruthy();
@@ -306,13 +306,13 @@ describe("war room overview", () => {
     fireEvent.change(screen.getByLabelText("Open questions"), {
       target: { value: "Did lease recovery run?\n\nDoes the queue recover?" },
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "Software or product" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Investigation context: Software or product" }), {
       target: { value: "Fixture Desk" },
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "Version" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Investigation context: Version" }), {
       target: { value: "4.2" },
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "Build" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Investigation context: Build" }), {
       target: { value: "build-007" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
@@ -1283,7 +1283,7 @@ describe("focused investigation view", () => {
     fireEvent.change(screen.getByLabelText("Open questions"), {
       target: { value: "Did the worker reclaim its lease?\nIs backlog still increasing?" },
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "Software or product" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Investigation context: Software or product" }), {
       target: { value: "Fixture Desk" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save situation" }));

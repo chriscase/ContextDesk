@@ -32,6 +32,15 @@
  */
 
 /** The subset of an investigation this module reads. All optional but `id`. */
+export interface SearchableInvestigationContext {
+  productName?: string | null;
+  version?: string | null;
+  build?: string | null;
+  component?: string | null;
+  environment?: string | null;
+  organization?: string | null;
+}
+
 export interface SearchableInvestigation {
   id: string;
   title?: string;
@@ -50,7 +59,7 @@ export interface SearchableInvestigation {
   reportedProblem?: string | null | undefined;
   problem?: string | null | undefined;
   summary?: string | null | undefined;
-  investigationContext?: Readonly<Record<string, string | null | undefined>> | null | undefined;
+  investigationContext?: SearchableInvestigationContext | null | undefined;
   participants?: readonly { username?: string }[] | undefined;
 }
 

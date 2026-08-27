@@ -159,7 +159,7 @@ function ContextComboBox(props: {
         className="login__input"
         role="combobox"
         aria-autocomplete="list"
-        aria-label={label}
+        aria-label={`Investigation context: ${label}`}
         list={listId}
         value={props.value}
         onChange={(event) => props.onChange(event.target.value)}
@@ -1297,7 +1297,7 @@ export function Cases(props: {
     }
     return labels;
   };
-  const { visible: searchableCases, hiddenArchived } = visibleInvestigations(
+  const { visible: searchableCases, hiddenArchived } = visibleInvestigations<CaseRow>(
     cases,
     { query: caseSearch, status: statusFilter, entityId: entityFilter, includeArchived },
     casesByEntity,
