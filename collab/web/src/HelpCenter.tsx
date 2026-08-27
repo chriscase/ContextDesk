@@ -449,7 +449,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "The server stores the question, task fingerprint, strategy, snapshot fingerprint, requester, lane identities, progress, results, citations, and unknowns. A run remains attributed to the person and evidence set that created it.",
         limits:
-          "Synthetic / offline runs are deterministic plumbing checks: they do not inspect evidence or run a model. Configured gateway runs use the host bridge, not browser credentials; gateway runs require at least two lanes. Usage and cost remain unknown unless the host reports them. A slow gateway can leave a run waiting for minutes; launching the identical run again while the first is still in flight is refused rather than run twice.",
+          "Synthetic / offline runs are deterministic plumbing checks: they do not inspect evidence or run a model. Configured gateway runs use the host bridge, not browser credentials; a focused question can use one lane, while comparisons use two or more lanes. Usage and cost remain unknown unless the host reports them. A slow gateway can leave a run waiting for minutes; launching the identical run again while the first is still in flight is refused rather than run twice.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {

@@ -7,12 +7,36 @@ fairly, and record the human action that follows.
 
 > Every example and screenshot referenced here is fully synthetic.
 
+## What you can do in War Room
+
+War Room keeps one investigation's context, evidence, analysis attempts, review,
+and human decision together. Use the feature that matches the question you are
+trying to answer:
+
+| If you want to… | Start here | What it gives you |
+| --- | --- | --- |
+| Understand a new problem | **Situation** | A bounded problem statement, affected people or systems, impact, and open questions |
+| Add logs, files, notes, email, or chat | **Capture** | Investigation-owned evidence with provenance and an intake preview |
+| Read several logs together | **Analyze → Log workbench** | Side-by-side files, bounded search, match navigation, saved views, bookmarks, and chronology tools |
+| Ask one focused question | **Analyze → Run history and launcher** | One recorded triage against one frozen evidence snapshot; one gateway lane is enough |
+| Compare approaches | **Compare** | Evidence-backed agreement, disagreement, unsupported claims, and unknowns across two or more lanes or runs |
+| Talk through uncertainty | **Discussion** | Durable review notes and questions, refreshed by polling |
+| Record what happens next | **Decide** | A human-owned action, rationale, owner, and revision history |
+| Find related cases | **Investigations** and **Entities** | Searchable investigations and reusable labels for customers, organizations, services, systems, or people |
+| Preserve or share work | **Decide → Export** | A readable brief, a deliberately selected evidence package, or a portable archive |
+
+The shortest useful path is: **Situation → Capture → Analyze → Decide**. Add
+**Compare** when you need independent approaches side by side. Return to
+Capture or Analyze whenever the evidence shows that the question is still too
+uncertain. “Gather more evidence” is a valid outcome.
+
 ## Start with the workspace, not a giant case page
 
 After sign-in, the primary navigation separates the major jobs:
 
 - **Overview** surfaces recent recorded activity and active investigations.
 - **Investigations** is the searchable and filterable case inventory.
+- **Entities** stores reusable labels for who or what an investigation concerns.
 - **Sources** maintains attribution labels reused during intake.
 - **Administration** is visible only to administrators and manages destination
   workspace access mappings.
@@ -90,15 +114,48 @@ Give each lane a distinct purpose rather than only changing wording:
 | Skeptic | Which leading claim is weakest? | Contradicting evidence and missing tests | Unsupported disagreement for its own sake |
 
 Synthetic mode runs offline. When the host has a configured gateway, switch to
-**Configured gateway**, select the frozen snapshot and question, choose at
-least two lanes, and choose a **Gateway model** for each lane. The integrated
-catalog can expose Qwen 3.6 27B, GPT-OSS 120B, and Ministral 3 14B. A deployment
-may expose a different bounded catalog. Endpoint and credential details remain
-on the host.
+**Configured gateway**, select the frozen snapshot and question, and choose a
+**Gateway model** for each lane. A focused question can use one lane. Choose
+two or more lanes when you want a comparison. The integrated catalog can
+expose Qwen 3.6 27B, GPT-OSS 120B, and Ministral 3 14B; a deployment may expose
+a different bounded catalog. Endpoint and credential details remain on the
+host.
 
 Record failed, partial, and superseded attempts. Before rerunning, note what
 changed: evidence, Situation, strategy, model, or configuration. If nothing
 changed, variation between answers is itself relevant evidence.
+
+#### Use the Log Workbench for large or messy logs
+
+The Log workbench is the investigation's power-user reading surface. It is for
+logs that have already been accepted on **Capture**; it is not a second global
+Sources library and it does not replace the evidence snapshot.
+
+1. On **Analyze**, filter the file list by name or path when the investigation
+   contains many files.
+2. Select up to four files to read side by side. Clear one selection before
+   choosing another file.
+3. Search with **Find**. Use match mode, include/exclude terms, severity, and a
+   full UTC time range only when needed. **Previous match**, **Next match**, F3,
+   and Ctrl/Cmd+G move through matches without silently wrapping.
+4. Read the result as two separate facts: how many matches were found, and how
+   much of the selected corpus has actually been searched. If the page is
+   incomplete, continue from the supplied position; a zero-match page can
+   still have more corpus to search.
+5. Save a view when the same files, filters, sort, grouping, or panes will be
+   useful again. Bookmark a line when it matters to the investigation. These
+   are navigation aids, not access tokens or evidence copies.
+6. For files with local timestamps and no offset, open **Timezone review** and
+   explicitly choose the correct IANA timezone. Then open **Normalized log
+   chronology** to read one merged order. War Room never guesses a timezone,
+   year, daylight-saving choice, or clock correction.
+
+Large corpora are processed in bounded windows. Search can return a continuation
+cursor instead of pretending that a partial page is a complete answer. If the
+selected files or their timezone revision changes, restart the search so it is
+not resumed against different bytes or timestamps.
+
+![Synthetic Analyze surface with evidence, snapshot, and lane controls](../media/gallery/war-room-analyze.png)
 
 ### 4. Compare: inspect findings, not votes
 
@@ -143,6 +200,18 @@ that evidence would distinguish the leading explanations. “Accept the majority
 answer” is not a sufficient rationale.
 
 ## Evidence, sources, and deep links
+
+### Entities describe what the investigation concerns
+
+Use **Entities** for reusable labels such as a customer, organization, person,
+service, system, product, version, build, component, or environment. An
+entity helps people find related investigations; it does not contain the
+investigation's logs and it is not a source of truth about a customer's system.
+
+Use **Sources** for a different question: who or what supplied a note, file,
+log, imported answer, or other information. A vendor may appear in both areas,
+but the two records have different meanings. Evidence, email, chat, and notes
+remain inside the investigation that captured them.
 
 ### Source attribution is not evidence storage
 
@@ -357,6 +426,23 @@ matters.
   depend on the host and provider. Missing measurements remain unknown.
 
 ![Synthetic bounded first-run setup checklist](../assets/war-room/war-room-first-run-setup.png)
+
+## When something is unclear or does not work
+
+| What you see | What it usually means | What to do |
+| --- | --- | --- |
+| You cannot see Gateway mode | This host has not exposed a configured runner to this session | Continue with Synthetic / offline, or ask an administrator to configure and qualify the host |
+| A gateway run is waiting | The host has not finished the request; selection is not proof that a provider was reached | Read the queued/running counts, wait for the host deadline, or cancel; do not start the identical run again while it is in flight |
+| A search says it is incomplete | Only a bounded page of the selected corpus has been searched | Continue from the supplied position; do not treat the current count as the corpus total |
+| A timestamp has no timezone | Its wall-clock meaning is unresolved | Use Timezone review and choose an explicit IANA zone; never infer one from a filename or nearby line |
+| A citation or bookmark no longer opens | The evidence bytes or investigation revision changed, or access is no longer available | Treat it as unresolved, reopen the current investigation, and verify the evidence again |
+| A ZIP import is rejected | A safety, privacy, format, size, or nesting limit was reached | Read the intake preview/error, remove the unsafe or unsupported member, or split the bundle; rejected content is not silently dropped |
+| A discussion note is not immediately visible to another person | Discussion uses bounded polling rather than a live chat socket | Wait for refresh and put the formal action in Decide |
+| LDAP login succeeds but access is missing | Authentication and ContextDesk authorization are separate | Have an administrator check the mapped destination group and role; do not expose directory credentials in the browser |
+
+If a result looks polished but its evidence link, provenance, timing, or
+authorization is unclear, keep it as unknown and record the next verification
+step. A fluent model answer is never a substitute for inspectable support.
 
 ## Operator closeout checklist
 

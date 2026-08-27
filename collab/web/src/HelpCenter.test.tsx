@@ -371,7 +371,7 @@ describe("help for behavior this build ships", () => {
     fireEvent.click(screen.getByRole("button", { name: "Ask a question about an investigation" }));
     expect(screen.getByText(/A triage starts with a question about one investigation/)).toBeTruthy();
     expect(screen.getByText(/Synthetic \/ offline runs are deterministic plumbing checks/)).toBeTruthy();
-    expect(screen.getByText(/gateway runs require at least two lanes/)).toBeTruthy();
+    expect(screen.getByText(/a focused question can use one lane, while comparisons use two or more lanes/)).toBeTruthy();
     expect(screen.getByText(/Open the Analyze stage/)).toBeTruthy();
   });
 
