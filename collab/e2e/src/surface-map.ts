@@ -44,7 +44,7 @@ export const WAR_ROOM_SURFACE_MAP: SurfaceRow[] = [
     requested: "launch two or more comparison lanes",
     status: "present",
     actual:
-      "TriageRunPanel launches a snapshot-bound synthetic or configured-gateway comparison with independently tracked candidate lanes and bounded gateway concurrency.",
+      "TriageRunPanel launches a snapshot-bound synthetic or configured-gateway triage, with one lane for a focused question and independently tracked candidate lanes for optional comparison.",
     probe: "Run history → Start a triage → model lanes",
   },
   {

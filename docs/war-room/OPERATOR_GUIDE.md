@@ -137,7 +137,8 @@ Sources library and it does not replace the evidence snapshot.
    choosing another file.
 3. Search with **Find**. Use match mode, include/exclude terms, severity, and a
    full UTC time range only when needed. **Previous match**, **Next match**, F3,
-   and Ctrl/Cmd+G move through matches without silently wrapping.
+   and Ctrl/Cmd+G move through the currently loaded matches; navigation wraps,
+   and the result counter shows your position.
 4. Read the result as two separate facts: how many matches were found, and how
    much of the selected corpus has actually been searched. If the page is
    incomplete, continue from the supplied position; a zero-match page can

@@ -80,6 +80,7 @@ Import an archive or directory. Import is deterministic and does not need a
 model:
 
 ```bash
+set -euo pipefail
 IMPORT="$($BIN --data-dir "$DATA" --json import ./fixtures/cli-release-demo)"
 printf '%s\n' "$IMPORT"
 "$BIN" --data-dir "$DATA" --json corpus list
@@ -92,7 +93,7 @@ outcome as authoritative:
 | --- | --- | --- |
 | `complete` | Everything intended for import was published | Continue |
 | `partial` | A corpus was published, but the defect ledger identifies missing or rejected material | Review the ledger before asking a question |
-| `rejected` | Nothing was published | Correct the source or archive and retry |
+| `rejected` | The import command fails with a non-zero result; nothing was published | Correct the source or archive and retry |
 
 Use the corpus id printed by `corpus list` in the commands below. Do not rely
 on a path name as the corpus identity. A successful import selects the new
@@ -104,9 +105,11 @@ CORPUS="<corpus-id-from-corpus-list>"
 "$BIN" --data-dir "$DATA" --json corpus show "$CORPUS"
 ```
 
-`--explain-selection` is useful for a large or mixed archive because it shows
-which sources the host selected, ignored, or rejected without requiring a
-provider:
+For a large or mixed archive, add `--explain-selection` to that import. It
+shows which sources the host selected, ignored, or rejected without requiring a
+provider. This is still a real import: it publishes and selects a new corpus;
+it is not a preview-only command. Use it on the import you intend to keep, or
+run `corpus use "$CORPUS"` again afterward:
 
 ```bash
 "$BIN" --data-dir "$DATA" --json import \
@@ -145,12 +148,12 @@ For an offline normalized artifact rather than a durable corpus, use
 `normalize` with a single default zone or an explicit source-to-zone map:
 
 ```bash
-"$BIN" normalize ./path/to/logs-or-archive \
+"$BIN" --data-dir "$DATA" normalize ./path/to/logs-or-archive \
   --output ./normalized-output \
   --timezone-map '{"service/app.log":"America/Chicago"}' \
   --strict-time
-"$BIN" normalized validate ./normalized-output
-"$BIN" normalized summarize ./normalized-output
+"$BIN" --data-dir "$DATA" normalized validate ./normalized-output
+"$BIN" --data-dir "$DATA" normalized summarize ./normalized-output
 ```
 
 `normalize` writes JSONL, a manifest, and a report; it does not publish a
@@ -187,7 +190,10 @@ question specific enough that a person can check the answer:
   "What is the first supported timeout in the corpus, what happened immediately before it, and which evidence supports that description?"
 ```
 
-The answer is model-generated, but grounding is host-owned. Read the evidence
+The answer is model-generated, but grounding is host-owned. In a non-interactive
+shell, permissioned tool calls are denied unless you add `--auto-approve`; use
+that only when the host tools are intentionally approved for automation. Read
+the evidence
 ids and citations, then open the corresponding records yourself. A grounded
 status means that citation identity resolved; it does **not** certify that the
 model's causal interpretation is complete or correct.
@@ -203,9 +209,9 @@ it:
   "What is the first supported timeout?"
 ```
 
-Dry-run does not create a session, read credentials, probe a gateway, or send
-corpus content anywhere. Use it to check corpus binding, context shape, and
-trace behavior before a live turn.
+Dry-run does not create a session, refresh credentials, probe a gateway, or
+send corpus content anywhere. Use it to check corpus binding, context shape,
+and trace behavior before a live turn.
 
 ### 6. Use the explicit SDK triage when you need a contract
 
@@ -255,6 +261,11 @@ terminal result when execution reaches one. Exit status is meaningful:
 | `10` | Completed with an honest partial result |
 | `8` | Failed or timed out |
 | `130` | Cancelled |
+
+This table covers terminal triage results. Validation and operational errors
+such as an invalid request, missing corpus, permission denial, provider error,
+or internal error have their own non-zero envelopes; use the command's error
+type rather than treating every non-zero result as a failed triage.
 
 Do not turn a failed, timed-out, cancelled, or ungrounded result into a
 successful conclusion in a wrapper script. Preserve the typed status and
@@ -311,13 +322,23 @@ place. One lane is enough for a focused triage.
 
 ### 1. Start the service and sign in
 
-From the repository's `collab/` directory, start the provider-free demo:
+From the repository's `collab/` directory, optionally verify the local package
+and tests, then start the provider-free demo:
 
 ```bash
 npm ci
 npm run demo:check
 npm run demo
 ```
+
+`npm run demo:check` verifies the workspace; it does not start the service. The
+last command is the one that starts it. The default demo intentionally prints
+that local timestamp review is hidden until both `COLLAB_BRIDGE_BIN` (or the
+legacy `COLLAB_TRIAGE_RUNNER`) and `COLLAB_LOG_CORPUS_ROOT` point to a trusted
+ContextDesk timestamp host and its corpus cache. Without those host settings,
+the normal synthetic triage flow still works, but **Timezone review**,
+**Normalized log chronology**, and UTC-range log search remain unavailable and
+should be treated as unavailable—not guessed around.
 
 Open the local address printed by the service and sign in as:
 
@@ -384,13 +405,17 @@ logs already captured in the investigation:
 5. Check whether the result is complete. A bounded page or continuation
    cursor is not a corpus-wide “no more matches” claim.
 6. Save the view or bookmark a line when you expect to return to it.
-7. If local timestamps have no offset, open **Timezone review**, choose the
-   correct IANA timezone explicitly, and then open **Normalized log chronology**.
+7. If local timestamps have no offset and the trusted timestamp host is
+   configured, open **Timezone review**, choose the correct IANA timezone
+   explicitly, and then open **Normalized log chronology**. The workbench also
+   has its own **Review chronology** control; use **Show merged chronology** to
+   combine the selected panes when that view is available.
 
 The workbench never guesses a timezone, year, daylight-saving choice, or clock
-correction. It keeps the raw evidence and the time declaration separate. A
-later evidence or timezone revision does not silently change an already frozen
-snapshot.
+correction. It keeps the raw evidence and the time declaration separate. Search
+continuation is bound to the selected files, scope, and timezone revision; a
+stale continuation is refused rather than silently reused. A later evidence or
+timezone revision does not silently change an already frozen snapshot.
 
 ![Synthetic Analyze page with evidence and triage controls](../media/gallery/war-room-analyze.png)
 
@@ -420,8 +445,8 @@ Still on **Analyze**, open **Run history and launcher**:
    citations, and unknowns instead of asking the model to “fix everything.”
 4. Give the work a short **Task fingerprint** so an intentional rerun of the
    same question can be recognized.
-5. Enter a meaningful **Strategy**, such as `timeline`, `failure-boundary`,
-   or `skeptic`.
+5. Enter a meaningful **Strategy**. This is free text; `timeline`,
+   `failure-boundary`, and `skeptic` are useful examples, not a fixed enum.
 6. Select exactly one lane for a focused triage. In gateway mode, choose the
    host-approved gateway model for that lane.
 7. Choose **Run synthetic triage** or **Run gateway triage**.

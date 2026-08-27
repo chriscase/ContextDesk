@@ -1018,7 +1018,7 @@ export function TriageRunPanel(props: {
                         {selectedGatewayCandidates.length > 1
                           ? "Each selected lane chooses its own gateway model for this comparison."
                           : "Choose one gateway model for this focused triage."}
-                        Credentials and endpoints stay on the War Room host.
+                        {" Credentials and endpoints stay on the War Room host."}
                         {!gatewayAvailable ? " Configure COLLAB_TRIAGE_RUNNER to enable gateway execution." : ""}
                         {selectedCandidates.length > 0
                           ? ` ${selectedGatewayCandidates.length} selected lane${selectedGatewayCandidates.length === 1 ? "" : "s"} · ${gatewayPurposeLabel}.`
