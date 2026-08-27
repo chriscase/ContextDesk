@@ -76,7 +76,7 @@ test.describe("War Room lane and deployment journeys", () => {
           && res.request().method() === "POST"
           && res.ok(),
       ),
-      analyze.getByRole("button", { name: "Run gateway triage" }).click(),
+      analyze.getByRole("button", { name: "Run gateway comparison" }).click(),
     ]);
     const job = (await launched.json()) as { id: string };
     const card = analyze.locator(`[id="triage-run-${job.id}"]`);

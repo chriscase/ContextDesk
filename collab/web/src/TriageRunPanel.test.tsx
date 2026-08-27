@@ -539,7 +539,7 @@ describe("TriageRunPanel", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }), { target: { value: "profile:qwen" } });
     fireEvent.change(screen.getByRole("combobox", { name: "gpt-oss-120b gateway model" }), { target: { value: "profile:gpt" } });
     fireEvent.change(screen.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 gateway model" }), { target: { value: "profile:qwen" } });
-    fireEvent.click(screen.getByRole("button", { name: "Run gateway triage" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run gateway comparison" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       "/api/cases/case-1/triage-runs",
@@ -551,6 +551,48 @@ describe("TriageRunPanel", () => {
     const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[1];
     expect(request?.body).toContain('"profileId":"profile:gpt"');
     expect(request?.body).toContain('"concurrency":3');
+  });
+
+  it("offers a focused one-lane gateway triage without requiring a comparison", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/snapshots")) {
+        return response({
+          snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }],
+        });
+      }
+      if (url.endsWith("/evidence")) return response({ artifacts: [] });
+      if (url.endsWith("/imports")) return response({ runs: [] });
+      if (url.endsWith("/api/triage-profiles")) {
+        return response({
+          profiles: [{ id: "profile:qwen", label: "Qwen gateway", provider: "openai-compatible" }],
+        });
+      }
+      if (url.endsWith("/api/triage-capabilities")) {
+        return response({ gatewayAvailable: true, gatewayMinCandidates: 1, gatewayMaxCandidates: 16 });
+      }
+      if (init?.method === "POST") {
+        return response({ id: "job-1", snapshotId: "snapshot-1", snapshotFingerprint: "a".repeat(64) });
+      }
+      return response({ jobs: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    await screen.findByRole("heading", { name: "Run history" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }), { target: { value: "profile:qwen" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /gpt-oss-120b/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }));
+
+    const launchButton = screen.getByRole("button", { name: "Run gateway triage" });
+    expect((launchButton as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(launchButton);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[1];
+    const body = JSON.parse(String(request?.body)) as { candidates: Array<{ candidateId: string }> };
+    expect(body.candidates).toHaveLength(1);
+    expect(body.candidates[0]?.candidateId).toBe("qwen-reviewer");
   });
 
   it("keeps distinct catalog models selectable when they share one gateway connection", async () => {
@@ -607,7 +649,7 @@ describe("TriageRunPanel", () => {
     expect((screen.getByRole("combobox", { name: "gpt-oss-120b gateway model" }) as HTMLSelectElement).value)
       .toBe("subject:gpt-oss");
 
-    fireEvent.click(screen.getByRole("button", { name: "Run gateway triage" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run gateway comparison" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
     const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[1];
     const body = JSON.parse(String(request?.body)) as {
@@ -991,7 +1033,7 @@ describe("TriageRunPanel", () => {
             schemaId: "cd-collab.triage_job_capabilities.v1",
             syntheticAvailable: true,
             gatewayAvailable: false,
-            gatewayMinCandidates: 2,
+            gatewayMinCandidates: 1,
             gatewayMaxCandidates: 16,
             profileCatalogConfigured: false,
             profileCount: 0,

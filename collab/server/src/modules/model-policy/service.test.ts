@@ -95,6 +95,32 @@ describe("ModelPurposePolicyService", () => {
     expect(policy.fingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
+  it("routes one gateway lane through the focused triage policy", async () => {
+    const rules = defaultModelPurposeRules(profiles.map((profile) => profile.id));
+    rules.triage.allowedSubjects = ["profile:qwen"];
+    rules.comparison.allowedSubjects = ["profile:gpt"];
+    const service = new ModelPurposePolicyService({
+      store: new MemoryModelPurposePolicyStore(),
+      profiles: [...profiles],
+    });
+    await service.update({ schemaId: MODEL_PURPOSE_POLICY_UPDATE_SCHEMA_ID, purposes: rules }, "admin");
+
+    const policy = await service.authorize({
+      request: request([{
+        candidateId: "qwen",
+        role: "single",
+        provider: "company-gateway",
+        profileId: "profile:qwen",
+        model: "qwen-3.6-27b",
+        version: null,
+      }]),
+      snapshot,
+      roles: ["case-lead"],
+      isAdmin: false,
+    });
+    expect(policy.purposes.triage.allowedSubjects).toEqual(["profile:qwen"]);
+  });
+
   it("fails closed for an unapproved model, private evidence, and excessive lanes", async () => {
     const rules = defaultModelPurposeRules(profiles.map((profile) => profile.id));
     rules.comparison.allowedSubjects = ["profile:qwen"];

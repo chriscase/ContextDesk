@@ -852,32 +852,52 @@ describe("snapshot-bound triage runs", () => {
     }
   });
 
-  it("rejects a one-lane gateway job before starting the host bridge", async () => {
+  it("runs a one-lane gateway job as a focused triage before comparison", async () => {
+    let calls = 0;
     const fx = await fixture(undefined, {
-      executeBatch: async (): Promise<TriageCandidateRunV1[]> => [],
+      executeBatch: async (context): Promise<TriageCandidateRunV1[]> => {
+        calls += 1;
+        return context.request.candidates.map((candidate) => ({
+          ...candidate,
+          status: "completed",
+          benchmarkRunId: "gateway-single",
+          outputHash: "gateway-single-hash",
+          summary: "Focused gateway triage result.",
+          evidenceRefs: [],
+          unknowns: ["usage", "cost"],
+          usageStatus: "unknown",
+          costStatus: "unknown",
+          errorCode: null,
+          startedAt: null,
+          finishedAt: null,
+          privacyClass: "owner_only",
+        }));
+      },
     });
     try {
-      await expect(
-        fx.service.create(
-          fx.caseId,
-          actor,
-          {
-            ...request(fx.snapshot.id),
-            mode: "gateway",
-            candidates: [{
-              candidateId: "gateway-only",
-              role: "reviewer",
-              provider: "openai-compatible",
-              profileId: "profile:test",
-              model: "grok-4",
-              version: null,
-            }],
-          },
-          "test",
-          false,
-          true,
-        ),
-      ).rejects.toThrow("gateway comparisons require at least 2 candidate lanes");
+      const created = await fx.service.create(
+        fx.caseId,
+        actor,
+        {
+          ...request(fx.snapshot.id),
+          mode: "gateway",
+          candidates: [{
+            candidateId: "gateway-only",
+            role: "single",
+            provider: "openai-compatible",
+            profileId: "profile:test",
+            model: "grok-4",
+            version: null,
+          }],
+        },
+        "test",
+        false,
+        true,
+      );
+      const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
+      expect(calls).toBe(1);
+      expect(completed.request.candidates).toHaveLength(1);
+      expect(completed.candidates[0]?.role).toBe("single");
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }
