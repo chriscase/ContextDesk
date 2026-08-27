@@ -229,6 +229,34 @@ describe("auth boundary", () => {
     expect(requested).not.toContain("/api/catalog/sources");
   });
 
+  it("explains a directory outage instead of silently treating the account as signed out", async () => {
+    const stub = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/setup/status") {
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
+      }
+      if (url === "/api/auth/me") {
+        return {
+          ok: false,
+          status: 503,
+          json: async () => ({ schemaId: "cd-collab.auth_error.v1", error: "unavailable" }),
+        } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", stub);
+    render(<App />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("directory is temporarily unavailable");
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    expect(stub.mock.calls.map((call) => String(call[0]))).toEqual([
+      "/api/setup/status",
+      "/api/auth/me",
+    ]);
+  });
+
   it("invalidates the whole protected shell when a background GET loses authorization", async () => {
     let denyActivity!: (value: Response) => void;
     const activity = new Promise<Response>((resolve) => { denyActivity = resolve; });

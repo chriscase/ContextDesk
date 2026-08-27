@@ -48,6 +48,12 @@ const AUTH_FAILURES: Record<string, Failure> = {
     retryable: true,
     refocus: false,
   },
+  unavailable: {
+    reason: "The sign-in service is temporarily unavailable.",
+    hint: "Check the directory connection and try again when it is ready.",
+    retryable: true,
+    refocus: false,
+  },
 };
 
 const UNREACHABLE: Failure = {

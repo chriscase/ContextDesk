@@ -234,6 +234,7 @@ export function App() {
   const syntheticDemo = import.meta.env.VITE_CONTEXTDESK_SYNTHETIC_DEMO === "1";
   const staticReadOnly = window.__CONTEXTDESK_STATIC_READ_ONLY__ === true;
   const [session, setSession] = useState<SessionView | null>(null);
+  const [sessionIssue, setSessionIssue] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [setupAvailable, setSetupAvailable] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
@@ -273,6 +274,7 @@ export function App() {
       restoreRef.current = isWorkLocation(current) ? current : null;
       setFocusedCaseTitle(null);
       setSession(null);
+      setSessionIssue(null);
       setReady(true);
       setLocation(SIGN_IN);
       writeHistory(SIGN_IN, "replace");
@@ -294,8 +296,17 @@ export function App() {
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/auth/me");
+    if (res.status === 503) {
+      setSession(null);
+      setSessionIssue(
+        "Your sign-in is valid, but the directory is temporarily unavailable. Try again when the directory connection is restored.",
+      );
+      setReady(true);
+      return;
+    }
     if (!res.ok) {
       setSession(null);
+      setSessionIssue(null);
       setReady(true);
       return;
     }
@@ -311,6 +322,7 @@ export function App() {
       roles: body.roles ?? [],
       ...(body.capabilities ? { capabilities: body.capabilities } : {}),
     });
+    setSessionIssue(null);
     setReady(true);
   }, []);
 
@@ -542,6 +554,11 @@ export function App() {
           <p className="shell__copy">
             A shared command center where your team works many hard investigations side by side.
           </p>
+          {sessionIssue ? (
+            <p className="login-screen__error" role="alert">
+              {sessionIssue}
+            </p>
+          ) : null}
           {syntheticDemo ? (
             <p className="login-screen__hint">
               Sample data mode: sign in with <code>demo</code> / <code>demo</code>. Local sample

@@ -124,6 +124,45 @@ describe("LDAP config", () => {
     expect(adapter.groupRefreshMode).toBe("live");
   });
 
+  it("allows an explicit login-time snapshot with a service bind", () => {
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+      COLLAB_LDAP_BIND_DN: "cn=svc,dc=example,dc=test",
+      COLLAB_LDAP_BIND_PASSWORD: "fixture-service-secret",
+      COLLAB_LDAP_GROUP_REFRESH_MODE: "login_snapshot",
+      ...identityEnv,
+    });
+    expect(cfg.groupRefreshMode).toBe("login_snapshot");
+    expect(publicLdapConfig(cfg, "ldap").groupRefreshMode).toBe("login_snapshot");
+    return import("./ldap-adapter.js").then(({ LdapAuthAdapter }) => {
+      const adapter = new LdapAuthAdapter(cfg, {
+        event: () => undefined,
+        lines: () => [],
+      });
+      expect(adapter.groupRefreshMode).toBe("login_snapshot");
+    });
+  });
+
+  it("refuses live refresh when no service bind is available", () => {
+    expect(() =>
+      loadLdapConfig({
+        COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+        COLLAB_LDAP_GROUP_REFRESH_MODE: "live",
+        ...identityEnv,
+      }),
+    ).toThrow(/requires a service bind/);
+  });
+
+  it("refuses an unknown group refresh mode", () => {
+    expect(() =>
+      loadLdapConfig({
+        COLLAB_LDAP_URL: "ldaps://directory.example.test:636",
+        COLLAB_LDAP_GROUP_REFRESH_MODE: "sometimes",
+        ...identityEnv,
+      }),
+    ).toThrow(/must be live or login_snapshot/);
+  });
+
   it("refuses TLS verification disable without explicit dev mode", () => {
     expect(() =>
       loadLdapConfig({

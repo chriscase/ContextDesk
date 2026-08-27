@@ -55,6 +55,9 @@ export const LDAP_ADMIN_ERROR_CODES = [
 ] as const;
 export type LdapAdminErrorCode = (typeof LDAP_ADMIN_ERROR_CODES)[number];
 
+export const LDAP_GROUP_REFRESH_MODES = ["live", "login_snapshot"] as const;
+export type LdapGroupRefreshMode = (typeof LDAP_GROUP_REFRESH_MODES)[number];
+
 export const LDAP_MAX_GROUPS = 50;
 export const LDAP_PROBE_USERNAME_MAX = 128;
 export const LDAP_PROBE_DETAIL_MAX = 240;
@@ -81,6 +84,8 @@ export interface LdapPublicConfigV1 {
   netbiosDomain: string | null;
   attributeMap: DirectoryAttributeMapV1;
   timeoutMs: number;
+  /** Optional for compatibility with older admin-config responses. */
+  groupRefreshMode?: LdapGroupRefreshMode;
 }
 
 export interface LdapProbeRequestV1 {
@@ -144,6 +149,7 @@ const publicConfigShape: ObjectShape = {
     }),
   ),
   timeoutMs: f.req(f.u64),
+  groupRefreshMode: f.opt(f.en(...LDAP_GROUP_REFRESH_MODES)),
 };
 
 const probeRequestShape: ObjectShape = {

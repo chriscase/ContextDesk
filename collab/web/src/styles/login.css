@@ -104,6 +104,17 @@
   background: color-mix(in srgb, var(--fg) 2%, var(--bg));
 }
 
+.login-screen__error {
+  margin: 0.9rem 0 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid color-mix(in srgb, #f7768e 55%, var(--border));
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, #f7768e 8%, transparent);
+  color: #f7768e;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
 @media (max-width: 480px) {
   .login-screen {
     padding: 1.1rem 1rem 1.25rem;

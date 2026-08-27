@@ -65,16 +65,10 @@ export async function authorizeSession(
   request: FastifyRequest,
   deps: SessionAuthorizationDeps,
 ): Promise<SessionAuthResult> {
-  const session = await resolveActiveSession(request, deps.auth);
-  if (!session) return { kind: "unauthenticated" };
-  let groups = session.groups;
-  if (groups.length === 0) {
-    try {
-      groups = await deps.auth.adapter.lookupGroups(session.identity);
-    } catch {
-      return { kind: "unavailable" };
-    }
-  }
+  const active = await resolveActiveSession(request, deps.auth);
+  if (active.kind !== "ok") return { kind: active.kind };
+  const session = active.session;
+  const groups = session.groups;
   const roles = deps.roles.resolve(groups);
   let profile: { status: string; provenance: string } | null;
   let grants: readonly { capability: Capability }[];

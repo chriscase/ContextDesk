@@ -172,7 +172,11 @@ export async function registerAdminPeopleRoutes(
         displayName: target.displayName,
       });
     } catch {
-      groups = [];
+      // A live directory failure is not the same thing as a user with no
+      // effective roles. Do not publish a false empty authorization result to
+      // an administrator; keep the response fail-closed and retryable.
+      void reply.code(503);
+      return peopleError("unavailable");
     }
     const roles = deps.sessionAuth.roles.resolve(groups);
     const grants = await deps.grants.list(id);

@@ -477,12 +477,12 @@ counts.
   fields remain editable. Historical attribution is unchanged.
 - **Directory-removal auto-disable is not automatic.** The `disabled`
   status is a real, valid, tested state, settable by an admin through the
-  same status endpoint used for suspend/reactivate, but nothing currently
-  distinguishes "directory is briefly unreachable" from "this person was
-  actually removed" strongly enough to auto-transition a profile - see
-  `resolveActiveSession`'s existing `catch { groups = [] }` fallback, which
-  already conflates those two cases for group resolution. Closing this
-  gap needs a stronger not-found signal from the LDAP adapter.
+  same status endpoint used for suspend/reactivate. Live LDAP refresh now
+  distinguishes a directory outage or ambiguous empty refresh from a valid
+  session: it returns a retryable unavailable result rather than publishing
+  a misleading 200 response with no roles. The LDAP adapter still does not
+  provide a durable, authoritative "directory identity removed" signal, so
+  the server does not auto-transition a profile to `disabled`.
 
 ## Acceptance checklist
 

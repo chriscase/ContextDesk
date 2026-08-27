@@ -63,6 +63,11 @@ export interface AuthRouteDeps {
 
 export type ActiveSessionDeps = Pick<AuthRouteDeps, "sessions" | "policy" | "adapter">;
 
+export type ActiveSessionResolution =
+  | { kind: "ok"; session: SessionRecord }
+  | { kind: "unauthenticated" }
+  | { kind: "unavailable" };
+
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
 }
@@ -84,23 +89,38 @@ function readCookie(request: FastifyRequest): string | undefined {
 export async function resolveActiveSession(
   request: FastifyRequest,
   deps: ActiveSessionDeps,
-): Promise<SessionRecord | null> {
+): Promise<ActiveSessionResolution> {
   const token = readCookie(request);
-  if (!token) return null;
+  if (!token) return { kind: "unauthenticated" };
   const record = await deps.sessions.getByToken(token);
-  if (!record || !isSessionActive(record, deps.policy)) return null;
+  if (!record || !isSessionActive(record, deps.policy)) {
+    return { kind: "unauthenticated" };
+  }
   await deps.sessions.touch(record.id);
   let groups = record.groups;
   if (deps.adapter.groupRefreshMode !== "login_snapshot") {
     try {
       groups = await deps.adapter.lookupGroups(record.identity);
     } catch {
-      // Live directory refresh is fail-closed. Snapshot adapters never enter
-      // this branch because they have no independent service identity.
-      groups = [];
+      // Live directory refresh is fail-closed. Do not turn an outage into an
+      // apparently valid session with an empty role set: callers need a
+      // retryable, distinguishable unavailable result.
+      return { kind: "unavailable" };
+    }
+    // A live LDAP session was admitted with at least one group at login. An
+    // empty refresh is ambiguous: it may be a legitimate revocation, but it
+    // may also be a service-bind/search mismatch. Treat it as unavailable so
+    // the UI never presents a successful 200 response with misleadingly empty
+    // authorization. Access remains fail-closed either way.
+    if (
+      deps.adapter.provenance === "ldap" &&
+      record.groups.length > 0 &&
+      groups.length === 0
+    ) {
+      return { kind: "unavailable" };
     }
   }
-  return { ...record, groups };
+  return { kind: "ok", session: { ...record, groups } };
 }
 
 export async function registerAuthRoutes(
@@ -291,7 +311,7 @@ export async function registerAuthRoutes(
   });
 
   app.post("/api/auth/logout", async (request, reply) => {
-    const session = await resolveActiveSession(request, deps);
+    const session = await readActiveSession(request, deps);
     if (session) {
       await deps.sessions.revoke(session.id);
       await deps.audit.append({
@@ -308,11 +328,16 @@ export async function registerAuthRoutes(
   });
 
   app.get("/api/auth/me", async (request, reply) => {
-    const session = await resolveActiveSession(request, deps);
-    if (!session) {
+    const resolved = await resolveActiveSession(request, deps);
+    if (resolved.kind === "unavailable") {
+      void reply.code(503);
+      return authError("unavailable");
+    }
+    if (resolved.kind !== "ok") {
       void reply.code(401);
       return authError("unauthenticated");
     }
+    const session = resolved.session;
     const roles = deps.roles.resolve(session.groups);
     if (deps.profiles) {
       let profile: { status: string; provenance: string } | null;
@@ -335,6 +360,16 @@ export async function registerAuthRoutes(
     };
     return bodyOut;
   });
+}
+
+async function readActiveSession(
+  request: FastifyRequest,
+  deps: ActiveSessionDeps,
+): Promise<SessionRecord | null> {
+  const token = readCookie(request);
+  if (!token) return null;
+  const record = await deps.sessions.getByToken(token);
+  return record && isSessionActive(record, deps.policy) ? record : null;
 }
 
 async function sessionCapabilities(

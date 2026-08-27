@@ -41,6 +41,7 @@ own directory before treating a deployment as compatible.
 | UPN suffix | `COLLAB_LDAP_UPN_SUFFIX` | Required for UPN mode. Must match the typed suffix exactly. |
 | NetBIOS domain | `COLLAB_LDAP_NETBIOS_DOMAIN` | Required for `DOMAIN\user`. Never guessed from `DC=` parts. |
 | Group search | `COLLAB_LDAP_GROUP_SEARCH_BASE` and filter | Optional when `memberOf` (or `COLLAB_LDAP_MEMBER_ATTR`) is set. |
+| Group refresh | `COLLAB_LDAP_GROUP_REFRESH_MODE` | `live` re-reads membership with the service bind; `login_snapshot` keeps the groups proven during sign-in. The default follows whether a service bind is configured. |
 | Display, email, title, team | `COLLAB_LDAP_ATTR_*` | Mapped through the provider-neutral profile contract at login. |
 | Bind secret | environment, bind-password file, or `file:` reference | Exactly one source. Never stored in the browser or logs. |
 | Directory CA | `COLLAB_LDAP_CA`, or `NODE_EXTRA_CA_CERTS` | PEM content, not a path. `COLLAB_LDAP_CA` replaces system trust; `NODE_EXTRA_CA_CERTS` adds to it. |
@@ -85,6 +86,11 @@ port, or an untrusted certificate is reported as a transport failure rather
 than as an available directory. The configuration view names the group-refresh
 mode and whether an operator-supplied CA is in use, so a failing stage can be
 matched to the setting behind it.
+
+If a live membership refresh fails after sign-in, the server returns a
+retryable directory-unavailable response rather than a successful response
+with an empty role list. Access remains fail-closed, while the operator gets a
+clear indication that the directory connection or group query needs attention.
 
 ## Current limits
 
