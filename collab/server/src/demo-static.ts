@@ -251,6 +251,9 @@ async function inlineHelpIllustrations(javascript: string): Promise<string> {
     const bytes = await readFile(join(illustrationDir, name));
     inlined = inlined.replaceAll(`/help/war-room/${name}`, `data:image/png;base64,${bytes.toString("base64")}`);
   }
+  if (inlined.includes("/help/war-room/")) {
+    throw new Error("static demo contains an un-inlined War Room help illustration");
+  }
   return inlined;
 }
 

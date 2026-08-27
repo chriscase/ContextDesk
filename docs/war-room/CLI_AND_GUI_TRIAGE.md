@@ -77,11 +77,12 @@ the release instructions for that build.
 ### 2. Import the corpus and read its verdict
 
 Import an archive or directory. Import is deterministic and does not need a
-model:
+model. The following is a Bash snippet; run it in Bash after setting `BIN` and
+`DATA` as above (PowerShell variables do not carry into Bash):
 
 ```bash
 set -euo pipefail
-IMPORT="$($BIN --data-dir "$DATA" --json import ./fixtures/cli-release-demo)"
+IMPORT="$("$BIN" --data-dir "$DATA" --json import ./fixtures/cli-release-demo)"
 printf '%s\n' "$IMPORT"
 "$BIN" --data-dir "$DATA" --json corpus list
 ```
@@ -334,11 +335,12 @@ npm run demo
 `npm run demo:check` verifies the workspace; it does not start the service. The
 last command is the one that starts it. The default demo intentionally prints
 that local timestamp review is hidden until both `COLLAB_BRIDGE_BIN` (or the
-legacy `COLLAB_TRIAGE_RUNNER`) and `COLLAB_LOG_CORPUS_ROOT` point to a trusted
+fallback `COLLAB_TRIAGE_RUNNER`) and `COLLAB_LOG_CORPUS_ROOT` point to a trusted
 ContextDesk timestamp host and its corpus cache. Without those host settings,
-the normal synthetic triage flow still works, but **Timezone review**,
-**Normalized log chronology**, and UTC-range log search remain unavailable and
-should be treated as unavailable—not guessed around.
+the normal synthetic triage flow still works, but **Timezone review** and
+**Normalized log chronology** are unavailable. A UTC-range search still runs,
+but only timestamps that already carry an offset can be compared reliably; treat
+that result as incomplete rather than guessing around the missing host.
 
 Open the local address printed by the service and sign in as:
 
