@@ -22,6 +22,8 @@ describe("Log workbench layout contracts", () => {
     expect(workbenchCss).toMatch(/\.log-workbench__match-nav \{[\s\S]*?flex-wrap:\s*nowrap/);
     expect(workbenchCss).toMatch(/\.log-workbench__match-nav \{[\s\S]*?white-space:\s*nowrap/);
     expect(workbenchCss).toMatch(/\.log-workbench__hits \{[\s\S]*?max-height:\s*18rem/);
+    expect(workbenchCss).toMatch(/\.log-workbench__file--virtual \{[\s\S]*?height:\s*2\.5rem/);
+    expect(workbenchCss).toMatch(/\.log-workbench__file--virtual[\s\S]*?white-space:\s*nowrap/);
   });
 
   it("covers laptop, phone, reduced motion, and forced colors", () => {

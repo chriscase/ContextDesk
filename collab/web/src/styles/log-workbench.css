@@ -161,6 +161,28 @@
   border-radius: 0.45rem;
 }
 
+.log-workbench__file--virtual {
+  box-sizing: border-box;
+  height: 2.5rem;
+  min-height: 2.5rem;
+  overflow: hidden;
+}
+
+.log-workbench__file--virtual .log-workbench__file-copy {
+  display: block;
+}
+
+.log-workbench__file--virtual .log-workbench__file-copy > strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-workbench__file--virtual .log-workbench__file-copy > small {
+  display: none;
+}
+
 .log-workbench__file > input {
   width: 1.1rem;
   height: 1.1rem;

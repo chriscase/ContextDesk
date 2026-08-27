@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { TechnicalIdentifiers } from "./technical-identity.js";
 import { protectedApiFetch } from "./protected-api.js";
 
-function virtualizedWindow(input: {
+export function virtualizedWindow(input: {
   totalRows: number;
   scrollTop: number;
   rowHeight: number;
@@ -939,7 +939,14 @@ export function LogWorkbench(props: {
             ) : null}
             {visibleFiles.map((item) => {
               return (
-                <label key={item.evidenceId} className="log-workbench__file">
+                <label
+                  key={item.evidenceId}
+                  className={
+                    virtualizeFiles
+                      ? "log-workbench__file log-workbench__file--virtual"
+                      : "log-workbench__file"
+                  }
+                >
                   <input
                     type="checkbox"
                     checked={panes.includes(item.evidenceId)}
@@ -960,16 +967,18 @@ export function LogWorkbench(props: {
                       </small>
                     ) : null}
                   </span>
-                  <TechnicalIdentifiers
-                    record={item.displayLabel}
-                    summary="Details"
-                    className="log-workbench__file-details"
-                    items={[
-                      { label: "Evidence id", value: item.evidenceId },
-                      { label: "Digest", value: item.digest },
-                      { label: "Intake batch", value: item.intakeBatchId },
-                    ]}
-                  />
+                  {virtualizeFiles ? null : (
+                    <TechnicalIdentifiers
+                      record={item.displayLabel}
+                      summary="Details"
+                      className="log-workbench__file-details"
+                      items={[
+                        { label: "Evidence id", value: item.evidenceId },
+                        { label: "Digest", value: item.digest },
+                        { label: "Intake batch", value: item.intakeBatchId },
+                      ]}
+                    />
+                  )}
                 </label>
               );
             })}
@@ -988,7 +997,7 @@ export function LogWorkbench(props: {
           <p className="log-workbench__hint">
             Showing files {(fileWindow.start + 1).toLocaleString()}–
             {Math.max(fileWindow.start + 1, fileWindow.end).toLocaleString()} of{" "}
-            {filteredItems.length.toLocaleString()}. Filter to jump to a name.
+            {filteredItems.length.toLocaleString()}. Filter to jump to a file and inspect its details.
           </p>
         ) : null}
       </div>

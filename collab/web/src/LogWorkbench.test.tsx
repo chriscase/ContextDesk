@@ -5,9 +5,9 @@ import {
   filterInvestigationLogs,
   groupSearchMatches,
   LogWorkbench,
+  virtualizedWindow,
   WORKBENCH_VIRTUALIZATION,
 } from "./LogWorkbench.js";
-import { virtualizedWindow } from "@cd-collab/contracts";
 
 afterEach(() => {
   cleanup();
@@ -751,6 +751,7 @@ describe("Log workbench file picker at 3, 30, and 300 files", () => {
     expect(visible.length).toBeLessThan(300);
     expect(screen.getByText(/300 files/)).toBeTruthy();
     expect(screen.getByText(/Showing files 1/)).toBeTruthy();
+    expect(screen.queryByText("Details")).toBeNull();
 
     fireEvent.change(screen.getByLabelText("Filter log files"), {
       target: { value: "svc-299" },
@@ -758,6 +759,7 @@ describe("Log workbench file picker at 3, 30, and 300 files", () => {
     expect(screen.getAllByRole("checkbox", { name: /Show .* in a pane/ })).toHaveLength(1);
     expect(screen.getByLabelText("Show svc-299.log in a pane")).toBeTruthy();
     expect(screen.getByText(/1 of 300 files match/)).toBeTruthy();
+    expect(screen.getByText("Details")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter log files"), {
       target: { value: "no-such-file" },
