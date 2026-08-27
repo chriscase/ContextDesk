@@ -1206,6 +1206,7 @@ describe("evidence snapshot cockpit", () => {
     expect(screen.getByText(/Differences between lanes reflect the models and settings/)).toBeTruthy();
     expect(screen.getAllByText(/same-snapshot proof recorded/)).toHaveLength(2);
     expect(screen.getByText(/it does not make any lane's answer correct/)).toBeTruthy();
+    expect(screen.getByText("No lane cited a shared evidence item; snapshot fairness is verified separately below.")).toBeTruthy();
     expect(screen.getByText("frozen")).toBeTruthy();
     expect(screen.getByText("owner only")).toBeTruthy();
     expect(screen.getByText("2026-08-19 23:41 UTC")).toBeTruthy();

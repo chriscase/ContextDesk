@@ -1296,7 +1296,7 @@ export function TriageRunPanel(props: {
                                 </details>
                               ) : null}
                             </>
-                          : "none established"}
+                          : "No lane cited a shared evidence item; snapshot fairness is verified separately below."}
                       </div>
                     </>
                   )}

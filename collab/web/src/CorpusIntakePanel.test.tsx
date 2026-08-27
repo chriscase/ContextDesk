@@ -13,6 +13,18 @@ afterEach(() => {
 });
 
 describe("CorpusIntakePanel", () => {
+  it("explains content reuse without implying that evidence references disappear", () => {
+    render(
+      <CorpusIntakePanel
+        caseId="11111111-1111-4111-8111-111111111111"
+        canWrite
+        readOnly={false}
+      />,
+    );
+
+    expect(screen.getByText(/Identical bytes are stored once.*separate evidence reference\./)).toBeTruthy();
+  });
+
   it("condenses rejection reasons into human-readable action groups", () => {
     expect(summarizeCorpusRejections([
       { reason: "binary_or_unknown" },
