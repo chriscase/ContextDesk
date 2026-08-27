@@ -486,6 +486,94 @@ describe("auth flow", () => {
     });
   });
 
+  it("reports live group-refresh failure as unavailable instead of empty authorization", async () => {
+    const users = fixtureUsers();
+    const base = new MapAuthAdapter(users);
+    let refreshes = 0;
+    const adapter: AuthAdapter = {
+      provenance: base.provenance,
+      groupRefreshMode: "live",
+      authenticate: (username, password) => base.authenticate(username, password),
+      lookupGroups: async () => {
+        refreshes += 1;
+        throw new Error("directory refresh failed");
+      },
+      searchIdentities: (term, options) => base.searchIdentities(term, options),
+      searchDirectoryGroups: (term, options) => base.searchDirectoryGroups(term, options),
+    };
+    await withApp(
+      async ({ app }) => {
+        const login = await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          payload: { username: "alice", password: FIXTURE_PASSWORD },
+        });
+        const cookie = cookieFrom(login);
+        const me = await app.inject({
+          method: "GET",
+          url: "/api/auth/me",
+          headers: { cookie },
+        });
+        expect(me.statusCode).toBe(503);
+        expect(parseAuthError(JSON.parse(me.body)).error).toBe("unavailable");
+
+        const protectedRequest = await app.inject({
+          method: "POST",
+          url: "/api/authz/mutations",
+          headers: { cookie },
+          payload: { kind: "probe" },
+        });
+        expect(protectedRequest.statusCode).toBe(503);
+        expect(JSON.parse(protectedRequest.body)).toEqual({ error: "unavailable" });
+        expect(refreshes).toBe(2);
+      },
+      { users, adapter },
+    );
+  });
+
+  it("does not present an empty live LDAP refresh as a successful session", async () => {
+    const users = fixtureUsers();
+    const base = new MapAuthAdapter(users);
+    const adapter: AuthAdapter = {
+      provenance: "ldap",
+      groupRefreshMode: "live",
+      authenticate: (username, password) => base.authenticate(username, password),
+      lookupGroups: async () => [],
+      searchIdentities: (term, options) => base.searchIdentities(term, options),
+      searchDirectoryGroups: (term, options) => base.searchDirectoryGroups(term, options),
+    };
+
+    await withApp(
+      async ({ app }) => {
+        const login = await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          payload: { username: "alice", password: FIXTURE_PASSWORD },
+        });
+        expect(login.statusCode).toBe(200);
+        const cookie = cookieFrom(login);
+
+        const me = await app.inject({
+          method: "GET",
+          url: "/api/auth/me",
+          headers: { cookie },
+        });
+        expect(me.statusCode).toBe(503);
+        expect(parseAuthError(JSON.parse(me.body)).error).toBe("unavailable");
+
+        const protectedRequest = await app.inject({
+          method: "POST",
+          url: "/api/authz/mutations",
+          headers: { cookie },
+          payload: { kind: "probe" },
+        });
+        expect(protectedRequest.statusCode).toBe(503);
+        expect(JSON.parse(protectedRequest.body)).toEqual({ error: "unavailable" });
+      },
+      { users, adapter },
+    );
+  });
+
   it("keeps login-time groups when an adapter explicitly uses snapshot refresh", async () => {
     const users = fixtureUsers();
     const adapter = new MapAuthAdapter(users, "login_snapshot");

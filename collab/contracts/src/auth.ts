@@ -60,7 +60,8 @@ export type AuthErrorCode =
   | "access_denied"
   | "rate_limited"
   | "unauthenticated"
-  | "forbidden";
+  | "forbidden"
+  | "unavailable";
 
 export interface AuthErrorV1 {
   schemaId: typeof AUTH_ERROR_SCHEMA_ID;
@@ -76,6 +77,7 @@ const authErrorShape: ObjectShape = {
       "rate_limited",
       "unauthenticated",
       "forbidden",
+      "unavailable",
     ),
   ),
 };

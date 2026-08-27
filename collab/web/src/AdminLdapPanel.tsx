@@ -196,7 +196,8 @@ export function AdminLdapPanel() {
               <dd>
                 {config.authMode !== "ldap"
                   ? "not applicable"
-                  : config.bindPasswordConfigured
+                  : config.groupRefreshMode === "live" ||
+                      (!config.groupRefreshMode && config.bindPasswordConfigured)
                     ? "live — the service bind re-reads membership on each request"
                     : "login-time snapshot — membership changes apply at next sign-in"}
               </dd>

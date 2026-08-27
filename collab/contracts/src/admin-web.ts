@@ -151,6 +151,7 @@ export type { DirectoryAttributeMapV1, DirectoryMappedField } from "./directory-
 export {
   LDAP_ADMIN_ERROR_CODES,
   LDAP_ADMIN_ERROR_SCHEMA_ID,
+  LDAP_GROUP_REFRESH_MODES,
   LDAP_MAX_GROUPS,
   LDAP_PROBE_REPORT_SCHEMA_ID,
   LDAP_PROBE_REQUEST_SCHEMA_ID,
@@ -168,6 +169,7 @@ export {
 export type {
   LdapAdminErrorCode,
   LdapAdminErrorV1,
+  LdapGroupRefreshMode,
   LdapProbeReportV1,
   LdapProbeRequestV1,
   LdapProbeStageId,

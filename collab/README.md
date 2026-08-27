@@ -118,6 +118,13 @@ decision.
   when the directory hides group OUs from the user (osixia returns LDAP 0x20).
   `lookupGroups` repeats that service-bind search on each request so directory
   group removal does not wait for the 8h/30m session TTL.
+- `COLLAB_LDAP_GROUP_REFRESH_MODE` explicitly selects `live` or
+  `login_snapshot`. It defaults to `live` with a service bind and to
+  `login_snapshot` without one. Use snapshot mode when the directory proves
+  membership during the user login bind but does not provide a reliable
+  service-bound membership read. A live refresh failure is returned as a
+  retryable unavailable result; it is never converted into a successful
+  empty-role session.
 - Compatible user-resolution modes, when explicitly configured, run in listed
   order: service-bind search, DN template, AD UPN, and `DOMAIN\user`. ContextDesk
   never derives a UPN suffix or NetBIOS name from `DC=` components of a search
@@ -157,6 +164,7 @@ decision.
 | `tls_verify` | verified TLS default; fixture-only disable requires `COLLAB_LDAP_TLS_INSECURE=1` and `COLLAB_LDAP_DEV_MODE=1` |
 | `ca_cert` / `tls_ca` | `COLLAB_LDAP_CA` as PEM content (replaces system trust), or `NODE_EXTRA_CA_CERTS` to add to it |
 | `timeout` | `COLLAB_LDAP_TIMEOUT_MS` (100..30000, default 8000). No automatic retry |
+| `group_refresh_mode` | `COLLAB_LDAP_GROUP_REFRESH_MODE=live` or `login_snapshot`; service-bind default is `live` |
 | Silent UPN/NetBIOS from `DC=` | **Not copied.** Set `COLLAB_LDAP_UPN_SUFFIX=example.test` and `COLLAB_LDAP_NETBIOS_DOMAIN=EXAMPLE` |
 
 This table is a configuration translation. It is not evidence that any live

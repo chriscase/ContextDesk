@@ -53,7 +53,11 @@ export {
   registerAuthRoutes,
   resolveActiveSession,
 } from "./routes.js";
-export type { ActiveSessionDeps, AuthRouteDeps } from "./routes.js";
+export type {
+  ActiveSessionDeps,
+  ActiveSessionResolution,
+  AuthRouteDeps,
+} from "./routes.js";
 export {
   CSRF_HEADER,
   CSRF_HEADER_VALUE,

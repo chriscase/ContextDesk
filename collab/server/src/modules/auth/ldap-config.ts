@@ -16,6 +16,7 @@ import {
   type LdapUserResolutionMode,
 } from "@cd-collab/contracts";
 import type { SetupLdapAuthenticationV1 } from "@cd-collab/contracts/setup";
+import type { GroupRefreshMode } from "./adapter.js";
 
 export const LDAP_MIN_TIMEOUT_MS = 100;
 export const LDAP_MAX_TIMEOUT_MS = 30_000;
@@ -39,6 +40,7 @@ export interface LdapConfig {
   /** Memory-only; never logged. */
   bindPassword: string | undefined;
   timeoutMs: number;
+  groupRefreshMode: GroupRefreshMode;
   userResolutionModes: LdapUserResolutionMode[];
   upnSuffix: string | undefined;
   netbiosDomain: string | undefined;
@@ -73,6 +75,24 @@ function clampTimeout(raw: string | undefined): number {
   const parsed = Number.parseInt(raw ?? `${LDAP_DEFAULT_TIMEOUT_MS}`, 10);
   if (!Number.isFinite(parsed)) return LDAP_DEFAULT_TIMEOUT_MS;
   return Math.max(LDAP_MIN_TIMEOUT_MS, Math.min(LDAP_MAX_TIMEOUT_MS, parsed));
+}
+
+function parseGroupRefreshMode(
+  raw: string | undefined,
+  hasServiceBind: boolean,
+): GroupRefreshMode {
+  const mode = raw?.trim() || (hasServiceBind ? "live" : "login_snapshot");
+  if (mode !== "live" && mode !== "login_snapshot") {
+    throw new Error(
+      "COLLAB_LDAP_GROUP_REFRESH_MODE must be live or login_snapshot",
+    );
+  }
+  if (mode === "live" && !hasServiceBind) {
+    throw new Error(
+      "COLLAB_LDAP_GROUP_REFRESH_MODE=live requires a service bind",
+    );
+  }
+  return mode;
 }
 
 function readBindSecretFile(path: string): string {
@@ -289,6 +309,7 @@ export function loadLdapConfig(env: NodeJS.ProcessEnv = process.env): LdapConfig
     upnSuffix,
     netbiosDomain,
   });
+  const bindPassword = loadBindPassword(env);
   const config: LdapConfig = {
     url,
     starttls,
@@ -303,8 +324,12 @@ export function loadLdapConfig(env: NodeJS.ProcessEnv = process.env): LdapConfig
       "(&(objectClass=groupOfNames)(member={dn}))",
     memberAttribute,
     bindDn: env.COLLAB_LDAP_BIND_DN,
-    bindPassword: loadBindPassword(env),
+    bindPassword,
     timeoutMs: clampTimeout(env.COLLAB_LDAP_TIMEOUT_MS),
+    groupRefreshMode: parseGroupRefreshMode(
+      env.COLLAB_LDAP_GROUP_REFRESH_MODE,
+      Boolean(env.COLLAB_LDAP_BIND_DN && bindPassword),
+    ),
     userResolutionModes: parseResolutionModes(env.COLLAB_LDAP_USER_RESOLUTION, derived),
     upnSuffix,
     netbiosDomain,
@@ -349,6 +374,10 @@ export function ldapConfigFromSetup(
     bindDn: ldap.bindDn ?? undefined,
     bindPassword,
     timeoutMs: LDAP_DEFAULT_TIMEOUT_MS,
+    groupRefreshMode: parseGroupRefreshMode(
+      undefined,
+      Boolean(ldap.bindDn && bindPassword),
+    ),
     userResolutionModes: ldap.userResolutionModes
       ? [...ldap.userResolutionModes]
       : derived.length > 0
@@ -386,5 +415,8 @@ export function publicLdapConfig(
     netbiosDomain: config?.netbiosDomain ?? null,
     attributeMap: config?.attributeMap ?? DEFAULT_DIRECTORY_ATTRIBUTE_MAP,
     timeoutMs: config?.timeoutMs ?? LDAP_DEFAULT_TIMEOUT_MS,
+    ...(config?.groupRefreshMode
+      ? { groupRefreshMode: config.groupRefreshMode }
+      : {}),
   };
 }

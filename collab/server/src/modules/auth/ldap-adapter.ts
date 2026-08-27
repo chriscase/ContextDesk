@@ -99,8 +99,7 @@ export class LdapAuthAdapter implements AuthAdapter {
     private readonly log: AuthLog,
     private readonly sessions: LdapSessionFactory = createLiveLdapFactory(config),
   ) {
-    this.groupRefreshMode =
-      config.bindDn && config.bindPassword ? "live" : "login_snapshot";
+    this.groupRefreshMode = config.groupRefreshMode;
   }
 
   async authenticate(
