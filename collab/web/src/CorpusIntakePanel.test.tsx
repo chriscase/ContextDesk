@@ -60,7 +60,7 @@ describe("CorpusIntakePanel", () => {
     expect(corpusSelectionLimitError("zip", [{
       relativePath: "incident.zip",
       size: CORPUS_INTAKE_LIMITS.maxArchiveBytes + 1,
-    }])).toMatch(/64 MiB/);
+    }])).toMatch(/512 MiB/);
     expect(corpusSelectionLimitError("files", [{
       relativePath: "incident.log",
       size: CORPUS_INTAKE_LIMITS.maxFileBytes,
@@ -68,7 +68,7 @@ describe("CorpusIntakePanel", () => {
     expect(corpusSelectionLimitError("files", [{
       relativePath: "incident.log",
       size: CORPUS_INTAKE_LIMITS.maxFileBytes + 1,
-    }])).toMatch(/64 MiB/);
+    }])).toMatch(/512 MiB/);
     const exactCount = Array.from(
       { length: CORPUS_INTAKE_LIMITS.maxFileCount },
       (_, index) => ({ relativePath: `${index}.log`, size: 0 }),
@@ -80,7 +80,7 @@ describe("CorpusIntakePanel", () => {
     ])).toMatch(/4,096 files/);
     const fullCapacity = Array.from({ length: 8 }, (_, index) => ({
       relativePath: `capacity-${index}.log`,
-      size: CORPUS_INTAKE_LIMITS.maxFileBytes,
+      size: CORPUS_INTAKE_LIMITS.maxExpandedBytes / 8,
     }));
     expect(corpusSelectionLimitError("files", fullCapacity)).toBeNull();
     expect(corpusSelectionLimitError("files", [

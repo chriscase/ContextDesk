@@ -158,9 +158,9 @@ describe("help search", () => {
     renderHelp();
     searchFor("idempotency key");
     fireEvent.click(within(resultsList()).getAllByRole("button")[0] as HTMLElement);
-    expect(screen.getByText(/Archives are capped at 64 MiB/)).toBeTruthy();
+    expect(screen.getByText(/Archives are capped at 512 MiB/)).toBeTruthy();
     expect(screen.getByText(/expanded bytes at 512 MiB, 4,096 files/)).toBeTruthy();
-    expect(screen.getByText(/64 MiB per file, compression ratio 256, and 60 seconds/)).toBeTruthy();
+    expect(screen.getByText(/512 MiB per file, compression ratio 256, and 60 seconds/)).toBeTruthy();
     expect(screen.getByText(/overflow is rejected, never silently dropped/)).toBeTruthy();
     expect(screen.getByText(/JSONL\/NDJSON/)).toBeTruthy();
     expect(screen.getByText(/structured JSON and JSONL records must parse/)).toBeTruthy();
