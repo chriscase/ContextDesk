@@ -89,6 +89,18 @@ describe("help landing", () => {
       }),
     ).toBeTruthy();
   });
+
+  it("opens a screenshot at full size and closes with Escape", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: /Walk through a fresh investigation/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand screenshot: Start with an investigation and give it a specific title." }),
+    );
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
 });
 
 describe("help search", () => {

@@ -1334,7 +1334,9 @@ export function HelpCenter(props: {
 }) {
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<Selection>(null);
+  const [openIllustration, setOpenIllustration] = useState<HelpIllustration | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const illustrationCloseRef = useRef<HTMLButtonElement>(null);
 
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const searching = terms.length > 0;
@@ -1356,6 +1358,16 @@ export function HelpCenter(props: {
     }
     headingRef.current?.focus();
   }, [selection, searching]);
+
+  useEffect(() => {
+    if (!openIllustration) return;
+    illustrationCloseRef.current?.focus();
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpenIllustration(null);
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [openIllustration]);
 
   function openArticle(id: string) {
     setQuery("");
@@ -1521,12 +1533,20 @@ export function HelpCenter(props: {
                   <div className="help-illustrations">
                     {selectedArticle.article.illustrations.map((illustration) => (
                       <figure className="help-illustration" key={illustration.src}>
-                        <img
-                          src={illustration.src}
-                          alt={illustration.alt}
-                          loading="lazy"
-                          decoding="async"
-                        />
+                        <button
+                          type="button"
+                          className="help-illustration__open"
+                          onClick={() => setOpenIllustration(illustration)}
+                          aria-label={`Expand screenshot: ${illustration.caption}`}
+                        >
+                          <img
+                            src={illustration.src}
+                            alt={illustration.alt}
+                            loading="lazy"
+                            decoding="async"
+                          />
+                          <span className="help-illustration__hint">Expand screenshot</span>
+                        </button>
                         <figcaption>{illustration.caption}</figcaption>
                       </figure>
                     ))}
@@ -1681,6 +1701,33 @@ export function HelpCenter(props: {
           ) : null}
         </div>
       </div>
+      {openIllustration ? (
+        <div
+          className="help-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="help-lightbox-title"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setOpenIllustration(null);
+          }}
+        >
+          <div className="help-lightbox__panel">
+            <div className="help-lightbox__header">
+              <h3 id="help-lightbox-title">{openIllustration.caption}</h3>
+              <button
+                ref={illustrationCloseRef}
+                type="button"
+                className="help-lightbox__close"
+                onClick={() => setOpenIllustration(null)}
+              >
+                Close
+              </button>
+            </div>
+            <img src={openIllustration.src} alt={openIllustration.alt} />
+            <p> Synthetic example — your screens and recorded data will be different.</p>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
