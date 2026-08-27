@@ -1299,48 +1299,72 @@ export function LogWorkbench(props: {
         })}
       </div>
 
-      <div className="log-workbench__tools">
+      <div className="log-workbench__tools" role="group" aria-label="Workbench view controls">
         {props.canWrite && !props.readOnly ? (
-          <div>
-            <label>
-              <span>Save this view as</span>
-              <input value={viewName} onChange={(event) => setViewName(event.target.value)} />
-            </label>
-            <button type="button" onClick={() => void saveView()}>
-              Save view
-            </button>
-          </div>
+          <section className="log-workbench__tool-section log-workbench__tool-section--save" aria-labelledby="log-workbench-save-title">
+            <div className="log-workbench__tool-heading">
+              <strong id="log-workbench-save-title">Save a view</strong>
+              <span>Keep this search, file selection, and layout for later.</span>
+            </div>
+            <div className="log-workbench__tool-form">
+              <label>
+                <span>View name</span>
+                <input
+                  value={viewName}
+                  onChange={(event) => setViewName(event.target.value)}
+                  placeholder="e.g. Checkout timeout"
+                />
+              </label>
+              <button type="button" onClick={() => void saveView()}>
+                Save view
+              </button>
+            </div>
+          </section>
         ) : null}
         {views.length > 0 ? (
-          <ul aria-label="Saved views">
-            {views.map((view) => (
-              <li key={view.id}>
-                <button type="button" onClick={() => applyView(view)}>
-                  {view.name}
-                </button>
-              </li>
-            ))}
-          </ul>
+          <section className="log-workbench__tool-section log-workbench__tool-section--saved" aria-labelledby="log-workbench-saved-title">
+            <div className="log-workbench__tool-heading">
+              <strong id="log-workbench-saved-title">Saved views</strong>
+              <span>Restore a previous investigation layout.</span>
+            </div>
+            <ul aria-label="Saved views">
+              {views.map((view) => (
+                <li key={view.id}>
+                  <button type="button" onClick={() => applyView(view)}>
+                    {view.name}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
         ) : null}
-        <label>
-          <span>Chronology grouping</span>
-          <select
-            value={grouping}
-            onChange={(event) => setGrouping(event.target.value)}
-            aria-label="Chronology grouping"
-          >
-            <option value="none">None</option>
-            <option value="file">File</option>
-            <option value="component">Component</option>
-            <option value="batch">Batch</option>
-            <option value="rotation_family">Rotation family</option>
-            <option value="entity">Observed identifier</option>
-            <option value="severity">Severity</option>
-          </select>
-        </label>
-        <button type="button" onClick={() => void runChronology()} disabled={chronologyBusy}>
-          {chronologyBusy ? "Building chronology…" : "Show merged chronology"}
-        </button>
+        <section className="log-workbench__tool-section log-workbench__tool-section--chronology" aria-labelledby="log-workbench-group-title">
+          <div className="log-workbench__tool-heading">
+            <strong id="log-workbench-group-title">Review chronology</strong>
+            <span>Choose how related lines should be grouped.</span>
+          </div>
+          <div className="log-workbench__tool-form">
+            <label>
+              <span>Group by</span>
+              <select
+                value={grouping}
+                onChange={(event) => setGrouping(event.target.value)}
+                aria-label="Chronology grouping"
+              >
+                <option value="none">No grouping</option>
+                <option value="file">File</option>
+                <option value="component">Component</option>
+                <option value="batch">Intake batch</option>
+                <option value="rotation_family">Rotation family</option>
+                <option value="entity">Observed identifier</option>
+                <option value="severity">Severity</option>
+              </select>
+            </label>
+            <button type="button" onClick={() => void runChronology()} disabled={chronologyBusy}>
+              {chronologyBusy ? "Building chronology…" : "Show merged chronology"}
+            </button>
+          </div>
+        </section>
       </div>
 
       {chronology ? (
