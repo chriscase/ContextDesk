@@ -292,6 +292,8 @@ describe("glossary", () => {
     ]) {
       expect(terms).toContain(required);
     }
+    expect(screen.getByText(/A job binding one or more lanes/)).toBeTruthy();
+    expect(screen.queryByText(/A job binding two or more lanes/)).toBeNull();
   });
 });
 

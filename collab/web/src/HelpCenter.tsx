@@ -1105,7 +1105,7 @@ const GLOSSARY: readonly GlossaryEntry[] = [
   {
     term: "triage run",
     definition:
-      "A job binding two or more lanes to one frozen snapshot, in synthetic or gateway mode. It records its snapshot fingerprint, requester, and per-lane results; usage and cost stay unknown.",
+      "A job binding one or more lanes to one frozen snapshot, in synthetic or gateway mode. It records its snapshot fingerprint, requester, and per-lane results; usage and cost stay unknown.",
   },
   {
     term: "accepted decision",
@@ -1724,7 +1724,7 @@ export function HelpCenter(props: {
               </button>
             </div>
             <img src={openIllustration.src} alt={openIllustration.alt} />
-            <p> Synthetic example — your screens and recorded data will be different.</p>
+            <p>Synthetic example — your screens and recorded data will be different.</p>
           </div>
         </div>
       ) : null}
