@@ -41,8 +41,8 @@ describe("CorpusIntakePanel", () => {
       {
         reason: "nested_archive",
         count: 1,
-        label: "Nested ZIP archive",
-        guidance: "Open and review nested archives separately before adding their relevant files.",
+        label: "Nested archive needs attention",
+        guidance: "ZIPs are expanded through 3 layers. A deeper, damaged, or non-ZIP archive stays out so you can split or review it safely.",
       },
       {
         reason: "unsupported_media",

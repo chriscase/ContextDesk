@@ -19,7 +19,7 @@ test.describe("comparison lanes and requested war-room states", () => {
     // surfaces there before moving to the separately focused Compare stage.
     await expect(page.getByRole("heading", { name: "Evidence and snapshots" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Run history" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Start a snapshot-bound comparison" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Start a triage" })).toBeVisible();
     await expect(page.getByText("Freeze evidence above before launching a run.")).toBeVisible();
 
     await gotoStage(page, "Compare");

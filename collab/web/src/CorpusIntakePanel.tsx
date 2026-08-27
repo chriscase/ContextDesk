@@ -51,8 +51,8 @@ const REJECTION_COPY: Record<string, { label: string; guidance: string }> = {
     guidance: "Inspect these files outside the War Room before deciding whether they belong in the investigation.",
   },
   nested_archive: {
-    label: "Nested ZIP archive",
-    guidance: "Open and review nested archives separately before adding their relevant files.",
+    label: "Nested archive needs attention",
+    guidance: `ZIPs are expanded through ${CORPUS_INTAKE_LIMITS.maxArchiveDepth} layers. A deeper, damaged, or non-ZIP archive stays out so you can split or review it safely.`,
   },
   redaction_failed: {
     label: "Not safe for the selected sharing level",

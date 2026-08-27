@@ -232,6 +232,21 @@ export function isNestedArchive(path: string): boolean {
   return /\.(zip|jar|war|apk|7z|rar)$/i.test(path);
 }
 
+/**
+ * A directly selected ZIP is layer 1. Three layers permit the common
+ * support-bundle shape `outer.zip!/host.zip!/logs/app.log` while keeping
+ * recursive parsing bounded.
+ */
+export const MAX_NESTED_ZIP_DEPTH = CORPUS_INTAKE_LIMITS.maxArchiveDepth;
+
+function isZipArchive(path: string): boolean {
+  return /\.zip$/i.test(path);
+}
+
+function archiveMemberPath(prefix: string, member: string): string {
+  return prefix ? `${prefix}!/${member}` : member;
+}
+
 interface CdEntry {
   name:
     | { ok: true; name: string }
@@ -389,36 +404,75 @@ function unixMode(entry: CdEntry): number | null {
   return (entry.externalAttr >>> 16) & 0xffff;
 }
 
-export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtractResult {
+interface ZipExtractionState {
+  rejected: ZipRejection[];
+  members: ZipMember[];
+  seenPaths: Set<string>;
+  expandedBytes: number;
+  evidenceEntryCount: number;
+  startedAt: number;
+}
+
+function addSeenPath(state: ZipExtractionState, path: string): boolean {
+  const foldKey = path.toLocaleLowerCase("en-US");
+  const nfcKey = path.normalize("NFC");
+  if (state.seenPaths.has(foldKey) || state.seenPaths.has(nfcKey)) return false;
+  state.seenPaths.add(foldKey);
+  state.seenPaths.add(nfcKey);
+  return true;
+}
+
+function isRecoverableNestedError(error: ZipError): boolean {
+  return error.reason === "malformed_zip" || error.reason === "unsupported_zip64";
+}
+
+function appendNestedRejection(
+  state: ZipExtractionState,
+  path: string,
+  error: ZipError,
+): void {
+  state.rejected.push({
+    relativePath: path,
+    reason: error.reason,
+    detail: `nested archive: ${error.message}`,
+  });
+}
+
+function extractArchiveLevel(
+  archive: Uint8Array,
+  state: ZipExtractionState,
+  prefix: string,
+  depth: number,
+): void {
   if (archiveExceedsLimit(archive.byteLength)) {
     throw new ZipError("oversized_archive", "archive exceeds byte cap");
   }
-  if (archive.byteLength >= 4 && u32(archive, 0) === SIG_ZIP64_EOCD) {
+  if (archive.length >= 4 && u32(archive, 0) === SIG_ZIP64_EOCD) {
     throw new ZipError("unsupported_zip64", "ZIP64 is not accepted");
   }
-  const rejected: ZipRejection[] = [];
-  const members: ZipMember[] = [];
-  const seen = new Set<string>();
-  const seenOffsets = new Set<number>();
-  let expanded = 0;
-  let evidenceEntryCount = 0;
   const entries = parseCentralDirectory(archive);
+  // Local offsets are only meaningful inside this archive. Keeping this set
+  // per level avoids treating an innocent offset reuse in an inner ZIP as a
+  // hardlink to an outer member, while still rejecting duplicate offsets in
+  // the archive that supplied them.
+  const seenOffsets = new Set<number>();
   for (const entry of entries) {
-    if (processingExceedsLimit(startedAt)) {
+    if (processingExceedsLimit(state.startedAt)) {
       throw new ZipError("processing_timeout", "extraction exceeded time cap");
     }
     if (!entry.name.ok) {
-      rejected.push({
-        relativePath: "<invalid-encoding>",
+      state.rejected.push({
+        relativePath: archiveMemberPath(prefix, "<invalid-encoding>"),
         reason: entry.name.reason,
         detail: entry.name.detail,
       });
       continue;
     }
     const entryName = entry.name.name;
+    const displayName = archiveMemberPath(prefix, entryName);
     if (entry.flags & ZIP_ENCRYPTED) {
-      rejected.push({
-        relativePath: entryName,
+      state.rejected.push({
+        relativePath: displayName,
         reason: "encrypted_archive",
         detail: "encrypted ZIP entries are rejected",
       });
@@ -426,7 +480,7 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
     }
     const dosAttr = entry.externalAttr & 0xff;
     if ((dosAttr & 0x08) !== 0) {
-      rejected.push({ relativePath: entryName, reason: "device_entry", detail: "volume or device label" });
+      state.rejected.push({ relativePath: displayName, reason: "device_entry", detail: "volume or device label" });
       continue;
     }
     if ((dosAttr & 0x10) !== 0 || entryName.endsWith("/")) continue;
@@ -441,40 +495,46 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
       || portableBase === ".DS_Store"
       || portableBase.startsWith("._")
     ) continue;
-    evidenceEntryCount += 1;
-    if (fileCountExceedsLimit(evidenceEntryCount)) {
+    state.evidenceEntryCount += 1;
+    if (fileCountExceedsLimit(state.evidenceEntryCount)) {
       throw new ZipError("too_many_files", "file count exceeds cap");
     }
     const mode = unixMode(entry);
     if (mode !== null) {
       const type = mode & S_IFMT;
       if (type === S_IFLNK) {
-        rejected.push({ relativePath: entryName, reason: "symlink_or_hardlink", detail: "symlink" });
+        state.rejected.push({ relativePath: displayName, reason: "symlink_or_hardlink", detail: "symlink" });
         continue;
       }
       if (type === S_IFBLK || type === S_IFCHR || type === S_IFIFO || type === S_IFSOCK) {
-        rejected.push({ relativePath: entryName, reason: "device_entry", detail: "device or ipc entry" });
+        state.rejected.push({ relativePath: displayName, reason: "device_entry", detail: "device or ipc entry" });
         continue;
       }
     }
-    const normalized = normalizeIntakePath(entryName);
-    if (!normalized.ok) {
-      rejected.push({ relativePath: entryName, reason: normalized.reason, detail: normalized.detail });
+    // Validate the member before adding its archive ancestry. This keeps an
+    // inner absolute/drive/traversal name from becoming relative merely
+    // because it is displayed below a trusted outer member.
+    const normalizedMember = normalizeIntakePath(entryName);
+    if (!normalizedMember.ok) {
+      state.rejected.push({ relativePath: displayName, reason: normalizedMember.reason, detail: normalizedMember.detail });
       continue;
     }
-    const foldKey = normalized.path.toLocaleLowerCase("en-US");
-    if (seen.has(foldKey) || seen.has(normalized.path.normalize("NFC"))) {
-      rejected.push({
+    const composed = archiveMemberPath(prefix, normalizedMember.path);
+    const normalized = normalizeIntakePath(composed);
+    if (!normalized.ok) {
+      state.rejected.push({ relativePath: composed, reason: normalized.reason, detail: normalized.detail });
+      continue;
+    }
+    if (!addSeenPath(state, normalized.path)) {
+      state.rejected.push({
         relativePath: normalized.path,
         reason: "duplicate_normalized_path",
         detail: "duplicate after Unicode/case normalization",
       });
       continue;
     }
-    seen.add(foldKey);
-    seen.add(normalized.path.normalize("NFC"));
     if (seenOffsets.has(entry.localOffset)) {
-      rejected.push({
+      state.rejected.push({
         relativePath: normalized.path,
         reason: "symlink_or_hardlink",
         detail: "hardlink or duplicate local offset",
@@ -482,16 +542,8 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
       continue;
     }
     seenOffsets.add(entry.localOffset);
-    if (isNestedArchive(normalized.path)) {
-      rejected.push({
-        relativePath: normalized.path,
-        reason: "nested_archive",
-        detail: "nested archives are unsupported",
-      });
-      continue;
-    }
     if (fileExceedsLimit(entry.uncompressed)) {
-      rejected.push({
+      state.rejected.push({
         relativePath: normalized.path,
         reason: "file_too_large",
         detail: "declared file size exceeds cap",
@@ -499,27 +551,76 @@ export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtr
       continue;
     }
     if (compressionRatioExceedsLimit(entry.compressed, entry.uncompressed)) {
-      rejected.push({
+      state.rejected.push({
         relativePath: normalized.path,
         reason: "extreme_ratio",
         detail: "compression ratio exceeds cap",
       });
       continue;
     }
-    if (expandedBytesExceedLimit(expanded, entry.uncompressed)) {
+    if (expandedBytesExceedLimit(state.expandedBytes, entry.uncompressed)) {
       throw new ZipError("oversized_expanded", "expanded size exceeds cap");
     }
-    const bytes = extractLocal(archive, entry);
-    if (bytes.byteLength !== entry.uncompressed) {
-      throw new ZipError("malformed_zip", "inflated size mismatch");
+    let bytes: Uint8Array;
+    try {
+      bytes = extractLocal(archive, entry);
+      if (bytes.byteLength !== entry.uncompressed) {
+        throw new ZipError("malformed_zip", "inflated size mismatch");
+      }
+      if ((crc32(Buffer.from(bytes)) >>> 0) !== entry.crc) {
+        throw new ZipError("malformed_zip", "CRC mismatch");
+      }
+    } catch (error) {
+      if (isNestedArchive(normalized.path) && error instanceof ZipError && isRecoverableNestedError(error)) {
+        appendNestedRejection(state, normalized.path, error);
+        continue;
+      }
+      throw error;
     }
-    if ((crc32(Buffer.from(bytes)) >>> 0) !== entry.crc) {
-      throw new ZipError("malformed_zip", "CRC mismatch");
+    state.expandedBytes += bytes.byteLength;
+    if (isNestedArchive(normalized.path)) {
+      if (!isZipArchive(normalized.path)) {
+        state.rejected.push({
+          relativePath: normalized.path,
+          reason: "nested_archive",
+          detail: "only nested ZIP archives are supported",
+        });
+        continue;
+      }
+      if (depth >= MAX_NESTED_ZIP_DEPTH) {
+        state.rejected.push({
+          relativePath: normalized.path,
+          reason: "nested_archive",
+          detail: `archive nesting exceeds the maximum of ${MAX_NESTED_ZIP_DEPTH} ZIP layers`,
+        });
+        continue;
+      }
+      try {
+        extractArchiveLevel(bytes, state, normalized.path, depth + 1);
+      } catch (error) {
+        if (error instanceof ZipError && isRecoverableNestedError(error)) {
+          appendNestedRejection(state, normalized.path, error);
+          continue;
+        }
+        throw error;
+      }
+      continue;
     }
-    expanded += bytes.byteLength;
-    members.push({ relativePath: normalized.path, bytes });
+    state.members.push({ relativePath: normalized.path, bytes });
   }
-  return { members, rejected };
+}
+
+export function extractZip(archive: Uint8Array, startedAt = Date.now()): ZipExtractResult {
+  const state: ZipExtractionState = {
+    rejected: [],
+    members: [],
+    seenPaths: new Set<string>(),
+    expandedBytes: 0,
+    evidenceEntryCount: 0,
+    startedAt,
+  };
+  extractArchiveLevel(archive, state, "", 1);
+  return { members: state.members, rejected: state.rejected };
 }
 
 export function buildTestZip(

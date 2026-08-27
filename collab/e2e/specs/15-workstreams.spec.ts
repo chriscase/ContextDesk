@@ -42,7 +42,7 @@ async function frozenRunFor(page: Page, title: string): Promise<string> {
     ),
     page.getByRole("button", { name: "Freeze selected evidence (1)" }).click(),
   ]);
-  await page.getByRole("button", { name: "Run synthetic comparison" }).click();
+  await page.getByRole("button", { name: "Run synthetic triage" }).click();
   await expect(page.locator(".triage-runs__status--completed").first()).toBeVisible({
     timeout: 30_000,
   });

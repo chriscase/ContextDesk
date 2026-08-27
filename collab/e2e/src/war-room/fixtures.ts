@@ -48,7 +48,8 @@ export interface ExpectedRejection {
  * A support bundle as they actually arrive: readable logs mixed with a binary
  * blob, a file whose extension lies about its contents, a duplicate path, and a
  * nested archive. The point of the fixture is that a responder can see what the
- * intake refused and why, rather than discovering later that a file vanished.
+ * intake accepted and refused, with nested provenance preserved rather than
+ * discovering later that a file vanished.
  */
 export const NOISY_BUNDLE_ACCEPTED: readonly ExpectedAcceptance[] = [
   {
@@ -63,6 +64,10 @@ export const NOISY_BUNDLE_ACCEPTED: readonly ExpectedAcceptance[] = [
     path: "bundle/notes/collector-notes.md",
     why: "readable markdown written by whoever collected the bundle",
   },
+  {
+    path: "bundle/inner-bundle.zip!/inner/extra.log",
+    why: "readable log recovered from a bounded nested ZIP with its archive ancestry preserved",
+  },
 ] as const;
 
 export const NOISY_BUNDLE_REJECTED: readonly ExpectedRejection[] = [
@@ -75,11 +80,6 @@ export const NOISY_BUNDLE_REJECTED: readonly ExpectedRejection[] = [
     path: "bundle/mailer/truncated.log",
     reason: "binary_or_unknown",
     why: "claims a .log extension but carries NUL bytes, so it is not decodable text",
-  },
-  {
-    path: "bundle/inner-bundle.zip",
-    reason: "nested_archive",
-    why: "an archive inside the archive is refused rather than recursively expanded",
   },
 ] as const;
 
@@ -117,7 +117,7 @@ export function noisySupportBundle(): Buffer {
     { name: "bundle/mailer/truncated.log", data: TRUNCATED_LOG },
     { name: "bundle/deploy/deploy-utc.log", data: warRoomBytes("deploy-utc.log") },
     { name: "bundle/notes/collector-notes.md", data: Buffer.from(COLLECTOR_NOTES, "utf8") },
-    // A bundle built by wrapping another bundle. Refused, not expanded.
+    // A bundle built by wrapping another bundle. Expanded with stable ancestry.
     {
       name: "bundle/inner-bundle.zip",
       data: syntheticZip([

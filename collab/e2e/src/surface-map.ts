@@ -45,7 +45,7 @@ export const WAR_ROOM_SURFACE_MAP: SurfaceRow[] = [
     status: "present",
     actual:
       "TriageRunPanel launches a snapshot-bound synthetic or configured-gateway comparison with independently tracked candidate lanes and bounded gateway concurrency.",
-    probe: "Run history → Start a snapshot-bound comparison → model lanes",
+    probe: "Run history → Start a triage → model lanes",
   },
   {
     id: "run-states",

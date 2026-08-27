@@ -41,6 +41,7 @@ const CORPUS_CAPACITY_COPY =
   `Archives are capped at ${asMiB(CORPUS_INTAKE_LIMITS.maxArchiveBytes)} MiB, `
   + `expanded bytes at ${asMiB(CORPUS_INTAKE_LIMITS.maxExpandedBytes)} MiB, `
   + `${CORPUS_INTAKE_LIMITS.maxFileCount.toLocaleString("en-US")} files, `
+  + `nested ZIP depth ${CORPUS_INTAKE_LIMITS.maxArchiveDepth}, `
   + `path depth ${CORPUS_INTAKE_LIMITS.maxPathDepth}, `
   + `path length ${CORPUS_INTAKE_LIMITS.maxPathLength}, `
   + `${asMiB(CORPUS_INTAKE_LIMITS.maxFileBytes)} MiB per file, `
@@ -281,7 +282,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each accepted file gets its own evidence identity and records relative path, media type, digest, byte length, privacy class, uploader identity, import time, source attribution, and intake batch id. Equal digests reuse the same content-addressed bytes without collapsing those distinct evidence records. Deep links exist for the batch on Capture and each evidence item on Analyze.",
         limits:
-          `${CORPUS_CAPACITY_COPY} These are hard bounds: overflow is rejected, never silently dropped. ZIP intake rejects unsafe paths, links, duplicate normalized paths, nested/encrypted archives, and malformed archives. Supported text formats include logs, rotated logs, TXT, JSON, JSONL/NDJSON, CSV, XML, email, and Markdown; structured JSON and JSONL records must parse. The intake validates privacy and content, but marking an item share_safe does not scrub it. XML and email require owner_only, and the global source catalog is not the path for investigation uploads.`,
+          `${CORPUS_CAPACITY_COPY} These are hard bounds: overflow is rejected, never silently dropped. ZIP intake expands nested ZIP members through the stated depth and preserves their virtual archive paths, while rejecting unsafe paths, links, duplicate normalized paths, encrypted/non-ZIP nested archives, and malformed archives. Supported text formats include logs, rotated logs, TXT, JSON, JSONL/NDJSON, CSV, XML, email, and Markdown; structured JSON and JSONL records must parse. The intake validates privacy and content, but marking an item share_safe does not scrub it. XML and email require owner_only, and the global source catalog is not the path for investigation uploads.`,
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
     ],

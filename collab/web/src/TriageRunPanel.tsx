@@ -867,7 +867,7 @@ export function TriageRunPanel(props: {
           <p className="case-memory__eyebrow">Connected triage foundation</p>
           <h3 id="triage-runs-heading">Run history</h3>
           <p className="triage-runs__copy">
-            Launch a reproducible comparison against one frozen evidence snapshot. Synthetic runs are offline; gateway runs use the configured host bridge and the same job record.
+            Ask a question about one frozen evidence snapshot. Add more lanes when you want to compare answers; synthetic runs are offline, while gateway runs use the configured host bridge.
           </p>
         </div>
         <span className="case-memory__badge">{jobs.length} runs</span>
@@ -880,7 +880,7 @@ export function TriageRunPanel(props: {
             <div className="triage-runs__launcher">
               <div className="triage-runs__launcher-heading">
                 <div>
-                  <h4>Start a snapshot-bound comparison</h4>
+                  <h4>Start a triage</h4>
                   <p className="case-memory__note">
                     {mode === "gateway"
                       ? gatewayAvailable
@@ -1112,7 +1112,7 @@ export function TriageRunPanel(props: {
                     disabled={running || !selectedSnapshotId || selectedCandidates.length === 0 || (mode === "gateway" && (!gatewayAvailable || selectedCandidates.length < 2 || !gatewayProfilesReady || triagePolicy?.purposes.comparison?.enabled === false || (gatewayProfiles.length > 0 && selectableGatewayProfiles.length === 0)))}
                     onClick={() => void launch()}
                   >
-                    {running ? "Starting…" : mode === "gateway" ? "Run gateway comparison" : "Run synthetic comparison"}
+                    {running ? "Starting…" : mode === "gateway" ? "Run gateway triage" : "Run synthetic triage"}
                   </button>
                   {launchReceipt ? (
                     <div

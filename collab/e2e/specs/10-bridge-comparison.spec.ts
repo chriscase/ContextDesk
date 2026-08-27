@@ -37,7 +37,7 @@ test.describe("provider-free Rust bridge comparison", () => {
     await include.check();
     await page.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
     await expect(page.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Start a snapshot-bound comparison" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Start a triage" })).toBeVisible();
 
     await page.getByRole("combobox", { name: "Execution mode" }).selectOption("gateway");
     await expect(page.getByRole("combobox", { name: "qwen-3.6-27b gateway model" })).toBeVisible();
@@ -45,7 +45,7 @@ test.describe("provider-free Rust bridge comparison", () => {
     await page.getByRole("combobox", { name: "gpt-oss-120b gateway model" }).selectOption("profile:fixture-gpt");
     await page.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 gateway model" }).selectOption("profile:fixture-ministral");
     await page.getByRole("combobox", { name: "Lane concurrency" }).selectOption("2");
-    await page.getByRole("button", { name: "Run gateway comparison" }).click();
+    await page.getByRole("button", { name: "Run gateway triage" }).click();
 
     await expect(page.locator(".triage-runs__status--completed").first()).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText("Gateway model Fixture Qwen")).toBeVisible();
