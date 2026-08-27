@@ -142,6 +142,7 @@ describe("corpus intake contract", () => {
       maxExpandedBytes: 536_870_912,
       maxCompressionRatio: 256,
       maxFileCount: 4_096,
+      maxArchiveDepth: 3,
       maxPathDepth: 8,
       maxPathLength: 240,
       maxFileBytes: 536_870_912,

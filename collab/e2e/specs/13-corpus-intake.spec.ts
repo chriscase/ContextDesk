@@ -114,12 +114,12 @@ test.describe("investigation-scoped corpus intake", () => {
     expect(secondSnapshot.evidence).toHaveLength(2);
     await expect(analyze.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
     await expect(analyze.getByRole("combobox", { name: "Snapshot", exact: true })).toHaveValue(secondSnapshot.id);
-    await expect(analyze.getByRole("button", { name: "Run synthetic comparison" })).toBeEnabled();
+    await expect(analyze.getByRole("button", { name: "Run synthetic triage" })).toBeEnabled();
     const [launchedResponse] = await Promise.all([
       page.waitForResponse(
         (res) => res.url().endsWith(`/api/cases/${caseId}/triage-runs`) && res.request().method() === "POST" && res.ok(),
       ),
-      analyze.getByRole("button", { name: "Run synthetic comparison" }).click(),
+      analyze.getByRole("button", { name: "Run synthetic triage" }).click(),
     ]);
     const launched = (await launchedResponse.json()) as {
       id: string;

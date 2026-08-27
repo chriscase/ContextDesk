@@ -12,6 +12,12 @@ interface HelpAction {
   go: HelpActionTarget;
 }
 
+interface HelpIllustration {
+  src: string;
+  alt: string;
+  caption: string;
+}
+
 interface HelpArticle {
   id: string;
   title: string;
@@ -22,6 +28,7 @@ interface HelpArticle {
   steps: readonly string[];
   recorded: string;
   limits: string;
+  illustrations?: readonly HelpIllustration[];
   actions?: readonly HelpAction[];
 }
 
@@ -41,6 +48,7 @@ const CORPUS_CAPACITY_COPY =
   `Archives are capped at ${asMiB(CORPUS_INTAKE_LIMITS.maxArchiveBytes)} MiB, `
   + `expanded bytes at ${asMiB(CORPUS_INTAKE_LIMITS.maxExpandedBytes)} MiB, `
   + `${CORPUS_INTAKE_LIMITS.maxFileCount.toLocaleString("en-US")} files, `
+  + `nested ZIP depth ${CORPUS_INTAKE_LIMITS.maxArchiveDepth}, `
   + `path depth ${CORPUS_INTAKE_LIMITS.maxPathDepth}, `
   + `path length ${CORPUS_INTAKE_LIMITS.maxPathLength}, `
   + `${asMiB(CORPUS_INTAKE_LIMITS.maxFileBytes)} MiB per file, `
@@ -58,6 +66,68 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
     id: "get-started",
     title: "Get started",
     articles: [
+      {
+        id: "first-investigation",
+        title: "Complete your first investigation",
+        summary:
+          "A guided path from a blank workspace to a recorded, reviewable human decision — using one investigation from start to finish.",
+        keywords: [
+          "first investigation",
+          "getting started",
+          "end to end",
+          "new user",
+          "fresh",
+          "walkthrough",
+          "triage",
+          "question",
+          "decision",
+        ],
+        what:
+          "Use this walkthrough when you are starting with no investigation record. It shows the smallest useful path: describe the problem, add the material you want the team to inspect, freeze that material, ask one clear question, review the recorded answer, and make the human call. You can stop after any stage and come back later; the investigation keeps the work and its history together.",
+        when:
+          "Use this for your first real or synthetic case, for a demo, or whenever you are unsure which stage to open next.",
+        steps: [
+          "Open Investigations and select Start investigation. Give the case a short, specific title — for example, “Checkout requests time out after the 4.2.1 upgrade.”",
+          "In Situation, write what someone actually observed, who or what is affected, the impact, and the scope you know so far. Put unresolved questions on separate lines; leave anything unknown blank rather than guessing.",
+          "Add useful context such as organization or customer, software, version, build, component, and environment. Reuse a suggested value when it matches; otherwise enter the value as it appears in your records.",
+          "Open Capture. Add a note, hypothesis, or next action if a person already has one. Use Logs and files for a log file, ZIP, nested ZIP, directory, email, or chat transcript that belongs to this investigation.",
+          "Review the intake preview before committing it. Keep private material owner_only; choose share_safe only when the material is genuinely safe to share, because that label does not scrub secrets.",
+          "Open Analyze and inspect the evidence list. Select the items that belong to this question, then ask a case lead to freeze the selection as an evidence snapshot.",
+          "In Run history and launcher, choose that frozen snapshot, write one answerable question, choose a strategy, and select a lane. Run Synthetic / offline first for a provider-free workflow check; use Configured gateway only when the host is prepared.",
+          "Open the resulting workstream and read the cited evidence, findings, and unknowns. Treat an AI-assisted or imported answer as analysis to review, not as a human finding or proof of correctness.",
+          "Use Compare only if you ran multiple lanes or want to compare finished runs. Look for agreement, disagreement, and unresolved questions rather than choosing a winner by model name.",
+          "Open Decide, record the human conclusion with its reason, and review the revision/history if the case changed while you were working.",
+          "Export a brief or selected-evidence package only when you need to share the result. Start with share_safe and read the privacy result; if it is blocked, nothing was exported.",
+          "When the work is finished, resolve the investigation with the human decision or archive it if it should leave the active list. You can reopen the record later from Investigations.",
+        ],
+        recorded:
+          "The case records its creator, Situation, notes and imports, evidence provenance, frozen snapshot and fingerprint, triage question and strategy, lane results, citations, unknowns, decision history, and exports. Each item remains attributable to the person or system that supplied it.",
+        limits:
+          "Creating, freezing, launching lanes, deciding, and exporting are role-gated. Synthetic mode checks the workflow but does not read your evidence or call a model. A focused gateway triage can use one lane; comparisons use two or more lanes, and both require a configured host. A snapshot is fixed: later uploads require a new snapshot and a new run. This walkthrough does not configure LDAP, a gateway, retention, or backups.",
+        illustrations: [
+          {
+            src: "/help/war-room/war-room-investigations.png",
+            alt: "Investigations page with the Start Investigation button and sample cases",
+            caption: "Start with an investigation and give it a specific title.",
+          },
+          {
+            src: "/help/war-room/war-room-situation.png",
+            alt: "Situation page showing recorded context, affected systems, impact, and open questions",
+            caption: "Write down what happened, who is affected, and what is still unknown.",
+          },
+          {
+            src: "/help/war-room/war-room-evidence-deep-link.png",
+            alt: "Analyze page showing evidence cards and an evidence cross-examination table",
+            caption: "Inspect the evidence and follow citations before you run or compare lanes.",
+          },
+          {
+            src: "/help/war-room/war-room-compare.png",
+            alt: "Compare and Decide page showing candidate lanes, evidence, unknowns, and a human decision",
+            caption: "Compare what the lanes agree on, then record the human decision.",
+          },
+        ],
+        actions: [{ label: "Start from Investigations", go: { area: "investigations" } }],
+      },
       {
         id: "war-room-basics",
         title: "What the War Room is",
@@ -281,7 +351,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each accepted file gets its own evidence identity and records relative path, media type, digest, byte length, privacy class, uploader identity, import time, source attribution, and intake batch id. Equal digests reuse the same content-addressed bytes without collapsing those distinct evidence records. Deep links exist for the batch on Capture and each evidence item on Analyze.",
         limits:
-          `${CORPUS_CAPACITY_COPY} These are hard bounds: overflow is rejected, never silently dropped. ZIP intake rejects unsafe paths, links, duplicate normalized paths, nested/encrypted archives, and malformed archives. Supported text formats include logs, rotated logs, TXT, JSON, JSONL/NDJSON, CSV, XML, email, and Markdown; structured JSON and JSONL records must parse. The intake validates privacy and content, but marking an item share_safe does not scrub it. XML and email require owner_only, and the global source catalog is not the path for investigation uploads.`,
+          `${CORPUS_CAPACITY_COPY} These are hard bounds: overflow is rejected, never silently dropped. ZIP intake expands nested ZIP members through the stated depth and preserves their virtual archive paths, while rejecting unsafe paths, links, duplicate normalized paths, encrypted/non-ZIP nested archives, and malformed archives. Supported text formats include logs, rotated logs, TXT, JSON, JSONL/NDJSON, CSV, XML, email, and Markdown; structured JSON and JSONL records must parse. The intake validates privacy and content, but marking an item share_safe does not scrub it. XML and email require owner_only, and the global source catalog is not the path for investigation uploads.`,
         actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
     ],
@@ -379,7 +449,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "The server stores the question, task fingerprint, strategy, snapshot fingerprint, requester, lane identities, progress, results, citations, and unknowns. A run remains attributed to the person and evidence set that created it.",
         limits:
-          "Synthetic / offline runs are deterministic plumbing checks: they do not inspect evidence or run a model. Configured gateway runs use the host bridge, not browser credentials; gateway runs require at least two lanes. Usage and cost remain unknown unless the host reports them. A slow gateway can leave a run waiting for minutes; launching the identical run again while the first is still in flight is refused rather than run twice.",
+          "Synthetic / offline runs are deterministic plumbing checks: they do not inspect evidence or run a model. Configured gateway runs use the host bridge, not browser credentials; a focused question can use one lane, while comparisons use two or more lanes. Usage and cost remain unknown unless the host reports them. A slow gateway can leave a run waiting for minutes; launching the identical run again while the first is still in flight is refused rather than run twice.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
@@ -440,7 +510,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "retry",
         ],
         what:
-          "A triage run binds one to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Synthetic / offline is a deterministic, provider-free stand-in. Configured gateway sends the request through the host bridge, which owns provider calls and credentials. Gateway mode requires at least two lanes. Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled. A run is partial only when at least one lane actually produced a result; when every lane failed, missed its deadline, or was cancelled, the run says failed, timed out, or cancelled rather than partial, and nothing is offered for review.",
+          "A triage run binds one to sixteen candidate lanes — each an alias, model identity, role, and (for gateway runs) a host profile — to exactly one frozen snapshot. Synthetic / offline is a deterministic, provider-free stand-in. Configured gateway sends the request through the host bridge, which owns provider calls and credentials. A focused gateway triage can use one lane; comparisons use two or more lanes. Lane statuses move through queued, running, and a settled outcome: completed, partial, failed, timed out, or cancelled. A run is partial only when at least one lane actually produced a result; when every lane failed, missed its deadline, or was cancelled, the run says failed, timed out, or cancelled rather than partial, and nothing is offered for review.",
         when:
           "Run lanes after freezing a snapshot, when the team wants a recorded answer over exactly that evidence or wants structured outputs to compare.",
         steps: [
@@ -1035,7 +1105,7 @@ const GLOSSARY: readonly GlossaryEntry[] = [
   {
     term: "triage run",
     definition:
-      "A job binding two or more lanes to one frozen snapshot, in synthetic or gateway mode. It records its snapshot fingerprint, requester, and per-lane results; usage and cost stay unknown.",
+      "A job binding one or more lanes to one frozen snapshot, in synthetic or gateway mode. It records its snapshot fingerprint, requester, and per-lane results; usage and cost stay unknown.",
   },
   {
     term: "accepted decision",
@@ -1096,6 +1166,7 @@ const FLOW_STEPS: readonly { name: string; kicker: string; human?: boolean }[] =
 
 /** Task-first entry points shown under "What are you trying to do?". */
 const QUICK_TASKS: readonly { task: string; articleId: string }[] = [
+  { task: "Walk through a fresh investigation", articleId: "first-investigation" },
   { task: "Record what you observed", articleId: "record-contributions" },
   { task: "Bring in a run from another tool", articleId: "import-external-run" },
   { task: "Freeze evidence and run AI lanes", articleId: "run-lanes" },
@@ -1263,7 +1334,9 @@ export function HelpCenter(props: {
 }) {
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<Selection>(null);
+  const [openIllustration, setOpenIllustration] = useState<HelpIllustration | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const illustrationCloseRef = useRef<HTMLButtonElement>(null);
 
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const searching = terms.length > 0;
@@ -1285,6 +1358,16 @@ export function HelpCenter(props: {
     }
     headingRef.current?.focus();
   }, [selection, searching]);
+
+  useEffect(() => {
+    if (!openIllustration) return;
+    illustrationCloseRef.current?.focus();
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpenIllustration(null);
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [openIllustration]);
 
   function openArticle(id: string) {
     setQuery("");
@@ -1440,6 +1523,36 @@ export function HelpCenter(props: {
                 {selectedArticle.article.title}
               </h3>
               <p className="help-article__summary">{selectedArticle.article.summary}</p>
+              {selectedArticle.article.illustrations ? (
+                <section className="help-article__section help-article__section--illustrations">
+                  <h4>See the path</h4>
+                  <p className="help-article__visual-intro">
+                    These synthetic screens show where the main steps happen. Your labels and
+                    recorded data will be different.
+                  </p>
+                  <div className="help-illustrations">
+                    {selectedArticle.article.illustrations.map((illustration) => (
+                      <figure className="help-illustration" key={illustration.src}>
+                        <button
+                          type="button"
+                          className="help-illustration__open"
+                          onClick={() => setOpenIllustration(illustration)}
+                          aria-label={`Expand screenshot: ${illustration.caption}`}
+                        >
+                          <img
+                            src={illustration.src}
+                            alt={illustration.alt}
+                            loading="lazy"
+                            decoding="async"
+                          />
+                          <span className="help-illustration__hint">Expand screenshot</span>
+                        </button>
+                        <figcaption>{illustration.caption}</figcaption>
+                      </figure>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
               <section className="help-article__section">
                 <h4>What this is</h4>
                 <p>{selectedArticle.article.what}</p>
@@ -1588,6 +1701,33 @@ export function HelpCenter(props: {
           ) : null}
         </div>
       </div>
+      {openIllustration ? (
+        <div
+          className="help-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="help-lightbox-title"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setOpenIllustration(null);
+          }}
+        >
+          <div className="help-lightbox__panel">
+            <div className="help-lightbox__header">
+              <h3 id="help-lightbox-title">{openIllustration.caption}</h3>
+              <button
+                ref={illustrationCloseRef}
+                type="button"
+                className="help-lightbox__close"
+                onClick={() => setOpenIllustration(null)}
+              >
+                Close
+              </button>
+            </div>
+            <img src={openIllustration.src} alt={openIllustration.alt} />
+            <p>Synthetic example — your screens and recorded data will be different.</p>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -33,6 +33,9 @@ describe("help landing", () => {
     expect(
       screen.getByRole("heading", { name: "What are you trying to do?" }),
     ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Walk through a fresh investigation/ }),
+    ).toBeTruthy();
     const flow = screen.getByRole("list", { name: "Capture to Decide flow" });
     const steps = within(flow).getAllByRole("listitem");
     expect(steps.map((step) => step.textContent)).toEqual([
@@ -66,6 +69,37 @@ describe("help landing", () => {
     renderHelp();
     expect(screen.queryByRole("heading", { name: "What this is" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Limits" })).toBeNull();
+  });
+
+  it("opens the complete first-investigation walkthrough", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: /Walk through a fresh investigation/ }));
+    expect(
+      screen.getByRole("heading", { name: "Complete your first investigation" }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Open Investigations and select Start investigation/)).toBeTruthy();
+    expect(screen.getByText(/Review the intake preview before committing it/)).toBeTruthy();
+    expect(screen.getByText(/record the human conclusion with its reason/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start from Investigations" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "See the path" })).toBeTruthy();
+    expect(screen.getAllByRole("img")).toHaveLength(4);
+    expect(
+      screen.getByRole("img", {
+        name: "Investigations page with the Start Investigation button and sample cases",
+      }),
+    ).toBeTruthy();
+  });
+
+  it("opens a screenshot at full size and closes with Escape", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: /Walk through a fresh investigation/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand screenshot: Start with an investigation and give it a specific title." }),
+    );
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
 
@@ -258,6 +292,8 @@ describe("glossary", () => {
     ]) {
       expect(terms).toContain(required);
     }
+    expect(screen.getByText(/A job binding one or more lanes/)).toBeTruthy();
+    expect(screen.queryByText(/A job binding two or more lanes/)).toBeNull();
   });
 });
 
@@ -337,7 +373,7 @@ describe("help for behavior this build ships", () => {
     fireEvent.click(screen.getByRole("button", { name: "Ask a question about an investigation" }));
     expect(screen.getByText(/A triage starts with a question about one investigation/)).toBeTruthy();
     expect(screen.getByText(/Synthetic \/ offline runs are deterministic plumbing checks/)).toBeTruthy();
-    expect(screen.getByText(/gateway runs require at least two lanes/)).toBeTruthy();
+    expect(screen.getByText(/a focused question can use one lane, while comparisons use two or more lanes/)).toBeTruthy();
     expect(screen.getByText(/Open the Analyze stage/)).toBeTruthy();
   });
 

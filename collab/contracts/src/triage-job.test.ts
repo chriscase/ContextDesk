@@ -31,7 +31,7 @@ describe("triage job contracts", () => {
       schemaId: "cd-collab.triage_job_capabilities.v1",
       syntheticAvailable: true,
       gatewayAvailable: false,
-      gatewayMinCandidates: 2,
+      gatewayMinCandidates: 1,
       gatewayMaxCandidates: 16,
       profileCatalogConfigured: true,
       profileCount: 2,

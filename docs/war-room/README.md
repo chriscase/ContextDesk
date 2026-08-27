@@ -22,6 +22,7 @@ The signed-in workspace provides separate destinations for different jobs:
 | --- | --- |
 | **Overview** | See recent recorded activity and active investigations, then follow a link to the relevant stage or item |
 | **Investigations** | Search, filter, create, and resume investigations visible to the signed-in person |
+| **Entities** | Keep reusable labels for the customer, organization, person, service, system, product, version, build, or environment an investigation concerns |
 | **Sources** | Manage reusable attribution labels for people, tools, systems, and imported material; a source is not a credential or a global evidence store |
 | **Administration** | For administrators, search a bounded view of configured directory identities and groups and maintain explicit group-to-role mappings |
 | **Help** | Search operating guidance while working in War Room |
@@ -34,6 +35,15 @@ recipient lands near the recorded context rather than at the investigation
 inventory.
 
 ![Synthetic War Room investigation list](../assets/war-room/war-room-investigations.png)
+
+## Do one triage end to end
+
+The [CLI and GUI triage guide](CLI_AND_GUI_TRIAGE.md) explains the complete
+operator path in both hosts: importing and checking evidence, resolving
+ambiguous timestamps, asking one focused question, reading the result
+honestly, optionally comparing independent lanes, and recording the human
+decision. Use it when you need to understand the difference between a focused
+triage and a multi-lane comparison.
 
 ## The evidence-first mental model
 
@@ -83,6 +93,46 @@ interval and send the team back to Capture or Analyze. A rerun produces a new
 recorded attempt rather than replacing the earlier result. “Gather more
 evidence” can be the correct human decision.
 
+## Choose the path that matches your work
+
+You do not need to run every stage for every question:
+
+| Your goal | Recommended path |
+| --- | --- |
+| Record and resolve one straightforward issue | Situation → Capture → Analyze → Decide |
+| Ask one focused question about known evidence | Analyze → freeze a snapshot → launch one lane → read the workstream → Decide |
+| Compare independent approaches | Analyze → freeze a snapshot → launch two or more lanes → Compare → Decide |
+| Understand a large or messy log bundle | Capture → Analyze → Log workbench → Timezone review (if needed) → Normalized log chronology → Decide |
+| Revisit earlier work | Investigations → open the case → Historical artifacts, activity, or a saved view |
+| Hand work to another authorized person | Compare or Decide → follow a deep link or export the appropriate artifact |
+
+One focused gateway triage needs only one lane. Two or more lanes are for a
+comparison; lane count is not a correctness score.
+
+## Log Workbench: the power-user reading path
+
+The **Log workbench** lives on an investigation's **Analyze** stage. It lets an
+operator work directly with investigation-owned logs without putting those
+logs into the reusable **Sources** catalog.
+
+- Filter a long file list by name or path and select up to four files for
+  side-by-side reading.
+- Search selected files with match mode, include/exclude terms, severity, and
+  explicit UTC bounds. Previous/Next, F3, and Ctrl/Cmd+G navigate matches.
+- Continue a search page from its opaque position when the selected corpus is
+  larger than one bounded request. A partial page identifies itself rather than
+  presenting a partial count as complete.
+- Save a view and bookmark a line for later work. These records stay tied to
+  the investigation and are not permission tokens.
+- Use **Timezone review** to choose an IANA timezone for local timestamps that
+  have no offset, then use **Normalized log chronology** for one merged order.
+  The workbench never guesses a timezone, year, daylight-saving choice, or
+  clock correction.
+
+The workbench is additive to the normal evidence board: Capture owns intake,
+the snapshot owns the exact material a triage may read, and the workbench helps
+people inspect that material before they decide what to ask.
+
 These synthetic captures show the same investigation at the most useful
 handoffs:
 
@@ -93,6 +143,21 @@ handoffs:
 ![Synthetic Compare stage with historical artifacts, deep links, and lane focus](../media/gallery/war-room-compare-decide.png)
 
 ![Synthetic Decide stage with an accepted human decision and export boundary](../media/gallery/war-room-export.png)
+
+## Entities and Sources answer different questions
+
+**Entities** answer “who or what is this investigation about?” Use them for
+customers, organizations, products, versions, builds, components, services,
+systems, people, or environments so related investigations can be found again.
+
+**Sources** answer “who or what supplied this information?” They contain
+reusable attribution labels for a person, monitoring system, external tool,
+another ContextDesk record, or unknown origin.
+
+Neither area stores logs, email, chat, notes, or uploaded files. Evidence stays
+owned by the investigation that captured it. A customer or vendor may be both
+an Entity and a Source, but the two labels should not be substituted for one
+another.
 
 ## Sources are labels; evidence belongs to an investigation
 
@@ -235,9 +300,9 @@ No live provider or external material is required. Continue with the
 
 | Area | Current integrated behavior | Residual or non-claim |
 | --- | --- | --- |
-| Navigation | Multi-page Overview, Investigations, Sources, Administration, and Help; five routed investigation stages; breadcrumbs and deep links | Authorization still applies when another person follows a link |
+| Navigation | Multi-page Overview, Investigations, Entities, Sources, Administration, and Help; five routed investigation stages; breadcrumbs and deep links | Authorization still applies when another person follows a link |
 | Evidence | Investigation-scoped notes, imports, uploads, ZIP/directory intake, snapshots, readable excerpts, context links, and Technical details | A citation or polished summary is not proof; intake limits and privacy classification still apply |
-| Analysis | Synthetic/offline and configured-gateway runs, independent lanes, run history, and gateway model selection | Model availability and quality depend on the deployment; unknown cost or usage remains unknown |
+| Analysis | Synthetic/offline and configured-gateway runs, one-lane focused triage, multi-lane comparison, run history, gateway model selection, and the Log workbench | Model availability and quality depend on the deployment; unknown cost or usage remains unknown |
 | Comparison and decision | Lane focus, evidence-backed differences, unknowns, discussion, human action, and optional owner | Agreement is not proof and a model cannot approve the human decision |
 | Discussion | Durable records refreshed through polling | No WebSocket chat, typing indicators, instant delivery, or authoritative presence |
 | Identity and administration | LDAP-capable sign-in adapter, directory display identity, bounded directory visibility, persistent group-to-role mappings | LDAP must be configured and qualified per deployment; the console does not administer the directory itself |

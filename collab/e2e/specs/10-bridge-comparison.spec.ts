@@ -12,6 +12,7 @@ import {
   uploadEvidence,
 } from "../src/helpers.js";
 import { FIXTURE_USERS, SEEDED_SOURCES } from "../src/users.js";
+import { triageRuns } from "../src/war-room/journey.js";
 
 test.describe("provider-free Rust bridge comparison", () => {
   test.skip(process.env.COLLAB_E2E_BRIDGE !== "1", "set COLLAB_E2E_BRIDGE=1 to run the bridge fixture");
@@ -37,7 +38,7 @@ test.describe("provider-free Rust bridge comparison", () => {
     await include.check();
     await page.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
     await expect(page.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Start a snapshot-bound comparison" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Start a triage" })).toBeVisible();
 
     await page.getByRole("combobox", { name: "Execution mode" }).selectOption("gateway");
     await expect(page.getByRole("combobox", { name: "qwen-3.6-27b gateway model" })).toBeVisible();
@@ -68,5 +69,51 @@ test.describe("provider-free Rust bridge comparison", () => {
       "ready in Compare, opened as the newest comparison",
       { timeout: 30_000 },
     );
+  });
+
+  test("launches one configured gateway lane as a focused triage", async ({ page }) => {
+    const title = uniqueTitle("Focused gateway triage");
+    const dave = FIXTURE_USERS.dave;
+    await loginAs(page, dave);
+    await createCase(page, title);
+    const caseId = await caseIdForTitle(page, title);
+    await uploadEvidence(page, caseId, {
+      kind: "log",
+      summary: "Synthetic focused gateway evidence",
+      filename: "focused-timeout.log",
+      mediaType: "text/plain",
+      bytes: fixtureBytes("evidence", "shared-timeout.log"),
+      privacyClass: "share_safe",
+    });
+
+    await page.reload();
+    await openCase(page, title);
+    await page.getByRole("checkbox", { name: "Include focused-timeout.log in snapshot" }).check();
+    await page.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
+    await expect(page.getByRole("heading", { name: "Start a triage" })).toBeVisible();
+
+    await page.getByRole("combobox", { name: "Execution mode" }).selectOption("gateway");
+    await page.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }).selectOption("profile:fixture-qwen");
+    await page.getByRole("checkbox", { name: /gpt-oss-120b/ }).uncheck();
+    await page.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }).uncheck();
+    await page.getByRole("textbox", { name: "Question" }).fill("Which event first explains the timeout?");
+    await page.getByRole("textbox", { name: "Task fingerprint" }).fill("focused-gateway-timeout");
+
+    const [launched] = await Promise.all([
+      page.waitForResponse(
+        (res) =>
+          res.url().endsWith(`/api/cases/${caseId}/triage-runs`)
+          && res.request().method() === "POST"
+          && res.ok(),
+      ),
+      page.getByRole("button", { name: "Run gateway triage" }).click(),
+    ]);
+    const job = (await launched.json()) as { id: string };
+    await expect(page.locator(`[id="triage-run-${job.id}"] .triage-runs__status--completed`)).toBeVisible({ timeout: 30_000 });
+
+    const runs = await triageRuns(page, caseId);
+    const run = runs.find((candidate) => candidate.id === job.id);
+    expect(run?.candidates).toHaveLength(1);
+    expect(run?.candidates[0]?.candidateId).toBe("qwen-reviewer");
   });
 });

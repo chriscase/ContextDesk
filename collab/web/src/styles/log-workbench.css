@@ -250,10 +250,8 @@
 
 .log-workbench__search,
 .log-workbench__tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: end;
+  display: grid;
+  gap: 0.7rem;
   padding: 0.7rem;
   border: 1px solid var(--border);
   border-radius: 0.65rem;
@@ -261,8 +259,50 @@
 }
 
 .log-workbench__tools {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.log-workbench__tool-section {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(12rem, 0.8fr) max-content;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid var(--line-soft, var(--border));
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--surface) 72%, var(--surface-deep));
+}
+
+.log-workbench__tool-section--chronology {
+  grid-column: 1 / -1;
+}
+
+.log-workbench__tool-heading {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.log-workbench__tool-heading > strong {
+  font-size: 0.86rem;
+}
+
+.log-workbench__tool-heading > span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.log-workbench__tool-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 0.55rem;
+  align-items: end;
+  min-width: 0;
+}
+
+.log-workbench__tool-form > label {
+  min-width: 0;
 }
 
 .log-workbench__search {
@@ -273,8 +313,8 @@
 }
 
 .log-workbench__search-row {
-  display: flex;
-  flex-wrap: nowrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.7rem 0.9rem;
   align-items: end;
   min-width: 0;
@@ -289,7 +329,6 @@
 .log-workbench__search-primary {
   display: grid;
   grid-template-columns: minmax(12rem, 1fr) auto;
-  flex: 1 1 auto;
   gap: 0.55rem;
   align-items: end;
   min-width: 0;
@@ -388,21 +427,7 @@
   font-size: 0.8rem;
 }
 
-.log-workbench__tools > div {
-  display: grid;
-  grid-column: 1;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: end;
-  gap: 0.5rem;
-  min-width: 0;
-}
-
-.log-workbench__tools > div > label {
-  min-width: 0;
-}
-
-.log-workbench__tools > ul {
-  grid-column: 1 / -1;
+.log-workbench__tool-section ul {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
@@ -410,20 +435,6 @@
   margin: 0;
   padding: 0;
   list-style: none;
-}
-
-.log-workbench__tools > label {
-  grid-column: 2;
-  min-width: 0;
-}
-
-.log-workbench__tools > button:last-child {
-  grid-column: 3;
-  white-space: nowrap;
-}
-
-.log-workbench__tools:not(:has(> div)) > label {
-  grid-column: 1;
 }
 
 .log-workbench__search input,
@@ -669,7 +680,7 @@
   border: 1px solid var(--border);
   border-radius: 0.4rem;
   padding: 0.45rem 0.7rem;
-  background: color-mix(in srgb, var(--surface-input) 88%, var(--surface));
+  background: var(--surface);
   color: var(--fg);
   cursor: pointer;
   font: inherit;
@@ -687,11 +698,18 @@
 }
 
 .log-workbench__search-primary > button,
-.log-workbench__tools > button:last-child {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  background: var(--accent-soft);
-  color: var(--fg);
+.log-workbench__tool-section--chronology .log-workbench__tool-form > button {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent, #17130a);
   font-weight: 650;
+}
+
+.log-workbench__search-primary > button:hover:not(:disabled),
+.log-workbench__tool-section--chronology .log-workbench__tool-form > button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 84%, white);
+  color: var(--on-accent, #17130a);
 }
 
 .log-workbench > section[aria-label="Merged chronology"] {
@@ -723,7 +741,7 @@
 
 @media (max-width: 64rem) {
   .log-workbench__search-row {
-    flex-wrap: wrap;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .log-workbench__match-nav {
@@ -737,7 +755,7 @@
   }
 
   .log-workbench__search-row {
-    flex-wrap: wrap;
+    grid-template-columns: 1fr;
   }
 
   .log-workbench__match-nav {
@@ -763,10 +781,7 @@
     grid-template-columns: 1fr;
   }
 
-  .log-workbench__tools > div,
-  .log-workbench__tools > label,
-  .log-workbench__tools > button:last-child,
-  .log-workbench__tools > ul {
+  .log-workbench__tool-section--chronology {
     grid-column: 1;
   }
 
@@ -789,6 +804,14 @@
   }
 
   .log-workbench__search-primary > button {
+    justify-self: stretch;
+  }
+
+  .log-workbench__tool-form {
+    grid-template-columns: 1fr;
+  }
+
+  .log-workbench__tool-form > button {
     justify-self: stretch;
   }
 }

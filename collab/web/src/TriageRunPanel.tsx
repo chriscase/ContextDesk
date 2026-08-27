@@ -527,12 +527,14 @@ export function TriageRunPanel(props: {
     [candidateOptions, selectedCandidates],
   );
   const gatewayAvailable = triageCapabilities?.gatewayAvailable ?? true;
+  const gatewayPurpose = selectedGatewayCandidates.length > 1 ? "comparison" : "triage";
+  const gatewayPurposeLabel = gatewayPurpose === "comparison" ? "comparison" : "single triage";
   const selectableGatewayProfiles = useMemo(() => {
     if (!triagePolicy) return gatewayProfiles;
-    const rule = triagePolicy.purposes.comparison;
+    const rule = triagePolicy.purposes[gatewayPurpose];
     if (!rule) return gatewayProfiles;
     return gatewayProfiles.filter((profile) => rule.allowedSubjects.includes(profile.id));
-  }, [gatewayProfiles, triagePolicy]);
+  }, [gatewayProfiles, gatewayPurpose, triagePolicy]);
   const gatewayProfilesReady = mode !== "gateway"
     || selectedGatewayCandidates.every((candidate) => Boolean(profileFor(candidate)));
 
@@ -867,7 +869,7 @@ export function TriageRunPanel(props: {
           <p className="case-memory__eyebrow">Connected triage foundation</p>
           <h3 id="triage-runs-heading">Run history</h3>
           <p className="triage-runs__copy">
-            Launch a reproducible comparison against one frozen evidence snapshot. Synthetic runs are offline; gateway runs use the configured host bridge and the same job record.
+            Ask a question about one frozen evidence snapshot. Add more lanes when you want to compare answers; synthetic runs are offline, while gateway runs use the configured host bridge.
           </p>
         </div>
         <span className="case-memory__badge">{jobs.length} runs</span>
@@ -880,7 +882,7 @@ export function TriageRunPanel(props: {
             <div className="triage-runs__launcher">
               <div className="triage-runs__launcher-heading">
                 <div>
-                  <h4>Start a snapshot-bound comparison</h4>
+                  <h4>Start a triage</h4>
                   <p className="case-memory__note">
                     {mode === "gateway"
                       ? gatewayAvailable
@@ -994,7 +996,7 @@ export function TriageRunPanel(props: {
                             </label>
                           ) : gatewayProfiles.length > 0 ? (
                             <p className="case-memory__note">
-                              No gateway model is approved for comparison by the current workspace policy.
+                              No gateway model is approved for this run by the current workspace policy.
                               Ask an administrator to approve a model before starting this run.
                             </p>
                           ) : (
@@ -1013,13 +1015,20 @@ export function TriageRunPanel(props: {
                     ))}
                     {mode === "gateway" ? (
                       <span className="case-memory__note">
-                        Each selected lane chooses its own gateway model. Credentials and endpoints stay on the War Room host.
+                        {selectedGatewayCandidates.length > 1
+                          ? "Each selected lane chooses its own gateway model for this comparison."
+                          : "Choose one gateway model for this focused triage."}
+                        {" Credentials and endpoints stay on the War Room host."}
                         {!gatewayAvailable ? " Configure COLLAB_TRIAGE_RUNNER to enable gateway execution." : ""}
-                        {selectedCandidates.length < 2 ? " Gateway comparisons require at least two lanes." : ""}
+                        {selectedCandidates.length > 0
+                          ? ` ${selectedGatewayCandidates.length} selected lane${selectedGatewayCandidates.length === 1 ? "" : "s"} · ${gatewayPurposeLabel}.`
+                          : " Select one lane for a triage, or two or more to compare answers."}
                         {triagePolicy ? ` Workspace model-use policy revision ${triagePolicy.revision} is applied.` : ""}
-                        {triagePolicy?.purposes.comparison?.enabled === false ? " Model comparison is disabled by workspace policy." : ""}
+                        {triagePolicy?.purposes[gatewayPurpose]?.enabled === false
+                          ? ` ${gatewayPurpose === "comparison" ? "Model comparison" : "Single triage"} is disabled by workspace policy.`
+                          : ""}
                         {triagePolicy && selectableGatewayProfiles.length === 0 && gatewayProfiles.length > 0
-                          ? " No approved gateway models are available for comparison."
+                          ? ` No approved gateway models are available for this ${gatewayPurposeLabel}.`
                           : ""}
                       </span>
                     ) : null}
@@ -1082,7 +1091,7 @@ export function TriageRunPanel(props: {
                             </label>
                           ) : gatewayProfiles.length > 0 ? (
                             <p className="case-memory__note">
-                              No gateway model is approved for comparison by the current workspace policy.
+                              No gateway model is approved for this run by the current workspace policy.
                             </p>
                           ) : (
                             <label className="triage-runs__field">
@@ -1109,10 +1118,14 @@ export function TriageRunPanel(props: {
                   <button
                     className="login__submit"
                     type="button"
-                    disabled={running || !selectedSnapshotId || selectedCandidates.length === 0 || (mode === "gateway" && (!gatewayAvailable || selectedCandidates.length < 2 || !gatewayProfilesReady || triagePolicy?.purposes.comparison?.enabled === false || (gatewayProfiles.length > 0 && selectableGatewayProfiles.length === 0)))}
+                    disabled={running || !selectedSnapshotId || selectedCandidates.length === 0 || (mode === "gateway" && (!gatewayAvailable || !gatewayProfilesReady || triagePolicy?.purposes[gatewayPurpose]?.enabled === false || (gatewayProfiles.length > 0 && selectableGatewayProfiles.length === 0)))}
                     onClick={() => void launch()}
                   >
-                    {running ? "Starting…" : mode === "gateway" ? "Run gateway comparison" : "Run synthetic comparison"}
+                    {running
+                      ? "Starting…"
+                      : mode === "gateway"
+                        ? gatewayPurpose === "comparison" ? "Run gateway comparison" : "Run gateway triage"
+                        : "Run synthetic triage"}
                   </button>
                   {launchReceipt ? (
                     <div

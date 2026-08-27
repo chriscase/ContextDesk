@@ -208,8 +208,8 @@ test.describe("complete war-room operator journey", () => {
     expect(snapshots[0]?.fingerprint).toBe(frozenBody.fingerprint);
 
     await expect(page.locator(".triage-runs__mode")).toHaveText("synthetic / offline");
-    await expect(page.getByRole("button", { name: "Run synthetic comparison" })).toBeEnabled();
-    await page.getByRole("button", { name: "Run synthetic comparison" }).click();
+    await expect(page.getByRole("button", { name: "Run synthetic triage" })).toBeEnabled();
+    await page.getByRole("button", { name: "Run synthetic triage" }).click();
     await expect(page.locator(".triage-runs__status--completed").first()).toBeVisible({
       timeout: 30_000,
     });

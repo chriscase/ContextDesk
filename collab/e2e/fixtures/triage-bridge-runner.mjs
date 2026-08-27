@@ -24,16 +24,17 @@ if (!requestPath || commandIndex < 0 || progressIndex < commandIndex || args.ind
   // not repeat a mode discriminator. Validate the bounded gateway shape that
   // the production executor actually sends.
   const requestShapeIsExpected = request.concurrency === 2
-    && candidates.length === expected.length
-    && candidates.every((candidate, index) => {
-      const wanted = expected[index];
-      return candidate.candidateId === wanted.candidateId
-        && candidate.profileId === wanted.profileId
-        && candidate.modelId === wanted.model;
-    });
+    && candidates.length >= 1
+    && candidates.length <= expected.length
+    && new Set(candidates.map((candidate) => candidate.candidateId)).size === candidates.length
+    && candidates.every((candidate) => expected.some((wanted) =>
+      candidate.candidateId === wanted.candidateId
+      && candidate.profileId === wanted.profileId
+      && candidate.modelId === wanted.model,
+    ));
   if (!requestShapeIsExpected) {
     process.exitCode = 1;
-    process.stderr.write("bridge fixture rejected unexpected gateway request shape\n");
+    process.stderr.write("bridge fixture rejected unexpected gateway lane selection\n");
   } else {
   const evidenceId = request.snapshot?.evidence?.[0]?.evidenceId ?? null;
   const prefix = "contextdesk.collab_triage_progress ";

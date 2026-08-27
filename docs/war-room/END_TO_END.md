@@ -91,7 +91,31 @@ replace the readable evidence.
 Expected result: you can explain what was observed, where it came from, and
 what remains inferred or unknown.
 
-## 2:20 — Inspect frozen evidence and lane attempts
+## 2:00 — Work the logs before asking a question
+
+If the investigation contains several or very large logs, stay on **Analyze**
+and use **Log workbench** before launching a lane:
+
+1. Filter the evidence list and select up to four files for side-by-side
+   reading.
+2. Search with **Find**, then use Previous/Next, F3, or Ctrl/Cmd+G to move
+   through matches.
+3. Read whether the result is complete. If the search stopped after a bounded
+   page, continue from its position instead of treating the current count as a
+   corpus-wide total.
+4. Save a view or bookmark a useful line when you will return to it.
+5. If a line has no timezone, use **Timezone review** to choose its IANA zone,
+   then open **Normalized log chronology**. The workbench never guesses a
+   timezone, year, daylight-saving choice, or clock correction.
+
+Nested ZIP members retain their archive paths and are subject to the same
+bounded safety and privacy checks as ordinary files. Rejected members are not
+silently dropped.
+
+Expected result: you can point to the relevant lines and know whether the
+search and chronology are complete enough to support the next question.
+
+## 2:35 — Inspect frozen evidence and lane attempts
 
 In **Analyze**, confirm that the comparison lanes are bound to a frozen
 evidence snapshot. Synthetic mode is offline. A configured deployment can
@@ -201,6 +225,8 @@ portable archives are never trusted.
 - investigation-scoped evidence and separate source attribution labels;
 - readable logs, stack traces, observations, deep links, and Technical details;
 - snapshot-bound lane attempts, focused lane inspection, and history;
+- side-by-side Log workbench reading, bounded search continuation, saved views,
+  explicit timezone review, and normalized chronology;
 - evidence-based comparison and a human-owned decision;
 - durable discussion and activity using polling;
 - selected-evidence prompt packaging;

@@ -47,7 +47,10 @@ export type RecoveryRefusalReason =
   | "recovery_authorization_unavailable";
 
 const MAX_CANDIDATES = 16;
-const MIN_GATEWAY_CANDIDATES = 2;
+// A gateway can answer one focused triage as well as a multi-lane comparison.
+// The model-purpose policy still distinguishes the two by lane count and
+// applies the matching allowlist/max-lane rule server-side.
+const MIN_GATEWAY_CANDIDATES = 1;
 const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const MAX_GATEWAY_CONCURRENCY = 4;
 const MAX_GATEWAY_EVIDENCE_ITEM_BYTES = 4 * 1024 * 1024;
@@ -662,9 +665,6 @@ export class TriageRunService {
     if (request.candidates.length < 1 || request.candidates.length > MAX_CANDIDATES) {
       throw new TriageRunConflictError(`candidate count must be between 1 and ${MAX_CANDIDATES}`);
     }
-    if (request.mode === "gateway" && request.candidates.length < MIN_GATEWAY_CANDIDATES) {
-      throw new TriageRunConflictError(`gateway comparisons require at least ${MIN_GATEWAY_CANDIDATES} candidate lanes`);
-    }
     const gatewayConcurrency = request.concurrency ?? DEFAULT_GATEWAY_CONCURRENCY;
     if (
       request.mode === "gateway"
@@ -673,7 +673,7 @@ export class TriageRunService {
       throw new TriageRunConflictError(`gateway concurrency must be between 1 and ${MAX_GATEWAY_CONCURRENCY}`);
     }
     if (request.mode !== "gateway" && request.concurrency !== undefined) {
-      throw new TriageRunConflictError("concurrency is only configurable for gateway comparisons");
+      throw new TriageRunConflictError("concurrency is only configurable for gateway runs");
     }
     let normalizedRequest: TriageJobRequestV1 = request.mode === "gateway"
       ? { ...request, concurrency: gatewayConcurrency }

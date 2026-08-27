@@ -238,6 +238,25 @@ function escapeScript(value: string): string {
   return value.replaceAll("</script", "<\\/script").replaceAll("<!--", "<\\!--");
 }
 
+async function inlineHelpIllustrations(javascript: string): Promise<string> {
+  const illustrationDir = join(here, "..", "..", "web", "public", "help", "war-room");
+  const illustrations = [
+    "war-room-investigations.png",
+    "war-room-situation.png",
+    "war-room-evidence-deep-link.png",
+    "war-room-compare.png",
+  ] as const;
+  let inlined = javascript;
+  for (const name of illustrations) {
+    const bytes = await readFile(join(illustrationDir, name));
+    inlined = inlined.replaceAll(`/help/war-room/${name}`, `data:image/png;base64,${bytes.toString("base64")}`);
+  }
+  if (inlined.includes("/help/war-room/")) {
+    throw new Error("static demo contains an un-inlined War Room help illustration");
+  }
+  return inlined;
+}
+
 export async function writeStaticDemo(outputPath: string): Promise<string> {
   const webDist = join(here, "..", "..", "web", "dist-demo");
   const assets = join(webDist, "assets");
@@ -247,10 +266,11 @@ export async function writeStaticDemo(outputPath: string): Promise<string> {
   if (!jsName || !cssName) {
     throw new Error("synthetic web bundle is missing; run the demo web build first");
   }
-  const [javascript, css] = await Promise.all([
+  const [javascriptSource, css] = await Promise.all([
     readFile(join(assets, jsName), "utf8"),
     readFile(join(assets, cssName), "utf8"),
   ]);
+  const javascript = await inlineHelpIllustrations(javascriptSource);
   const demo = await buildDemoApp({ staticDir: null });
   try {
     const routes = await snapshots(demo.app, demo.caseId);

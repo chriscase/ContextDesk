@@ -129,9 +129,19 @@ describe("extractZip adversarial matrix", () => {
     expect(reasons(extractZip(patched))).toContain("symlink_or_hardlink");
   });
 
-  it("rejects nested archives, encrypted entries, and zip64 extra fields", () => {
-    const nested = extractZip(buildTestZip([{ name: "mailer/inner.zip", data: LOG }]));
-    expect(reasons(nested)).toContain("nested_archive");
+  it("expands nested ZIPs with stable ancestry and still rejects encrypted entries", () => {
+    const nested = extractZip(buildTestZip([
+      { name: "mailer/outer.log", data: LOG },
+      {
+        name: "mailer/inner.zip",
+        data: buildTestZip([{ name: "host-a/app.log", data: LOG }]),
+      },
+    ]));
+    expect(names(nested)).toEqual([
+      "mailer/outer.log",
+      "mailer/inner.zip!/host-a/app.log",
+    ]);
+    expect(reasons(nested)).not.toContain("nested_archive");
     const encrypted = extractZip(
       buildTestZip([{ name: "mailer/secret.log", data: LOG, encrypted: true }]),
     );
@@ -142,6 +152,39 @@ describe("extractZip adversarial matrix", () => {
     expect(() =>
       extractZip(buildTestZip([{ name: "mailer/huge.log", data: LOG, extra }])),
     ).toThrow(ZipError);
+  });
+
+  it("keeps valid outer members when a nested ZIP is malformed", () => {
+    const extracted = extractZip(buildTestZip([
+      { name: "mailer/usable.log", data: LOG },
+      { name: "mailer/broken.zip", data: new TextEncoder().encode("not a zip") },
+    ]));
+    expect(names(extracted)).toEqual(["mailer/usable.log"]);
+    expect(extracted.rejected).toEqual([{
+      relativePath: "mailer/broken.zip",
+      reason: "malformed_zip",
+      detail: "nested archive: archive too small",
+    }]);
+  });
+
+  it("allows three ZIP layers and reports a fourth without recursing", () => {
+    let archive = buildTestZip([{ name: "logs/app.log", data: LOG }]);
+    for (let layer = 2; layer >= 1; layer -= 1) {
+      archive = buildTestZip([{ name: `level-${layer}.zip`, data: archive }]);
+    }
+    const allowed = extractZip(archive);
+    expect(names(allowed)).toEqual([
+      "level-1.zip!/level-2.zip!/logs/app.log",
+    ]);
+
+    archive = buildTestZip([{ name: "level-3.zip", data: archive }]);
+    const bounded = extractZip(archive);
+    expect(names(bounded)).toEqual([]);
+    expect(bounded.rejected).toContainEqual({
+      relativePath: "level-3.zip!/level-1.zip!/level-2.zip",
+      reason: "nested_archive",
+      detail: "archive nesting exceeds the maximum of 3 ZIP layers",
+    });
   });
 
   it("rejects extreme ratios, too many files, and truncated archives", () => {

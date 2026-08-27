@@ -287,7 +287,7 @@ export async function runSyntheticComparison(page: Page, caseId: string): Promis
         && res.request().method() === "POST"
         && res.ok(),
     ),
-    analyze.getByRole("button", { name: "Run synthetic comparison" }).click(),
+    analyze.getByRole("button", { name: "Run synthetic triage" }).click(),
   ]);
   const job = (await launched.json()) as { id: string };
   await expect(

@@ -109,7 +109,7 @@ describe("triage profile route", () => {
         schemaId: "cd-collab.triage_job_capabilities.v1",
         syntheticAvailable: true,
         gatewayAvailable: false,
-        gatewayMinCandidates: 2,
+        gatewayMinCandidates: 1,
         profileCatalogConfigured: true,
         profileCount: 1,
       });
