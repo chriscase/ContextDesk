@@ -113,7 +113,7 @@ test.describe("provider-free Rust bridge comparison", () => {
 
     const runs = await triageRuns(page, caseId);
     const run = runs.find((candidate) => candidate.id === job.id);
-    expect(run?.request.candidates).toHaveLength(1);
-    expect(run?.request.candidates[0]?.candidateId).toBe("qwen-reviewer");
+    expect(run?.candidates).toHaveLength(1);
+    expect(run?.candidates[0]?.candidateId).toBe("qwen-reviewer");
   });
 });
