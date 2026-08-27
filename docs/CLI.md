@@ -26,6 +26,7 @@ wrapper.
 [Language integration](LANGUAGE_INTEGRATION.md) ·
 [CLI packaging](CLI_PACKAGING.md) ·
 [Normative normalized events](specs/NORMALIZED_LOG_EVENTS_V1.md) ·
+[CLI and GUI triage](war-room/CLI_AND_GUI_TRIAGE.md) ·
 [README: CLI and log normalization](../README.md#cli-and-log-normalization)
 
 ## Command grammar (verified against `--help`)

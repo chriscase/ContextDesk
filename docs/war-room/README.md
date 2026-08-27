@@ -36,6 +36,15 @@ inventory.
 
 ![Synthetic War Room investigation list](../assets/war-room/war-room-investigations.png)
 
+## Do one triage end to end
+
+The [CLI and GUI triage guide](CLI_AND_GUI_TRIAGE.md) explains the complete
+operator path in both hosts: importing and checking evidence, resolving
+ambiguous timestamps, asking one focused question, reading the result
+honestly, optionally comparing independent lanes, and recording the human
+decision. Use it when you need to understand the difference between a focused
+triage and a multi-lane comparison.
+
 ## The evidence-first mental model
 
 War Room moves a problem through a reviewable chain:
