@@ -1380,6 +1380,69 @@ describe("experiment lab", () => {
     expect(screen.queryByRole("button", { name: "Annotate trace" })).toBeNull();
   });
 
+  it("offers frozen snapshot evidence when provider-free lanes cite nothing", async () => {
+    const snapshotOnlyView = {
+      ...view,
+      agreement: {
+        sharedAnchors: [],
+        candidateSpecific: [],
+        roleConflicts: [],
+        notes: ["Provider-free simulation did not inspect evidence."],
+      },
+      traces: [],
+      observations: [],
+      decisions: [],
+      gold: null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [snapshotOnlyView] }) };
+        }
+        if (url.endsWith("/evidence")) {
+          return {
+            ok: true,
+            json: async () => ({
+              artifacts: [{
+                id: "ev-snapshot-only",
+                kind: "log",
+                filename: "snapshot-only.log",
+                uri: null,
+                mediaType: "text/plain",
+                privacyClass: "owner_only",
+                verificationStatus: "verified",
+              }],
+            }),
+          };
+        }
+        if (url.endsWith("/snapshots")) {
+          return {
+            ok: true,
+            json: async () => ({
+              snapshots: [{
+                id: "snapshot-1",
+                fingerprint: view.snapshotFingerprint.slice("snap-".length),
+                evidence: [{ evidenceId: "ev-snapshot-only" }],
+                createdBy: "demo",
+              }],
+            }),
+          };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+
+    render(<ExperimentLab caseId="00000000-0000-4000-8000-000000000001" canWrite canLead />);
+
+    const decisionEvidence = await screen.findByRole("group", {
+      name: "Evidence supporting this decision (optional)",
+    });
+    expect(within(decisionEvidence).getByText("snapshot-only.log")).toBeTruthy();
+    expect(within(decisionEvidence).getAllByRole("checkbox")).toHaveLength(1);
+  });
+
   it("submits accessible evidence choices and honest decision ownership without raw ids", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
