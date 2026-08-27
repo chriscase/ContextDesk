@@ -202,6 +202,21 @@ describe("help search", () => {
   });
 });
 
+describe("log workbench help", () => {
+  it("teaches file filtering, Find, and match navigation for the workbench", () => {
+    renderHelp();
+    searchFor("filter files");
+    const result = within(resultsList()).getByRole("button", {
+      name: /Use the Log workbench/,
+    });
+    fireEvent.click(result);
+    expect(screen.getByRole("heading", { name: "Use the Log workbench" })).toBeTruthy();
+    expect(screen.getByText(/Filter files by name or path/)).toBeTruthy();
+    expect(screen.getByText(/Previous\/Next, F3, or Ctrl\/Cmd\+G/)).toBeTruthy();
+    expect(screen.getByText(/Timezone review is reversible and never guesses a zone/)).toBeTruthy();
+  });
+});
+
 describe("article selection and mobile back", () => {
   it("selects an article from the rail, marks it current, and hands focus to its title", () => {
     renderHelp();

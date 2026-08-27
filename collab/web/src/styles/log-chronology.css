@@ -85,7 +85,9 @@
 
 .log-chronology__table-wrap {
   margin-top: 0.75rem;
-  overflow-x: auto;
+  max-height: 24rem;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .log-chronology__table {

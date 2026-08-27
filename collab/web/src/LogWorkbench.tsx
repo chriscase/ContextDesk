@@ -35,6 +35,12 @@ const OVERSCAN = 6;
 const MAX_PANES = 4;
 /** Lines of lead-in kept above a revealed match so it has visible context. */
 const PAGE_LEAD_LINES = 10;
+/** File-picker row height matches the checkbox row min-height in CSS. */
+const FILE_ROW_HEIGHT = 40;
+const FILE_VIEWPORT_HEIGHT = 320;
+const FILE_OVERSCAN = 6;
+/** Above this many matching files, only a window of rows stays in the DOM. */
+const FILE_VIRTUALIZE_AFTER = 24;
 
 interface InventoryItem {
   evidenceId: string;
@@ -192,6 +198,69 @@ function groupLabel(grouping: string, groupKey: string): string | null {
   return groupKey;
 }
 
+/**
+ * File picker filter for 3, 30, and 300 files: match the human label or the
+ * relative path, never an evidence id.
+ */
+export function filterInvestigationLogs<T extends { displayLabel: string; relativePath: string }>(
+  items: readonly T[],
+  query: string,
+): T[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...items];
+  return items.filter(
+    (item) =>
+      item.displayLabel.toLowerCase().includes(needle)
+      || item.relativePath.toLowerCase().includes(needle),
+  );
+}
+
+/** Search hits grouped by file so a 50-match page is scannable, not a flat dump. */
+export function groupSearchMatches<T extends { relativePath: string }>(
+  matches: readonly T[],
+): { relativePath: string; displayLabel: string; entries: { row: T; index: number }[] }[] {
+  const groups: {
+    relativePath: string;
+    displayLabel: string;
+    entries: { row: T; index: number }[];
+  }[] = [];
+  const indexByPath = new Map<string, number>();
+  matches.forEach((row, index) => {
+    let groupIndex = indexByPath.get(row.relativePath);
+    if (groupIndex === undefined) {
+      groupIndex = groups.length;
+      indexByPath.set(row.relativePath, groupIndex);
+      const slash = row.relativePath.lastIndexOf("/");
+      groups.push({
+        relativePath: row.relativePath,
+        displayLabel: slash >= 0 ? row.relativePath.slice(slash + 1) : row.relativePath,
+        entries: [],
+      });
+    }
+    groups[groupIndex]!.entries.push({ row, index });
+  });
+  return groups;
+}
+
+/** Count of advanced filters that differ from the novice defaults. */
+export function countAdvancedFilters(input: {
+  mode: string;
+  include: string;
+  exclude: string;
+  severity: string;
+  timeFrom: string;
+  timeTo: string;
+}): number {
+  return [
+    input.mode !== "case_insensitive",
+    input.include.trim().length > 0,
+    input.exclude.trim().length > 0,
+    input.severity.trim().length > 0,
+    input.timeFrom.trim().length > 0,
+    input.timeTo.trim().length > 0,
+  ].filter(Boolean).length;
+}
+
 /** Stable, bounded key: same name and same view content replay as one save. */
 function viewIdempotencyKey(name: string, content: unknown): string {
   const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40) || "view";
@@ -250,6 +319,8 @@ export function LogWorkbench(props: {
   const [unreadFiles, setUnreadFiles] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
   const [chronologyBusy, setChronologyBusy] = useState(false);
+  const [fileQuery, setFileQuery] = useState("");
+  const [fileScrollTop, setFileScrollTop] = useState(0);
   const liveRef = useRef<HTMLParagraphElement>(null);
   /** Panes already read once, so a selection change does not re-page them. */
   const loadedPanes = useRef<Set<string>>(new Set());
@@ -258,6 +329,33 @@ export function LogWorkbench(props: {
     () => items.filter((item) => panes.includes(item.evidenceId)),
     [items, panes],
   );
+  const filteredItems = useMemo(
+    () => filterInvestigationLogs(items, fileQuery),
+    [items, fileQuery],
+  );
+  const virtualizeFiles = filteredItems.length > FILE_VIRTUALIZE_AFTER;
+  const fileWindow = virtualizedWindow({
+    totalRows: filteredItems.length,
+    scrollTop: fileScrollTop,
+    rowHeight: FILE_ROW_HEIGHT,
+    viewportHeight: FILE_VIEWPORT_HEIGHT,
+    overscan: FILE_OVERSCAN,
+  });
+  const visibleFiles = virtualizeFiles
+    ? filteredItems.slice(fileWindow.start, fileWindow.end)
+    : filteredItems;
+  const advancedOn = countAdvancedFilters({
+    mode,
+    include,
+    exclude,
+    severity,
+    timeFrom,
+    timeTo,
+  });
+
+  useEffect(() => {
+    setFileScrollTop(0);
+  }, [fileQuery]);
 
   const load = useCallback(async () => {
     setLoadState("loading");
@@ -411,11 +509,19 @@ export function LogWorkbench(props: {
   }
 
   function togglePane(evidenceId: string) {
-    setPanes((current) => {
-      if (current.includes(evidenceId)) return current.filter((id) => id !== evidenceId);
-      if (current.length >= MAX_PANES) return current;
-      return [...current, evidenceId];
-    });
+    if (panes.includes(evidenceId)) {
+      setPanes((current) => current.filter((id) => id !== evidenceId));
+      return;
+    }
+    if (panes.length >= MAX_PANES) {
+      setNotice(
+        `Only ${MAX_PANES} files can be open side by side. Clear one to open another.`,
+      );
+      return;
+    }
+    setPanes((current) =>
+      current.includes(evidenceId) ? current : [...current, evidenceId],
+    );
   }
 
   const searchFilters = useCallback(
@@ -665,25 +771,42 @@ export function LogWorkbench(props: {
 
   if (loadState === "loading") {
     return (
-      <section className="log-workbench" id="log-workbench" aria-labelledby="log-workbench-heading">
-        <h4 id="log-workbench-heading">Log workbench</h4>
-        <p>Loading this investigation’s logs…</p>
+      <section
+        className="log-workbench"
+        id="log-workbench"
+        aria-labelledby="log-workbench-heading"
+        aria-busy="true"
+      >
+        <header className="log-workbench__head">
+          <h4 id="log-workbench-heading">Log workbench</h4>
+          <p className="log-workbench__lede" role="status">
+            Loading this investigation’s logs…
+          </p>
+        </header>
       </section>
     );
   }
   if (loadState === "unauthorized") {
     return (
       <section className="log-workbench" id="log-workbench" aria-labelledby="log-workbench-heading">
-        <h4 id="log-workbench-heading">Log workbench</h4>
-        <p role="alert">You do not have access to this investigation’s logs.</p>
+        <header className="log-workbench__head">
+          <h4 id="log-workbench-heading">Log workbench</h4>
+          <p className="log-workbench__error" role="alert">
+            You do not have access to this investigation’s logs.
+          </p>
+        </header>
       </section>
     );
   }
   if (loadState === "error") {
     return (
       <section className="log-workbench" id="log-workbench" aria-labelledby="log-workbench-heading">
-        <h4 id="log-workbench-heading">Log workbench</h4>
-        <p role="alert">{error}</p>
+        <header className="log-workbench__head">
+          <h4 id="log-workbench-heading">Log workbench</h4>
+          <p className="log-workbench__error" role="alert">
+            {error}
+          </p>
+        </header>
         <button type="button" onClick={() => void load()}>
           Try again
         </button>
@@ -693,17 +816,20 @@ export function LogWorkbench(props: {
   if (items.length === 0) {
     return (
       <section className="log-workbench" id="log-workbench" aria-labelledby="log-workbench-heading">
-        <h4 id="log-workbench-heading">Log workbench</h4>
-        <p>
-          This investigation has no imported logs yet. Add files, a ZIP, or a directory on
-          Capture — those files stay with this investigation, not in the shared Sources
-          catalog.
-        </p>
+        <header className="log-workbench__head">
+          <h4 id="log-workbench-heading">Log workbench</h4>
+          <p className="log-workbench__lede">
+            This investigation has no imported logs yet. Add files, a ZIP, or a directory on
+            Capture — those files stay with this investigation, not in the shared Sources
+            catalog.
+          </p>
+        </header>
       </section>
     );
   }
 
   const activeMatch = search?.matches[matchIndex] ?? null;
+  const matchGroups = search ? groupSearchMatches(search.matches) : [];
 
   return (
     <section className="log-workbench" id="log-workbench" aria-labelledby="log-workbench-heading">
@@ -725,8 +851,9 @@ export function LogWorkbench(props: {
       ) : null}
       {reviewCount && reviewCount > 0 ? (
         <p className="log-workbench__notice">
-          {reviewCount.toLocaleString()} lines still have a clock but no timezone. Open
-          Timezone review below to declare a zone — nothing here will guess one.
+          {reviewCount.toLocaleString()} lines still have a clock but no timezone.{" "}
+          <a href="#triage-log-time">Open Timezone review</a> to declare a zone — nothing
+          here will guess one.
         </p>
       ) : null}
       <p ref={liveRef} className="log-workbench__live" role="status" aria-live="polite">
@@ -742,43 +869,128 @@ export function LogWorkbench(props: {
         <div className="log-workbench__files-head">
           <div>
             <strong>Choose log files</strong>
-            <span>Select one or more to open them side by side.</span>
+            <span>
+              Filter by name or path, then tick up to {MAX_PANES} files to open them side by
+              side.
+            </span>
           </div>
           <span className="log-workbench__muted">
-            {items.length.toLocaleString()} {items.length === 1 ? "file" : "files"}
+            {fileQuery.trim()
+              ? `${filteredItems.length.toLocaleString()} of ${items.length.toLocaleString()} files match`
+              : `${items.length.toLocaleString()} ${items.length === 1 ? "file" : "files"}`}
+            {" · "}
+            {panes.length === 0
+              ? `no panes open (up to ${MAX_PANES})`
+              : `${panes.length} of ${MAX_PANES} panes open`}
           </span>
         </div>
-        {items.map((item) => (
-          <label key={item.evidenceId} className="log-workbench__file">
+        <div className="log-workbench__files-toolbar">
+          <label htmlFor="log-workbench-file-filter">
+            <span>Filter files</span>
             <input
-              type="checkbox"
-              checked={panes.includes(item.evidenceId)}
-              onChange={() => togglePane(item.evidenceId)}
-              aria-label={`Show ${item.displayLabel} in a pane`}
-            />
-            <span className="log-workbench__file-copy">
-              <strong>{item.displayLabel}</strong>
-              {item.relativePath !== item.displayLabel || item.fullyRead === false ? (
-                <small>
-                  {item.relativePath === item.displayLabel
-                    ? ""
-                    : item.relativePath.slice(0, item.relativePath.length - item.displayLabel.length)}
-                  {item.fullyRead === false ? "not fully read" : ""}
-                </small>
-              ) : null}
-            </span>
-            <TechnicalIdentifiers
-              record={item.displayLabel}
-              summary="Details"
-              className="log-workbench__file-details"
-              items={[
-                { label: "Evidence id", value: item.evidenceId },
-                { label: "Digest", value: item.digest },
-                { label: "Intake batch", value: item.intakeBatchId },
-              ]}
+              id="log-workbench-file-filter"
+              type="search"
+              value={fileQuery}
+              onChange={(event) => setFileQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setFileQuery("");
+                }
+              }}
+              aria-label="Filter log files"
+              placeholder="Name or path…"
+              autoComplete="off"
+              spellCheck={false}
             />
           </label>
-        ))}
+          {fileQuery.trim() ? (
+            <button type="button" onClick={() => setFileQuery("")}>
+              Clear file filter
+            </button>
+          ) : null}
+          {panes.length > 0 ? (
+            <button type="button" onClick={() => setPanes([])}>
+              Clear open files
+            </button>
+          ) : null}
+        </div>
+        {filteredItems.length === 0 ? (
+          <p className="log-workbench__notice" role="status">
+            No files match “{fileQuery.trim()}”. Clear the filter to see all{" "}
+            {items.length.toLocaleString()} files.
+          </p>
+        ) : (
+          <div
+            className={
+              virtualizeFiles
+                ? "log-workbench__file-list log-workbench__file-list--virtual"
+                : "log-workbench__file-list"
+            }
+            aria-label="Matching log files"
+            onScroll={(event) => setFileScrollTop(event.currentTarget.scrollTop)}
+          >
+            {virtualizeFiles ? (
+              <div
+                className="log-workbench__spacer"
+                aria-hidden="true"
+                style={{ height: `${fileWindow.start * FILE_ROW_HEIGHT}px` }}
+              />
+            ) : null}
+            {visibleFiles.map((item) => {
+              return (
+                <label key={item.evidenceId} className="log-workbench__file">
+                  <input
+                    type="checkbox"
+                    checked={panes.includes(item.evidenceId)}
+                    onChange={() => togglePane(item.evidenceId)}
+                    aria-label={`Show ${item.displayLabel} in a pane`}
+                  />
+                  <span className="log-workbench__file-copy">
+                    <strong>{item.displayLabel}</strong>
+                    {item.relativePath !== item.displayLabel || item.fullyRead === false ? (
+                      <small>
+                        {item.relativePath === item.displayLabel
+                          ? ""
+                          : item.relativePath.slice(
+                              0,
+                              item.relativePath.length - item.displayLabel.length,
+                            )}
+                        {item.fullyRead === false ? "not fully read" : ""}
+                      </small>
+                    ) : null}
+                  </span>
+                  <TechnicalIdentifiers
+                    record={item.displayLabel}
+                    summary="Details"
+                    className="log-workbench__file-details"
+                    items={[
+                      { label: "Evidence id", value: item.evidenceId },
+                      { label: "Digest", value: item.digest },
+                      { label: "Intake batch", value: item.intakeBatchId },
+                    ]}
+                  />
+                </label>
+              );
+            })}
+            {virtualizeFiles ? (
+              <div
+                className="log-workbench__spacer"
+                aria-hidden="true"
+                style={{
+                  height: `${Math.max(0, filteredItems.length - fileWindow.end) * FILE_ROW_HEIGHT}px`,
+                }}
+              />
+            ) : null}
+          </div>
+        )}
+        {virtualizeFiles ? (
+          <p className="log-workbench__hint">
+            Showing files {(fileWindow.start + 1).toLocaleString()}–
+            {Math.max(fileWindow.start + 1, fileWindow.end).toLocaleString()} of{" "}
+            {filteredItems.length.toLocaleString()}. Filter to jump to a name.
+          </p>
+        ) : null}
       </div>
 
       <div className="log-workbench__search">
@@ -788,25 +1000,66 @@ export function LogWorkbench(props: {
             <span>Start with a word or phrase. Open advanced filters only when you need them.</span>
           </div>
         </div>
-        <div className="log-workbench__search-primary">
-          <label>
-            <span>Find</span>
-            <input
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={onSearchKey}
-              aria-label="Find in logs"
-              placeholder="Message, error, identifier…"
-            />
-          </label>
-          <button type="button" onClick={() => void runSearch()} disabled={searching}>
-            {searching ? "Searching…" : "Search"}
-          </button>
+        <div className="log-workbench__search-row">
+          <div className="log-workbench__search-primary">
+            <label>
+              <span>Find</span>
+              <input
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={onSearchKey}
+                aria-label="Find in logs"
+                placeholder="Message, error, identifier…"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <button type="button" onClick={() => void runSearch()} disabled={searching}>
+              {searching ? "Searching…" : "Search"}
+            </button>
+          </div>
+          <div
+            className="log-workbench__match-nav"
+            role="group"
+            aria-label="Search match navigation"
+          >
+            <button
+              type="button"
+              aria-label="Previous match"
+              disabled={!search || search.matches.length === 0}
+              onClick={() =>
+                search && search.matches.length > 0
+                  ? selectMatch((matchIndex + search.matches.length - 1) % search.matches.length)
+                  : undefined
+              }
+            >
+              Previous
+            </button>
+            <span aria-live="polite" aria-atomic="true">
+              {search && search.matches.length > 0
+                ? `${matchIndex + 1} of ${search.matches.length}`
+                : "No matches"}
+            </span>
+            <button
+              type="button"
+              aria-label="Next match"
+              disabled={!search || search.matches.length === 0}
+              onClick={() =>
+                search && search.matches.length > 0
+                  ? selectMatch((matchIndex + 1) % search.matches.length)
+                  : undefined
+              }
+            >
+              Next
+            </button>
+          </div>
         </div>
 
         <details className="log-workbench__search-advanced">
-          <summary>Advanced filters</summary>
+          <summary>
+            {advancedOn > 0 ? `Advanced filters (${advancedOn} on)` : "Advanced filters"}
+          </summary>
           <div className="log-workbench__search-filters">
             <label>
               <span>Match</span>
@@ -866,42 +1119,6 @@ export function LogWorkbench(props: {
             Local times without a zone are refused rather than guessed.
           </p>
         </details>
-
-        <div
-          className="log-workbench__match-nav"
-          role="group"
-          aria-label="Search match navigation"
-        >
-          <button
-            type="button"
-            aria-label="Previous match"
-            disabled={!search || search.matches.length === 0}
-            onClick={() =>
-              search && search.matches.length > 0
-                ? selectMatch((matchIndex + search.matches.length - 1) % search.matches.length)
-                : undefined
-            }
-          >
-            Previous
-          </button>
-          <span aria-live="polite" aria-atomic="true">
-            {search && search.matches.length > 0
-              ? `${matchIndex + 1} of ${search.matches.length}`
-              : "No matches"}
-          </span>
-          <button
-            type="button"
-            aria-label="Next match"
-            disabled={!search || search.matches.length === 0}
-            onClick={() =>
-              search && search.matches.length > 0
-                ? selectMatch((matchIndex + 1) % search.matches.length)
-                : undefined
-            }
-          >
-            Next
-          </button>
-        </div>
       </div>
       <p className="log-workbench__hint">
         Press F3 (or Ctrl/Cmd+G) in Find to move through matches.
@@ -910,7 +1127,11 @@ export function LogWorkbench(props: {
         <p className="log-workbench__notice">{search.timeFilterUnknownReason}</p>
       ) : null}
       {search ? (
-        <section className="log-workbench__search-results" aria-label="Search results">
+        <section
+          className="log-workbench__search-results"
+          aria-label="Search results"
+          aria-busy={searching}
+        >
           <p className="log-workbench__search-summary" role="status" aria-live="polite">
             {searchSummary(search, search.matches.length, corpusTruncated)}
             {activeMatch ? ` Showing match ${matchIndex + 1} of ${search.matches.length}.` : ""}
@@ -922,21 +1143,44 @@ export function LogWorkbench(props: {
           ) : null}
           {search.matches.length > 0 ? (
             <ol className="log-workbench__hits" aria-label="Search matches">
-              {search.matches.map((row, index) => (
-                <li key={`${row.evidenceId}:${row.lineNumber}:${index}`}>
-                  <button
-                    type="button"
-                    aria-current={index === matchIndex ? "true" : undefined}
-                    onClick={() => selectMatch(index)}
-                  >
-                    {row.relativePath}:{row.lineNumber}
-                  </button>
-                  <span className="log-workbench__text">{row.text}</span>
+              {matchGroups.map((group) => (
+                <li key={group.relativePath} className="log-workbench__hit-group">
+                  <div className="log-workbench__hit-group-head">
+                    <strong>{group.displayLabel}</strong>
+                    <span>
+                      {group.entries.length.toLocaleString()}{" "}
+                      {group.entries.length === 1 ? "match" : "matches"}
+                      {group.relativePath !== group.displayLabel ? ` · ${group.relativePath}` : ""}
+                    </span>
+                  </div>
+                  <ol>
+                    {group.entries.map(({ row, index }) => (
+                      <li
+                        key={`${row.evidenceId}:${row.lineNumber}:${index}`}
+                        className={
+                          index === matchIndex
+                            ? "log-workbench__hit-row log-workbench__hit-row--current"
+                            : "log-workbench__hit-row"
+                        }
+                      >
+                        <button
+                          type="button"
+                          aria-current={index === matchIndex ? "true" : undefined}
+                          onClick={() => selectMatch(index)}
+                        >
+                          {row.relativePath}:{row.lineNumber}
+                        </button>
+                        <span className="log-workbench__text" title={row.text}>
+                          {row.text}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
                 </li>
               ))}
             </ol>
           ) : (
-            <p>
+            <p role="status">
               {search.coverageComplete === false
                 ? "No match yet in the lines searched so far. There are more selected lines to search."
                 : "No line in the selected files matches this search."}
@@ -1194,4 +1438,9 @@ export const WORKBENCH_VIRTUALIZATION = {
   ROW_HEIGHT,
   VIEWPORT_HEIGHT,
   OVERSCAN,
+  FILE_ROW_HEIGHT,
+  FILE_VIEWPORT_HEIGHT,
+  FILE_OVERSCAN,
+  FILE_VIRTUALIZE_AFTER,
+  MAX_PANES,
 };
