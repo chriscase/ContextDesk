@@ -334,7 +334,7 @@ npm run demo
 
 `npm run demo:check` verifies the workspace; it does not start the service. The
 last command is the one that starts it. The default demo intentionally prints
-that local timestamp review is hidden until both `COLLAB_BRIDGE_BIN` (or the
+that local log chronology is hidden until both `COLLAB_BRIDGE_BIN` (or the
 fallback `COLLAB_TRIAGE_RUNNER`) and `COLLAB_LOG_CORPUS_ROOT` point to a trusted
 ContextDesk timestamp host and its corpus cache. Without those host settings,
 the normal synthetic triage flow still works, but **Timezone review** and
