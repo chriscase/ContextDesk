@@ -60,6 +60,46 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
     title: "Get started",
     articles: [
       {
+        id: "first-investigation",
+        title: "Complete your first investigation",
+        summary:
+          "A guided path from a blank workspace to a recorded, reviewable human decision — using one investigation from start to finish.",
+        keywords: [
+          "first investigation",
+          "getting started",
+          "end to end",
+          "new user",
+          "fresh",
+          "walkthrough",
+          "triage",
+          "question",
+          "decision",
+        ],
+        what:
+          "Use this walkthrough when you are starting with no investigation record. It shows the smallest useful path: describe the problem, add the material you want the team to inspect, freeze that material, ask one clear question, review the recorded answer, and make the human call. You can stop after any stage and come back later; the investigation keeps the work and its history together.",
+        when:
+          "Use this for your first real or synthetic case, for a demo, or whenever you are unsure which stage to open next.",
+        steps: [
+          "Open Investigations and select Start investigation. Give the case a short, specific title — for example, “Checkout requests time out after the 4.2.1 upgrade.”",
+          "In Situation, write what someone actually observed, who or what is affected, the impact, and the scope you know so far. Put unresolved questions on separate lines; leave anything unknown blank rather than guessing.",
+          "Add useful context such as organization or customer, software, version, build, component, and environment. Reuse a suggested value when it matches; otherwise enter the value as it appears in your records.",
+          "Open Capture. Add a note, hypothesis, or next action if a person already has one. Use Logs and files for a log file, ZIP, nested ZIP, directory, email, or chat transcript that belongs to this investigation.",
+          "Review the intake preview before committing it. Keep private material owner_only; choose share_safe only when the material is genuinely safe to share, because that label does not scrub secrets.",
+          "Open Analyze and inspect the evidence list. Select the items that belong to this question, then ask a case lead to freeze the selection as an evidence snapshot.",
+          "In Run history and launcher, choose that frozen snapshot, write one answerable question, choose a strategy, and select a lane. Run Synthetic / offline first for a provider-free workflow check; use Configured gateway only when the host is prepared.",
+          "Open the resulting workstream and read the cited evidence, findings, and unknowns. Treat an AI-assisted or imported answer as analysis to review, not as a human finding or proof of correctness.",
+          "Use Compare only if you ran multiple lanes or want to compare finished runs. Look for agreement, disagreement, and unresolved questions rather than choosing a winner by model name.",
+          "Open Decide, record the human conclusion with its reason, and review the revision/history if the case changed while you were working.",
+          "Export a brief or selected-evidence package only when you need to share the result. Start with share_safe and read the privacy result; if it is blocked, nothing was exported.",
+          "When the work is finished, resolve the investigation with the human decision or archive it if it should leave the active list. You can reopen the record later from Investigations.",
+        ],
+        recorded:
+          "The case records its creator, Situation, notes and imports, evidence provenance, frozen snapshot and fingerprint, triage question and strategy, lane results, citations, unknowns, decision history, and exports. Each item remains attributable to the person or system that supplied it.",
+        limits:
+          "Creating, freezing, launching lanes, deciding, and exporting are role-gated. Synthetic mode checks the workflow but does not read your evidence or call a model. Gateway mode requires at least two lanes and a configured host. A snapshot is fixed: later uploads require a new snapshot and a new run. This walkthrough does not configure LDAP, a gateway, retention, or backups.",
+        actions: [{ label: "Start from Investigations", go: { area: "investigations" } }],
+      },
+      {
         id: "war-room-basics",
         title: "What the War Room is",
         summary:
@@ -1097,6 +1137,7 @@ const FLOW_STEPS: readonly { name: string; kicker: string; human?: boolean }[] =
 
 /** Task-first entry points shown under "What are you trying to do?". */
 const QUICK_TASKS: readonly { task: string; articleId: string }[] = [
+  { task: "Walk through a fresh investigation", articleId: "first-investigation" },
   { task: "Record what you observed", articleId: "record-contributions" },
   { task: "Bring in a run from another tool", articleId: "import-external-run" },
   { task: "Freeze evidence and run AI lanes", articleId: "run-lanes" },

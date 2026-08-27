@@ -33,6 +33,9 @@ describe("help landing", () => {
     expect(
       screen.getByRole("heading", { name: "What are you trying to do?" }),
     ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Walk through a fresh investigation/ }),
+    ).toBeTruthy();
     const flow = screen.getByRole("list", { name: "Capture to Decide flow" });
     const steps = within(flow).getAllByRole("listitem");
     expect(steps.map((step) => step.textContent)).toEqual([
@@ -66,6 +69,18 @@ describe("help landing", () => {
     renderHelp();
     expect(screen.queryByRole("heading", { name: "What this is" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Limits" })).toBeNull();
+  });
+
+  it("opens the complete first-investigation walkthrough", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: /Walk through a fresh investigation/ }));
+    expect(
+      screen.getByRole("heading", { name: "Complete your first investigation" }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Open Investigations and select Start investigation/)).toBeTruthy();
+    expect(screen.getByText(/Review the intake preview before committing it/)).toBeTruthy();
+    expect(screen.getByText(/record the human conclusion with its reason/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start from Investigations" })).toBeTruthy();
   });
 });
 
