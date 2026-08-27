@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { MouseEvent, ReactNode } from "react";
 import { pathFor, type RouteItemKind, type WorkFocus } from "./app-location.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
@@ -125,6 +125,11 @@ interface EvidenceArtifactView {
   mediaType: string | null;
   privacyClass: string;
   verificationStatus: string | null;
+}
+
+interface SnapshotView {
+  fingerprint: string;
+  evidence: { evidenceId: string }[];
 }
 
 function isRestoredAttribution(username: string | null | undefined): boolean {
@@ -509,6 +514,20 @@ function evidenceRefsFor(view: ExperimentView): string[] {
   return [...refs].sort((left, right) => left.localeCompare(right));
 }
 
+function normalizedSnapshotFingerprint(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  return normalized.startsWith("snap-") ? normalized.slice("snap-".length) : normalized;
+}
+
+function snapshotEvidenceRefsFor(view: ExperimentView, snapshots: SnapshotView[]): string[] {
+  const fingerprint = normalizedSnapshotFingerprint(view.snapshotFingerprint);
+  const snapshot = snapshots.find(
+    (candidate) => normalizedSnapshotFingerprint(candidate.fingerprint) === fingerprint,
+  );
+  return [...new Set((snapshot?.evidence ?? []).map((item) => item.evidenceId))]
+    .sort((left, right) => left.localeCompare(right));
+}
+
 const MAX_EVIDENCE_EXCERPT_BYTES = 64 * 1024;
 
 function decodeEvidenceExcerpt(contentBase64: string): LoadedEvidenceExcerpt | null {
@@ -530,6 +549,7 @@ function EvidencePicker(props: {
   artifacts: EvidenceArtifactView[];
   legend: string;
   roles?: boolean;
+  additionalRefs?: readonly string[];
 }) {
   const [query, setQuery] = useState("");
   const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set());
@@ -538,8 +558,14 @@ function EvidencePicker(props: {
   // Resolve the whole set at once: picking one reference at a time cannot see
   // that two of them would render under the same name, and a chooser whose
   // options read identically cannot be used to choose.
-  const identities = evidenceIdentityIndex(props.view, props.artifacts);
-  const choices = evidenceRefsFor(props.view).map((ref) => {
+  const refs = [...new Set([...evidenceRefsFor(props.view), ...(props.additionalRefs ?? [])])]
+    .sort((left, right) => left.localeCompare(right));
+  const identityLookup = identityContext(props.view, props.artifacts, {});
+  const identities = new Map(
+    disambiguateIdentities(refs.map((ref) => evidenceIdentity(ref, identityLookup)))
+      .map((identity) => [identity.reference, identity]),
+  );
+  const choices = refs.map((ref) => {
     const identity = identities.get(ref);
     return {
       ref,
@@ -547,7 +573,7 @@ function EvidencePicker(props: {
       source: identity?.source ?? "named from the recorded reference",
       excerpt: identity?.excerpt ?? null,
     };
-  });
+    });
   const normalized = query.trim().toLowerCase();
   const visible = normalized
     ? choices.filter((choice) =>
@@ -1352,6 +1378,7 @@ export function ExperimentLab(props: {
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
   const [presence, setPresence] = useState<PresenceView | null>(null);
   const [evidenceArtifacts, setEvidenceArtifacts] = useState<EvidenceArtifactView[]>([]);
+  const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
   const [evidenceExcerpts, setEvidenceExcerpts] = useState<Record<string, LoadedEvidenceExcerpt>>({});
   const requestedEvidenceExcerpts = useRef(new Set<string>());
   // Focus is URL-backed for reload/back/forward, but never filters evidence.
@@ -1405,15 +1432,25 @@ export function ExperimentLab(props: {
   useEffect(() => {
     let mounted = true;
     setEvidenceArtifacts([]);
+    setSnapshots([]);
     setEvidenceExcerpts({});
     requestedEvidenceExcerpts.current = new Set<string>();
-    void protectedApiFetch(`/api/cases/${props.caseId}/evidence`)
-      .then(async (response) => {
-        if (!response.ok) return null;
-        return (await response.json()) as { artifacts?: EvidenceArtifactView[] };
-      })
-      .then((body) => {
-        if (mounted && body) setEvidenceArtifacts(body.artifacts ?? []);
+    void Promise.all([
+      protectedApiFetch(`/api/cases/${props.caseId}/evidence`)
+        .then(async (response) => response.ok
+          ? (await response.json()) as { artifacts?: EvidenceArtifactView[] }
+          : null)
+        .catch(() => null),
+      protectedApiFetch(`/api/cases/${props.caseId}/snapshots`)
+        .then(async (response) => response.ok
+          ? (await response.json()) as { snapshots?: SnapshotView[] }
+          : null)
+        .catch(() => null),
+    ])
+      .then(([evidenceBody, snapshotsBody]) => {
+        if (!mounted) return;
+        if (evidenceBody) setEvidenceArtifacts(evidenceBody.artifacts ?? []);
+        if (snapshotsBody) setSnapshots(snapshotsBody.snapshots ?? []);
       })
       .catch(() => undefined);
     return () => {
@@ -1558,11 +1595,15 @@ export function ExperimentLab(props: {
     experiments.find((row) => row.id === active)
     ?? experiments.find((row) => row.id === defaultExperimentId(experiments))
     ?? null;
+  const snapshotEvidenceRefs = useMemo(
+    () => current ? snapshotEvidenceRefsFor(current, snapshots) : [],
+    [current, snapshots],
+  );
 
   useEffect(() => {
     if (!current) return undefined;
     const artifactIds = new Set(evidenceArtifacts.map((artifact) => artifact.id));
-    const pending = evidenceRefsFor(current).filter(
+    const pending = [...new Set([...evidenceRefsFor(current), ...snapshotEvidenceRefs])].filter(
       (evidenceId) => artifactIds.has(evidenceId) && !requestedEvidenceExcerpts.current.has(evidenceId),
     );
     if (!pending.length) return undefined;
@@ -1590,7 +1631,7 @@ export function ExperimentLab(props: {
     return () => {
       mounted = false;
     };
-  }, [current, evidenceArtifacts, props.caseId]);
+  }, [current, evidenceArtifacts, props.caseId, snapshotEvidenceRefs]);
 
   const evidenceRouteItems = new Set(current ? evidenceRefsFor(current) : []);
   const laneRouteItems = new Set((current?.candidates ?? []).map((row) => row.candidateId));
@@ -3612,6 +3653,7 @@ export function ExperimentLab(props: {
                     view={current}
                     artifacts={evidenceArtifacts}
                     legend="Evidence supporting this helpfulness review (optional)"
+                    additionalRefs={snapshotEvidenceRefs}
                   />
                   <textarea className="login__input" name="rationale" rows={2} required aria-label="Helpfulness rationale" placeholder="Helpfulness rationale" />
                   <button className="login__submit" type="submit">
@@ -3731,6 +3773,7 @@ export function ExperimentLab(props: {
                   view={current}
                   artifacts={evidenceArtifacts}
                   legend="Evidence supporting this decision (optional)"
+                  additionalRefs={snapshotEvidenceRefs}
                 />
                 <button className="login__submit" type="submit">
                   Propose decision
@@ -3809,6 +3852,7 @@ export function ExperimentLab(props: {
                   view={current}
                   artifacts={evidenceArtifacts}
                   legend="Evidence anchors for this human benchmark"
+                  additionalRefs={snapshotEvidenceRefs}
                   roles
                 />
                 <input
