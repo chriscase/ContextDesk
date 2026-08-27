@@ -95,6 +95,7 @@ const SITUATION_KEYS = [
   "impact",
   "scope",
   "openQuestions",
+  "investigationContext",
 ] as const;
 
 function situationInput(body: Record<string, unknown>):
@@ -111,6 +112,11 @@ function situationInput(body: Record<string, unknown>):
         return { valid: false };
       }
       value.openQuestions = field;
+    } else if (key === "investigationContext") {
+      if (field !== null && (typeof field !== "object" || Array.isArray(field))) {
+        return { valid: false };
+      }
+      value.investigationContext = field;
     } else {
       if (typeof field !== "string") return { valid: false };
       value[key] = field;
@@ -282,6 +288,7 @@ export async function registerCaseRoutes(
       impact?: string;
       scope?: string;
       openQuestions?: string[];
+      investigationContext?: unknown;
       occurredAt?: unknown;
       occurredAtPrecision?: unknown;
       occurredAtZone?: unknown;

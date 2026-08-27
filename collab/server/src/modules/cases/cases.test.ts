@@ -192,6 +192,7 @@ describe("cases timeline evidence provenance", () => {
       expect(created.impact).toBe("");
       expect(created.scope).toBe("");
       expect(created.openQuestions).toEqual([]);
+      expect(created.investigationContext).toBeNull();
 
       const updatedResponse = await app.inject({
         method: "PATCH",
@@ -207,6 +208,14 @@ describe("cases timeline evidence provenance", () => {
             " Did lease recovery run before the queue stalled? ",
             "",
           ],
+          investigationContext: {
+            productName: "  Fixture Desk  ",
+            version: "4.2",
+            build: "build-007",
+            component: "queue-worker",
+            environment: "QA / us-central",
+            organization: "Synthetic Harbor",
+          },
         },
       });
       expect(updatedResponse.statusCode).toBe(200);
@@ -220,6 +229,14 @@ describe("cases timeline evidence provenance", () => {
       expect(updated.openQuestions).toEqual([
         "Did lease recovery run before the queue stalled?",
       ]);
+      expect(updated.investigationContext).toEqual({
+        productName: "  Fixture Desk  ",
+        version: "4.2",
+        build: "build-007",
+        component: "queue-worker",
+        environment: "QA / us-central",
+        organization: "Synthetic Harbor",
+      });
       expect(updated.situationVersion).toBe(1);
 
       const fetched = parseCase(JSON.parse((await app.inject({

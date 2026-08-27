@@ -5,9 +5,9 @@ import { latestMigrationVersion, listMigrations, migrateDown, migrateUp } from "
 describe("migration versions", () => {
   // The integration-train migrations remain consecutively ordered: the
   // investigation record graph, the case-bound log corpus, the narrow
-  // experiment row-lock privilege, the administrator model-use policy, then
-  // the investigation log workbench.
-  it("pins the canonical PostgreSQL head at the log workbench", () => {
+  // experiment row-lock privilege, the administrator model-use policy, the
+  // investigation log workbench, and structured investigation context.
+  it("pins the canonical PostgreSQL head at investigation context", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -17,7 +17,8 @@ describe("migration versions", () => {
     expect(versions).toContain("020_model_purpose_policy");
     expect(versions).toContain("021_workbench");
     expect(versions).toContain("022_software_impact");
-    expect(latestMigrationVersion()).toBe("022_software_impact");
+    expect(versions).toContain("023_investigation_context");
+    expect(latestMigrationVersion()).toBe("023_investigation_context");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -27,10 +28,10 @@ describe("migration versions", () => {
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
     expect(versions.slice(-4)).toEqual([
-      "019_experiment_lock_privilege",
       "020_model_purpose_policy",
       "021_workbench",
       "022_software_impact",
+      "023_investigation_context",
     ]);
   });
 });
@@ -62,6 +63,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("020_model_purpose_policy");
       expect(up.applied).toContain("021_workbench");
       expect(up.applied).toContain("022_software_impact");
+      expect(up.applied).toContain("023_investigation_context");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -121,9 +123,17 @@ describe.skipIf(!adminUrl())("migrations", () => {
         `SELECT to_regclass('public.log_corpora') AS to_regclass`,
       );
       expect(logTimeBeforeRollback.rows[0]?.to_regclass).not.toBeNull();
-      // 022 removes software impact records, then 021 removes the workbench
-      // records, then 020 removes the singleton
-      // policy state before 019 narrows the app role's row-lock privilege.
+      const contextColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cases'
+           AND column_name = 'investigation_context'`,
+      );
+      expect(contextColumns.rows.map((row) => row.column_name)).toEqual([
+        "investigation_context",
+      ]);
+      // 023 is storage for the case context, then the product migrations
+      // unwind before the privilege and record migrations below.
+      expect((await migrateDown(client)).rolledBack).toBe("023_investigation_context");
       expect((await migrateDown(client)).rolledBack).toBe("022_software_impact");
       expect((await migrateDown(client)).rolledBack).toBe("021_workbench");
       expect((await migrateDown(client)).rolledBack).toBe("020_model_purpose_policy");
@@ -221,6 +231,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("020_model_purpose_policy");
       expect(dry.pending).toContain("021_workbench");
       expect(dry.pending).toContain("022_software_impact");
+      expect(dry.pending).toContain("023_investigation_context");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

@@ -129,7 +129,7 @@ describe("war room overview", () => {
     stubCaseFetch();
     render(<Cases roles={["case-lead"]} view="investigations" />);
     const search = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, situation text, people, or ID",
+      name: "Search investigations by title, situation text, people, context, or ID",
     });
 
     fireEvent.change(search, { target: { value: "alice" } });
@@ -146,6 +146,42 @@ describe("war room overview", () => {
     expect(
       screen.getByText("No investigations match the current search or filter."),
     ).toBeTruthy();
+  });
+
+  it("suggests existing structured context, accepts new values, and searches it", async () => {
+    stubCaseFetch({
+      cases: [
+        {
+          ...fixtureCases[0],
+          investigationContext: {
+            productName: "Fixture Desk",
+            version: "4.2",
+            build: "build-007",
+            component: "queue-worker",
+            environment: "QA / us-central",
+            organization: "Synthetic Harbor",
+          },
+        },
+        {
+          ...fixtureCases[1],
+          investigationContext: { productName: "Search Catalog" },
+        },
+      ],
+    });
+    render(<Cases roles={["contributor"]} view="investigations" />);
+    const product = await screen.findByRole("combobox", { name: "Investigation context: Software or product" });
+    const list = document.getElementById("investigation-context-options-productName");
+    expect(list?.querySelector('option[value="Fixture Desk"]')).toBeTruthy();
+
+    fireEvent.change(product, { target: { value: "A brand-new product label" } });
+    expect((product as HTMLInputElement).value).toBe("A brand-new product label");
+
+    const search = screen.getByRole("searchbox", {
+      name: "Search investigations by title, situation text, people, context, or ID",
+    });
+    fireEvent.change(search, { target: { value: "qa / US-CENTRAL" } });
+    expect(screen.getByRole("button", { name: "Fixture incident" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Search indexing" })).toBeNull();
   });
 
   it("does not offer investigation creation to a viewer", async () => {
@@ -270,6 +306,15 @@ describe("war room overview", () => {
     fireEvent.change(screen.getByLabelText("Open questions"), {
       target: { value: "Did lease recovery run?\n\nDoes the queue recover?" },
     });
+    fireEvent.change(screen.getByRole("combobox", { name: "Investigation context: Software or product" }), {
+      target: { value: "Fixture Desk" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Investigation context: Version" }), {
+      target: { value: "4.2" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Investigation context: Build" }), {
+      target: { value: "build-007" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
 
     expect(await screen.findByRole("heading", { name: "Synthetic worker delay" })).toBeTruthy();
@@ -279,6 +324,14 @@ describe("war room overview", () => {
       impact: "Synthetic jobs require manual replay.",
       scope: "One disposable worker group.",
       openQuestions: ["Did lease recovery run?", "Does the queue recover?"],
+      investigationContext: {
+        productName: "Fixture Desk",
+        version: "4.2",
+        build: "build-007",
+        component: "",
+        environment: "",
+        organization: "",
+      },
     });
   });
 
@@ -1123,7 +1176,7 @@ describe("focused investigation view", () => {
     stubCaseFetch();
     render(<Cases roles={["case-lead"]} view="investigations" />);
     const search = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, situation text, people, or ID",
+      name: "Search investigations by title, situation text, people, context, or ID",
     });
     fireEvent.change(search, { target: { value: "fixture" } });
     fireEvent.click(screen.getByRole("button", { name: "Fixture incident" }));
@@ -1137,7 +1190,7 @@ describe("focused investigation view", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
     const searchAgain = await screen.findByRole("searchbox", {
-      name: "Search investigations by title, situation text, people, or ID",
+      name: "Search investigations by title, situation text, people, context, or ID",
     });
     expect((searchAgain as HTMLInputElement).value).toBe("fixture");
   });
@@ -1193,7 +1246,11 @@ describe("focused investigation view", () => {
   });
 
   it("lets an authorized member edit Situation context and keeps viewers read-only", async () => {
-    let current = { ...fixtureCases[0]!, situationVersion: 0 };
+    let current = {
+      ...fixtureCases[0]!,
+      situationVersion: 0,
+      investigationContext: null as Record<string, string> | null,
+    };
     const fetchStub = stubCaseFetch({
       cases: [current],
       onRequest: (url, init) => {
@@ -1209,6 +1266,7 @@ describe("focused investigation view", () => {
             impact: patch.impact as string,
             scope: patch.scope as string,
             openQuestions: patch.openQuestions as string[],
+            investigationContext: patch.investigationContext as Record<string, string> | null,
             situationVersion: current.situationVersion + 1,
           };
           return Promise.resolve({ ok: true, json: async () => current });
@@ -1225,6 +1283,9 @@ describe("focused investigation view", () => {
     fireEvent.change(screen.getByLabelText("Open questions"), {
       target: { value: "Did the worker reclaim its lease?\nIs backlog still increasing?" },
     });
+    fireEvent.change(screen.getByRole("combobox", { name: "Investigation context: Software or product" }), {
+      target: { value: "Fixture Desk" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save situation" }));
 
     await screen.findByText("Synthetic queue pressure continues after restart.");
@@ -1233,6 +1294,14 @@ describe("focused investigation view", () => {
       (call) => String(call[0]) === "/api/cases/c1/situation",
     );
     expect(patchCall?.[1]?.method).toBe("PATCH");
+    expect(JSON.parse(String(patchCall?.[1]?.body)).investigationContext).toEqual({
+      productName: "Fixture Desk",
+      version: "",
+      build: "",
+      component: "",
+      environment: "",
+      organization: "",
+    });
     unmount();
 
     stubCaseFetch({ cases: [current] });
@@ -1295,7 +1364,7 @@ describe("focused investigation view", () => {
     render(<Cases roles={["case-lead"]} view="investigations" />);
     fireEvent.click(await screen.findByRole("button", { name: "Search indexing" }));
     const situation = screen.getByRole("region", { name: "Recorded context" });
-    expect(within(situation).getAllByText("Not recorded")).toHaveLength(4);
+    expect(within(situation).getAllByText("Not recorded")).toHaveLength(10);
     expect(within(situation).getByText("None recorded")).toBeTruthy();
   });
 
