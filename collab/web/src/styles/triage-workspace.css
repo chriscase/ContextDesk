@@ -786,6 +786,23 @@
 
 .log-time__tools input {
   min-width: min(24rem, 70vw);
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  font: inherit;
+}
+
+.log-time__tools input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.log-time input[type="search"],
+.log-time input[type="text"] {
+  color-scheme: inherit;
 }
 
 .log-time__tools p,

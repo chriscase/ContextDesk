@@ -1,7 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LogWorkbench, WORKBENCH_VIRTUALIZATION } from "./LogWorkbench.js";
-import { virtualizedWindow } from "@cd-collab/contracts";
+import {
+  countAdvancedFilters,
+  filterInvestigationLogs,
+  groupSearchMatches,
+  LogWorkbench,
+  virtualizedWindow,
+  WORKBENCH_VIRTUALIZATION,
+} from "./LogWorkbench.js";
 
 afterEach(() => {
   cleanup();
@@ -641,5 +647,271 @@ describe("Log workbench honesty and navigation", () => {
         (url) => url.includes(encodeURIComponent(EVIDENCE_A)) && url.includes("startLine=1&"),
       ),
     ).toEqual([]);
+  });
+});
+
+const EVIDENCE_C = "77777777-7777-4777-8777-777777777777";
+
+function fileItem(index: number) {
+  const id = `22222222-2222-4222-8222-${index.toString(16).padStart(12, "0")}`;
+  const name = `svc-${String(index).padStart(3, "0")}.log`;
+  return {
+    evidenceId: index === 0 ? EVIDENCE_A : index === 1 ? EVIDENCE_B : index === 2 ? EVIDENCE_C : id,
+    relativePath: `hosts/host-${index % 16}/${name}`,
+    rotationFamily: name,
+    displayLabel: name,
+    digest: index.toString(16).padStart(64, "a"),
+    intakeBatchId: null,
+    privacyClass: "owner_only",
+    lineCount: 12,
+  };
+}
+
+function inventoryOf(count: number) {
+  return {
+    items: Array.from({ length: count }, (_, index) => fileItem(index)),
+    normalizationRevision: 1,
+  };
+}
+
+function stubSizedWorkbench(count: number, searchBody?: unknown) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventoryOf(count));
+      if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+      if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+      if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 2 });
+      if (url.includes("/workbench/page")) {
+        return jsonResponse({
+          evidenceId: EVIDENCE_A,
+          relativePath: "hosts/host-0/svc-000.log",
+          startLine: 1,
+          rows: [],
+          wrappedRowCount: 0,
+          nextStartLine: null,
+          bounded: false,
+        });
+      }
+      if (url.includes("/workbench/search") && searchBody) return jsonResponse(searchBody);
+      return jsonResponse({ error: "not_found" }, 404);
+    }),
+  );
+}
+
+describe("Log workbench file picker at 3, 30, and 300 files", () => {
+  it("keeps three files fully listed and filterable", async () => {
+    stubSizedWorkbench(3);
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    expect(screen.getAllByRole("checkbox", { name: /Show .* in a pane/ })).toHaveLength(3);
+    expect(screen.getByText(/3 files/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Filter log files"), {
+      target: { value: "svc-002" },
+    });
+    expect(screen.getAllByRole("checkbox", { name: /Show .* in a pane/ })).toHaveLength(1);
+    expect(screen.getByLabelText("Show svc-002.log in a pane")).toBeTruthy();
+  });
+
+  it("filters thirty files and caps side-by-side panes at four", async () => {
+    stubSizedWorkbench(30);
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    expect(screen.getByText(/30 files/)).toBeTruthy();
+    const visible = screen.getAllByRole("checkbox", { name: /Show .* in a pane/ });
+    expect(visible.length).toBeGreaterThan(0);
+    expect(visible.length).toBeLessThanOrEqual(40);
+    expect(screen.getByText(/Showing files/)).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Show svc-000.log in a pane"));
+    fireEvent.click(screen.getByLabelText("Show svc-001.log in a pane"));
+    fireEvent.click(screen.getByLabelText("Show svc-002.log in a pane"));
+    fireEvent.click(screen.getByLabelText("Show svc-003.log in a pane"));
+    fireEvent.click(screen.getByLabelText("Show svc-004.log in a pane"));
+    expect(screen.getByText(/Only 4 files can be open side by side/)).toBeTruthy();
+    expect(screen.getByText(/4 of 4 panes open/)).toBeTruthy();
+    expect((screen.getByLabelText("Show svc-004.log in a pane") as HTMLInputElement).checked).toBe(
+      false,
+    );
+
+    fireEvent.change(screen.getByLabelText("Filter log files"), {
+      target: { value: "svc-029" },
+    });
+    expect(screen.getByLabelText("Show svc-029.log in a pane")).toBeTruthy();
+    expect(screen.getAllByRole("checkbox", { name: /Show .* in a pane/ })).toHaveLength(1);
+  });
+
+  it("bounds the 300-file picker DOM and jumps by filter", async () => {
+    stubSizedWorkbench(300);
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    const visible = screen.getAllByRole("checkbox", { name: /Show .* in a pane/ });
+    expect(visible.length).toBeLessThanOrEqual(40);
+    expect(visible.length).toBeLessThan(300);
+    expect(screen.getByText(/300 files/)).toBeTruthy();
+    expect(screen.getByText(/Showing files 1/)).toBeTruthy();
+    expect(screen.queryByText("Details")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Filter log files"), {
+      target: { value: "svc-299" },
+    });
+    expect(screen.getAllByRole("checkbox", { name: /Show .* in a pane/ })).toHaveLength(1);
+    expect(screen.getByLabelText("Show svc-299.log in a pane")).toBeTruthy();
+    expect(screen.getByText(/1 of 300 files match/)).toBeTruthy();
+    expect(screen.getByText("Details")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Filter log files"), {
+      target: { value: "no-such-file" },
+    });
+    expect(screen.getByText(/No files match/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Clear file filter" }));
+    expect(screen.getAllByRole("checkbox", { name: /Show .* in a pane/ }).length).toBeGreaterThan(1);
+  });
+});
+
+describe("Log workbench search hierarchy and progressive disclosure", () => {
+  it("groups matches by file and marks the current hit", async () => {
+    stubSizedWorkbench(3, {
+      matches: [
+        {
+          evidenceId: EVIDENCE_A,
+          relativePath: "hosts/host-0/svc-000.log",
+          rotationFamily: "svc-000.log",
+          lineNumber: 4,
+          byteOffset: 10,
+          text: "ERROR timeout in gateway",
+          wrapped: false,
+          originalTimestamp: null,
+          normalizedUtc: null,
+          parseClass: "missing",
+          contextBefore: [],
+          contextAfter: [],
+        },
+        {
+          evidenceId: EVIDENCE_C,
+          relativePath: "hosts/host-2/svc-002.log",
+          rotationFamily: "svc-002.log",
+          lineNumber: 9,
+          byteOffset: 40,
+          text: "ERROR timeout in worker",
+          wrapped: false,
+          originalTimestamp: null,
+          normalizedUtc: null,
+          parseClass: "missing",
+          contextBefore: [],
+          contextAfter: [],
+        },
+      ],
+      returned: 2,
+      bounded: false,
+      atLeast: 2,
+      nextCursor: null,
+      nextPageCursor: null,
+      cancelled: false,
+      corpusTruncated: false,
+      coverageComplete: true,
+      scannedLines: 24,
+      scannedLinesTotal: 24,
+      scopeFileCount: 3,
+      timeFilterUnknownReason: null,
+    });
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "timeout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    const hits = await screen.findByRole("list", { name: "Search matches" });
+    expect(hits.textContent).toMatch(/svc-000\.log/);
+    expect(hits.textContent).toMatch(/svc-002\.log/);
+    expect(hits.textContent).toMatch(/1 match/);
+    expect(hits.querySelectorAll(".log-workbench__hit-group")).toHaveLength(2);
+    expect(hits.querySelector(".log-workbench__hit-row--current")).toBeTruthy();
+    expect(
+      hits.querySelector(".log-workbench__hit-row--current")?.textContent,
+    ).toMatch(/hosts\/host-0\/svc-000\.log:4/);
+  });
+
+  it("keeps advanced filters closed and names how many are on", async () => {
+    stubFetch();
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    const advanced = document.querySelector("details.log-workbench__search-advanced");
+    expect(advanced?.hasAttribute("open")).toBe(false);
+    expect(screen.getByText("Advanced filters")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Match mode"), { target: { value: "literal" } });
+    fireEvent.change(screen.getByLabelText("Include terms"), { target: { value: "edge" } });
+    expect(screen.getByText("Advanced filters (2 on)")).toBeTruthy();
+  });
+
+  it("links timezone uncertainty to the review panel without implying a zone", async () => {
+    stubSizedWorkbench(3);
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    expect(await screen.findByRole("link", { name: "Open Timezone review" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Open Timezone review" }).getAttribute("href")).toBe(
+      "#triage-log-time",
+    );
+    expect(screen.getByText(/nothing here will guess one/i)).toBeTruthy();
+  });
+
+  it("marks inventory loading as busy for assistive tech", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => undefined)),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    expect(document.getElementById("log-workbench")?.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByText(/Loading this investigation/)).toBeTruthy();
+  });
+});
+
+describe("Log workbench selection helpers", () => {
+  it("filters by label or path and groups hits in file order", () => {
+    const files = [
+      { displayLabel: "edge.log", relativePath: "gateway/edge.log" },
+      { displayLabel: "batch.log", relativePath: "worker/batch.log" },
+      { displayLabel: "offset.log", relativePath: "mailer/offset.log" },
+    ];
+    expect(filterInvestigationLogs(files, "batch")).toEqual([files[1]]);
+    expect(filterInvestigationLogs(files, "gateway")).toEqual([files[0]]);
+    const grouped = groupSearchMatches([
+      { relativePath: "gateway/edge.log" },
+      { relativePath: "worker/batch.log" },
+      { relativePath: "gateway/edge.log" },
+    ]);
+    expect(grouped.map((group) => group.displayLabel)).toEqual(["edge.log", "batch.log"]);
+    expect(grouped[0]?.entries.map((entry) => entry.index)).toEqual([0, 2]);
+    expect(
+      countAdvancedFilters({
+        mode: "case_insensitive",
+        include: "",
+        exclude: "",
+        severity: "",
+        timeFrom: "",
+        timeTo: "",
+      }),
+    ).toBe(0);
+    expect(
+      countAdvancedFilters({
+        mode: "regex",
+        include: "edge",
+        exclude: "",
+        severity: "",
+        timeFrom: "",
+        timeTo: "",
+      }),
+    ).toBe(2);
+  });
+
+  it("keeps the file-picker virtual window bounded", () => {
+    const window = virtualizedWindow({
+      totalRows: 300,
+      scrollTop: 0,
+      rowHeight: WORKBENCH_VIRTUALIZATION.FILE_ROW_HEIGHT,
+      viewportHeight: WORKBENCH_VIRTUALIZATION.FILE_VIEWPORT_HEIGHT,
+      overscan: WORKBENCH_VIRTUALIZATION.FILE_OVERSCAN,
+    });
+    expect(window.resident).toBeLessThanOrEqual(40);
+    expect(WORKBENCH_VIRTUALIZATION.MAX_PANES).toBe(4);
+    expect(WORKBENCH_VIRTUALIZATION.FILE_VIRTUALIZE_AFTER).toBeLessThan(30);
   });
 });

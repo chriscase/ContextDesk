@@ -158,9 +158,9 @@ describe("help search", () => {
     renderHelp();
     searchFor("idempotency key");
     fireEvent.click(within(resultsList()).getAllByRole("button")[0] as HTMLElement);
-    expect(screen.getByText(/Archives are capped at 64 MiB/)).toBeTruthy();
+    expect(screen.getByText(/Archives are capped at 512 MiB/)).toBeTruthy();
     expect(screen.getByText(/expanded bytes at 512 MiB, 4,096 files/)).toBeTruthy();
-    expect(screen.getByText(/64 MiB per file, compression ratio 256, and 60 seconds/)).toBeTruthy();
+    expect(screen.getByText(/512 MiB per file, compression ratio 256, and 60 seconds/)).toBeTruthy();
     expect(screen.getByText(/overflow is rejected, never silently dropped/)).toBeTruthy();
     expect(screen.getByText(/JSONL\/NDJSON/)).toBeTruthy();
     expect(screen.getByText(/structured JSON and JSONL records must parse/)).toBeTruthy();
@@ -199,6 +199,21 @@ describe("help search", () => {
     fireEvent.click(glossaryResult as HTMLElement);
     expect(screen.getByRole("heading", { name: "Glossary" })).toBeTruthy();
     expect(document.activeElement?.id).toBe("help-term-qualification");
+  });
+});
+
+describe("log workbench help", () => {
+  it("teaches file filtering, Find, and match navigation for the workbench", () => {
+    renderHelp();
+    searchFor("filter files");
+    const result = within(resultsList()).getByRole("button", {
+      name: /Use the Log workbench/,
+    });
+    fireEvent.click(result);
+    expect(screen.getByRole("heading", { name: "Use the Log workbench" })).toBeTruthy();
+    expect(screen.getByText(/Filter files by name or path/)).toBeTruthy();
+    expect(screen.getByText(/Previous\/Next, F3, or Ctrl\/Cmd\+G/)).toBeTruthy();
+    expect(screen.getByText(/Timezone review is reversible and never guesses a zone/)).toBeTruthy();
   });
 });
 

@@ -47,13 +47,17 @@ export const CORPUS_REJECTION_REASONS = [
 export type CorpusRejectionReason = (typeof CORPUS_REJECTION_REASONS)[number];
 
 export const CORPUS_INTAKE_LIMITS = {
-  maxArchiveBytes: 64 * 1024 * 1024,
+  // Keep the archive and per-file ceilings aligned with the total expanded
+  // budget so realistic support bundles are not rejected before their
+  // bounded contents can be reviewed. The aggregate, count, ratio, path,
+  // and processing-time limits remain authoritative safeguards.
+  maxArchiveBytes: 512 * 1024 * 1024,
   maxExpandedBytes: 512 * 1024 * 1024,
   maxCompressionRatio: 256,
   maxFileCount: 4_096,
   maxPathDepth: 8,
   maxPathLength: 240,
-  maxFileBytes: 64 * 1024 * 1024,
+  maxFileBytes: 512 * 1024 * 1024,
   maxProcessingMs: 60_000,
 } as const;
 

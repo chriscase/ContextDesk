@@ -176,6 +176,26 @@ describe("LogTimeReviewPanel", () => {
     expect(screen.getByText("1 of 30 files match")).toBeTruthy();
   });
 
+  it("keeps a 300-file timezone review bounded until the operator filters", async () => {
+    const sources = Array.from({ length: 300 }, (_, index) =>
+      sourceStatus({ source: `worker/source-${String(index).padStart(3, "0")}.log` }),
+    );
+    stubFetch({ "/log-time": () => stateBody({ sources }) });
+    render(panel());
+
+    expect(await screen.findByText("worker/source-011.log")).toBeTruthy();
+    expect(screen.queryByText("worker/source-012.log")).toBeNull();
+    expect(screen.getByText("300 of 300 files match")).toBeTruthy();
+    expect(screen.getByText(/Showing 12 of 300 matching files/)).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Find a log file"), {
+      target: { value: "source-299" },
+    });
+    expect(screen.getByText("worker/source-299.log")).toBeTruthy();
+    expect(screen.getByText("1 of 300 files match")).toBeTruthy();
+    expect(screen.queryByText("worker/source-000.log")).toBeNull();
+  });
+
   it("offers no timezone until a person types one", async () => {
     stubFetch({ "/log-time": () => stateBody() });
     render(panel());

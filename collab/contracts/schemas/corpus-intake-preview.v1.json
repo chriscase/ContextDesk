@@ -21,11 +21,11 @@
         "properties": {
           "relativePath": { "type": "string", "maxLength": 240 },
           "mediaType": { "type": "string", "maxLength": 128 },
-          "contentBase64": { "type": "string", "maxLength": 89478488 }
+          "contentBase64": { "type": "string", "maxLength": 715827884 }
         }
       }
     },
-    "archiveBase64": { "type": ["string", "null"], "maxLength": 89478488 }
+    "archiveBase64": { "type": ["string", "null"], "maxLength": 715827884 }
   },
   "allOf": [
     {

@@ -26,13 +26,13 @@
         "maxProcessingMs"
       ],
       "properties": {
-        "maxArchiveBytes": { "type": "integer", "const": 67108864 },
+        "maxArchiveBytes": { "type": "integer", "const": 536870912 },
         "maxExpandedBytes": { "type": "integer", "const": 536870912 },
         "maxCompressionRatio": { "type": "integer", "const": 256 },
         "maxFileCount": { "type": "integer", "const": 4096 },
         "maxPathDepth": { "type": "integer", "const": 8 },
         "maxPathLength": { "type": "integer", "const": 240 },
-        "maxFileBytes": { "type": "integer", "const": 67108864 },
+        "maxFileBytes": { "type": "integer", "const": 536870912 },
         "maxProcessingMs": { "type": "integer", "const": 60000 }
       }
     }
