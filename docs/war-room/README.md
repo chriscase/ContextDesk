@@ -291,7 +291,7 @@ No live provider or external material is required. Continue with the
 
 | Area | Current integrated behavior | Residual or non-claim |
 | --- | --- | --- |
-| Navigation | Multi-page Overview, Investigations, Sources, Administration, and Help; five routed investigation stages; breadcrumbs and deep links | Authorization still applies when another person follows a link |
+| Navigation | Multi-page Overview, Investigations, Entities, Sources, Administration, and Help; five routed investigation stages; breadcrumbs and deep links | Authorization still applies when another person follows a link |
 | Evidence | Investigation-scoped notes, imports, uploads, ZIP/directory intake, snapshots, readable excerpts, context links, and Technical details | A citation or polished summary is not proof; intake limits and privacy classification still apply |
 | Analysis | Synthetic/offline and configured-gateway runs, one-lane focused triage, multi-lane comparison, run history, gateway model selection, and the Log workbench | Model availability and quality depend on the deployment; unknown cost or usage remains unknown |
 | Comparison and decision | Lane focus, evidence-backed differences, unknowns, discussion, human action, and optional owner | Agreement is not proof and a model cannot approve the human decision |
