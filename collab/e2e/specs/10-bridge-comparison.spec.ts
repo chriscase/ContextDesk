@@ -43,6 +43,8 @@ test.describe("provider-free Rust bridge comparison", () => {
     await page.getByRole("combobox", { name: "Execution mode" }).selectOption("gateway");
     await expect(page.getByRole("combobox", { name: "qwen-3.6-27b gateway model" })).toBeVisible();
     await page.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }).selectOption("profile:fixture-qwen");
+    await page.getByRole("checkbox", { name: /gpt-oss-120b .*contributor/ }).check();
+    await page.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512 .*challenger/ }).check();
     await page.getByRole("combobox", { name: "gpt-oss-120b gateway model" }).selectOption("profile:fixture-gpt");
     await page.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 gateway model" }).selectOption("profile:fixture-ministral");
     await page.getByRole("combobox", { name: "Lane concurrency" }).selectOption("2");

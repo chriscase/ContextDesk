@@ -63,6 +63,8 @@ test.describe("War Room lane and deployment journeys", () => {
     await analyze
       .getByRole("combobox", { name: "qwen-3.6-27b gateway model" })
       .selectOption("profile:fixture-qwen");
+    await analyze.getByRole("checkbox", { name: /gpt-oss-120b .*contributor/ }).check();
+    await analyze.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512 .*challenger/ }).check();
     await analyze
       .getByRole("combobox", { name: "gpt-oss-120b gateway model" })
       .selectOption("profile:fixture-gpt");
