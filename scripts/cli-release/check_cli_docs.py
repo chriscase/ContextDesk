@@ -67,6 +67,16 @@ DEMO_SHIPPED_VERBS = {
     "logging-assessment",
     "exception-episodes",
     "episodes",
+    "retrieval-status",
+    "retrieval-diagnose",
+    "retrieval-reanalyze",
+    "models",
+    "eval",
+    "triage-policy",
+    "triage",
+    "collab-triage-run",
+    "collab-log-time",
+    "gateway",
 }
 
 SHIPPED_COMMANDS = {
@@ -87,6 +97,16 @@ SHIPPED_COMMANDS = {
     "help",
     "logging-assessment",
     "exception-episodes",
+    "retrieval-status",
+    "retrieval-diagnose",
+    "retrieval-reanalyze",
+    "models",
+    "eval",
+    "triage-policy",
+    "triage",
+    "collab-triage-run",
+    "collab-log-time",
+    "gateway",
 }
 
 HUB_LINKS = [
@@ -341,7 +361,6 @@ def check_command_drift() -> None:
         return
     ok(f"parsed --help commands: {sorted(cmds)}")
 
-    missing = SHIPPED_COMMANDS - cmds - {"help"}
     # help may appear as subcommand
     for c in sorted(SHIPPED_COMMANDS):
         if c == "help":
@@ -350,6 +369,12 @@ def check_command_drift() -> None:
             ok(f"binary has {c}")
         else:
             fail(f"binary missing shipped command {c} (docs claim shipped)")
+
+    undocumented = cmds - SHIPPED_COMMANDS - {"help"}
+    if undocumented:
+        fail(f"binary exposes undocumented top-level commands: {sorted(undocumented)}")
+    else:
+        ok("every binary top-level command is in the shipped docs inventory")
 
     if has_normalize(bin_path):
         ok("binary has normalize")

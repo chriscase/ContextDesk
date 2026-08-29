@@ -379,7 +379,9 @@ export function TriageRunPanel(props: {
   const [candidateOptions, setCandidateOptions] = useState<CandidateOption[]>(DEFAULT_CANDIDATES);
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string>("");
   const [selectedCandidates, setSelectedCandidates] = useState<string[]>(
-    DEFAULT_CANDIDATES.map((candidate) => candidate.candidateId),
+    // A first run is a focused triage, not an implicit three-provider
+    // comparison. Additional lanes remain one explicit checkbox away.
+    DEFAULT_CANDIDATES.slice(0, 1).map((candidate) => candidate.candidateId),
   );
   const [mode, setMode] = useState<"deterministic_mock" | "gateway">("deterministic_mock");
   const [concurrency, setConcurrency] = useState(DEFAULT_GATEWAY_CONCURRENCY);

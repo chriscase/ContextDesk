@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="portable-title portable-desc">
   <title id="portable-title">Portable investigation archive trust boundary</title>
-  <desc id="portable-desc">A dark-neutral and gold diagram showing a source War Room exporting a complete investigation archive, a destination War Room validating it with a dry-run preflight and deterministic identifier remapping, historical identities remaining attribution only, and a blocked restore boundary because apply is not available.</desc>
+  <desc id="portable-desc">A dark-neutral and gold diagram showing a source War Room exporting a complete investigation archive, a destination War Room validating it with a dry-run preflight and deterministic identifier remapping, historical identities remaining attribution only, and an exact restore proceeding only after the case lead types RESTORE.</desc>
 
   <defs>
     <linearGradient id="portable-bg" x1="0" y1="0" x2="1" y2="1">
@@ -36,7 +36,7 @@
   <g class="sans">
     <text x="72" y="64" class="eyebrow" fill="#d9b85f">Complete investigation archive</text>
     <text x="72" y="112" class="title" fill="#f6f0e2">Inspect the transfer plan before anything can change</text>
-    <text x="72" y="146" class="body" fill="#aaa69c">Export and dry-run preflight are available. Restore/apply is intentionally unavailable.</text>
+    <text x="72" y="146" class="body" fill="#aaa69c">Export, dry-run preflight, and confirmed exact restore are available.</text>
 
     <!-- Source -->
     <g filter="url(#portable-shadow)">
@@ -94,32 +94,32 @@
     <text x="849" y="442" class="small" fill="#9f9b92">No destination user</text>
     <text x="849" y="462" class="small" fill="#9f9b92">No role or capability</text>
 
-    <!-- Blocked apply -->
-    <path d="M1018 372 H1124" fill="none" stroke="#7c6940" stroke-width="3" stroke-dasharray="9 9"/>
-    <circle cx="1072" cy="372" r="23" fill="#2b231c" stroke="#d28a55" stroke-width="2"/>
-    <path d="M1062 362 L1082 382 M1082 362 L1062 382" stroke="#efb17f" stroke-width="3" stroke-linecap="round"/>
+    <!-- Confirmed exact restore -->
+    <path d="M1018 372 H1124" fill="none" stroke="url(#portable-gold)" stroke-width="3" marker-end="url(#portable-arrow)"/>
+    <circle cx="1072" cy="372" r="23" fill="#2f2b20" stroke="#d7b75e" stroke-width="2"/>
+    <path d="M1061 372 L1068 379 L1083 361" fill="none" stroke="#f2d880" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 
     <g filter="url(#portable-shadow)">
-      <rect x="1124" y="206" width="252" height="334" rx="20" fill="#211b18" stroke="#8a5a3c"/>
-      <rect x="1124" y="206" width="252" height="5" rx="2.5" fill="#c77a49"/>
+      <rect x="1124" y="206" width="252" height="334" rx="20" fill="#211f19" stroke="#8d7538"/>
+      <rect x="1124" y="206" width="252" height="5" rx="2.5" fill="#d4b45b"/>
     </g>
-    <text x="1150" y="251" class="eyebrow" fill="#e19c6d">Trust boundary</text>
-    <text x="1150" y="291" class="card-title" fill="#fff1e7">No restore/apply</text>
+    <text x="1150" y="251" class="eyebrow" fill="#d5b55b">Trust boundary</text>
+    <text x="1150" y="291" class="card-title" fill="#fff7e6">Confirm exact restore</text>
     <text x="1150" y="332" class="body" fill="#d2c2b8">
-      <tspan x="1150" dy="0">The preflight creates no</tspan>
-      <tspan x="1150" dy="23">investigation, user, member,</tspan>
-      <tspan x="1150" dy="23">role, permission, or capability.</tspan>
+      <tspan x="1150" dy="0">Dry-run changes nothing.</tspan>
+      <tspan x="1150" dy="23">A case lead must type RESTORE</tspan>
+      <tspan x="1150" dy="23">before exact reconstruction.</tspan>
     </text>
     <text x="1150" y="427" class="body" fill="#d2c2b8">
-      <tspan x="1150" dy="0">Apply remains unavailable until</tspan>
-      <tspan x="1150" dy="23">atomic rollback is proven across</tspan>
-      <tspan x="1150" dy="23">supported storage backends.</tspan>
+      <tspan x="1150" dy="0">Unsupported or metadata-only</tspan>
+      <tspan x="1150" dy="23">archives stay blocked. Historical</tspan>
+      <tspan x="1150" dy="23">people receive no access.</tspan>
     </text>
 
     <!-- Bottom result rail -->
     <rect x="64" y="590" width="1312" height="104" rx="18" fill="#181815" stroke="#3c3931"/>
     <text x="94" y="628" class="eyebrow" fill="#b99b4d">Dry-run result</text>
-    <text x="94" y="663" class="body" fill="#eee7d9">A deterministic, reviewable transfer plan — not a completed import.</text>
+    <text x="94" y="663" class="body" fill="#eee7d9">A deterministic, reviewable transfer plan — restore still requires explicit confirmation.</text>
     <rect x="1016" y="615" width="330" height="42" rx="21" fill="#30291d" stroke="#8d7538"/>
     <text x="1181" y="642" text-anchor="middle" class="label" fill="#f0d887">Destination state remains unchanged</text>
 

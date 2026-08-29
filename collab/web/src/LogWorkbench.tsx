@@ -1,13 +1,14 @@
 /**
  * Log workbench — investigation-owned log exploration on Analyze.
  *
- * Evidence listed here is this investigation's intake, not the global Sources
+ * Evidence listed here is this investigation's intake, not the global Attribution
  * catalog. Technical ids stay behind a disclosure. Rendering is a bounded
  * window over paged rows; imported text is always a text node.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { TechnicalIdentifiers } from "./technical-identity.js";
 import { protectedApiFetch } from "./protected-api.js";
+import { focusVisibleSectionTarget } from "./route-focus.js";
 
 export function virtualizedWindow(input: {
   totalRows: number;
@@ -140,6 +141,14 @@ interface ChronologyEvent {
   normalizedUtc: string | null;
   groupKey?: string;
   anchorStatus?: string | null;
+}
+
+function chronologyTime(event: ChronologyEvent): { label: string; value: string | null } {
+  if (event.normalizedUtc) return { label: "Normalized UTC", value: event.normalizedUtc };
+  if (event.originalTimestamp) {
+    return { label: "Unresolved local time", value: event.originalTimestamp };
+  }
+  return { label: "Order only", value: null };
 }
 
 /**
@@ -820,7 +829,7 @@ export function LogWorkbench(props: {
           <h4 id="log-workbench-heading">Log workbench</h4>
           <p className="log-workbench__lede">
             This investigation has no imported logs yet. Add files, a ZIP, or a directory on
-            Capture — those files stay with this investigation, not in the shared Sources
+            Capture — those files stay with this investigation, not in the shared Attribution
             catalog.
           </p>
         </header>
@@ -852,7 +861,27 @@ export function LogWorkbench(props: {
       {reviewCount && reviewCount > 0 ? (
         <p className="log-workbench__notice">
           {reviewCount.toLocaleString()} lines still have a clock but no timezone.{" "}
-          <a href="#triage-log-time">Open Timezone review</a> to declare a zone — nothing
+          <a
+            href="#triage-log-time"
+            onClick={(event) => {
+              if (
+                event.button !== 0
+                || event.metaKey
+                || event.ctrlKey
+                || event.shiftKey
+                || event.altKey
+              ) return;
+              event.preventDefault();
+              window.history.pushState(
+                window.history.state,
+                "",
+                `${window.location.pathname}${window.location.search}#triage-log-time`,
+              );
+              focusVisibleSectionTarget("triage-log-time");
+            }}
+          >
+            Open Timezone review
+          </a>{" "}to declare a zone — nothing
           here will guess one.
         </p>
       ) : null}
@@ -1383,9 +1412,11 @@ export function LogWorkbench(props: {
             </details>
           ) : null}
           <ol>
-            {chronology.map((event, index) => (
+            {chronology.map((event, index) => {
+              const time = chronologyTime(event);
+              return (
               <li key={`${event.relativePath}:${event.lineNumber}:${index}`}>
-                <span>{event.normalizedUtc ?? event.originalTimestamp ?? "order only"}</span>
+                <span><strong>{time.label}</strong>{time.value ? `: ${time.value}` : ""}</span>
                 {" · "}
                 <span>{event.relativePath}</span>
                 {groupLabel(grouping, event.groupKey ?? "") ? (
@@ -1414,7 +1445,8 @@ export function LogWorkbench(props: {
                   <small> Observed id {event.correlationId}</small>
                 ) : null}
               </li>
-            ))}
+              );
+            })}
           </ol>
         </section>
       ) : null}

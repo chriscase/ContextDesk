@@ -206,11 +206,40 @@ describe("the read-only static fallback covers every investigation it lists", ()
       const routes = await captureStaticDemoRoutes(demo.app, demo.caseId);
       const listed = routes["GET /api/cases"] as { cases: { id: string; title: string }[] };
       expect(listed.cases.length).toBeGreaterThanOrEqual(4);
+      expect(routes["GET /api/entities"]).toBeDefined();
+      expect(routes["GET /api/involvement/index"]).toBeDefined();
+      expect(routes["GET /api/profile/me"]).toBeDefined();
       // A case listed in the inventory that 404s when opened is a broken link
       // inside an artefact nobody can fix from the page.
       for (const row of listed.cases) {
-        for (const suffix of ["", "/timeline", "/contributions", "/evidence", "/lifecycle"]) {
+        for (const suffix of [
+          "",
+          "/timeline",
+          "/contributions",
+          "/evidence",
+          "/lifecycle",
+          "/workstreams",
+          "/workbench",
+          "/workbench/views",
+          "/workbench/bookmarks",
+          "/workbench/review-queue",
+        ]) {
           expect(routes[`GET /api/cases/${row.id}${suffix}`]).toBeDefined();
+        }
+        const evidence = routes[`GET /api/cases/${row.id}/evidence`] as {
+          artifacts?: { id: string }[];
+        };
+        for (const artifact of evidence.artifacts ?? []) {
+          expect(routes[`GET /api/cases/${row.id}/evidence/${artifact.id}`]).toBeDefined();
+          expect(routes[`GET /api/cases/${row.id}/evidence/${artifact.id}/bytes`]).toBeDefined();
+        }
+        const workbench = routes[`GET /api/cases/${row.id}/workbench`] as {
+          items?: { evidenceId: string }[];
+        };
+        for (const item of workbench.items ?? []) {
+          expect(
+            routes[`GET /api/cases/${row.id}/workbench/page?evidenceId=${encodeURIComponent(item.evidenceId)}&startLine=1&limit=80`],
+          ).toBeDefined();
         }
       }
     } finally {

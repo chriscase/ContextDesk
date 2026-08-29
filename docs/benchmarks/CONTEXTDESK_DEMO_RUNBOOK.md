@@ -12,6 +12,12 @@ npm run demo
 
 Open `http://127.0.0.1:8787` and sign in with `demo` / `demo`. Set `COLLAB_DEMO_PORT` to another local port if 8787 is occupied. The launcher is a separate entry point: it does not change the production PostgreSQL or LDAP startup path, it binds only to loopback, and its temporary evidence is removed when it stops.
 
+The default launcher does not install the separate trusted timezone host.
+Offset-bearing timestamps remain comparable; zone-less timestamps stay
+unresolved, and timezone review/normalized chronology report the dependency as
+unavailable. Demonstrate successful normalization only in a separately
+configured host-backed rehearsal.
+
 Use **Interface theme** if you want to change the presentation (`Command`,
 `Dark`, `Slate`, `Light`, `Sand`, or `Forest`). `Command` is the default. The
 selected theme is a local browser preference.
@@ -94,11 +100,13 @@ npm run demo:static
 ```
 
 Open `collab/.demo/contextdesk-synthetic-demo.html` in a normal browser. This
-single file has no server dependency and is useful only for a limited,
-read-only comparison view. It does **not** reproduce the complete War Room
-journey: Discussion, evidence and snapshots, run history, routing, and durable
-edits require the normal loopback demo. Do not present the static fallback as
-equivalent to the primary demo.
+single file has no server dependency. It records the seeded Overview,
+investigation routes, Discussion, evidence and snapshots, workstreams, run
+history, Entities, Attribution, profile, and initial Log workbench pages as a
+read-only surface. Arbitrary new searches or chronology requests, edits,
+durability, live presence, directory checks, provider calls, and the trusted
+timezone host still require a running deployment. Do not present the static
+fallback as equivalent to the primary demo.
 
 ## Preflight
 

@@ -208,6 +208,35 @@ describe("Log workbench", () => {
     expect(screen.getByRole("button", { name: "Next match" })).toBeTruthy();
   });
 
+  it("labels normalized, unresolved, and order-only chronology rows explicitly", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("/workbench/chronology")) {
+          return jsonResponse({
+            events: [
+              { evidenceId: EVIDENCE_A, relativePath: "a.log", lineNumber: 1, excerpt: "one", adjacencyReason: "time", uncertainty: [], correlationKind: "none", correlationId: null, originalTimestamp: "2024-03-10T08:10:00Z", normalizedUtc: "2024-03-10T08:10:00.000Z" },
+              { evidenceId: EVIDENCE_A, relativePath: "a.log", lineNumber: 2, excerpt: "two", adjacencyReason: "order", uncertainty: ["timezone_missing"], correlationKind: "none", correlationId: null, originalTimestamp: "03/10 01:11:00", normalizedUtc: null },
+              { evidenceId: EVIDENCE_A, relativePath: "a.log", lineNumber: 3, excerpt: "three", adjacencyReason: "order", uncertainty: ["timestamp_missing"], correlationKind: "none", correlationId: null, originalTimestamp: null, normalizedUtc: null },
+            ],
+            unknownBuckets: [],
+            bounded: false,
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    const chronology = await screen.findByRole("region", { name: "Merged chronology" });
+    expect(chronology.textContent).toContain("Normalized UTC: 2024-03-10T08:10:00.000Z");
+    expect(chronology.textContent).toContain("Unresolved local time: 03/10 01:11:00");
+    expect(chronology.textContent).toContain("Order only");
+  });
+
   it("restores filters, time window, grouping, and display from a saved view", async () => {
     stubFetch();
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
@@ -845,11 +874,25 @@ describe("Log workbench search hierarchy and progressive disclosure", () => {
 
   it("links timezone uncertainty to the review panel without implying a zone", async () => {
     stubSizedWorkbench(3);
-    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
-    expect(await screen.findByRole("link", { name: "Open Timezone review" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Open Timezone review" }).getAttribute("href")).toBe(
+    render(
+      <>
+        <div hidden>
+          <section id="triage-log-time-capture" tabIndex={-1}>Capture review</section>
+        </div>
+        <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />
+        <section id="triage-log-time" tabIndex={-1} data-testid="visible-timezone-review">
+          Analyze review
+        </section>
+      </>,
+    );
+    const link = await screen.findByRole("link", { name: "Open Timezone review" });
+    expect(link).toBeTruthy();
+    expect(link.getAttribute("href")).toBe(
       "#triage-log-time",
     );
+    fireEvent.click(link);
+    expect(window.location.hash).toBe("#triage-log-time");
+    expect(document.activeElement).toBe(screen.getByTestId("visible-timezone-review"));
     expect(screen.getByText(/nothing here will guess one/i)).toBeTruthy();
   });
 

@@ -366,7 +366,7 @@ Choose **Investigations → Start an investigation**. Enter:
 - an earlier occurrence date when entering historical work.
 
 The structured context fields are searchable and reusable labels. **Entities**
-describe what the investigation concerns. **Sources** describe who or what
+describe what the investigation concerns. **Attribution** describes who or what
 supplied an item. Neither is a global log store. The evidence remains owned by
 this investigation.
 

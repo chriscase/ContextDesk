@@ -75,6 +75,15 @@ export function visibleSectionTarget(section: string): HTMLElement | null {
   return null;
 }
 
+/** Follow an in-page link to the visible copy of a mounted section. */
+export function focusVisibleSectionTarget(section: string): boolean {
+  const target = visibleSectionTarget(section);
+  if (!target) return false;
+  target.focus({ preventScroll: true });
+  target.scrollIntoView?.({ block: "start", inline: "nearest" });
+  return true;
+}
+
 /** What a route address settled on, so a provisional landing can be upgraded. */
 interface AppliedFocus {
   key: string;

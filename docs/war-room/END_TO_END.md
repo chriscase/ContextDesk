@@ -24,6 +24,12 @@ Password: demo
 This is a fixture identity, not an LDAP claim. After sign-in, the account menu
 shows the synthetic display name, username, and access role.
 
+The default demo does not install the separate trusted timezone host. Offset-
+bearing timestamps remain comparable; local timestamps without an offset stay
+unresolved, and timezone review/normalized chronology report that dependency
+as unavailable. Use a separately configured host-backed rehearsal for those
+actions.
+
 If the local address does not load, stop and record the environment failure.
 Do not substitute external data for this walkthrough.
 
@@ -33,7 +39,7 @@ Use the main navigation to distinguish the workspace destinations:
 
 - **Overview** shows recent recorded activity and active investigations.
 - **Investigations** is the searchable inventory.
-- **Sources** contains reusable attribution labels, not global evidence.
+- **Attribution** contains reusable source labels, not global evidence.
 - **Administration** is the admin-only destination for bounded directory
   visibility and workspace group-to-role mappings.
 - **Help** contains searchable operating guidance.
@@ -74,7 +80,7 @@ inspect the investigation-scoped synthetic logs or stack traces.
 
 ![Fully synthetic Capture stage with provenance and investigation-scoped intake](../media/gallery/war-room-capture-analyze.png)
 
-The **Sources** library records who or what produced an item. The actual log,
+The **Attribution** catalog records who or what produced an item. The actual log,
 note, upload, or imported response belongs to this investigation.
 
 Open **Compare**, choose a finding, and follow its evidence link. Confirm the
@@ -104,16 +110,19 @@ and use **Log workbench** before launching a lane:
    page, continue from its position instead of treating the current count as a
    corpus-wide total.
 4. Save a view or bookmark a useful line when you will return to it.
-5. If a line has no timezone, use **Timezone review** to choose its IANA zone,
-   then open **Normalized log chronology**. The workbench never guesses a
-   timezone, year, daylight-saving choice, or clock correction.
+5. In a host-backed rehearsal, if a line has no timezone, use **Timezone
+   review** to choose its IANA zone, then open **Normalized log chronology**.
+   In the default demo, confirm that action reports the trusted host as
+   unavailable. The workbench never guesses a timezone, year, daylight-saving
+   choice, or clock correction.
 
 Nested ZIP members retain their archive paths and are subject to the same
 bounded safety and privacy checks as ordinary files. Rejected members are not
 silently dropped.
 
 Expected result: you can point to the relevant lines and know whether the
-search and chronology are complete enough to support the next question.
+search is complete; chronology is either explicitly normalized by a configured
+trusted host or explicitly unavailable.
 
 ## 2:35 — Inspect frozen evidence and lane attempts
 

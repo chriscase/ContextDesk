@@ -93,13 +93,17 @@ describe("help landing", () => {
   it("opens a screenshot at full size and closes with Escape", () => {
     renderHelp();
     fireEvent.click(screen.getByRole("button", { name: /Walk through a fresh investigation/ }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Expand screenshot: Start with an investigation and give it a specific title." }),
-    );
-    expect(screen.getByRole("dialog")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    const invoker = screen.getByRole("button", { name: "Expand screenshot: Start with an investigation and give it a specific title." });
+    fireEvent.click(invoker);
+    const dialog = screen.getByRole("dialog");
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(dialog.getAttribute("aria-describedby")).toBe("help-lightbox-description");
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(invoker);
   });
 });
 
