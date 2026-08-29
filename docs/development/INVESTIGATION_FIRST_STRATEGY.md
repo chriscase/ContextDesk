@@ -47,7 +47,7 @@ The focused `InvestigationFirst.test.tsx` and shell strategy suites cover the
 fast form, shared create payload, sparse detail, evidence annotation/inventory,
 explicit War Room technical-tool handoff, viewer restrictions, safe selection,
 stale-detail suppression, strategy switching, and strategy-aware titles. The
-full web suite passes 663 tests across 43 files; web typecheck, lint, and the
+full web suite passes 664 tests across 43 files; web typecheck, lint, and the
 production build are green.
 
 A hands-on synthetic-demo acceptance pass also verified the rendered strategy

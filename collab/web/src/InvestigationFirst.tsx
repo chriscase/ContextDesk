@@ -222,6 +222,8 @@ export function InvestigationFirst(props: {
   const [uploading, setUploading] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const detailGeneration = useRef(0);
+  const activeFocusCaseId = useRef(props.focusCaseId);
+  activeFocusCaseId.current = props.focusCaseId;
 
   const refreshCases = useCallback(async () => {
     setLoading(true);
@@ -239,6 +241,7 @@ export function InvestigationFirst(props: {
   }, []);
 
   const refreshDetail = useCallback(async (caseId: string) => {
+    if (caseId !== activeFocusCaseId.current) return;
     const generation = detailGeneration.current + 1;
     detailGeneration.current = generation;
     setDetailLoading(true);
@@ -249,23 +252,28 @@ export function InvestigationFirst(props: {
         protectedApiFetch(`/api/cases/${caseId}/evidence`),
         protectedApiFetch(`/api/cases/${caseId}/contributions`),
       ]);
-      if (generation !== detailGeneration.current) return;
+      if (generation !== detailGeneration.current || caseId !== activeFocusCaseId.current) return;
       if (!caseResponse.ok) throw new Error(await errorMessage(caseResponse, "This investigation could not be opened."));
-      const caseBody = (await caseResponse.json()) as InvestigationRow;
+      const [caseBody, evidenceBody, contributionsBody] = await Promise.all([
+        caseResponse.json() as Promise<InvestigationRow>,
+        evidenceResponse.ok ? evidenceResponse.json() as Promise<{ artifacts?: EvidenceRow[] }> : Promise.resolve({ artifacts: [] }),
+        contributionsResponse.ok ? contributionsResponse.json() as Promise<{ contributions?: ContributionRow[] }> : Promise.resolve({ contributions: [] }),
+      ]);
+      if (generation !== detailGeneration.current || caseId !== activeFocusCaseId.current) return;
       setSelected(caseBody);
-      setEvidence(evidenceResponse.ok ? ((await evidenceResponse.json()) as { artifacts?: EvidenceRow[] }).artifacts ?? [] : []);
-      setContributions(contributionsResponse.ok ? ((await contributionsResponse.json()) as { contributions?: ContributionRow[] }).contributions ?? [] : []);
+      setEvidence(evidenceBody.artifacts ?? []);
+      setContributions(contributionsBody.contributions ?? []);
       props.onFocusedCaseTitle?.(caseBody.title);
       setError(null);
     } catch (cause) {
-      if (generation !== detailGeneration.current) return;
+      if (generation !== detailGeneration.current || caseId !== activeFocusCaseId.current) return;
       setSelected(null);
       setEvidence([]);
       setContributions([]);
       setError(cause instanceof Error ? cause.message : "This investigation could not be opened.");
       props.onFocusedCaseTitle?.(null);
     } finally {
-      if (generation === detailGeneration.current) setDetailLoading(false);
+      if (generation === detailGeneration.current && caseId === activeFocusCaseId.current) setDetailLoading(false);
     }
   }, [props.onFocusedCaseTitle]);
 

@@ -140,11 +140,43 @@ describe("Investigation First", () => {
       return { ok: false, status: 404, json: async () => ({}) };
     }));
     const { rerender } = render(<InvestigationFirst {...commonProps} focusCaseId="a" />);
+    await waitFor(() => expect(resolveA).toBeTypeOf("function"));
     rerender(<InvestigationFirst {...commonProps} focusCaseId="b" />);
     await waitFor(() => expect(resolveB).toBeTypeOf("function"));
     resolveB?.(caseB);
     expect(await screen.findByRole("heading", { name: "Investigation B" })).toBeTruthy();
     resolveA?.(caseA);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByRole("heading", { name: "Investigation B" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Investigation A" })).toBeNull();
+  });
+
+  it("does not reopen an old investigation when its evidence upload finishes late", async () => {
+    let resolveUpload: ((value: unknown) => void) | undefined;
+    const caseA = { ...baseCase, id: "a", title: "Investigation A" };
+    const caseB = { ...baseCase, id: "b", title: "Investigation B" };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [caseA, caseB] }) };
+      if (url === "/api/cases/a/evidence" && init?.method === "POST") {
+        return new Promise((resolve) => { resolveUpload = resolve; });
+      }
+      if (url === "/api/cases/a") return { ok: true, json: async () => caseA };
+      if (url === "/api/cases/b") return { ok: true, json: async () => caseB };
+      if (url.endsWith("/evidence") || url.endsWith("/contributions")) return { ok: true, json: async () => ({ artifacts: [], contributions: [] }) };
+      if (url.endsWith("/lifecycle")) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    const { rerender } = render(<InvestigationFirst {...commonProps} focusCaseId="a" />);
+    expect(await screen.findByRole("heading", { name: "Investigation A" })).toBeTruthy();
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    fireEvent.change(screen.getByLabelText("File"), { target: { files: [file] } });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), { target: { value: "Operator notes" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    await waitFor(() => expect(resolveUpload).toBeTypeOf("function"));
+    rerender(<InvestigationFirst {...commonProps} focusCaseId="b" />);
+    expect(await screen.findByRole("heading", { name: "Investigation B" })).toBeTruthy();
+    resolveUpload?.({ ok: true, json: async () => ({}) });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.getByRole("heading", { name: "Investigation B" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Investigation A" })).toBeNull();
