@@ -257,6 +257,103 @@ describe("Log workbench", () => {
     expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
   });
 
+  it("invalidates scoped results when a bookmark opens another evidence pane", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-second-file",
+              note: "Open second file",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: EVIDENCE_B, lineNumber: 1 },
+              shareSafeToken: "bookmark-second-file-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/review-queue")) {
+          return jsonResponse({ candidateCount: 0 });
+        }
+        if (url.includes("/workbench/page")) {
+          return jsonResponse({
+            evidenceId: url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A,
+            relativePath: url.includes(encodeURIComponent(EVIDENCE_B))
+              ? '<img src=x onerror=alert(1)>.log'
+              : "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        if (url.includes("/workbench/search")) {
+          return jsonResponse({
+            matches: [{
+              evidenceId: EVIDENCE_A,
+              relativePath: "gateway/edge.log",
+              rotationFamily: "gateway/edge.log",
+              lineNumber: 1,
+              byteOffset: 0,
+              text: "result scoped only to the first pane",
+              wrapped: false,
+              originalTimestamp: null,
+              normalizedUtc: null,
+              parseClass: "missing",
+              contextBefore: [],
+              contextAfter: [],
+            }],
+            returned: 1,
+            bounded: false,
+            atLeast: 1,
+            nextCursor: null,
+            nextPageCursor: null,
+            coverageComplete: true,
+            timeFilterUnknownReason: null,
+          });
+        }
+        if (url.includes("/workbench/chronology")) {
+          return jsonResponse({
+            events: [{
+              evidenceId: EVIDENCE_A,
+              relativePath: "gateway/edge.log",
+              lineNumber: 1,
+              excerpt: "chronology scoped only to the first pane",
+              adjacencyReason: "order",
+              uncertainty: [],
+              correlationKind: "none",
+              correlationId: null,
+              originalTimestamp: null,
+              normalizedUtc: null,
+            }],
+            unknownBuckets: [],
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    expect(await screen.findByText("result scoped only to the first pane")).toBeTruthy();
+    expect(await screen.findByText("chronology scoped only to the first pane")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second file" }));
+
+    expect(screen.getByText(/2 of 4 panes open/)).toBeTruthy();
+    expect(screen.queryByText("result scoped only to the first pane")).toBeNull();
+    expect(screen.queryByText("chronology scoped only to the first pane")).toBeNull();
+    expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
   it("does not publish search or chronology responses after the file scope is cleared", async () => {
     stubFetch();
     const baseFetch = fetch as ReturnType<typeof vi.fn>;

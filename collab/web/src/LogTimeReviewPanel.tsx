@@ -192,33 +192,88 @@ export function LogTimeReviewPanel(props: {
   // disappears rather than reporting an error for a feature nobody enabled.
   const [unavailable, setUnavailable] = useState(false);
   const requestVersion = useRef(0);
+  const actionVersion = useRef(0);
+  const currentCaseIdRef = useRef(props.caseId);
+  currentCaseIdRef.current = props.caseId;
+  const mountedRef = useRef(true);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestVersion.current += 1;
+      actionVersion.current += 1;
+    };
+  }, []);
+
+  const isCurrentCase = useCallback(
+    (caseId: string) => mountedRef.current && currentCaseIdRef.current === caseId,
+    [],
+  );
+
+  // The workspace normally keys this panel by investigation. Keep the
+  // component safe when it is embedded or tested without that key as well:
+  // no state, selection, notice, or pending request belongs to the next case.
+  useEffect(() => {
+    requestVersion.current += 1;
+    actionVersion.current += 1;
+    setState(null);
+    setDependents([]);
+    setSelectedSource(null);
+    setSourceFilter("");
+    setSourceLimit(INITIAL_SOURCE_ROWS);
+    setZone("");
+    setPreview(null);
+    setBusy(null);
+    setError(null);
+    setNotice(null);
+    setUnavailable(false);
+  }, [props.caseId]);
+
+  const load = useCallback(async (preserveError = false) => {
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return;
     const version = ++requestVersion.current;
     setBusy("load");
+    if (!preserveError) setError(null);
     try {
       const response = await protectedApiFetch(
-        `/api/cases/${props.caseId}/log-time`,
+        `/api/cases/${requestCaseId}/log-time`,
       );
       if (response.status === 404) {
-        if (requestVersion.current === version) setUnavailable(true);
+        if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+          setUnavailable(true);
+          setState(null);
+          setDependents([]);
+        }
         return;
       }
       if (!response.ok) {
-        setError(await errorText(response, "Time review could not be loaded."));
+        const message = await errorText(response, "Time review could not be loaded.");
+        if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+          setState(null);
+          setDependents([]);
+          setError(message);
+        }
         return;
       }
       const body = (await response.json()) as StateResponse;
-      if (requestVersion.current !== version) return;
+      if (!isCurrentCase(requestCaseId) || requestVersion.current !== version) return;
       setUnavailable(false);
       setState(body.state);
       setDependents(body.dependents ?? []);
     } catch {
-      setError("Time review could not be loaded.");
+      if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+        setState(null);
+        setDependents([]);
+        setError("Time review could not be loaded.");
+      }
     } finally {
-      setBusy(null);
+      if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+        setBusy(null);
+      }
     }
-  }, [props.caseId]);
+  }, [isCurrentCase, props.caseId]);
 
   useEffect(() => {
     void load();
@@ -241,12 +296,13 @@ export function LogTimeReviewPanel(props: {
   const hiddenSourceCount = Math.max(0, filteredSources.length - renderedSources.length);
 
   /** Any durable change invalidates the preview a reviewer was looking at. */
-  function resetAfterChange(message: string) {
+  function resetAfterChange(message: string, requestCaseId: string) {
+    if (!isCurrentCase(requestCaseId)) return;
     setPreview(null);
     setNotice(message);
     window.dispatchEvent(
       new CustomEvent("contextdesk:log-time-changed", {
-        detail: { caseId: props.caseId },
+        detail: { caseId: requestCaseId },
       }),
     );
     void load();
@@ -259,6 +315,9 @@ export function LogTimeReviewPanel(props: {
     fallback: string,
   ): Promise<unknown | null> {
     if (props.readOnly || !props.canWrite || busy) return null;
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return null;
+    const version = ++actionVersion.current;
     setError(null);
     setNotice(null);
     setBusy(phase);
@@ -266,7 +325,7 @@ export function LogTimeReviewPanel(props: {
       // Build takes no body. Declaring a JSON content-type without one makes
       // Fastify reject the request before it reaches the route.
       const response = await protectedApiFetch(
-        `/api/cases/${props.caseId}/log-time/${path}`,
+        `/api/cases/${requestCaseId}/log-time/${path}`,
         body === undefined
           ? { method: "POST" }
           : {
@@ -275,33 +334,45 @@ export function LogTimeReviewPanel(props: {
               body: JSON.stringify(body),
             },
       );
+      if (!isCurrentCase(requestCaseId) || actionVersion.current !== version) return null;
       if (!response.ok) {
-        setError(await errorText(response, fallback));
+        const message = await errorText(response, fallback);
+        if (!isCurrentCase(requestCaseId) || actionVersion.current !== version) return null;
+        setError(message);
         // A conflict means someone else moved the corpus. Re-read so the
         // reviewer is deciding against what is actually there now.
-        if (response.status === 409) void load();
+        if (response.status === 409) void load(true);
         return null;
       }
-      return await response.json();
+      const result = await response.json();
+      return isCurrentCase(requestCaseId) && actionVersion.current === version
+        ? result
+        : null;
     } catch {
-      setError(fallback);
+      if (isCurrentCase(requestCaseId) && actionVersion.current === version) {
+        setError(fallback);
+      }
       return null;
     } finally {
-      setBusy(null);
+      if (isCurrentCase(requestCaseId) && actionVersion.current === version) {
+        setBusy(null);
+      }
     }
   }
 
   async function runBuild() {
+    const requestCaseId = props.caseId;
     const result = await post(
       "build",
       undefined,
       "build",
       "The log corpus could not be built.",
     );
-    if (result) resetAfterChange("Log corpus built from this case's files.");
+    if (result) resetAfterChange("Log corpus built from this case's files.", requestCaseId);
   }
 
   async function runPreview(source: string) {
+    const requestCaseId = props.caseId;
     if (!state?.corpusId || !zone.trim()) return;
     const result = (await post(
       "preview",
@@ -314,10 +385,11 @@ export function LogTimeReviewPanel(props: {
       "preview",
       "That timezone could not be previewed.",
     )) as Preview | null;
-    if (result) setPreview(result);
+    if (result && isCurrentCase(requestCaseId)) setPreview(result);
   }
 
   async function runApply() {
+    const requestCaseId = props.caseId;
     // A declaration that resolves no timestamps cannot publish an event-time
     // revision. Keep the honest preview visible, but do not offer a request
     // which the host must reject as an empty revision.
@@ -335,14 +407,16 @@ export function LogTimeReviewPanel(props: {
       "apply",
       "That timezone could not be applied.",
     );
-    if (result) {
+    if (result && isCurrentCase(requestCaseId)) {
       resetAfterChange(
         `${preview.ianaTimezone} applied to ${preview.source}. ${lines(preview.affectedRecords)} now have an exact time.`,
+        requestCaseId,
       );
     }
   }
 
   async function runClear(source: string) {
+    const requestCaseId = props.caseId;
     if (!state) return;
     const result = await post(
       "clear",
@@ -355,14 +429,16 @@ export function LogTimeReviewPanel(props: {
       "clear",
       "That declaration could not be cleared.",
     );
-    if (result) {
+    if (result && isCurrentCase(requestCaseId)) {
       resetAfterChange(
         `Declaration removed from ${source}. Those lines are back to file order only.`,
+        requestCaseId,
       );
     }
   }
 
   async function runUndo() {
+    const requestCaseId = props.caseId;
     if (!state) return;
     const result = await post(
       "undo",
@@ -374,7 +450,9 @@ export function LogTimeReviewPanel(props: {
       "undo",
       "The last time change could not be undone.",
     );
-    if (result) resetAfterChange("Last time change undone.");
+    if (result && isCurrentCase(requestCaseId)) {
+      resetAfterChange("Last time change undone.", requestCaseId);
+    }
   }
 
   const heading = (

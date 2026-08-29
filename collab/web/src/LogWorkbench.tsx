@@ -624,6 +624,11 @@ export function LogWorkbench(props: {
       const requestCaseId = props.caseId;
       if (!isCurrentCase(requestCaseId)) return;
       if (!panes.includes(row.evidenceId) && panes.length < MAX_PANES) {
+        // A bookmark may point into a file outside the current pane scope.
+        // Opening it expands both the search and chronology corpus, so results
+        // that described the previous scope must disappear before the pane is
+        // added just as they do for an explicit selector change.
+        invalidateScopedResults();
         setPanes((current) =>
           current.includes(row.evidenceId) ? current : [...current, row.evidenceId],
         );
@@ -645,7 +650,15 @@ export function LogWorkbench(props: {
       if (syncScroll) setScrollTop(offset);
       setScrollByPane((current) => ({ ...current, [row.evidenceId]: offset }));
     },
-    [isCurrentCase, loadPane, pageByPane, panes, props.caseId, syncScroll],
+    [
+      invalidateScopedResults,
+      isCurrentCase,
+      loadPane,
+      pageByPane,
+      panes,
+      props.caseId,
+      syncScroll,
+    ],
   );
 
   function selectMatch(index: number) {

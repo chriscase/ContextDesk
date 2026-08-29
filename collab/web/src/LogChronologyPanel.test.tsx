@@ -1,8 +1,24 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LogChronologyPanel } from "./LogChronologyPanel.js";
 
 const CASE_ID = "11111111-1111-4111-8111-111111111111";
+const CASE_B = "99999999-9999-4999-8999-999999999999";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 function row(overrides: Record<string, unknown> = {}) {
   return {
@@ -142,10 +158,87 @@ describe("LogChronologyPanel", () => {
     render(<LogChronologyPanel caseId={CASE_ID} />);
     await screen.findByRole("table");
 
-    window.dispatchEvent(
-      new CustomEvent("contextdesk:log-time-changed", { detail: { caseId: CASE_ID } }),
-    );
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", { detail: { caseId: CASE_ID } }),
+      );
+    });
     expect(await screen.findByText("fresh chronology after timezone change")).toBeTruthy();
+  });
+
+  it("clears the old chronology while a timezone refresh is pending and keeps it clear on failure", async () => {
+    const refreshGate = deferred<Response>();
+    let reads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        reads += 1;
+        if (reads === 1) return jsonResponse(page());
+        return refreshGate.promise;
+      }),
+    );
+    render(<LogChronologyPanel caseId={CASE_ID} />);
+    expect(await screen.findByText("edge accepted synthetic request")).toBeTruthy();
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", { detail: { caseId: CASE_ID } }),
+      );
+    });
+    expect(screen.queryByText("edge accepted synthetic request")).toBeNull();
+    expect(screen.getByText("Loading chronology…")).toBeTruthy();
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse({ error: "refresh failed" }, 503));
+      await refreshGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "refresh failed",
+    );
+    expect(screen.queryByText("edge accepted synthetic request")).toBeNull();
+    expect(screen.queryByText(/revision 2/)).toBeNull();
+  });
+
+  it("does not publish a delayed chronology from a previous investigation", async () => {
+    const oldCaseLoad = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes(`/api/cases/${CASE_ID}/`)) return oldCaseLoad.promise;
+        if (url.includes(`/api/cases/${CASE_B}/`)) {
+          return jsonResponse(
+            page({
+              caseId: CASE_B,
+              rows: [row({ source: "case-b/current.log", message: "current case B row" })],
+              totalMatched: 1,
+              orderOnlyCount: 0,
+              timeQuality: "wall",
+            }),
+          );
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(<LogChronologyPanel caseId={CASE_ID} />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    view.rerender(<LogChronologyPanel caseId={CASE_B} />);
+    expect(await screen.findByText("current case B row")).toBeTruthy();
+
+    await act(async () => {
+      oldCaseLoad.resolve(
+        jsonResponse(
+          page({ rows: [row({ message: "stale case A row" })], totalMatched: 1 }),
+        ),
+      );
+      await oldCaseLoad.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByText("current case B row")).toBeTruthy();
+    expect(screen.queryByText("stale case A row")).toBeNull();
   });
 });
 

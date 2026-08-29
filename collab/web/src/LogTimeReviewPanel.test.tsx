@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
 
@@ -8,7 +8,23 @@ afterEach(() => {
 });
 
 const CASE_ID = "11111111-1111-4111-8111-111111111111";
+const CASE_B = "99999999-9999-4999-8999-999999999999";
 const FINGERPRINT = "a".repeat(64);
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 function sourceStatus(overrides: Record<string, unknown> = {}) {
   return {
@@ -343,6 +359,78 @@ describe("LogTimeReviewPanel", () => {
     expect((onTimeChanged.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
       caseId: CASE_ID,
     });
+    window.removeEventListener("contextdesk:log-time-changed", onTimeChanged);
+  });
+
+  it("does not let a delayed write update or reload a later investigation", async () => {
+    const applyGate = deferred<Response>();
+    const caseBLoad = deferred<Response>();
+    const onTimeChanged = vi.fn();
+    window.addEventListener("contextdesk:log-time-changed", onTimeChanged);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes(`/api/cases/${CASE_ID}/log-time/preview`)) {
+          return jsonResponse(PREVIEW);
+        }
+        if (url.includes(`/api/cases/${CASE_ID}/log-time/apply`)) {
+          return applyGate.promise;
+        }
+        if (url.endsWith(`/api/cases/${CASE_ID}/log-time`)) {
+          return jsonResponse(stateBody());
+        }
+        if (url.endsWith(`/api/cases/${CASE_B}/log-time`)) {
+          return caseBLoad.promise;
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(panel());
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /apply America\/Chicago to this file/i }),
+    );
+
+    view.rerender(
+      <LogTimeReviewPanel caseId={CASE_B} canWrite readOnly={false} />,
+    );
+    await waitFor(() => {
+      expect(screen.queryByText(/5 lines still in file order only/i)).toBeNull();
+      expect(screen.getByText(/Loading time review/i)).toBeTruthy();
+    });
+
+    await act(async () => {
+      applyGate.resolve(jsonResponse({ schemaId: "cd-collab.log_time_outcome.v1" }));
+      await applyGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    const oldCaseLoads = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([input]) => String(input).endsWith(`/api/cases/${CASE_ID}/log-time`),
+    );
+    expect(oldCaseLoads).toHaveLength(1);
+    expect(onTimeChanged).not.toHaveBeenCalled();
+    expect(screen.queryByText(/America\/Chicago applied/i)).toBeNull();
+
+    await act(async () => {
+      caseBLoad.resolve(
+        jsonResponse(
+          stateBody({
+            caseId: CASE_B,
+            sources: [sourceStatus({ source: "case-b/current.log" })],
+          }),
+        ),
+      );
+      await caseBLoad.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(await screen.findByText("case-b/current.log")).toBeTruthy();
     window.removeEventListener("contextdesk:log-time-changed", onTimeChanged);
   });
 
