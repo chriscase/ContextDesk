@@ -98,6 +98,25 @@ describe("Investigation First", () => {
     expect(onOpenAdvancedTools).toHaveBeenCalledWith("sparse", "analyze");
   });
 
+  it("keeps evidence selection safe and sends file annotations through the protected route", async () => {
+    const { requests } = stubFetch({
+      cases: [{ ...baseCase, id: "case-1" }],
+      artifacts: [{ id: "e1", kind: "attachment", filename: "notes.txt", contentHash: null, verificationStatus: "unverified", privacyClass: "owner_only" }],
+    });
+    render(<InvestigationFirst {...commonProps} focusCaseId="case-1" />);
+    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
+    const checkbox = screen.getByRole("checkbox");
+    fireEvent.click(checkbox);
+    expect((screen.getByRole("button", { name: "Move selected to trash" }) as HTMLButtonElement).disabled).toBe(true);
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    fireEvent.change(screen.getByLabelText("File"), { target: { files: [file] } });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), { target: { value: "Operator notes" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    await waitFor(() => expect(requests.some((request) => request.url.endsWith("/evidence") && request.init?.method === "POST")).toBe(true));
+    const uploadRequest = requests.find((request) => request.url.endsWith("/evidence") && request.init?.method === "POST");
+    expect(JSON.parse(String(uploadRequest?.init?.body))).toMatchObject({ filename: "notes.txt", summary: "Operator notes", kind: "attachment" });
+  });
+
   it("does not expose creation to a viewer", async () => {
     stubFetch();
     render(<InvestigationFirst {...commonProps} canWrite={false} />);
