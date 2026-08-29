@@ -335,9 +335,30 @@ export function LogWorkbench(props: {
   const loadedPanes = useRef<Set<string>>(new Set());
   /** The first available file is selected once per investigation, never after an explicit clear. */
   const defaultPaneCase = useRef<string | null>(null);
+  /** Latest pane selection for async inventory reconciliation. */
+  const panesRef = useRef(panes);
+  panesRef.current = panes;
   /** Ignore async results that were started against an obsolete file selection. */
   const searchRequestGeneration = useRef(0);
   const chronologyRequestGeneration = useRef(0);
+  const loadRequestGeneration = useRef(0);
+
+  const invalidateSearchResults = useCallback(() => {
+    searchRequestGeneration.current += 1;
+    setSearch(null);
+    setSearching(false);
+    setError(null);
+    setNotice(null);
+  }, []);
+
+  const invalidateChronologyResults = useCallback(() => {
+    chronologyRequestGeneration.current += 1;
+    setChronology(null);
+    setUnknownBuckets([]);
+    setChronologyBusy(false);
+    setError(null);
+    setNotice(null);
+  }, []);
 
   const invalidateScopedResults = useCallback(() => {
     searchRequestGeneration.current += 1;
@@ -347,6 +368,8 @@ export function LogWorkbench(props: {
     setUnknownBuckets([]);
     setSearching(false);
     setChronologyBusy(false);
+    setError(null);
+    setNotice(null);
   }, []);
 
   const selectedItems = useMemo(
@@ -381,18 +404,23 @@ export function LogWorkbench(props: {
     setFileScrollTop(0);
   }, [fileQuery]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (options?: { invalidateResults?: boolean }) => {
+    const requestGeneration = ++loadRequestGeneration.current;
+    if (options?.invalidateResults) invalidateScopedResults();
     setLoadState("loading");
     setError(null);
     loadedPanes.current.clear();
     try {
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench`);
+      if (loadRequestGeneration.current !== requestGeneration) return;
       if (response.status === 401 || response.status === 403) {
         setLoadState("unauthorized");
         return;
       }
       if (!response.ok) {
-        setError(await errorText(response, "The log workbench could not be loaded."));
+        const message = await errorText(response, "The log workbench could not be loaded.");
+        if (loadRequestGeneration.current !== requestGeneration) return;
+        setError(message);
         setLoadState("error");
         return;
       }
@@ -402,10 +430,14 @@ export function LogWorkbench(props: {
         corpusTruncated?: boolean;
         unreadFiles?: string[];
       };
+      if (loadRequestGeneration.current !== requestGeneration) return;
       const nextItems = body.items ?? [];
+      const availableIds = new Set(nextItems.map((item) => item.evidenceId));
+      if (panesRef.current.some((id) => !availableIds.has(id))) {
+        invalidateScopedResults();
+      }
       setItems(nextItems);
       setPanes((current) => {
-        const availableIds = new Set(nextItems.map((item) => item.evidenceId));
         const valid = current.filter((id) => availableIds.has(id));
         if (defaultPaneCase.current !== props.caseId && nextItems.length > 0) {
           defaultPaneCase.current = props.caseId;
@@ -419,51 +451,61 @@ export function LogWorkbench(props: {
       setLoadState("ready");
       try {
         const viewsRes = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/views`);
+        if (loadRequestGeneration.current !== requestGeneration) return;
         if (viewsRes.ok) {
           const parsed = (await viewsRes.json()) as { views?: SavedView[] };
+          if (loadRequestGeneration.current !== requestGeneration) return;
           setViews(parsed.views ?? []);
         }
       } catch {
+        if (loadRequestGeneration.current !== requestGeneration) return;
         setViews([]);
       }
       try {
         const bookmarksRes = await protectedApiFetch(
           `/api/cases/${props.caseId}/workbench/bookmarks`,
         );
+        if (loadRequestGeneration.current !== requestGeneration) return;
         if (bookmarksRes.ok) {
           const parsed = (await bookmarksRes.json()) as { bookmarks?: BookmarkRow[] };
+          if (loadRequestGeneration.current !== requestGeneration) return;
           setBookmarks(parsed.bookmarks ?? []);
         }
       } catch {
+        if (loadRequestGeneration.current !== requestGeneration) return;
         setBookmarks([]);
       }
       try {
         const queueRes = await protectedApiFetch(
           `/api/cases/${props.caseId}/workbench/review-queue`,
         );
+        if (loadRequestGeneration.current !== requestGeneration) return;
         if (queueRes.ok) {
           const parsed = (await queueRes.json()) as { candidateCount?: number };
+          if (loadRequestGeneration.current !== requestGeneration) return;
           setReviewCount(parsed.candidateCount ?? 0);
         }
       } catch {
+        if (loadRequestGeneration.current !== requestGeneration) return;
         setReviewCount(null);
       }
     } catch {
+      if (loadRequestGeneration.current !== requestGeneration) return;
       setError("The log workbench could not be loaded.");
       setLoadState("error");
     }
-  }, [props.caseId]);
+  }, [invalidateScopedResults, props.caseId]);
 
   useEffect(() => {
     if (props.active === false) return;
-    void load();
+    void load({ invalidateResults: true });
   }, [load, props.active]);
 
   useEffect(() => {
     const reload = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId && detail.caseId !== props.caseId) return;
-      void load();
+      void load({ invalidateResults: true });
     };
     window.addEventListener("contextdesk:corpus-intake-committed", reload);
     window.addEventListener("contextdesk:snapshot-frozen", reload);
@@ -795,10 +837,8 @@ export function LogWorkbench(props: {
       void runSearch();
     }
     if (event.key === "Escape") {
+      invalidateSearchResults();
       setQuery("");
-      searchRequestGeneration.current += 1;
-      setSearching(false);
-      setSearch(null);
     }
     if (event.key === "F3" || ((event.key === "g" || event.key === "G") && (event.metaKey || event.ctrlKey))) {
       event.preventDefault();
@@ -863,7 +903,7 @@ export function LogWorkbench(props: {
             {error}
           </p>
         </header>
-        <button type="button" onClick={() => void load()}>
+        <button type="button" onClick={() => void load({ invalidateResults: true })}>
           Try again
         </button>
       </section>
@@ -1099,7 +1139,10 @@ export function LogWorkbench(props: {
               <input
                 type="search"
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setQuery(event.target.value);
+                }}
                 onKeyDown={onSearchKey}
                 aria-label="Find in logs"
                 placeholder="Message, error, identifier…"
@@ -1161,7 +1204,10 @@ export function LogWorkbench(props: {
               <span>Match</span>
               <select
                 value={mode}
-                onChange={(event) => setMode(event.target.value as typeof mode)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setMode(event.target.value as typeof mode);
+                }}
                 aria-label="Match mode"
               >
                 <option value="literal">Literal</option>
@@ -1173,7 +1219,10 @@ export function LogWorkbench(props: {
               <span>Include</span>
               <input
                 value={include}
-                onChange={(event) => setInclude(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setInclude(event.target.value);
+                }}
                 aria-label="Include terms"
               />
             </label>
@@ -1181,7 +1230,10 @@ export function LogWorkbench(props: {
               <span>Exclude</span>
               <input
                 value={exclude}
-                onChange={(event) => setExclude(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setExclude(event.target.value);
+                }}
                 aria-label="Exclude terms"
               />
             </label>
@@ -1189,7 +1241,10 @@ export function LogWorkbench(props: {
               <span>Severity</span>
               <input
                 value={severity}
-                onChange={(event) => setSeverity(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setSeverity(event.target.value);
+                }}
                 aria-label="Severity"
               />
             </label>
@@ -1197,7 +1252,10 @@ export function LogWorkbench(props: {
               <span>From (UTC)</span>
               <input
                 value={timeFrom}
-                onChange={(event) => setTimeFrom(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setTimeFrom(event.target.value);
+                }}
                 aria-label="From (UTC)"
               />
             </label>
@@ -1205,7 +1263,10 @@ export function LogWorkbench(props: {
               <span>To (UTC)</span>
               <input
                 value={timeTo}
-                onChange={(event) => setTimeTo(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setTimeTo(event.target.value);
+                }}
                 aria-label="To (UTC)"
               />
             </label>
@@ -1440,7 +1501,10 @@ export function LogWorkbench(props: {
               <span>Group by</span>
               <select
                 value={grouping}
-                onChange={(event) => setGrouping(event.target.value)}
+                onChange={(event) => {
+                  invalidateChronologyResults();
+                  setGrouping(event.target.value);
+                }}
                 aria-label="Chronology grouping"
               >
                 <option value="none">No grouping</option>

@@ -15,6 +15,7 @@ afterEach(() => {
 });
 
 const CASE_ID = "11111111-1111-4111-8111-111111111111";
+const CASE_B = "99999999-9999-4999-8999-999999999999";
 const EVIDENCE_A = "22222222-2222-4222-8222-222222222222";
 const EVIDENCE_B = "55555555-5555-4555-8555-555555555555";
 
@@ -249,6 +250,11 @@ describe("Log workbench", () => {
     expect(navigation.textContent).toContain("1 of 1");
     expect(screen.getByRole("button", { name: "Previous match" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Next match" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Find in logs"), {
+      target: { value: "a different request" },
+    });
+    expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
+    expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
   });
 
   it("does not publish search or chronology responses after the file scope is cleared", async () => {
@@ -322,6 +328,191 @@ describe("Log workbench", () => {
 
     expect(screen.queryByText("obsolete search result")).toBeNull();
     expect(screen.queryByText("obsolete chronology result")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
+  it("does not publish responses started for a previous investigation", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const searchGate = deferred<Response>();
+    const chronologyGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/search")) return searchGate.promise;
+        if (url.includes("/workbench/chronology")) return chronologyGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    const view = render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    view.rerender(<LogWorkbench caseId={CASE_B} canWrite readOnly={false} />);
+
+    await act(async () => {
+      searchGate.resolve(jsonResponse({
+        matches: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "case-a.log",
+          rotationFamily: "case-a.log",
+          lineNumber: 1,
+          byteOffset: 0,
+          text: "previous investigation search",
+          wrapped: false,
+          originalTimestamp: null,
+          normalizedUtc: null,
+          parseClass: "missing",
+          contextBefore: [],
+          contextAfter: [],
+        }],
+        returned: 1,
+        bounded: false,
+        atLeast: 1,
+        nextCursor: null,
+        timeFilterUnknownReason: null,
+      }));
+      chronologyGate.resolve(jsonResponse({
+        events: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "case-a.log",
+          lineNumber: 1,
+          excerpt: "previous investigation chronology",
+          adjacencyReason: "order",
+          uncertainty: [],
+          correlationKind: "none",
+          correlationId: null,
+          originalTimestamp: null,
+          normalizedUtc: null,
+        }],
+        unknownBuckets: [],
+        bounded: false,
+      }));
+      await Promise.all([searchGate.promise, chronologyGate.promise]);
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText(/1 of 4 panes open/)).toBeTruthy();
+    expect(screen.queryByText("previous investigation search")).toBeNull();
+    expect(screen.queryByText("previous investigation chronology")).toBeNull();
+  });
+
+  it("does not publish a delayed inventory from a previous investigation", async () => {
+    const oldInventory = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith(`/api/cases/${CASE_ID}/workbench`) && !init?.method) {
+          return oldInventory.promise;
+        }
+        if (url.endsWith(`/api/cases/${CASE_B}/workbench`) && !init?.method) {
+          return jsonResponse({
+            items: [{
+              evidenceId: EVIDENCE_B,
+              relativePath: "case-b/current.log",
+              rotationFamily: "case-b/current.log",
+              displayLabel: "current-case-b.log",
+              digest: "b".repeat(64),
+              intakeBatchId: null,
+              privacyClass: "owner_only",
+              lineCount: 1,
+            }],
+            normalizationRevision: 4,
+          });
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          return jsonResponse({
+            evidenceId: EVIDENCE_B,
+            relativePath: "case-b/current.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    view.rerender(<LogWorkbench caseId={CASE_B} canWrite readOnly={false} />);
+    expect((await screen.findAllByText("current-case-b.log")).length).toBeGreaterThan(0);
+
+    await act(async () => {
+      oldInventory.resolve(jsonResponse({
+        items: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "case-a/stale.log",
+          rotationFamily: "case-a/stale.log",
+          displayLabel: "stale-case-a.log",
+          digest: "a".repeat(64),
+          intakeBatchId: null,
+          privacyClass: "owner_only",
+          lineCount: 1,
+        }],
+        normalizationRevision: 3,
+      }));
+      await oldInventory.promise;
+      await Promise.resolve();
+    });
+
+    expect(screen.getAllByText("current-case-b.log").length).toBeGreaterThan(0);
+    expect(screen.queryByText("stale-case-a.log")).toBeNull();
+  });
+
+  it("invalidates pending results when the corpus or request controls change", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const searchGate = deferred<Response>();
+    const chronologyGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/search")) return searchGate.promise;
+        if (url.includes("/workbench/chronology")) return chronologyGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "new query" } });
+    fireEvent.change(screen.getByLabelText("Include terms"), { target: { value: "new filter" } });
+    fireEvent.change(screen.getByLabelText("Chronology grouping"), { target: { value: "component" } });
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }),
+    );
+
+    await act(async () => {
+      searchGate.resolve(jsonResponse({
+        matches: [],
+        returned: 0,
+        bounded: false,
+        atLeast: 0,
+        nextCursor: null,
+        timeFilterUnknownReason: null,
+      }));
+      chronologyGate.resolve(jsonResponse({
+        events: [],
+        unknownBuckets: [],
+        bounded: false,
+      }));
+      await Promise.all([searchGate.promise, chronologyGate.promise]);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
+    expect(screen.queryByText(/Merged chronology built/)).toBeNull();
     expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
   });
