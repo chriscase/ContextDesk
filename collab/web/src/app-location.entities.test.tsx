@@ -36,5 +36,15 @@ describe("the Entities address", () => {
     expect(titleFor({ area: "sources", caseId: null, stage: "situation" })).toBe(
       "Attribution · ContextDesk War Room",
     );
+    expect(titleFor(ENTITIES, null, { surfaceName: "Investigation First" })).toBe(
+      "Entities · ContextDesk Investigation First",
+    );
+    expect(
+      titleFor(
+        { area: "investigations", caseId: "case-1", stage: "analyze" },
+        "Sparse import",
+        { surfaceName: "Investigation First", includeInvestigationStage: false },
+      ),
+    ).toBe("Sparse import · ContextDesk Investigation First");
   });
 });

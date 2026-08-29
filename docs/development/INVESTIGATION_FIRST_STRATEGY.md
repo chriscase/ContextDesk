@@ -2,8 +2,9 @@
 
 ## Status
 
-**Local integration** on `codex/investigation-first-strategy-v1`. This slice is
-not a replacement for the War Room and is not yet a claim about the default
+**Pull request integration** on `codex/investigation-first-strategy-v1` in
+[#1108](https://github.com/chriscase/ContextDesk/pull/1108). This slice is not a
+replacement for the War Room and is not yet a claim about the default
 experience on `main`.
 
 ## Boundary
@@ -20,6 +21,10 @@ checks, case access, audit history, revisions, evidence identity, retention, or
 deletion. Strategy changes preserve the canonical investigation URL and case
 identifier. The explicit technical-tools action opens the reference War Room
 for specialist log exploration; it does not duplicate or weaken that tool.
+Browser-local preferences are namespaced by authenticated username so a shared
+browser does not hand one user's selected presentation to another user. The
+browser title follows the active presentation, while Investigation First omits
+War Room-only stage wording from its title.
 
 ## First slice
 
@@ -38,10 +43,20 @@ for specialist log exploration; it does not duplicate or weaken that tool.
 
 ## Proof
 
-The focused `InvestigationFirst.test.tsx` suite covers the fast form, shared
-create payload, sparse detail, evidence annotation/inventory, explicit War
-Room technical-tool handoff, and viewer restrictions. The full web suite and
-production build must remain green before promotion.
+The focused `InvestigationFirst.test.tsx` and shell strategy suites cover the
+fast form, shared create payload, sparse detail, evidence annotation/inventory,
+explicit War Room technical-tool handoff, viewer restrictions, safe selection,
+stale-detail suppression, strategy switching, and strategy-aware titles. The
+full web suite passes 662 tests across 43 files; web typecheck, lint, and the
+production build are green.
+
+A hands-on synthetic-demo acceptance pass also verified the rendered strategy
+selector, username preference persistence across reload, single-page create,
+explicit existing/new combo-field feedback, reuse of newly recorded product
+and build values, sparse-safe detail, evidence annotations and selection, the
+permanently disabled trash placeholder, and the canonical handoff to the same
+investigation's War Room Analyze/log workbench route. Synthetic state was
+discarded when the demo server stopped.
 
 ## Follow-up
 
@@ -49,4 +64,3 @@ Instance/role governance, server-persisted user preferences, a first-class
 trash/deletion workflow, canonical product/build catalogs, and additional UI
 strategies remain separate milestones. Storage-provider migration, plugins,
 branding, and LDAP administration are intentionally outside this slice.
-

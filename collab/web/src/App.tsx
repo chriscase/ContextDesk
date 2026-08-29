@@ -318,8 +318,11 @@ export function App() {
   sessionRef.current = session;
 
   useEffect(() => {
-    document.title = titleFor(location, focusedCaseTitle);
-  }, [location, focusedCaseTitle]);
+    document.title = titleFor(location, focusedCaseTitle, {
+      surfaceName: uiStrategy.name,
+      includeInvestigationStage: uiStrategy.id === DEFAULT_UI_STRATEGY_ID,
+    });
+  }, [location, focusedCaseTitle, uiStrategy.id, uiStrategy.name]);
 
   useEffect(() => {
     const invalidate = () => {

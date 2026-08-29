@@ -462,42 +462,53 @@ export function parseHashStage(hash: string): StageId | null {
   return LEGACY_ANCHOR_STAGES[raw] ?? null;
 }
 
-export function titleFor(location: ShellLocation, investigationTitle?: string | null): string {
+export function titleFor(
+  location: ShellLocation,
+  investigationTitle?: string | null,
+  options: {
+    surfaceName?: string;
+    includeInvestigationStage?: boolean;
+  } = {},
+): string {
+  const shellTitle = `ContextDesk ${options.surfaceName ?? "War Room"}`;
   if (isSignInLocation(location)) {
-    return "Sign in · ContextDesk War Room";
+    return `Sign in · ${shellTitle}`;
   }
   if (isUnknownLocation(location)) {
-    return "Page not found · ContextDesk War Room";
+    return `Page not found · ${shellTitle}`;
   }
   if (location.area === "entities") {
-    return "Entities · ContextDesk War Room";
+    return `Entities · ${shellTitle}`;
   }
   if (location.area === "sources") {
-    return "Attribution · ContextDesk War Room";
+    return `Attribution · ${shellTitle}`;
   }
   if (location.area === "help") {
-    return "Help · ContextDesk War Room";
+    return `Help · ${shellTitle}`;
   }
   if (location.area === "profile") {
-    return "My profile · ContextDesk War Room";
+    return `My profile · ${shellTitle}`;
   }
   if (location.area === "administration") {
     return isPeopleLocation(location)
-      ? "People · Administration · ContextDesk War Room"
+      ? `People · Administration · ${shellTitle}`
         : isLdapAdminLocation(location)
-          ? "Directory · Administration · ContextDesk War Room"
+          ? `Directory · Administration · ${shellTitle}`
           : isModelPolicyLocation(location)
-            ? "Model use · Administration · ContextDesk War Room"
-          : "Administration · ContextDesk War Room";
+            ? `Model use · Administration · ${shellTitle}`
+          : `Administration · ${shellTitle}`;
   }
   if (location.area === "investigations" && location.caseId) {
+    if (options.includeInvestigationStage === false) {
+      return `${investigationTitle || "Investigation"} · ${shellTitle}`;
+    }
     const stage = location.stage.slice(0, 1).toUpperCase() + location.stage.slice(1);
-    return `${investigationTitle || "Investigation"} · ${stage} · ContextDesk War Room`;
+    return `${investigationTitle || "Investigation"} · ${stage} · ${shellTitle}`;
   }
   if (location.area === "investigations") {
-    return "Investigations · ContextDesk War Room";
+    return `Investigations · ${shellTitle}`;
   }
-  return "ContextDesk War Room";
+  return shellTitle;
 }
 
 export function restoreAfterSignIn(pending: ShellLocation | null): WorkLocation {
