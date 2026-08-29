@@ -198,6 +198,7 @@ test("README alt semantics are enforced for every published image form", () => {
       `<img src="${pathname}">\n`,
       `<img src="${pathname}" data-alt="Synthetic frame">\n`,
       `<img src="${pathname}" aria-alt="Synthetic frame">\n`,
+      `<img src="${pathname}" data-note=" alt='Synthetic frame'">\n`,
     ];
 
     for (const contents of cases) {
@@ -348,6 +349,14 @@ test("reference-style and HTML images cannot bypass the ledger", () => {
     const dataSrc = run(root);
     assert.notEqual(dataSrc.status, 0);
     assert.match(dataSrc.stderr, /without a quoted literal src cannot be checked/);
+
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n<img data-note=" src='${pathname}'" alt="Synthetic frame">\n`,
+    );
+    const embeddedSrc = run(root);
+    assert.notEqual(embeddedSrc.status, 0);
+    assert.match(embeddedSrc.stderr, /without a quoted literal src cannot be checked/);
 
     // 6. A reference image naming a raster with no definition is ambiguous.
     fs.writeFileSync(readme, `# Fixture\n\n![docs/images/smuggled.png]\n`);

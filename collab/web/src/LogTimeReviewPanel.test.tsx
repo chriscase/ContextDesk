@@ -625,7 +625,8 @@ describe("LogTimeReviewPanel", () => {
       refreshGate.resolve(jsonResponse({ error: "Time review refresh failed." }, 500));
       await refreshGate.promise;
     });
-    expect(await screen.findByText("Time review refresh failed.")).toBeTruthy();
+    const refreshError = await screen.findByRole("alert");
+    expect(refreshError.textContent).toContain("Time review refresh failed.");
     expect(screen.queryByText("Loading time review…")).toBeNull();
     expect(screen.queryByText("Time review unavailable.")).toBeNull();
 

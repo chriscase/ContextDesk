@@ -348,29 +348,81 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
 
   // Raw HTML: <img src="target" alt="description">
   for (const match of text.matchAll(/<img\b([^>]*)>/gi)) {
-    // Attribute names must begin at the tag's attribute boundary. A word
-    // boundary alone also matches `data-src` and `data-alt`, which would let a
-    // non-rendered metadata attribute impersonate the real accessibility
-    // contract.
-    const src = match[1].match(
-      /(?:^|\s)src\s*=\s*("([^"]*)"|'([^']*)')/i,
-    );
-    if (!src) {
+    const attributes = parseHtmlAttributes(match[1], document, match[0]);
+    const src = attributes.get("src");
+    if (src === undefined || src === null) {
       throw new Error(
         `${document}: <img> tag without a quoted literal src cannot be checked: ${match[0]}`,
       );
     }
-    const alt = match[1].match(
-      /(?:^|\s)alt\s*=\s*("([^"]*)"|'([^']*)')/i,
-    );
     targets.push({
-      target: src[2] ?? src[3] ?? "",
+      target: src,
       form: "html",
-      alt: alt?.[2] ?? alt?.[3] ?? "",
+      alt: attributes.get("alt") ?? "",
     });
   }
 
   return targets;
+}
+
+/**
+ * Read an HTML tag's attributes from left to right. Regex searching cannot do
+ * this safely: text such as `data-note=" alt='false'"` is one attribute value,
+ * not a second attribute. Only exact, quoted src/alt attributes are useful to
+ * the publication gate; duplicate exact names are rejected as ambiguous.
+ */
+function parseHtmlAttributes(source, document, tag) {
+  const attributes = new Map();
+  let index = 0;
+  while (index < source.length) {
+    while (/\s/.test(source[index] ?? "")) index += 1;
+    if (index >= source.length) break;
+    if (source[index] === "/") {
+      index += 1;
+      continue;
+    }
+
+    const nameStart = index;
+    while (index < source.length && !/[\s=/>]/.test(source[index])) {
+      index += 1;
+    }
+    if (nameStart === index) {
+      throw new Error(`${document}: <img> tag has malformed attributes: ${tag}`);
+    }
+    const name = source.slice(nameStart, index).toLocaleLowerCase("en-US");
+    while (/\s/.test(source[index] ?? "")) index += 1;
+
+    let value = null;
+    if (source[index] === "=") {
+      index += 1;
+      while (/\s/.test(source[index] ?? "")) index += 1;
+      const quote = source[index];
+      if (quote === `"` || quote === `'`) {
+        index += 1;
+        const valueStart = index;
+        while (index < source.length && source[index] !== quote) index += 1;
+        if (index >= source.length) {
+          throw new Error(
+            `${document}: <img> tag has an unterminated quoted attribute: ${tag}`,
+          );
+        }
+        value = source.slice(valueStart, index);
+        index += 1;
+      } else {
+        // Consume an unquoted value as one attribute so its contents cannot be
+        // reinterpreted. src/alt remain null and therefore fail closed.
+        while (index < source.length && !/\s/.test(source[index])) index += 1;
+      }
+    }
+
+    if (attributes.has(name)) {
+      throw new Error(
+        `${document}: <img> tag has duplicate '${name}' attributes: ${tag}`,
+      );
+    }
+    attributes.set(name, value);
+  }
+  return attributes;
 }
 
 function main() {

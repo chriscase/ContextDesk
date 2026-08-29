@@ -528,10 +528,14 @@ export function LogTimeReviewPanel(props: {
   }
 
   if (!state) {
+    const failedLoad = !loadBusy && error !== null;
     return (
       <section className="log-time" id={panelId} aria-labelledby={headingId}>
         {heading}
-        <p className="log-time__copy">
+        <p
+          className={failedLoad ? "log-time__error" : "log-time__copy"}
+          role={failedLoad ? "alert" : (loadBusy || actionBusy ? "status" : undefined)}
+        >
           {loadBusy
             ? "Loading time review…"
             : (error ??
