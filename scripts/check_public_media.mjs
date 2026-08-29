@@ -270,12 +270,11 @@ export function validatePublishedReferences(
     if (!fs.existsSync(documentPath)) continue;
     const text = fs.readFileSync(documentPath, "utf8");
     for (const { target, form, alt } of collectPublishedImageTargets(text, document)) {
+      const localTarget = normalizePublishedLocalTarget(target, document);
       // Remote badges are not repository media and carry no local bytes.
-      if (/^(?:https?:)?\/\//i.test(target) || target.startsWith("data:")) {
-        continue;
-      }
-      if (!RASTER_EXTENSION_RE.test(target)) continue;
-      const normalized = target.replace(/^\.\//, "");
+      if (localTarget === null) continue;
+      if (!RASTER_EXTENSION_RE.test(localTarget)) continue;
+      const normalized = localTarget.replace(/^\.\//, "");
       if (!altTermsByPath.has(normalized)) {
         throw new Error(
           `${document}: published raster '${target}' (${form}) is not in the public media ledger`,
@@ -299,6 +298,29 @@ export function validatePublishedReferences(
   return references;
 }
 
+export function normalizePublishedLocalTarget(target, document = "<memory>") {
+  const decoded = decodeHtmlCharacterReferences(target, document);
+  // HTML accepts numeric character references without a semicolon and has a
+  // much larger named-reference table than this dependency-free validator.
+  // Anything that still looks entity-shaped is therefore ambiguous: letting
+  // it fall through could make the browser see `.png` while the gate sees no
+  // raster extension. Fail closed instead of maintaining a partial allowlist.
+  if (/&(?:#|[a-z])/i.test(decoded)) {
+    throw new Error(
+      `${document}: published image target uses an ambiguous HTML character reference: ${target}`,
+    );
+  }
+  if (/^(?:https?:)?\/\//i.test(decoded) || decoded.startsWith("data:")) {
+    return null;
+  }
+  const withoutSuffix = decoded.split(/[?#]/, 1)[0];
+  try {
+    return decodeURIComponent(withoutSuffix);
+  } catch {
+    throw new Error(`${document}: published image target has invalid percent encoding: ${target}`);
+  }
+}
+
 /**
  * Every syntax GitHub actually renders as an image, not just the inline one.
  *
@@ -311,50 +333,52 @@ export function validatePublishedReferences(
 export function collectPublishedImageTargets(text, document = "<memory>") {
   const targets = [];
 
-  // Link reference definitions: `[label]: target "optional title"`.
-  const definitions = new Map();
-  for (const match of text.matchAll(
-    /^[ \t]{0,3}\[((?:\\.|[^\]\\])+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))(?:[ \t]+["'(].*)?[ \t]*$/gm,
-  )) {
-    definitions.set(
-      match[1].trim().toLowerCase(),
-      match[2] ?? match[3],
-    );
-  }
-
-  // Inline: ![alt](target "title")
-  for (const match of text.matchAll(
-    /!\[((?:\\.|[^\]\\])*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))[^)]*\)/g,
-  )) {
-    targets.push({
-      target: match[2] ?? match[3],
-      form: "inline",
-      alt: match[1],
-    });
-  }
-
-  // Full reference ![alt][label], collapsed ![label][], shortcut ![label].
-  for (const match of text.matchAll(
-    /!\[((?:\\.|[^\]\\])*)\](?:\[((?:\\.|[^\]\\])*)\])?/g,
-  )) {
-    const end = match.index + match[0].length;
-    // Skip the inline form, already collected above.
-    if (match[2] === undefined && text.slice(end, end + 1) === "(") continue;
-    const label = (match[2] && match[2].trim()) || match[1].trim();
-    if (!label) continue;
-    const target = definitions.get(label.toLowerCase());
-    if (target === undefined) {
-      // A reference image with no definition renders as literal text, but an
-      // unresolvable *local raster* reference is the ambiguous case this must
-      // not wave through.
-      if (RASTER_EXTENSION_RE.test(label)) {
-        throw new Error(
-          `${document}: reference image '${match[0]}' has no link definition`,
-        );
-      }
+  const definitions = collectMarkdownDefinitions(text);
+  let cursor = 0;
+  while (cursor < text.length) {
+    const imageStart = text.indexOf("![", cursor);
+    if (imageStart < 0) break;
+    const alt = parseBracketedMarkdown(text, imageStart + 1);
+    if (alt === null) {
+      cursor = imageStart + 2;
       continue;
     }
-    targets.push({ target, form: "reference", alt: match[1] });
+
+    if (text[alt.end] === "(") {
+      const inline = parseInlineMarkdownDestination(text, alt.end);
+      if (inline !== null) {
+        targets.push({ target: inline.target, form: "inline", alt: alt.value });
+        cursor = inline.end;
+        continue;
+      }
+    } else {
+      let label = alt.value;
+      let end = alt.end;
+      if (text[alt.end] === "[") {
+        const explicitLabel = parseBracketedMarkdown(text, alt.end);
+        if (explicitLabel === null) {
+          cursor = alt.end;
+          continue;
+        }
+        label = explicitLabel.value.trim() || alt.value;
+        end = explicitLabel.end;
+      }
+      const normalizedLabel = normalizeMarkdownLabel(label);
+      const target = definitions.get(normalizedLabel);
+      if (target !== undefined) {
+        targets.push({ target, form: "reference", alt: alt.value });
+        cursor = end;
+        continue;
+      }
+      // A reference image with no definition renders as literal text, but an
+      // unresolvable local raster-shaped label is ambiguous and fails closed.
+      if (RASTER_EXTENSION_RE.test(unescapeMarkdown(label))) {
+        throw new Error(
+          `${document}: reference image '${text.slice(imageStart, end)}' has no link definition`,
+        );
+      }
+    }
+    cursor = Math.max(alt.end, imageStart + 2);
   }
 
   // Raw HTML: <img src="target" alt="description">
@@ -369,11 +393,183 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
     targets.push({
       target: src,
       form: "html",
-      alt: attributes.get("alt") ?? "",
+      alt: decodeHtmlCharacterReferences(
+        attributes.get("alt") ?? "",
+        document,
+        match[0],
+      ),
     });
   }
 
   return targets;
+}
+
+function unescapeMarkdown(value) {
+  return value.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "$1");
+}
+
+function normalizeMarkdownLabel(value) {
+  return unescapeMarkdown(value).trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+
+function parseBracketedMarkdown(source, openIndex) {
+  if (source[openIndex] !== "[") return null;
+  let depth = 1;
+  let index = openIndex + 1;
+  let value = "";
+  while (index < source.length) {
+    const character = source[index];
+    if (character === "\\" && index + 1 < source.length) {
+      value += source.slice(index, index + 2);
+      index += 2;
+      continue;
+    }
+    if (character === "[") {
+      depth += 1;
+      value += character;
+      index += 1;
+      continue;
+    }
+    if (character === "]") {
+      depth -= 1;
+      if (depth === 0) return { value, end: index + 1 };
+      value += character;
+      index += 1;
+      continue;
+    }
+    value += character;
+    index += 1;
+  }
+  return null;
+}
+
+function parseInlineMarkdownDestination(source, openParenIndex) {
+  let index = openParenIndex + 1;
+  while (/[ \t\r\n]/.test(source[index] ?? "")) index += 1;
+  let target = "";
+
+  if (source[index] === "<") {
+    index += 1;
+    while (index < source.length && source[index] !== ">") {
+      if (source[index] === "\\" && index + 1 < source.length) {
+        target += source[index + 1];
+        index += 2;
+      } else {
+        target += source[index];
+        index += 1;
+      }
+    }
+    if (source[index] !== ">") return null;
+    index += 1;
+  } else {
+    let nestedParens = 0;
+    while (index < source.length) {
+      const character = source[index];
+      if (character === "\\" && index + 1 < source.length) {
+        target += source[index + 1];
+        index += 2;
+        continue;
+      }
+      if (character === "(") {
+        nestedParens += 1;
+        target += character;
+        index += 1;
+        continue;
+      }
+      if (character === ")") {
+        if (nestedParens === 0) break;
+        nestedParens -= 1;
+        target += character;
+        index += 1;
+        continue;
+      }
+      if (/[ \t\r\n]/.test(character) && nestedParens === 0) break;
+      target += character;
+      index += 1;
+    }
+    if (nestedParens !== 0) return null;
+  }
+  if (!target) return null;
+
+  // Skip an optional title without treating a parenthesis inside quotes as
+  // the end of the rendered image.
+  let quote = null;
+  while (index < source.length) {
+    const character = source[index];
+    if (character === "\\" && index + 1 < source.length) {
+      index += 2;
+      continue;
+    }
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      index += 1;
+      continue;
+    }
+    if (character === `"` || character === `'`) {
+      quote = character;
+      index += 1;
+      continue;
+    }
+    if (character === ")") return { target, end: index + 1 };
+    index += 1;
+  }
+  return null;
+}
+
+function parseMarkdownDefinitionDestination(line, start) {
+  let index = start;
+  while (/[ \t]/.test(line[index] ?? "")) index += 1;
+  if (line[index] === "<") {
+    const close = line.indexOf(">", index + 1);
+    if (close < 0) return null;
+    return unescapeMarkdown(line.slice(index + 1, close));
+  }
+  const destinationStart = index;
+  while (index < line.length && !/[ \t]/.test(line[index])) index += 1;
+  return destinationStart === index
+    ? null
+    : unescapeMarkdown(line.slice(destinationStart, index));
+}
+
+function collectMarkdownDefinitions(text) {
+  const definitions = new Map();
+  for (const line of text.split(/\r?\n/)) {
+    const indent = line.match(/^[ \t]{0,3}/)?.[0].length ?? 0;
+    if (line[indent] !== "[") continue;
+    const label = parseBracketedMarkdown(line, indent);
+    if (label === null || line[label.end] !== ":") continue;
+    const target = parseMarkdownDefinitionDestination(line, label.end + 1);
+    // CommonMark resolves the first definition for a normalized label. Using
+    // the last one would let a later ledger-listed target hide an earlier
+    // unreviewed target that GitHub actually renders.
+    const normalizedLabel = normalizeMarkdownLabel(label.value);
+    if (target !== null && !definitions.has(normalizedLabel)) {
+      definitions.set(normalizedLabel, target);
+    }
+  }
+  return definitions;
+}
+
+function decodeHtmlCharacterReferences(value, document, context = value) {
+  const named = { amp: "&", lt: "<", gt: ">", quot: `"`, apos: `'` };
+  const decoded = value.replace(
+    /&(?:#(\d+);?|#x([0-9a-f]+);?|([a-z][a-z0-9]+);)/gi,
+    (entity, decimal, hexadecimal, name) => {
+      if (decimal !== undefined) return String.fromCodePoint(Number(decimal));
+      if (hexadecimal !== undefined) return String.fromCodePoint(Number.parseInt(hexadecimal, 16));
+      return named[name.toLocaleLowerCase("en-US")] ?? entity;
+    },
+  );
+  if (/&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);/i.test(decoded)) {
+    throw new Error(
+      `${document}: image syntax uses an unsupported HTML character reference: ${context}`,
+    );
+  }
+  return decoded;
+}
+
+function isHtmlSpace(character) {
+  return character !== undefined && /[ \t\n\f\r]/.test(character);
 }
 
 /**
@@ -386,7 +582,7 @@ function parseHtmlAttributes(source, document, tag) {
   const attributes = new Map();
   let index = 0;
   while (index < source.length) {
-    while (/\s/.test(source[index] ?? "")) index += 1;
+    while (isHtmlSpace(source[index])) index += 1;
     if (index >= source.length) break;
     if (source[index] === "/") {
       index += 1;
@@ -394,19 +590,23 @@ function parseHtmlAttributes(source, document, tag) {
     }
 
     const nameStart = index;
-    while (index < source.length && !/[\s=/>]/.test(source[index])) {
+    while (
+      index < source.length &&
+      !isHtmlSpace(source[index]) &&
+      !/[=/>]/.test(source[index])
+    ) {
       index += 1;
     }
     if (nameStart === index) {
       throw new Error(`${document}: <img> tag has malformed attributes: ${tag}`);
     }
     const name = source.slice(nameStart, index).toLocaleLowerCase("en-US");
-    while (/\s/.test(source[index] ?? "")) index += 1;
+    while (isHtmlSpace(source[index])) index += 1;
 
     let value = null;
     if (source[index] === "=") {
       index += 1;
-      while (/\s/.test(source[index] ?? "")) index += 1;
+      while (isHtmlSpace(source[index])) index += 1;
       const quote = source[index];
       if (quote === `"` || quote === `'`) {
         index += 1;
@@ -422,7 +622,7 @@ function parseHtmlAttributes(source, document, tag) {
       } else {
         // Consume an unquoted value as one attribute so its contents cannot be
         // reinterpreted. src/alt remain null and therefore fail closed.
-        while (index < source.length && !/\s/.test(source[index])) index += 1;
+        while (index < source.length && !isHtmlSpace(source[index])) index += 1;
       }
     }
 

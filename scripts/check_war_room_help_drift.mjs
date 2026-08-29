@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  collectPublishedImageTargets,
+  normalizePublishedLocalTarget,
+} from "./check_public_media.mjs";
 
 const ownRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -55,11 +59,24 @@ export function validateWarRoomHelpDrift(repositoryRoot = ownRoot) {
   ];
   for (const markdown of markdownRoots.flatMap(walk).filter((path) => extname(path) === ".md")) {
     const text = readFileSync(markdown, "utf8");
-    for (const match of text.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)) {
-      const alt = match[1].trim();
-      const target = match[2].trim().split("#", 1)[0];
+    let imageTargets;
+    try {
+      imageTargets = collectPublishedImageTargets(text, relative(root, markdown));
+    } catch (error) {
+      fail(errors, error.message);
+      continue;
+    }
+    for (const { alt: rawAlt, target: rawTarget } of imageTargets) {
+      const alt = rawAlt.replace(/\\(.)/g, "$1").trim();
       if (!alt) fail(errors, `${relative(root, markdown)} has an image with empty alt text`);
-      if (!target || /^(?:https?:|data:)/.test(target)) continue;
+      let target;
+      try {
+        target = normalizePublishedLocalTarget(rawTarget, relative(root, markdown));
+      } catch (error) {
+        fail(errors, error.message);
+        continue;
+      }
+      if (target === null || !target) continue;
       const asset = resolve(dirname(markdown), target);
       if (!asset.startsWith(`${root}/`) || !existsSync(asset) || !statSync(asset).isFile()) {
         fail(errors, `${relative(root, markdown)} references missing image ${target}`);

@@ -70,3 +70,26 @@ test("a stale Markdown description of public media fails closed", () => {
   assert.match(errors, /alt for docs\/media\/gallery\/war-room-decide-export\.png must include 'decision'/);
   assert.match(errors, /alt for docs\/media\/gallery\/war-room-decide-export\.png must include 'share-safe'/);
 });
+
+test("raw HTML images without alt text fail the Help drift gate", () => {
+  const root = fixture();
+  const guide = join(root, "docs", "war-room", "README.md");
+  writeFileSync(
+    guide,
+    `${readFileSync(guide, "utf8")}\n<img src="../assets/war-room/war-room-administration.png">\n`,
+  );
+  const errors = validateWarRoomHelpDrift(root).errors.join("\n");
+  assert.match(errors, /docs\/war-room\/README\.md has an image with empty alt text/);
+});
+
+test("reference-style images cannot bypass Help alt validation", () => {
+  const root = fixture();
+  const guide = join(root, "docs", "war-room", "README.md");
+  writeFileSync(
+    guide,
+    `${readFileSync(guide, "utf8")}\n![][admin-shot]\n\n` +
+      `[admin-shot]: ../assets/war-room/war-room-administration.png\n`,
+  );
+  const errors = validateWarRoomHelpDrift(root).errors.join("\n");
+  assert.match(errors, /docs\/war-room\/README\.md has an image with empty alt text/);
+});

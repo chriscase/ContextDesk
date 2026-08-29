@@ -199,6 +199,9 @@ test("README alt semantics are enforced for every published image form", () => {
       `<img src="${pathname}" data-alt="Synthetic frame">\n`,
       `<img src="${pathname}" aria-alt="Synthetic frame">\n`,
       `<img src="${pathname}" data-note=" alt='Synthetic frame'">\n`,
+      `<img src="${pathname}" data-\u00a0alt="Synthetic frame">\n`,
+      `<img src="${pathname}" data-\u000balt="Synthetic frame">\n`,
+      `<img src="${pathname}" data-\u2003alt="Synthetic frame">\n`,
     ];
 
     for (const contents of cases) {
@@ -225,6 +228,78 @@ test("README alt semantics are enforced for every published image form", () => {
     const escapedAndAngled = run(root);
     assert.equal(escapedAndAngled.status, 0, escapedAndAngled.stderr);
     assert.match(escapedAndAngled.stdout, /2 published references/);
+  });
+});
+
+test("nested, balanced, suffixed, and entity-encoded raster targets fail closed", () => {
+  withRepository(({ root, pathname }) => {
+    const readme = path.join(root, "README.md");
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled(1).png"), "x");
+
+    const cases = [
+      `![Unreviewed [nested]](docs/images/smuggled.png)\n`,
+      `![Unreviewed](docs/images/smuggled(1).png)\n`,
+      `![Unreviewed](docs/images/smuggled\\(1\\).png)\n`,
+      `![Unreviewed](<docs/images/smuggled.png>)\n`,
+      `![Unreviewed](docs/images/smuggled.png "title with )")\n`,
+      `![Unreviewed](docs/images/smuggled.png?raw=1)\n`,
+      `![Unreviewed](docs/images/smuggled.png#preview)\n`,
+      `<img src="docs/images/smuggled&#46;png" alt="Unreviewed">\n`,
+      `<img src="docs/images/smuggled&#46png" alt="Unreviewed">\n`,
+    ];
+
+    for (const contents of cases) {
+      fs.writeFileSync(readme, `# Fixture\n\n${contents}`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, contents);
+      assert.match(
+        result.stderr,
+        /published raster '.*' \((?:inline|html)\) is not in the public media ledger/,
+        contents,
+      );
+    }
+
+    // Query/fragment syntax changes delivery, not the reviewed local bytes.
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![Synthetic listed](${pathname}?raw=1#preview)\n`,
+    );
+    const listedWithSuffix = run(root);
+    assert.equal(listedWithSuffix.status, 0, listedWithSuffix.stderr);
+    assert.match(listedWithSuffix.stdout, /1 published references/);
+  });
+});
+
+test("the first duplicate reference definition controls the rendered image", () => {
+  withRepository(({ root, pathname }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      `# Fixture\n\n![Synthetic][shot]\n\n` +
+        `[shot]: docs/images/smuggled.png\n` +
+        `[SHOT]: ${pathname}\n`,
+    );
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /published raster 'docs\/images\/smuggled\.png' \(reference\) is not in the public media ledger/,
+    );
+  });
+});
+
+test("ambiguous HTML character references in local targets fail closed", () => {
+  withRepository(({ root }) => {
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      `# Fixture\n\n<img src="docs/images/smuggled&periodpng" alt="Synthetic">\n`,
+    );
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ambiguous HTML character reference/);
   });
 });
 

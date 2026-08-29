@@ -876,6 +876,43 @@ describe("Log workbench", () => {
     expect(screen.queryByText(/Saved view .* recorded/)).toBeNull();
   });
 
+  it("does not restart hidden same-case reads after a delayed save finishes", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const saveGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes(`/api/cases/${CASE_ID}/workbench/views`) && init?.method === "POST") {
+          return saveGate.promise;
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    const view = render(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Save view" }));
+    view.rerender(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active={false} />,
+    );
+
+    await act(async () => {
+      saveGate.resolve(jsonResponse({ id: "saved-while-hidden" }));
+      await saveGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    const inventoryReads = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([input, init]) =>
+        String(input).endsWith(`/api/cases/${CASE_ID}/workbench`) && !init?.method,
+    );
+    expect(inventoryReads).toHaveLength(1);
+    expect(screen.queryByText(/Saved view .* recorded/)).toBeNull();
+  });
+
   it("clears case-owned views, bookmarks, and review counts before the next case is ready", async () => {
     vi.stubGlobal(
       "fetch",
@@ -1113,6 +1150,60 @@ describe("Log workbench", () => {
     });
 
     expect(screen.queryByText("stale chronology grouping result")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
+  it("does not rebuild an obsolete chronology scope after a delayed pin finishes", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const anchorGate = deferred<Response>();
+    let chronologyCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/chronology")) {
+          chronologyCalls += 1;
+          return jsonResponse({
+            events: [{
+              evidenceId: EVIDENCE_A,
+              relativePath: "gateway/edge.log",
+              lineNumber: 1,
+              excerpt: "pin this chronology row",
+              adjacencyReason: "order",
+              uncertainty: [],
+              correlationKind: "none",
+              correlationId: null,
+              originalTimestamp: null,
+              normalizedUtc: null,
+            }],
+            unknownBuckets: [],
+            bounded: false,
+          });
+        }
+        if (url.includes("/workbench/anchors") && init?.method === "POST") {
+          return anchorGate.promise;
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show merged chronology" }));
+    expect(await screen.findByText("pin this chronology row")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Pin as benchmark" }));
+    fireEvent.change(screen.getByLabelText("Chronology grouping"), {
+      target: { value: "component" },
+    });
+
+    await act(async () => {
+      anchorGate.resolve(jsonResponse({ id: "anchor-recorded" }));
+      await anchorGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(chronologyCalls).toBe(1);
+    expect(screen.queryByText("Benchmark pin recorded.")).toBeNull();
     expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
   });
 
