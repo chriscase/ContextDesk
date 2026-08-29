@@ -124,4 +124,29 @@ describe("Investigation First", () => {
     expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Create investigation" })).toBeNull();
   });
+
+  it("ignores a detail response that belongs to an investigation no longer in the URL", async () => {
+    let resolveA: ((value: unknown) => void) | undefined;
+    let resolveB: ((value: unknown) => void) | undefined;
+    const caseA = { ...baseCase, id: "a", title: "Investigation A" };
+    const caseB = { ...baseCase, id: "b", title: "Investigation B" };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [caseA, caseB] }) };
+      if (url === "/api/cases/a") return { ok: true, json: () => new Promise((resolve) => { resolveA = resolve; }) };
+      if (url === "/api/cases/b") return { ok: true, json: () => new Promise((resolve) => { resolveB = resolve; }) };
+      if (url.endsWith("/evidence") || url.endsWith("/contributions")) return { ok: true, json: async () => ({ artifacts: [], contributions: [] }) };
+      if (url.endsWith("/lifecycle")) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    const { rerender } = render(<InvestigationFirst {...commonProps} focusCaseId="a" />);
+    rerender(<InvestigationFirst {...commonProps} focusCaseId="b" />);
+    await waitFor(() => expect(resolveB).toBeTypeOf("function"));
+    resolveB?.(caseB);
+    expect(await screen.findByRole("heading", { name: "Investigation B" })).toBeTruthy();
+    resolveA?.(caseA);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByRole("heading", { name: "Investigation B" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Investigation A" })).toBeNull();
+  });
 });

@@ -101,11 +101,15 @@ function savedTheme(): ThemeName {
   }
 }
 
-const UI_STRATEGY_STORAGE_KEY = "cd-ui-strategy";
+const UI_STRATEGY_STORAGE_PREFIX = "cd-ui-strategy:";
 
-function savedUiStrategy(): UiStrategyDescriptor {
+function uiStrategyStorageKey(username: string): string {
+  return `${UI_STRATEGY_STORAGE_PREFIX}${encodeURIComponent(username)}`;
+}
+
+function savedUiStrategy(username: string): UiStrategyDescriptor {
   try {
-    const preferred = window.localStorage?.getItem(UI_STRATEGY_STORAGE_KEY);
+    const preferred = window.localStorage?.getItem(uiStrategyStorageKey(username));
     return resolveUiStrategy({ preferred });
   } catch {
     return resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID });
@@ -284,7 +288,9 @@ export function App() {
   const [ready, setReady] = useState(false);
   const [setupAvailable, setSetupAvailable] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
-  const [uiStrategy, setUiStrategy] = useState<UiStrategyDescriptor>(savedUiStrategy);
+  const [uiStrategy, setUiStrategy] = useState<UiStrategyDescriptor>(() =>
+    resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }),
+  );
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
@@ -342,12 +348,21 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (!session?.username) {
+      setUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
+      return;
+    }
+    setUiStrategy(savedUiStrategy(session.username));
+  }, [session?.username]);
+
+  useEffect(() => {
+    if (!session?.username) return;
     try {
-      window.localStorage?.setItem(UI_STRATEGY_STORAGE_KEY, uiStrategy.id);
+      window.localStorage?.setItem(uiStrategyStorageKey(session.username), uiStrategy.id);
     } catch {
       // A blocked browser store should not prevent the selected surface from working this session.
     }
-  }, [uiStrategy.id]);
+  }, [session?.username, uiStrategy.id]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/auth/me");

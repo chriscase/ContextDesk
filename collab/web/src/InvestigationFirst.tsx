@@ -47,6 +47,7 @@ type EvidenceRow = {
   summaryContributionId?: string | null;
   uploaderId?: string;
   relativePath?: string | null;
+  sourceId?: string;
 };
 
 type ContributionRow = {
@@ -161,6 +162,14 @@ function ComboField(props: {
   onChange: (value: string) => void;
 }) {
   const listId = `investigation-first-${props.field}-options`;
+  const hintId = `${listId}-hint`;
+  const normalizedValue = text(props.value).toLocaleLowerCase();
+  const existing = normalizedValue.length > 0 && props.options.some((option) => option.toLocaleLowerCase() === normalizedValue);
+  const hint = !normalizedValue
+    ? "Choose a recorded value or enter a new one."
+    : existing
+      ? "Using an existing recorded value."
+      : "New value — it will be recorded exactly as entered.";
   return (
     <label className="investigation-first__field">
       <span>{props.label}</span>
@@ -168,6 +177,7 @@ function ComboField(props: {
         className="login__input"
         role="combobox"
         aria-autocomplete="list"
+        aria-describedby={hintId}
         list={listId}
         value={props.value}
         onChange={(event) => props.onChange(event.target.value)}
@@ -175,6 +185,7 @@ function ComboField(props: {
       <datalist id={listId}>
         {props.options.map((option) => <option key={option} value={option} />)}
       </datalist>
+      <small id={hintId}>{hint}</small>
     </label>
   );
 }
@@ -210,6 +221,7 @@ export function InvestigationFirst(props: {
   const [creating, setCreating] = useState(false);
   const [uploading, setUploading] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
+  const detailGeneration = useRef(0);
 
   const refreshCases = useCallback(async () => {
     setLoading(true);
@@ -227,6 +239,8 @@ export function InvestigationFirst(props: {
   }, []);
 
   const refreshDetail = useCallback(async (caseId: string) => {
+    const generation = detailGeneration.current + 1;
+    detailGeneration.current = generation;
     setDetailLoading(true);
     setSelectedEvidence([]);
     try {
@@ -235,6 +249,7 @@ export function InvestigationFirst(props: {
         protectedApiFetch(`/api/cases/${caseId}/evidence`),
         protectedApiFetch(`/api/cases/${caseId}/contributions`),
       ]);
+      if (generation !== detailGeneration.current) return;
       if (!caseResponse.ok) throw new Error(await errorMessage(caseResponse, "This investigation could not be opened."));
       const caseBody = (await caseResponse.json()) as InvestigationRow;
       setSelected(caseBody);
@@ -243,13 +258,14 @@ export function InvestigationFirst(props: {
       props.onFocusedCaseTitle?.(caseBody.title);
       setError(null);
     } catch (cause) {
+      if (generation !== detailGeneration.current) return;
       setSelected(null);
       setEvidence([]);
       setContributions([]);
       setError(cause instanceof Error ? cause.message : "This investigation could not be opened.");
       props.onFocusedCaseTitle?.(null);
     } finally {
-      setDetailLoading(false);
+      if (generation === detailGeneration.current) setDetailLoading(false);
     }
   }, [props.onFocusedCaseTitle]);
 
@@ -259,6 +275,8 @@ export function InvestigationFirst(props: {
     if (props.focusCaseId) {
       void refreshDetail(props.focusCaseId);
     } else {
+      detailGeneration.current += 1;
+      setDetailLoading(false);
       setSelected(null);
       setEvidence([]);
       setContributions([]);
@@ -480,7 +498,7 @@ export function InvestigationFirst(props: {
         </div>
         <section className="investigation-first__card investigation-first__evidence" aria-labelledby="investigation-first-evidence-title">
           <div className="investigation-first__card-heading"><div><h3 id="investigation-first-evidence-title">Evidence inventory</h3><p>Files and references stay governed by the shared evidence and permission boundary.</p></div><span>{evidence.length} {evidence.length === 1 ? "item" : "items"}</span></div>
-          {evidence.length === 0 ? <p className="investigation-first__muted">No evidence has been registered yet.</p> : <ul className="investigation-first__evidence-list">{evidence.map((artifact) => { const annotation = artifact.summaryContributionId ? summaryById.get(artifact.summaryContributionId)?.body : null; return <li key={artifact.id}><label className="investigation-first__evidence-select"><input type="checkbox" checked={selectedEvidence.includes(artifact.id)} onChange={(event) => setSelectedEvidence((current) => event.target.checked ? [...new Set([...current, artifact.id])] : current.filter((id) => id !== artifact.id))} /><span><strong>{artifact.filename || artifact.uri || "Unnamed evidence"}</strong><small>{annotation || "Annotation not available"}</small></span></label><details><summary>Metadata</summary><dl className="investigation-first__evidence-meta"><div><dt>Kind</dt><dd>{display(artifact.kind)}</dd></div><div><dt>Verification</dt><dd>{display(artifact.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(artifact.privacyClass)}</dd></div><div><dt>Hash</dt><dd>{display(artifact.contentHash || artifact.expectedHash)}</dd></div><div><dt>Size</dt><dd>{artifact.byteLength == null ? "Not recorded" : `${artifact.byteLength.toLocaleString()} bytes`}</dd></div></dl></details></li>; })}</ul>}
+          {evidence.length === 0 ? <p className="investigation-first__muted">No evidence has been registered yet.</p> : <ul className="investigation-first__evidence-list">{evidence.map((artifact) => { const annotation = artifact.summaryContributionId ? summaryById.get(artifact.summaryContributionId)?.body : null; return <li key={artifact.id}><label className="investigation-first__evidence-select"><input type="checkbox" checked={selectedEvidence.includes(artifact.id)} onChange={(event) => setSelectedEvidence((current) => event.target.checked ? [...new Set([...current, artifact.id])] : current.filter((id) => id !== artifact.id))} /><span><strong>{artifact.filename || artifact.uri || "Unnamed evidence"}</strong><small>{annotation || "Annotation not available"}</small></span></label><details><summary>Metadata</summary><dl className="investigation-first__evidence-meta"><div><dt>Kind</dt><dd>{display(artifact.kind)}</dd></div><div><dt>Media type</dt><dd>{display(artifact.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(artifact.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(artifact.privacyClass)}</dd></div><div><dt>Hash</dt><dd>{display(artifact.contentHash || artifact.expectedHash)}</dd></div><div><dt>Size</dt><dd>{artifact.byteLength == null ? "Not recorded" : `${artifact.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(artifact.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(artifact.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(artifact.relativePath)}</dd></div></dl></details></li>; })}</ul>}
           <div className="investigation-first__bulk-actions"><span>{selectedEvidence.length} selected</span><button type="button" disabled title="Recoverable trash is not enabled in this slice">Move selected to trash</button><button type="button" onClick={() => setSelectedEvidence([])} disabled={!selectedEvidence.length}>Clear selection</button><small>Bulk trash is reserved for a recoverable, audited lifecycle workflow; no file is deleted here.</small></div>
           {props.canWrite && !props.readOnly ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment"><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option><option value="file_server_ref">File reference</option></select></label><label>Privacy<select name="privacyClass" defaultValue="owner_only"><option value="owner_only">Owner only</option><option value="share_safe">Share safe</option></select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={uploading}>{uploading ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
         </section>
