@@ -532,7 +532,9 @@ export function LogTimeReviewPanel(props: {
       <section className="log-time" id={panelId} aria-labelledby={headingId}>
         {heading}
         <p className="log-time__copy">
-          {busy === "load" ? "Loading time review…" : (error ?? "Time review unavailable.")}
+          {loadBusy || actionBusy
+            ? "Loading time review…"
+            : (error ?? "Time review unavailable.")}
         </p>
       </section>
     );

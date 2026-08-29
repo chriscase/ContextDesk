@@ -511,6 +511,7 @@ describe("LogTimeReviewPanel", () => {
 
   it("keeps a durable apply locked while a sibling refresh completes", async () => {
     const applyGate = deferred<Response>();
+    const refreshGate = deferred<Response>();
     let stateReads = 0;
     let applyReads = 0;
     vi.stubGlobal(
@@ -524,6 +525,7 @@ describe("LogTimeReviewPanel", () => {
         }
         if (url.endsWith("/log-time")) {
           stateReads += 1;
+          if (stateReads === 2) return refreshGate.promise;
           return jsonResponse(
             stateReads === 1
               ? stateBody()
@@ -553,6 +555,13 @@ describe("LogTimeReviewPanel", () => {
       );
     });
     await waitFor(() => expect(stateReads).toBe(2));
+    expect(await screen.findByText("Loading time review…")).toBeTruthy();
+    expect(screen.queryByText("Time review unavailable.")).toBeNull();
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse(stateBody({ corpusRevision: 2 })));
+      await refreshGate.promise;
+    });
     const cancel = await screen.findByRole("button", { name: "Cancel" });
     expect(cancel).toHaveProperty("disabled", true);
     fireEvent.click(cancel);
