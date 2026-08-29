@@ -338,10 +338,31 @@ export function LogWorkbench(props: {
   /** Latest pane selection for async inventory reconciliation. */
   const panesRef = useRef(panes);
   panesRef.current = panes;
+  const revisionRef = useRef(revision);
+  revisionRef.current = revision;
+  /** Async continuations must still belong to the mounted investigation. */
+  const currentCaseIdRef = useRef(props.caseId);
+  currentCaseIdRef.current = props.caseId;
+  const mountedRef = useRef(true);
+  const loadedCaseRef = useRef<string | null>(null);
   /** Ignore async results that were started against an obsolete file selection. */
   const searchRequestGeneration = useRef(0);
   const chronologyRequestGeneration = useRef(0);
   const loadRequestGeneration = useRef(0);
+  const pageScopeGeneration = useRef(0);
+  const pageRequestByEvidence = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const isCurrentCase = useCallback(
+    (caseId: string) => mountedRef.current && currentCaseIdRef.current === caseId,
+    [],
+  );
 
   const invalidateSearchResults = useCallback(() => {
     searchRequestGeneration.current += 1;
@@ -370,6 +391,13 @@ export function LogWorkbench(props: {
     setChronologyBusy(false);
     setError(null);
     setNotice(null);
+  }, []);
+
+  const invalidateEvidencePages = useCallback(() => {
+    pageScopeGeneration.current += 1;
+    pageRequestByEvidence.current.clear();
+    loadedPanes.current.clear();
+    setPageByPane({});
   }, []);
 
   const selectedItems = useMemo(
@@ -405,21 +433,39 @@ export function LogWorkbench(props: {
   }, [fileQuery]);
 
   const load = useCallback(async (options?: { invalidateResults?: boolean }) => {
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return;
     const requestGeneration = ++loadRequestGeneration.current;
-    if (options?.invalidateResults) invalidateScopedResults();
+    if (options?.invalidateResults) {
+      invalidateScopedResults();
+      invalidateEvidencePages();
+    }
+    if (loadedCaseRef.current !== requestCaseId) {
+      loadedCaseRef.current = requestCaseId;
+      setItems([]);
+      setPanes([]);
+      setPageByPane({});
+      setScrollByPane({});
+      setViews([]);
+      setBookmarks([]);
+      setReviewCount(null);
+      setRevision(null);
+      setCorpusTruncated(false);
+      setUnreadFiles([]);
+    }
     setLoadState("loading");
     setError(null);
     loadedPanes.current.clear();
     try {
-      const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench`);
-      if (loadRequestGeneration.current !== requestGeneration) return;
+      const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench`);
+      if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
       if (response.status === 401 || response.status === 403) {
         setLoadState("unauthorized");
         return;
       }
       if (!response.ok) {
         const message = await errorText(response, "The log workbench could not be loaded.");
-        if (loadRequestGeneration.current !== requestGeneration) return;
+        if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         setError(message);
         setLoadState("error");
         return;
@@ -430,7 +476,12 @@ export function LogWorkbench(props: {
         corpusTruncated?: boolean;
         unreadFiles?: string[];
       };
-      if (loadRequestGeneration.current !== requestGeneration) return;
+      if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
+      const nextRevision = body.normalizationRevision ?? null;
+      if (!options?.invalidateResults && revisionRef.current !== nextRevision) {
+        invalidateScopedResults();
+        invalidateEvidencePages();
+      }
       const nextItems = body.items ?? [];
       const availableIds = new Set(nextItems.map((item) => item.evidenceId));
       if (panesRef.current.some((id) => !availableIds.has(id))) {
@@ -445,56 +496,56 @@ export function LogWorkbench(props: {
         }
         return valid;
       });
-      setRevision(body.normalizationRevision ?? null);
+      setRevision(nextRevision);
       setCorpusTruncated(body.corpusTruncated === true);
       setUnreadFiles(body.unreadFiles ?? []);
       setLoadState("ready");
       try {
-        const viewsRes = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/views`);
-        if (loadRequestGeneration.current !== requestGeneration) return;
+        const viewsRes = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/views`);
+        if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         if (viewsRes.ok) {
           const parsed = (await viewsRes.json()) as { views?: SavedView[] };
-          if (loadRequestGeneration.current !== requestGeneration) return;
+          if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
           setViews(parsed.views ?? []);
-        }
+        } else setViews([]);
       } catch {
-        if (loadRequestGeneration.current !== requestGeneration) return;
+        if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         setViews([]);
       }
       try {
         const bookmarksRes = await protectedApiFetch(
-          `/api/cases/${props.caseId}/workbench/bookmarks`,
+          `/api/cases/${requestCaseId}/workbench/bookmarks`,
         );
-        if (loadRequestGeneration.current !== requestGeneration) return;
+        if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         if (bookmarksRes.ok) {
           const parsed = (await bookmarksRes.json()) as { bookmarks?: BookmarkRow[] };
-          if (loadRequestGeneration.current !== requestGeneration) return;
+          if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
           setBookmarks(parsed.bookmarks ?? []);
-        }
+        } else setBookmarks([]);
       } catch {
-        if (loadRequestGeneration.current !== requestGeneration) return;
+        if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         setBookmarks([]);
       }
       try {
         const queueRes = await protectedApiFetch(
-          `/api/cases/${props.caseId}/workbench/review-queue`,
+          `/api/cases/${requestCaseId}/workbench/review-queue`,
         );
-        if (loadRequestGeneration.current !== requestGeneration) return;
+        if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         if (queueRes.ok) {
           const parsed = (await queueRes.json()) as { candidateCount?: number };
-          if (loadRequestGeneration.current !== requestGeneration) return;
+          if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
           setReviewCount(parsed.candidateCount ?? 0);
-        }
+        } else setReviewCount(null);
       } catch {
-        if (loadRequestGeneration.current !== requestGeneration) return;
+        if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         setReviewCount(null);
       }
     } catch {
-      if (loadRequestGeneration.current !== requestGeneration) return;
+      if (!isCurrentCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
       setError("The log workbench could not be loaded.");
       setLoadState("error");
     }
-  }, [invalidateScopedResults, props.caseId]);
+  }, [invalidateEvidencePages, invalidateScopedResults, isCurrentCase, props.caseId]);
 
   useEffect(() => {
     if (props.active === false) return;
@@ -511,28 +562,45 @@ export function LogWorkbench(props: {
     window.addEventListener("contextdesk:snapshot-frozen", reload);
     // Evidence can also arrive through the board beside this panel on Analyze.
     window.addEventListener("contextdesk:evidence-changed", reload);
+    window.addEventListener("contextdesk:log-time-changed", reload);
     return () => {
       window.removeEventListener("contextdesk:corpus-intake-committed", reload);
       window.removeEventListener("contextdesk:snapshot-frozen", reload);
       window.removeEventListener("contextdesk:evidence-changed", reload);
+      window.removeEventListener("contextdesk:log-time-changed", reload);
     };
   }, [load, props.caseId]);
 
   const loadPane = useCallback(
     async (evidenceId: string, startLine = 1) => {
+      const requestCaseId = props.caseId;
+      if (!isCurrentCase(requestCaseId)) return;
+      const requestScopeGeneration = pageScopeGeneration.current;
+      const requestSequence = (pageRequestByEvidence.current.get(evidenceId) ?? 0) + 1;
+      pageRequestByEvidence.current.set(evidenceId, requestSequence);
       loadedPanes.current.add(evidenceId);
       try {
         const response = await protectedApiFetch(
-          `/api/cases/${props.caseId}/workbench/page?evidenceId=${encodeURIComponent(evidenceId)}&startLine=${startLine}&limit=80`,
+          `/api/cases/${requestCaseId}/workbench/page?evidenceId=${encodeURIComponent(evidenceId)}&startLine=${startLine}&limit=80`,
         );
+        if (
+          !isCurrentCase(requestCaseId) ||
+          pageScopeGeneration.current !== requestScopeGeneration ||
+          pageRequestByEvidence.current.get(evidenceId) !== requestSequence
+        ) return;
         if (!response.ok) return;
         const page = (await response.json()) as PageResult;
+        if (
+          !isCurrentCase(requestCaseId) ||
+          pageScopeGeneration.current !== requestScopeGeneration ||
+          pageRequestByEvidence.current.get(evidenceId) !== requestSequence
+        ) return;
         setPageByPane((current) => ({ ...current, [evidenceId]: page }));
       } catch {
         /* unmount or test teardown */
       }
     },
-    [props.caseId],
+    [isCurrentCase, props.caseId],
   );
 
   // Only panes that have never been read are opened at line 1. Re-reading them
@@ -553,6 +621,8 @@ export function LogWorkbench(props: {
    */
   const revealMatch = useCallback(
     async (row: MatchRow) => {
+      const requestCaseId = props.caseId;
+      if (!isCurrentCase(requestCaseId)) return;
       if (!panes.includes(row.evidenceId) && panes.length < MAX_PANES) {
         setPanes((current) =>
           current.includes(row.evidenceId) ? current : [...current, row.evidenceId],
@@ -563,6 +633,7 @@ export function LogWorkbench(props: {
         page && page.rows.some((candidate) => candidate.lineNumber === row.lineNumber);
       if (!inWindow) {
         await loadPane(row.evidenceId, Math.max(1, row.lineNumber - PAGE_LEAD_LINES));
+        if (!isCurrentCase(requestCaseId)) return;
       }
       const start = Math.max(1, row.lineNumber - PAGE_LEAD_LINES);
       const offset = Math.max(
@@ -574,7 +645,7 @@ export function LogWorkbench(props: {
       if (syncScroll) setScrollTop(offset);
       setScrollByPane((current) => ({ ...current, [row.evidenceId]: offset }));
     },
-    [loadPane, pageByPane, panes, syncScroll],
+    [isCurrentCase, loadPane, pageByPane, panes, props.caseId, syncScroll],
   );
 
   function selectMatch(index: number) {
@@ -625,6 +696,8 @@ export function LogWorkbench(props: {
    * used to start over from the beginning.
    */
   async function runSearch(pageCursor: string | null = null) {
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return;
     if (panes.length === 0) {
       setNotice("Select at least one log file before searching.");
       return;
@@ -633,7 +706,7 @@ export function LogWorkbench(props: {
     setError(null);
     setSearching(true);
     try {
-      const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/search`, {
+      const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/search`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -649,24 +722,27 @@ export function LogWorkbench(props: {
           expectedNormalizationRevision: revision,
         }),
       });
+      if (!isCurrentCase(requestCaseId)) return;
       if (!response.ok) {
         const message = await errorText(response, "Search could not run.");
-        if (searchRequestGeneration.current === requestGeneration) setError(message);
+        if (isCurrentCase(requestCaseId) && searchRequestGeneration.current === requestGeneration) setError(message);
         return;
       }
       const result = (await response.json()) as SearchResult;
-      if (searchRequestGeneration.current !== requestGeneration) return;
+      if (!isCurrentCase(requestCaseId) || searchRequestGeneration.current !== requestGeneration) return;
       const previous = pageCursor && search ? search.matches : [];
       const merged = { ...result, matches: [...previous, ...result.matches] };
       setSearch(merged);
       if (!pageCursor) setMatchIndex(0);
       setNotice(searchSummary(result, merged.matches.length, corpusTruncated));
     } finally {
-      if (searchRequestGeneration.current === requestGeneration) setSearching(false);
+      if (isCurrentCase(requestCaseId) && searchRequestGeneration.current === requestGeneration) setSearching(false);
     }
   }
 
   async function runChronology() {
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return;
     if (panes.length === 0) {
       setNotice("Select at least one log file before building a chronology.");
       return;
@@ -674,14 +750,15 @@ export function LogWorkbench(props: {
     const requestGeneration = ++chronologyRequestGeneration.current;
     setChronologyBusy(true);
     try {
-      const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/chronology`, {
+      const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/chronology`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ grouping, evidenceIds: panes }),
       });
+      if (!isCurrentCase(requestCaseId)) return;
       if (!response.ok) {
         const message = await errorText(response, "The merged chronology could not be built.");
-        if (chronologyRequestGeneration.current === requestGeneration) setError(message);
+        if (isCurrentCase(requestCaseId) && chronologyRequestGeneration.current === requestGeneration) setError(message);
         return;
       }
       const body = (await response.json()) as {
@@ -690,7 +767,7 @@ export function LogWorkbench(props: {
         bounded?: boolean;
         atLeast?: number;
       };
-      if (chronologyRequestGeneration.current !== requestGeneration) return;
+      if (!isCurrentCase(requestCaseId) || chronologyRequestGeneration.current !== requestGeneration) return;
       setChronology(body.events ?? []);
       setUnknownBuckets(body.unknownBuckets ?? []);
       setNotice(
@@ -699,13 +776,15 @@ export function LogWorkbench(props: {
           : `Merged chronology built from ${(body.events ?? []).length.toLocaleString()} lines.`,
       );
     } finally {
-      if (chronologyRequestGeneration.current === requestGeneration) setChronologyBusy(false);
+      if (isCurrentCase(requestCaseId) && chronologyRequestGeneration.current === requestGeneration) setChronologyBusy(false);
     }
   }
 
   async function pinEvent(event: ChronologyEvent, status: "pinned" | "human_ground_truth") {
     if (props.readOnly || !props.canWrite || !event.evidenceId) return;
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/anchors`, {
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return;
+    const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/anchors`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -716,8 +795,10 @@ export function LogWorkbench(props: {
         idempotencyKey: `anchor-${event.evidenceId.slice(0, 8)}-${event.lineNumber}-${status}`,
       }),
     });
+    if (!isCurrentCase(requestCaseId)) return;
     if (!response.ok) {
-      setError(await errorText(response, "The chronology pin could not be saved."));
+      const message = await errorText(response, "The chronology pin could not be saved.");
+      if (isCurrentCase(requestCaseId)) setError(message);
       return;
     }
     setNotice(status === "human_ground_truth" ? "Ground truth recorded." : "Benchmark pin recorded.");
@@ -730,7 +811,9 @@ export function LogWorkbench(props: {
       setNotice("Select at least one log file before saving a view.");
       return;
     }
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/views`, {
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return;
+    const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/views`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -779,8 +862,10 @@ export function LogWorkbench(props: {
         }),
       }),
     });
+    if (!isCurrentCase(requestCaseId)) return;
     if (!response.ok) {
-      setError(await errorText(response, "The view could not be saved."));
+      const message = await errorText(response, "The view could not be saved.");
+      if (isCurrentCase(requestCaseId)) setError(message);
       return;
     }
     setNotice(`Saved view “${viewName.trim() || "Saved view"}” recorded for this investigation.`);
@@ -789,8 +874,10 @@ export function LogWorkbench(props: {
 
   async function saveBookmark(row: MatchRow) {
     if (props.readOnly || !props.canWrite) return;
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return;
     const item = items.find((entry) => entry.evidenceId === row.evidenceId);
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/bookmarks`, {
+    const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/bookmarks`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -807,8 +894,10 @@ export function LogWorkbench(props: {
         idempotencyKey: `bookmark-${row.evidenceId.slice(0, 8)}-${row.lineNumber}`,
       }),
     });
+    if (!isCurrentCase(requestCaseId)) return;
     if (!response.ok) {
-      setError(await errorText(response, "The bookmark could not be saved."));
+      const message = await errorText(response, "The bookmark could not be saved.");
+      if (isCurrentCase(requestCaseId)) setError(message);
       return;
     }
     setNotice("Bookmark recorded.");

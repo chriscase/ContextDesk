@@ -311,6 +311,8 @@ describe("LogTimeReviewPanel", () => {
 
   it("sends the exact previewed fingerprint and revision when applying", async () => {
     const calls: { url: string; body: Record<string, unknown> }[] = [];
+    const onTimeChanged = vi.fn();
+    window.addEventListener("contextdesk:log-time-changed", onTimeChanged);
     stubFetch(
       {
         "/log-time/preview": () => PREVIEW,
@@ -337,6 +339,11 @@ describe("LogTimeReviewPanel", () => {
     expect(apply?.body.declarationFingerprint).toBe(FINGERPRINT);
     expect(apply?.body.expectedRevision).toBe(1);
     expect(apply?.body.ianaTimezone).toBe("America/Chicago");
+    expect(onTimeChanged).toHaveBeenCalledTimes(1);
+    expect((onTimeChanged.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+      caseId: CASE_ID,
+    });
+    window.removeEventListener("contextdesk:log-time-changed", onTimeChanged);
   });
 
   it("shows how a declared timezone was decided, including its fingerprint", async () => {

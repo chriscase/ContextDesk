@@ -468,7 +468,281 @@ describe("Log workbench", () => {
     expect(screen.queryByText("stale-case-a.log")).toBeNull();
   });
 
-  it("invalidates pending results when the corpus or request controls change", async () => {
+  it("does not start an old-case reload after a delayed save finishes", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const saveGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes(`/api/cases/${CASE_ID}/workbench/views`) && init?.method === "POST") {
+          return saveGate.promise;
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    const view = render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Save view" }));
+    view.rerender(<LogWorkbench caseId={CASE_B} canWrite readOnly={false} />);
+    await screen.findByRole("button", { name: "Search" });
+
+    await act(async () => {
+      saveGate.resolve(jsonResponse({ id: "saved-on-a" }));
+      await saveGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    const oldInventoryReads = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([input, init]) =>
+        String(input).endsWith(`/api/cases/${CASE_ID}/workbench`) && !init?.method,
+    );
+    expect(oldInventoryReads).toHaveLength(1);
+    expect(screen.queryByText(/Saved view .* recorded/)).toBeNull();
+  });
+
+  it("clears case-owned views, bookmarks, and review counts before the next case is ready", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        const isNextCase = url.includes(`/api/cases/${CASE_B}/`);
+        if (url.includes("/workbench/views")) {
+          return isNextCase
+            ? jsonResponse({ error: "unavailable" }, 503)
+            : jsonResponse({ views: [{
+                id: "view-a",
+                name: "Case A saved view",
+                selectedPanes: [EVIDENCE_A],
+                query: "timeout",
+                mode: "literal",
+              }] });
+        }
+        if (url.includes("/workbench/bookmarks")) {
+          return isNextCase
+            ? jsonResponse({ error: "unavailable" }, 503)
+            : jsonResponse({ bookmarks: [{
+                id: "bookmark-a",
+                note: "Case A bookmark",
+                status: "resolved",
+                staleReason: null,
+                locator: { evidenceId: EVIDENCE_A, lineNumber: 1 },
+                shareSafeToken: "bookmark-a-token",
+              }] });
+        }
+        if (url.includes("/workbench/review-queue")) {
+          return isNextCase
+            ? jsonResponse({ error: "unavailable" }, 503)
+            : jsonResponse({ candidateCount: 2 });
+        }
+        if (url.includes("/workbench/page")) {
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    expect(await screen.findByRole("button", { name: "Case A saved view" })).toBeTruthy();
+    expect(screen.getByText("Case A bookmark")).toBeTruthy();
+    expect(screen.getByText(/2 lines still have a clock/)).toBeTruthy();
+
+    view.rerender(<LogWorkbench caseId={CASE_B} canWrite readOnly={false} />);
+    await screen.findByRole("button", { name: "Search" });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Case A saved view" })).toBeNull();
+      expect(screen.queryByText("Case A bookmark")).toBeNull();
+      expect(screen.queryByText(/2 lines still have a clock/)).toBeNull();
+    });
+  });
+
+  it("keeps a refreshed pane when an older same-case page response arrives late", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const oldPage = deferred<Response>();
+    let pageCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/page")) {
+          pageCalls += 1;
+          if (pageCalls === 1) return oldPage.promise;
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [{
+              evidenceId: EVIDENCE_A,
+              relativePath: "gateway/edge.log",
+              rotationFamily: "gateway/edge.log",
+              lineNumber: 1,
+              byteOffset: 0,
+              text: "fresh normalized pane row",
+              wrapped: false,
+              originalTimestamp: null,
+              normalizedUtc: "2024-03-10T08:10:00.000Z",
+              parseClass: "host_resolved",
+              contextBefore: [],
+              contextAfter: [],
+            }],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("button", { name: "Search" });
+    await waitFor(() => expect(pageCalls).toBe(1));
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:log-time-changed", { detail: { caseId: CASE_ID } }),
+    );
+    expect(await screen.findByText("fresh normalized pane row")).toBeTruthy();
+
+    await act(async () => {
+      oldPage.resolve(jsonResponse({
+        evidenceId: EVIDENCE_A,
+        relativePath: "gateway/edge.log",
+        startLine: 1,
+        rows: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "gateway/edge.log",
+          rotationFamily: "gateway/edge.log",
+          lineNumber: 1,
+          byteOffset: 0,
+          text: "obsolete normalized pane row",
+          wrapped: false,
+          originalTimestamp: null,
+          normalizedUtc: null,
+          parseClass: "missing",
+          contextBefore: [],
+          contextAfter: [],
+        }],
+        wrappedRowCount: 0,
+        nextStartLine: null,
+        bounded: false,
+      }));
+      await oldPage.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByText("fresh normalized pane row")).toBeTruthy();
+    expect(screen.queryByText("obsolete normalized pane row")).toBeNull();
+  });
+
+  it.each([
+    ["query", "Find in logs", "new query"],
+    ["match mode", "Match mode", "literal"],
+    ["include filter", "Include terms", "required"],
+    ["exclude filter", "Exclude terms", "ignored"],
+    ["severity filter", "Severity", "error"],
+    ["start time", "From (UTC)", "2024-03-10T08:00:00Z"],
+    ["end time", "To (UTC)", "2024-03-10T09:00:00Z"],
+  ])("invalidates a pending search when the %s changes", async (_name, label, value) => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const searchGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/search")) return searchGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+
+    await act(async () => {
+      searchGate.resolve(jsonResponse({
+        matches: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "stale.log",
+          rotationFamily: "stale.log",
+          lineNumber: 1,
+          byteOffset: 0,
+          text: "stale search control result",
+          wrapped: false,
+          originalTimestamp: null,
+          normalizedUtc: null,
+          parseClass: "missing",
+          contextBefore: [],
+          contextAfter: [],
+        }],
+        returned: 1,
+        bounded: false,
+        atLeast: 1,
+        nextCursor: null,
+        timeFilterUnknownReason: null,
+      }));
+      await searchGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByText("stale search control result")).toBeNull();
+    expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
+    expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
+  });
+
+  it("invalidates a pending chronology when grouping changes", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const chronologyGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("/workbench/chronology")) return chronologyGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show merged chronology" }));
+    fireEvent.change(screen.getByLabelText("Chronology grouping"), {
+      target: { value: "component" },
+    });
+    await act(async () => {
+      chronologyGate.resolve(jsonResponse({
+        events: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "stale.log",
+          lineNumber: 1,
+          excerpt: "stale chronology grouping result",
+          adjacencyReason: "order",
+          uncertainty: [],
+          correlationKind: "none",
+          correlationId: null,
+          originalTimestamp: null,
+          normalizedUtc: null,
+        }],
+        unknownBuckets: [],
+        bounded: false,
+      }));
+      await chronologyGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByText("stale chronology grouping result")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
+  it("invalidates pending search and chronology results when the corpus reloads", async () => {
     stubFetch();
     const baseFetch = fetch as ReturnType<typeof vi.fn>;
     const searchGate = deferred<Response>();
@@ -486,27 +760,15 @@ describe("Log workbench", () => {
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
     fireEvent.click(await screen.findByRole("button", { name: "Search" }));
     fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
-    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "new query" } });
-    fireEvent.change(screen.getByLabelText("Include terms"), { target: { value: "new filter" } });
-    fireEvent.change(screen.getByLabelText("Chronology grouping"), { target: { value: "component" } });
     window.dispatchEvent(
       new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }),
     );
-
     await act(async () => {
       searchGate.resolve(jsonResponse({
-        matches: [],
-        returned: 0,
-        bounded: false,
-        atLeast: 0,
-        nextCursor: null,
+        matches: [], returned: 0, bounded: false, atLeast: 0, nextCursor: null,
         timeFilterUnknownReason: null,
       }));
-      chronologyGate.resolve(jsonResponse({
-        events: [],
-        unknownBuckets: [],
-        bounded: false,
-      }));
+      chronologyGate.resolve(jsonResponse({ events: [], unknownBuckets: [], bounded: false }));
       await Promise.all([searchGate.promise, chronologyGate.promise]);
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     });

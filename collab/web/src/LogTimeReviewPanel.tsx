@@ -244,6 +244,11 @@ export function LogTimeReviewPanel(props: {
   function resetAfterChange(message: string) {
     setPreview(null);
     setNotice(message);
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:log-time-changed", {
+        detail: { caseId: props.caseId },
+      }),
+    );
     void load();
   }
 

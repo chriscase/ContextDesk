@@ -2629,6 +2629,7 @@ export function Cases(props: {
             <TriageAnchor id="triage-log-workbench" label="Log workbench">
               <div hidden={workstreamFocused}>
                 <LogWorkbench
+                  key={current.id}
                   caseId={current.id}
                   canWrite={canWrite}
                   readOnly={readOnly}
