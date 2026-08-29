@@ -60,13 +60,13 @@
     },
     {
       "path": "docs/media/gallery/war-room-analyze.png",
-      "gitBlob": "13366d15b77e199e9419bfb23c28bd49556ca7ed",
-      "sourceSha": "5508e9e63b540d1ba5080fc7d70eecd74f08e332",
+      "gitBlob": "9a97ee6d0a6912f13495ef82c216e58934d32bb0",
+      "sourceSha": "af3ab0ae88ddb9fa143149f52f38e9e0704e625c",
       "privacyReview": "publishable",
       "modelInventoryVisible": false,
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
-      "claim": "Analyze workspace showing completed synthetic Workstreams and the beginning of the investigation-owned Log workbench",
+      "claim": "Analyze workspace showing completed synthetic Workstreams and the current default-selected checkout.log at the beginning of the investigation-owned Log workbench",
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     },

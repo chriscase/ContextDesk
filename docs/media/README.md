@@ -53,16 +53,19 @@ credential, private path, or non-synthetic corpus is visible.
 | --- | --- | --- | --- | --- |
 | `gallery/war-room-overview.png` | Overview activity feed and active investigation | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-capture-analyze.png` | Capture provenance, imported-output boundary, and corpus intake | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-analyze.png` | Workstreams and investigation-owned Log workbench | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-analyze.png` | Workstreams and current default-selected checkout.log in the investigation-owned Log workbench | 1440 × 1000 PNG | `af3ab0ae88ddb9fa143149f52f38e9e0704e625c` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-compare-decide.png` | Comparison lab, evidence, deep links, and lane focus | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-decide-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 
-**Known residual — this is not a single-build gallery.** The War Room set is a
-current, single-SHA browser capture, while the three native desktop frames
-still span earlier packaged-app builds. `gallery/logs-library-demo.png` predates
-the Logs toolbar regrouping. Closing that native residual requires recapture
-from one freshly built `.app`; it cannot be discharged by editing this file.
+**Known residual — this is not a single-build gallery.** The Analyze frame was
+refreshed at `af3ab0ae88ddb9fa143149f52f38e9e0704e625c` to show the current
+default-open workbench pane; the other War Room frames remain exact captures of
+`5508e9e63b540d1ba5080fc7d70eecd74f08e332`, while the three native desktop
+frames still span earlier packaged-app builds. `gallery/logs-library-demo.png`
+predates the Logs toolbar regrouping. Closing that residual requires a full
+recapture from one freshly built release; it cannot be discharged by editing
+this file.
 
 ## Publication privacy gate
 
