@@ -314,6 +314,7 @@ export function LogWorkbench(props: {
   const [grouping, setGrouping] = useState("file");
   const [sort, setSort] = useState("time_asc");
   const [pageByPane, setPageByPane] = useState<Record<string, PageResult>>({});
+  const [paneErrors, setPaneErrors] = useState<Record<string, string>>({});
   const [scrollByPane, setScrollByPane] = useState<Record<string, number>>({});
   const [search, setSearch] = useState<SearchResult | null>(null);
   const [matchIndex, setMatchIndex] = useState(0);
@@ -404,6 +405,7 @@ export function LogWorkbench(props: {
     pageRequestByEvidence.current.clear();
     loadedPanes.current.clear();
     setPageByPane({});
+    setPaneErrors({});
   }, []);
 
   const selectedItems = useMemo(
@@ -451,6 +453,7 @@ export function LogWorkbench(props: {
       setItems([]);
       setPanes([]);
       setPageByPane({});
+      setPaneErrors({});
       setScrollByPane({});
       setViews([]);
       setBookmarks([]);
@@ -598,7 +601,12 @@ export function LogWorkbench(props: {
       const requestScopeGeneration = pageScopeGeneration.current;
       const requestSequence = (pageRequestByEvidence.current.get(evidenceId) ?? 0) + 1;
       pageRequestByEvidence.current.set(evidenceId, requestSequence);
-      loadedPanes.current.add(evidenceId);
+      setPaneErrors((current) => {
+        if (!(evidenceId in current)) return current;
+        const next = { ...current };
+        delete next[evidenceId];
+        return next;
+      });
       try {
         const response = await protectedApiFetch(
           `/api/cases/${requestCaseId}/workbench/page?evidenceId=${encodeURIComponent(evidenceId)}&startLine=${startLine}&limit=80`,
@@ -608,16 +616,42 @@ export function LogWorkbench(props: {
           pageScopeGeneration.current !== requestScopeGeneration ||
           pageRequestByEvidence.current.get(evidenceId) !== requestSequence
         ) return;
-        if (!response.ok) return;
+        if (!response.ok) {
+          const message = await errorText(response, "These log lines could not be loaded.");
+          if (
+            !isActiveCase(requestCaseId) ||
+            pageScopeGeneration.current !== requestScopeGeneration ||
+            pageRequestByEvidence.current.get(evidenceId) !== requestSequence
+          ) return;
+          loadedPanes.current.delete(evidenceId);
+          setPaneErrors((current) => ({ ...current, [evidenceId]: message }));
+          return;
+        }
         const page = (await response.json()) as PageResult;
         if (
           !isActiveCase(requestCaseId) ||
           pageScopeGeneration.current !== requestScopeGeneration ||
           pageRequestByEvidence.current.get(evidenceId) !== requestSequence
         ) return;
+        loadedPanes.current.add(evidenceId);
+        setPaneErrors((current) => {
+          if (!(evidenceId in current)) return current;
+          const next = { ...current };
+          delete next[evidenceId];
+          return next;
+        });
         setPageByPane((current) => ({ ...current, [evidenceId]: page }));
       } catch {
-        /* unmount or test teardown */
+        if (
+          !isActiveCase(requestCaseId) ||
+          pageScopeGeneration.current !== requestScopeGeneration ||
+          pageRequestByEvidence.current.get(evidenceId) !== requestSequence
+        ) return;
+        loadedPanes.current.delete(evidenceId);
+        setPaneErrors((current) => ({
+          ...current,
+          [evidenceId]: "These log lines could not be loaded.",
+        }));
       }
     },
     [isActiveCase, props.caseId],
@@ -1515,6 +1549,7 @@ export function LogWorkbench(props: {
         ) : null}
         {selectedItems.map((item) => {
           const page = pageByPane[item.evidenceId];
+          const paneError = paneErrors[item.evidenceId];
           const rows = page?.rows ?? [];
           const paneScroll = syncScroll ? scrollTop : (scrollByPane[item.evidenceId] ?? 0);
           const paneWindow = virtualizedWindow({
@@ -1541,6 +1576,14 @@ export function LogWorkbench(props: {
                   <span> {page.wrappedRowCount} wrapped long lines</span>
                 ) : null}
               </header>
+              {paneError ? (
+                <p className="log-workbench__notice" role="alert">
+                  {paneError}{" "}
+                  <button type="button" onClick={() => void loadPane(item.evidenceId)}>
+                    Retry loading lines
+                  </button>
+                </p>
+              ) : null}
               <div
                 className="log-workbench__spacer"
                 aria-hidden="true"

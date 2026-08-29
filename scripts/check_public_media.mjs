@@ -308,7 +308,12 @@ export function validatePublishedReferences(
 }
 
 export function normalizePublishedLocalTarget(target, document = "<memory>") {
-  const decoded = decodeHtmlCharacterReferences(target, document).replace(
+  const rawTrimmed = target.replace(/^[ \t\n\f\r]+|[ \t\n\f\r]+$/g, "");
+  // Remote targets carry no repository bytes. Short-circuit their literal
+  // scheme before applying the intentionally conservative local-entity gate,
+  // so an ordinary badge query cannot break the privacy lane.
+  if (/^(?:https?:)?\/\//i.test(rawTrimmed)) return null;
+  const decoded = decodeHtmlCharacterReferences(rawTrimmed, document).replace(
     /^[ \t\n\f\r]+|[ \t\n\f\r]+$/g,
     "",
   );
@@ -327,6 +332,11 @@ export function normalizePublishedLocalTarget(target, document = "<memory>") {
   if (/&(?:#|[a-z])/i.test(withoutSuffix)) {
     throw new Error(
       `${document}: published image target uses an ambiguous HTML character reference: ${target}`,
+    );
+  }
+  if (/%(?:2e|2f|5c)/i.test(withoutSuffix)) {
+    throw new Error(
+      `${document}: published image target uses an encoded path separator or traversal segment: ${target}`,
     );
   }
   try {
@@ -348,20 +358,25 @@ export function normalizePublishedLocalTarget(target, document = "<memory>") {
 export function collectPublishedImageTargets(text, document = "<memory>") {
   const targets = [];
   const renderedText = maskMarkdownHtmlComments(maskMarkdownFencedCode(text));
+  // Inline code is literal text, not an image or HTML node. Keep a separate
+  // masked view for syntax scans while retaining the original rendered text
+  // for accessible Markdown alt extraction below.
+  const markdownRenderedText = maskMarkdownInlineCode(renderedText);
+  const htmlRenderedText = markdownRenderedText;
 
-  const definitions = collectMarkdownDefinitions(text);
+  const definitions = collectMarkdownDefinitions(text, document);
   let cursor = 0;
   while (cursor < renderedText.length) {
-    const imageStart = renderedText.indexOf("![", cursor);
+    const imageStart = markdownRenderedText.indexOf("![", cursor);
     if (imageStart < 0) break;
-    const alt = parseBracketedMarkdown(renderedText, imageStart + 1);
+    const alt = parseBracketedMarkdown(markdownRenderedText, imageStart + 1);
     if (alt === null) {
       cursor = imageStart + 2;
       continue;
     }
 
-    if (renderedText[alt.end] === "(") {
-      const inline = parseInlineMarkdownDestination(renderedText, alt.end);
+    if (markdownRenderedText[alt.end] === "(") {
+      const inline = parseInlineMarkdownDestination(markdownRenderedText, alt.end);
       if (inline !== null) {
         targets.push({
           target: inline.target,
@@ -371,36 +386,37 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
         cursor = inline.end;
         continue;
       }
-    } else {
-      let label = alt.value;
-      let end = alt.end;
-      if (renderedText[alt.end] === "[") {
-        const explicitLabel = parseBracketedMarkdown(renderedText, alt.end);
-        if (explicitLabel === null) {
-          cursor = alt.end;
-          continue;
-        }
+    }
+
+    // If an apparent inline or full-reference suffix is malformed, CommonMark
+    // backtracks and may still render the preceding `![alt]` as a shortcut
+    // reference. Resolve that form instead of silently skipping the image.
+    let label = alt.value;
+    let end = alt.end;
+    if (markdownRenderedText[alt.end] === "[") {
+      const explicitLabel = parseBracketedMarkdown(markdownRenderedText, alt.end);
+      if (explicitLabel !== null) {
         label = explicitLabel.value.trim() || alt.value;
         end = explicitLabel.end;
       }
-      const normalizedLabel = normalizeMarkdownLabel(label);
-      const target = definitions.get(normalizedLabel);
-      if (target !== undefined) {
-        targets.push({
-          target,
-          form: "reference",
-          alt: renderMarkdownAltText(alt.value, document),
-        });
-        cursor = end;
-        continue;
-      }
-      // A reference image with no definition renders as literal text, but an
-      // unresolvable local raster-shaped label is ambiguous and fails closed.
-      if (RASTER_EXTENSION_RE.test(unescapeMarkdown(label))) {
-        throw new Error(
-          `${document}: reference image '${renderedText.slice(imageStart, end)}' has no link definition`,
-        );
-      }
+    }
+    const normalizedLabel = normalizeMarkdownLabel(label);
+    const target = definitions.get(normalizedLabel);
+    if (target !== undefined) {
+      targets.push({
+        target,
+        form: "reference",
+        alt: renderMarkdownAltText(alt.value, document),
+      });
+      cursor = end;
+      continue;
+    }
+    // A reference image with no definition renders as literal text, but an
+    // unresolvable local raster-shaped label is ambiguous and fails closed.
+    if (RASTER_EXTENSION_RE.test(unescapeMarkdown(label))) {
+      throw new Error(
+        `${document}: reference image '${markdownRenderedText.slice(imageStart, end)}' has no link definition`,
+      );
     }
     cursor = Math.max(alt.end, imageStart + 2);
   }
@@ -410,13 +426,15 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
   // unreviewed `srcset` or `<picture><source>` payload at another viewport or
   // pixel density.
   const pictureRanges = [];
-  for (const picture of renderedText.matchAll(/<picture\b[\s\S]*?<\/picture\s*>/gi)) {
+  for (const picture of htmlRenderedText.matchAll(/<picture\b[\s\S]*?<\/picture\s*>/gi)) {
     pictureRanges.push({ start: picture.index, end: picture.index + picture[0].length });
     const imageTags = collectHtmlTags(picture[0], "img", document);
-    if (imageTags.length === 0) {
-      throw new Error(`${document}: <picture> has no quoted fallback <img> to supply alt text`);
+    if (imageTags.length !== 1) {
+      throw new Error(
+        `${document}: <picture> must have exactly one quoted fallback <img> to supply alt text`,
+      );
     }
-    const fallback = imageTags.at(-1);
+    const fallback = imageTags[0];
     const fallbackAttributes = parseHtmlAttributes(
       fallback.attributes,
       document,
@@ -441,7 +459,7 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
     }
   }
 
-  for (const match of collectHtmlTags(renderedText, "img", document)) {
+  for (const match of collectHtmlTags(htmlRenderedText, "img", document)) {
     const attributes = parseHtmlAttributes(match.attributes, document, match.tag);
     const src = attributes.get("src");
     if (src === undefined || src === null) {
@@ -476,7 +494,7 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
   // may belong to audio/video. If it nevertheless carries srcset, browsers can
   // treat it as responsive image syntax in malformed markup; reject rather
   // than silently guessing its accessibility or privacy scope.
-  for (const source of collectHtmlTags(renderedText, "source", document)) {
+  for (const source of collectHtmlTags(htmlRenderedText, "source", document)) {
     if (pictureRanges.some((range) => source.start >= range.start && source.end <= range.end)) {
       continue;
     }
@@ -499,6 +517,50 @@ function normalizeMarkdownLabel(value) {
   return unescapeMarkdown(value).trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
 }
 
+function maskMarkdownInlineCode(value) {
+  // `value` is indexed in UTF-16 code units throughout the parser. Keep the
+  // same indexing here so an emoji before a code span cannot shift the mask.
+  const masked = value.split("");
+  let index = 0;
+  while (index < value.length) {
+    if (value[index] === "<") {
+      const htmlEnd = inlineHtmlTagEnd(value, index);
+      if (htmlEnd !== null) {
+        index = htmlEnd;
+        continue;
+      }
+    }
+    if (value[index] !== "`") {
+      index += 1;
+      continue;
+    }
+    let runEnd = index + 1;
+    while (value[runEnd] === "`") runEnd += 1;
+    const runLength = runEnd - index;
+    let close = runEnd;
+    let matched = false;
+    while (close < value.length) {
+      close = value.indexOf("`".repeat(runLength), close);
+      if (close < 0) break;
+      if (
+        !/\r?\n[ \t]*\r?\n/.test(value.slice(runEnd, close)) &&
+        value[close - 1] !== "`" &&
+        value[close + runLength] !== "`"
+      ) {
+        for (let cursor = index; cursor < close + runLength; cursor += 1) {
+          if (masked[cursor] !== "\n" && masked[cursor] !== "\r") masked[cursor] = " ";
+        }
+        index = close + runLength;
+        matched = true;
+        break;
+      }
+      close += runLength;
+    }
+    if (!matched) index = runEnd;
+  }
+  return masked.join("");
+}
+
 /**
  * Image alt text is the rendered inline content, not the Markdown source.
  * Link destinations and raw-HTML attributes are invisible to assistive
@@ -518,7 +580,7 @@ function renderMarkdownAltText(value, document) {
       while (value[runEnd] === "`") runEnd += 1;
       const delimiter = "`".repeat(runEnd - index);
       const close = value.indexOf(delimiter, runEnd);
-      if (close >= 0) {
+      if (close >= 0 && !/\r?\n[ \t]*\r?\n/.test(value.slice(runEnd, close))) {
         rendered += value.slice(runEnd, close).replace(/[\r\n]+/g, " ");
         index = close + delimiter.length;
         continue;
@@ -586,6 +648,7 @@ function parseBracketedMarkdown(source, openIndex) {
       while (close < source.length) {
         close = source.indexOf("`".repeat(runLength), close);
         if (close < 0) break;
+        if (/\r?\n[ \t]*\r?\n/.test(source.slice(runEnd, close))) break;
         if (source[close - 1] !== "`" && source[close + runLength] !== "`") {
           value += source.slice(index, close + runLength);
           index = close + runLength;
@@ -758,16 +821,34 @@ function parseMarkdownDefinitionDestination(source, start) {
     : unescapeMarkdown(source.slice(destinationStart, index));
 }
 
-function markdownContainerContent(line) {
+function markdownContainerInfo(line) {
   let remainder = line;
-  for (let depth = 0; depth < 16; depth += 1) {
-    const next = remainder
-      .replace(/^[ \t]{0,3}>[ \t]?/, "")
-      .replace(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/, "");
-    if (next === remainder) break;
-    remainder = next;
+  const containers = [];
+  while (true) {
+    const quote = remainder.match(/^[ \t]{0,3}>[ \t]?/);
+    if (quote !== null) {
+      containers.push({ type: "blockquote" });
+      remainder = remainder.slice(quote[0].length);
+      continue;
+    }
+    const list = remainder.match(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
+    if (list !== null) {
+      containers.push({ type: "list", indent: list[0].length });
+      remainder = remainder.slice(list[0].length);
+      continue;
+    }
+    break;
   }
-  return remainder;
+  return {
+    content: remainder,
+    containers,
+    blockquoteDepth: containers.filter((container) => container.type === "blockquote").length,
+    listDepth: containers.filter((container) => container.type === "list").length,
+  };
+}
+
+function markdownContainerContent(line) {
+  return markdownContainerInfo(line).content;
 }
 
 function stripMarkdownContainerPrefixes(text) {
@@ -779,11 +860,42 @@ function maskMarkdownFencedCode(text) {
   let fence = null;
   for (let index = 0; index < parts.length; index += 2) {
     const line = parts[index];
-    const content = markdownContainerContent(line);
+    const info = markdownContainerInfo(line);
+    const content = info.content;
     if (fence === null) {
       const opener = content.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);
       if (opener !== null && !(opener[1][0] === "`" && opener[2].includes("`"))) {
-        fence = { character: opener[1][0], length: opener[1].length };
+        fence = {
+          character: opener[1][0],
+          length: opener[1].length,
+          blockquoteDepth: info.blockquoteDepth,
+          listDepth: info.listDepth,
+        };
+        parts[index] = " ".repeat(line.length);
+      }
+      continue;
+    }
+
+    // A fence belongs to the blockquote/list containers that opened it. A
+    // global fence state would otherwise hide top-level definitions after an
+    // unclosed quoted/list item fence, even though CommonMark has already
+    // returned to the outer document. Terminate the fence before a line that
+    // has escaped its owner container.
+    if (!lineBelongsToContainer(fence, info, line)) {
+      fence = null;
+      // Process this line again as ordinary Markdown. It may itself open a
+      // new fence, and it must remain visible when it is a real definition.
+      const nextOpener = content.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);
+      if (
+        nextOpener !== null &&
+        !(nextOpener[1][0] === "`" && nextOpener[2].includes("`"))
+      ) {
+        fence = {
+          character: nextOpener[1][0],
+          length: nextOpener[1].length,
+          blockquoteDepth: info.blockquoteDepth,
+          listDepth: info.listDepth,
+        };
         parts[index] = " ".repeat(line.length);
       }
       continue;
@@ -803,10 +915,141 @@ function maskMarkdownHtmlComments(text) {
   );
 }
 
-function collectMarkdownDefinitions(text) {
+const RAW_HTML_BLOCK_TAGS = new Set([
+  "address", "article", "aside", "base", "basefont", "blockquote", "body",
+  "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir",
+  "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
+  "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html",
+  "iframe", "legend", "li", "link", "main", "menu", "menuitem", "nav", "ol",
+  "p", "pre", "script", "section", "style", "summary", "table", "tbody", "td",
+  "tfoot", "th", "thead", "title", "tr", "track", "ul",
+]);
+
+function htmlTagTokens(value) {
+  const tokens = [];
+  let index = 0;
+  while (index < value.length) {
+    const start = value.indexOf("<", index);
+    if (start < 0) break;
+    let cursor = start + 1;
+    let closing = false;
+    if (value[cursor] === "/") {
+      closing = true;
+      cursor += 1;
+    }
+    while (/[ \t\r\n]/.test(value[cursor] ?? "")) cursor += 1;
+    const name = value.slice(cursor).match(/^[A-Za-z][A-Za-z0-9:-]*/)?.[0];
+    if (!name) {
+      index = start + 1;
+      continue;
+    }
+    cursor += name.length;
+    let quote = null;
+    while (cursor < value.length) {
+      const character = value[cursor];
+      if (quote !== null) {
+        if (character === quote) quote = null;
+      } else if (character === `"` || character === `'`) {
+        quote = character;
+      } else if (character === ">") {
+        tokens.push({
+          name: name.toLocaleLowerCase("en-US"),
+          closing,
+          selfClosing: /\/\s*$/.test(value.slice(start, cursor)),
+        });
+        index = cursor + 1;
+        break;
+      }
+      cursor += 1;
+    }
+    if (cursor >= value.length) break;
+  }
+  return tokens;
+}
+
+function maskMarkdownHtmlBlocks(text, document = "<memory>") {
+  const parts = text.split(/(\r\n|\n|\r)/);
+  let openTags = [];
+  let owner = null;
+  for (let index = 0; index < parts.length; index += 2) {
+    const line = parts[index];
+    const content = markdownContainerContent(line);
+    const tokens = htmlTagTokens(content);
+    const startsWithBlockTag = /^\s*</.test(content) && tokens.length > 0;
+
+    if (openTags.length > 0) {
+      const info = markdownContainerInfo(line);
+      if (!lineBelongsToContainer(owner, info, line)) {
+        openTags = [];
+        owner = null;
+      } else {
+        parts[index] = " ".repeat(line.length);
+        for (const token of tokens) {
+          if (!token.closing && RAW_HTML_BLOCK_TAGS.has(token.name) && !token.selfClosing) {
+            openTags.push(token.name);
+          } else if (token.closing && token.name === openTags.at(-1)) {
+            openTags.pop();
+          }
+        }
+        continue;
+      }
+    }
+
+    if (!startsWithBlockTag) continue;
+    const first = tokens[0];
+    if (!RAW_HTML_BLOCK_TAGS.has(first.name)) continue;
+    parts[index] = " ".repeat(line.length);
+    if (!first.closing && !first.selfClosing) {
+      owner = markdownContainerInfo(line);
+      openTags = [first.name];
+      for (const token of tokens.slice(1)) {
+        if (!token.closing && RAW_HTML_BLOCK_TAGS.has(token.name) && !token.selfClosing) {
+          openTags.push(token.name);
+        } else if (token.closing && token.name === openTags.at(-1)) {
+          openTags.pop();
+        }
+      }
+    }
+  }
+  if (openTags.length > 0) {
+    throw new Error(
+      `${document}: unterminated raw HTML block <${openTags.at(-1)}> cannot be checked safely`,
+    );
+  }
+  return parts.join("");
+}
+
+/*
+ * Keep this helper's ownership rule in one place for future block-level
+ * scanners. A container-aware parser is intentionally not pulled in as a
+ * runtime dependency: this validator runs before npm install in release jobs.
+ */
+function lineBelongsToContainer(owner, info, line) {
+  // A root-level fence/raw block owns every line, including lines that begin
+  // with `>` or a list marker: those markers are literal content until the
+  // matching fence/tag closes. Container transitions only matter when the
+  // block itself was opened inside a container.
+  if (owner.blockquoteDepth === 0 && owner.listDepth === 0) return true;
+  const sameBlockquote = info.blockquoteDepth === owner.blockquoteDepth;
+  const sameOrNestedList = owner.listDepth > 0
+    ? info.listDepth >= owner.listDepth
+    : info.listDepth === 0;
+  const listContinuation =
+    owner.listDepth > 0 &&
+    info.listDepth < owner.listDepth &&
+    /^[ \t]{2,}/.test(line) &&
+    info.blockquoteDepth === owner.blockquoteDepth &&
+    line.trim() !== "";
+  return sameBlockquote && (sameOrNestedList || listContinuation);
+}
+
+function collectMarkdownDefinitions(text, document = "<memory>") {
   const definitions = new Map();
   const visibleBlocks = stripMarkdownContainerPrefixes(
-    maskMarkdownHtmlComments(maskMarkdownFencedCode(text)),
+    maskMarkdownHtmlBlocks(
+      maskMarkdownHtmlComments(maskMarkdownFencedCode(text)),
+      document,
+    ),
   );
   const lineStart = /^(?:[ \t]{0,3})\[/gm;
   for (const match of visibleBlocks.matchAll(lineStart)) {
@@ -827,12 +1070,36 @@ function collectMarkdownDefinitions(text) {
 }
 
 function decodeHtmlCharacterReferences(value, document, context = value) {
-  const named = { amp: "&", lt: "<", gt: ">", quot: `"`, apos: `'` };
+  const named = {
+    amp: "&",
+    apos: `'`,
+    gt: ">",
+    hellip: "…",
+    lt: "<",
+    mdash: "—",
+    nbsp: "\u00a0",
+    ndash: "–",
+    quot: `"`,
+  };
   const decoded = value.replace(
     /&(?:#(\d+);?|#x([0-9a-f]+);?|([a-z][a-z0-9]+);)/gi,
     (entity, decimal, hexadecimal, name) => {
-      if (decimal !== undefined) return String.fromCodePoint(Number(decimal));
-      if (hexadecimal !== undefined) return String.fromCodePoint(Number.parseInt(hexadecimal, 16));
+      if (decimal !== undefined || hexadecimal !== undefined) {
+        const codePoint = decimal !== undefined
+          ? Number(decimal)
+          : Number.parseInt(hexadecimal, 16);
+        if (
+          !Number.isInteger(codePoint) ||
+          codePoint < 0 ||
+          codePoint > 0x10ffff ||
+          (codePoint >= 0xd800 && codePoint <= 0xdfff)
+        ) {
+          throw new Error(
+            `${document}: image syntax uses an invalid numeric character reference: ${context}`,
+          );
+        }
+        return String.fromCodePoint(codePoint);
+      }
       return named[name.toLocaleLowerCase("en-US")] ?? entity;
     },
   );

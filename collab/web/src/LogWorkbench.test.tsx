@@ -1375,6 +1375,39 @@ describe("Log workbench honesty and navigation", () => {
     expect(screen.getByText(/batch\.log/)).toBeTruthy();
   });
 
+  it("keeps a failed pane page retryable", async () => {
+    let pageAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          pageAttempts += 1;
+          if (pageAttempts === 1) return jsonResponse({ error: "temporary page failure" }, 503);
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    expect(await screen.findByText("temporary page failure")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading lines" }));
+    await waitFor(() => expect(pageAttempts).toBe(2));
+    expect(screen.queryByText("temporary page failure")).toBeNull();
+  });
+
   it("does not describe a bounded search as a complete count", async () => {
     vi.stubGlobal(
       "fetch",

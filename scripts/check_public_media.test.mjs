@@ -299,6 +299,7 @@ test("non-ledgerable local and embedded images are rejected", () => {
       `![Extensionless](docs/images/unreviewed)\n`,
       `![Encoded query](docs/images/unreviewed.png%3Fraw=1)\n`,
       `![Encoded fragment](docs/images/unreviewed.png%23preview)\n`,
+      `![Encoded path separator](docs%2Fmedia%2Fgallery%2Fframe.png)\n`,
     ];
     for (const contents of cases) {
       fs.writeFileSync(readme, `# Fixture\n\n${contents}`);
@@ -306,7 +307,7 @@ test("non-ledgerable local and embedded images are rejected", () => {
       assert.notEqual(result.status, 0, contents);
       assert.match(
         result.stderr,
-        /embedded data images are not privacy-ledgered|local SVG image .* is outside the raster privacy ledger|local image .* has no supported privacy-ledgered raster extension/,
+        /embedded data images are not privacy-ledgered|local SVG image .* is outside the raster privacy ledger|local image .* has no supported privacy-ledgered raster extension|encoded path separator or traversal segment/,
       );
     }
   });
@@ -357,11 +358,30 @@ test("responsive HTML image candidates cannot bypass the ledger", () => {
 
     fs.writeFileSync(
       readme,
+      `# Fixture\n\n<div>\n[shot]: docs/images/smuggled.png\n\n![Synthetic][shot]\n`,
+    );
+    const unclosedHtml = run(root);
+    assert.notEqual(unclosedHtml.status, 0);
+    assert.match(unclosedHtml.stderr, /unterminated raw HTML block/);
+
+    fs.writeFileSync(
+      readme,
       `# Fixture\n\n<picture><source srcset="${pathname} 2x"><img src="${pathname}" srcset="${pathname} 1x" alt="Synthetic"></picture>\n`,
     );
     const listed = run(root);
     assert.equal(listed.status, 0, listed.stderr);
     assert.match(listed.stdout, /3 published references/);
+
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n<picture><source srcset="${pathname} 2x"><img src="${pathname}" alt="Synthetic"><img src="${pathname}" alt="Synthetic"></picture>\n`,
+    );
+    const duplicateFallback = run(root);
+    assert.notEqual(duplicateFallback.status, 0);
+    assert.match(
+      duplicateFallback.stderr,
+      /<picture> must have exactly one quoted fallback <img>/,
+    );
   });
 });
 
@@ -395,6 +415,10 @@ test("reference definitions honor rendered block context and blockquote containe
       `![Synthetic][shot]\n\n- \`\`\`md\n  [shot]: ${pathname}\n  \`\`\`\n\n[shot]: docs/images/smuggled.png\n`,
       `![Synthetic][shot]\n\n<!--\n[shot]: ${pathname}\n-->\n\n[shot]: docs/images/smuggled.png\n`,
       `![Synthetic][shot]\n\n> [shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n<div>\n[shot]: ${pathname}\n</div>\n\n[shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n> \`\`\`md\n> [shot]: ${pathname}\n\n[shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n- \`\`\`md\n  [shot]: ${pathname}\n\n[shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n${"> ".repeat(17)}[shot]: docs/images/smuggled.png\n\n[shot]: ${pathname}\n`,
     ];
     for (const contents of cases) {
       fs.writeFileSync(readme, `# Fixture\n\n${contents}`);
@@ -422,9 +446,11 @@ test("images inside fenced code and HTML comments are not published", () => {
   withRepository(({ root }) => {
     fs.writeFileSync(
       path.join(root, "README.md"),
-      `# Fixture\n\n\`\`\`md\n![Code](docs/images/unreviewed.png)\n\`\`\`\n\n` +
-        `> \`\`\`html\n> <img src="docs/images/unreviewed.png" alt="Code">\n> \`\`\`\n\n` +
-        `<!-- ![Comment](docs/images/unreviewed.png) -->\n`,
+      `# Fixture\n\n\`\`\`md\n![Code](docs/images/unreviewed.png)\n- ![List code](docs/images/unreviewed.png)\n> <img src="docs/images/unreviewed.png" alt="Code">\n\`\`\`\n\n` +
+      `> \`\`\`html\n> <img src="docs/images/unreviewed.png" alt="Code">\n> \`\`\`\n\n` +
+        `<!-- ![Comment](docs/images/unreviewed.png) -->\n\n` +
+        "`<img src=\"docs/images/unreviewed.png\" alt=\"Code\">`\n" +
+        "`![Code](docs/images/unreviewed.png)`\n",
     );
     const result = run(root);
     assert.equal(result.status, 0, result.stderr);
@@ -456,6 +482,67 @@ test("ordinary ampersands in remote and local query strings remain valid", () =>
     const result = run(root);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /1 published references/);
+  });
+});
+
+test("malformed inline images still resolve their shortcut reference definition", () => {
+  withRepository(({ root }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      "# Fixture\n\n![shot](docs/images/smuggled.png\n\n[shot]: docs/images/smuggled.png\n",
+    );
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /published raster 'docs\/images\/smuggled\.png' \(reference\)/,
+    );
+  });
+});
+
+test("Markdown code spans cannot hide an image across a blank paragraph", () => {
+  withRepository(({ root }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      "# Fixture\n\n![Synthetic `code\n\n](docs/images/smuggled.png)`\n",
+    );
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /published raster 'docs\/images\/smuggled\.png' \(inline\)/,
+    );
+  });
+});
+
+test("named character references and invalid numeric references are handled explicitly", () => {
+  withRepository(({ root, pathname }) => {
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      `# Fixture\n\n<img src="${pathname}" alt="Synthetic &mdash; frame&nbsp;">\n`,
+    );
+    const named = run(root);
+    assert.equal(named.status, 0, named.stderr);
+    assert.match(named.stdout, /1 published references/);
+
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      `# Fixture\n\n<img src="${pathname}" alt="Synthetic &#x110000;">\n`,
+    );
+    const invalid = run(root);
+    assert.notEqual(invalid.status, 0);
+    assert.match(invalid.stderr, /invalid numeric character reference/);
+
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      "# Fixture\n\n![Remote](https://example.invalid/badge.svg?x=&copy;)\n",
+    );
+    const remote = run(root);
+    assert.equal(remote.status, 0, remote.stderr);
   });
 });
 
