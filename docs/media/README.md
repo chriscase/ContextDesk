@@ -58,14 +58,15 @@ credential, private path, or non-synthetic corpus is visible.
 | `gallery/war-room-capture-analyze.png` | Capture provenance, imported-output boundary, and corpus intake | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-analyze.png` | Workstreams and the beginning of the investigation-owned Log workbench, including its current open-pane count | 1440 × 1000 PNG | `cddc38fb0088f377b124fc30cf5c76c0c4234cb4` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-compare-decide.png` | Comparison lab, evidence, deep links, and lane focus | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-decide-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-decide-export.png` | Human decision journal, recorded comparison context, and share-safe export boundary | 1440 × 1000 PNG | `c7d0ca8b364ff5336cc2a95dc4f2c22ce175cbcf` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `c7d0ca8b364ff5336cc2a95dc4f2c22ce175cbcf` | Synthetic checkout-timeout War Room demo |
 
 **Known residual — this is not a single-build gallery.** The Analyze frame was
-refreshed at `cddc38fb0088f377b124fc30cf5c76c0c4234cb4` to show the current
-workbench entry point and open-pane count; the other War Room frames remain exact captures of
-`5508e9e63b540d1ba5080fc7d70eecd74f08e332`, while the three native desktop
-frames still span earlier packaged-app builds. `gallery/logs-library-demo.png`
+refreshed at `cddc38fb0088f377b124fc30cf5c76c0c4234cb4`; the two Decide/export
+frames were refreshed at `c7d0ca8b364ff5336cc2a95dc4f2c22ce175cbcf`;
+and the Overview, Capture, and Compare frames remain exact captures of
+`5508e9e63b540d1ba5080fc7d70eecd74f08e332`. The three native desktop frames
+still span earlier packaged-app builds. `gallery/logs-library-demo.png`
 predates the Logs toolbar regrouping. Closing that residual requires a full
 recapture from one freshly built release; it cannot be discharged by editing
 this file.
