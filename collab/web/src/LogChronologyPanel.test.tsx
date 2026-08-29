@@ -116,6 +116,58 @@ describe("LogChronologyPanel", () => {
     expect(filtered.searchParams.getAll("sources")).toEqual(["worker/batch.log"]);
   });
 
+  it("clears completed chronology immediately when a visible filter changes", async () => {
+    stubFetch([
+      page({ rows: [row({ message: "old completed chronology" })] }),
+      page({ rows: [row({ message: "fresh filtered chronology" })] }),
+    ]);
+    render(<LogChronologyPanel caseId={CASE_ID} />);
+    expect(await screen.findByText("old completed chronology")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Search log messages"), {
+      target: { value: "fresh" },
+    });
+    expect(screen.queryByText("old completed chronology")).toBeNull();
+    expect(await screen.findByText("fresh filtered chronology")).toBeTruthy();
+  });
+
+  it("does not publish an older request during the filter debounce", async () => {
+    const oldRead = deferred<Response>();
+    const filteredRead = deferred<Response>();
+    let reads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        reads += 1;
+        return reads === 1 ? oldRead.promise : filteredRead.promise;
+      }),
+    );
+    render(<LogChronologyPanel caseId={CASE_ID} />);
+    await waitFor(() => expect(reads).toBe(1));
+
+    fireEvent.change(screen.getByLabelText("Search log messages"), {
+      target: { value: "fresh" },
+    });
+    await act(async () => {
+      oldRead.resolve(
+        jsonResponse(page({ rows: [row({ message: "stale reply during debounce" })] })),
+      );
+      await oldRead.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByText("stale reply during debounce")).toBeNull();
+
+    await waitFor(() => expect(reads).toBe(2));
+    await act(async () => {
+      filteredRead.resolve(
+        jsonResponse(page({ rows: [row({ message: "fresh reply after debounce" })] })),
+      );
+      await filteredRead.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(await screen.findByText("fresh reply after debounce")).toBeTruthy();
+  });
+
   it("uses the opaque cursor to append a stable next page", async () => {
     const first = page({ nextCursor: "opaque-cursor-1" });
     const second = page({

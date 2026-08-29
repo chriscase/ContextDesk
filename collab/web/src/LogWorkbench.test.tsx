@@ -272,6 +272,74 @@ describe("Log workbench", () => {
     expect(inventoryReads).toBe(2);
   });
 
+  it("does not expose completed stale inventory while a hidden change reloads", async () => {
+    const freshInventory = deferred<Response>();
+    let inventoryReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) {
+          inventoryReads += 1;
+          if (inventoryReads === 1) {
+            const stale = inventory();
+            stale.items[0] = {
+              ...stale.items[0]!,
+              relativePath: "stale-ready.log",
+              displayLabel: "stale-ready.log",
+            };
+            stale.items = stale.items.slice(0, 1);
+            return jsonResponse(stale);
+          }
+          return freshInventory.promise;
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) {
+          return jsonResponse({ candidateCount: 0 });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />,
+    );
+    expect(await screen.findByLabelText("Show stale-ready.log in a pane")).toBeTruthy();
+
+    view.rerender(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active={false} />,
+    );
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }),
+      );
+    });
+    expect(inventoryReads).toBe(1);
+
+    view.rerender(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />,
+    );
+    expect(screen.queryByText("stale-ready.log")).toBeNull();
+    expect(screen.getByText(/Loading this investigation’s logs/i)).toBeTruthy();
+    await waitFor(() => expect(inventoryReads).toBe(2));
+
+    const fresh = inventory();
+    fresh.items[0] = {
+      ...fresh.items[0]!,
+      relativePath: "fresh-after-hidden.log",
+      displayLabel: "fresh-after-hidden.log",
+    };
+    fresh.items = fresh.items.slice(0, 1);
+    await act(async () => {
+      freshInventory.resolve(jsonResponse(fresh));
+      await freshInventory.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(await screen.findByLabelText("Show fresh-after-hidden.log in a pane")).toBeTruthy();
+    expect(screen.queryByText("stale-ready.log")).toBeNull();
+  });
+
   it("shows investigation logs with human labels and keeps HTML filenames as text", async () => {
     stubFetch();
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);

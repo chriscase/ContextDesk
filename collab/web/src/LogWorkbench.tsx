@@ -554,6 +554,10 @@ export function LogWorkbench(props: {
       // delayed inventory, search, chronology, or pane reply cannot repopulate
       // state that will be exposed briefly on the next activation.
       loadRequestGeneration.current += 1;
+      // Keep the user's pane choices for reconciliation with the next
+      // inventory, but gate every inventory-derived surface behind loading so
+      // a later activation cannot commit one frame of completed stale data.
+      setLoadState("loading");
       invalidateScopedResults();
       invalidateEvidencePages();
       return;

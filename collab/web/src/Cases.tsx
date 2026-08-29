@@ -2633,7 +2633,7 @@ export function Cases(props: {
                   caseId={current.id}
                   canWrite={canWrite}
                   readOnly={readOnly}
-                  active={stage === "analyze"}
+                  active={stage === "analyze" && !workstreamFocused}
                 />
               </div>
             </TriageAnchor>
@@ -2656,7 +2656,7 @@ export function Cases(props: {
                 <LogChronologyPanel
                   key={current.id}
                   caseId={current.id}
-                  active={stage === "analyze"}
+                  active={stage === "analyze" && !workstreamFocused}
                 />
               </div>
             </TriageAnchor>

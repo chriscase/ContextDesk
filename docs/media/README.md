@@ -1,17 +1,20 @@
 # Public product media
 
-Screenshots referenced by the top-level `README.md` are native captures of the
-packaged application. They communicate visible product behavior; they are not
-proof of provider quality, tool-loop success, universal performance,
-company-data behavior, or owner acceptance.
+Screenshots referenced by the top-level `README.md` include both native
+packaged-application captures and the loopback synthetic War Room capture
+identified in the ledger below. They communicate visible product behavior;
+they are not proof of provider quality, tool-loop success, universal
+performance, company-data behavior, or owner acceptance.
 
 ## Exact app-build capture template
 
 `docs/media/public-assets.json` is the authority for which app-source SHA each
-published frame came from, so this section states it **per file** rather than in
-aggregate. The current gallery was not captured from a single build — it spans
-two, recorded below. Later documentation-only commits may advance repository
-`HEAD` without changing the packaged application bytes.
+published frame came from, so this document states it **per file** rather than
+in aggregate. The three native packaged-application frames were not captured
+from one build — that subset spans the two app-source SHAs recorded below. The
+War Room table separately records its loopback web-demo source SHAs. Later
+documentation-only commits may advance repository `HEAD` without changing a
+captured application surface.
 
 | Property | Required value |
 | --- | --- |

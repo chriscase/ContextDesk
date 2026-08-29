@@ -192,9 +192,13 @@ export function LogTimeReviewPanel(props: {
   const [sourceLimit, setSourceLimit] = useState(INITIAL_SOURCE_ROWS);
   const [zone, setZone] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [busy, setBusy] = useState<
-    "load" | "build" | "preview" | "apply" | "clear" | "undo" | null
-  >(null);
+  type ActionPhase = "build" | "preview" | "apply" | "clear" | "undo";
+  const [loadBusy, setLoadBusy] = useState(false);
+  const [actionBusy, setActionBusy] = useState<ActionPhase | null>(null);
+  const actionBusyRef = useRef<ActionPhase | null>(null);
+  // A background refresh must never replace the lock held by a durable POST.
+  // Keep the two lifecycles separate and expose one presentation value only.
+  const busy = actionBusy ?? (loadBusy ? "load" : null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // A deployment with no configured host pipeline never registers these
@@ -234,7 +238,9 @@ export function LogTimeReviewPanel(props: {
     setSourceLimit(INITIAL_SOURCE_ROWS);
     setZone("");
     setPreview(null);
-    setBusy(null);
+    actionBusyRef.current = null;
+    setActionBusy(null);
+    setLoadBusy(false);
     setError(null);
     setNotice(null);
     setUnavailable(false);
@@ -244,7 +250,7 @@ export function LogTimeReviewPanel(props: {
     const requestCaseId = props.caseId;
     if (!isCurrentCase(requestCaseId)) return;
     const version = ++requestVersion.current;
-    setBusy("load");
+    setLoadBusy(true);
     if (!preserveError) setError(null);
     try {
       const response = await protectedApiFetch(
@@ -280,7 +286,7 @@ export function LogTimeReviewPanel(props: {
       }
     } finally {
       if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
-        setBusy(null);
+        setLoadBusy(false);
       }
     }
   }, [isCurrentCase, props.caseId]);
@@ -302,9 +308,10 @@ export function LogTimeReviewPanel(props: {
       // its continuation and release the local busy state. Durable writes are
       // not cancelled here: they must settle against the server and publish
       // their own completion event (or surface the server's conflict).
-      if (busy === "preview") {
+      if (actionBusyRef.current === "preview") {
         actionVersion.current += 1;
-        setBusy(null);
+        actionBusyRef.current = null;
+        setActionBusy(null);
       }
       setState(null);
       setDependents([]);
@@ -316,7 +323,7 @@ export function LogTimeReviewPanel(props: {
     };
     window.addEventListener("contextdesk:log-time-changed", refresh);
     return () => window.removeEventListener("contextdesk:log-time-changed", refresh);
-  }, [busy, load, props.caseId]);
+  }, [load, props.caseId]);
 
   const outstanding = useMemo(
     () => (state?.sources ?? []).filter((s) => s.unresolvedLocalRecords > 0),
@@ -352,13 +359,14 @@ export function LogTimeReviewPanel(props: {
     phase: "build" | "preview" | "apply" | "clear" | "undo",
     fallback: string,
   ): Promise<unknown | null> {
-    if (props.readOnly || !props.canWrite || busy) return null;
+    if (props.readOnly || !props.canWrite || busy || actionBusyRef.current) return null;
     const requestCaseId = props.caseId;
     if (!isCurrentCase(requestCaseId)) return null;
     const version = ++actionVersion.current;
     setError(null);
     setNotice(null);
-    setBusy(phase);
+    actionBusyRef.current = phase;
+    setActionBusy(phase);
     try {
       // Build takes no body. Declaring a JSON content-type without one makes
       // Fastify reject the request before it reaches the route.
@@ -393,7 +401,8 @@ export function LogTimeReviewPanel(props: {
       return null;
     } finally {
       if (isCurrentCase(requestCaseId) && actionVersion.current === version) {
-        setBusy(null);
+        actionBusyRef.current = null;
+        setActionBusy(null);
       }
     }
   }

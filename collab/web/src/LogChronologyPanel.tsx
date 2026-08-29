@@ -237,6 +237,17 @@ export function LogChronologyPanel(props: {
     return () => window.removeEventListener("contextdesk:log-time-changed", refresh);
   }, [load, props.caseId, props.active]);
 
+  function invalidateForFilterEdit() {
+    // The visible inputs change synchronously. Fence the projection at the
+    // same boundary so an older request cannot publish beneath a new filter
+    // label while the replacement read waits for its debounce.
+    requestVersion.current += 1;
+    setPage(null);
+    setRows([]);
+    setBusy(false);
+    setError(null);
+  }
+
   if (unavailable) return null;
 
   return (
@@ -266,7 +277,10 @@ export function LogChronologyPanel(props: {
           <input
             aria-label="Search log messages"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+              invalidateForFilterEdit();
+              setSearch(event.target.value);
+            }}
             placeholder="Literal text"
             maxLength={256}
           />
@@ -276,7 +290,10 @@ export function LogChronologyPanel(props: {
           <input
             aria-label="Filter by source"
             value={source}
-            onChange={(event) => setSource(event.target.value)}
+            onChange={(event) => {
+              invalidateForFilterEdit();
+              setSource(event.target.value);
+            }}
             placeholder="Exact source identity"
             maxLength={4096}
           />
