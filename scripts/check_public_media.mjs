@@ -356,15 +356,19 @@ export function normalizePublishedLocalTarget(target, document = "<memory>") {
  * ignoring a form is exactly the hole this closes.
  */
 export function collectPublishedImageTargets(text, document = "<memory>") {
+  // Markdown treats CR, CRLF, and LF identically. Normalize once before any
+  // scanner sees the source so blank-line and continuation rules cannot drift
+  // across line-ending variants.
+  const normalizedText = text.replace(/\r\n?/g, "\n");
   const targets = [];
-  const renderedText = maskMarkdownHtmlComments(maskMarkdownFencedCode(text));
+  const renderedText = maskMarkdownHtmlComments(maskMarkdownFencedCode(normalizedText));
   // Inline code is literal text, not an image or HTML node. Keep a separate
   // masked view for syntax scans while retaining the original rendered text
   // for accessible Markdown alt extraction below.
   const markdownRenderedText = maskMarkdownInlineCode(renderedText);
   const htmlRenderedText = markdownRenderedText;
 
-  const definitions = collectMarkdownDefinitions(text, document);
+  const definitions = collectMarkdownDefinitions(normalizedText, document);
   let cursor = 0;
   while (cursor < renderedText.length) {
     const imageStart = markdownRenderedText.indexOf("![", cursor);

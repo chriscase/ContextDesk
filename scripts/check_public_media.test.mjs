@@ -475,6 +475,8 @@ test("escaped delimiters and Markdown containers cannot hide published images", 
     const cases = [
       "# Fixture\n\n\\`![Synthetic](docs/images/unreviewed.png)\\`\n",
       "# Fixture\n\n\\<!-- ![Synthetic](docs/images/unreviewed.png) -->\n",
+      "# Fixture\r\r`code\r\r![Synthetic](docs/images/unreviewed.png)`\r",
+      "# Fixture\r\r`code\r\r<img src=\"docs/images/unreviewed.png\" alt=\"Synthetic\">`\r",
       "# Fixture\n\n![Synthetic][shot]\n\n- outer\n  - inner\n\n    [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n> - item\n>\n>     [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n> \t[shot]: docs/images/unreviewed.png\n",
@@ -529,6 +531,20 @@ test("CommonMark HTML blocks keep definitions inert until their blank-line bound
         /docs\/images\/unreviewed\.png|unsupported raw HTML declaration/,
       );
     }
+  });
+});
+
+test("CR-only blank lines do not hide the rendered reference definition", () => {
+  withRepository(({ root }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "unreviewed.png"), "x");
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      "# Fixture\r\r![Synthetic][shot]\r\r[shot\r\r]: docs/media/gallery/frame.png\r\r[shot]: docs/images/unreviewed.png\r",
+    );
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /published raster 'docs\/images\/unreviewed\.png'/);
   });
 });
 
