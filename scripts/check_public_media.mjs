@@ -347,30 +347,35 @@ export function normalizePublishedLocalTarget(target, document = "<memory>") {
  */
 export function collectPublishedImageTargets(text, document = "<memory>") {
   const targets = [];
+  const renderedText = maskMarkdownHtmlComments(maskMarkdownFencedCode(text));
 
   const definitions = collectMarkdownDefinitions(text);
   let cursor = 0;
-  while (cursor < text.length) {
-    const imageStart = text.indexOf("![", cursor);
+  while (cursor < renderedText.length) {
+    const imageStart = renderedText.indexOf("![", cursor);
     if (imageStart < 0) break;
-    const alt = parseBracketedMarkdown(text, imageStart + 1);
+    const alt = parseBracketedMarkdown(renderedText, imageStart + 1);
     if (alt === null) {
       cursor = imageStart + 2;
       continue;
     }
 
-    if (text[alt.end] === "(") {
-      const inline = parseInlineMarkdownDestination(text, alt.end);
+    if (renderedText[alt.end] === "(") {
+      const inline = parseInlineMarkdownDestination(renderedText, alt.end);
       if (inline !== null) {
-        targets.push({ target: inline.target, form: "inline", alt: alt.value });
+        targets.push({
+          target: inline.target,
+          form: "inline",
+          alt: renderMarkdownAltText(alt.value, document),
+        });
         cursor = inline.end;
         continue;
       }
     } else {
       let label = alt.value;
       let end = alt.end;
-      if (text[alt.end] === "[") {
-        const explicitLabel = parseBracketedMarkdown(text, alt.end);
+      if (renderedText[alt.end] === "[") {
+        const explicitLabel = parseBracketedMarkdown(renderedText, alt.end);
         if (explicitLabel === null) {
           cursor = alt.end;
           continue;
@@ -381,7 +386,11 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
       const normalizedLabel = normalizeMarkdownLabel(label);
       const target = definitions.get(normalizedLabel);
       if (target !== undefined) {
-        targets.push({ target, form: "reference", alt: alt.value });
+        targets.push({
+          target,
+          form: "reference",
+          alt: renderMarkdownAltText(alt.value, document),
+        });
         cursor = end;
         continue;
       }
@@ -389,7 +398,7 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
       // unresolvable local raster-shaped label is ambiguous and fails closed.
       if (RASTER_EXTENSION_RE.test(unescapeMarkdown(label))) {
         throw new Error(
-          `${document}: reference image '${text.slice(imageStart, end)}' has no link definition`,
+          `${document}: reference image '${renderedText.slice(imageStart, end)}' has no link definition`,
         );
       }
     }
@@ -401,7 +410,7 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
   // unreviewed `srcset` or `<picture><source>` payload at another viewport or
   // pixel density.
   const pictureRanges = [];
-  for (const picture of text.matchAll(/<picture\b[\s\S]*?<\/picture\s*>/gi)) {
+  for (const picture of renderedText.matchAll(/<picture\b[\s\S]*?<\/picture\s*>/gi)) {
     pictureRanges.push({ start: picture.index, end: picture.index + picture[0].length });
     const imageTags = collectHtmlTags(picture[0], "img", document);
     if (imageTags.length === 0) {
@@ -432,7 +441,7 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
     }
   }
 
-  for (const match of collectHtmlTags(text, "img", document)) {
+  for (const match of collectHtmlTags(renderedText, "img", document)) {
     const attributes = parseHtmlAttributes(match.attributes, document, match.tag);
     const src = attributes.get("src");
     if (src === undefined || src === null) {
@@ -467,7 +476,7 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
   // may belong to audio/video. If it nevertheless carries srcset, browsers can
   // treat it as responsive image syntax in malformed markup; reject rather
   // than silently guessing its accessibility or privacy scope.
-  for (const source of collectHtmlTags(text, "source", document)) {
+  for (const source of collectHtmlTags(renderedText, "source", document)) {
     if (pictureRanges.some((range) => source.start >= range.start && source.end <= range.end)) {
       continue;
     }
@@ -488,6 +497,71 @@ function unescapeMarkdown(value) {
 
 function normalizeMarkdownLabel(value) {
   return unescapeMarkdown(value).trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+
+/**
+ * Image alt text is the rendered inline content, not the Markdown source.
+ * Link destinations and raw-HTML attributes are invisible to assistive
+ * technology, so they must never satisfy a manifest-required alt term.
+ */
+function renderMarkdownAltText(value, document) {
+  let rendered = "";
+  let index = 0;
+  while (index < value.length) {
+    if (value[index] === "\\" && index + 1 < value.length) {
+      rendered += value[index + 1];
+      index += 2;
+      continue;
+    }
+    if (value[index] === "`") {
+      let runEnd = index + 1;
+      while (value[runEnd] === "`") runEnd += 1;
+      const delimiter = "`".repeat(runEnd - index);
+      const close = value.indexOf(delimiter, runEnd);
+      if (close >= 0) {
+        rendered += value.slice(runEnd, close).replace(/[\r\n]+/g, " ");
+        index = close + delimiter.length;
+        continue;
+      }
+    }
+    if (value[index] === "<") {
+      const htmlEnd = inlineHtmlTagEnd(value, index);
+      if (htmlEnd !== null) {
+        index = htmlEnd;
+        continue;
+      }
+    }
+    const bracketStart = value[index] === "["
+      ? index
+      : value[index] === "!" && value[index + 1] === "["
+        ? index + 1
+        : null;
+    if (bracketStart !== null) {
+      const label = parseBracketedMarkdown(value, bracketStart);
+      if (label !== null) {
+        rendered += renderMarkdownAltText(label.value, document);
+        if (value[label.end] === "(") {
+          const inline = parseInlineMarkdownDestination(value, label.end);
+          if (inline !== null) {
+            index = inline.end;
+            continue;
+          }
+        }
+        if (value[label.end] === "[") {
+          const reference = parseBracketedMarkdown(value, label.end);
+          if (reference !== null) {
+            index = reference.end;
+            continue;
+          }
+        }
+        index = label.end;
+        continue;
+      }
+    }
+    rendered += value[index];
+    index += 1;
+  }
+  return decodeHtmlCharacterReferences(rendered, document, value);
 }
 
 function parseBracketedMarkdown(source, openIndex) {
@@ -684,15 +758,63 @@ function parseMarkdownDefinitionDestination(source, start) {
     : unescapeMarkdown(source.slice(destinationStart, index));
 }
 
+function markdownContainerContent(line) {
+  let remainder = line;
+  for (let depth = 0; depth < 16; depth += 1) {
+    const next = remainder
+      .replace(/^[ \t]{0,3}>[ \t]?/, "")
+      .replace(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/, "");
+    if (next === remainder) break;
+    remainder = next;
+  }
+  return remainder;
+}
+
+function stripMarkdownContainerPrefixes(text) {
+  return text.replace(/^[^\r\n]*/gm, markdownContainerContent);
+}
+
+function maskMarkdownFencedCode(text) {
+  const parts = text.split(/(\r\n|\n|\r)/);
+  let fence = null;
+  for (let index = 0; index < parts.length; index += 2) {
+    const line = parts[index];
+    const content = markdownContainerContent(line);
+    if (fence === null) {
+      const opener = content.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);
+      if (opener !== null && !(opener[1][0] === "`" && opener[2].includes("`"))) {
+        fence = { character: opener[1][0], length: opener[1].length };
+        parts[index] = " ".repeat(line.length);
+      }
+      continue;
+    }
+    const escaped = fence.character === "`" ? "`" : "~";
+    const closing = new RegExp(`^[ \\t]{0,3}${escaped}{${fence.length},}[ \\t]*$`);
+    parts[index] = " ".repeat(line.length);
+    if (closing.test(content)) fence = null;
+  }
+  return parts.join("");
+}
+
+function maskMarkdownHtmlComments(text) {
+  return text.replace(
+    /<!--(?!>|->)(?:(?!--)[\s\S])*?-->/g,
+    (comment) => comment.replace(/[^\r\n]/g, " "),
+  );
+}
+
 function collectMarkdownDefinitions(text) {
   const definitions = new Map();
+  const visibleBlocks = stripMarkdownContainerPrefixes(
+    maskMarkdownHtmlComments(maskMarkdownFencedCode(text)),
+  );
   const lineStart = /^(?:[ \t]{0,3})\[/gm;
-  for (const match of text.matchAll(lineStart)) {
+  for (const match of visibleBlocks.matchAll(lineStart)) {
     const open = match.index + match[0].lastIndexOf("[");
-    const label = parseBracketedMarkdown(text, open);
-    if (label === null || text[label.end] !== ":") continue;
-    if (/\n[ \t]*\n/.test(text.slice(open, label.end))) continue;
-    const target = parseMarkdownDefinitionDestination(text, label.end + 1);
+    const label = parseBracketedMarkdown(visibleBlocks, open);
+    if (label === null || visibleBlocks[label.end] !== ":") continue;
+    if (/\n[ \t]*\n/.test(visibleBlocks.slice(open, label.end))) continue;
+    const target = parseMarkdownDefinitionDestination(visibleBlocks, label.end + 1);
     // CommonMark resolves the first definition for a normalized label. Using
     // the last one would let a later ledger-listed target hide an earlier
     // unreviewed target that GitHub actually renders.

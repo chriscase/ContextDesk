@@ -93,3 +93,23 @@ test("reference-style images cannot bypass Help alt validation", () => {
   const errors = validateWarRoomHelpDrift(root).errors.join("\n");
   assert.match(errors, /docs\/war-room\/README\.md has an image with empty alt text/);
 });
+
+test("hidden Markdown destinations and HTML attributes cannot satisfy Help alt terms", () => {
+  const root = fixture();
+  const guide = join(root, "docs", "war-room", "README.md");
+  writeFileSync(
+    guide,
+    `${readFileSync(guide, "utf8")}\n` +
+      `![Old [frame](https://share-safe.invalid/decision)](../media/gallery/war-room-decide-export.png)\n` +
+      `![Old <span title="decision share-safe">frame</span>](../media/gallery/war-room-decide-export.png)\n`,
+  );
+  const errors = validateWarRoomHelpDrift(root).errors.join("\n");
+  assert.match(
+    errors,
+    /alt for docs\/media\/gallery\/war-room-decide-export\.png must include 'decision'/,
+  );
+  assert.match(
+    errors,
+    /alt for docs\/media\/gallery\/war-room-decide-export\.png must include 'share-safe'/,
+  );
+});

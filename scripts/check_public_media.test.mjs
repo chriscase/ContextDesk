@@ -206,6 +206,8 @@ test("README alt semantics are enforced for every published image form", () => {
       `<img src="${pathname}" data-\u00a0alt="Synthetic frame">\n`,
       `<img src="${pathname}" data-\u000balt="Synthetic frame">\n`,
       `<img src="${pathname}" data-\u2003alt="Synthetic frame">\n`,
+      `![Old [frame](https://synthetic.invalid)](${pathname})\n`,
+      `![Old <span title="synthetic">frame</span>](${pathname})\n`,
     ];
 
     for (const contents of cases) {
@@ -223,6 +225,15 @@ test("README alt semantics are enforced for every published image form", () => {
       `# Fixture\n\n![Synthetic frame](${pathname})\n`,
     );
     assert.equal(run(root).status, 0);
+
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![Old [synthetic frame](https://example.invalid)](${pathname})\n` +
+        `![Old <span>synthetic frame</span>](${pathname})\n`,
+    );
+    const renderedAlt = run(root);
+    assert.equal(renderedAlt.status, 0, renderedAlt.stderr);
+    assert.match(renderedAlt.stdout, /2 published references/);
 
     fs.writeFileSync(
       readme,
@@ -286,6 +297,8 @@ test("non-ledgerable local and embedded images are rejected", () => {
       `![Embedded](data:image/png;base64,c3ludGhldGlj)\n`,
       `![Vector](docs/images/unreviewed.svg)\n`,
       `![Extensionless](docs/images/unreviewed)\n`,
+      `![Encoded query](docs/images/unreviewed.png%3Fraw=1)\n`,
+      `![Encoded fragment](docs/images/unreviewed.png%23preview)\n`,
     ];
     for (const contents of cases) {
       fs.writeFileSync(readme, `# Fixture\n\n${contents}`);
@@ -368,6 +381,54 @@ test("the first duplicate reference definition controls the rendered image", () 
       result.stderr,
       /published raster 'docs\/images\/smuggled\.png' \(reference\) is not in the public media ledger/,
     );
+  });
+});
+
+test("reference definitions honor rendered block context and blockquote containers", () => {
+  withRepository(({ root, pathname }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
+    const readme = path.join(root, "README.md");
+    const cases = [
+      `![Synthetic][shot]\n\n\`\`\`md\n[shot]: ${pathname}\n\`\`\`\n\n[shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n> \`\`\`md\n> [shot]: ${pathname}\n> \`\`\`\n\n[shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n- \`\`\`md\n  [shot]: ${pathname}\n  \`\`\`\n\n[shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n<!--\n[shot]: ${pathname}\n-->\n\n[shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n> [shot]: docs/images/smuggled.png\n`,
+    ];
+    for (const contents of cases) {
+      fs.writeFileSync(readme, `# Fixture\n\n${contents}`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, contents);
+      assert.match(
+        result.stderr,
+        /published raster 'docs\/images\/smuggled\.png' \(reference\) is not in the public media ledger/,
+        contents,
+      );
+    }
+
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![Synthetic][shot]\n\n[shot]: ${pathname}\n\n` +
+        "```md\n[shot]: docs/images/smuggled.png\n```\n",
+    );
+    const inertLaterDefinition = run(root);
+    assert.equal(inertLaterDefinition.status, 0, inertLaterDefinition.stderr);
+    assert.match(inertLaterDefinition.stdout, /1 published references/);
+  });
+});
+
+test("images inside fenced code and HTML comments are not published", () => {
+  withRepository(({ root }) => {
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      `# Fixture\n\n\`\`\`md\n![Code](docs/images/unreviewed.png)\n\`\`\`\n\n` +
+        `> \`\`\`html\n> <img src="docs/images/unreviewed.png" alt="Code">\n> \`\`\`\n\n` +
+        `<!-- ![Comment](docs/images/unreviewed.png) -->\n`,
+    );
+    const result = run(root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /0 published references/);
   });
 });
 
@@ -581,7 +642,7 @@ test("published image extraction covers every rendered form", () => {
       .map((f) => [f.form, f.alt]),
     [
       ["inline", "a"],
-      ["inline", "escaped \\] alt"],
+      ["inline", "escaped ] alt"],
       ["reference", "b"],
       ["html", "c"],
     ],
