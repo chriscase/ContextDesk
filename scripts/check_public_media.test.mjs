@@ -413,6 +413,10 @@ test("reference definitions honor rendered block context and blockquote containe
       `![Synthetic][shot]\n\n\`\`\`md\n[shot]: ${pathname}\n\`\`\`\n\n[shot]: docs/images/smuggled.png\n`,
       `![Synthetic][shot]\n\n> \`\`\`md\n> [shot]: ${pathname}\n> \`\`\`\n\n[shot]: docs/images/smuggled.png\n`,
       `![Synthetic][shot]\n\n- \`\`\`md\n  [shot]: ${pathname}\n  \`\`\`\n\n[shot]: docs/images/smuggled.png\n`,
+      `![Synthetic][shot]\n\n100. ` +
+        "```md\n     [shot]: " +
+        pathname +
+        "\n  [shot]: docs/images/smuggled.png\n",
       `![Synthetic][shot]\n\n<!--\n[shot]: ${pathname}\n-->\n\n[shot]: docs/images/smuggled.png\n`,
       `![Synthetic][shot]\n\n> [shot]: docs/images/smuggled.png\n`,
       `![Synthetic][shot]\n\n<div>\n[shot]: ${pathname}\n</div>\n\n[shot]: docs/images/smuggled.png\n`,

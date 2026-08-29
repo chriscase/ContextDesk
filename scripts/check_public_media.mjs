@@ -844,6 +844,9 @@ function markdownContainerInfo(line) {
     containers,
     blockquoteDepth: containers.filter((container) => container.type === "blockquote").length,
     listDepth: containers.filter((container) => container.type === "list").length,
+    listIndents: containers
+      .filter((container) => container.type === "list")
+      .map((container) => container.indent),
   };
 }
 
@@ -870,6 +873,10 @@ function maskMarkdownFencedCode(text) {
           length: opener[1].length,
           blockquoteDepth: info.blockquoteDepth,
           listDepth: info.listDepth,
+          listContinuationIndent: info.listIndents.reduce(
+            (total, indent) => total + indent,
+            0,
+          ),
         };
         parts[index] = " ".repeat(line.length);
       }
@@ -895,6 +902,10 @@ function maskMarkdownFencedCode(text) {
           length: nextOpener[1].length,
           blockquoteDepth: info.blockquoteDepth,
           listDepth: info.listDepth,
+          listContinuationIndent: info.listIndents.reduce(
+            (total, indent) => total + indent,
+            0,
+          ),
         };
         parts[index] = " ".repeat(line.length);
       }
@@ -1037,10 +1048,21 @@ function lineBelongsToContainer(owner, info, line) {
   const listContinuation =
     owner.listDepth > 0 &&
     info.listDepth < owner.listDepth &&
-    /^[ \t]{2,}/.test(line) &&
+    leadingIndentAfterBlockquotes(line, owner.blockquoteDepth) >=
+      (owner.listContinuationIndent ?? 2) &&
     info.blockquoteDepth === owner.blockquoteDepth &&
     line.trim() !== "";
   return sameBlockquote && (sameOrNestedList || listContinuation);
+}
+
+function leadingIndentAfterBlockquotes(line, blockquoteDepth) {
+  let remainder = line;
+  for (let index = 0; index < blockquoteDepth; index += 1) {
+    const quote = remainder.match(/^[ \t]{0,3}>[ \t]?/);
+    if (quote === null) return -1;
+    remainder = remainder.slice(quote[0].length);
+  }
+  return (remainder.match(/^[ \t]*/) ?? [""])[0].length;
 }
 
 function collectMarkdownDefinitions(text, document = "<memory>") {

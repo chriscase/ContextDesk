@@ -1408,6 +1408,52 @@ describe("Log workbench honesty and navigation", () => {
     expect(screen.queryByText("temporary page failure")).toBeNull();
   });
 
+  it("retries a failed later page at the same line offset", async () => {
+    const pageRequests: string[] = [];
+    let laterPageAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          if (start === 81) {
+            laterPageAttempts += 1;
+            if (laterPageAttempts === 1) {
+              return jsonResponse({ error: "temporary later-page failure" }, 503);
+            }
+          }
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: start === 1 ? 81 : null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes("startLine=1&"))).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load next lines" }));
+    await screen.findByText("temporary later-page failure");
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading lines" }));
+    await waitFor(() => expect(laterPageAttempts).toBe(2));
+    const laterRequests = pageRequests.filter((url) => url.includes("startLine=81&"));
+    expect(laterRequests).toHaveLength(2);
+    expect(screen.queryByText("temporary later-page failure")).toBeNull();
+  });
+
   it("does not describe a bounded search as a complete count", async () => {
     vi.stubGlobal(
       "fetch",

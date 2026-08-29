@@ -99,6 +99,11 @@ interface PageResult {
   bounded: boolean;
 }
 
+interface PaneError {
+  message: string;
+  startLine: number;
+}
+
 interface SavedView {
   id: string;
   name: string;
@@ -314,7 +319,7 @@ export function LogWorkbench(props: {
   const [grouping, setGrouping] = useState("file");
   const [sort, setSort] = useState("time_asc");
   const [pageByPane, setPageByPane] = useState<Record<string, PageResult>>({});
-  const [paneErrors, setPaneErrors] = useState<Record<string, string>>({});
+  const [paneErrors, setPaneErrors] = useState<Record<string, PaneError>>({});
   const [scrollByPane, setScrollByPane] = useState<Record<string, number>>({});
   const [search, setSearch] = useState<SearchResult | null>(null);
   const [matchIndex, setMatchIndex] = useState(0);
@@ -624,7 +629,10 @@ export function LogWorkbench(props: {
             pageRequestByEvidence.current.get(evidenceId) !== requestSequence
           ) return;
           loadedPanes.current.delete(evidenceId);
-          setPaneErrors((current) => ({ ...current, [evidenceId]: message }));
+          setPaneErrors((current) => ({
+            ...current,
+            [evidenceId]: { message, startLine },
+          }));
           return;
         }
         const page = (await response.json()) as PageResult;
@@ -650,7 +658,10 @@ export function LogWorkbench(props: {
         loadedPanes.current.delete(evidenceId);
         setPaneErrors((current) => ({
           ...current,
-          [evidenceId]: "These log lines could not be loaded.",
+          [evidenceId]: {
+            message: "These log lines could not be loaded.",
+            startLine,
+          },
         }));
       }
     },
@@ -1578,8 +1589,11 @@ export function LogWorkbench(props: {
               </header>
               {paneError ? (
                 <p className="log-workbench__notice" role="alert">
-                  {paneError}{" "}
-                  <button type="button" onClick={() => void loadPane(item.evidenceId)}>
+                  {paneError.message}{" "}
+                  <button
+                    type="button"
+                    onClick={() => void loadPane(item.evidenceId, paneError.startLine)}
+                  >
                     Retry loading lines
                   </button>
                 </p>
