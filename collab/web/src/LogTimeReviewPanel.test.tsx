@@ -358,8 +358,72 @@ describe("LogTimeReviewPanel", () => {
     expect(onTimeChanged).toHaveBeenCalledTimes(1);
     expect((onTimeChanged.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
       caseId: CASE_ID,
+      notice: "America/Chicago applied to worker/batch.log. 4 lines now have an exact time.",
     });
     window.removeEventListener("contextdesk:log-time-changed", onTimeChanged);
+  });
+
+  it("synchronizes both mounted timezone panels after one panel changes the case", async () => {
+    let stateReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/log-time/preview")) return jsonResponse(PREVIEW);
+        if (url.endsWith("/log-time/apply")) {
+          return jsonResponse({ schemaId: "cd-collab.log_time_outcome.v1" });
+        }
+        if (url.endsWith("/log-time")) {
+          stateReads += 1;
+          return jsonResponse(
+            stateReads <= 2
+              ? stateBody()
+              : stateBody({
+                  corpusRevision: 2,
+                  reviewOutstanding: false,
+                  sources: [
+                    sourceStatus({
+                      unresolvedLocalRecords: 0,
+                      resolvedLocalRecords: 4,
+                      declaration: {
+                        source: "worker/batch.log",
+                        ianaTimezone: "America/Chicago",
+                        basis: "user_declared",
+                        declaredAt: 1710093600,
+                        appliedRevision: 2,
+                        declarationFingerprint: FINGERPRINT,
+                        declaredBy: "analyst-synthetic-01",
+                      },
+                    }),
+                  ],
+                }),
+          );
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(
+      <>
+        <div data-testid="capture-time-review">{panel()}</div>
+        <div data-testid="analyze-time-review">{panel()}</div>
+      </>,
+    );
+    const capture = within(screen.getByTestId("capture-time-review"));
+    fireEvent.click(await capture.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(capture.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(capture.getByRole("button", { name: /show me what this would do/i }));
+    fireEvent.click(
+      await capture.findByRole("button", { name: /apply America\/Chicago to this file/i }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/revision 2/)).toHaveLength(2);
+      expect(screen.getAllByText(/4 lines placed at an exact time/)).toHaveLength(2);
+    });
+    expect(stateReads).toBe(4);
   });
 
   it("does not let a delayed write update or reload a later investigation", async () => {

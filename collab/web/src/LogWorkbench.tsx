@@ -623,7 +623,16 @@ export function LogWorkbench(props: {
     async (row: MatchRow) => {
       const requestCaseId = props.caseId;
       if (!isCurrentCase(requestCaseId)) return;
-      if (!panes.includes(row.evidenceId) && panes.length < MAX_PANES) {
+      if (!panes.includes(row.evidenceId)) {
+        if (panes.length >= MAX_PANES) {
+          // Bookmark navigation follows the same visible contract as the file
+          // selector. Do not fetch and scroll a hidden fifth pane, and do not
+          // invalidate results whose four-file scope has not changed.
+          setNotice(
+            `Only ${MAX_PANES} files can be open side by side. Clear one to open another.`,
+          );
+          return;
+        }
         // A bookmark may point into a file outside the current pane scope.
         // Opening it expands both the search and chronology corpus, so results
         // that described the previous scope must disappear before the pane is

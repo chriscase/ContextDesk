@@ -354,6 +354,130 @@ describe("Log workbench", () => {
     expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
   });
 
+  it("preserves scoped results and explains when a bookmark would exceed four panes", async () => {
+    const capIds = [
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000002",
+      "10000000-0000-4000-8000-000000000003",
+      "10000000-0000-4000-8000-000000000004",
+      "10000000-0000-4000-8000-000000000005",
+    ] as const;
+    const pageRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) {
+          return jsonResponse({
+            items: capIds.map((evidenceId, index) => ({
+              evidenceId,
+              relativePath: `worker/file-${index + 1}.log`,
+              rotationFamily: `worker/file-${index + 1}.log`,
+              displayLabel: `file-${index + 1}.log`,
+              digest: String(index + 1).repeat(64),
+              intakeBatchId: null,
+              privacyClass: "owner_only",
+              lineCount: 1,
+            })),
+            normalizationRevision: 3,
+          });
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-fifth-file",
+              note: "Open fifth file",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: capIds[4], lineNumber: 1 },
+              shareSafeToken: "bookmark-fifth-file-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/review-queue")) {
+          return jsonResponse({ candidateCount: 0 });
+        }
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const evidenceId = capIds.find((id) => url.includes(encodeURIComponent(id))) ?? capIds[0];
+          return jsonResponse({
+            evidenceId,
+            relativePath: `worker/file-${capIds.indexOf(evidenceId) + 1}.log`,
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        if (url.includes("/workbench/search")) {
+          return jsonResponse({
+            matches: [{
+              evidenceId: capIds[0],
+              relativePath: "worker/file-1.log",
+              rotationFamily: "worker/file-1.log",
+              lineNumber: 1,
+              byteOffset: 0,
+              text: "preserved four-pane search result",
+              wrapped: false,
+              originalTimestamp: null,
+              normalizedUtc: null,
+              parseClass: "missing",
+              contextBefore: [],
+              contextAfter: [],
+            }],
+            returned: 1,
+            bounded: false,
+            atLeast: 1,
+            nextCursor: null,
+            nextPageCursor: null,
+            coverageComplete: true,
+            timeFilterUnknownReason: null,
+          });
+        }
+        if (url.includes("/workbench/chronology")) {
+          return jsonResponse({
+            events: [{
+              evidenceId: capIds[0],
+              relativePath: "worker/file-1.log",
+              lineNumber: 1,
+              excerpt: "preserved four-pane chronology result",
+              adjacencyReason: "order",
+              uncertainty: [],
+              correlationKind: "none",
+              correlationId: null,
+              originalTimestamp: null,
+              normalizedUtc: null,
+            }],
+            unknownBuckets: [],
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    for (const name of ["file-2.log", "file-3.log", "file-4.log"]) {
+      fireEvent.click(screen.getByLabelText(`Show ${name} in a pane`));
+    }
+    expect(screen.getByText(/4 of 4 panes open/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    expect(await screen.findByText("preserved four-pane search result")).toBeTruthy();
+    expect(await screen.findByText("preserved four-pane chronology result")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open fifth file" }));
+
+    expect(screen.getByText(/Only 4 files can be open side by side/)).toBeTruthy();
+    expect(screen.getByText("preserved four-pane search result")).toBeTruthy();
+    expect(screen.getByText("preserved four-pane chronology result")).toBeTruthy();
+    expect(screen.getByText(/4 of 4 panes open/)).toBeTruthy();
+    expect(pageRequests.some((url) => url.includes(encodeURIComponent(capIds[4])))).toBe(false);
+  });
+
   it("does not publish search or chronology responses after the file scope is cleared", async () => {
     stubFetch();
     const baseFetch = fetch as ReturnType<typeof vi.fn>;

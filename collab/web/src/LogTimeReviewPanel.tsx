@@ -88,6 +88,11 @@ interface StateResponse {
   dependents: Dependent[];
 }
 
+interface LogTimeChangedDetail {
+  caseId?: string;
+  notice?: string;
+}
+
 /**
  * Zones offered in the picker. This is a starting list for a reviewer who
  * knows where the system ran, not a guess about where it ran — any IANA id can
@@ -279,6 +284,26 @@ export function LogTimeReviewPanel(props: {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const refresh = (event: Event) => {
+      const detail = (event as CustomEvent<LogTimeChangedDetail>).detail;
+      if (detail?.caseId && detail.caseId !== props.caseId) return;
+      // A case can mount this review in both Capture and Analyze. The event is
+      // the one reload path for every instance, including the panel that made
+      // the durable change, so neither stage can retain the prior revision.
+      requestVersion.current += 1;
+      setState(null);
+      setDependents([]);
+      setPreview(null);
+      setError(null);
+      setNotice(detail?.notice ?? null);
+      setUnavailable(false);
+      void load();
+    };
+    window.addEventListener("contextdesk:log-time-changed", refresh);
+    return () => window.removeEventListener("contextdesk:log-time-changed", refresh);
+  }, [load, props.caseId]);
+
   const outstanding = useMemo(
     () => (state?.sources ?? []).filter((s) => s.unresolvedLocalRecords > 0),
     [state],
@@ -302,10 +327,9 @@ export function LogTimeReviewPanel(props: {
     setNotice(message);
     window.dispatchEvent(
       new CustomEvent("contextdesk:log-time-changed", {
-        detail: { caseId: requestCaseId },
+        detail: { caseId: requestCaseId, notice: message },
       }),
     );
-    void load();
   }
 
   async function post(
