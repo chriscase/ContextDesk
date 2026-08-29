@@ -323,7 +323,7 @@ describe("Log workbench", () => {
         }),
       );
       await Promise.all([searchGate.promise, chronologyGate.promise]);
-      await Promise.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     });
 
     expect(screen.queryByText("obsolete search result")).toBeNull();
@@ -391,7 +391,7 @@ describe("Log workbench", () => {
         bounded: false,
       }));
       await Promise.all([searchGate.promise, chronologyGate.promise]);
-      await Promise.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     });
 
     expect(await screen.findByText(/1 of 4 panes open/)).toBeTruthy();
@@ -461,7 +461,7 @@ describe("Log workbench", () => {
         normalizationRevision: 3,
       }));
       await oldInventory.promise;
-      await Promise.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     });
 
     expect(screen.getAllByText("current-case-b.log").length).toBeGreaterThan(0);
@@ -508,7 +508,7 @@ describe("Log workbench", () => {
         bounded: false,
       }));
       await Promise.all([searchGate.promise, chronologyGate.promise]);
-      await Promise.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     });
 
     expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
