@@ -788,6 +788,7 @@ function parseMarkdownDefinitionDestination(source, start) {
   while (/[ \t]/.test(source[index] ?? "")) index += 1;
   if (source[index] === "\r" && source[index + 1] === "\n") index += 2;
   else if (source[index] === "\n") index += 1;
+  else if (source[index] === "\r") index += 1;
   if (index > start) {
     // Reference destinations may be indented beyond four characters (and
     // may mix tabs and spaces). Consume the complete continuation indentation

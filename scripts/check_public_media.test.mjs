@@ -321,6 +321,7 @@ test("multiline reference labels and continuation destinations fail closed", () 
       `![Unreviewed][shot]\n\n[shot]:\n  docs/images/smuggled.png\n`,
       `![Unreviewed][shot]\n\n[shot]:\n     docs/images/smuggled.png\n`,
       `![Unreviewed][shot]\n\n[shot]:\n\t docs/images/smuggled.png\n`,
+      "![Unreviewed][shot]\r\r[shot]:\r  docs/images/smuggled.png\r",
       `![Unreviewed][multi\n label]\n\n[multi\n label]: docs/images/smuggled.png\n`,
       `![Unreviewed\n multiline][shot]\n\n[shot]: docs/images/smuggled.png\n`,
     ];
