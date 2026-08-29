@@ -397,13 +397,6 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Saved views and bookmarks stay with the investigation. A stale bookmark explains that the file bytes moved; it does not silently jump to another line.",
         limits:
           "Each search page does a bounded amount of work and then says where it stopped, so continuing is always possible and no match is skipped or shown twice. An answer that has not covered every selected line says so instead of reading as a complete count. If the files you selected change, or a timezone is applied, a half-finished search is refused rather than resumed against different lines — start it again. A time range is answered by the timezone host, which owns that resolution; if that host cannot be reached the time range is refused rather than guessed. Regex that would run unbounded is refused. The current local server materializes one selected evidence file in memory before building line windows, so paging is not a constant-memory guarantee for one extremely large file. Share-safe locator tokens re-check authorization and do not reveal a private filename to someone who cannot open the investigation.",
-        illustrations: [
-          {
-            src: "/help/war-room/war-room-workbench-narrow.png",
-            alt: "Narrow Log workbench with file selection, search controls, and a stacked log pane",
-            caption: "At narrow widths, Workbench controls and selected log panes stack without hiding the log text.",
-          },
-        ],
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {

@@ -85,6 +85,16 @@ export function validateWarRoomHelpDrift(repositoryRoot = ownRoot) {
 
   const ledgerPath = join(root, "docs", "war-room", "help-media.json");
   const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  const administrationMedia = (ledger.assets ?? []).find(
+    (row) => row.path === "docs/assets/war-room/war-room-administration.png",
+  );
+  if (
+    !administrationMedia
+    || administrationMedia.sourceSha === "1017ae9c800a22208fe53db337ea6bf81921afce"
+    || !/current Entities and Attribution navigation/i.test(administrationMedia.caption ?? "")
+  ) {
+    fail(errors, "Administration media must prove the current Entities and Attribution navigation");
+  }
   const governed = [
     ...walk(docsAssets),
     ...walk(publicAssets),

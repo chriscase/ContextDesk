@@ -41,7 +41,16 @@ test("a mislabeled PNG and duplicate canonical anchor fail closed", () => {
     workspace,
     readFileSync(workspace, "utf8").replace('id="triage-log-time-capture"', 'id="triage-log-time"'),
   );
+  const ledger = join(root, "docs", "war-room", "help-media.json");
+  writeFileSync(
+    ledger,
+    readFileSync(ledger, "utf8").replace(
+      "87f1f29f82d6b404369e55cdaeeadcd0fc441897",
+      "1017ae9c800a22208fe53db337ea6bf81921afce",
+    ),
+  );
   const errors = validateWarRoomHelpDrift(root).errors.join("\n");
   assert.match(errors, /not PNG data/);
   assert.match(errors, /exactly one canonical triage-log-time id/);
+  assert.match(errors, /Administration media must prove the current Entities and Attribution navigation/);
 });

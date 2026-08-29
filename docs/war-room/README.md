@@ -137,8 +137,6 @@ The workbench is additive to the normal evidence board: Capture owns intake,
 the snapshot owns the exact material a triage may read, and the workbench helps
 people inspect that material before they decide what to ask.
 
-![Synthetic narrow Log workbench with stacked controls and log pane](../assets/war-room/war-room-workbench-narrow.png)
-
 These synthetic captures show the same investigation at the most useful
 handoffs:
 
