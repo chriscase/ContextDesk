@@ -291,6 +291,7 @@ export function App() {
   const [uiStrategy, setUiStrategy] = useState<UiStrategyDescriptor>(() =>
     resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }),
   );
+  const [uiStrategyOwner, setUiStrategyOwner] = useState<string | null>(null);
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
@@ -301,6 +302,7 @@ export function App() {
   const [leaveRequest, setLeaveRequest] = useState(false);
   const locationRef = useRef(location);
   locationRef.current = location;
+  const suppressNextUiStrategyPersistence = useRef(false);
   const profileDirtyRef = useRef(false);
   profileDirtyRef.current = profileDirty;
   const pendingLeaveRef = useRef<
@@ -352,20 +354,26 @@ export function App() {
 
   useEffect(() => {
     if (!session?.username) {
+      setUiStrategyOwner(null);
       setUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
       return;
     }
+    setUiStrategyOwner(session.username);
     setUiStrategy(savedUiStrategy(session.username));
   }, [session?.username]);
 
   useEffect(() => {
-    if (!session?.username) return;
+    if (!session?.username || uiStrategyOwner !== session.username) return;
+    if (suppressNextUiStrategyPersistence.current) {
+      suppressNextUiStrategyPersistence.current = false;
+      return;
+    }
     try {
       window.localStorage?.setItem(uiStrategyStorageKey(session.username), uiStrategy.id);
     } catch {
       // A blocked browser store should not prevent the selected surface from working this session.
     }
-  }, [session?.username, uiStrategy.id]);
+  }, [session?.username, uiStrategy.id, uiStrategyOwner]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/auth/me");
@@ -652,6 +660,7 @@ export function App() {
   const roles = session.roles;
   const capabilities = sessionCapabilities(session);
   const canWrite = !staticReadOnly && hasCapability(capabilities, "investigation:write");
+  const canLeadCases = !staticReadOnly && hasCapability(capabilities, "run:strategies");
   const canLeadCatalog =
     !staticReadOnly &&
     (hasCapability(capabilities, "run:strategies") ||
@@ -776,7 +785,7 @@ export function App() {
               {uiStrategy.id === "investigation-first" ? (
                 <InvestigationFirst
                   canWrite={canWrite}
-                  canLead={hasCapability(capabilities, "run:strategies")}
+                  canLead={canLeadCases}
                   readOnly={staticReadOnly}
                   view={work.area === "investigations" ? "investigations" : "overview"}
                   focusCaseId={inCasesArea ? work.caseId : null}
@@ -789,6 +798,7 @@ export function App() {
                     // Specialist tools remain in the reference War Room. The
                     // switch is explicit in the button label and preserves the
                     // canonical case/stage URL and all shared record state.
+                    suppressNextUiStrategyPersistence.current = true;
                     setUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
                     navigate({ area: "investigations", caseId, stage });
                   }}

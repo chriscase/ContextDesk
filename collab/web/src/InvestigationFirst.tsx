@@ -211,6 +211,7 @@ export function InvestigationFirst(props: {
   const [evidenceLoadError, setEvidenceLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -246,6 +247,7 @@ export function InvestigationFirst(props: {
     const generation = detailGeneration.current + 1;
     detailGeneration.current = generation;
     setDetailLoading(true);
+    setDetailError(null);
     setSelectedEvidence([]);
     setEvidenceLoadError(null);
     try {
@@ -255,7 +257,14 @@ export function InvestigationFirst(props: {
         protectedApiFetch(`/api/cases/${caseId}/contributions`),
       ]);
       if (generation !== detailGeneration.current || caseId !== activeFocusCaseId.current) return;
-      if (!caseResponse.ok) throw new Error(await errorMessage(caseResponse, "This investigation could not be opened."));
+      if (!caseResponse.ok) {
+        const fallback = caseResponse.status === 404
+          ? "This investigation could not be found."
+          : caseResponse.status === 403
+            ? "You no longer have access to this investigation."
+            : "This investigation could not be opened.";
+        throw new Error(await errorMessage(caseResponse, fallback));
+      }
       const evidenceBodyPromise: Promise<{ artifacts?: EvidenceRow[]; loadError?: string }> = evidenceResponse.ok
         ? evidenceResponse.json()
         : errorMessage(evidenceResponse, "Evidence inventory could not be loaded.").then((loadError) => ({ artifacts: [], loadError }));
@@ -273,6 +282,7 @@ export function InvestigationFirst(props: {
       setContributions(contributionsBody.contributions ?? []);
       setEvidenceLoadError(evidenceBody.loadError ?? contributionsBody.loadError ?? null);
       props.onFocusedCaseTitle?.(caseBody.title);
+      setDetailError(null);
       setError(null);
     } catch (cause) {
       if (generation !== detailGeneration.current || caseId !== activeFocusCaseId.current) return;
@@ -280,7 +290,7 @@ export function InvestigationFirst(props: {
       setEvidence([]);
       setContributions([]);
       setEvidenceLoadError(null);
-      setError(cause instanceof Error ? cause.message : "This investigation could not be opened.");
+      setDetailError(cause instanceof Error ? cause.message : "This investigation could not be opened.");
       props.onFocusedCaseTitle?.(null);
     } finally {
       if (generation === detailGeneration.current && caseId === activeFocusCaseId.current) setDetailLoading(false);
@@ -299,6 +309,7 @@ export function InvestigationFirst(props: {
       setEvidence([]);
       setContributions([]);
       setEvidenceLoadError(null);
+      setDetailError(null);
       props.onFocusedCaseTitle?.(null);
     }
   }, [props.focusCaseId, refreshDetail, props.onFocusedCaseTitle]);
@@ -498,8 +509,9 @@ export function InvestigationFirst(props: {
   }
 
   function renderDetail() {
-    if (detailLoading) return <section className="investigation-first__detail"><p className="investigation-first__empty">Opening investigation…</p></section>;
-    if (!selected) return <section className="investigation-first__detail"><p className="investigation-first__empty">This investigation is unavailable or you no longer have access to it.</p><button type="button" onClick={props.onExitFocus}>Back to investigations</button></section>;
+    if (detailLoading || (!detailError && selected?.id !== props.focusCaseId)) return <section className="investigation-first__detail" aria-busy="true"><p className="investigation-first__empty" role="status">Opening investigation…</p></section>;
+    if (detailError) return <section className="investigation-first__detail"><p className="investigation-first__error" role="alert">{detailError}</p><button type="button" onClick={props.onExitFocus}>Back to investigations</button></section>;
+    if (!selected) return <section className="investigation-first__detail"><p className="investigation-first__empty">This investigation is unavailable.</p><button type="button" onClick={props.onExitFocus}>Back to investigations</button></section>;
     const missing = [selected.problemStatement, selected.affectedParties, selected.impact].filter((value) => !text(value)).length;
     return (
       <section className="investigation-first__detail" aria-labelledby="investigation-first-detail-title">
@@ -522,7 +534,7 @@ export function InvestigationFirst(props: {
           <div className="investigation-first__bulk-actions"><span>{selectedEvidence.length} selected</span><button type="button" disabled title="Recoverable trash is not enabled in this slice">Move selected to trash</button><button type="button" onClick={() => setSelectedEvidence([])} disabled={!selectedEvidence.length}>Clear selection</button><small>Bulk trash is reserved for a recoverable, audited lifecycle workflow; no file is deleted here.</small></div>
           {props.canWrite && !props.readOnly ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment"><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option><option value="file_server_ref">File reference</option></select></label><label>Privacy<select name="privacyClass" defaultValue="owner_only"><option value="owner_only">Owner only</option><option value="share_safe">Share safe</option></select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={uploading}>{uploading ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
         </section>
-        {selected.status === "archived" || props.canLead ? <LifecyclePanel caseId={selected.id} status={selected.status} canLead={props.canLead} onChanged={async () => { await refreshCases(); await refreshDetail(selected.id); }} /> : null}
+        {selected.status === "archived" || props.canLead ? <LifecyclePanel caseId={selected.id} status={selected.status} canLead={props.canLead && !props.readOnly} onChanged={async () => { await refreshCases(); await refreshDetail(selected.id); }} /> : null}
       </section>
     );
   }

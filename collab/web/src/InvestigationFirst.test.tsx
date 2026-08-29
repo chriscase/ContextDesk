@@ -138,8 +138,16 @@ describe("Investigation First", () => {
     render(<InvestigationFirst {...commonProps} focusCaseId="missing" />);
     expect(await screen.findByText("Opening investigation…")).toBeTruthy();
     resolveCase?.({ ok: false, status: 404, json: async () => ({}) });
-    expect(await screen.findByText("This investigation is unavailable or you no longer have access to it.")).toBeTruthy();
+    expect(await screen.findByText("This investigation could not be found.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Back to investigations" })).toBeTruthy();
+  });
+
+  it("keeps lifecycle mutations unavailable in static read-only mode", async () => {
+    stubFetch();
+    render(<InvestigationFirst {...commonProps} canLead readOnly focusCaseId="case-1" />);
+    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
+    expect(screen.getByText("Only a case lead can archive or restore this investigation.")).toBeTruthy();
   });
 
   it("does not describe a failed evidence read as an empty inventory", async () => {

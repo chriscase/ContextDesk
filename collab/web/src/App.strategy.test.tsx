@@ -71,4 +71,46 @@ describe("strategy selection in the shell", () => {
     expect(window.localStorage.getItem("cd-ui-strategy:alice")).toBe("investigation-first");
     expect(window.localStorage.getItem("cd-ui-strategy:bob")).toBe("war-room");
   });
+
+  it("opens War Room technical tools without replacing the saved personal strategy", async () => {
+    const caseId = "00000000-0000-4000-8000-000000000001";
+    const values = new Map<string, string>();
+    const storage: Storage = {
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => { values.delete(key); },
+      setItem: (key, value) => { values.set(key, value); },
+    };
+    vi.stubGlobal("localStorage", storage);
+    window.localStorage.setItem("cd-ui-strategy:alice", "investigation-first");
+    window.history.replaceState(null, "", `/investigations/${caseId}`);
+    const investigation = {
+      id: caseId,
+      title: "Checkout pauses",
+      status: "open",
+      severity: "high",
+      participants: [],
+      createdAt: "2026-08-29T12:00:00.000Z",
+      createdBy: "alice",
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
+      if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["case-lead"], capabilities: ["investigation:read", "investigation:write", "run:strategies"] }) };
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [investigation] }) };
+      if (url === `/api/cases/${caseId}`) return { ok: true, json: async () => investigation };
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: [] }) };
+      if (url.endsWith("/contributions")) return { ok: true, json: async () => ({ contributions: [] }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open War Room technical tools" }));
+    await waitFor(() => expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room"));
+    expect(window.localStorage.getItem("cd-ui-strategy:alice")).toBe("investigation-first");
+    expect(window.location.pathname).toBe(`/investigations/${caseId}/analyze`);
+  });
 });

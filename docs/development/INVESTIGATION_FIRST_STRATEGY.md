@@ -46,9 +46,12 @@ War Room-only stage wording from its title.
 The focused `InvestigationFirst.test.tsx` and shell strategy suites cover the
 fast form, shared create payload, sparse detail, evidence annotation/inventory,
 explicit War Room technical-tool handoff, viewer restrictions, safe selection,
-stale-detail suppression, strategy switching, and strategy-aware titles. The
-full web suite passes 666 tests across 43 files; web typecheck, lint, and the
-production build are green.
+stale-detail suppression, truthful detail failures, static read-only lifecycle
+gating, non-persistent technical handoff, strategy switching, and
+strategy-aware titles. The full web suite passes 668 tests across 43 files;
+collaboration typecheck, lint, and the production build are green. The three
+loopback-dependent LDAP transport tests also pass outside the filesystem/network
+sandbox that prevents binding a local test port.
 
 A hands-on synthetic-demo acceptance pass also verified the rendered strategy
 selector, username preference persistence across reload, single-page create,

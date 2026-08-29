@@ -83,11 +83,11 @@
 .investigation-first__list-title { font-weight: 700; }
 .investigation-first__list-meta { display: flex; gap: 0.65rem; flex-wrap: wrap; color: var(--muted); font-size: 0.78rem; }
 .investigation-first__list-hint { color: var(--muted); font-size: 0.75rem; }
-.status-pill, .severity-pill { display: inline-flex; align-items: center; width: fit-content; padding: 0.18rem 0.45rem; border-radius: 999px; background: var(--accent-soft); color: var(--fg); font-size: 0.7rem; font-weight: 700; text-transform: capitalize; }
-.status-pill--resolved { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
-.status-pill--archived { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
-.status-pill--open, .status-pill--monitoring { background: color-mix(in srgb, var(--warning) 15%, transparent); color: var(--warning); }
-.severity-pill { border-radius: 0.35rem; color: var(--warning); }
+.investigation-first .status-pill, .investigation-first .severity-pill { display: inline-flex; align-items: center; width: fit-content; padding: 0.18rem 0.45rem; border-radius: 999px; background: var(--accent-soft); color: var(--fg); font-size: 0.7rem; font-weight: 700; text-transform: capitalize; }
+.investigation-first .status-pill--resolved { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+.investigation-first .status-pill--archived { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+.investigation-first .status-pill--open, .investigation-first .status-pill--monitoring { background: color-mix(in srgb, var(--warning) 15%, transparent); color: var(--warning); }
+.investigation-first .severity-pill { border-radius: 0.35rem; color: var(--warning); }
 
 .investigation-first__empty { margin: 1rem 0; padding: 1rem; border: 1px dashed var(--border); color: var(--muted); text-align: center; }
 .investigation-first__error { margin: 0.8rem 0; padding: 0.65rem 0.8rem; border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--border)); border-radius: 0.45rem; color: var(--danger); }
@@ -132,18 +132,6 @@
 .investigation-first__upload-grid input, .investigation-first__upload-grid select { min-width: 0; padding: 0.42rem; border: 1px solid var(--border); border-radius: 0.4rem; background: var(--surface-input); color: var(--fg); }
 .investigation-first .lifecycle-panel { margin-top: 0.8rem; }
 
-.account__strategies { display: grid; gap: 0.5rem; margin: 0; padding: 0.6rem; border: 1px solid var(--border); border-radius: 0.45rem; }
-.account__panel { min-width: min(23rem, calc(100vw - 2rem)); }
-.account__strategies legend { padding: 0 0.25rem; color: var(--muted); font-size: 0.78rem; }
-.account__strategy-note { margin: 0; color: var(--muted); font-size: 0.72rem; line-height: 1.35; }
-.account__strategy-option { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 0.45rem; align-items: start; padding: 0.4rem; border-radius: 0.35rem; cursor: pointer; }
-.account__strategy-option:has(input:checked) { background: var(--accent-soft); }
-.account__strategy-option span { display: grid; gap: 0.1rem; }
-.account__strategy-preview { width: 1.35rem; height: 1.35rem; border: 1px solid var(--border); border-radius: 0.3rem; background: linear-gradient(145deg, var(--accent), var(--surface-deep)); }
-.account__strategy-preview[data-preview="strategy-war-room"] { background: linear-gradient(145deg, #7aa2f7, #302f62); }
-.account__strategy-preview[data-preview="strategy-investigation-first"] { background: linear-gradient(145deg, #f0b429, #2e6a58); }
-.account__strategy-option small { color: var(--muted); font-size: 0.68rem; line-height: 1.3; }
-
 @media (max-width: 800px) {
   .investigation-first__hero, .investigation-first__detail-grid { grid-template-columns: 1fr; }
   .investigation-first__card--wide { grid-row: auto; }
@@ -153,5 +141,5 @@
   .investigation-first__field--wide { grid-column: auto; }
   .investigation-first__section-heading, .investigation-first__detail-header { display: grid; }
   .investigation-first__detail-actions { justify-content: start; }
-  .investigation-first__evidence-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .investigation-first__evidence-meta { grid-template-columns: 1fr; }
 }
