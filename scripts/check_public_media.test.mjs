@@ -96,7 +96,11 @@ test("the checked-in public media ledger validates against the real repository",
       !/^(?:https?:)?\/\//i.test(entry.target) &&
       /\.(?:png|jpe?g|webp|gif)$/i.test(entry.target),
   );
-  assert.ok(localRasters.length > 0, "README publishes no local rasters");
+  assert.equal(
+    localRasters.length,
+    4,
+    "README local-raster publication count changed without updating the pinned privacy expectation",
+  );
   assert.match(
     result.stdout,
     new RegExp(`${localRasters.length} published references`),
@@ -240,6 +244,8 @@ test("nested, balanced, suffixed, and entity-encoded raster targets fail closed"
 
     const cases = [
       `![Unreviewed [nested]](docs/images/smuggled.png)\n`,
+      "![Unreviewed `code]` alt](docs/images/smuggled.png)\n",
+      `![Unreviewed <span title="]"> alt](docs/images/smuggled.png)\n`,
       `![Unreviewed](docs/images/smuggled(1).png)\n`,
       `![Unreviewed](docs/images/smuggled\\(1\\).png)\n`,
       `![Unreviewed](<docs/images/smuggled.png>)\n`,
@@ -248,6 +254,7 @@ test("nested, balanced, suffixed, and entity-encoded raster targets fail closed"
       `![Unreviewed](docs/images/smuggled.png#preview)\n`,
       `<img src="docs/images/smuggled&#46;png" alt="Unreviewed">\n`,
       `<img src="docs/images/smuggled&#46png" alt="Unreviewed">\n`,
+      `<img src=" docs/images/smuggled.png " alt="Unreviewed">\n`,
     ];
 
     for (const contents of cases) {
@@ -264,11 +271,84 @@ test("nested, balanced, suffixed, and entity-encoded raster targets fail closed"
     // Query/fragment syntax changes delivery, not the reviewed local bytes.
     fs.writeFileSync(
       readme,
-      `# Fixture\n\n![Synthetic listed](${pathname}?raw=1#preview)\n`,
+      `# Fixture\n\n![Synthetic listed](${pathname}?raw=1&label=a#preview)\n`,
     );
     const listedWithSuffix = run(root);
     assert.equal(listedWithSuffix.status, 0, listedWithSuffix.stderr);
     assert.match(listedWithSuffix.stdout, /1 published references/);
+  });
+});
+
+test("non-ledgerable local and embedded images are rejected", () => {
+  withRepository(({ root }) => {
+    const readme = path.join(root, "README.md");
+    const cases = [
+      `![Embedded](data:image/png;base64,c3ludGhldGlj)\n`,
+      `![Vector](docs/images/unreviewed.svg)\n`,
+      `![Extensionless](docs/images/unreviewed)\n`,
+    ];
+    for (const contents of cases) {
+      fs.writeFileSync(readme, `# Fixture\n\n${contents}`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, contents);
+      assert.match(
+        result.stderr,
+        /embedded data images are not privacy-ledgered|local SVG image .* is outside the raster privacy ledger|local image .* has no supported privacy-ledgered raster extension/,
+      );
+    }
+  });
+});
+
+test("multiline reference labels and continuation destinations fail closed", () => {
+  withRepository(({ root }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
+    const cases = [
+      `![Unreviewed][shot]\n\n[shot]:\n  docs/images/smuggled.png\n`,
+      `![Unreviewed][multi\n label]\n\n[multi\n label]: docs/images/smuggled.png\n`,
+      `![Unreviewed\n multiline][shot]\n\n[shot]: docs/images/smuggled.png\n`,
+    ];
+    for (const contents of cases) {
+      fs.writeFileSync(path.join(root, "README.md"), `# Fixture\n\n${contents}`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, contents);
+      assert.match(
+        result.stderr,
+        /published raster 'docs\/images\/smuggled\.png' \(reference\) is not in the public media ledger/,
+        contents,
+      );
+    }
+  });
+});
+
+test("responsive HTML image candidates cannot bypass the ledger", () => {
+  withRepository(({ root, pathname }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
+    const readme = path.join(root, "README.md");
+
+    const cases = [
+      `<img src="${pathname}" srcset="docs/images/smuggled.png 2x" alt="Synthetic">\n`,
+      `<picture><source srcset="docs/images/smuggled.png 1x"><img src="${pathname}" alt="Synthetic"></picture>\n`,
+    ];
+    for (const contents of cases) {
+      fs.writeFileSync(readme, `# Fixture\n\n${contents}`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, contents);
+      assert.match(
+        result.stderr,
+        /published raster 'docs\/images\/smuggled\.png' \(html\) is not in the public media ledger/,
+        contents,
+      );
+    }
+
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n<picture><source srcset="${pathname} 2x"><img src="${pathname}" srcset="${pathname} 1x" alt="Synthetic"></picture>\n`,
+    );
+    const listed = run(root);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /3 published references/);
   });
 });
 
@@ -300,6 +380,21 @@ test("ambiguous HTML character references in local targets fail closed", () => {
     const result = run(root);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /ambiguous HTML character reference/);
+  });
+});
+
+test("ordinary ampersands in remote and local query strings remain valid", () => {
+  withRepository(({ root, pathname }) => {
+    const readme = path.join(root, "README.md");
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![Remote](https://example.invalid/badge.svg?a=1&b=2)\n` +
+        `![Remote encoded](https://example.invalid/badge.svg?a=1&amp;b=2)\n` +
+        `![Synthetic listed](${pathname}?label=a&b=c)\n`,
+    );
+    const result = run(root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /1 published references/);
   });
 });
 

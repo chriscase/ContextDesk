@@ -273,7 +273,16 @@ export function validatePublishedReferences(
       const localTarget = normalizePublishedLocalTarget(target, document);
       // Remote badges are not repository media and carry no local bytes.
       if (localTarget === null) continue;
-      if (!RASTER_EXTENSION_RE.test(localTarget)) continue;
+      if (/\.svg$/i.test(localTarget)) {
+        throw new Error(
+          `${document}: local SVG image '${target}' is outside the raster privacy ledger`,
+        );
+      }
+      if (!RASTER_EXTENSION_RE.test(localTarget)) {
+        throw new Error(
+          `${document}: local image '${target}' has no supported privacy-ledgered raster extension`,
+        );
+      }
       const normalized = localTarget.replace(/^\.\//, "");
       if (!altTermsByPath.has(normalized)) {
         throw new Error(
@@ -299,21 +308,27 @@ export function validatePublishedReferences(
 }
 
 export function normalizePublishedLocalTarget(target, document = "<memory>") {
-  const decoded = decodeHtmlCharacterReferences(target, document);
+  const decoded = decodeHtmlCharacterReferences(target, document).replace(
+    /^[ \t\n\f\r]+|[ \t\n\f\r]+$/g,
+    "",
+  );
+  if (/^(?:https?:)?\/\//i.test(decoded)) {
+    return null;
+  }
+  if (/^data:/i.test(decoded)) {
+    throw new Error(`${document}: embedded data images are not privacy-ledgered`);
+  }
+  const withoutSuffix = decoded.split(/[?#]/, 1)[0];
   // HTML accepts numeric character references without a semicolon and has a
   // much larger named-reference table than this dependency-free validator.
   // Anything that still looks entity-shaped is therefore ambiguous: letting
   // it fall through could make the browser see `.png` while the gate sees no
   // raster extension. Fail closed instead of maintaining a partial allowlist.
-  if (/&(?:#|[a-z])/i.test(decoded)) {
+  if (/&(?:#|[a-z])/i.test(withoutSuffix)) {
     throw new Error(
       `${document}: published image target uses an ambiguous HTML character reference: ${target}`,
     );
   }
-  if (/^(?:https?:)?\/\//i.test(decoded) || decoded.startsWith("data:")) {
-    return null;
-  }
-  const withoutSuffix = decoded.split(/[?#]/, 1)[0];
   try {
     return decodeURIComponent(withoutSuffix);
   } catch {
@@ -381,24 +396,87 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
     cursor = Math.max(alt.end, imageStart + 2);
   }
 
-  // Raw HTML: <img src="target" alt="description">
-  for (const match of text.matchAll(/<img\b([^>]*)>/gi)) {
-    const attributes = parseHtmlAttributes(match[1], document, match[0]);
+  // Raw HTML: govern both the fallback source and every responsive candidate.
+  // A reviewed `src` is not sufficient when the browser can choose an
+  // unreviewed `srcset` or `<picture><source>` payload at another viewport or
+  // pixel density.
+  const pictureRanges = [];
+  for (const picture of text.matchAll(/<picture\b[\s\S]*?<\/picture\s*>/gi)) {
+    pictureRanges.push({ start: picture.index, end: picture.index + picture[0].length });
+    const imageTags = collectHtmlTags(picture[0], "img", document);
+    if (imageTags.length === 0) {
+      throw new Error(`${document}: <picture> has no quoted fallback <img> to supply alt text`);
+    }
+    const fallback = imageTags.at(-1);
+    const fallbackAttributes = parseHtmlAttributes(
+      fallback.attributes,
+      document,
+      fallback.tag,
+    );
+    const fallbackAlt = decodeHtmlCharacterReferences(
+      fallbackAttributes.get("alt") ?? "",
+      document,
+      fallback.tag,
+    );
+    for (const source of collectHtmlTags(picture[0], "source", document)) {
+      const attributes = parseHtmlAttributes(source.attributes, document, source.tag);
+      const srcset = attributes.get("srcset");
+      if (srcset === undefined || srcset === null) {
+        throw new Error(
+          `${document}: <picture> source without a quoted literal srcset cannot be checked: ${source.tag}`,
+        );
+      }
+      for (const target of parseHtmlSrcset(srcset, document, source.tag)) {
+        targets.push({ target, form: "html", alt: fallbackAlt });
+      }
+    }
+  }
+
+  for (const match of collectHtmlTags(text, "img", document)) {
+    const attributes = parseHtmlAttributes(match.attributes, document, match.tag);
     const src = attributes.get("src");
     if (src === undefined || src === null) {
       throw new Error(
-        `${document}: <img> tag without a quoted literal src cannot be checked: ${match[0]}`,
+        `${document}: <img> tag without a quoted literal src cannot be checked: ${match.tag}`,
       );
     }
+    const alt = decodeHtmlCharacterReferences(
+      attributes.get("alt") ?? "",
+      document,
+      match.tag,
+    );
     targets.push({
       target: src,
       form: "html",
-      alt: decodeHtmlCharacterReferences(
-        attributes.get("alt") ?? "",
-        document,
-        match[0],
-      ),
+      alt,
     });
+    if (attributes.has("srcset")) {
+      const srcset = attributes.get("srcset");
+      if (srcset === null) {
+        throw new Error(
+          `${document}: <img> tag without a quoted literal srcset cannot be checked: ${match.tag}`,
+        );
+      }
+      for (const target of parseHtmlSrcset(srcset, document, match.tag)) {
+        targets.push({ target, form: "html", alt });
+      }
+    }
+  }
+
+  // A source tag outside a picture does not inherit an image alt contract and
+  // may belong to audio/video. If it nevertheless carries srcset, browsers can
+  // treat it as responsive image syntax in malformed markup; reject rather
+  // than silently guessing its accessibility or privacy scope.
+  for (const source of collectHtmlTags(text, "source", document)) {
+    if (pictureRanges.some((range) => source.start >= range.start && source.end <= range.end)) {
+      continue;
+    }
+    const attributes = parseHtmlAttributes(source.attributes, document, source.tag);
+    if (attributes.has("srcset")) {
+      throw new Error(
+        `${document}: <source srcset> outside a complete <picture> cannot be checked: ${source.tag}`,
+      );
+    }
   }
 
   return targets;
@@ -424,6 +502,35 @@ function parseBracketedMarkdown(source, openIndex) {
       index += 2;
       continue;
     }
+    if (character === "`") {
+      const runStart = index;
+      let runEnd = index + 1;
+      while (source[runEnd] === "`") runEnd += 1;
+      const runLength = runEnd - index;
+      let close = runEnd;
+      let matched = false;
+      while (close < source.length) {
+        close = source.indexOf("`".repeat(runLength), close);
+        if (close < 0) break;
+        if (source[close - 1] !== "`" && source[close + runLength] !== "`") {
+          value += source.slice(index, close + runLength);
+          index = close + runLength;
+          matched = true;
+          break;
+        }
+        close += runLength;
+      }
+      if (matched) continue;
+      index = runStart;
+    }
+    if (character === "<") {
+      const htmlEnd = inlineHtmlTagEnd(source, index);
+      if (htmlEnd !== null) {
+        value += source.slice(index, htmlEnd);
+        index = htmlEnd;
+        continue;
+      }
+    }
     if (character === "[") {
       depth += 1;
       value += character;
@@ -438,6 +545,29 @@ function parseBracketedMarkdown(source, openIndex) {
       continue;
     }
     value += character;
+    index += 1;
+  }
+  return null;
+}
+
+function inlineHtmlTagEnd(source, start) {
+  if (!/[A-Za-z!/?]/.test(source[start + 1] ?? "")) return null;
+  let index = start + 1;
+  let quote = null;
+  while (index < source.length) {
+    const character = source[index];
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      index += 1;
+      continue;
+    }
+    if (character === `"` || character === `'`) {
+      quote = character;
+      index += 1;
+      continue;
+    }
+    if (character === ">") return index + 1;
+    if (character === "\n" || character === "\r") return null;
     index += 1;
   }
   return null;
@@ -516,29 +646,53 @@ function parseInlineMarkdownDestination(source, openParenIndex) {
   return null;
 }
 
-function parseMarkdownDefinitionDestination(line, start) {
+function parseMarkdownDefinitionDestination(source, start) {
   let index = start;
-  while (/[ \t]/.test(line[index] ?? "")) index += 1;
-  if (line[index] === "<") {
-    const close = line.indexOf(">", index + 1);
+  while (/[ \t]/.test(source[index] ?? "")) index += 1;
+  if (source[index] === "\r" && source[index + 1] === "\n") index += 2;
+  else if (source[index] === "\n") index += 1;
+  if (index > start) {
+    let continuationIndent = 0;
+    while (/[ \t]/.test(source[index] ?? "") && continuationIndent < 4) {
+      index += 1;
+      continuationIndent += 1;
+    }
+  }
+  if (source[index] === "<") {
+    const close = source.indexOf(">", index + 1);
     if (close < 0) return null;
-    return unescapeMarkdown(line.slice(index + 1, close));
+    if (/[\r\n]/.test(source.slice(index + 1, close))) return null;
+    return unescapeMarkdown(source.slice(index + 1, close));
   }
   const destinationStart = index;
-  while (index < line.length && !/[ \t]/.test(line[index])) index += 1;
+  let depth = 0;
+  while (index < source.length && !/[ \t\r\n]/.test(source[index])) {
+    if (source[index] === "\\" && index + 1 < source.length) {
+      index += 2;
+      continue;
+    }
+    if (source[index] === "(") depth += 1;
+    if (source[index] === ")") {
+      if (depth === 0) break;
+      depth -= 1;
+    }
+    index += 1;
+  }
+  if (depth !== 0) return null;
   return destinationStart === index
     ? null
-    : unescapeMarkdown(line.slice(destinationStart, index));
+    : unescapeMarkdown(source.slice(destinationStart, index));
 }
 
 function collectMarkdownDefinitions(text) {
   const definitions = new Map();
-  for (const line of text.split(/\r?\n/)) {
-    const indent = line.match(/^[ \t]{0,3}/)?.[0].length ?? 0;
-    if (line[indent] !== "[") continue;
-    const label = parseBracketedMarkdown(line, indent);
-    if (label === null || line[label.end] !== ":") continue;
-    const target = parseMarkdownDefinitionDestination(line, label.end + 1);
+  const lineStart = /^(?:[ \t]{0,3})\[/gm;
+  for (const match of text.matchAll(lineStart)) {
+    const open = match.index + match[0].lastIndexOf("[");
+    const label = parseBracketedMarkdown(text, open);
+    if (label === null || text[label.end] !== ":") continue;
+    if (/\n[ \t]*\n/.test(text.slice(open, label.end))) continue;
+    const target = parseMarkdownDefinitionDestination(text, label.end + 1);
     // CommonMark resolves the first definition for a normalized label. Using
     // the last one would let a later ledger-listed target hide an earlier
     // unreviewed target that GitHub actually renders.
@@ -570,6 +724,63 @@ function decodeHtmlCharacterReferences(value, document, context = value) {
 
 function isHtmlSpace(character) {
   return character !== undefined && /[ \t\n\f\r]/.test(character);
+}
+
+function collectHtmlTags(text, tagName, document) {
+  const tags = [];
+  const opener = new RegExp(`<${tagName}\\b`, "gi");
+  for (const match of text.matchAll(opener)) {
+    let index = match.index + match[0].length;
+    let quote = null;
+    while (index < text.length) {
+      const character = text[index];
+      if (quote !== null) {
+        if (character === quote) quote = null;
+        index += 1;
+        continue;
+      }
+      if (character === `"` || character === `'`) {
+        quote = character;
+        index += 1;
+        continue;
+      }
+      if (character === ">") break;
+      index += 1;
+    }
+    if (index >= text.length || quote !== null) {
+      throw new Error(`${document}: <${tagName}> tag is not terminated and cannot be checked`);
+    }
+    tags.push({
+      tag: text.slice(match.index, index + 1),
+      attributes: text.slice(match.index + match[0].length, index),
+      start: match.index,
+      end: index + 1,
+    });
+  }
+  return tags;
+}
+
+function parseHtmlSrcset(value, document, tag) {
+  const decoded = decodeHtmlCharacterReferences(value, document, tag).trim();
+  if (!decoded) {
+    throw new Error(`${document}: image srcset must not be empty: ${tag}`);
+  }
+  if (/\bdata:/i.test(decoded)) {
+    throw new Error(`${document}: embedded data image in srcset is not privacy-ledgered: ${tag}`);
+  }
+  const targets = [];
+  for (const candidate of decoded.split(",")) {
+    const parts = candidate.trim().split(/[ \t\n\f\r]+/);
+    const target = parts.shift() ?? "";
+    if (!target || parts.length > 1) {
+      throw new Error(`${document}: image srcset candidate is malformed: ${tag}`);
+    }
+    if (parts.length === 1 && !/^(?:[1-9][0-9]*w|(?:[0-9]*\.)?[0-9]+x)$/.test(parts[0])) {
+      throw new Error(`${document}: image srcset descriptor is malformed: ${tag}`);
+    }
+    targets.push(target);
+  }
+  return targets;
 }
 
 /**
