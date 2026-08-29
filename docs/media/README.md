@@ -45,25 +45,24 @@ recorded in `docs/media/public-assets.json`.
 
 The War Room frames are captured from the loopback synthetic web demo, not
 from a live provider or a customer installation. They all use the same exact
-post-release source SHA and the deterministic, memory-backed checkout-timeout
-fixture. The browser viewport is 1280 × 720; no provider/model inventory,
+source SHA and the deterministic, memory-backed checkout-timeout fixture. The
+browser viewport is 1440 × 1000; no provider/model inventory,
 credential, private path, or non-synthetic corpus is visible.
 
 | File | Surface | Dimensions | Source SHA | Fixture |
 | --- | --- | --- | --- | --- |
-| `gallery/war-room-overview.png` | Overview activity feed and active investigation | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-capture-analyze.png` | Capture provenance, imported-output boundary, and corpus intake | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-analyze.png` | Evidence board, snapshot lineage, and model lanes | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-compare-decide.png` | Comparison lab, historical artifacts, deep links, and lane focus | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-decide-export.png` | Accepted human decision journal | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-export.png` | Accepted decision and share-safe export boundary | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-overview.png` | Overview activity feed and active investigation | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-capture-analyze.png` | Capture provenance, imported-output boundary, and corpus intake | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-analyze.png` | Workstreams and investigation-owned Log workbench | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-compare-decide.png` | Comparison lab, evidence, deep links, and lane focus | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-decide-export.png` | Portable archive export, dry-run, and exact-restore boundary | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-export.png` | Portable archive export, dry-run, and exact-restore boundary | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 
-**Known residual — this is not a single-build gallery.** #734 asks for one
-exact packaged-app SHA and #677 asks for frames current with the promoted
-build. Two frames predate the third, and `gallery/logs-library-demo.png` was
-captured before the Logs toolbar was regrouped, so it no longer matches
-production. Closing that requires native recapture from one freshly built
-`.app`; it cannot be discharged by editing this file.
+**Known residual — this is not a single-build gallery.** The War Room set is a
+current, single-SHA browser capture, while the three native desktop frames
+still span earlier packaged-app builds. `gallery/logs-library-demo.png` predates
+the Logs toolbar regrouping. Closing that native residual requires recapture
+from one freshly built `.app`; it cannot be discharged by editing this file.
 
 ## Publication privacy gate
 

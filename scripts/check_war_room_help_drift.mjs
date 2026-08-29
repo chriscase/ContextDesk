@@ -30,6 +30,15 @@ function pngDimensions(path) {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
+function mediaDimensions(path, format) {
+  if (format === "png") return pngDimensions(path);
+  if (format !== "svg") return null;
+  const svg = readFileSync(path, "utf8");
+  const width = Number(svg.match(/<svg[^>]*\bwidth="([0-9]+)"/)?.[1]);
+  const height = Number(svg.match(/<svg[^>]*\bheight="([0-9]+)"/)?.[1]);
+  return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null;
+}
+
 export function validateWarRoomHelpDrift(repositoryRoot = ownRoot) {
   const root = resolve(repositoryRoot);
   const errors = [];
@@ -73,6 +82,34 @@ export function validateWarRoomHelpDrift(repositoryRoot = ownRoot) {
       fail(errors, `${relative(root, publicPath)} differs from ${relative(root, docsPath)}`);
     }
   }
+
+  const ledgerPath = join(root, "docs", "war-room", "help-media.json");
+  const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  const governed = [
+    ...walk(docsAssets),
+    ...walk(publicAssets),
+  ].filter((path) => [".png", ".svg"].includes(extname(path).toLowerCase()));
+  const recorded = new Map((ledger.assets ?? []).map((row) => [row.path, row]));
+  for (const asset of governed) {
+    const rel = relative(root, asset);
+    const row = recorded.get(rel);
+    if (!row) {
+      fail(errors, `${rel} is missing from docs/war-room/help-media.json`);
+      continue;
+    }
+    const format = extname(asset).slice(1).toLowerCase();
+    const dimensions = mediaDimensions(asset, format);
+    if (row.sha256 !== sha256(asset)) fail(errors, `${rel} hash differs from the Help media ledger`);
+    if (row.format !== format) fail(errors, `${rel} format differs from the Help media ledger`);
+    if (!dimensions || row.width !== dimensions.width || row.height !== dimensions.height) {
+      fail(errors, `${rel} dimensions differ from the Help media ledger`);
+    }
+    if (!/^[0-9a-f]{40}$/.test(row.sourceSha ?? "")) fail(errors, `${rel} has no exact source SHA`);
+    if (!row.fixture?.trim() || !row.caption?.trim()) fail(errors, `${rel} lacks fixture or caption provenance`);
+    if (row.privacyReview !== "publishable") fail(errors, `${rel} is not privacy-reviewed as publishable`);
+    recorded.delete(rel);
+  }
+  for (const extra of recorded.keys()) fail(errors, `Help media ledger has stale path ${extra}`);
 
   const helpPath = join(root, "collab", "web", "src", "HelpCenter.tsx");
   const help = readFileSync(helpPath, "utf8");
