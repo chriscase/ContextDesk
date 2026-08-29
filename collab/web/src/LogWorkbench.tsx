@@ -333,6 +333,8 @@ export function LogWorkbench(props: {
   const liveRef = useRef<HTMLParagraphElement>(null);
   /** Panes already read once, so a selection change does not re-page them. */
   const loadedPanes = useRef<Set<string>>(new Set());
+  /** The first available file is selected once per investigation, never after an explicit clear. */
+  const defaultPaneCase = useRef<string | null>(null);
 
   const selectedItems = useMemo(
     () => items.filter((item) => panes.includes(item.evidenceId)),
@@ -387,7 +389,17 @@ export function LogWorkbench(props: {
         corpusTruncated?: boolean;
         unreadFiles?: string[];
       };
-      setItems(body.items ?? []);
+      const nextItems = body.items ?? [];
+      setItems(nextItems);
+      setPanes((current) => {
+        const availableIds = new Set(nextItems.map((item) => item.evidenceId));
+        const valid = current.filter((id) => availableIds.has(id));
+        if (defaultPaneCase.current !== props.caseId && nextItems.length > 0) {
+          defaultPaneCase.current = props.caseId;
+          return valid.length > 0 ? valid : [nextItems[0]!.evidenceId];
+        }
+        return valid;
+      });
       setRevision(body.normalizationRevision ?? null);
       setCorpusTruncated(body.corpusTruncated === true);
       setUnreadFiles(body.unreadFiles ?? []);
@@ -472,8 +484,7 @@ export function LogWorkbench(props: {
   // whenever the selection changes would throw away where the reader had paged
   // to — including the window a revealed search match just loaded.
   useEffect(() => {
-    const ids = panes.length > 0 ? panes : items.slice(0, 1).map((item) => item.evidenceId);
-    for (const id of ids) {
+    for (const id of panes) {
       if (loadedPanes.current.has(id)) continue;
       void loadPane(id);
     }
@@ -662,7 +673,7 @@ export function LogWorkbench(props: {
         },
         query,
         mode,
-        selectedPanes: panes.length > 0 ? panes : items.slice(0, 2).map((item) => item.evidenceId),
+        selectedPanes: panes,
         timeFrom: timeFrom.trim() || null,
         timeTo: timeTo.trim() || null,
         sort,
@@ -1250,7 +1261,12 @@ export function LogWorkbench(props: {
       </label>
 
       <div className="log-workbench__panes">
-        {(selectedItems.length > 0 ? selectedItems : items.slice(0, 1)).map((item) => {
+        {selectedItems.length === 0 && items.length > 0 ? (
+          <p className="log-workbench__notice" role="status">
+            Select a log file to open its lines.
+          </p>
+        ) : null}
+        {selectedItems.map((item) => {
           const page = pageByPane[item.evidenceId];
           const rows = page?.rows ?? [];
           const paneScroll = syncScroll ? scrollTop : (scrollByPane[item.evidenceId] ?? 0);

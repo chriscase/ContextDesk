@@ -189,6 +189,26 @@ describe("Log workbench", () => {
     expect(screen.getAllByText("Details")).toHaveLength(2);
   });
 
+  it("keeps the default pane, selector, count, and clear state consistent", async () => {
+    stubFetch();
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+
+    expect((screen.getByLabelText("Show edge.log in a pane") as HTMLInputElement).checked).toBe(
+      true,
+    );
+    expect(screen.getByText(/1 of 4 panes open/)).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "edge.log lines" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear open files" }));
+    expect((screen.getByLabelText("Show edge.log in a pane") as HTMLInputElement).checked).toBe(
+      false,
+    );
+    expect(screen.getByText(/no panes open/)).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "edge.log lines" })).toBeNull();
+    expect(screen.getByText("Select a log file to open its lines.")).toBeTruthy();
+  });
+
   it("searches and reports an exact match count", async () => {
     stubFetch();
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
@@ -659,7 +679,6 @@ describe("Log workbench honesty and navigation", () => {
     );
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
     await screen.findByRole("heading", { name: "Log workbench" });
-    fireEvent.click(screen.getByLabelText("Show edge.log in a pane"));
     await waitFor(() => expect(pageRequests.length).toBeGreaterThan(0));
     fireEvent.click(screen.getAllByRole("button", { name: "Load next lines" })[0]!);
     await waitFor(() =>
@@ -753,7 +772,6 @@ describe("Log workbench file picker at 3, 30, and 300 files", () => {
     expect(visible.length).toBeLessThanOrEqual(40);
     expect(screen.getByText(/Showing files/)).toBeTruthy();
 
-    fireEvent.click(screen.getByLabelText("Show svc-000.log in a pane"));
     fireEvent.click(screen.getByLabelText("Show svc-001.log in a pane"));
     fireEvent.click(screen.getByLabelText("Show svc-002.log in a pane"));
     fireEvent.click(screen.getByLabelText("Show svc-003.log in a pane"));

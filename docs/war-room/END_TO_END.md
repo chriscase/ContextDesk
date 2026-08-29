@@ -26,9 +26,9 @@ shows the synthetic display name, username, and access role.
 
 The default demo does not install the separate trusted timezone host. Offset-
 bearing timestamps remain comparable; local timestamps without an offset stay
-unresolved, and timezone review/normalized chronology report that dependency
-as unavailable. Use a separately configured host-backed rehearsal for those
-actions.
+unresolved. Timezone review reports the trusted host as unavailable, and the
+normalized chronology stays hidden because it has no host result to display.
+Use a separately configured host-backed rehearsal for those actions.
 
 If the local address does not load, stop and record the environment failure.
 Do not substitute external data for this walkthrough.
@@ -112,9 +112,9 @@ and use **Log workbench** before launching a lane:
 4. Save a view or bookmark a useful line when you will return to it.
 5. In a host-backed rehearsal, if a line has no timezone, use **Timezone
    review** to choose its IANA zone, then open **Normalized log chronology**.
-   In the default demo, confirm that action reports the trusted host as
-   unavailable. The workbench never guesses a timezone, year, daylight-saving
-   choice, or clock correction.
+   In the default demo, confirm that Timezone review reports the trusted host as
+   unavailable and that normalized chronology remains hidden. The workbench
+   never guesses a timezone, year, daylight-saving choice, or clock correction.
 
 Nested ZIP members retain their archive paths and are subject to the same
 bounded safety and privacy checks as ordinary files. Rejected members are not

@@ -14,9 +14,10 @@ Open `http://127.0.0.1:8787` and sign in with `demo` / `demo`. Set `COLLAB_DEMO_
 
 The default launcher does not install the separate trusted timezone host.
 Offset-bearing timestamps remain comparable; zone-less timestamps stay
-unresolved, and timezone review/normalized chronology report the dependency as
-unavailable. Demonstrate successful normalization only in a separately
-configured host-backed rehearsal.
+unresolved. Timezone review reports the trusted host as unavailable, while
+normalized chronology stays hidden because it has no host result to display.
+Demonstrate successful normalization only in a separately configured
+host-backed rehearsal.
 
 Use **Interface theme** if you want to change the presentation (`Command`,
 `Dark`, `Slate`, `Light`, `Sand`, or `Forest`). `Command` is the default. The

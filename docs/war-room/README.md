@@ -302,9 +302,10 @@ No live provider or external material is required. Continue with the
 
 The default demo does not install the separate trusted timezone host. Lines
 that already include an offset remain comparable, but zone-less timestamps
-stay explicitly unresolved and timezone review/normalized chronology report
-that the host is unavailable. Exercise successful normalization only in a
-host-backed rehearsal with that service configured.
+stay explicitly unresolved. Timezone review reports that the host is
+unavailable, while normalized chronology stays hidden because it has no host
+result to display. Exercise successful normalization only in a host-backed
+rehearsal with that service configured.
 
 ## Shipped boundaries and honest limits
 
