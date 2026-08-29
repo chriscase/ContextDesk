@@ -533,7 +533,14 @@ describe("TriageRunPanel", () => {
 
     render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
     await screen.findByRole("heading", { name: "Run history" });
+    expect((screen.getByRole("checkbox", { name: /qwen-3.6-27b/ }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: /gpt-oss-120b/ }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }) as HTMLInputElement).checked).toBe(false);
     fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
+    expect(screen.getByRole("button", { name: "Run gateway triage" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /gpt-oss-120b/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }));
+    expect(screen.getByRole("button", { name: "Run gateway comparison" })).toBeTruthy();
     expect((screen.getByRole("combobox", { name: "Lane concurrency" }) as HTMLSelectElement).value).toBe("2");
     fireEvent.change(screen.getByRole("combobox", { name: "Lane concurrency" }), { target: { value: "3" } });
     fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }), { target: { value: "profile:qwen" } });
@@ -582,8 +589,6 @@ describe("TriageRunPanel", () => {
     await screen.findByRole("heading", { name: "Run history" });
     fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
     fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }), { target: { value: "profile:qwen" } });
-    fireEvent.click(screen.getByRole("checkbox", { name: /gpt-oss-120b/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }));
 
     const launchButton = screen.getByRole("button", { name: "Run gateway triage" });
     expect((launchButton as HTMLButtonElement).disabled).toBe(false);
@@ -642,7 +647,7 @@ describe("TriageRunPanel", () => {
     render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
     await screen.findByRole("heading", { name: "Run history" });
     fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
-    fireEvent.click(screen.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /gpt-oss-120b/ }));
 
     expect((screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }) as HTMLSelectElement).value)
       .toBe("subject:qwen");

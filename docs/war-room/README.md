@@ -23,7 +23,7 @@ The signed-in workspace provides separate destinations for different jobs:
 | **Overview** | See recent recorded activity and active investigations, then follow a link to the relevant stage or item |
 | **Investigations** | Search, filter, create, and resume investigations visible to the signed-in person |
 | **Entities** | Keep reusable labels for the customer, organization, person, service, system, product, version, build, or environment an investigation concerns |
-| **Sources** | Manage reusable attribution labels for people, tools, systems, and imported material; a source is not a credential or a global evidence store |
+| **Attribution** | Manage reusable source labels for people, tools, systems, and imported material; a source is not a credential or a global evidence store |
 | **Administration** | For administrators, search a bounded view of configured directory identities and groups and maintain explicit group-to-role mappings |
 | **Help** | Search operating guidance while working in War Room |
 
@@ -113,10 +113,10 @@ comparison; lane count is not a correctness score.
 
 The **Log workbench** lives on an investigation's **Analyze** stage. It lets an
 operator work directly with investigation-owned logs without putting those
-logs into the reusable **Sources** catalog.
+logs into the reusable **Attribution** catalog.
 
 - Filter a long file list by name or path and select up to four files for
-  side-by-side reading.
+  side-by-side reading. At narrow widths, the same panes stack vertically.
 - Search selected files with match mode, include/exclude terms, severity, and
   explicit UTC bounds. Previous/Next, F3, and Ctrl/Cmd+G navigate matches.
 - Continue a search page from its opaque position when the selected corpus is
@@ -128,6 +128,10 @@ logs into the reusable **Sources** catalog.
   have no offset, then use **Normalized log chronology** for one merged order.
   The workbench never guesses a timezone, year, daylight-saving choice, or
   clock correction.
+- Row rendering and search are paged and bounded, but the current local server
+  materializes one selected evidence file in memory before it builds line
+  windows. Paging is not a promise of constant server memory for one very
+  large file.
 
 The workbench is additive to the normal evidence board: Capture owns intake,
 the snapshot owns the exact material a triage may read, and the workbench helps
@@ -138,19 +142,19 @@ handoffs:
 
 ![Synthetic Capture stage with human notes, imported output, and investigation-scoped file intake](../media/gallery/war-room-capture-analyze.png)
 
-![Synthetic Analyze stage with evidence board, frozen snapshot lineage, and model lanes](../media/gallery/war-room-analyze.png)
+![Synthetic Analyze stage showing completed Workstreams and the beginning of the Log workbench](../media/gallery/war-room-analyze.png)
 
 ![Synthetic Compare stage with historical artifacts, deep links, and lane focus](../media/gallery/war-room-compare-decide.png)
 
-![Synthetic Decide stage with an accepted human decision and export boundary](../media/gallery/war-room-export.png)
+![Synthetic portable archive download and dry-run controls with an exact-restore warning](../media/gallery/war-room-export.png)
 
-## Entities and Sources answer different questions
+## Entities and Attribution answer different questions
 
 **Entities** answer “who or what is this investigation about?” Use them for
 customers, organizations, products, versions, builds, components, services,
 systems, people, or environments so related investigations can be found again.
 
-**Sources** answer “who or what supplied this information?” They contain
+**Attribution** answers “who or what supplied this information?” It contains
 reusable attribution labels for a person, monitoring system, external tool,
 another ContextDesk record, or unknown origin.
 
@@ -159,9 +163,9 @@ owned by the investigation that captured it. A customer or vendor may be both
 an Entity and a Source, but the two labels should not be substituted for one
 another.
 
-## Sources are labels; evidence belongs to an investigation
+## Attribution contains labels; evidence belongs to an investigation
 
-The **Sources** library answers “who or what produced this item?” It contains
+The **Attribution** catalog answers “who or what produced this item?” It contains
 reusable attribution records such as a named person, monitoring system,
 external tool, or unknown source. Registering a source does not connect to the
 system, store its credentials, prove its correctness, or make its content
@@ -236,7 +240,7 @@ does not grant access. Only an explicit destination group-to-role mapping can
 grant a workspace role, and source-system roles from an imported archive are
 never trusted.
 
-![Synthetic Administration console with explicit group-to-role mappings](../assets/war-room/war-room-administration.png)
+![Synthetic Administration overview with navigation and component health](../assets/war-room/war-room-administration.png)
 
 ## Three different exports
 
@@ -260,7 +264,7 @@ The dry run creates no investigation, user, membership, role, or capability.
 An exact reconstruction can then be restored after typing RESTORE. Historical
 people remain attribution only. Archive signatures are recorded, not verified.
 
-![Synthetic portable investigation archive export and restore workspace](../media/gallery/war-room-export.png)
+![Synthetic portable archive download and dry-run controls with an exact-restore warning](../media/gallery/war-room-export.png)
 
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 
@@ -294,13 +298,20 @@ Password: demo
 No live provider or external material is required. Continue with the
 [five-minute end-to-end walkthrough](END_TO_END.md).
 
+The default demo does not install the separate trusted timezone host. Lines
+that already include an offset remain comparable, but zone-less timestamps
+stay explicitly unresolved. Timezone review says it "needs the trusted
+ContextDesk timestamp host on this installation," while normalized chronology
+stays hidden because it has no host result to display. Exercise successful
+normalization only in a host-backed rehearsal with that service configured.
+
 ## Shipped boundaries and honest limits
 
 “Integrated” does not mean every deployment is automatically configured.
 
 | Area | Current integrated behavior | Residual or non-claim |
 | --- | --- | --- |
-| Navigation | Multi-page Overview, Investigations, Entities, Sources, Administration, and Help; five routed investigation stages; breadcrumbs and deep links | Authorization still applies when another person follows a link |
+| Navigation | Multi-page Overview, Investigations, Entities, Attribution, Administration, and Help; five routed investigation stages; breadcrumbs and deep links | Authorization still applies when another person follows a link |
 | Evidence | Investigation-scoped notes, imports, uploads, ZIP/directory intake, snapshots, readable excerpts, context links, and Technical details | A citation or polished summary is not proof; intake limits and privacy classification still apply |
 | Analysis | Synthetic/offline and configured-gateway runs, one-lane focused triage, multi-lane comparison, run history, gateway model selection, and the Log workbench | Model availability and quality depend on the deployment; unknown cost or usage remains unknown |
 | Comparison and decision | Lane focus, evidence-backed differences, unknowns, discussion, human action, and optional owner | Agreement is not proof and a model cannot approve the human decision |

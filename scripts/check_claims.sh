@@ -160,9 +160,12 @@ if [ "${CHECK_CLAIMS_SKIP_AUX:-0}" != "1" ]; then
   node "$ROOT/scripts/check_design_handbook.mjs" "$ROOT"
   node "$ROOT/scripts/check_incident_evidence_drift.mjs"
   node "$ROOT/scripts/check_public_media.mjs" "$ROOT"
+  node --test "$ROOT/scripts/check_public_media.test.mjs"
   node "$ROOT/scripts/check_help_corpus.mjs"
   node "$ROOT/scripts/check_packaged_demo_manifest.mjs" "$ROOT"
   node "$ROOT/scripts/check_war_room_fixtures.mjs"
+  node "$ROOT/scripts/check_war_room_help_drift.mjs" "$ROOT"
+  node --test "$ROOT/scripts/check_war_room_help_drift.test.mjs"
 fi
 echo "check_claims: OK"
 exit 0

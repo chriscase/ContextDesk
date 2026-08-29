@@ -118,6 +118,9 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
     "POST /api/auth/login": { status: "synthetic_demo" },
     "POST /api/auth/logout": { status: "synthetic_demo" },
     "GET /api/cases": await json(app, "GET", "/api/cases", session),
+    "GET /api/entities": await json(app, "GET", "/api/entities", session),
+    "GET /api/involvement/index": await json(app, "GET", "/api/involvement/index", session),
+    "GET /api/profile/me": await json(app, "GET", "/api/profile/me", session),
     "GET /api/investigation-activity?limit=30": await json(
       app,
       "GET",
@@ -189,7 +192,7 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
   // above stay scoped to the primary case, which is the only one that has them.
   const listed = (routes["GET /api/cases"] ?? {}) as { cases?: { id?: string }[] };
   for (const row of listed.cases ?? []) {
-    if (!row.id || row.id === caseId) continue;
+    if (!row.id) continue;
     for (const suffix of [
       "",
       "/timeline",
@@ -203,8 +206,31 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
       "/presence",
       "/lifecycle",
       "/export/inventory",
+      "/workstreams",
+      "/workbench",
+      "/workbench/views",
+      "/workbench/bookmarks",
+      "/workbench/review-queue",
     ]) {
       const url = `/api/cases/${row.id}${suffix}`;
+      routes[`GET ${url}`] = await json(app, "GET", url, session);
+    }
+    const evidence = routes[`GET /api/cases/${row.id}/evidence`] as {
+      artifacts?: { id?: string }[];
+    };
+    for (const artifact of evidence.artifacts ?? []) {
+      if (!artifact.id) continue;
+      for (const suffix of ["", "/bytes"]) {
+        const url = `/api/cases/${row.id}/evidence/${artifact.id}${suffix}`;
+        routes[`GET ${url}`] = await json(app, "GET", url, session);
+      }
+    }
+    const workbench = routes[`GET /api/cases/${row.id}/workbench`] as {
+      items?: { evidenceId?: string }[];
+    };
+    for (const item of workbench.items ?? []) {
+      if (!item.evidenceId) continue;
+      const url = `/api/cases/${row.id}/workbench/page?evidenceId=${encodeURIComponent(item.evidenceId)}&startLine=1&limit=80`;
       routes[`GET ${url}`] = await json(app, "GET", url, session);
     }
   }
@@ -240,12 +266,9 @@ function escapeScript(value: string): string {
 
 async function inlineHelpIllustrations(javascript: string): Promise<string> {
   const illustrationDir = join(here, "..", "..", "web", "public", "help", "war-room");
-  const illustrations = [
-    "war-room-investigations.png",
-    "war-room-situation.png",
-    "war-room-evidence-deep-link.png",
-    "war-room-compare.png",
-  ] as const;
+  const illustrations = (await readdir(illustrationDir))
+    .filter((name) => name.endsWith(".png"))
+    .sort();
   let inlined = javascript;
   for (const name of illustrations) {
     const bytes = await readFile(join(illustrationDir, name));
@@ -289,8 +312,10 @@ export async function writeStaticDemo(outputPath: string): Promise<string> {
         if (
           path !== "/" &&
           path.indexOf("/investigations") !== 0 &&
+          path !== "/entities" &&
           path !== "/sources" &&
           path !== "/help" &&
+          path !== "/profile" &&
           path !== "/signin" &&
           path !== "/sign-in" &&
           path !== "/login"

@@ -37,7 +37,7 @@ After sign-in, the primary navigation separates the major jobs:
 - **Overview** surfaces recent recorded activity and active investigations.
 - **Investigations** is the searchable and filterable case inventory.
 - **Entities** stores reusable labels for who or what an investigation concerns.
-- **Sources** maintains attribution labels reused during intake.
+- **Attribution** maintains source labels reused during intake.
 - **Administration** is visible only to administrators and manages destination
   workspace access mappings.
 - **Help** provides searchable operating guidance.
@@ -100,8 +100,9 @@ finding or decision.
 
 ### 3. Analyze: select evidence, freeze a snapshot, run attempts
 
-Upload or select the investigation's logs, stack traces, files, and other
-evidence in Analyze. Inspect the material before freezing it. A frozen snapshot
+Use **Capture → Logs and files** for bulk files, ZIP archives, and directories.
+Use the **Analyze → Evidence** board for a single-file upload or for selecting
+already captured evidence. Inspect the material before freezing it. A frozen snapshot
 binds a run to an exact evidence selection and fingerprint so later comparisons
 can report whether lanes saw equivalent material.
 
@@ -129,7 +130,8 @@ changed, variation between answers is itself relevant evidence.
 
 The Log workbench is the investigation's power-user reading surface. It is for
 logs that have already been accepted on **Capture**; it is not a second global
-Sources library and it does not replace the evidence snapshot.
+Attribution catalog and it does not replace the evidence snapshot. Up to four
+panes sit side by side when space permits and stack vertically at narrow widths.
 
 1. On **Analyze**, filter the file list by name or path when the investigation
    contains many files.
@@ -154,9 +156,11 @@ Sources library and it does not replace the evidence snapshot.
 Large corpora are processed in bounded windows. Search can return a continuation
 cursor instead of pretending that a partial page is a complete answer. If the
 selected files or their timezone revision changes, restart the search so it is
-not resumed against different bytes or timestamps.
+not resumed against different bytes or timestamps. The current local server
+materializes one selected evidence file in memory before building line windows;
+paging is not constant-memory proof for one extremely large file.
 
-![Synthetic Analyze surface with evidence, snapshot, and lane controls](../media/gallery/war-room-analyze.png)
+![Synthetic Analyze surface showing completed Workstreams and the beginning of the Log workbench](../media/gallery/war-room-analyze.png)
 
 ### 4. Compare: inspect findings, not votes
 
@@ -209,14 +213,14 @@ service, system, product, version, build, component, or environment. An
 entity helps people find related investigations; it does not contain the
 investigation's logs and it is not a source of truth about a customer's system.
 
-Use **Sources** for a different question: who or what supplied a note, file,
+Use **Attribution** for a different question: who or what supplied a note, file,
 log, imported answer, or other information. A vendor may appear in both areas,
 but the two records have different meanings. Evidence, email, chat, and notes
 remain inside the investigation that captured them.
 
 ### Source attribution is not evidence storage
 
-The **Sources** library stores reusable labels for who or what produced an
+The **Attribution** catalog stores reusable labels for who or what produced an
 item: a person, an internal system, an external tool, another ContextDesk
 record, or an unknown origin. The source record is not a connector, credential,
 global corpus, or correctness claim.
@@ -248,7 +252,11 @@ A finding's evidence link opens the cited item in its investigation context.
 Share the resulting URL when another authorized reviewer needs the same stage,
 comparison, lane, section, or evidence item.
 
-![Synthetic finding opened through an evidence deep link](../assets/war-room/war-room-evidence-deep-link.png)
+The synthetic image below shows the Analyze workstreams context reached during
+this flow, not the cited evidence target itself. Verify the target in the live
+workspace before treating the citation as resolved.
+
+![Synthetic Analyze workstreams context reached from the evidence-review flow](../assets/war-room/war-room-evidence-deep-link.png)
 
 If a deep link resolves to the wrong item, has insufficient context, or no
 longer resolves, treat the citation as unverified. Do not rely on its prose.
@@ -312,7 +320,7 @@ the directory does not provide a service bind, the groups proven during login
 are retained for that session and take effect again at the next login; the
 application never stores or reuses the user’s password for this purpose.
 
-![Synthetic Administration console with explicit group-to-role mappings](../assets/war-room/war-room-administration.png)
+![Synthetic Administration overview with navigation and component health](../assets/war-room/war-room-administration.png)
 
 ## Three different exports
 

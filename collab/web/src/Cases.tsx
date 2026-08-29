@@ -2629,16 +2629,18 @@ export function Cases(props: {
             <TriageAnchor id="triage-log-workbench" label="Log workbench">
               <div hidden={workstreamFocused}>
                 <LogWorkbench
+                  key={current.id}
                   caseId={current.id}
                   canWrite={canWrite}
                   readOnly={readOnly}
-                  active={stage === "analyze"}
+                  active={stage === "analyze" && !workstreamFocused}
                 />
               </div>
             </TriageAnchor>
             <TriageAnchor id="triage-log-time" label="Timezone review">
               <div hidden={workstreamFocused}>
                 <LogTimeReviewPanel
+                  key={current.id}
                   caseId={current.id}
                   canWrite={canWrite}
                   readOnly={readOnly}
@@ -2651,7 +2653,11 @@ export function Cases(props: {
                 investigation has no normalized corpus. */}
             <TriageAnchor id="triage-log-chronology" label="Normalized log chronology">
               <div hidden={workstreamFocused}>
-                <LogChronologyPanel caseId={current.id} active={stage === "analyze"} />
+                <LogChronologyPanel
+                  key={current.id}
+                  caseId={current.id}
+                  active={stage === "analyze" && !workstreamFocused}
+                />
               </div>
             </TriageAnchor>
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">

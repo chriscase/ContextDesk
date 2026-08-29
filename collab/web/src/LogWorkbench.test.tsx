@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   countAdvancedFilters,
@@ -15,6 +15,7 @@ afterEach(() => {
 });
 
 const CASE_ID = "11111111-1111-4111-8111-111111111111";
+const CASE_B = "99999999-9999-4999-8999-999999999999";
 const EVIDENCE_A = "22222222-2222-4222-8222-222222222222";
 const EVIDENCE_B = "55555555-5555-4555-8555-555555555555";
 
@@ -23,6 +24,14 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 function inventory() {
@@ -178,6 +187,159 @@ function stubFetch() {
 }
 
 describe("Log workbench", () => {
+  it("does not load or event-reload while Analyze is mounted but inactive", async () => {
+    stubFetch();
+    const view = render(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active={false} />,
+    );
+    await waitFor(() => expect(fetch).not.toHaveBeenCalled());
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }),
+      );
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", { detail: { caseId: CASE_ID } }),
+      );
+    });
+    await waitFor(() => expect(fetch).not.toHaveBeenCalled());
+
+    view.rerender(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />);
+    await waitFor(() => {
+      const inventoryReads = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([input, init]) => String(input).endsWith("/workbench") && !init?.method,
+      );
+      expect(inventoryReads).toHaveLength(1);
+    });
+  });
+
+  it("does not publish an inventory reply that finishes after Analyze becomes inactive", async () => {
+    const pendingInventory = deferred<Response>();
+    let inventoryReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) {
+          inventoryReads += 1;
+          if (inventoryReads === 1) return pendingInventory.promise;
+          const fresh = inventory();
+          fresh.items[0] = {
+            ...fresh.items[0]!,
+            relativePath: "fresh-return.log",
+            displayLabel: "fresh-return.log",
+          };
+          fresh.items = fresh.items.slice(0, 1);
+          fresh.normalizationRevision = 4;
+          return jsonResponse(fresh);
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) {
+          return jsonResponse({ candidateCount: 0 });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />,
+    );
+    await waitFor(() => expect(inventoryReads).toBe(1));
+    view.rerender(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active={false} />,
+    );
+
+    const stale = inventory();
+    stale.items[0] = {
+      ...stale.items[0]!,
+      relativePath: "stale-hidden.log",
+      displayLabel: "stale-hidden.log",
+    };
+    stale.items = stale.items.slice(0, 1);
+    await act(async () => {
+      pendingInventory.resolve(jsonResponse(stale));
+      await pendingInventory.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByText("stale-hidden.log")).toBeNull();
+    expect(inventoryReads).toBe(1);
+
+    view.rerender(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />,
+    );
+    expect(await screen.findByLabelText("Show fresh-return.log in a pane")).toBeTruthy();
+    expect(inventoryReads).toBe(2);
+  });
+
+  it("does not expose completed stale inventory while a hidden change reloads", async () => {
+    const freshInventory = deferred<Response>();
+    let inventoryReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) {
+          inventoryReads += 1;
+          if (inventoryReads === 1) {
+            const stale = inventory();
+            stale.items[0] = {
+              ...stale.items[0]!,
+              relativePath: "stale-ready.log",
+              displayLabel: "stale-ready.log",
+            };
+            stale.items = stale.items.slice(0, 1);
+            return jsonResponse(stale);
+          }
+          return freshInventory.promise;
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) {
+          return jsonResponse({ candidateCount: 0 });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />,
+    );
+    expect(await screen.findByLabelText("Show stale-ready.log in a pane")).toBeTruthy();
+
+    view.rerender(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active={false} />,
+    );
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }),
+      );
+    });
+    expect(inventoryReads).toBe(1);
+
+    view.rerender(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />,
+    );
+    expect(screen.queryByText("stale-ready.log")).toBeNull();
+    expect(screen.getByText(/Loading this investigation’s logs/i)).toBeTruthy();
+    await waitFor(() => expect(inventoryReads).toBe(2));
+
+    const fresh = inventory();
+    fresh.items[0] = {
+      ...fresh.items[0]!,
+      relativePath: "fresh-after-hidden.log",
+      displayLabel: "fresh-after-hidden.log",
+    };
+    fresh.items = fresh.items.slice(0, 1);
+    await act(async () => {
+      freshInventory.resolve(jsonResponse(fresh));
+      await freshInventory.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(await screen.findByLabelText("Show fresh-after-hidden.log in a pane")).toBeTruthy();
+    expect(screen.queryByText("stale-ready.log")).toBeNull();
+  });
+
   it("shows investigation logs with human labels and keeps HTML filenames as text", async () => {
     stubFetch();
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
@@ -187,6 +349,41 @@ describe("Log workbench", () => {
     expect(document.querySelector("img")).toBeNull();
     expect(screen.queryByRole("heading", { name: EVIDENCE_A })).toBeNull();
     expect(screen.getAllByText("Details")).toHaveLength(2);
+  });
+
+  it("keeps the default pane, selector, count, and clear state consistent", async () => {
+    stubFetch();
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+
+    expect((screen.getByLabelText("Show edge.log in a pane") as HTMLInputElement).checked).toBe(
+      true,
+    );
+    expect(screen.getByText(/1 of 4 panes open/)).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "edge.log lines" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear open files" }));
+    expect((screen.getByLabelText("Show edge.log in a pane") as HTMLInputElement).checked).toBe(
+      false,
+    );
+    expect(screen.getByText(/no panes open/)).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "edge.log lines" })).toBeNull();
+    expect(screen.getByText("Select a log file to open its lines.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Search" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByRole("button", { name: "Save view" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(
+      (screen.getByRole("button", { name: "Show merged chronology" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    const fetchCalls = (fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "timeout" } });
+    fireEvent.keyDown(screen.getByLabelText("Find in logs"), { key: "Enter" });
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCalls);
   });
 
   it("searches and reports an exact match count", async () => {
@@ -206,6 +403,875 @@ describe("Log workbench", () => {
     expect(navigation.textContent).toContain("1 of 1");
     expect(screen.getByRole("button", { name: "Previous match" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Next match" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Find in logs"), {
+      target: { value: "a different request" },
+    });
+    expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
+    expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
+  });
+
+  it("invalidates scoped results when a bookmark opens another evidence pane", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-second-file",
+              note: "Open second file",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: EVIDENCE_B, lineNumber: 1 },
+              shareSafeToken: "bookmark-second-file-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/review-queue")) {
+          return jsonResponse({ candidateCount: 0 });
+        }
+        if (url.includes("/workbench/page")) {
+          return jsonResponse({
+            evidenceId: url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A,
+            relativePath: url.includes(encodeURIComponent(EVIDENCE_B))
+              ? '<img src=x onerror=alert(1)>.log'
+              : "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        if (url.includes("/workbench/search")) {
+          return jsonResponse({
+            matches: [{
+              evidenceId: EVIDENCE_A,
+              relativePath: "gateway/edge.log",
+              rotationFamily: "gateway/edge.log",
+              lineNumber: 1,
+              byteOffset: 0,
+              text: "result scoped only to the first pane",
+              wrapped: false,
+              originalTimestamp: null,
+              normalizedUtc: null,
+              parseClass: "missing",
+              contextBefore: [],
+              contextAfter: [],
+            }],
+            returned: 1,
+            bounded: false,
+            atLeast: 1,
+            nextCursor: null,
+            nextPageCursor: null,
+            coverageComplete: true,
+            timeFilterUnknownReason: null,
+          });
+        }
+        if (url.includes("/workbench/chronology")) {
+          return jsonResponse({
+            events: [{
+              evidenceId: EVIDENCE_A,
+              relativePath: "gateway/edge.log",
+              lineNumber: 1,
+              excerpt: "chronology scoped only to the first pane",
+              adjacencyReason: "order",
+              uncertainty: [],
+              correlationKind: "none",
+              correlationId: null,
+              originalTimestamp: null,
+              normalizedUtc: null,
+            }],
+            unknownBuckets: [],
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    expect(await screen.findByText("result scoped only to the first pane")).toBeTruthy();
+    expect(await screen.findByText("chronology scoped only to the first pane")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second file" }));
+
+    expect(screen.getByText(/2 of 4 panes open/)).toBeTruthy();
+    expect(screen.queryByText("result scoped only to the first pane")).toBeNull();
+    expect(screen.queryByText("chronology scoped only to the first pane")).toBeNull();
+    expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
+  it("preserves scoped results and explains when a bookmark would exceed four panes", async () => {
+    const capIds = [
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000002",
+      "10000000-0000-4000-8000-000000000003",
+      "10000000-0000-4000-8000-000000000004",
+      "10000000-0000-4000-8000-000000000005",
+    ] as const;
+    const pageRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) {
+          return jsonResponse({
+            items: capIds.map((evidenceId, index) => ({
+              evidenceId,
+              relativePath: `worker/file-${index + 1}.log`,
+              rotationFamily: `worker/file-${index + 1}.log`,
+              displayLabel: `file-${index + 1}.log`,
+              digest: String(index + 1).repeat(64),
+              intakeBatchId: null,
+              privacyClass: "owner_only",
+              lineCount: 1,
+            })),
+            normalizationRevision: 3,
+          });
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-fifth-file",
+              note: "Open fifth file",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: capIds[4], lineNumber: 1 },
+              shareSafeToken: "bookmark-fifth-file-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/review-queue")) {
+          return jsonResponse({ candidateCount: 0 });
+        }
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const evidenceId = capIds.find((id) => url.includes(encodeURIComponent(id))) ?? capIds[0];
+          return jsonResponse({
+            evidenceId,
+            relativePath: `worker/file-${capIds.indexOf(evidenceId) + 1}.log`,
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        if (url.includes("/workbench/search")) {
+          return jsonResponse({
+            matches: [{
+              evidenceId: capIds[0],
+              relativePath: "worker/file-1.log",
+              rotationFamily: "worker/file-1.log",
+              lineNumber: 1,
+              byteOffset: 0,
+              text: "preserved four-pane search result",
+              wrapped: false,
+              originalTimestamp: null,
+              normalizedUtc: null,
+              parseClass: "missing",
+              contextBefore: [],
+              contextAfter: [],
+            }],
+            returned: 1,
+            bounded: false,
+            atLeast: 1,
+            nextCursor: null,
+            nextPageCursor: null,
+            coverageComplete: true,
+            timeFilterUnknownReason: null,
+          });
+        }
+        if (url.includes("/workbench/chronology")) {
+          return jsonResponse({
+            events: [{
+              evidenceId: capIds[0],
+              relativePath: "worker/file-1.log",
+              lineNumber: 1,
+              excerpt: "preserved four-pane chronology result",
+              adjacencyReason: "order",
+              uncertainty: [],
+              correlationKind: "none",
+              correlationId: null,
+              originalTimestamp: null,
+              normalizedUtc: null,
+            }],
+            unknownBuckets: [],
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    for (const name of ["file-2.log", "file-3.log", "file-4.log"]) {
+      fireEvent.click(screen.getByLabelText(`Show ${name} in a pane`));
+    }
+    expect(screen.getByText(/4 of 4 panes open/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    expect(await screen.findByText("preserved four-pane search result")).toBeTruthy();
+    expect(await screen.findByText("preserved four-pane chronology result")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open fifth file" }));
+
+    expect(screen.getByText(/Only 4 files can be open side by side/)).toBeTruthy();
+    expect(screen.getByText("preserved four-pane search result")).toBeTruthy();
+    expect(screen.getByText("preserved four-pane chronology result")).toBeTruthy();
+    expect(screen.getByText(/4 of 4 panes open/)).toBeTruthy();
+    expect(pageRequests.some((url) => url.includes(encodeURIComponent(capIds[4])))).toBe(false);
+  });
+
+  it("does not publish search or chronology responses after the file scope is cleared", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const searchGate = deferred<Response>();
+    const chronologyGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/search")) return searchGate.promise;
+        if (url.includes("/workbench/chronology")) return chronologyGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear open files" }));
+
+    await act(async () => {
+      searchGate.resolve(
+        jsonResponse({
+          matches: [{
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            rotationFamily: "gateway/edge.log",
+            lineNumber: 1,
+            byteOffset: 0,
+            text: "obsolete search result",
+            wrapped: false,
+            originalTimestamp: null,
+            normalizedUtc: null,
+            parseClass: "missing",
+            contextBefore: [],
+            contextAfter: [],
+          }],
+          returned: 1,
+          bounded: false,
+          atLeast: 1,
+          nextCursor: null,
+          nextPageCursor: null,
+          coverageComplete: true,
+          timeFilterUnknownReason: null,
+        }),
+      );
+      chronologyGate.resolve(
+        jsonResponse({
+          events: [{
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            lineNumber: 1,
+            excerpt: "obsolete chronology result",
+            adjacencyReason: "order",
+            uncertainty: [],
+            correlationKind: "none",
+            correlationId: null,
+            originalTimestamp: null,
+            normalizedUtc: null,
+          }],
+          unknownBuckets: [],
+          bounded: false,
+        }),
+      );
+      await Promise.all([searchGate.promise, chronologyGate.promise]);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByText("obsolete search result")).toBeNull();
+    expect(screen.queryByText("obsolete chronology result")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
+  it("does not publish responses started for a previous investigation", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const searchGate = deferred<Response>();
+    const chronologyGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/search")) return searchGate.promise;
+        if (url.includes("/workbench/chronology")) return chronologyGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    const view = render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    view.rerender(<LogWorkbench caseId={CASE_B} canWrite readOnly={false} />);
+
+    await act(async () => {
+      searchGate.resolve(jsonResponse({
+        matches: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "case-a.log",
+          rotationFamily: "case-a.log",
+          lineNumber: 1,
+          byteOffset: 0,
+          text: "previous investigation search",
+          wrapped: false,
+          originalTimestamp: null,
+          normalizedUtc: null,
+          parseClass: "missing",
+          contextBefore: [],
+          contextAfter: [],
+        }],
+        returned: 1,
+        bounded: false,
+        atLeast: 1,
+        nextCursor: null,
+        timeFilterUnknownReason: null,
+      }));
+      chronologyGate.resolve(jsonResponse({
+        events: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "case-a.log",
+          lineNumber: 1,
+          excerpt: "previous investigation chronology",
+          adjacencyReason: "order",
+          uncertainty: [],
+          correlationKind: "none",
+          correlationId: null,
+          originalTimestamp: null,
+          normalizedUtc: null,
+        }],
+        unknownBuckets: [],
+        bounded: false,
+      }));
+      await Promise.all([searchGate.promise, chronologyGate.promise]);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(await screen.findByText(/1 of 4 panes open/)).toBeTruthy();
+    expect(screen.queryByText("previous investigation search")).toBeNull();
+    expect(screen.queryByText("previous investigation chronology")).toBeNull();
+  });
+
+  it("does not publish a delayed inventory from a previous investigation", async () => {
+    const oldInventory = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith(`/api/cases/${CASE_ID}/workbench`) && !init?.method) {
+          return oldInventory.promise;
+        }
+        if (url.endsWith(`/api/cases/${CASE_B}/workbench`) && !init?.method) {
+          return jsonResponse({
+            items: [{
+              evidenceId: EVIDENCE_B,
+              relativePath: "case-b/current.log",
+              rotationFamily: "case-b/current.log",
+              displayLabel: "current-case-b.log",
+              digest: "b".repeat(64),
+              intakeBatchId: null,
+              privacyClass: "owner_only",
+              lineCount: 1,
+            }],
+            normalizationRevision: 4,
+          });
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          return jsonResponse({
+            evidenceId: EVIDENCE_B,
+            relativePath: "case-b/current.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    view.rerender(<LogWorkbench caseId={CASE_B} canWrite readOnly={false} />);
+    expect((await screen.findAllByText("current-case-b.log")).length).toBeGreaterThan(0);
+
+    await act(async () => {
+      oldInventory.resolve(jsonResponse({
+        items: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "case-a/stale.log",
+          rotationFamily: "case-a/stale.log",
+          displayLabel: "stale-case-a.log",
+          digest: "a".repeat(64),
+          intakeBatchId: null,
+          privacyClass: "owner_only",
+          lineCount: 1,
+        }],
+        normalizationRevision: 3,
+      }));
+      await oldInventory.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getAllByText("current-case-b.log").length).toBeGreaterThan(0);
+    expect(screen.queryByText("stale-case-a.log")).toBeNull();
+  });
+
+  it("does not start an old-case reload after a delayed save finishes", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const saveGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes(`/api/cases/${CASE_ID}/workbench/views`) && init?.method === "POST") {
+          return saveGate.promise;
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    const view = render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Save view" }));
+    view.rerender(<LogWorkbench caseId={CASE_B} canWrite readOnly={false} />);
+    await screen.findByRole("button", { name: "Search" });
+
+    await act(async () => {
+      saveGate.resolve(jsonResponse({ id: "saved-on-a" }));
+      await saveGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    const oldInventoryReads = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([input, init]) =>
+        String(input).endsWith(`/api/cases/${CASE_ID}/workbench`) && !init?.method,
+    );
+    expect(oldInventoryReads).toHaveLength(1);
+    expect(screen.queryByText(/Saved view .* recorded/)).toBeNull();
+  });
+
+  it("does not restart hidden same-case reads after a delayed save finishes", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const saveGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes(`/api/cases/${CASE_ID}/workbench/views`) && init?.method === "POST") {
+          return saveGate.promise;
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    const view = render(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Save view" }));
+    view.rerender(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active={false} />,
+    );
+
+    await act(async () => {
+      saveGate.resolve(jsonResponse({ id: "saved-while-hidden" }));
+      await saveGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    const inventoryReads = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([input, init]) =>
+        String(input).endsWith(`/api/cases/${CASE_ID}/workbench`) && !init?.method,
+    );
+    expect(inventoryReads).toHaveLength(1);
+    expect(screen.queryByText(/Saved view .* recorded/)).toBeNull();
+  });
+
+  it("clears case-owned views, bookmarks, and review counts before the next case is ready", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        const isNextCase = url.includes(`/api/cases/${CASE_B}/`);
+        if (url.includes("/workbench/views")) {
+          return isNextCase
+            ? jsonResponse({ error: "unavailable" }, 503)
+            : jsonResponse({ views: [{
+                id: "view-a",
+                name: "Case A saved view",
+                selectedPanes: [EVIDENCE_A],
+                query: "timeout",
+                mode: "literal",
+              }] });
+        }
+        if (url.includes("/workbench/bookmarks")) {
+          return isNextCase
+            ? jsonResponse({ error: "unavailable" }, 503)
+            : jsonResponse({ bookmarks: [{
+                id: "bookmark-a",
+                note: "Case A bookmark",
+                status: "resolved",
+                staleReason: null,
+                locator: { evidenceId: EVIDENCE_A, lineNumber: 1 },
+                shareSafeToken: "bookmark-a-token",
+              }] });
+        }
+        if (url.includes("/workbench/review-queue")) {
+          return isNextCase
+            ? jsonResponse({ error: "unavailable" }, 503)
+            : jsonResponse({ candidateCount: 2 });
+        }
+        if (url.includes("/workbench/page")) {
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    expect(await screen.findByRole("button", { name: "Case A saved view" })).toBeTruthy();
+    expect(screen.getByText("Case A bookmark")).toBeTruthy();
+    expect(screen.getByText(/2 lines still have a clock/)).toBeTruthy();
+
+    view.rerender(<LogWorkbench caseId={CASE_B} canWrite readOnly={false} />);
+    await screen.findByRole("button", { name: "Search" });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Case A saved view" })).toBeNull();
+      expect(screen.queryByText("Case A bookmark")).toBeNull();
+      expect(screen.queryByText(/2 lines still have a clock/)).toBeNull();
+    });
+  });
+
+  it("keeps a refreshed pane when an older same-case page response arrives late", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const oldPage = deferred<Response>();
+    let pageCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/page")) {
+          pageCalls += 1;
+          if (pageCalls === 1) return oldPage.promise;
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [{
+              evidenceId: EVIDENCE_A,
+              relativePath: "gateway/edge.log",
+              rotationFamily: "gateway/edge.log",
+              lineNumber: 1,
+              byteOffset: 0,
+              text: "fresh normalized pane row",
+              wrapped: false,
+              originalTimestamp: null,
+              normalizedUtc: "2024-03-10T08:10:00.000Z",
+              parseClass: "host_resolved",
+              contextBefore: [],
+              contextAfter: [],
+            }],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("button", { name: "Search" });
+    await waitFor(() => expect(pageCalls).toBe(1));
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:log-time-changed", { detail: { caseId: CASE_ID } }),
+    );
+    expect(await screen.findByText("fresh normalized pane row")).toBeTruthy();
+
+    await act(async () => {
+      oldPage.resolve(jsonResponse({
+        evidenceId: EVIDENCE_A,
+        relativePath: "gateway/edge.log",
+        startLine: 1,
+        rows: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "gateway/edge.log",
+          rotationFamily: "gateway/edge.log",
+          lineNumber: 1,
+          byteOffset: 0,
+          text: "obsolete normalized pane row",
+          wrapped: false,
+          originalTimestamp: null,
+          normalizedUtc: null,
+          parseClass: "missing",
+          contextBefore: [],
+          contextAfter: [],
+        }],
+        wrappedRowCount: 0,
+        nextStartLine: null,
+        bounded: false,
+      }));
+      await oldPage.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByText("fresh normalized pane row")).toBeTruthy();
+    expect(screen.queryByText("obsolete normalized pane row")).toBeNull();
+  });
+
+  it.each([
+    ["query", "Find in logs", "new query"],
+    ["match mode", "Match mode", "literal"],
+    ["include filter", "Include terms", "required"],
+    ["exclude filter", "Exclude terms", "ignored"],
+    ["severity filter", "Severity", "error"],
+    ["start time", "From (UTC)", "2024-03-10T08:00:00Z"],
+    ["end time", "To (UTC)", "2024-03-10T09:00:00Z"],
+  ])("invalidates a pending search when the %s changes", async (_name, label, value) => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const searchGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/search")) return searchGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+
+    await act(async () => {
+      searchGate.resolve(jsonResponse({
+        matches: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "stale.log",
+          rotationFamily: "stale.log",
+          lineNumber: 1,
+          byteOffset: 0,
+          text: "stale search control result",
+          wrapped: false,
+          originalTimestamp: null,
+          normalizedUtc: null,
+          parseClass: "missing",
+          contextBefore: [],
+          contextAfter: [],
+        }],
+        returned: 1,
+        bounded: false,
+        atLeast: 1,
+        nextCursor: null,
+        timeFilterUnknownReason: null,
+      }));
+      await searchGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByText("stale search control result")).toBeNull();
+    expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
+    expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
+  });
+
+  it("invalidates a pending chronology when grouping changes", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const chronologyGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("/workbench/chronology")) return chronologyGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show merged chronology" }));
+    fireEvent.change(screen.getByLabelText("Chronology grouping"), {
+      target: { value: "component" },
+    });
+    await act(async () => {
+      chronologyGate.resolve(jsonResponse({
+        events: [{
+          evidenceId: EVIDENCE_A,
+          relativePath: "stale.log",
+          lineNumber: 1,
+          excerpt: "stale chronology grouping result",
+          adjacencyReason: "order",
+          uncertainty: [],
+          correlationKind: "none",
+          correlationId: null,
+          originalTimestamp: null,
+          normalizedUtc: null,
+        }],
+        unknownBuckets: [],
+        bounded: false,
+      }));
+      await chronologyGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByText("stale chronology grouping result")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
+  it("does not rebuild an obsolete chronology scope after a delayed pin finishes", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const anchorGate = deferred<Response>();
+    let chronologyCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/chronology")) {
+          chronologyCalls += 1;
+          return jsonResponse({
+            events: [{
+              evidenceId: EVIDENCE_A,
+              relativePath: "gateway/edge.log",
+              lineNumber: 1,
+              excerpt: "pin this chronology row",
+              adjacencyReason: "order",
+              uncertainty: [],
+              correlationKind: "none",
+              correlationId: null,
+              originalTimestamp: null,
+              normalizedUtc: null,
+            }],
+            unknownBuckets: [],
+            bounded: false,
+          });
+        }
+        if (url.includes("/workbench/anchors") && init?.method === "POST") {
+          return anchorGate.promise;
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show merged chronology" }));
+    expect(await screen.findByText("pin this chronology row")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Pin as benchmark" }));
+    fireEvent.change(screen.getByLabelText("Chronology grouping"), {
+      target: { value: "component" },
+    });
+
+    await act(async () => {
+      anchorGate.resolve(jsonResponse({ id: "anchor-recorded" }));
+      await anchorGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(chronologyCalls).toBe(1);
+    expect(screen.queryByText("Benchmark pin recorded.")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
+  it("invalidates pending search and chronology results when the corpus reloads", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const searchGate = deferred<Response>();
+    const chronologyGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/search")) return searchGate.promise;
+        if (url.includes("/workbench/chronology")) return chronologyGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }),
+    );
+    await act(async () => {
+      searchGate.resolve(jsonResponse({
+        matches: [], returned: 0, bounded: false, atLeast: 0, nextCursor: null,
+        timeFilterUnknownReason: null,
+      }));
+      chronologyGate.resolve(jsonResponse({ events: [], unknownBuckets: [], bounded: false }));
+      await Promise.all([searchGate.promise, chronologyGate.promise]);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByText(/Every selected line was searched/)).toBeNull();
+    expect(screen.queryByText(/Merged chronology built/)).toBeNull();
+    expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
+  it("labels normalized, unresolved, and order-only chronology rows explicitly", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("/workbench/chronology")) {
+          return jsonResponse({
+            events: [
+              { evidenceId: EVIDENCE_A, relativePath: "a.log", lineNumber: 1, excerpt: "one", adjacencyReason: "time", uncertainty: [], correlationKind: "none", correlationId: null, originalTimestamp: "2024-03-10T08:10:00Z", normalizedUtc: "2024-03-10T08:10:00.000Z" },
+              { evidenceId: EVIDENCE_A, relativePath: "a.log", lineNumber: 2, excerpt: "two", adjacencyReason: "order", uncertainty: ["timezone_missing"], correlationKind: "none", correlationId: null, originalTimestamp: "03/10 01:11:00", normalizedUtc: null },
+              { evidenceId: EVIDENCE_A, relativePath: "a.log", lineNumber: 3, excerpt: "three", adjacencyReason: "order", uncertainty: ["timestamp_missing"], correlationKind: "none", correlationId: null, originalTimestamp: null, normalizedUtc: null },
+            ],
+            unknownBuckets: [],
+            bounded: false,
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Show merged chronology" }),
+    );
+    const chronology = await screen.findByRole("region", { name: "Merged chronology" });
+    expect(chronology.textContent).toContain("Normalized UTC: 2024-03-10T08:10:00.000Z");
+    expect(chronology.textContent).toContain("Unresolved local time: 03/10 01:11:00");
+    expect(chronology.textContent).toContain("Order only");
   });
 
   it("restores filters, time window, grouping, and display from a saved view", async () => {
@@ -307,6 +1373,136 @@ describe("Log workbench honesty and navigation", () => {
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
     expect(await screen.findByText(/could not be read/)).toBeTruthy();
     expect(screen.getByText(/batch\.log/)).toBeTruthy();
+  });
+
+  it("keeps a failed pane page retryable", async () => {
+    let pageAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          pageAttempts += 1;
+          if (pageAttempts === 1) return jsonResponse({ error: "temporary page failure" }, 503);
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: 1,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    expect(await screen.findByText("temporary page failure")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading lines" }));
+    await waitFor(() => expect(pageAttempts).toBe(2));
+    expect(screen.queryByText("temporary page failure")).toBeNull();
+  });
+
+  it("retries a failed later page at the same line offset", async () => {
+    const pageRequests: string[] = [];
+    let laterPageAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          if (start === 81) {
+            laterPageAttempts += 1;
+            if (laterPageAttempts === 1) {
+              return jsonResponse({ error: "temporary later-page failure" }, 503);
+            }
+          }
+          return jsonResponse({
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: start === 1 ? 81 : null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes("startLine=1&"))).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load next lines" }));
+    await screen.findByText("temporary later-page failure");
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading lines" }));
+    await waitFor(() => expect(laterPageAttempts).toBe(2));
+    const laterRequests = pageRequests.filter((url) => url.includes("startLine=81&"));
+    expect(laterRequests).toHaveLength(2);
+    expect(screen.queryByText("temporary later-page failure")).toBeNull();
+  });
+
+  it("keeps a later-page error visible when another pane is opened", async () => {
+    const pageRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          const evidenceId = url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A;
+          if (evidenceId === EVIDENCE_A && start === 81) {
+            return jsonResponse({ error: "temporary later-page failure" }, 503);
+          }
+          return jsonResponse({
+            evidenceId,
+            relativePath: evidenceId === EVIDENCE_B ? "<img src=x onerror=alert(1)>.log" : "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: evidenceId === EVIDENCE_A && start === 1 ? 81 : null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_A)) && url.includes("startLine=1&"))).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load next lines" }));
+    await screen.findByText("temporary later-page failure");
+    const firstPageLoads = pageRequests.filter(
+      (url) => url.includes(encodeURIComponent(EVIDENCE_A)) && url.includes("startLine=1&"),
+    ).length;
+    fireEvent.click(screen.getByLabelText("Show <img src=x onerror=alert(1)>.log in a pane"));
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_B)))).toBe(true),
+    );
+    expect(
+      pageRequests.filter(
+        (url) => url.includes(encodeURIComponent(EVIDENCE_A)) && url.includes("startLine=1&"),
+      ),
+    ).toHaveLength(firstPageLoads);
+    expect(screen.getByText("temporary later-page failure")).toBeTruthy();
   });
 
   it("does not describe a bounded search as a complete count", async () => {
@@ -530,6 +1726,230 @@ describe("Log workbench honesty and navigation", () => {
     );
   });
 
+  it("reserves a closed pane for a late bookmark target", async () => {
+    const pageRequests: string[] = [];
+    let resolveTarget!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-late-file",
+              note: "Open late evidence",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: EVIDENCE_B, lineNumber: 4200 },
+              shareSafeToken: "bookmark-late-file-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const evidenceId = url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A;
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          if (evidenceId === EVIDENCE_B && start > 1) {
+            return new Promise<Response>((resolve) => {
+              resolveTarget = resolve;
+            });
+          }
+          return jsonResponse({
+            evidenceId,
+            relativePath: evidenceId === EVIDENCE_B ? "<img src=x onerror=alert(1)>.log" : "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_A)))).toBe(true),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open late evidence" }));
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=4190&"))).toBe(true),
+    );
+    expect(
+      pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=1&")),
+    ).toBe(false);
+    resolveTarget(jsonResponse({
+      evidenceId: EVIDENCE_B,
+      relativePath: "<img src=x onerror=alert(1)>.log",
+      startLine: 4190,
+      rows: Array.from({ length: 80 }, (_, index) => ({
+        evidenceId: EVIDENCE_B,
+        relativePath: "<img src=x onerror=alert(1)>.log",
+        rotationFamily: "<img src=x onerror=alert(1)>.log",
+        lineNumber: 4190 + index,
+        byteOffset: 0,
+        text: index === 10 ? "late bookmark line" : `line ${4190 + index}`,
+        wrapped: false,
+        originalTimestamp: null,
+        normalizedUtc: null,
+        parseClass: "missing",
+        contextBefore: [],
+        contextAfter: [],
+      })),
+      wrappedRowCount: 0,
+      nextStartLine: null,
+      bounded: false,
+    }));
+    expect(await screen.findByText("late bookmark line")).toBeTruthy();
+  });
+
+  it("keeps a failed closed bookmark target reserved when a sibling is selected", async () => {
+    const pageRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-failed-target",
+              note: "Open failed evidence",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: EVIDENCE_B, lineNumber: 4200 },
+              shareSafeToken: "bookmark-failed-target-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const evidenceId = url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A;
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          if (evidenceId === EVIDENCE_B && start > 1) {
+            return jsonResponse({ error: "late target unavailable" }, 503);
+          }
+          return jsonResponse({
+            evidenceId,
+            relativePath: evidenceId === EVIDENCE_B ? "<img src=x onerror=alert(1)>.log" : "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_A)))).toBe(true),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open failed evidence" }));
+    expect(await screen.findByText("late target unavailable")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show edge.log in a pane" }));
+    await waitFor(() =>
+      expect(
+        pageRequests.filter(
+          (url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=1&"),
+        ),
+      ).toHaveLength(0),
+    );
+    expect(screen.getByText("late target unavailable")).toBeTruthy();
+  });
+
+  it("does not let an obsolete page request clear a reopened target reservation", async () => {
+    const pageRequests: string[] = [];
+    let inventoryCalls = 0;
+    const targetResponses = deferred<Response>();
+    const reopenedTargetResponses = deferred<Response>();
+    let targetAttempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) {
+          inventoryCalls += 1;
+          return jsonResponse(inventory());
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-reopen-target",
+              note: "Reopen target evidence",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: EVIDENCE_B, lineNumber: 4200 },
+              shareSafeToken: "bookmark-reopen-target-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const evidenceId = url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A;
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          if (evidenceId === EVIDENCE_B && start > 1) {
+            targetAttempt += 1;
+            return targetAttempt === 1 ? targetResponses.promise : reopenedTargetResponses.promise;
+          }
+          return jsonResponse({
+            evidenceId,
+            relativePath: evidenceId === EVIDENCE_B ? "<img src=x onerror=alert(1)>.log" : "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_A)))).toBe(true),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Reopen target evidence" }));
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=4190&"))).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show edge.log in a pane" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show <img src=x onerror=alert(1)>.log in a pane" }));
+    // The first request is now obsolete; refresh the evidence scope while it
+    // is still pending, then reopen the same bookmark to create a new target
+    // reservation with a reused per-file sequence number.
+    window.dispatchEvent(new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }));
+    await waitFor(() => expect(inventoryCalls).toBeGreaterThan(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Reopen target evidence" }));
+    await waitFor(() => expect(targetAttempt).toBe(2));
+    targetResponses.resolve(jsonResponse({ error: "obsolete target" }, 503));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show edge.log in a pane" }));
+    await waitFor(() =>
+      expect(
+        pageRequests.filter(
+          (url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=1&"),
+        ),
+      ).toHaveLength(0),
+    );
+    reopenedTargetResponses.resolve(jsonResponse({
+      evidenceId: EVIDENCE_B,
+      relativePath: "<img src=x onerror=alert(1)>.log",
+      startLine: 4190,
+      rows: [],
+      wrappedRowCount: 0,
+      nextStartLine: null,
+      bounded: false,
+    }));
+  });
+
   it("saves a changed view under the same name instead of colliding on the key", async () => {
     const saved: string[] = [];
     vi.stubGlobal(
@@ -630,7 +2050,6 @@ describe("Log workbench honesty and navigation", () => {
     );
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
     await screen.findByRole("heading", { name: "Log workbench" });
-    fireEvent.click(screen.getByLabelText("Show edge.log in a pane"));
     await waitFor(() => expect(pageRequests.length).toBeGreaterThan(0));
     fireEvent.click(screen.getAllByRole("button", { name: "Load next lines" })[0]!);
     await waitFor(() =>
@@ -715,7 +2134,29 @@ describe("Log workbench file picker at 3, 30, and 300 files", () => {
   });
 
   it("filters thirty files and caps side-by-side panes at four", async () => {
-    stubSizedWorkbench(30);
+    stubSizedWorkbench(30, {
+      matches: [{
+        evidenceId: EVIDENCE_A,
+        relativePath: "hosts/host-0/svc-000.log",
+        rotationFamily: "svc-000.log",
+        lineNumber: 1,
+        byteOffset: 0,
+        text: "preserved search result",
+        wrapped: false,
+        originalTimestamp: null,
+        normalizedUtc: null,
+        parseClass: "missing",
+        contextBefore: [],
+        contextAfter: [],
+      }],
+      returned: 1,
+      bounded: false,
+      atLeast: 1,
+      nextCursor: null,
+      nextPageCursor: null,
+      coverageComplete: true,
+      timeFilterUnknownReason: null,
+    });
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
     await screen.findByRole("heading", { name: "Log workbench" });
     expect(screen.getByText(/30 files/)).toBeTruthy();
@@ -724,16 +2165,18 @@ describe("Log workbench file picker at 3, 30, and 300 files", () => {
     expect(visible.length).toBeLessThanOrEqual(40);
     expect(screen.getByText(/Showing files/)).toBeTruthy();
 
-    fireEvent.click(screen.getByLabelText("Show svc-000.log in a pane"));
     fireEvent.click(screen.getByLabelText("Show svc-001.log in a pane"));
     fireEvent.click(screen.getByLabelText("Show svc-002.log in a pane"));
     fireEvent.click(screen.getByLabelText("Show svc-003.log in a pane"));
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText("preserved search result")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Show svc-004.log in a pane"));
     expect(screen.getByText(/Only 4 files can be open side by side/)).toBeTruthy();
     expect(screen.getByText(/4 of 4 panes open/)).toBeTruthy();
     expect((screen.getByLabelText("Show svc-004.log in a pane") as HTMLInputElement).checked).toBe(
       false,
     );
+    expect(screen.getByText("preserved search result")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter log files"), {
       target: { value: "svc-029" },
@@ -845,11 +2288,25 @@ describe("Log workbench search hierarchy and progressive disclosure", () => {
 
   it("links timezone uncertainty to the review panel without implying a zone", async () => {
     stubSizedWorkbench(3);
-    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
-    expect(await screen.findByRole("link", { name: "Open Timezone review" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Open Timezone review" }).getAttribute("href")).toBe(
+    render(
+      <>
+        <div hidden>
+          <section id="triage-log-time-capture" tabIndex={-1}>Capture review</section>
+        </div>
+        <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />
+        <section id="triage-log-time" tabIndex={-1} data-testid="visible-timezone-review">
+          Analyze review
+        </section>
+      </>,
+    );
+    const link = await screen.findByRole("link", { name: "Open Timezone review" });
+    expect(link).toBeTruthy();
+    expect(link.getAttribute("href")).toBe(
       "#triage-log-time",
     );
+    fireEvent.click(link);
+    expect(window.location.hash).toBe("#triage-log-time");
+    expect(document.activeElement).toBe(screen.getByTestId("visible-timezone-review"));
     expect(screen.getByText(/nothing here will guess one/i)).toBeTruthy();
   });
 

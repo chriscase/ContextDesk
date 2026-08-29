@@ -1,17 +1,20 @@
 # Public product media
 
-Screenshots referenced by the top-level `README.md` are native captures of the
-packaged application. They communicate visible product behavior; they are not
-proof of provider quality, tool-loop success, universal performance,
-company-data behavior, or owner acceptance.
+Screenshots referenced by the top-level `README.md` include both native
+packaged-application captures and the loopback synthetic War Room capture
+identified in the ledger below. They communicate visible product behavior;
+they are not proof of provider quality, tool-loop success, universal
+performance, company-data behavior, or owner acceptance.
 
 ## Exact app-build capture template
 
 `docs/media/public-assets.json` is the authority for which app-source SHA each
-published frame came from, so this section states it **per file** rather than in
-aggregate. The current gallery was not captured from a single build — it spans
-two, recorded below. Later documentation-only commits may advance repository
-`HEAD` without changing the packaged application bytes.
+published frame came from, so this document states it **per file** rather than
+in aggregate. The three native packaged-application frames were not captured
+from one build — that subset spans the two app-source SHAs recorded below. The
+War Room table separately records its loopback web-demo source SHAs. Later
+documentation-only commits may advance repository `HEAD` without changing a
+captured application surface.
 
 | Property | Required value |
 | --- | --- |
@@ -44,26 +47,29 @@ recorded in `docs/media/public-assets.json`.
 ## War Room web capture set
 
 The War Room frames are captured from the loopback synthetic web demo, not
-from a live provider or a customer installation. They all use the same exact
-post-release source SHA and the deterministic, memory-backed checkout-timeout
-fixture. The browser viewport is 1280 × 720; no provider/model inventory,
+from a live provider or a customer installation. Each frame records its exact
+source SHA below and uses the deterministic, memory-backed checkout-timeout
+fixture. The browser viewport is 1440 × 1000; no provider/model inventory,
 credential, private path, or non-synthetic corpus is visible.
 
 | File | Surface | Dimensions | Source SHA | Fixture |
 | --- | --- | --- | --- | --- |
-| `gallery/war-room-overview.png` | Overview activity feed and active investigation | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-capture-analyze.png` | Capture provenance, imported-output boundary, and corpus intake | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-analyze.png` | Evidence board, snapshot lineage, and model lanes | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-compare-decide.png` | Comparison lab, historical artifacts, deep links, and lane focus | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-decide-export.png` | Accepted human decision journal | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-export.png` | Accepted decision and share-safe export boundary | 1280 × 720 PNG | `ea3f2cd58e26b21c6719d8ee543d7ba77cce59bd` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-overview.png` | Overview activity feed and active investigation | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-capture-analyze.png` | Capture provenance, imported-output boundary, and corpus intake | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-analyze.png` | Workstreams and the beginning of the investigation-owned Log workbench, including its current open-pane count | 1440 × 1000 PNG | `cddc38fb0088f377b124fc30cf5c76c0c4234cb4` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-compare-decide.png` | Comparison lab, evidence, deep links, and lane focus | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-decide-export.png` | Human decision journal, recorded comparison context, and share-safe export boundary | 1440 × 1000 PNG | `c7d0ca8b364ff5336cc2a95dc4f2c22ce175cbcf` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `c7d0ca8b364ff5336cc2a95dc4f2c22ce175cbcf` | Synthetic checkout-timeout War Room demo |
 
-**Known residual — this is not a single-build gallery.** #734 asks for one
-exact packaged-app SHA and #677 asks for frames current with the promoted
-build. Two frames predate the third, and `gallery/logs-library-demo.png` was
-captured before the Logs toolbar was regrouped, so it no longer matches
-production. Closing that requires native recapture from one freshly built
-`.app`; it cannot be discharged by editing this file.
+**Known residual — this is not a single-build gallery.** The Analyze frame was
+refreshed at `cddc38fb0088f377b124fc30cf5c76c0c4234cb4`; the two Decide/export
+frames were refreshed at `c7d0ca8b364ff5336cc2a95dc4f2c22ce175cbcf`;
+and the Overview, Capture, and Compare frames remain exact captures of
+`5508e9e63b540d1ba5080fc7d70eecd74f08e332`. The three native desktop frames
+still span earlier packaged-app builds. `gallery/logs-library-demo.png`
+predates the Logs toolbar regrouping. Closing that residual requires a full
+recapture from one freshly built release; it cannot be discharged by editing
+this file.
 
 ## Publication privacy gate
 
@@ -145,7 +151,8 @@ that an untested model or provider was used.
    git status --short
    ```
 
-   The media validator must report exactly three assets. Render the README once
+   The media validator must report the complete checked-in ledger with every
+   path, source record, and published reference valid. Render the README once
    more and visually inspect every referenced image and caption before
    publication.
 

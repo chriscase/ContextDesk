@@ -2736,6 +2736,11 @@ describe("workstreams in the Analyze stage", () => {
       const board = screen.queryByRole("heading", { name: "Evidence and snapshots" });
       expect(board).toBeNull();
     });
+    const requestedUrls = (fetch as ReturnType<typeof vi.fn>).mock.calls.map(([input]) =>
+      String(input),
+    );
+    expect(requestedUrls.some((url) => url.endsWith("/workbench"))).toBe(false);
+    expect(requestedUrls.some((url) => url.includes("/log-time/chronology"))).toBe(false);
     expect(screen.getByRole("link", { name: "All workstreams" })).toBeTruthy();
   });
 

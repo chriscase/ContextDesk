@@ -508,7 +508,7 @@ export function TriageWorkspace(props: {
               readOnly={props.readOnly}
               {...(props.routeFocus ? { routeFocus: props.routeFocus } : {})}
             />
-            <TriageAnchor id="triage-log-time" label="Timezone review">
+            <TriageAnchor id="triage-log-time-capture" label="Timezone review">
               <LogTimeReviewPanel
                 caseId={props.caseId}
                 canWrite={props.canWrite}

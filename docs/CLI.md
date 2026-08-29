@@ -73,7 +73,7 @@ metacharacters literal. If a question begins with a command name such as
 | `explore <query>` (alias `search`) | Template-level search |
 | `context` | Grounded evidence assembly without a model turn |
 | `session list\|show` | Durable chat sessions |
-| `chat <question>` (alias `ask`) | Grounded model turn |
+| `chat <question>` (alias `ask`) | Grounded model turn; `--mode single\|review\|contributions` selects the explicit multi-model policy described below |
 | `config init\|validate\|show\|path` | CLI + shared config |
 | `confluence …` | Optional Confluence connector |
 | `capabilities` | Machine-readable build surface |
@@ -81,10 +81,16 @@ metacharacters literal. If a question begins with a command name such as
 | `models [discover\|verify]` | Offline model readiness by default; explicit catalog discovery and selected/all role verification when requested |
 | `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
+| `retrieval-status` | Show configured retrieval roles and the mode configuration would select; optional probes are explicit. |
+| `retrieval-diagnose` (alias `retrieval-diagnostic`) | Compare executable retrieval lanes under fixed budgets; dry-run by default and never an answer-quality claim. |
+| `retrieval-reanalyze` (alias `reanalyze`) | Rebuild an existing corpus's vectors under the configured embedding space; dry-run by default. |
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
 | `triage-policy validate\|compile\|example` | Offline, owner-only Triage Policy V2 validation over explicit policy/preflight JSON files. Retains exact profile/model identities; does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
 | `triage-policy qualify` | One explicit, bounded synthetic role probe through the production backend; atomically saves host-owned exact-role evidence and never infers compatibility from a model name. |
+| `triage run` | Run one versioned Triage SDK request through the trusted production host. |
 | `bench-compare` | Host-only, bounded live comparison over one benchmark task. Materializes one exact snapshot/corpus, runs two or more explicit candidates, persists validated runs, and renders the honest owner-only comparison report. |
+| `collab-triage-run` | Execute one bounded War Room triage job through the host-owned live bridge. |
+| `collab-log-time` | Execute one case-bound War Room log-time operation through the shipped desktop pipeline; a timezone is applied only when explicitly named. |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 | `gateway ledger` | Offline cost/reliability comparison over share-safe diagnostic bundles and documented historical rows. Never makes live calls; never emits readiness claims from aggregates. See [Gateway cost/reliability ledger](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md). |
 
@@ -97,6 +103,13 @@ per corpus, with local raw artifacts and an aggregate report.
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
+
+`chat --mode single` is the default established path. `--mode review` opts in
+to a reviewer and reports the exact reason when it safely degrades to the
+single-model path (for example, an unconfigured or unqualified reviewer).
+`--mode contributions` opts in to configured host-grounded roles and requires
+current structured-proposal qualification for every role; it does not infer
+readiness from a model name.
 
 ## Happy path
 

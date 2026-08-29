@@ -120,18 +120,55 @@ export function LogChronologyPanel(props: {
   const [error, setError] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const requestVersion = useRef(0);
+  const currentCaseIdRef = useRef(props.caseId);
+  currentCaseIdRef.current = props.caseId;
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestVersion.current += 1;
+    };
+  }, []);
+
+  const isCurrentCase = useCallback(
+    (caseId: string) => mountedRef.current && currentCaseIdRef.current === caseId,
+    [],
+  );
+
+  useEffect(() => {
+    requestVersion.current += 1;
+    setSearch("");
+    setSource("");
+    setPage(null);
+    setRows([]);
+    setBusy(false);
+    setError(null);
+    setUnavailable(false);
+  }, [props.caseId]);
 
   const load = useCallback(
     async (cursor: string | null, append: boolean) => {
+      const requestCaseId = props.caseId;
+      if (!isCurrentCase(requestCaseId)) return;
       const version = ++requestVersion.current;
+      if (!append) {
+        // A replacement query or timezone refresh invalidates the currently
+        // rendered projection immediately. Never present an old revision as
+        // current while its replacement is pending or after it fails.
+        setPage(null);
+        setRows([]);
+      }
       setBusy(true);
       setError(null);
       try {
         const response = await protectedApiFetch(
-          queryPath(props.caseId, search, source.trim(), cursor),
+          queryPath(requestCaseId, search, source.trim(), cursor),
         );
+        if (!isCurrentCase(requestCaseId) || requestVersion.current !== version) return;
         if (response.status === 404) {
-          if (requestVersion.current === version) setUnavailable(true);
+          setUnavailable(true);
           return;
         }
         if (!response.ok) {
@@ -142,11 +179,13 @@ export function LogChronologyPanel(props: {
             void load(null, false);
             return;
           }
-          setError(await errorText(response, "Chronology could not be loaded."));
+          const message = await errorText(response, "Chronology could not be loaded.");
+          if (!isCurrentCase(requestCaseId) || requestVersion.current !== version) return;
+          setError(message);
           return;
         }
         const next = toChronologyPage(await response.json());
-        if (requestVersion.current !== version) return;
+        if (!isCurrentCase(requestCaseId) || requestVersion.current !== version) return;
         if (!next) {
           setError("Chronology could not be read from this server's reply.");
           return;
@@ -155,21 +194,30 @@ export function LogChronologyPanel(props: {
         setPage(next);
         setRows((current) => (append ? [...current, ...next.rows] : next.rows));
       } catch {
-        if (requestVersion.current === version) {
+        if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
           setError("Chronology could not be loaded.");
         }
       } finally {
-        if (requestVersion.current === version) setBusy(false);
+        if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+          setBusy(false);
+        }
       }
     },
-    [props.caseId, search, source],
+    [isCurrentCase, props.caseId, search, source],
   );
 
   // The filters are typed, not submitted. Firing a corpus query on every
   // keystroke turns a long word into a burst of full-corpus reads; one settled
   // pause is enough for a filter this cheap to change.
   useEffect(() => {
-    if (props.active === false) return;
+    if (props.active === false) {
+      // The panel remains mounted while Analyze is hidden. Invalidate any
+      // read already in flight so it cannot repopulate a projection that the
+      // next activation has not refreshed yet.
+      requestVersion.current += 1;
+      setBusy(false);
+      return;
+    }
     const timer = setTimeout(() => void load(null, false), FILTER_SETTLE_MS);
     return () => clearTimeout(timer);
   }, [load, props.active]);
@@ -178,12 +226,27 @@ export function LogChronologyPanel(props: {
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId && detail.caseId !== props.caseId) return;
+      requestVersion.current += 1;
+      setBusy(false);
+      setPage(null);
+      setRows([]);
       if (props.active === false) return;
       void load(null, false);
     };
     window.addEventListener("contextdesk:log-time-changed", refresh);
     return () => window.removeEventListener("contextdesk:log-time-changed", refresh);
   }, [load, props.caseId, props.active]);
+
+  function invalidateForFilterEdit() {
+    // The visible inputs change synchronously. Fence the projection at the
+    // same boundary so an older request cannot publish beneath a new filter
+    // label while the replacement read waits for its debounce.
+    requestVersion.current += 1;
+    setPage(null);
+    setRows([]);
+    setBusy(false);
+    setError(null);
+  }
 
   if (unavailable) return null;
 
@@ -214,7 +277,10 @@ export function LogChronologyPanel(props: {
           <input
             aria-label="Search log messages"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+              invalidateForFilterEdit();
+              setSearch(event.target.value);
+            }}
             placeholder="Literal text"
             maxLength={256}
           />
@@ -224,7 +290,10 @@ export function LogChronologyPanel(props: {
           <input
             aria-label="Filter by source"
             value={source}
-            onChange={(event) => setSource(event.target.value)}
+            onChange={(event) => {
+              invalidateForFilterEdit();
+              setSource(event.target.value);
+            }}
             placeholder="Exact source identity"
             maxLength={4096}
           />

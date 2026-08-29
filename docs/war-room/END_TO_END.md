@@ -24,6 +24,13 @@ Password: demo
 This is a fixture identity, not an LDAP claim. After sign-in, the account menu
 shows the synthetic display name, username, and access role.
 
+The default demo does not install the separate trusted timezone host. Offset-
+bearing timestamps remain comparable; local timestamps without an offset stay
+unresolved. Timezone review says it "needs the trusted ContextDesk timestamp
+host on this installation," and normalized chronology stays hidden because it
+has no host result to display. Use a separately configured host-backed rehearsal
+for those actions.
+
 If the local address does not load, stop and record the environment failure.
 Do not substitute external data for this walkthrough.
 
@@ -33,7 +40,7 @@ Use the main navigation to distinguish the workspace destinations:
 
 - **Overview** shows recent recorded activity and active investigations.
 - **Investigations** is the searchable inventory.
-- **Sources** contains reusable attribution labels, not global evidence.
+- **Attribution** contains reusable source labels, not global evidence.
 - **Administration** is the admin-only destination for bounded directory
   visibility and workspace group-to-role mappings.
 - **Help** contains searchable operating guidance.
@@ -74,15 +81,17 @@ inspect the investigation-scoped synthetic logs or stack traces.
 
 ![Fully synthetic Capture stage with provenance and investigation-scoped intake](../media/gallery/war-room-capture-analyze.png)
 
-The **Sources** library records who or what produced an item. The actual log,
+The **Attribution** catalog records who or what produced an item. The actual log,
 note, upload, or imported response belongs to this investigation.
 
-Open **Compare**, choose a finding, and follow its evidence link. Confirm the
+Open **Compare**, choose a finding, and follow its evidence link. The synthetic
+image below records the resulting Analyze workstreams context; it does not put
+the cited evidence target itself in frame. During acceptance, confirm the live
 destination shows a readable label and relevant log, stack frame, or
 observation context rather than only an opaque identifier. Expand longer
 technical material when needed.
 
-![Fully synthetic evidence deep-link destination](../assets/war-room/war-room-evidence-deep-link.png)
+![Fully synthetic Analyze workstreams context reached from the evidence-review flow](../assets/war-room/war-room-evidence-deep-link.png)
 
 Open **Technical details** to inspect exact identifiers, hashes, timestamps,
 source metadata, or lane configuration. Those fields support audit but do not
@@ -104,16 +113,20 @@ and use **Log workbench** before launching a lane:
    page, continue from its position instead of treating the current count as a
    corpus-wide total.
 4. Save a view or bookmark a useful line when you will return to it.
-5. If a line has no timezone, use **Timezone review** to choose its IANA zone,
-   then open **Normalized log chronology**. The workbench never guesses a
-   timezone, year, daylight-saving choice, or clock correction.
+5. In a host-backed rehearsal, if a line has no timezone, use **Timezone
+   review** to choose its IANA zone, then open **Normalized log chronology**.
+   In the default demo, confirm that Timezone review says it "needs the trusted
+   ContextDesk timestamp host on this installation" and normalized chronology
+   remains hidden. The workbench never guesses a timezone, year, daylight-saving
+   choice, or clock correction.
 
 Nested ZIP members retain their archive paths and are subject to the same
 bounded safety and privacy checks as ordinary files. Rejected members are not
 silently dropped.
 
 Expected result: you can point to the relevant lines and know whether the
-search and chronology are complete enough to support the next question.
+search is complete; chronology is either explicitly normalized by a configured
+trusted host or hidden because no host result exists.
 
 ## 2:35 — Inspect frozen evidence and lane attempts
 
@@ -130,7 +143,7 @@ investigation, comparison, lane, and section for authorized sharing.
 
 ![Fully synthetic focused analysis lane and history](../assets/war-room/war-room-lane-focus.png)
 
-![Fully synthetic Analyze stage with snapshot lineage and selectable model lanes](../media/gallery/war-room-analyze.png)
+![Fully synthetic Analyze stage showing completed Workstreams and the beginning of the Log workbench](../media/gallery/war-room-analyze.png)
 
 Use **Historical artifacts** to open prior runs and comparisons. They remain
 separate records and are not silently overwritten by a rerun.
@@ -172,8 +185,6 @@ approve the human decision.
 Expected result: discussion preserves review context while Decide remains the
 authoritative location for the action and owner.
 
-![Fully synthetic human decision journal with revision history](../media/gallery/war-room-decide-export.png)
-
 ## 4:20 — Choose the right export
 
 The Decide stage provides three different export jobs:
@@ -195,7 +206,7 @@ remain attribution only and receive no destination access.
 
 ![Fully synthetic portable investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
 
-![Fully synthetic Decide stage with accepted decision and share-safe export](../media/gallery/war-room-export.png)
+![Fully synthetic portable archive download and dry-run controls with an exact-restore warning](../media/gallery/war-room-export.png)
 
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 

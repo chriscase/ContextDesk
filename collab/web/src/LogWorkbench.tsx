@@ -1,13 +1,14 @@
 /**
  * Log workbench — investigation-owned log exploration on Analyze.
  *
- * Evidence listed here is this investigation's intake, not the global Sources
+ * Evidence listed here is this investigation's intake, not the global Attribution
  * catalog. Technical ids stay behind a disclosure. Rendering is a bounded
  * window over paged rows; imported text is always a text node.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { TechnicalIdentifiers } from "./technical-identity.js";
 import { protectedApiFetch } from "./protected-api.js";
+import { focusVisibleSectionTarget } from "./route-focus.js";
 
 export function virtualizedWindow(input: {
   totalRows: number;
@@ -98,6 +99,11 @@ interface PageResult {
   bounded: boolean;
 }
 
+interface PaneError {
+  message: string;
+  startLine: number;
+}
+
 interface SavedView {
   id: string;
   name: string;
@@ -140,6 +146,14 @@ interface ChronologyEvent {
   normalizedUtc: string | null;
   groupKey?: string;
   anchorStatus?: string | null;
+}
+
+function chronologyTime(event: ChronologyEvent): { label: string; value: string | null } {
+  if (event.normalizedUtc) return { label: "Normalized UTC", value: event.normalizedUtc };
+  if (event.originalTimestamp) {
+    return { label: "Unresolved local time", value: event.originalTimestamp };
+  }
+  return { label: "Order only", value: null };
 }
 
 /**
@@ -305,6 +319,7 @@ export function LogWorkbench(props: {
   const [grouping, setGrouping] = useState("file");
   const [sort, setSort] = useState("time_asc");
   const [pageByPane, setPageByPane] = useState<Record<string, PageResult>>({});
+  const [paneErrors, setPaneErrors] = useState<Record<string, PaneError>>({});
   const [scrollByPane, setScrollByPane] = useState<Record<string, number>>({});
   const [search, setSearch] = useState<SearchResult | null>(null);
   const [matchIndex, setMatchIndex] = useState(0);
@@ -324,6 +339,82 @@ export function LogWorkbench(props: {
   const liveRef = useRef<HTMLParagraphElement>(null);
   /** Panes already read once, so a selection change does not re-page them. */
   const loadedPanes = useRef<Set<string>>(new Set());
+  /** Explicit target-page requests reserve a pane before React renders it. */
+  const loadingPanes = useRef<Set<string>>(new Set());
+  /** The first available file is selected once per investigation, never after an explicit clear. */
+  const defaultPaneCase = useRef<string | null>(null);
+  /** Latest pane selection for async inventory reconciliation. */
+  const panesRef = useRef(panes);
+  panesRef.current = panes;
+  const revisionRef = useRef(revision);
+  revisionRef.current = revision;
+  /** Async continuations must still belong to the mounted investigation. */
+  const currentCaseIdRef = useRef(props.caseId);
+  currentCaseIdRef.current = props.caseId;
+  const activeRef = useRef(props.active !== false);
+  activeRef.current = props.active !== false;
+  const mountedRef = useRef(true);
+  const loadedCaseRef = useRef<string | null>(null);
+  /** Ignore async results that were started against an obsolete file selection. */
+  const searchRequestGeneration = useRef(0);
+  const chronologyRequestGeneration = useRef(0);
+  const loadRequestGeneration = useRef(0);
+  const pageScopeGeneration = useRef(0);
+  const pageRequestByEvidence = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const isCurrentCase = useCallback(
+    (caseId: string) => mountedRef.current && currentCaseIdRef.current === caseId,
+    [],
+  );
+  const isActiveCase = useCallback(
+    (caseId: string) => isCurrentCase(caseId) && activeRef.current,
+    [isCurrentCase],
+  );
+
+  const invalidateSearchResults = useCallback(() => {
+    searchRequestGeneration.current += 1;
+    setSearch(null);
+    setSearching(false);
+    setError(null);
+    setNotice(null);
+  }, []);
+
+  const invalidateChronologyResults = useCallback(() => {
+    chronologyRequestGeneration.current += 1;
+    setChronology(null);
+    setUnknownBuckets([]);
+    setChronologyBusy(false);
+    setError(null);
+    setNotice(null);
+  }, []);
+
+  const invalidateScopedResults = useCallback(() => {
+    searchRequestGeneration.current += 1;
+    chronologyRequestGeneration.current += 1;
+    setSearch(null);
+    setChronology(null);
+    setUnknownBuckets([]);
+    setSearching(false);
+    setChronologyBusy(false);
+    setError(null);
+    setNotice(null);
+  }, []);
+
+  const invalidateEvidencePages = useCallback(() => {
+    pageScopeGeneration.current += 1;
+    pageRequestByEvidence.current.clear();
+    loadedPanes.current.clear();
+    loadingPanes.current.clear();
+    setPageByPane({});
+    setPaneErrors({});
+  }, []);
 
   const selectedItems = useMemo(
     () => items.filter((item) => panes.includes(item.evidenceId)),
@@ -357,18 +448,43 @@ export function LogWorkbench(props: {
     setFileScrollTop(0);
   }, [fileQuery]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (options?: { invalidateResults?: boolean }) => {
+    const requestCaseId = props.caseId;
+    if (!isActiveCase(requestCaseId)) return;
+    const requestGeneration = ++loadRequestGeneration.current;
+    if (options?.invalidateResults) {
+      invalidateScopedResults();
+      invalidateEvidencePages();
+    }
+    if (loadedCaseRef.current !== requestCaseId) {
+      loadedCaseRef.current = requestCaseId;
+      setItems([]);
+      setPanes([]);
+      setPageByPane({});
+      setPaneErrors({});
+      loadingPanes.current.clear();
+      setScrollByPane({});
+      setViews([]);
+      setBookmarks([]);
+      setReviewCount(null);
+      setRevision(null);
+      setCorpusTruncated(false);
+      setUnreadFiles([]);
+    }
     setLoadState("loading");
     setError(null);
     loadedPanes.current.clear();
     try {
-      const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench`);
+      const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench`);
+      if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
       if (response.status === 401 || response.status === 403) {
         setLoadState("unauthorized");
         return;
       }
       if (!response.ok) {
-        setError(await errorText(response, "The log workbench could not be loaded."));
+        const message = await errorText(response, "The log workbench could not be loaded.");
+        if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
+        setError(message);
         setLoadState("error");
         return;
       }
@@ -378,97 +494,213 @@ export function LogWorkbench(props: {
         corpusTruncated?: boolean;
         unreadFiles?: string[];
       };
-      setItems(body.items ?? []);
-      setRevision(body.normalizationRevision ?? null);
+      if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
+      const nextRevision = body.normalizationRevision ?? null;
+      if (!options?.invalidateResults && revisionRef.current !== nextRevision) {
+        invalidateScopedResults();
+        invalidateEvidencePages();
+      }
+      const nextItems = body.items ?? [];
+      const availableIds = new Set(nextItems.map((item) => item.evidenceId));
+      if (panesRef.current.some((id) => !availableIds.has(id))) {
+        invalidateScopedResults();
+      }
+      setItems(nextItems);
+      setPanes((current) => {
+        const valid = current.filter((id) => availableIds.has(id));
+        if (defaultPaneCase.current !== props.caseId && nextItems.length > 0) {
+          defaultPaneCase.current = props.caseId;
+          return valid.length > 0 ? valid : [nextItems[0]!.evidenceId];
+        }
+        return valid;
+      });
+      setRevision(nextRevision);
       setCorpusTruncated(body.corpusTruncated === true);
       setUnreadFiles(body.unreadFiles ?? []);
       setLoadState("ready");
       try {
-        const viewsRes = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/views`);
+        const viewsRes = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/views`);
+        if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         if (viewsRes.ok) {
           const parsed = (await viewsRes.json()) as { views?: SavedView[] };
+          if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
           setViews(parsed.views ?? []);
-        }
+        } else setViews([]);
       } catch {
+        if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         setViews([]);
       }
       try {
         const bookmarksRes = await protectedApiFetch(
-          `/api/cases/${props.caseId}/workbench/bookmarks`,
+          `/api/cases/${requestCaseId}/workbench/bookmarks`,
         );
+        if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         if (bookmarksRes.ok) {
           const parsed = (await bookmarksRes.json()) as { bookmarks?: BookmarkRow[] };
+          if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
           setBookmarks(parsed.bookmarks ?? []);
-        }
+        } else setBookmarks([]);
       } catch {
+        if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         setBookmarks([]);
       }
       try {
         const queueRes = await protectedApiFetch(
-          `/api/cases/${props.caseId}/workbench/review-queue`,
+          `/api/cases/${requestCaseId}/workbench/review-queue`,
         );
+        if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         if (queueRes.ok) {
           const parsed = (await queueRes.json()) as { candidateCount?: number };
+          if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
           setReviewCount(parsed.candidateCount ?? 0);
-        }
+        } else setReviewCount(null);
       } catch {
+        if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
         setReviewCount(null);
       }
     } catch {
+      if (!isActiveCase(requestCaseId) || loadRequestGeneration.current !== requestGeneration) return;
       setError("The log workbench could not be loaded.");
       setLoadState("error");
     }
-  }, [props.caseId]);
+  }, [invalidateEvidencePages, invalidateScopedResults, isActiveCase, props.caseId]);
 
   useEffect(() => {
-    if (props.active === false) return;
-    void load();
-  }, [load, props.active]);
+    if (props.active === false) {
+      // Analyze remains mounted while another investigation stage is visible.
+      // Fence every continuation that began before the stage was hidden so a
+      // delayed inventory, search, chronology, or pane reply cannot repopulate
+      // state that will be exposed briefly on the next activation.
+      loadRequestGeneration.current += 1;
+      // Keep the user's pane choices for reconciliation with the next
+      // inventory, but gate every inventory-derived surface behind loading so
+      // a later activation cannot commit one frame of completed stale data.
+      setLoadState("loading");
+      invalidateScopedResults();
+      invalidateEvidencePages();
+      return;
+    }
+    void load({ invalidateResults: true });
+  }, [invalidateEvidencePages, invalidateScopedResults, load, props.active]);
 
   useEffect(() => {
     const reload = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId && detail.caseId !== props.caseId) return;
-      void load();
+      if (props.active === false) return;
+      void load({ invalidateResults: true });
     };
     window.addEventListener("contextdesk:corpus-intake-committed", reload);
     window.addEventListener("contextdesk:snapshot-frozen", reload);
     // Evidence can also arrive through the board beside this panel on Analyze.
     window.addEventListener("contextdesk:evidence-changed", reload);
+    window.addEventListener("contextdesk:log-time-changed", reload);
     return () => {
       window.removeEventListener("contextdesk:corpus-intake-committed", reload);
       window.removeEventListener("contextdesk:snapshot-frozen", reload);
       window.removeEventListener("contextdesk:evidence-changed", reload);
+      window.removeEventListener("contextdesk:log-time-changed", reload);
     };
-  }, [load, props.caseId]);
+  }, [load, props.active, props.caseId]);
 
   const loadPane = useCallback(
     async (evidenceId: string, startLine = 1) => {
-      loadedPanes.current.add(evidenceId);
+      const requestCaseId = props.caseId;
+      if (!isActiveCase(requestCaseId)) return;
+      const requestScopeGeneration = pageScopeGeneration.current;
+      const requestSequence = (pageRequestByEvidence.current.get(evidenceId) ?? 0) + 1;
+      pageRequestByEvidence.current.set(evidenceId, requestSequence);
+      loadingPanes.current.add(evidenceId);
+      setPaneErrors((current) => {
+        if (!(evidenceId in current)) return current;
+        const next = { ...current };
+        delete next[evidenceId];
+        return next;
+      });
       try {
         const response = await protectedApiFetch(
-          `/api/cases/${props.caseId}/workbench/page?evidenceId=${encodeURIComponent(evidenceId)}&startLine=${startLine}&limit=80`,
+          `/api/cases/${requestCaseId}/workbench/page?evidenceId=${encodeURIComponent(evidenceId)}&startLine=${startLine}&limit=80`,
         );
-        if (!response.ok) return;
+        if (
+          !isActiveCase(requestCaseId) ||
+          pageScopeGeneration.current !== requestScopeGeneration ||
+          pageRequestByEvidence.current.get(evidenceId) !== requestSequence
+        ) return;
+        if (!response.ok) {
+          const message = await errorText(response, "These log lines could not be loaded.");
+          if (
+            !isActiveCase(requestCaseId) ||
+            pageScopeGeneration.current !== requestScopeGeneration ||
+            pageRequestByEvidence.current.get(evidenceId) !== requestSequence
+          ) return;
+          // Keep a pane marked as loaded after a later-page failure. Its
+          // existing page is still useful, and selecting another file must not
+          // silently re-fetch page one while the retry affordance is visible.
+          if (startLine === 1) loadedPanes.current.delete(evidenceId);
+          setPaneErrors((current) => ({
+            ...current,
+            [evidenceId]: { message, startLine },
+          }));
+          return;
+        }
         const page = (await response.json()) as PageResult;
+        if (
+          !isActiveCase(requestCaseId) ||
+          pageScopeGeneration.current !== requestScopeGeneration ||
+          pageRequestByEvidence.current.get(evidenceId) !== requestSequence
+        ) return;
+        loadedPanes.current.add(evidenceId);
+        setPaneErrors((current) => {
+          if (!(evidenceId in current)) return current;
+          const next = { ...current };
+          delete next[evidenceId];
+          return next;
+        });
         setPageByPane((current) => ({ ...current, [evidenceId]: page }));
       } catch {
-        /* unmount or test teardown */
+        if (
+          !isActiveCase(requestCaseId) ||
+          pageScopeGeneration.current !== requestScopeGeneration ||
+          pageRequestByEvidence.current.get(evidenceId) !== requestSequence
+        ) return;
+        if (startLine === 1) loadedPanes.current.delete(evidenceId);
+        setPaneErrors((current) => ({
+          ...current,
+          [evidenceId]: {
+            message: "These log lines could not be loaded.",
+            startLine,
+          },
+        }));
+      }
+      finally {
+        if (
+          pageScopeGeneration.current === requestScopeGeneration &&
+          pageRequestByEvidence.current.get(evidenceId) === requestSequence
+        ) {
+          loadingPanes.current.delete(evidenceId);
+        }
       }
     },
-    [props.caseId],
+    [isActiveCase, props.caseId],
   );
 
   // Only panes that have never been read are opened at line 1. Re-reading them
   // whenever the selection changes would throw away where the reader had paged
   // to — including the window a revealed search match just loaded.
   useEffect(() => {
-    const ids = panes.length > 0 ? panes : items.slice(0, 1).map((item) => item.evidenceId);
-    for (const id of ids) {
-      if (loadedPanes.current.has(id)) continue;
+    for (const id of panes) {
+      // A failed explicit bookmark/target load is a reservation too. Do not
+      // replace the requested location with an automatic page-one fetch just
+      // because another pane was selected; the user must explicitly retry or
+      // remove the pane.
+      if (
+        loadedPanes.current.has(id) ||
+        loadingPanes.current.has(id) ||
+        paneErrors[id]
+      ) continue;
       void loadPane(id);
     }
-  }, [panes, items, loadPane]);
+  }, [panes, items, loadPane, paneErrors]);
 
   /**
    * Open the match. A hit list that only highlights rows already on screen is
@@ -478,7 +710,23 @@ export function LogWorkbench(props: {
    */
   const revealMatch = useCallback(
     async (row: MatchRow) => {
-      if (!panes.includes(row.evidenceId) && panes.length < MAX_PANES) {
+      const requestCaseId = props.caseId;
+      if (!isActiveCase(requestCaseId)) return;
+      if (!panes.includes(row.evidenceId)) {
+        if (panes.length >= MAX_PANES) {
+          // Bookmark navigation follows the same visible contract as the file
+          // selector. Do not fetch and scroll a hidden fifth pane, and do not
+          // invalidate results whose four-file scope has not changed.
+          setNotice(
+            `Only ${MAX_PANES} files can be open side by side. Clear one to open another.`,
+          );
+          return;
+        }
+        // A bookmark may point into a file outside the current pane scope.
+        // Opening it expands both the search and chronology corpus, so results
+        // that described the previous scope must disappear before the pane is
+        // added just as they do for an explicit selector change.
+        invalidateScopedResults();
         setPanes((current) =>
           current.includes(row.evidenceId) ? current : [...current, row.evidenceId],
         );
@@ -488,6 +736,7 @@ export function LogWorkbench(props: {
         page && page.rows.some((candidate) => candidate.lineNumber === row.lineNumber);
       if (!inWindow) {
         await loadPane(row.evidenceId, Math.max(1, row.lineNumber - PAGE_LEAD_LINES));
+        if (!isActiveCase(requestCaseId)) return;
       }
       const start = Math.max(1, row.lineNumber - PAGE_LEAD_LINES);
       const offset = Math.max(
@@ -499,7 +748,15 @@ export function LogWorkbench(props: {
       if (syncScroll) setScrollTop(offset);
       setScrollByPane((current) => ({ ...current, [row.evidenceId]: offset }));
     },
-    [loadPane, pageByPane, panes, syncScroll],
+    [
+      invalidateScopedResults,
+      isActiveCase,
+      loadPane,
+      pageByPane,
+      panes,
+      props.caseId,
+      syncScroll,
+    ],
   );
 
   function selectMatch(index: number) {
@@ -510,6 +767,7 @@ export function LogWorkbench(props: {
 
   function togglePane(evidenceId: string) {
     if (panes.includes(evidenceId)) {
+      invalidateScopedResults();
       setPanes((current) => current.filter((id) => id !== evidenceId));
       return;
     }
@@ -519,6 +777,7 @@ export function LogWorkbench(props: {
       );
       return;
     }
+    invalidateScopedResults();
     setPanes((current) =>
       current.includes(evidenceId) ? current : [...current, evidenceId],
     );
@@ -548,10 +807,17 @@ export function LogWorkbench(props: {
    * used to start over from the beginning.
    */
   async function runSearch(pageCursor: string | null = null) {
+    const requestCaseId = props.caseId;
+    if (!isActiveCase(requestCaseId)) return;
+    if (panes.length === 0) {
+      setNotice("Select at least one log file before searching.");
+      return;
+    }
+    const requestGeneration = ++searchRequestGeneration.current;
     setError(null);
     setSearching(true);
     try {
-      const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/search`, {
+      const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/search`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -567,31 +833,43 @@ export function LogWorkbench(props: {
           expectedNormalizationRevision: revision,
         }),
       });
+      if (!isActiveCase(requestCaseId)) return;
       if (!response.ok) {
-        setError(await errorText(response, "Search could not run."));
+        const message = await errorText(response, "Search could not run.");
+        if (isActiveCase(requestCaseId) && searchRequestGeneration.current === requestGeneration) setError(message);
         return;
       }
       const result = (await response.json()) as SearchResult;
+      if (!isActiveCase(requestCaseId) || searchRequestGeneration.current !== requestGeneration) return;
       const previous = pageCursor && search ? search.matches : [];
       const merged = { ...result, matches: [...previous, ...result.matches] };
       setSearch(merged);
       if (!pageCursor) setMatchIndex(0);
       setNotice(searchSummary(result, merged.matches.length, corpusTruncated));
     } finally {
-      setSearching(false);
+      if (isActiveCase(requestCaseId) && searchRequestGeneration.current === requestGeneration) setSearching(false);
     }
   }
 
   async function runChronology() {
+    const requestCaseId = props.caseId;
+    if (!isActiveCase(requestCaseId)) return;
+    if (panes.length === 0) {
+      setNotice("Select at least one log file before building a chronology.");
+      return;
+    }
+    const requestGeneration = ++chronologyRequestGeneration.current;
     setChronologyBusy(true);
     try {
-      const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/chronology`, {
+      const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/chronology`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ grouping, evidenceIds: panes }),
       });
+      if (!isActiveCase(requestCaseId)) return;
       if (!response.ok) {
-        setError(await errorText(response, "The merged chronology could not be built."));
+        const message = await errorText(response, "The merged chronology could not be built.");
+        if (isActiveCase(requestCaseId) && chronologyRequestGeneration.current === requestGeneration) setError(message);
         return;
       }
       const body = (await response.json()) as {
@@ -600,6 +878,7 @@ export function LogWorkbench(props: {
         bounded?: boolean;
         atLeast?: number;
       };
+      if (!isActiveCase(requestCaseId) || chronologyRequestGeneration.current !== requestGeneration) return;
       setChronology(body.events ?? []);
       setUnknownBuckets(body.unknownBuckets ?? []);
       setNotice(
@@ -608,13 +887,20 @@ export function LogWorkbench(props: {
           : `Merged chronology built from ${(body.events ?? []).length.toLocaleString()} lines.`,
       );
     } finally {
-      setChronologyBusy(false);
+      if (isActiveCase(requestCaseId) && chronologyRequestGeneration.current === requestGeneration) setChronologyBusy(false);
     }
   }
 
   async function pinEvent(event: ChronologyEvent, status: "pinned" | "human_ground_truth") {
     if (props.readOnly || !props.canWrite || !event.evidenceId) return;
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/anchors`, {
+    const requestCaseId = props.caseId;
+    if (!isActiveCase(requestCaseId)) return;
+    // A pin is durable once submitted, but its UI continuation still belongs
+    // to the chronology scope the operator pinned from. Changing grouping,
+    // panes, investigation, or stage while the write is pending must not let
+    // the old render rebuild and publish a chronology under new controls.
+    const requestScopeGeneration = chronologyRequestGeneration.current;
+    const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/anchors`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -625,8 +911,13 @@ export function LogWorkbench(props: {
         idempotencyKey: `anchor-${event.evidenceId.slice(0, 8)}-${event.lineNumber}-${status}`,
       }),
     });
+    if (
+      !isActiveCase(requestCaseId) ||
+      chronologyRequestGeneration.current !== requestScopeGeneration
+    ) return;
     if (!response.ok) {
-      setError(await errorText(response, "The chronology pin could not be saved."));
+      const message = await errorText(response, "The chronology pin could not be saved.");
+      if (isActiveCase(requestCaseId)) setError(message);
       return;
     }
     setNotice(status === "human_ground_truth" ? "Ground truth recorded." : "Benchmark pin recorded.");
@@ -635,7 +926,13 @@ export function LogWorkbench(props: {
 
   async function saveView() {
     if (props.readOnly || !props.canWrite) return;
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/views`, {
+    if (panes.length === 0) {
+      setNotice("Select at least one log file before saving a view.");
+      return;
+    }
+    const requestCaseId = props.caseId;
+    if (!isActiveCase(requestCaseId)) return;
+    const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/views`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -653,7 +950,7 @@ export function LogWorkbench(props: {
         },
         query,
         mode,
-        selectedPanes: panes.length > 0 ? panes : items.slice(0, 2).map((item) => item.evidenceId),
+        selectedPanes: panes,
         timeFrom: timeFrom.trim() || null,
         timeTo: timeTo.trim() || null,
         sort,
@@ -684,8 +981,10 @@ export function LogWorkbench(props: {
         }),
       }),
     });
+    if (!isActiveCase(requestCaseId)) return;
     if (!response.ok) {
-      setError(await errorText(response, "The view could not be saved."));
+      const message = await errorText(response, "The view could not be saved.");
+      if (isActiveCase(requestCaseId)) setError(message);
       return;
     }
     setNotice(`Saved view “${viewName.trim() || "Saved view"}” recorded for this investigation.`);
@@ -694,8 +993,10 @@ export function LogWorkbench(props: {
 
   async function saveBookmark(row: MatchRow) {
     if (props.readOnly || !props.canWrite) return;
+    const requestCaseId = props.caseId;
+    if (!isActiveCase(requestCaseId)) return;
     const item = items.find((entry) => entry.evidenceId === row.evidenceId);
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/bookmarks`, {
+    const response = await protectedApiFetch(`/api/cases/${requestCaseId}/workbench/bookmarks`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -712,8 +1013,10 @@ export function LogWorkbench(props: {
         idempotencyKey: `bookmark-${row.evidenceId.slice(0, 8)}-${row.lineNumber}`,
       }),
     });
+    if (!isActiveCase(requestCaseId)) return;
     if (!response.ok) {
-      setError(await errorText(response, "The bookmark could not be saved."));
+      const message = await errorText(response, "The bookmark could not be saved.");
+      if (isActiveCase(requestCaseId)) setError(message);
       return;
     }
     setNotice("Bookmark recorded.");
@@ -721,6 +1024,7 @@ export function LogWorkbench(props: {
   }
 
   function applyView(view: SavedView) {
+    invalidateScopedResults();
     setPanes(view.selectedPanes.slice(0, MAX_PANES));
     setQuery(view.query);
     setMode((view.mode as typeof mode) || "case_insensitive");
@@ -741,8 +1045,8 @@ export function LogWorkbench(props: {
       void runSearch();
     }
     if (event.key === "Escape") {
+      invalidateSearchResults();
       setQuery("");
-      setSearch(null);
     }
     if (event.key === "F3" || ((event.key === "g" || event.key === "G") && (event.metaKey || event.ctrlKey))) {
       event.preventDefault();
@@ -807,7 +1111,7 @@ export function LogWorkbench(props: {
             {error}
           </p>
         </header>
-        <button type="button" onClick={() => void load()}>
+        <button type="button" onClick={() => void load({ invalidateResults: true })}>
           Try again
         </button>
       </section>
@@ -820,7 +1124,7 @@ export function LogWorkbench(props: {
           <h4 id="log-workbench-heading">Log workbench</h4>
           <p className="log-workbench__lede">
             This investigation has no imported logs yet. Add files, a ZIP, or a directory on
-            Capture — those files stay with this investigation, not in the shared Sources
+            Capture — those files stay with this investigation, not in the shared Attribution
             catalog.
           </p>
         </header>
@@ -852,7 +1156,27 @@ export function LogWorkbench(props: {
       {reviewCount && reviewCount > 0 ? (
         <p className="log-workbench__notice">
           {reviewCount.toLocaleString()} lines still have a clock but no timezone.{" "}
-          <a href="#triage-log-time">Open Timezone review</a> to declare a zone — nothing
+          <a
+            href="#triage-log-time"
+            onClick={(event) => {
+              if (
+                event.button !== 0
+                || event.metaKey
+                || event.ctrlKey
+                || event.shiftKey
+                || event.altKey
+              ) return;
+              event.preventDefault();
+              window.history.pushState(
+                window.history.state,
+                "",
+                `${window.location.pathname}${window.location.search}#triage-log-time`,
+              );
+              focusVisibleSectionTarget("triage-log-time");
+            }}
+          >
+            Open Timezone review
+          </a>{" "}to declare a zone — nothing
           here will guess one.
         </p>
       ) : null}
@@ -910,7 +1234,14 @@ export function LogWorkbench(props: {
             </button>
           ) : null}
           {panes.length > 0 ? (
-            <button type="button" onClick={() => setPanes([])}>
+            <button
+              type="button"
+              onClick={() => {
+                invalidateScopedResults();
+                setPanes([]);
+                setNotice("Open-file selection cleared. Select a file before searching.");
+              }}
+            >
               Clear open files
             </button>
           ) : null}
@@ -1016,7 +1347,10 @@ export function LogWorkbench(props: {
               <input
                 type="search"
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setQuery(event.target.value);
+                }}
                 onKeyDown={onSearchKey}
                 aria-label="Find in logs"
                 placeholder="Message, error, identifier…"
@@ -1024,7 +1358,11 @@ export function LogWorkbench(props: {
                 spellCheck={false}
               />
             </label>
-            <button type="button" onClick={() => void runSearch()} disabled={searching}>
+            <button
+              type="button"
+              onClick={() => void runSearch()}
+              disabled={searching || panes.length === 0}
+            >
               {searching ? "Searching…" : "Search"}
             </button>
           </div>
@@ -1074,7 +1412,10 @@ export function LogWorkbench(props: {
               <span>Match</span>
               <select
                 value={mode}
-                onChange={(event) => setMode(event.target.value as typeof mode)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setMode(event.target.value as typeof mode);
+                }}
                 aria-label="Match mode"
               >
                 <option value="literal">Literal</option>
@@ -1086,7 +1427,10 @@ export function LogWorkbench(props: {
               <span>Include</span>
               <input
                 value={include}
-                onChange={(event) => setInclude(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setInclude(event.target.value);
+                }}
                 aria-label="Include terms"
               />
             </label>
@@ -1094,7 +1438,10 @@ export function LogWorkbench(props: {
               <span>Exclude</span>
               <input
                 value={exclude}
-                onChange={(event) => setExclude(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setExclude(event.target.value);
+                }}
                 aria-label="Exclude terms"
               />
             </label>
@@ -1102,7 +1449,10 @@ export function LogWorkbench(props: {
               <span>Severity</span>
               <input
                 value={severity}
-                onChange={(event) => setSeverity(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setSeverity(event.target.value);
+                }}
                 aria-label="Severity"
               />
             </label>
@@ -1110,7 +1460,10 @@ export function LogWorkbench(props: {
               <span>From (UTC)</span>
               <input
                 value={timeFrom}
-                onChange={(event) => setTimeFrom(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setTimeFrom(event.target.value);
+                }}
                 aria-label="From (UTC)"
               />
             </label>
@@ -1118,7 +1471,10 @@ export function LogWorkbench(props: {
               <span>To (UTC)</span>
               <input
                 value={timeTo}
-                onChange={(event) => setTimeTo(event.target.value)}
+                onChange={(event) => {
+                  invalidateSearchResults();
+                  setTimeTo(event.target.value);
+                }}
                 aria-label="To (UTC)"
               />
             </label>
@@ -1221,8 +1577,14 @@ export function LogWorkbench(props: {
       </label>
 
       <div className="log-workbench__panes">
-        {(selectedItems.length > 0 ? selectedItems : items.slice(0, 1)).map((item) => {
+        {selectedItems.length === 0 && items.length > 0 ? (
+          <p className="log-workbench__notice" role="status">
+            Select a log file to open its lines.
+          </p>
+        ) : null}
+        {selectedItems.map((item) => {
           const page = pageByPane[item.evidenceId];
+          const paneError = paneErrors[item.evidenceId];
           const rows = page?.rows ?? [];
           const paneScroll = syncScroll ? scrollTop : (scrollByPane[item.evidenceId] ?? 0);
           const paneWindow = virtualizedWindow({
@@ -1249,6 +1611,17 @@ export function LogWorkbench(props: {
                   <span> {page.wrappedRowCount} wrapped long lines</span>
                 ) : null}
               </header>
+              {paneError ? (
+                <p className="log-workbench__notice" role="alert">
+                  {paneError.message}{" "}
+                  <button
+                    type="button"
+                    onClick={() => void loadPane(item.evidenceId, paneError.startLine)}
+                  >
+                    Retry loading lines
+                  </button>
+                </p>
+              ) : null}
               <div
                 className="log-workbench__spacer"
                 aria-hidden="true"
@@ -1315,7 +1688,7 @@ export function LogWorkbench(props: {
                   placeholder="e.g. Checkout timeout"
                 />
               </label>
-              <button type="button" onClick={() => void saveView()}>
+              <button type="button" onClick={() => void saveView()} disabled={panes.length === 0}>
                 Save view
               </button>
             </div>
@@ -1348,7 +1721,10 @@ export function LogWorkbench(props: {
               <span>Group by</span>
               <select
                 value={grouping}
-                onChange={(event) => setGrouping(event.target.value)}
+                onChange={(event) => {
+                  invalidateChronologyResults();
+                  setGrouping(event.target.value);
+                }}
                 aria-label="Chronology grouping"
               >
                 <option value="none">No grouping</option>
@@ -1360,7 +1736,11 @@ export function LogWorkbench(props: {
                 <option value="severity">Severity</option>
               </select>
             </label>
-            <button type="button" onClick={() => void runChronology()} disabled={chronologyBusy}>
+            <button
+              type="button"
+              onClick={() => void runChronology()}
+              disabled={chronologyBusy || panes.length === 0}
+            >
               {chronologyBusy ? "Building chronology…" : "Show merged chronology"}
             </button>
           </div>
@@ -1383,9 +1763,11 @@ export function LogWorkbench(props: {
             </details>
           ) : null}
           <ol>
-            {chronology.map((event, index) => (
+            {chronology.map((event, index) => {
+              const time = chronologyTime(event);
+              return (
               <li key={`${event.relativePath}:${event.lineNumber}:${index}`}>
-                <span>{event.normalizedUtc ?? event.originalTimestamp ?? "order only"}</span>
+                <span><strong>{time.label}</strong>{time.value ? `: ${time.value}` : ""}</span>
                 {" · "}
                 <span>{event.relativePath}</span>
                 {groupLabel(grouping, event.groupKey ?? "") ? (
@@ -1414,7 +1796,8 @@ export function LogWorkbench(props: {
                   <small> Observed id {event.correlationId}</small>
                 ) : null}
               </li>
-            ))}
+              );
+            })}
           </ol>
         </section>
       ) : null}

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LogTimeReviewPanel } from "./LogTimeReviewPanel.js";
 
@@ -8,7 +8,23 @@ afterEach(() => {
 });
 
 const CASE_ID = "11111111-1111-4111-8111-111111111111";
+const CASE_B = "99999999-9999-4999-8999-999999999999";
 const FINGERPRINT = "a".repeat(64);
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 function sourceStatus(overrides: Record<string, unknown> = {}) {
   return {
@@ -311,6 +327,8 @@ describe("LogTimeReviewPanel", () => {
 
   it("sends the exact previewed fingerprint and revision when applying", async () => {
     const calls: { url: string; body: Record<string, unknown> }[] = [];
+    const onTimeChanged = vi.fn();
+    window.addEventListener("contextdesk:log-time-changed", onTimeChanged);
     stubFetch(
       {
         "/log-time/preview": () => PREVIEW,
@@ -337,6 +355,360 @@ describe("LogTimeReviewPanel", () => {
     expect(apply?.body.declarationFingerprint).toBe(FINGERPRINT);
     expect(apply?.body.expectedRevision).toBe(1);
     expect(apply?.body.ianaTimezone).toBe("America/Chicago");
+    expect(onTimeChanged).toHaveBeenCalledTimes(1);
+    expect((onTimeChanged.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+      caseId: CASE_ID,
+      notice: "America/Chicago applied to worker/batch.log. 4 lines now have an exact time.",
+    });
+    window.removeEventListener("contextdesk:log-time-changed", onTimeChanged);
+  });
+
+  it("synchronizes both mounted timezone panels after one panel changes the case", async () => {
+    let stateReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/log-time/preview")) return jsonResponse(PREVIEW);
+        if (url.endsWith("/log-time/apply")) {
+          return jsonResponse({ schemaId: "cd-collab.log_time_outcome.v1" });
+        }
+        if (url.endsWith("/log-time")) {
+          stateReads += 1;
+          return jsonResponse(
+            stateReads <= 2
+              ? stateBody()
+              : stateBody({
+                  corpusRevision: 2,
+                  reviewOutstanding: false,
+                  sources: [
+                    sourceStatus({
+                      unresolvedLocalRecords: 0,
+                      resolvedLocalRecords: 4,
+                      declaration: {
+                        source: "worker/batch.log",
+                        ianaTimezone: "America/Chicago",
+                        basis: "user_declared",
+                        declaredAt: 1710093600,
+                        appliedRevision: 2,
+                        declarationFingerprint: FINGERPRINT,
+                        declaredBy: "analyst-synthetic-01",
+                      },
+                    }),
+                  ],
+                }),
+          );
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(
+      <>
+        <div data-testid="capture-time-review">{panel()}</div>
+        <div data-testid="analyze-time-review">{panel()}</div>
+      </>,
+    );
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("heading", { name: "When did these log lines happen?" }),
+      ).toHaveLength(2);
+    });
+    const ids = Array.from(document.querySelectorAll<HTMLElement>("[id]"), (node) => node.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const review of document.querySelectorAll<HTMLElement>("section.log-time")) {
+      const labelledBy = review.getAttribute("aria-labelledby");
+      expect(labelledBy).toBeTruthy();
+      expect(review.querySelector(`#${labelledBy}`)).toBeTruthy();
+    }
+    const capture = within(screen.getByTestId("capture-time-review"));
+    fireEvent.click(await capture.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(capture.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(capture.getByRole("button", { name: /show me what this would do/i }));
+    fireEvent.click(
+      await capture.findByRole("button", { name: /apply America\/Chicago to this file/i }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/revision 2/)).toHaveLength(2);
+      expect(screen.getAllByText(/4 lines placed at an exact time/)).toHaveLength(2);
+    });
+    expect(stateReads).toBe(4);
+  });
+
+  it("fences a deferred preview when the sibling panel publishes a newer revision", async () => {
+    const previewGate = deferred<Response>();
+    let stateReads = 0;
+    let previewReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/log-time/preview")) {
+          previewReads += 1;
+          return previewGate.promise;
+        }
+        if (url.endsWith("/log-time")) {
+          stateReads += 1;
+          return jsonResponse(
+            stateReads <= 2
+              ? stateBody()
+              : stateBody({ corpusRevision: 2 }),
+          );
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(
+      <>
+        <div data-testid="capture-time-review">{panel()}</div>
+        <div data-testid="analyze-time-review">{panel()}</div>
+      </>,
+    );
+    await waitFor(() => expect(stateReads).toBe(2));
+    const capture = within(screen.getByTestId("capture-time-review"));
+    fireEvent.click(await capture.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(capture.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(capture.getByRole("button", { name: /show me what this would do/i }));
+    await waitFor(() => expect(previewReads).toBe(1));
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", {
+          detail: { caseId: CASE_ID, notice: "A sibling panel published revision 2." },
+        }),
+      );
+    });
+    await waitFor(() => {
+      const revisionBadges = document.querySelectorAll(".log-time__badge");
+      expect(revisionBadges).toHaveLength(2);
+      for (const badge of revisionBadges) {
+        expect(badge.textContent).toContain("revision 2");
+      }
+    });
+    expect(
+      capture.getByRole("button", { name: /show me what this would do/i }),
+    ).toHaveProperty("disabled", false);
+
+    await act(async () => {
+      previewGate.resolve(jsonResponse(PREVIEW));
+      await previewGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      screen.queryByRole("heading", { name: "What America/Chicago would do" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /apply America\/Chicago to this file/i }),
+    ).toBeNull();
+    expect(screen.queryByText(/could not be previewed/i)).toBeNull();
+  });
+
+  it("keeps a durable apply locked while a sibling refresh completes", async () => {
+    const applyGate = deferred<Response>();
+    const refreshGate = deferred<Response>();
+    let stateReads = 0;
+    let applyReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/log-time/preview")) return jsonResponse(PREVIEW);
+        if (url.endsWith("/log-time/apply")) {
+          applyReads += 1;
+          return applyGate.promise;
+        }
+        if (url.endsWith("/log-time")) {
+          stateReads += 1;
+          if (stateReads === 2) return refreshGate.promise;
+          return jsonResponse(
+            stateReads === 1
+              ? stateBody()
+              : stateBody({ corpusRevision: 2 }),
+          );
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(panel());
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /apply America\/Chicago to this file/i }),
+    );
+    await waitFor(() => expect(applyReads).toBe(1));
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", {
+          detail: { caseId: CASE_ID, notice: "A sibling panel published revision 2." },
+        }),
+      );
+    });
+    await waitFor(() => expect(stateReads).toBe(2));
+    expect(await screen.findByText("Loading time review…")).toBeTruthy();
+    expect(screen.queryByText("Time review unavailable.")).toBeNull();
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse(stateBody({ corpusRevision: 2 })));
+      await refreshGate.promise;
+    });
+    const cancel = await screen.findByRole("button", { name: "Cancel" });
+    expect(cancel).toHaveProperty("disabled", true);
+    fireEvent.click(cancel);
+    expect(applyReads).toBe(1);
+
+    await act(async () => {
+      applyGate.resolve(jsonResponse({ applied: true }));
+      await applyGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() => {
+      expect(stateReads).toBe(3);
+      expect(screen.getByRole("button", { name: "Cancel" })).toHaveProperty("disabled", false);
+    });
+  });
+
+  it("surfaces a failed sibling refresh while a durable apply stays pending", async () => {
+    const applyGate = deferred<Response>();
+    const refreshGate = deferred<Response>();
+    let stateReads = 0;
+    let applyReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/log-time/preview")) return jsonResponse(PREVIEW);
+        if (url.endsWith("/log-time/apply")) {
+          applyReads += 1;
+          return applyGate.promise;
+        }
+        if (url.endsWith("/log-time")) {
+          stateReads += 1;
+          if (stateReads === 2) return refreshGate.promise;
+          return jsonResponse(stateBody({ corpusRevision: stateReads }));
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(panel());
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /apply America\/Chicago to this file/i }),
+    );
+    await waitFor(() => expect(applyReads).toBe(1));
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", {
+          detail: { caseId: CASE_ID, notice: "A sibling panel published revision 2." },
+        }),
+      );
+    });
+    expect(await screen.findByText("Loading time review…")).toBeTruthy();
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse({ error: "Time review refresh failed." }, 500));
+      await refreshGate.promise;
+    });
+    const refreshError = await screen.findByRole("alert");
+    expect(refreshError.textContent).toContain("Time review refresh failed.");
+    expect(screen.queryByText("Loading time review…")).toBeNull();
+    expect(screen.queryByText("Time review unavailable.")).toBeNull();
+
+    await act(async () => {
+      applyGate.resolve(jsonResponse({ applied: true }));
+      await applyGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() => expect(stateReads).toBe(3));
+    expect(await screen.findByText(/revision 3/)).toBeTruthy();
+  });
+
+  it("does not let a delayed write update or reload a later investigation", async () => {
+    const applyGate = deferred<Response>();
+    const caseBLoad = deferred<Response>();
+    const onTimeChanged = vi.fn();
+    window.addEventListener("contextdesk:log-time-changed", onTimeChanged);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes(`/api/cases/${CASE_ID}/log-time/preview`)) {
+          return jsonResponse(PREVIEW);
+        }
+        if (url.includes(`/api/cases/${CASE_ID}/log-time/apply`)) {
+          return applyGate.promise;
+        }
+        if (url.endsWith(`/api/cases/${CASE_ID}/log-time`)) {
+          return jsonResponse(stateBody());
+        }
+        if (url.endsWith(`/api/cases/${CASE_B}/log-time`)) {
+          return caseBLoad.promise;
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    const view = render(panel());
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /apply America\/Chicago to this file/i }),
+    );
+
+    view.rerender(
+      <LogTimeReviewPanel caseId={CASE_B} canWrite readOnly={false} />,
+    );
+    await waitFor(() => {
+      expect(screen.queryByText(/5 lines still in file order only/i)).toBeNull();
+      expect(screen.getByText(/Loading time review/i)).toBeTruthy();
+    });
+
+    await act(async () => {
+      applyGate.resolve(jsonResponse({ schemaId: "cd-collab.log_time_outcome.v1" }));
+      await applyGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    const oldCaseLoads = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([input]) => String(input).endsWith(`/api/cases/${CASE_ID}/log-time`),
+    );
+    expect(oldCaseLoads).toHaveLength(1);
+    expect(onTimeChanged).not.toHaveBeenCalled();
+    expect(screen.queryByText(/America\/Chicago applied/i)).toBeNull();
+
+    await act(async () => {
+      caseBLoad.resolve(
+        jsonResponse(
+          stateBody({
+            caseId: CASE_B,
+            sources: [sourceStatus({ source: "case-b/current.log" })],
+          }),
+        ),
+      );
+      await caseBLoad.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(await screen.findByText("case-b/current.log")).toBeTruthy();
+    window.removeEventListener("contextdesk:log-time-changed", onTimeChanged);
   });
 
   it("shows how a declared timezone was decided, including its fingerprint", async () => {

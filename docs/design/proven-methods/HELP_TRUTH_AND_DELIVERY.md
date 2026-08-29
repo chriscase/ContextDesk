@@ -64,6 +64,7 @@ Out of scope:
 | Geometry sanity for diagrams | **Partial** | `validateSvgGeometry` catches clipping, text collisions, and border crowding | Font metrics and arrow quality need the rendered contact sheet |
 | Rendered visual review | **Accepted design** | [`render_help_svg_contact_sheet.sh`](../../../scripts/render_help_svg_contact_sheet.sh) | Reviewer judgement; not automatable |
 | Corpus prose matching shipped behavior | **Partial** | [`HELP_TRUTH_AUDIT.md`](../../HELP_TRUTH_AUDIT.md) | Known drift; see §16 |
+| War Room structured Help/media synchronization | **Local integration** | [`check_war_room_help_drift.mjs`](../../../scripts/check_war_room_help_drift.mjs) checks Markdown references, web Help alt/captions, true PNG bytes, public/docs byte identity, static-demo discovery, canonical anchors, and named truth boundaries; [`HelpCenter.tsx`](../../../collab/web/src/HelpCenter.tsx) traps lightbox focus and restores the invoker | Exact rendered composition and prose accuracy remain human review |
 
 ## 3. Reusable method
 
@@ -282,6 +283,7 @@ threw — a checker that fails for the wrong reason is not coverage.
 | Contextual popover primitive and deep links | **Shipped** |
 | Contextual Help coverage across all complex surfaces | **Partial** |
 | Corpus prose matching current shipped behavior | **Partial** |
+| War Room structured Help/media synchronization | **Local integration** |
 | Rendered diagram quality review | **Accepted design** |
 | Non-text (stroke) contrast enforcement | **Planned** |
 | Shared anchor implementation between reader and validator | **Planned** |

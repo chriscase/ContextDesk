@@ -10,7 +10,7 @@
  * It never proposes a zone. There is no default, no "detected" value, and no
  * pre-selected option in the picker.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { protectedApiFetch } from "./protected-api.js";
 
 const MAX_ERROR_LENGTH = 240;
@@ -86,6 +86,11 @@ interface Dependent {
 interface StateResponse {
   state: CorpusState;
   dependents: Dependent[];
+}
+
+interface LogTimeChangedDetail {
+  caseId?: string;
+  notice?: string;
 }
 
 /**
@@ -175,6 +180,11 @@ export function LogTimeReviewPanel(props: {
   canWrite: boolean;
   readOnly: boolean;
 }) {
+  const instanceId = useId().replace(/:/g, "");
+  const panelId = `log-time-${instanceId}`;
+  const headingId = `${panelId}-heading`;
+  const sourceFilterId = `${panelId}-source-filter`;
+  const zoneOptionsId = `${panelId}-zone-options`;
   const [state, setState] = useState<CorpusState | null>(null);
   const [dependents, setDependents] = useState<Dependent[]>([]);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
@@ -182,9 +192,13 @@ export function LogTimeReviewPanel(props: {
   const [sourceLimit, setSourceLimit] = useState(INITIAL_SOURCE_ROWS);
   const [zone, setZone] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [busy, setBusy] = useState<
-    "load" | "build" | "preview" | "apply" | "clear" | "undo" | null
-  >(null);
+  type ActionPhase = "build" | "preview" | "apply" | "clear" | "undo";
+  const [loadBusy, setLoadBusy] = useState(false);
+  const [actionBusy, setActionBusy] = useState<ActionPhase | null>(null);
+  const actionBusyRef = useRef<ActionPhase | null>(null);
+  // A background refresh must never replace the lock held by a durable POST.
+  // Keep the two lifecycles separate and expose one presentation value only.
+  const busy = actionBusy ?? (loadBusy ? "load" : null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // A deployment with no configured host pipeline never registers these
@@ -192,37 +206,124 @@ export function LogTimeReviewPanel(props: {
   // disappears rather than reporting an error for a feature nobody enabled.
   const [unavailable, setUnavailable] = useState(false);
   const requestVersion = useRef(0);
+  const actionVersion = useRef(0);
+  const currentCaseIdRef = useRef(props.caseId);
+  currentCaseIdRef.current = props.caseId;
+  const mountedRef = useRef(true);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestVersion.current += 1;
+      actionVersion.current += 1;
+    };
+  }, []);
+
+  const isCurrentCase = useCallback(
+    (caseId: string) => mountedRef.current && currentCaseIdRef.current === caseId,
+    [],
+  );
+
+  // The workspace normally keys this panel by investigation. Keep the
+  // component safe when it is embedded or tested without that key as well:
+  // no state, selection, notice, or pending request belongs to the next case.
+  useEffect(() => {
+    requestVersion.current += 1;
+    actionVersion.current += 1;
+    setState(null);
+    setDependents([]);
+    setSelectedSource(null);
+    setSourceFilter("");
+    setSourceLimit(INITIAL_SOURCE_ROWS);
+    setZone("");
+    setPreview(null);
+    actionBusyRef.current = null;
+    setActionBusy(null);
+    setLoadBusy(false);
+    setError(null);
+    setNotice(null);
+    setUnavailable(false);
+  }, [props.caseId]);
+
+  const load = useCallback(async (preserveError = false) => {
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return;
     const version = ++requestVersion.current;
-    setBusy("load");
+    setLoadBusy(true);
+    if (!preserveError) setError(null);
     try {
       const response = await protectedApiFetch(
-        `/api/cases/${props.caseId}/log-time`,
+        `/api/cases/${requestCaseId}/log-time`,
       );
       if (response.status === 404) {
-        if (requestVersion.current === version) setUnavailable(true);
+        if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+          setUnavailable(true);
+          setState(null);
+          setDependents([]);
+        }
         return;
       }
       if (!response.ok) {
-        setError(await errorText(response, "Time review could not be loaded."));
+        const message = await errorText(response, "Time review could not be loaded.");
+        if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+          setState(null);
+          setDependents([]);
+          setError(message);
+        }
         return;
       }
       const body = (await response.json()) as StateResponse;
-      if (requestVersion.current !== version) return;
+      if (!isCurrentCase(requestCaseId) || requestVersion.current !== version) return;
       setUnavailable(false);
       setState(body.state);
       setDependents(body.dependents ?? []);
     } catch {
-      setError("Time review could not be loaded.");
+      if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+        setState(null);
+        setDependents([]);
+        setError("Time review could not be loaded.");
+      }
     } finally {
-      setBusy(null);
+      if (isCurrentCase(requestCaseId) && requestVersion.current === version) {
+        setLoadBusy(false);
+      }
     }
-  }, [props.caseId]);
+  }, [isCurrentCase, props.caseId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const refresh = (event: Event) => {
+      const detail = (event as CustomEvent<LogTimeChangedDetail>).detail;
+      if (detail?.caseId && detail.caseId !== props.caseId) return;
+      // A case can mount this review in both Capture and Analyze. The event is
+      // the one reload path for every instance, including the panel that made
+      // the durable change, so neither stage can retain the prior revision.
+      requestVersion.current += 1;
+      // A preview is advisory and bound to the revision it inspected. If the
+      // sibling panel changes that revision while a preview is pending, fence
+      // its continuation and release the local busy state. Durable writes are
+      // not cancelled here: they must settle against the server and publish
+      // their own completion event (or surface the server's conflict).
+      if (actionBusyRef.current === "preview") {
+        actionVersion.current += 1;
+        actionBusyRef.current = null;
+        setActionBusy(null);
+      }
+      setState(null);
+      setDependents([]);
+      setPreview(null);
+      setError(null);
+      setNotice(detail?.notice ?? null);
+      setUnavailable(false);
+      void load();
+    };
+    window.addEventListener("contextdesk:log-time-changed", refresh);
+    return () => window.removeEventListener("contextdesk:log-time-changed", refresh);
+  }, [load, props.caseId]);
 
   const outstanding = useMemo(
     () => (state?.sources ?? []).filter((s) => s.unresolvedLocalRecords > 0),
@@ -241,10 +342,15 @@ export function LogTimeReviewPanel(props: {
   const hiddenSourceCount = Math.max(0, filteredSources.length - renderedSources.length);
 
   /** Any durable change invalidates the preview a reviewer was looking at. */
-  function resetAfterChange(message: string) {
+  function resetAfterChange(message: string, requestCaseId: string) {
+    if (!isCurrentCase(requestCaseId)) return;
     setPreview(null);
     setNotice(message);
-    void load();
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:log-time-changed", {
+        detail: { caseId: requestCaseId, notice: message },
+      }),
+    );
   }
 
   async function post(
@@ -253,15 +359,19 @@ export function LogTimeReviewPanel(props: {
     phase: "build" | "preview" | "apply" | "clear" | "undo",
     fallback: string,
   ): Promise<unknown | null> {
-    if (props.readOnly || !props.canWrite || busy) return null;
+    if (props.readOnly || !props.canWrite || busy || actionBusyRef.current) return null;
+    const requestCaseId = props.caseId;
+    if (!isCurrentCase(requestCaseId)) return null;
+    const version = ++actionVersion.current;
     setError(null);
     setNotice(null);
-    setBusy(phase);
+    actionBusyRef.current = phase;
+    setActionBusy(phase);
     try {
       // Build takes no body. Declaring a JSON content-type without one makes
       // Fastify reject the request before it reaches the route.
       const response = await protectedApiFetch(
-        `/api/cases/${props.caseId}/log-time/${path}`,
+        `/api/cases/${requestCaseId}/log-time/${path}`,
         body === undefined
           ? { method: "POST" }
           : {
@@ -270,33 +380,46 @@ export function LogTimeReviewPanel(props: {
               body: JSON.stringify(body),
             },
       );
+      if (!isCurrentCase(requestCaseId) || actionVersion.current !== version) return null;
       if (!response.ok) {
-        setError(await errorText(response, fallback));
+        const message = await errorText(response, fallback);
+        if (!isCurrentCase(requestCaseId) || actionVersion.current !== version) return null;
+        setError(message);
         // A conflict means someone else moved the corpus. Re-read so the
         // reviewer is deciding against what is actually there now.
-        if (response.status === 409) void load();
+        if (response.status === 409) void load(true);
         return null;
       }
-      return await response.json();
+      const result = await response.json();
+      return isCurrentCase(requestCaseId) && actionVersion.current === version
+        ? result
+        : null;
     } catch {
-      setError(fallback);
+      if (isCurrentCase(requestCaseId) && actionVersion.current === version) {
+        setError(fallback);
+      }
       return null;
     } finally {
-      setBusy(null);
+      if (isCurrentCase(requestCaseId) && actionVersion.current === version) {
+        actionBusyRef.current = null;
+        setActionBusy(null);
+      }
     }
   }
 
   async function runBuild() {
+    const requestCaseId = props.caseId;
     const result = await post(
       "build",
       undefined,
       "build",
       "The log corpus could not be built.",
     );
-    if (result) resetAfterChange("Log corpus built from this case's files.");
+    if (result) resetAfterChange("Log corpus built from this case's files.", requestCaseId);
   }
 
   async function runPreview(source: string) {
+    const requestCaseId = props.caseId;
     if (!state?.corpusId || !zone.trim()) return;
     const result = (await post(
       "preview",
@@ -309,10 +432,11 @@ export function LogTimeReviewPanel(props: {
       "preview",
       "That timezone could not be previewed.",
     )) as Preview | null;
-    if (result) setPreview(result);
+    if (result && isCurrentCase(requestCaseId)) setPreview(result);
   }
 
   async function runApply() {
+    const requestCaseId = props.caseId;
     // A declaration that resolves no timestamps cannot publish an event-time
     // revision. Keep the honest preview visible, but do not offer a request
     // which the host must reject as an empty revision.
@@ -330,14 +454,16 @@ export function LogTimeReviewPanel(props: {
       "apply",
       "That timezone could not be applied.",
     );
-    if (result) {
+    if (result && isCurrentCase(requestCaseId)) {
       resetAfterChange(
         `${preview.ianaTimezone} applied to ${preview.source}. ${lines(preview.affectedRecords)} now have an exact time.`,
+        requestCaseId,
       );
     }
   }
 
   async function runClear(source: string) {
+    const requestCaseId = props.caseId;
     if (!state) return;
     const result = await post(
       "clear",
@@ -350,14 +476,16 @@ export function LogTimeReviewPanel(props: {
       "clear",
       "That declaration could not be cleared.",
     );
-    if (result) {
+    if (result && isCurrentCase(requestCaseId)) {
       resetAfterChange(
         `Declaration removed from ${source}. Those lines are back to file order only.`,
+        requestCaseId,
       );
     }
   }
 
   async function runUndo() {
+    const requestCaseId = props.caseId;
     if (!state) return;
     const result = await post(
       "undo",
@@ -369,12 +497,14 @@ export function LogTimeReviewPanel(props: {
       "undo",
       "The last time change could not be undone.",
     );
-    if (result) resetAfterChange("Last time change undone.");
+    if (result && isCurrentCase(requestCaseId)) {
+      resetAfterChange("Last time change undone.", requestCaseId);
+    }
   }
 
   const heading = (
     <header className="log-time__head">
-      <h4 id="log-time-heading">When did these log lines happen?</h4>
+      <h4 id={headingId}>When did these log lines happen?</h4>
       {state?.corpusId ? (
         <span className="log-time__badge">
           revision {state.corpusRevision}
@@ -386,7 +516,7 @@ export function LogTimeReviewPanel(props: {
 
   if (unavailable) {
     return (
-      <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+      <section className="log-time" id={panelId} aria-labelledby={headingId}>
         {heading}
         <p className="log-time__copy" role="status">
           Timezone review needs the trusted ContextDesk timestamp host on this installation.
@@ -398,11 +528,20 @@ export function LogTimeReviewPanel(props: {
   }
 
   if (!state) {
+    const failedLoad = !loadBusy && error !== null;
     return (
-      <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+      <section className="log-time" id={panelId} aria-labelledby={headingId}>
         {heading}
-        <p className="log-time__copy">
-          {busy === "load" ? "Loading time review…" : (error ?? "Time review unavailable.")}
+        <p
+          className={failedLoad ? "log-time__error" : "log-time__copy"}
+          role={failedLoad ? "alert" : (loadBusy || actionBusy ? "status" : undefined)}
+        >
+          {loadBusy
+            ? "Loading time review…"
+            : (error ??
+              (actionBusy
+                ? "A time change is still in progress."
+                : "Time review unavailable."))}
         </p>
       </section>
     );
@@ -410,7 +549,7 @@ export function LogTimeReviewPanel(props: {
 
   if (!state.corpusId) {
     return (
-      <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+      <section className="log-time" id={panelId} aria-labelledby={headingId}>
         {heading}
         <p className="log-time__copy">
           Once you have added log files to this investigation, build a log corpus
@@ -436,7 +575,7 @@ export function LogTimeReviewPanel(props: {
   }
 
   return (
-    <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+    <section className="log-time" id={panelId} aria-labelledby={headingId}>
       {heading}
 
       {outstanding.length > 0 ? (
@@ -467,10 +606,10 @@ export function LogTimeReviewPanel(props: {
 
       {state.sources.length > 0 ? (
         <div className="log-time__tools">
-          <label htmlFor="log-time-source-filter">
+          <label htmlFor={sourceFilterId}>
             Find a log file
             <input
-              id="log-time-source-filter"
+              id={sourceFilterId}
               type="search"
               value={sourceFilter}
               placeholder="Filename or timezone"
@@ -490,6 +629,7 @@ export function LogTimeReviewPanel(props: {
         {renderedSources.map((source) => {
           const isSelected = selectedSource === source.source;
           const showPreview = preview && preview.source === source.source;
+          const zoneInputId = `${panelId}-zone-${encodeURIComponent(source.source)}`;
           return (
             <li
               key={source.source}
@@ -577,12 +717,12 @@ export function LogTimeReviewPanel(props: {
 
               {isSelected && !source.declaration ? (
                 <div className="log-time__declare">
-                  <label htmlFor={`log-time-zone-${source.source}`}>
+                  <label htmlFor={zoneInputId}>
                     Which timezone was this file written in?
                   </label>
                   <input
-                    id={`log-time-zone-${source.source}`}
-                    list="log-time-zone-options"
+                    id={zoneInputId}
+                    list={zoneOptionsId}
                     value={zone}
                     placeholder="Start typing, e.g. America/Chicago"
                     onChange={(event) => {
@@ -590,7 +730,7 @@ export function LogTimeReviewPanel(props: {
                       setPreview(null);
                     }}
                   />
-                  <datalist id="log-time-zone-options">
+                  <datalist id={zoneOptionsId}>
                     {COMMON_ZONES.map((option) => (
                       <option key={option} value={option} />
                     ))}

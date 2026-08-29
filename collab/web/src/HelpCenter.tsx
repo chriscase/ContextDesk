@@ -117,8 +117,8 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           },
           {
             src: "/help/war-room/war-room-evidence-deep-link.png",
-            alt: "Analyze page showing evidence cards and an evidence cross-examination table",
-            caption: "Inspect the evidence and follow citations before you run or compare lanes.",
+            alt: "Analyze page showing the investigation workstreams section",
+            caption: "Open Analyze to review completed workstreams in their investigation context.",
           },
           {
             src: "/help/war-room/war-room-compare.png",
@@ -338,7 +338,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "triage",
         ],
         what:
-          "The Capture stage's Logs and files panel adds evidence to the open investigation only. You can choose individual files, a ZIP archive, or a directory (the browser supplies relative paths). Preview lists accepted and rejected files before anything is stored. Commit stages accepted bytes, then records evidence, provenance, timeline, batch, and success audit as one operation; a failure rolls all of them back. The global Sources catalog stays for reusable connector definitions — ordinary one-investigation uploads do not go through it.",
+          "The Capture stage's Logs and files panel adds evidence to the open investigation only. You can choose individual files, a ZIP archive, or a directory (the browser supplies relative paths). Preview lists accepted and rejected files before anything is stored. Commit stages accepted bytes, then records evidence, provenance, timeline, batch, and success audit as one operation; a failure rolls all of them back. The global Attribution catalog stays for reusable source labels — ordinary one-investigation uploads do not go through it.",
         when:
           "Use it when an operator has a folder or ZIP of logs for one investigation and needs them on the evidence board without a separate conversion step.",
         steps: [
@@ -364,7 +364,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         id: "log-workbench",
         title: "Use the Log workbench",
         summary:
-          "Read this investigation’s imported logs side by side, search them, save a view, and bookmark a line without putting evidence in the global Sources catalog.",
+          "Read this investigation’s imported logs side by side, search them, save a view, and bookmark a line without putting evidence in the global Attribution catalog.",
         keywords: [
           "log workbench",
           "side by side",
@@ -384,7 +384,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Use it after Capture has imported files, a ZIP, or a directory, when you need to read more than one log at once or return to a saved view after reload.",
         steps: [
           "Open Analyze and find Log workbench.",
-          "Filter files by name or path when the list is long, then tick up to four files to open them side by side. Clear one to open another.",
+          "Filter files by name or path when the list is long, then tick up to four files to open them side by side. At narrow widths the panes stack vertically. Clear one to open another.",
           "Type in Find and press Search or Enter. Advanced filters (match mode, include/exclude, severity, UTC range) stay closed until you need them.",
           "Use Previous/Next, F3, or Ctrl/Cmd+G in Find to move through matches without wrapping the buttons. Choose a hit to open that file at the matching line. Matches are grouped by file.",
           "Read the two facts in the answer separately: how many matches it found, and whether every selected line was searched. When lines remain, choose “Keep searching the rest of the selected lines” to continue from exactly where it stopped — including after a page that found nothing.",
@@ -396,7 +396,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Saved views and bookmarks stay with the investigation. A stale bookmark explains that the file bytes moved; it does not silently jump to another line.",
         limits:
-          "Each search page does a bounded amount of work and then says where it stopped, so continuing is always possible and no match is skipped or shown twice. An answer that has not covered every selected line says so instead of reading as a complete count. If the files you selected change, or a timezone is applied, a half-finished search is refused rather than resumed against different lines — start it again. A time range is answered by the timezone host, which owns that resolution; if that host cannot be reached the time range is refused rather than guessed. Regex that would run unbounded is refused. Share-safe locator tokens re-check authorization and do not reveal a private filename to someone who cannot open the investigation.",
+          "Each search page does a bounded amount of work and then says where it stopped, so continuing is always possible and no match is skipped or shown twice. An answer that has not covered every selected line says so instead of reading as a complete count. If the files you selected change, or a timezone is applied, a half-finished search is refused rather than resumed against different lines — start it again. A time range is answered by the timezone host, which owns that resolution; if that host cannot be reached the time range is refused rather than guessed. Regex that would run unbounded is refused. The current local server materializes one selected evidence file in memory before building line windows, so paging is not a constant-memory guarantee for one extremely large file. Share-safe locator tokens re-check authorization and do not reveal a private filename to someone who cannot open the investigation.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {
@@ -1336,7 +1336,9 @@ export function HelpCenter(props: {
   const [selection, setSelection] = useState<Selection>(null);
   const [openIllustration, setOpenIllustration] = useState<HelpIllustration | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const illustrationDialogRef = useRef<HTMLDivElement>(null);
   const illustrationCloseRef = useRef<HTMLButtonElement>(null);
+  const illustrationInvokerRef = useRef<HTMLButtonElement | null>(null);
 
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const searching = terms.length > 0;
@@ -1362,11 +1364,43 @@ export function HelpCenter(props: {
   useEffect(() => {
     if (!openIllustration) return;
     illustrationCloseRef.current?.focus();
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpenIllustration(null);
+    function keepFocusInDialog(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpenIllustration(null);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = illustrationDialogRef.current;
+      if (!dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+      )].filter((element) => element.closest("[hidden], [aria-hidden='true']") === null);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first?.focus();
+      }
     }
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    window.addEventListener("keydown", keepFocusInDialog);
+    return () => window.removeEventListener("keydown", keepFocusInDialog);
+  }, [openIllustration]);
+
+  useEffect(() => {
+    if (openIllustration !== null) return;
+    const invoker = illustrationInvokerRef.current;
+    if (invoker && document.contains(invoker)) invoker.focus();
+    illustrationInvokerRef.current = null;
   }, [openIllustration]);
 
   function openArticle(id: string) {
@@ -1536,7 +1570,10 @@ export function HelpCenter(props: {
                         <button
                           type="button"
                           className="help-illustration__open"
-                          onClick={() => setOpenIllustration(illustration)}
+                          onClick={(event) => {
+                            illustrationInvokerRef.current = event.currentTarget;
+                            setOpenIllustration(illustration);
+                          }}
                           aria-label={`Expand screenshot: ${illustration.caption}`}
                         >
                           <img
@@ -1703,10 +1740,13 @@ export function HelpCenter(props: {
       </div>
       {openIllustration ? (
         <div
+          ref={illustrationDialogRef}
           className="help-lightbox"
           role="dialog"
           aria-modal="true"
           aria-labelledby="help-lightbox-title"
+          aria-describedby="help-lightbox-description"
+          tabIndex={-1}
           onClick={(event) => {
             if (event.target === event.currentTarget) setOpenIllustration(null);
           }}
@@ -1724,7 +1764,9 @@ export function HelpCenter(props: {
               </button>
             </div>
             <img src={openIllustration.src} alt={openIllustration.alt} />
-            <p>Synthetic example — your screens and recorded data will be different.</p>
+            <p id="help-lightbox-description">
+              Synthetic example — your screens and recorded data will be different.
+            </p>
           </div>
         </div>
       ) : null}
