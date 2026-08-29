@@ -529,6 +529,8 @@ export function LogWorkbench(props: {
   }
 
   function togglePane(evidenceId: string) {
+    setSearch(null);
+    setChronology(null);
     if (panes.includes(evidenceId)) {
       setPanes((current) => current.filter((id) => id !== evidenceId));
       return;
@@ -568,6 +570,10 @@ export function LogWorkbench(props: {
    * used to start over from the beginning.
    */
   async function runSearch(pageCursor: string | null = null) {
+    if (panes.length === 0) {
+      setNotice("Select at least one log file before searching.");
+      return;
+    }
     setError(null);
     setSearching(true);
     try {
@@ -603,6 +609,10 @@ export function LogWorkbench(props: {
   }
 
   async function runChronology() {
+    if (panes.length === 0) {
+      setNotice("Select at least one log file before building a chronology.");
+      return;
+    }
     setChronologyBusy(true);
     try {
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/chronology`, {
@@ -655,6 +665,10 @@ export function LogWorkbench(props: {
 
   async function saveView() {
     if (props.readOnly || !props.canWrite) return;
+    if (panes.length === 0) {
+      setNotice("Select at least one log file before saving a view.");
+      return;
+    }
     const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/views`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -742,6 +756,8 @@ export function LogWorkbench(props: {
 
   function applyView(view: SavedView) {
     setPanes(view.selectedPanes.slice(0, MAX_PANES));
+    setSearch(null);
+    setChronology(null);
     setQuery(view.query);
     setMode((view.mode as typeof mode) || "case_insensitive");
     setInclude(view.filters?.includeTerms?.[0] ?? "");
@@ -950,7 +966,15 @@ export function LogWorkbench(props: {
             </button>
           ) : null}
           {panes.length > 0 ? (
-            <button type="button" onClick={() => setPanes([])}>
+            <button
+              type="button"
+              onClick={() => {
+                setPanes([]);
+                setSearch(null);
+                setChronology(null);
+                setNotice("Open-file selection cleared. Select a file before searching.");
+              }}
+            >
               Clear open files
             </button>
           ) : null}
@@ -1064,7 +1088,11 @@ export function LogWorkbench(props: {
                 spellCheck={false}
               />
             </label>
-            <button type="button" onClick={() => void runSearch()} disabled={searching}>
+            <button
+              type="button"
+              onClick={() => void runSearch()}
+              disabled={searching || panes.length === 0}
+            >
               {searching ? "Searching…" : "Search"}
             </button>
           </div>
@@ -1360,7 +1388,7 @@ export function LogWorkbench(props: {
                   placeholder="e.g. Checkout timeout"
                 />
               </label>
-              <button type="button" onClick={() => void saveView()}>
+              <button type="button" onClick={() => void saveView()} disabled={panes.length === 0}>
                 Save view
               </button>
             </div>
@@ -1405,7 +1433,11 @@ export function LogWorkbench(props: {
                 <option value="severity">Severity</option>
               </select>
             </label>
-            <button type="button" onClick={() => void runChronology()} disabled={chronologyBusy}>
+            <button
+              type="button"
+              onClick={() => void runChronology()}
+              disabled={chronologyBusy || panes.length === 0}
+            >
               {chronologyBusy ? "Building chronology…" : "Show merged chronology"}
             </button>
           </div>

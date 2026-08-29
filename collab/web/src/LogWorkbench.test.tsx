@@ -207,6 +207,21 @@ describe("Log workbench", () => {
     expect(screen.getByText(/no panes open/)).toBeTruthy();
     expect(screen.queryByRole("region", { name: "edge.log lines" })).toBeNull();
     expect(screen.getByText("Select a log file to open its lines.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Search" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByRole("button", { name: "Save view" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(
+      (screen.getByRole("button", { name: "Show merged chronology" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    const fetchCalls = (fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    fireEvent.change(screen.getByLabelText("Find in logs"), { target: { value: "timeout" } });
+    fireEvent.keyDown(screen.getByLabelText("Find in logs"), { key: "Enter" });
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCalls);
   });
 
   it("searches and reports an exact match count", async () => {
