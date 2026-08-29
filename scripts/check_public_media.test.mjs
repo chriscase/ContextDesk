@@ -216,6 +216,15 @@ test("README alt semantics are enforced for every published image form", () => {
       `# Fixture\n\n![Synthetic frame](${pathname})\n`,
     );
     assert.equal(run(root).status, 0);
+
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![Synthetic \\] frame](<${pathname}>)\n\n` +
+        `![Synthetic \\] reference][shot]\n\n[shot]: <${pathname}>\n`,
+    );
+    const escapedAndAngled = run(root);
+    assert.equal(escapedAndAngled.status, 0, escapedAndAngled.stderr);
+    assert.match(escapedAndAngled.stdout, /2 published references/);
   });
 });
 
@@ -379,6 +388,7 @@ test("reference-style and HTML images cannot bypass the ledger", () => {
 test("published image extraction covers every rendered form", () => {
   const found = collectPublishedImageTargets(
     `![a](docs/media/gallery/one.png)\n` +
+      `![escaped \\] alt](<docs/media/gallery/angled.png>)\n` +
       `![b][two]\n` +
       `<img src="docs/media/gallery/three.png" alt="c">\n` +
       `![CI](https://example.invalid/badge.svg)\n\n` +
@@ -386,6 +396,7 @@ test("published image extraction covers every rendered form", () => {
   );
   assert.deepEqual(found.map((f) => f.form).sort(), [
     "html",
+    "inline",
     "inline",
     "inline",
     "reference",
@@ -400,6 +411,7 @@ test("published image extraction covers every rendered form", () => {
       .map((f) => [f.form, f.alt]),
     [
       ["inline", "a"],
+      ["inline", "escaped \\] alt"],
       ["reference", "b"],
       ["html", "c"],
     ],

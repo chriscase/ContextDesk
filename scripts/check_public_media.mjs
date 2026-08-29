@@ -314,18 +314,29 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
   // Link reference definitions: `[label]: target "optional title"`.
   const definitions = new Map();
   for (const match of text.matchAll(
-    /^[ \t]{0,3}\[([^\]]+)\]:[ \t]*(\S+)(?:[ \t]+["'(].*)?[ \t]*$/gm,
+    /^[ \t]{0,3}\[((?:\\.|[^\]\\])+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))(?:[ \t]+["'(].*)?[ \t]*$/gm,
   )) {
-    definitions.set(match[1].trim().toLowerCase(), match[2]);
+    definitions.set(
+      match[1].trim().toLowerCase(),
+      match[2] ?? match[3],
+    );
   }
 
   // Inline: ![alt](target "title")
-  for (const match of text.matchAll(/!\[([^\]]*)\]\(\s*([^)\s]+)[^)]*\)/g)) {
-    targets.push({ target: match[2], form: "inline", alt: match[1] });
+  for (const match of text.matchAll(
+    /!\[((?:\\.|[^\]\\])*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))[^)]*\)/g,
+  )) {
+    targets.push({
+      target: match[2] ?? match[3],
+      form: "inline",
+      alt: match[1],
+    });
   }
 
   // Full reference ![alt][label], collapsed ![label][], shortcut ![label].
-  for (const match of text.matchAll(/!\[([^\]]*)\](?:\[([^\]]*)\])?/g)) {
+  for (const match of text.matchAll(
+    /!\[((?:\\.|[^\]\\])*)\](?:\[((?:\\.|[^\]\\])*)\])?/g,
+  )) {
     const end = match.index + match[0].length;
     // Skip the inline form, already collected above.
     if (match[2] === undefined && text.slice(end, end + 1) === "(") continue;
