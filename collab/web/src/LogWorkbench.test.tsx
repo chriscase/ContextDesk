@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   countAdvancedFilters,
@@ -23,6 +23,14 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 function inventory() {
@@ -243,6 +251,81 @@ describe("Log workbench", () => {
     expect(screen.getByRole("button", { name: "Next match" })).toBeTruthy();
   });
 
+  it("does not publish search or chronology responses after the file scope is cleared", async () => {
+    stubFetch();
+    const baseFetch = fetch as ReturnType<typeof vi.fn>;
+    const searchGate = deferred<Response>();
+    const chronologyGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/workbench/search")) return searchGate.promise;
+        if (url.includes("/workbench/chronology")) return chronologyGate.promise;
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await screen.findByRole("heading", { name: "Log workbench" });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear open files" }));
+
+    await act(async () => {
+      searchGate.resolve(
+        jsonResponse({
+          matches: [{
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            rotationFamily: "gateway/edge.log",
+            lineNumber: 1,
+            byteOffset: 0,
+            text: "obsolete search result",
+            wrapped: false,
+            originalTimestamp: null,
+            normalizedUtc: null,
+            parseClass: "missing",
+            contextBefore: [],
+            contextAfter: [],
+          }],
+          returned: 1,
+          bounded: false,
+          atLeast: 1,
+          nextCursor: null,
+          nextPageCursor: null,
+          coverageComplete: true,
+          timeFilterUnknownReason: null,
+        }),
+      );
+      chronologyGate.resolve(
+        jsonResponse({
+          events: [{
+            evidenceId: EVIDENCE_A,
+            relativePath: "gateway/edge.log",
+            lineNumber: 1,
+            excerpt: "obsolete chronology result",
+            adjacencyReason: "order",
+            uncertainty: [],
+            correlationKind: "none",
+            correlationId: null,
+            originalTimestamp: null,
+            normalizedUtc: null,
+          }],
+          unknownBuckets: [],
+          bounded: false,
+        }),
+      );
+      await Promise.all([searchGate.promise, chronologyGate.promise]);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("obsolete search result")).toBeNull();
+    expect(screen.queryByText("obsolete chronology result")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Search matches" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merged chronology" })).toBeNull();
+  });
+
   it("labels normalized, unresolved, and order-only chronology rows explicitly", async () => {
     stubFetch();
     const baseFetch = fetch as ReturnType<typeof vi.fn>;
@@ -264,8 +347,9 @@ describe("Log workbench", () => {
       }),
     );
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
-    await screen.findByRole("heading", { name: "Log workbench" });
-    fireEvent.click(screen.getByRole("button", { name: "Show merged chronology" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Show merged chronology" }),
+    );
     const chronology = await screen.findByRole("region", { name: "Merged chronology" });
     expect(chronology.textContent).toContain("Normalized UTC: 2024-03-10T08:10:00.000Z");
     expect(chronology.textContent).toContain("Unresolved local time: 03/10 01:11:00");
@@ -778,7 +862,29 @@ describe("Log workbench file picker at 3, 30, and 300 files", () => {
   });
 
   it("filters thirty files and caps side-by-side panes at four", async () => {
-    stubSizedWorkbench(30);
+    stubSizedWorkbench(30, {
+      matches: [{
+        evidenceId: EVIDENCE_A,
+        relativePath: "hosts/host-0/svc-000.log",
+        rotationFamily: "svc-000.log",
+        lineNumber: 1,
+        byteOffset: 0,
+        text: "preserved search result",
+        wrapped: false,
+        originalTimestamp: null,
+        normalizedUtc: null,
+        parseClass: "missing",
+        contextBefore: [],
+        contextAfter: [],
+      }],
+      returned: 1,
+      bounded: false,
+      atLeast: 1,
+      nextCursor: null,
+      nextPageCursor: null,
+      coverageComplete: true,
+      timeFilterUnknownReason: null,
+    });
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
     await screen.findByRole("heading", { name: "Log workbench" });
     expect(screen.getByText(/30 files/)).toBeTruthy();
@@ -790,12 +896,15 @@ describe("Log workbench file picker at 3, 30, and 300 files", () => {
     fireEvent.click(screen.getByLabelText("Show svc-001.log in a pane"));
     fireEvent.click(screen.getByLabelText("Show svc-002.log in a pane"));
     fireEvent.click(screen.getByLabelText("Show svc-003.log in a pane"));
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText("preserved search result")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Show svc-004.log in a pane"));
     expect(screen.getByText(/Only 4 files can be open side by side/)).toBeTruthy();
     expect(screen.getByText(/4 of 4 panes open/)).toBeTruthy();
     expect((screen.getByLabelText("Show svc-004.log in a pane") as HTMLInputElement).checked).toBe(
       false,
     );
+    expect(screen.getByText("preserved search result")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter log files"), {
       target: { value: "svc-029" },

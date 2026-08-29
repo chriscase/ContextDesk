@@ -252,7 +252,11 @@ A finding's evidence link opens the cited item in its investigation context.
 Share the resulting URL when another authorized reviewer needs the same stage,
 comparison, lane, section, or evidence item.
 
-![Synthetic finding opened through an evidence deep link](../assets/war-room/war-room-evidence-deep-link.png)
+The synthetic image below shows the Analyze workstreams context reached during
+this flow, not the cited evidence target itself. Verify the target in the live
+workspace before treating the citation as resolved.
+
+![Synthetic Analyze workstreams context reached from the evidence-review flow](../assets/war-room/war-room-evidence-deep-link.png)
 
 If a deep link resolves to the wrong item, has insufficient context, or no
 longer resolves, treat the citation as unverified. Do not rely on its prose.
@@ -316,7 +320,7 @@ the directory does not provide a service bind, the groups proven during login
 are retained for that session and take effect again at the next login; the
 application never stores or reuses the user’s password for this purpose.
 
-![Synthetic Administration console with explicit group-to-role mappings](../assets/war-room/war-room-administration.png)
+![Synthetic Administration overview with navigation and component health](../assets/war-room/war-room-administration.png)
 
 ## Three different exports
 

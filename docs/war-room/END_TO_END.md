@@ -83,12 +83,14 @@ inspect the investigation-scoped synthetic logs or stack traces.
 The **Attribution** catalog records who or what produced an item. The actual log,
 note, upload, or imported response belongs to this investigation.
 
-Open **Compare**, choose a finding, and follow its evidence link. Confirm the
+Open **Compare**, choose a finding, and follow its evidence link. The synthetic
+image below records the resulting Analyze workstreams context; it does not put
+the cited evidence target itself in frame. During acceptance, confirm the live
 destination shows a readable label and relevant log, stack frame, or
 observation context rather than only an opaque identifier. Expand longer
 technical material when needed.
 
-![Fully synthetic evidence deep-link destination](../assets/war-room/war-room-evidence-deep-link.png)
+![Fully synthetic Analyze workstreams context reached from the evidence-review flow](../assets/war-room/war-room-evidence-deep-link.png)
 
 Open **Technical details** to inspect exact identifiers, hashes, timestamps,
 source metadata, or lane configuration. Those fields support audit but do not

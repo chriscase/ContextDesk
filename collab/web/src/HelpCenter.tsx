@@ -117,8 +117,8 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           },
           {
             src: "/help/war-room/war-room-evidence-deep-link.png",
-            alt: "Analyze page showing evidence cards and an evidence cross-examination table",
-            caption: "Inspect the evidence and follow citations before you run or compare lanes.",
+            alt: "Analyze page showing the investigation workstreams section",
+            caption: "Follow citations into Analyze, then inspect the cited item in its workstream context.",
           },
           {
             src: "/help/war-room/war-room-compare.png",

@@ -335,6 +335,19 @@ export function LogWorkbench(props: {
   const loadedPanes = useRef<Set<string>>(new Set());
   /** The first available file is selected once per investigation, never after an explicit clear. */
   const defaultPaneCase = useRef<string | null>(null);
+  /** Ignore async results that were started against an obsolete file selection. */
+  const searchRequestGeneration = useRef(0);
+  const chronologyRequestGeneration = useRef(0);
+
+  const invalidateScopedResults = useCallback(() => {
+    searchRequestGeneration.current += 1;
+    chronologyRequestGeneration.current += 1;
+    setSearch(null);
+    setChronology(null);
+    setUnknownBuckets([]);
+    setSearching(false);
+    setChronologyBusy(false);
+  }, []);
 
   const selectedItems = useMemo(
     () => items.filter((item) => panes.includes(item.evidenceId)),
@@ -529,9 +542,8 @@ export function LogWorkbench(props: {
   }
 
   function togglePane(evidenceId: string) {
-    setSearch(null);
-    setChronology(null);
     if (panes.includes(evidenceId)) {
+      invalidateScopedResults();
       setPanes((current) => current.filter((id) => id !== evidenceId));
       return;
     }
@@ -541,6 +553,7 @@ export function LogWorkbench(props: {
       );
       return;
     }
+    invalidateScopedResults();
     setPanes((current) =>
       current.includes(evidenceId) ? current : [...current, evidenceId],
     );
@@ -574,6 +587,7 @@ export function LogWorkbench(props: {
       setNotice("Select at least one log file before searching.");
       return;
     }
+    const requestGeneration = ++searchRequestGeneration.current;
     setError(null);
     setSearching(true);
     try {
@@ -594,17 +608,19 @@ export function LogWorkbench(props: {
         }),
       });
       if (!response.ok) {
-        setError(await errorText(response, "Search could not run."));
+        const message = await errorText(response, "Search could not run.");
+        if (searchRequestGeneration.current === requestGeneration) setError(message);
         return;
       }
       const result = (await response.json()) as SearchResult;
+      if (searchRequestGeneration.current !== requestGeneration) return;
       const previous = pageCursor && search ? search.matches : [];
       const merged = { ...result, matches: [...previous, ...result.matches] };
       setSearch(merged);
       if (!pageCursor) setMatchIndex(0);
       setNotice(searchSummary(result, merged.matches.length, corpusTruncated));
     } finally {
-      setSearching(false);
+      if (searchRequestGeneration.current === requestGeneration) setSearching(false);
     }
   }
 
@@ -613,6 +629,7 @@ export function LogWorkbench(props: {
       setNotice("Select at least one log file before building a chronology.");
       return;
     }
+    const requestGeneration = ++chronologyRequestGeneration.current;
     setChronologyBusy(true);
     try {
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/workbench/chronology`, {
@@ -621,7 +638,8 @@ export function LogWorkbench(props: {
         body: JSON.stringify({ grouping, evidenceIds: panes }),
       });
       if (!response.ok) {
-        setError(await errorText(response, "The merged chronology could not be built."));
+        const message = await errorText(response, "The merged chronology could not be built.");
+        if (chronologyRequestGeneration.current === requestGeneration) setError(message);
         return;
       }
       const body = (await response.json()) as {
@@ -630,6 +648,7 @@ export function LogWorkbench(props: {
         bounded?: boolean;
         atLeast?: number;
       };
+      if (chronologyRequestGeneration.current !== requestGeneration) return;
       setChronology(body.events ?? []);
       setUnknownBuckets(body.unknownBuckets ?? []);
       setNotice(
@@ -638,7 +657,7 @@ export function LogWorkbench(props: {
           : `Merged chronology built from ${(body.events ?? []).length.toLocaleString()} lines.`,
       );
     } finally {
-      setChronologyBusy(false);
+      if (chronologyRequestGeneration.current === requestGeneration) setChronologyBusy(false);
     }
   }
 
@@ -755,9 +774,8 @@ export function LogWorkbench(props: {
   }
 
   function applyView(view: SavedView) {
+    invalidateScopedResults();
     setPanes(view.selectedPanes.slice(0, MAX_PANES));
-    setSearch(null);
-    setChronology(null);
     setQuery(view.query);
     setMode((view.mode as typeof mode) || "case_insensitive");
     setInclude(view.filters?.includeTerms?.[0] ?? "");
@@ -778,6 +796,8 @@ export function LogWorkbench(props: {
     }
     if (event.key === "Escape") {
       setQuery("");
+      searchRequestGeneration.current += 1;
+      setSearching(false);
       setSearch(null);
     }
     if (event.key === "F3" || ((event.key === "g" || event.key === "G") && (event.metaKey || event.ctrlKey))) {
@@ -969,9 +989,8 @@ export function LogWorkbench(props: {
             <button
               type="button"
               onClick={() => {
+                invalidateScopedResults();
                 setPanes([]);
-                setSearch(null);
-                setChronology(null);
                 setNotice("Open-file selection cleared. Select a file before searching.");
               }}
             >

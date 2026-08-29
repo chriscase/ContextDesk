@@ -240,7 +240,7 @@ does not grant access. Only an explicit destination group-to-role mapping can
 grant a workspace role, and source-system roles from an imported archive are
 never trusted.
 
-![Synthetic Administration console with explicit group-to-role mappings](../assets/war-room/war-room-administration.png)
+![Synthetic Administration overview with navigation and component health](../assets/war-room/war-room-administration.png)
 
 ## Three different exports
 
