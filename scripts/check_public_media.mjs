@@ -789,11 +789,10 @@ function parseMarkdownDefinitionDestination(source, start) {
   if (source[index] === "\r" && source[index + 1] === "\n") index += 2;
   else if (source[index] === "\n") index += 1;
   if (index > start) {
-    let continuationIndent = 0;
-    while (/[ \t]/.test(source[index] ?? "") && continuationIndent < 4) {
-      index += 1;
-      continuationIndent += 1;
-    }
+    // Reference destinations may be indented beyond four characters (and
+    // may mix tabs and spaces). Consume the complete continuation indentation
+    // rather than leaving a fifth character at the destination start.
+    while (/[ \t]/.test(source[index] ?? "")) index += 1;
   }
   if (source[index] === "<") {
     const close = source.indexOf(">", index + 1);
@@ -835,9 +834,10 @@ function markdownContainerInfo(line) {
     }
     const list = remainder.match(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
     if (list !== null) {
+      const listStartColumn = sourceColumn;
       containers.push({
         type: "list",
-        indent: markdownIndentColumns(list[0]),
+        indent: markdownAdvanceColumns(list[0], listStartColumn) - listStartColumn,
       });
       sourceColumn = markdownAdvanceColumns(list[0], sourceColumn);
       remainder = remainder.slice(list[0].length);
@@ -890,44 +890,37 @@ function stripMarkdownContainerPrefixes(text) {
   return text.replace(/^[^\r\n]*/gm, markdownContainerContent);
 }
 
-// Keep list markers in the source coordinate system used by the backward
-// context check, while removing only blockquote prefixes. The publication
-// candidate has all containers stripped; the helper still needs to see the
-// list marker that owns an indented definition.
-function stripMarkdownBlockquotePrefixes(line) {
-  let remainder = line;
-  let preservedLists = "";
-  while (true) {
-    const quote = remainder.match(/^[ \t]{0,3}>[ \t]?/);
-    if (quote !== null) {
-      remainder = remainder.slice(quote[0].length);
-      continue;
-    }
-    const list = remainder.match(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
-    if (list !== null) {
-      preservedLists += list[0];
-      remainder = remainder.slice(list[0].length);
-      continue;
-    }
-    break;
-  }
-  return preservedLists + remainder;
-}
-
 function isIndentedDefinitionInList(sourceLines, lineIndex, indent) {
   for (let index = lineIndex - 1; index >= 0; index -= 1) {
     const line = sourceLines[index];
-    if (/^[ \t]*$/.test(line)) continue;
-    const list = line.match(/^[ \t]*(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
-    if (list !== null) {
-      return indent >= markdownIndentColumns(list[0]);
+    const info = markdownContainerInfo(line);
+    if (/^[ \t]*$/.test(info.content)) continue;
+    const listIndent = markdownListMarkerIndent(line);
+    if (listIndent !== null) {
+      return indent >= listIndent;
     }
-    const lineIndent = markdownIndentColumns(
-      (line.match(/^[ \t]*/) ?? [""])[0],
-    );
+    const lineIndent = markdownLeadingIndentAfterContainers(line);
     if (lineIndent < indent) return false;
   }
   return false;
+}
+
+// The normal container scanner intentionally limits leading indentation to
+// CommonMark's three-column container prefix. A definition nested under a
+// list, however, can have a marker several columns deep; inspect that marker
+// separately while retaining the original tab-stop offset after blockquotes.
+function markdownListMarkerIndent(line) {
+  let remainder = line;
+  let sourceColumn = 0;
+  while (true) {
+    const quote = remainder.match(/^[ \t]{0,3}>[ \t]?/);
+    if (quote === null) break;
+    sourceColumn = markdownAdvanceColumns(quote[0], sourceColumn);
+    remainder = remainder.slice(quote[0].length);
+  }
+  const list = remainder.match(/^[ \t]*(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
+  if (list === null) return null;
+  return markdownAdvanceColumns(list[0], sourceColumn) - sourceColumn;
 }
 
 function maskMarkdownFencedCode(text) {
@@ -1218,9 +1211,7 @@ function collectMarkdownDefinitions(text, document = "<memory>") {
   // Definition matches are found after blockquote/list container prefixes
   // have been stripped. For list-context validation, remove only blockquote
   // prefixes so the owning list marker remains visible to the backward scan.
-  const sourceLines = maskedBlocks
-    .split(/\r\n|\n|\r/)
-    .map(stripMarkdownBlockquotePrefixes);
+  const sourceLines = maskedBlocks.split(/\r\n|\n|\r/);
   const lineStart = /^[ \t]*\[/gm;
   const maskedSourceLines = maskedBlocks.split(/\r\n|\n|\r/);
   for (const match of visibleBlocks.matchAll(lineStart)) {

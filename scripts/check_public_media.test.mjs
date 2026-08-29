@@ -319,6 +319,8 @@ test("multiline reference labels and continuation destinations fail closed", () 
     fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
     const cases = [
       `![Unreviewed][shot]\n\n[shot]:\n  docs/images/smuggled.png\n`,
+      `![Unreviewed][shot]\n\n[shot]:\n     docs/images/smuggled.png\n`,
+      `![Unreviewed][shot]\n\n[shot]:\n\t docs/images/smuggled.png\n`,
       `![Unreviewed][multi\n label]\n\n[multi\n label]: docs/images/smuggled.png\n`,
       `![Unreviewed\n multiline][shot]\n\n[shot]: docs/images/smuggled.png\n`,
     ];
@@ -476,6 +478,7 @@ test("escaped delimiters and Markdown containers cannot hide published images", 
       "# Fixture\n\n![Synthetic][shot]\n\n> - item\n>\n>     [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n> \t[shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n> >\t[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n> \t- item\n>\n>     [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n100. item\n\n     [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n-\t" +
         "```md\n    code\n  [shot]: docs/images/unreviewed.png\n",
