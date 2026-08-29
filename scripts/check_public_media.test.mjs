@@ -107,7 +107,7 @@ test("a README raster outside the ledger fails closed", () => {
   withRepository(({ root, pathname }) => {
     fs.writeFileSync(
       path.join(root, "README.md"),
-      `# Fixture\n\n![CI](https://example.invalid/badge.svg)\n\n![Listed](${pathname})\n`,
+      `# Fixture\n\n![CI](https://example.invalid/badge.svg)\n\n![Synthetic listed](${pathname})\n`,
     );
     const listed = run(root);
     assert.equal(listed.status, 0, listed.stderr);
@@ -185,6 +185,34 @@ test("missing or malformed alt semantics fail closed", () => {
     const blank = run(root);
     assert.notEqual(blank.status, 0);
     assert.match(blank.stderr, /altRequiredTerms must be a non-empty array/);
+  });
+});
+
+test("README alt semantics are enforced for every published image form", () => {
+  withRepository(({ root, pathname }) => {
+    const readme = path.join(root, "README.md");
+    const cases = [
+      `![Old description](${pathname})\n`,
+      `![Old description][shot]\n\n[shot]: ${pathname}\n`,
+      `<img src="${pathname}" alt="Old description">\n`,
+      `<img src="${pathname}">\n`,
+    ];
+
+    for (const contents of cases) {
+      fs.writeFileSync(readme, `# Fixture\n\n${contents}`);
+      const result = run(root);
+      assert.notEqual(result.status, 0);
+      assert.match(
+        result.stderr,
+        /alt text must include required term\(s\): synthetic/,
+      );
+    }
+
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![Synthetic frame](${pathname})\n`,
+    );
+    assert.equal(run(root).status, 0);
   });
 });
 
@@ -267,7 +295,7 @@ test("reference-style and HTML images cannot bypass the ledger", () => {
     fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
     fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
 
-    fs.writeFileSync(readme, `# Fixture\n\n![Listed](${pathname})\n`);
+    fs.writeFileSync(readme, `# Fixture\n\n![Synthetic listed](${pathname})\n`);
     assert.match(run(root).stdout, /1 published references/);
 
     // 1. Full reference style.
@@ -319,8 +347,8 @@ test("reference-style and HTML images cannot bypass the ledger", () => {
     // Ledger-listed assets still pass in every covered form.
     fs.writeFileSync(
       readme,
-      `# Fixture\n\n![Inline](${pathname})\n\n![Ref][ok]\n\n` +
-        `<img src="${pathname}" alt="Html">\n\n[ok]: ${pathname}\n`,
+      `# Fixture\n\n![Synthetic inline](${pathname})\n\n![Synthetic ref][ok]\n\n` +
+        `<img src="${pathname}" alt="Synthetic html">\n\n[ok]: ${pathname}\n`,
     );
     const allForms = run(root);
     assert.equal(allForms.status, 0, allForms.stderr);
@@ -332,7 +360,7 @@ test("published image extraction covers every rendered form", () => {
   const found = collectPublishedImageTargets(
     `![a](docs/media/gallery/one.png)\n` +
       `![b][two]\n` +
-      `<img src="docs/media/gallery/three.png">\n` +
+      `<img src="docs/media/gallery/three.png" alt="c">\n` +
       `![CI](https://example.invalid/badge.svg)\n\n` +
       `[two]: docs/media/gallery/two.png\n`,
   );
@@ -345,5 +373,15 @@ test("published image extraction covers every rendered form", () => {
   assert.ok(
     found.some((f) => f.target === "docs/media/gallery/two.png"),
     "reference definitions must resolve to their target",
+  );
+  assert.deepEqual(
+    found
+      .filter((f) => !/^https?:/i.test(f.target))
+      .map((f) => [f.form, f.alt]),
+    [
+      ["inline", "a"],
+      ["reference", "b"],
+      ["html", "c"],
+    ],
   );
 });

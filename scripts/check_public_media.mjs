@@ -143,6 +143,7 @@ export function validatePublicMedia(
   }
 
   const seen = new Set();
+  const altTermsByPath = new Map();
   for (const [index, asset] of parsed.assets.entries()) {
     const source = `assets[${index}]`;
     if (asset === null || typeof asset !== "object" || Array.isArray(asset)) {
@@ -176,6 +177,10 @@ export function validatePublicMedia(
     ) {
       throw new Error(`${source}: altRequiredTerms must be a non-empty array of non-empty strings`);
     }
+    altTermsByPath.set(
+      assetPath,
+      asset.altRequiredTerms.map((term) => term.trim()),
+    );
 
     const absolute = path.resolve(root, ...assetPath.split("/"));
     if (!isInside(mediaRoot, absolute)) {
@@ -213,7 +218,7 @@ export function validatePublicMedia(
     );
   }
 
-  const published = validatePublishedReferences(root, seen);
+  const published = validatePublishedReferences(root, altTermsByPath);
   const provenance = validateProvenanceRecord(root, parsed.assets);
 
   return { assets: inventory.length, published, provenance };
@@ -256,7 +261,7 @@ export function validateProvenanceRecord(
  */
 export function validatePublishedReferences(
   root,
-  listed,
+  altTermsByPath,
   documents = ["README.md"],
 ) {
   let references = 0;
@@ -264,16 +269,28 @@ export function validatePublishedReferences(
     const documentPath = path.join(root, document);
     if (!fs.existsSync(documentPath)) continue;
     const text = fs.readFileSync(documentPath, "utf8");
-    for (const { target, form } of collectPublishedImageTargets(text, document)) {
+    for (const { target, form, alt } of collectPublishedImageTargets(text, document)) {
       // Remote badges are not repository media and carry no local bytes.
       if (/^(?:https?:)?\/\//i.test(target) || target.startsWith("data:")) {
         continue;
       }
       if (!RASTER_EXTENSION_RE.test(target)) continue;
       const normalized = target.replace(/^\.\//, "");
-      if (!listed.has(normalized)) {
+      if (!altTermsByPath.has(normalized)) {
         throw new Error(
           `${document}: published raster '${target}' (${form}) is not in the public media ledger`,
+        );
+      }
+      const normalizedAlt = alt.trim().toLocaleLowerCase("en-US");
+      const missingTerms = altTermsByPath
+        .get(normalized)
+        .filter(
+          (term) =>
+            !normalizedAlt.includes(term.toLocaleLowerCase("en-US")),
+        );
+      if (missingTerms.length > 0) {
+        throw new Error(
+          `${document}: published raster '${target}' (${form}) alt text must include required term(s): ${missingTerms.join(", ")}`,
         );
       }
       references += 1;
@@ -303,8 +320,8 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
   }
 
   // Inline: ![alt](target "title")
-  for (const match of text.matchAll(/!\[[^\]]*\]\(\s*([^)\s]+)[^)]*\)/g)) {
-    targets.push({ target: match[1], form: "inline" });
+  for (const match of text.matchAll(/!\[([^\]]*)\]\(\s*([^)\s]+)[^)]*\)/g)) {
+    targets.push({ target: match[2], form: "inline", alt: match[1] });
   }
 
   // Full reference ![alt][label], collapsed ![label][], shortcut ![label].
@@ -326,10 +343,10 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
       }
       continue;
     }
-    targets.push({ target, form: "reference" });
+    targets.push({ target, form: "reference", alt: match[1] });
   }
 
-  // Raw HTML: <img src="target">
+  // Raw HTML: <img src="target" alt="description">
   for (const match of text.matchAll(/<img\b([^>]*)>/gi)) {
     const src = match[1].match(/\bsrc\s*=\s*("([^"]*)"|'([^']*)')/i);
     if (!src) {
@@ -337,7 +354,12 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
         `${document}: <img> tag without a quoted literal src cannot be checked: ${match[0]}`,
       );
     }
-    targets.push({ target: src[2] ?? src[3] ?? "", form: "html" });
+    const alt = match[1].match(/\balt\s*=\s*("([^"]*)"|'([^']*)')/i);
+    targets.push({
+      target: src[2] ?? src[3] ?? "",
+      form: "html",
+      alt: alt?.[2] ?? alt?.[3] ?? "",
+    });
   }
 
   return targets;
