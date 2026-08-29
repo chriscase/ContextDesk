@@ -673,7 +673,10 @@ export function LogWorkbench(props: {
         }));
       }
       finally {
-        if (pageRequestByEvidence.current.get(evidenceId) === requestSequence) {
+        if (
+          pageScopeGeneration.current === requestScopeGeneration &&
+          pageRequestByEvidence.current.get(evidenceId) === requestSequence
+        ) {
           loadingPanes.current.delete(evidenceId);
         }
       }
@@ -686,10 +689,18 @@ export function LogWorkbench(props: {
   // to — including the window a revealed search match just loaded.
   useEffect(() => {
     for (const id of panes) {
-      if (loadedPanes.current.has(id) || loadingPanes.current.has(id)) continue;
+      // A failed explicit bookmark/target load is a reservation too. Do not
+      // replace the requested location with an automatic page-one fetch just
+      // because another pane was selected; the user must explicitly retry or
+      // remove the pane.
+      if (
+        loadedPanes.current.has(id) ||
+        loadingPanes.current.has(id) ||
+        paneErrors[id]
+      ) continue;
       void loadPane(id);
     }
-  }, [panes, items, loadPane]);
+  }, [panes, items, loadPane, paneErrors]);
 
   /**
    * Open the match. A hit list that only highlights rows already on screen is

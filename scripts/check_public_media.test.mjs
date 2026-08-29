@@ -477,6 +477,7 @@ test("escaped delimiters and Markdown containers cannot hide published images", 
       "# Fixture\n\n![Synthetic][shot]\n\n100. <div>\n     code\n  [shot]: docs/images/unreviewed.png\n</div>\n",
       "# Fixture\n\n![Synthetic][shot]\n\n- outer\n  - inner\n    - third\n\n      [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n123456789. item\n\n           [shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n123456789. item\n\n\t\t   [shot]: docs/images/unreviewed.png\n",
     ];
     for (const contents of cases) {
       fs.writeFileSync(readme, contents);
@@ -499,9 +500,13 @@ test("CommonMark HTML blocks keep definitions inert until their blank-line bound
       `# Fixture\n\n![Synthetic][shot]\n\n<div>\n</div>\n[shot]: ${pathname}\n\n[shot]: docs/images/unreviewed.png\n`,
       `# Fixture\n\n![Synthetic][shot]\n\n<x-test>\n[shot]: ${pathname}\n\n[shot]: docs/images/unreviewed.png\n`,
       "# Fixture\n\n<script>\nconst x = 1;\n</script>\n![Synthetic][shot]\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<script></script>\n[shot]: docs/images/unreviewed.png\n\n![Synthetic][shot]\n",
       "# Fixture\n\n<style>\n.x { color: red; }\n</style>\n![Synthetic][shot]\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<style></style>\n[shot]: docs/images/unreviewed.png\n\n![Synthetic][shot]\n",
       "# Fixture\n\n<pre>\ntext\n</pre>\n![Synthetic][shot]\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<pre></pre>\n[shot]: docs/images/unreviewed.png\n\n![Synthetic][shot]\n",
       "# Fixture\n\n<textarea>\ntext\n</textarea>\n![Synthetic][shot]\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<textarea></textarea>\n[shot]: docs/images/unreviewed.png\n\n![Synthetic][shot]\n",
       "# Fixture\n\n<?target\n[shot]: docs/media/gallery/frame.png\n?>\n\n[shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n<!DOCTYPE html>\n[shot]: docs/media/gallery/frame.png\n>\n\n[shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n<![CDATA[\n[shot]: docs/media/gallery/frame.png\n]]>\n\n[shot]: docs/images/unreviewed.png\n",

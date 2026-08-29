@@ -1100,6 +1100,20 @@ function maskMarkdownHtmlBlocks(text, document = "<memory>") {
         openTags.pop();
       }
     }
+    // Type-1 raw HTML blocks (script/style/pre/textarea) end at their
+    // matching close tag, including when opener and closer share one line.
+    // Without this transition the next definition is masked as if it were
+    // still inside the block, allowing its image target to evade checking.
+    if (
+      openTags.length === 0 &&
+      tokens.some(
+        (token) =>
+          token.closing && RAW_HTML_CLOSE_TERMINATED_TAGS.has(token.name),
+      )
+    ) {
+      blockActive = false;
+      owner = null;
+    }
   }
   if (openTags.length > 0) {
     throw new Error(
@@ -1166,7 +1180,11 @@ function collectMarkdownDefinitions(text, document = "<memory>") {
   const sourceLines = text.split(/\r\n|\n|\r/);
   const lineStart = /^[ \t]*\[/gm;
   for (const match of visibleBlocks.matchAll(lineStart)) {
-    const indent = match[0].length - 1;
+    // Markdown indentation is measured in columns, not JavaScript string
+    // characters: a tab advances to the next four-column tab stop. Keeping
+    // the same measure as the list-container parser prevents deeply nested
+    // tab-indented definitions from escaping the publication ledger.
+    const indent = markdownIndentColumns(match[0].slice(0, -1));
     if (
       indent > 3 &&
       !isIndentedDefinitionInList(

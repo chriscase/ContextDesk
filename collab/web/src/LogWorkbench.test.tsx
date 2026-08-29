@@ -1806,6 +1806,150 @@ describe("Log workbench honesty and navigation", () => {
     expect(await screen.findByText("late bookmark line")).toBeTruthy();
   });
 
+  it("keeps a failed closed bookmark target reserved when a sibling is selected", async () => {
+    const pageRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-failed-target",
+              note: "Open failed evidence",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: EVIDENCE_B, lineNumber: 4200 },
+              shareSafeToken: "bookmark-failed-target-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const evidenceId = url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A;
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          if (evidenceId === EVIDENCE_B && start > 1) {
+            return jsonResponse({ error: "late target unavailable" }, 503);
+          }
+          return jsonResponse({
+            evidenceId,
+            relativePath: evidenceId === EVIDENCE_B ? "<img src=x onerror=alert(1)>.log" : "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_A)))).toBe(true),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open failed evidence" }));
+    expect(await screen.findByText("late target unavailable")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show edge.log in a pane" }));
+    await waitFor(() =>
+      expect(
+        pageRequests.filter(
+          (url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=1&"),
+        ),
+      ).toHaveLength(0),
+    );
+    expect(screen.getByText("late target unavailable")).toBeTruthy();
+  });
+
+  it("does not let an obsolete page request clear a reopened target reservation", async () => {
+    const pageRequests: string[] = [];
+    let inventoryCalls = 0;
+    const targetResponses = deferred<Response>();
+    const reopenedTargetResponses = deferred<Response>();
+    let targetAttempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) {
+          inventoryCalls += 1;
+          return jsonResponse(inventory());
+        }
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-reopen-target",
+              note: "Reopen target evidence",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: EVIDENCE_B, lineNumber: 4200 },
+              shareSafeToken: "bookmark-reopen-target-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const evidenceId = url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A;
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          if (evidenceId === EVIDENCE_B && start > 1) {
+            targetAttempt += 1;
+            return targetAttempt === 1 ? targetResponses.promise : reopenedTargetResponses.promise;
+          }
+          return jsonResponse({
+            evidenceId,
+            relativePath: evidenceId === EVIDENCE_B ? "<img src=x onerror=alert(1)>.log" : "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_A)))).toBe(true),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Reopen target evidence" }));
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=4190&"))).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show edge.log in a pane" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show <img src=x onerror=alert(1)>.log in a pane" }));
+    // The first request is now obsolete; refresh the evidence scope while it
+    // is still pending, then reopen the same bookmark to create a new target
+    // reservation with a reused per-file sequence number.
+    window.dispatchEvent(new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }));
+    await waitFor(() => expect(inventoryCalls).toBeGreaterThan(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Reopen target evidence" }));
+    await waitFor(() => expect(targetAttempt).toBe(2));
+    targetResponses.resolve(jsonResponse({ error: "obsolete target" }, 503));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show edge.log in a pane" }));
+    await waitFor(() =>
+      expect(
+        pageRequests.filter(
+          (url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=1&"),
+        ),
+      ).toHaveLength(0),
+    );
+    reopenedTargetResponses.resolve(jsonResponse({
+      evidenceId: EVIDENCE_B,
+      relativePath: "<img src=x onerror=alert(1)>.log",
+      startLine: 4190,
+      rows: [],
+      wrappedRowCount: 0,
+      nextStartLine: null,
+      bounded: false,
+    }));
+  });
+
   it("saves a changed view under the same name instead of colliding on the key", async () => {
     const saved: string[] = [];
     vi.stubGlobal(
