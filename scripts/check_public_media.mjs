@@ -823,11 +823,13 @@ function parseMarkdownDefinitionDestination(source, start) {
 
 function markdownContainerInfo(line) {
   let remainder = line;
+  let sourceColumn = 0;
   const containers = [];
   while (true) {
     const quote = remainder.match(/^[ \t]{0,3}>[ \t]?/);
     if (quote !== null) {
       containers.push({ type: "blockquote" });
+      sourceColumn = markdownAdvanceColumns(quote[0], sourceColumn);
       remainder = remainder.slice(quote[0].length);
       continue;
     }
@@ -837,6 +839,7 @@ function markdownContainerInfo(line) {
         type: "list",
         indent: markdownIndentColumns(list[0]),
       });
+      sourceColumn = markdownAdvanceColumns(list[0], sourceColumn);
       remainder = remainder.slice(list[0].length);
       continue;
     }
@@ -844,6 +847,7 @@ function markdownContainerInfo(line) {
   }
   return {
     content: remainder,
+    contentColumn: sourceColumn,
     containers,
     blockquoteDepth: containers.filter((container) => container.type === "blockquote").length,
     listDepth: containers.filter((container) => container.type === "list").length,
@@ -857,7 +861,11 @@ function markdownContainerInfo(line) {
 }
 
 function markdownIndentColumns(value) {
-  let columns = 0;
+  return markdownAdvanceColumns(value, 0);
+}
+
+function markdownAdvanceColumns(value, initialColumn) {
+  let columns = initialColumn;
   for (const character of value) {
     if (character === "\t") {
       columns += 4 - (columns % 4);
@@ -866,6 +874,12 @@ function markdownIndentColumns(value) {
     }
   }
   return columns;
+}
+
+function markdownLeadingIndentAfterContainers(line) {
+  const info = markdownContainerInfo(line);
+  const leading = (info.content.match(/^[ \t]*/) ?? [""])[0];
+  return markdownAdvanceColumns(leading, info.contentColumn) - info.contentColumn;
 }
 
 function markdownContainerContent(line) {
@@ -1208,17 +1222,19 @@ function collectMarkdownDefinitions(text, document = "<memory>") {
     .split(/\r\n|\n|\r/)
     .map(stripMarkdownBlockquotePrefixes);
   const lineStart = /^[ \t]*\[/gm;
+  const maskedSourceLines = maskedBlocks.split(/\r\n|\n|\r/);
   for (const match of visibleBlocks.matchAll(lineStart)) {
     // Markdown indentation is measured in columns, not JavaScript string
     // characters: a tab advances to the next four-column tab stop. Keeping
     // the same measure as the list-container parser prevents deeply nested
     // tab-indented definitions from escaping the publication ledger.
-    const indent = markdownIndentColumns(match[0].slice(0, -1));
+    const lineIndex = visibleBlocks.slice(0, match.index).split(/\r\n|\n|\r/).length - 1;
+    const indent = markdownLeadingIndentAfterContainers(maskedSourceLines[lineIndex] ?? "");
     if (
       indent > 3 &&
       !isIndentedDefinitionInList(
         sourceLines,
-        visibleBlocks.slice(0, match.index).split(/\r\n|\n|\r/).length - 1,
+        lineIndex,
         indent,
       )
     ) {

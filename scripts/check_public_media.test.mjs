@@ -474,6 +474,8 @@ test("escaped delimiters and Markdown containers cannot hide published images", 
       "# Fixture\n\n\\<!-- ![Synthetic](docs/images/unreviewed.png) -->\n",
       "# Fixture\n\n![Synthetic][shot]\n\n- outer\n  - inner\n\n    [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n> - item\n>\n>     [shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n> \t[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n> >\t[shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n100. item\n\n     [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n-\t" +
         "```md\n    code\n  [shot]: docs/images/unreviewed.png\n",
