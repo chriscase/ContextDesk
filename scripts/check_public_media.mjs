@@ -876,6 +876,30 @@ function stripMarkdownContainerPrefixes(text) {
   return text.replace(/^[^\r\n]*/gm, markdownContainerContent);
 }
 
+// Keep list markers in the source coordinate system used by the backward
+// context check, while removing only blockquote prefixes. The publication
+// candidate has all containers stripped; the helper still needs to see the
+// list marker that owns an indented definition.
+function stripMarkdownBlockquotePrefixes(line) {
+  let remainder = line;
+  let preservedLists = "";
+  while (true) {
+    const quote = remainder.match(/^[ \t]{0,3}>[ \t]?/);
+    if (quote !== null) {
+      remainder = remainder.slice(quote[0].length);
+      continue;
+    }
+    const list = remainder.match(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
+    if (list !== null) {
+      preservedLists += list[0];
+      remainder = remainder.slice(list[0].length);
+      continue;
+    }
+    break;
+  }
+  return preservedLists + remainder;
+}
+
 function isIndentedDefinitionInList(sourceLines, lineIndex, indent) {
   for (let index = lineIndex - 1; index >= 0; index -= 1) {
     const line = sourceLines[index];
@@ -1177,7 +1201,12 @@ function collectMarkdownDefinitions(text, document = "<memory>") {
     document,
   );
   const visibleBlocks = stripMarkdownContainerPrefixes(maskedBlocks);
-  const sourceLines = text.split(/\r\n|\n|\r/);
+  // Definition matches are found after blockquote/list container prefixes
+  // have been stripped. For list-context validation, remove only blockquote
+  // prefixes so the owning list marker remains visible to the backward scan.
+  const sourceLines = maskedBlocks
+    .split(/\r\n|\n|\r/)
+    .map(stripMarkdownBlockquotePrefixes);
   const lineStart = /^[ \t]*\[/gm;
   for (const match of visibleBlocks.matchAll(lineStart)) {
     // Markdown indentation is measured in columns, not JavaScript string
