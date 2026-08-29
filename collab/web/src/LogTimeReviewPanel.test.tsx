@@ -578,6 +578,66 @@ describe("LogTimeReviewPanel", () => {
     });
   });
 
+  it("surfaces a failed sibling refresh while a durable apply stays pending", async () => {
+    const applyGate = deferred<Response>();
+    const refreshGate = deferred<Response>();
+    let stateReads = 0;
+    let applyReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/log-time/preview")) return jsonResponse(PREVIEW);
+        if (url.endsWith("/log-time/apply")) {
+          applyReads += 1;
+          return applyGate.promise;
+        }
+        if (url.endsWith("/log-time")) {
+          stateReads += 1;
+          if (stateReads === 2) return refreshGate.promise;
+          return jsonResponse(stateBody({ corpusRevision: stateReads }));
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(panel());
+    fireEvent.click(await screen.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(screen.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /show me what this would do/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /apply America\/Chicago to this file/i }),
+    );
+    await waitFor(() => expect(applyReads).toBe(1));
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", {
+          detail: { caseId: CASE_ID, notice: "A sibling panel published revision 2." },
+        }),
+      );
+    });
+    expect(await screen.findByText("Loading time review…")).toBeTruthy();
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse({ error: "Time review refresh failed." }, 500));
+      await refreshGate.promise;
+    });
+    expect(await screen.findByText("Time review refresh failed.")).toBeTruthy();
+    expect(screen.queryByText("Loading time review…")).toBeNull();
+    expect(screen.queryByText("Time review unavailable.")).toBeNull();
+
+    await act(async () => {
+      applyGate.resolve(jsonResponse({ applied: true }));
+      await applyGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() => expect(stateReads).toBe(3));
+    expect(await screen.findByText(/revision 3/)).toBeTruthy();
+  });
+
   it("does not let a delayed write update or reload a later investigation", async () => {
     const applyGate = deferred<Response>();
     const caseBLoad = deferred<Response>();

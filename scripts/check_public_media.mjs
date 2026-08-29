@@ -348,13 +348,21 @@ export function collectPublishedImageTargets(text, document = "<memory>") {
 
   // Raw HTML: <img src="target" alt="description">
   for (const match of text.matchAll(/<img\b([^>]*)>/gi)) {
-    const src = match[1].match(/\bsrc\s*=\s*("([^"]*)"|'([^']*)')/i);
+    // Attribute names must begin at the tag's attribute boundary. A word
+    // boundary alone also matches `data-src` and `data-alt`, which would let a
+    // non-rendered metadata attribute impersonate the real accessibility
+    // contract.
+    const src = match[1].match(
+      /(?:^|\s)src\s*=\s*("([^"]*)"|'([^']*)')/i,
+    );
     if (!src) {
       throw new Error(
         `${document}: <img> tag without a quoted literal src cannot be checked: ${match[0]}`,
       );
     }
-    const alt = match[1].match(/\balt\s*=\s*("([^"]*)"|'([^']*)')/i);
+    const alt = match[1].match(
+      /(?:^|\s)alt\s*=\s*("([^"]*)"|'([^']*)')/i,
+    );
     targets.push({
       target: src[2] ?? src[3] ?? "",
       form: "html",
