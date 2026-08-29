@@ -475,12 +475,17 @@ test("escaped delimiters and Markdown containers cannot hide published images", 
       "# Fixture\n\n![Synthetic][shot]\n\n-\t" +
         "```md\n    code\n  [shot]: docs/images/unreviewed.png\n",
       "# Fixture\n\n![Synthetic][shot]\n\n100. <div>\n     code\n  [shot]: docs/images/unreviewed.png\n</div>\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n- outer\n  - inner\n    - third\n\n      [shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n123456789. item\n\n           [shot]: docs/images/unreviewed.png\n",
     ];
     for (const contents of cases) {
       fs.writeFileSync(readme, contents);
       const result = run(root);
       assert.notEqual(result.status, 0, contents);
-      assert.match(result.stderr, /docs\/images\/unreviewed\.png/);
+      assert.match(
+        result.stderr,
+        /docs\/images\/unreviewed\.png|unsupported raw HTML declaration/,
+      );
     }
   });
 });
@@ -493,12 +498,22 @@ test("CommonMark HTML blocks keep definitions inert until their blank-line bound
     const cases = [
       `# Fixture\n\n![Synthetic][shot]\n\n<div>\n</div>\n[shot]: ${pathname}\n\n[shot]: docs/images/unreviewed.png\n`,
       `# Fixture\n\n![Synthetic][shot]\n\n<x-test>\n[shot]: ${pathname}\n\n[shot]: docs/images/unreviewed.png\n`,
+      "# Fixture\n\n<script>\nconst x = 1;\n</script>\n![Synthetic][shot]\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<style>\n.x { color: red; }\n</style>\n![Synthetic][shot]\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<pre>\ntext\n</pre>\n![Synthetic][shot]\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<textarea>\ntext\n</textarea>\n![Synthetic][shot]\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<?target\n[shot]: docs/media/gallery/frame.png\n?>\n\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<!DOCTYPE html>\n[shot]: docs/media/gallery/frame.png\n>\n\n[shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n<![CDATA[\n[shot]: docs/media/gallery/frame.png\n]]>\n\n[shot]: docs/images/unreviewed.png\n",
     ];
     for (const contents of cases) {
       fs.writeFileSync(readme, contents);
       const result = run(root);
       assert.notEqual(result.status, 0, contents);
-      assert.match(result.stderr, /docs\/images\/unreviewed\.png/);
+      assert.match(
+        result.stderr,
+        /docs\/images\/unreviewed\.png|unsupported raw HTML declaration/,
+      );
     }
   });
 });

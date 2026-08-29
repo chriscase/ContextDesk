@@ -880,7 +880,7 @@ function isIndentedDefinitionInList(sourceLines, lineIndex, indent) {
   for (let index = lineIndex - 1; index >= 0; index -= 1) {
     const line = sourceLines[index];
     if (/^[ \t]*$/.test(line)) continue;
-    const list = line.match(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
+    const list = line.match(/^[ \t]*(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
     if (list !== null) {
       return indent >= markdownIndentColumns(list[0]);
     }
@@ -974,7 +974,14 @@ const RAW_HTML_BLOCK_TAGS = new Set([
   "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html",
   "iframe", "legend", "li", "link", "main", "menu", "menuitem", "nav", "ol",
   "p", "pre", "script", "section", "style", "summary", "table", "tbody", "td",
-  "tfoot", "th", "thead", "title", "tr", "track", "ul",
+  "tfoot", "th", "thead", "textarea", "title", "tr", "track", "ul",
+]);
+
+const RAW_HTML_CLOSE_TERMINATED_TAGS = new Set([
+  "pre",
+  "script",
+  "style",
+  "textarea",
 ]);
 
 function htmlTagTokens(value) {
@@ -1027,6 +1034,11 @@ function maskMarkdownHtmlBlocks(text, document = "<memory>") {
   for (let index = 0; index < parts.length; index += 2) {
     const line = parts[index];
     const content = markdownContainerContent(line);
+    if (/^[ \t]*(?:<\?|<!\[CDATA\[|<![A-Za-z])/i.test(content)) {
+      throw new Error(
+        `${document}: unsupported raw HTML declaration cannot be checked safely: ${content.trim()}`,
+      );
+    }
     const tokens = htmlTagTokens(content);
     const startsWithBlockTag = /^\s*</.test(content) && tokens.length > 0;
 
@@ -1057,6 +1069,13 @@ function maskMarkdownHtmlBlocks(text, document = "<memory>") {
             openTags.push(token.name);
           } else if (token.closing && token.name === openTags.at(-1)) {
             openTags.pop();
+            if (
+              openTags.length === 0 &&
+              RAW_HTML_CLOSE_TERMINATED_TAGS.has(token.name)
+            ) {
+              blockActive = false;
+              owner = null;
+            }
           }
         }
         continue;
@@ -1145,7 +1164,7 @@ function collectMarkdownDefinitions(text, document = "<memory>") {
   );
   const visibleBlocks = stripMarkdownContainerPrefixes(maskedBlocks);
   const sourceLines = text.split(/\r\n|\n|\r/);
-  const lineStart = /^(?:[ \t]{0,9})\[/gm;
+  const lineStart = /^[ \t]*\[/gm;
   for (const match of visibleBlocks.matchAll(lineStart)) {
     const indent = match[0].length - 1;
     if (
