@@ -1,0 +1,108 @@
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { InvestigationFirst } from "./InvestigationFirst.js";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+const baseCase = {
+  id: "case-1",
+  title: "Checkout pauses",
+  status: "open",
+  severity: "high",
+  problemStatement: "Requests pause while the worker restarts.",
+  affectedParties: "Checkout operators",
+  impact: "Manual replay is required.",
+  scope: "One worker group",
+  openQuestions: ["Did the queue stall first?"],
+  investigationContext: { productName: "ContextDesk", build: "build-42" },
+  occurredAt: null,
+  occurredAtPrecision: "unknown",
+  occurredAtZone: "unknown",
+  participants: [],
+  createdAt: "2026-08-29T12:00:00.000Z",
+  createdBy: "alice",
+};
+
+function stubFetch(options?: { cases?: unknown[]; created?: unknown; artifacts?: unknown[] }) {
+  const requests: { url: string; init?: RequestInit }[] = [];
+  const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    requests.push(init === undefined ? { url } : { url, init });
+    if (url === "/api/cases" && (init?.method ?? "GET") === "POST") {
+      return { ok: true, json: async () => options?.created ?? { ...baseCase, id: "case-new", title: "New investigation" } };
+    }
+    if (url === "/api/cases") return { ok: true, json: async () => ({ cases: options?.cases ?? [baseCase] }) };
+    if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: options?.artifacts ?? [] }) };
+    if (url.endsWith("/contributions")) return { ok: true, json: async () => ({ contributions: options?.artifacts ? [{ id: "summary-1", body: "Collected by the import" }] : [] }) };
+    if (url === "/api/cases/sparse") return { ok: true, json: async () => ({ id: "sparse", title: "Imported record", status: "open", severity: "low" }) };
+    if (url.startsWith("/api/cases/")) return { ok: true, json: async () => baseCase };
+    return { ok: false, status: 404, json: async () => ({}) };
+  });
+  vi.stubGlobal("fetch", stub);
+  return { stub, requests };
+}
+
+const commonProps = {
+  canWrite: true,
+  canLead: true,
+  readOnly: false,
+  view: "investigations" as const,
+  focusCaseId: null,
+  stage: "situation" as const,
+  onOpenCase: vi.fn(),
+  onExitFocus: vi.fn(),
+};
+
+describe("Investigation First", () => {
+  it("puts fast capture above the browse list and keeps technical fields progressive", async () => {
+    stubFetch();
+    render(<InvestigationFirst {...commonProps} />);
+    expect(await screen.findByRole("heading", { name: "Create an investigation" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("Short investigation title")).toBeTruthy();
+    expect(screen.getByText("Advanced context")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Investigations" })).toBeTruthy();
+    expect(document.querySelector('#investigation-first-productName-options option[value="ContextDesk"]')).toBeTruthy();
+  });
+
+  it("posts the shared case payload and opens the server-confirmed record", async () => {
+    const { requests } = stubFetch();
+    const onOpenCase = vi.fn();
+    render(<InvestigationFirst {...commonProps} onOpenCase={onOpenCase} />);
+    await screen.findByRole("heading", { name: "Create an investigation" });
+    fireEvent.change(screen.getByPlaceholderText("Short investigation title"), { target: { value: "New investigation" } });
+    fireEvent.change(screen.getByPlaceholderText("Describe the problem without assuming its cause."), { target: { value: "A clear observation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+    await waitFor(() => expect(onOpenCase).toHaveBeenCalledWith("case-new"));
+    const createRequest = requests.find((request) => request.url === "/api/cases" && request.init?.method === "POST");
+    expect(createRequest).toBeTruthy();
+    expect(JSON.parse(String(createRequest?.init?.body))).toMatchObject({ title: "New investigation", problemStatement: "A clear observation", severity: "medium" });
+  });
+
+  it("renders sparse records honestly and inventories annotated evidence", async () => {
+    stubFetch({
+      cases: [{ id: "sparse", title: "Imported record", status: "open", severity: "low" }],
+      artifacts: [{ id: "e1", kind: "log", filename: "worker.log", contentHash: "abc", verificationStatus: "unverified", privacyClass: "owner_only", byteLength: 12, summaryContributionId: "summary-1" }],
+    });
+    const onOpenAdvancedTools = vi.fn();
+    const { rerender } = render(<InvestigationFirst {...commonProps} onOpenAdvancedTools={onOpenAdvancedTools} />);
+    await screen.findByRole("button", { name: /Imported record/ });
+    rerender(<InvestigationFirst {...commonProps} focusCaseId="sparse" onOpenAdvancedTools={onOpenAdvancedTools} />);
+    expect(await screen.findByRole("heading", { name: "Imported record" })).toBeTruthy();
+    expect(screen.getAllByText("Not recorded").length).toBeGreaterThan(0);
+    expect(screen.getByText("worker.log")).toBeTruthy();
+    expect(screen.getByText("Collected by the import")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open War Room technical tools" }));
+    expect(onOpenAdvancedTools).toHaveBeenCalledWith("sparse", "analyze");
+  });
+
+  it("does not expose creation to a viewer", async () => {
+    stubFetch();
+    render(<InvestigationFirst {...commonProps} canWrite={false} />);
+    await screen.findByRole("heading", { name: "Investigations" });
+    expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create investigation" })).toBeNull();
+  });
+});

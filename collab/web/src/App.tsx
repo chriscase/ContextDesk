@@ -34,6 +34,7 @@ import {
   type WorkLocation,
 } from "./app-location.js";
 import { Cases } from "./Cases.js";
+import { InvestigationFirst } from "./InvestigationFirst.js";
 import { Catalog } from "./Catalog.js";
 import { Entities } from "./Entities.js";
 import { Administration } from "./Administration.js";
@@ -43,6 +44,13 @@ import { SetupWizard } from "./SetupWizard.js";
 import { SelfProfilePanel } from "./SelfProfilePanel.js";
 import { BrandMark } from "./graphics.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
+import {
+  DEFAULT_UI_STRATEGY_ID,
+  UI_STRATEGIES,
+  resolveUiStrategy,
+  type UiStrategyDescriptor,
+  type UiStrategyId,
+} from "./ui-strategy.js";
 
 interface SessionView {
   username: string;
@@ -93,6 +101,17 @@ function savedTheme(): ThemeName {
   }
 }
 
+const UI_STRATEGY_STORAGE_KEY = "cd-ui-strategy";
+
+function savedUiStrategy(): UiStrategyDescriptor {
+  try {
+    const preferred = window.localStorage?.getItem(UI_STRATEGY_STORAGE_KEY);
+    return resolveUiStrategy({ preferred });
+  } catch {
+    return resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID });
+  }
+}
+
 declare global {
   interface Window {
     __CONTEXTDESK_STATIC_READ_ONLY__?: boolean;
@@ -116,6 +135,8 @@ function AccountMenu(props: {
   profileActive: boolean;
   onOpenProfile: () => void;
   onThemeChange: (theme: ThemeName) => void;
+  strategy: UiStrategyDescriptor;
+  onStrategyChange: (strategy: UiStrategyId) => void;
   onSignOut: (() => void) | null;
 }) {
   const [open, setOpen] = useState(false);
@@ -197,6 +218,31 @@ function AccountMenu(props: {
               ))}
             </select>
           </label>
+          <fieldset className="account__strategies">
+            <legend>Investigation experience</legend>
+            <p className="account__strategy-note">
+              Presentation and navigation only. Your case data, evidence, permissions, and audit
+              history stay shared.
+            </p>
+            {UI_STRATEGIES.map((strategy) => (
+              <label key={strategy.id} className="account__strategy-option">
+                <input
+                  type="radio"
+                  name="ui-strategy"
+                  value={strategy.id}
+                  checked={props.strategy.id === strategy.id}
+                  onChange={() => props.onStrategyChange(strategy.id)}
+                />
+                <span className="account__strategy-preview" data-preview={strategy.previewToken} aria-hidden="true" />
+                <span>
+                  <strong>{strategy.name}</strong>
+                  <small>{strategy.description}</small>
+                  <small>{strategy.maturity === "reference" ? "Reference" : "Pilot"} · {strategy.status} · v{strategy.version}</small>
+                  <small>Compatible with {strategy.compatibility.schemaId} {strategy.compatibility.version}</small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
           {props.onSignOut ? (
             <button
               className="account__signout"
@@ -238,6 +284,7 @@ export function App() {
   const [ready, setReady] = useState(false);
   const [setupAvailable, setSetupAvailable] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
+  const [uiStrategy, setUiStrategy] = useState<UiStrategyDescriptor>(savedUiStrategy);
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
@@ -293,6 +340,14 @@ export function App() {
       // A blocked or unavailable browser store should not disable the app.
     }
   }, [theme]);
+
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(UI_STRATEGY_STORAGE_KEY, uiStrategy.id);
+    } catch {
+      // A blocked browser store should not prevent the selected surface from working this session.
+    }
+  }, [uiStrategy.id]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/auth/me");
@@ -604,7 +659,7 @@ export function App() {
           <BrandMark />
           <h1 className="topbar__title">
             <span className="topbar__title-product">ContextDesk</span>{" "}
-            <span className="topbar__title-app">War Room</span>
+            <span className="topbar__title-app">{uiStrategy.name}</span>
           </h1>
         </div>
         <button
@@ -658,9 +713,11 @@ export function App() {
               displayName={session.displayName}
               roles={roles}
               theme={theme}
+              strategy={uiStrategy}
               profileActive={work.area === "profile"}
               onOpenProfile={() => guardedNavigate(PROFILE)}
               onThemeChange={setTheme}
+              onStrategyChange={(strategyId) => setUiStrategy(resolveUiStrategy({ preferred: strategyId }))}
               onSignOut={staticReadOnly ? null : () => guardedLogout()}
             />
           </div>
@@ -698,46 +755,69 @@ export function App() {
         ) : (
           <>
             <section className="app__area" aria-label="Investigations" hidden={!inCasesArea}>
-              <Cases
-                onFocusedCaseTitle={setFocusedCaseTitle}
-                roles={roles}
-                capabilities={capabilities}
-                readOnly={staticReadOnly}
-                participant={{ username: session.username, roles }}
-                view={work.area === "investigations" ? "investigations" : "overview"}
-                focusCaseId={inCasesArea ? work.caseId : null}
-                stage={work.stage}
-                {...(work.focus ? { focus: work.focus } : {})}
-                startSignal={startSignal}
-                onOpenCase={(id) =>
-                  navigate({ area: "investigations", caseId: id, stage: "situation" })
-                }
-                onStageChange={(stage) =>
-                  isWorkLocation(locationRef.current) && locationRef.current.caseId
-                    ? navigate({
-                        area: "investigations",
-                        caseId: locationRef.current.caseId,
-                        stage,
-                      })
-                    : undefined
-                }
-                onDeepNavigate={(stage, focus) =>
-                  isWorkLocation(locationRef.current) && locationRef.current.caseId
-                    ? navigate({
-                        area: "investigations",
-                        caseId: locationRef.current.caseId,
-                        stage,
-                        focus,
-                      })
-                    : undefined
-                }
-                onActivityOpen={(caseId, stage, focus) =>
-                  navigate({ area: "investigations", caseId, stage, focus })
-                }
-                onExitFocus={(target) =>
-                  navigate({ area: target, caseId: null, stage: "situation" })
-                }
-              />
+              {uiStrategy.id === "investigation-first" ? (
+                <InvestigationFirst
+                  canWrite={canWrite}
+                  canLead={hasCapability(capabilities, "run:strategies")}
+                  readOnly={staticReadOnly}
+                  view={work.area === "investigations" ? "investigations" : "overview"}
+                  focusCaseId={inCasesArea ? work.caseId : null}
+                  stage={work.stage}
+                  {...(work.focus ? { focus: work.focus } : {})}
+                  startSignal={startSignal}
+                  onOpenCase={(id) => navigate({ area: "investigations", caseId: id, stage: "situation" })}
+                  onExitFocus={() => navigate({ area: "investigations", caseId: null, stage: "situation" })}
+                  onOpenAdvancedTools={(caseId, stage) => {
+                    // Specialist tools remain in the reference War Room. The
+                    // switch is explicit in the button label and preserves the
+                    // canonical case/stage URL and all shared record state.
+                    setUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
+                    navigate({ area: "investigations", caseId, stage });
+                  }}
+                  onFocusedCaseTitle={setFocusedCaseTitle}
+                />
+              ) : (
+                <Cases
+                  onFocusedCaseTitle={setFocusedCaseTitle}
+                  roles={roles}
+                  capabilities={capabilities}
+                  readOnly={staticReadOnly}
+                  participant={{ username: session.username, roles }}
+                  view={work.area === "investigations" ? "investigations" : "overview"}
+                  focusCaseId={inCasesArea ? work.caseId : null}
+                  stage={work.stage}
+                  {...(work.focus ? { focus: work.focus } : {})}
+                  startSignal={startSignal}
+                  onOpenCase={(id) =>
+                    navigate({ area: "investigations", caseId: id, stage: "situation" })
+                  }
+                  onStageChange={(stage) =>
+                    isWorkLocation(locationRef.current) && locationRef.current.caseId
+                      ? navigate({
+                          area: "investigations",
+                          caseId: locationRef.current.caseId,
+                          stage,
+                        })
+                      : undefined
+                  }
+                  onDeepNavigate={(stage, focus) =>
+                    isWorkLocation(locationRef.current) && locationRef.current.caseId
+                      ? navigate({
+                          area: "investigations",
+                          caseId: locationRef.current.caseId,
+                          stage,
+                          focus,
+                        })
+                      : undefined
+                  }
+                  onActivityOpen={(caseId, stage, focus) =>
+                    navigate({ area: "investigations", caseId, stage, focus })
+                  }
+                  onExitFocus={(target) =>
+                    navigate({ area: target, caseId: null, stage: "situation" })
+                  }
+                />
+              )}
             </section>
             <section
               className="app__area"
