@@ -339,6 +339,8 @@ export function LogWorkbench(props: {
   const liveRef = useRef<HTMLParagraphElement>(null);
   /** Panes already read once, so a selection change does not re-page them. */
   const loadedPanes = useRef<Set<string>>(new Set());
+  /** Explicit target-page requests reserve a pane before React renders it. */
+  const loadingPanes = useRef<Set<string>>(new Set());
   /** The first available file is selected once per investigation, never after an explicit clear. */
   const defaultPaneCase = useRef<string | null>(null);
   /** Latest pane selection for async inventory reconciliation. */
@@ -409,6 +411,7 @@ export function LogWorkbench(props: {
     pageScopeGeneration.current += 1;
     pageRequestByEvidence.current.clear();
     loadedPanes.current.clear();
+    loadingPanes.current.clear();
     setPageByPane({});
     setPaneErrors({});
   }, []);
@@ -459,6 +462,7 @@ export function LogWorkbench(props: {
       setPanes([]);
       setPageByPane({});
       setPaneErrors({});
+      loadingPanes.current.clear();
       setScrollByPane({});
       setViews([]);
       setBookmarks([]);
@@ -606,6 +610,7 @@ export function LogWorkbench(props: {
       const requestScopeGeneration = pageScopeGeneration.current;
       const requestSequence = (pageRequestByEvidence.current.get(evidenceId) ?? 0) + 1;
       pageRequestByEvidence.current.set(evidenceId, requestSequence);
+      loadingPanes.current.add(evidenceId);
       setPaneErrors((current) => {
         if (!(evidenceId in current)) return current;
         const next = { ...current };
@@ -628,7 +633,10 @@ export function LogWorkbench(props: {
             pageScopeGeneration.current !== requestScopeGeneration ||
             pageRequestByEvidence.current.get(evidenceId) !== requestSequence
           ) return;
-          loadedPanes.current.delete(evidenceId);
+          // Keep a pane marked as loaded after a later-page failure. Its
+          // existing page is still useful, and selecting another file must not
+          // silently re-fetch page one while the retry affordance is visible.
+          if (startLine === 1) loadedPanes.current.delete(evidenceId);
           setPaneErrors((current) => ({
             ...current,
             [evidenceId]: { message, startLine },
@@ -655,7 +663,7 @@ export function LogWorkbench(props: {
           pageScopeGeneration.current !== requestScopeGeneration ||
           pageRequestByEvidence.current.get(evidenceId) !== requestSequence
         ) return;
-        loadedPanes.current.delete(evidenceId);
+        if (startLine === 1) loadedPanes.current.delete(evidenceId);
         setPaneErrors((current) => ({
           ...current,
           [evidenceId]: {
@@ -663,6 +671,11 @@ export function LogWorkbench(props: {
             startLine,
           },
         }));
+      }
+      finally {
+        if (pageRequestByEvidence.current.get(evidenceId) === requestSequence) {
+          loadingPanes.current.delete(evidenceId);
+        }
       }
     },
     [isActiveCase, props.caseId],
@@ -673,7 +686,7 @@ export function LogWorkbench(props: {
   // to — including the window a revealed search match just loaded.
   useEffect(() => {
     for (const id of panes) {
-      if (loadedPanes.current.has(id)) continue;
+      if (loadedPanes.current.has(id) || loadingPanes.current.has(id)) continue;
       void loadPane(id);
     }
   }, [panes, items, loadPane]);

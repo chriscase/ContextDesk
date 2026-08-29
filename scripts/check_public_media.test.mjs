@@ -462,6 +462,47 @@ test("images inside fenced code and HTML comments are not published", () => {
   });
 });
 
+test("escaped delimiters and Markdown containers cannot hide published images", () => {
+  withRepository(({ root }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "unreviewed.png"), "x");
+    const readme = path.join(root, "README.md");
+    const cases = [
+      "# Fixture\n\n\\`![Synthetic](docs/images/unreviewed.png)\\`\n",
+      "# Fixture\n\n\\<!-- ![Synthetic](docs/images/unreviewed.png) -->\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n- outer\n  - inner\n\n    [shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n100. item\n\n     [shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n-\t" +
+        "```md\n    code\n  [shot]: docs/images/unreviewed.png\n",
+      "# Fixture\n\n![Synthetic][shot]\n\n100. <div>\n     code\n  [shot]: docs/images/unreviewed.png\n</div>\n",
+    ];
+    for (const contents of cases) {
+      fs.writeFileSync(readme, contents);
+      const result = run(root);
+      assert.notEqual(result.status, 0, contents);
+      assert.match(result.stderr, /docs\/images\/unreviewed\.png/);
+    }
+  });
+});
+
+test("CommonMark HTML blocks keep definitions inert until their blank-line boundary", () => {
+  withRepository(({ root, pathname }) => {
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "unreviewed.png"), "x");
+    const readme = path.join(root, "README.md");
+    const cases = [
+      `# Fixture\n\n![Synthetic][shot]\n\n<div>\n</div>\n[shot]: ${pathname}\n\n[shot]: docs/images/unreviewed.png\n`,
+      `# Fixture\n\n![Synthetic][shot]\n\n<x-test>\n[shot]: ${pathname}\n\n[shot]: docs/images/unreviewed.png\n`,
+    ];
+    for (const contents of cases) {
+      fs.writeFileSync(readme, contents);
+      const result = run(root);
+      assert.notEqual(result.status, 0, contents);
+      assert.match(result.stderr, /docs\/images\/unreviewed\.png/);
+    }
+  });
+});
+
 test("ambiguous HTML character references in local targets fail closed", () => {
   withRepository(({ root }) => {
     fs.writeFileSync(

@@ -530,7 +530,7 @@ function maskMarkdownInlineCode(value) {
         continue;
       }
     }
-    if (value[index] !== "`") {
+    if (value[index] !== "`" || isMarkdownEscaped(value, index)) {
       index += 1;
       continue;
     }
@@ -833,7 +833,10 @@ function markdownContainerInfo(line) {
     }
     const list = remainder.match(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
     if (list !== null) {
-      containers.push({ type: "list", indent: list[0].length });
+      containers.push({
+        type: "list",
+        indent: markdownIndentColumns(list[0]),
+      });
       remainder = remainder.slice(list[0].length);
       continue;
     }
@@ -847,7 +850,22 @@ function markdownContainerInfo(line) {
     listIndents: containers
       .filter((container) => container.type === "list")
       .map((container) => container.indent),
+    listContinuationIndent: containers
+      .filter((container) => container.type === "list")
+      .reduce((total, container) => total + container.indent, 0),
   };
+}
+
+function markdownIndentColumns(value) {
+  let columns = 0;
+  for (const character of value) {
+    if (character === "\t") {
+      columns += 4 - (columns % 4);
+    } else {
+      columns += 1;
+    }
+  }
+  return columns;
 }
 
 function markdownContainerContent(line) {
@@ -856,6 +874,22 @@ function markdownContainerContent(line) {
 
 function stripMarkdownContainerPrefixes(text) {
   return text.replace(/^[^\r\n]*/gm, markdownContainerContent);
+}
+
+function isIndentedDefinitionInList(sourceLines, lineIndex, indent) {
+  for (let index = lineIndex - 1; index >= 0; index -= 1) {
+    const line = sourceLines[index];
+    if (/^[ \t]*$/.test(line)) continue;
+    const list = line.match(/^[ \t]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
+    if (list !== null) {
+      return indent >= markdownIndentColumns(list[0]);
+    }
+    const lineIndent = markdownIndentColumns(
+      (line.match(/^[ \t]*/) ?? [""])[0],
+    );
+    if (lineIndent < indent) return false;
+  }
+  return false;
 }
 
 function maskMarkdownFencedCode(text) {
@@ -873,10 +907,7 @@ function maskMarkdownFencedCode(text) {
           length: opener[1].length,
           blockquoteDepth: info.blockquoteDepth,
           listDepth: info.listDepth,
-          listContinuationIndent: info.listIndents.reduce(
-            (total, indent) => total + indent,
-            0,
-          ),
+          listContinuationIndent: info.listContinuationIndent,
         };
         parts[index] = " ".repeat(line.length);
       }
@@ -902,10 +933,7 @@ function maskMarkdownFencedCode(text) {
           length: nextOpener[1].length,
           blockquoteDepth: info.blockquoteDepth,
           listDepth: info.listDepth,
-          listContinuationIndent: info.listIndents.reduce(
-            (total, indent) => total + indent,
-            0,
-          ),
+          listContinuationIndent: info.listContinuationIndent,
         };
         parts[index] = " ".repeat(line.length);
       }
@@ -920,10 +948,23 @@ function maskMarkdownFencedCode(text) {
 }
 
 function maskMarkdownHtmlComments(text) {
-  return text.replace(
-    /<!--(?!>|->)(?:(?!--)[\s\S])*?-->/g,
-    (comment) => comment.replace(/[^\r\n]/g, " "),
-  );
+  const masked = text.split("");
+  const comments = /<!--(?!>|->)(?:(?!--)[\s\S])*?-->/g;
+  for (const match of text.matchAll(comments)) {
+    if (isMarkdownEscaped(text, match.index)) continue;
+    for (let index = match.index; index < match.index + match[0].length; index += 1) {
+      if (masked[index] !== "\n" && masked[index] !== "\r") masked[index] = " ";
+    }
+  }
+  return masked.join("");
+}
+
+function isMarkdownEscaped(value, index) {
+  let slashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
 }
 
 const RAW_HTML_BLOCK_TAGS = new Set([
@@ -982,19 +1023,35 @@ function maskMarkdownHtmlBlocks(text, document = "<memory>") {
   const parts = text.split(/(\r\n|\n|\r)/);
   let openTags = [];
   let owner = null;
+  let blockActive = false;
   for (let index = 0; index < parts.length; index += 2) {
     const line = parts[index];
     const content = markdownContainerContent(line);
     const tokens = htmlTagTokens(content);
     const startsWithBlockTag = /^\s*</.test(content) && tokens.length > 0;
 
-    if (openTags.length > 0) {
+    if (blockActive) {
       const info = markdownContainerInfo(line);
-      if (!lineBelongsToContainer(owner, info, line)) {
+      if (/^[ \t]*$/.test(content)) {
+        if (
+          openTags.length > 0 &&
+          RAW_HTML_BLOCK_TAGS.has(openTags.at(-1))
+        ) {
+          throw new Error(
+            `${document}: unterminated raw HTML block <${openTags.at(-1)}> cannot be checked safely`,
+          );
+        }
         openTags = [];
         owner = null;
+        blockActive = false;
+        continue;
+      }
+      if (owner !== null && !lineBelongsToContainer(owner, info, line)) {
+        openTags = [];
+        owner = null;
+        blockActive = false;
       } else {
-        parts[index] = " ".repeat(line.length);
+        parts[index] = maskHtmlBlockLine(line, document);
         for (const token of tokens) {
           if (!token.closing && RAW_HTML_BLOCK_TAGS.has(token.name) && !token.selfClosing) {
             openTags.push(token.name);
@@ -1008,17 +1065,20 @@ function maskMarkdownHtmlBlocks(text, document = "<memory>") {
 
     if (!startsWithBlockTag) continue;
     const first = tokens[0];
-    if (!RAW_HTML_BLOCK_TAGS.has(first.name)) continue;
-    parts[index] = " ".repeat(line.length);
-    if (!first.closing && !first.selfClosing) {
-      owner = markdownContainerInfo(line);
-      openTags = [first.name];
-      for (const token of tokens.slice(1)) {
-        if (!token.closing && RAW_HTML_BLOCK_TAGS.has(token.name) && !token.selfClosing) {
-          openTags.push(token.name);
-        } else if (token.closing && token.name === openTags.at(-1)) {
-          openTags.pop();
-        }
+    const isBlockTag =
+      RAW_HTML_BLOCK_TAGS.has(first.name) ||
+      (!new Set(["img", "picture", "source"]).has(first.name) &&
+        /^[ \t]*<[^>]+>[ \t]*$/.test(content));
+    if (!isBlockTag) continue;
+    parts[index] = maskHtmlBlockLine(line, document);
+    blockActive = true;
+    owner = markdownContainerInfo(line);
+    openTags = [];
+    for (const token of tokens) {
+      if (!token.closing && !token.selfClosing) {
+        openTags.push(token.name);
+      } else if (token.closing && token.name === openTags.at(-1)) {
+        openTags.pop();
       }
     }
   }
@@ -1028,6 +1088,18 @@ function maskMarkdownHtmlBlocks(text, document = "<memory>") {
     );
   }
   return parts.join("");
+}
+
+function maskHtmlBlockLine(line, document) {
+  const masked = " ".repeat(line.length).split("");
+  for (const tagName of ["img", "picture", "source"]) {
+    for (const tag of collectHtmlTags(line, tagName, document)) {
+      for (let index = tag.start; index < tag.end; index += 1) {
+        masked[index] = line[index];
+      }
+    }
+  }
+  return masked.join("");
 }
 
 /*
@@ -1062,19 +1134,30 @@ function leadingIndentAfterBlockquotes(line, blockquoteDepth) {
     if (quote === null) return -1;
     remainder = remainder.slice(quote[0].length);
   }
-  return (remainder.match(/^[ \t]*/) ?? [""])[0].length;
+  return markdownIndentColumns((remainder.match(/^[ \t]*/) ?? [""])[0]);
 }
 
 function collectMarkdownDefinitions(text, document = "<memory>") {
   const definitions = new Map();
-  const visibleBlocks = stripMarkdownContainerPrefixes(
-    maskMarkdownHtmlBlocks(
-      maskMarkdownHtmlComments(maskMarkdownFencedCode(text)),
-      document,
-    ),
+  const maskedBlocks = maskMarkdownHtmlBlocks(
+    maskMarkdownHtmlComments(maskMarkdownFencedCode(text)),
+    document,
   );
-  const lineStart = /^(?:[ \t]{0,3})\[/gm;
+  const visibleBlocks = stripMarkdownContainerPrefixes(maskedBlocks);
+  const sourceLines = text.split(/\r\n|\n|\r/);
+  const lineStart = /^(?:[ \t]{0,9})\[/gm;
   for (const match of visibleBlocks.matchAll(lineStart)) {
+    const indent = match[0].length - 1;
+    if (
+      indent > 3 &&
+      !isIndentedDefinitionInList(
+        sourceLines,
+        visibleBlocks.slice(0, match.index).split(/\r\n|\n|\r/).length - 1,
+        indent,
+      )
+    ) {
+      continue;
+    }
     const open = match.index + match[0].lastIndexOf("[");
     const label = parseBracketedMarkdown(visibleBlocks, open);
     if (label === null || visibleBlocks[label.end] !== ":") continue;

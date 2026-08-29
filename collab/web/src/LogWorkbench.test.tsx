@@ -1454,6 +1454,57 @@ describe("Log workbench honesty and navigation", () => {
     expect(screen.queryByText("temporary later-page failure")).toBeNull();
   });
 
+  it("keeps a later-page error visible when another pane is opened", async () => {
+    const pageRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/bookmarks")) return jsonResponse({ bookmarks: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          const evidenceId = url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A;
+          if (evidenceId === EVIDENCE_A && start === 81) {
+            return jsonResponse({ error: "temporary later-page failure" }, 503);
+          }
+          return jsonResponse({
+            evidenceId,
+            relativePath: evidenceId === EVIDENCE_B ? "<img src=x onerror=alert(1)>.log" : "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: evidenceId === EVIDENCE_A && start === 1 ? 81 : null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_A)) && url.includes("startLine=1&"))).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load next lines" }));
+    await screen.findByText("temporary later-page failure");
+    const firstPageLoads = pageRequests.filter(
+      (url) => url.includes(encodeURIComponent(EVIDENCE_A)) && url.includes("startLine=1&"),
+    ).length;
+    fireEvent.click(screen.getByLabelText("Show <img src=x onerror=alert(1)>.log in a pane"));
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_B)))).toBe(true),
+    );
+    expect(
+      pageRequests.filter(
+        (url) => url.includes(encodeURIComponent(EVIDENCE_A)) && url.includes("startLine=1&"),
+      ),
+    ).toHaveLength(firstPageLoads);
+    expect(screen.getByText("temporary later-page failure")).toBeTruthy();
+  });
+
   it("does not describe a bounded search as a complete count", async () => {
     vi.stubGlobal(
       "fetch",
@@ -1673,6 +1724,86 @@ describe("Log workbench honesty and navigation", () => {
     await waitFor(() =>
       expect(pageRequests.some((url) => /startLine=419\d/.test(url))).toBe(true),
     );
+  });
+
+  it("reserves a closed pane for a late bookmark target", async () => {
+    const pageRequests: string[] = [];
+    let resolveTarget!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/workbench") && !init?.method) return jsonResponse(inventory());
+        if (url.includes("/workbench/views")) return jsonResponse({ views: [] });
+        if (url.includes("/workbench/review-queue")) return jsonResponse({ candidateCount: 0 });
+        if (url.includes("/workbench/bookmarks")) {
+          return jsonResponse({
+            bookmarks: [{
+              id: "bookmark-late-file",
+              note: "Open late evidence",
+              status: "resolved",
+              staleReason: null,
+              locator: { evidenceId: EVIDENCE_B, lineNumber: 4200 },
+              shareSafeToken: "bookmark-late-file-token",
+            }],
+          });
+        }
+        if (url.includes("/workbench/page")) {
+          pageRequests.push(url);
+          const evidenceId = url.includes(encodeURIComponent(EVIDENCE_B)) ? EVIDENCE_B : EVIDENCE_A;
+          const start = Number(new URL(url, "http://x").searchParams.get("startLine") ?? "1");
+          if (evidenceId === EVIDENCE_B && start > 1) {
+            return new Promise<Response>((resolve) => {
+              resolveTarget = resolve;
+            });
+          }
+          return jsonResponse({
+            evidenceId,
+            relativePath: evidenceId === EVIDENCE_B ? "<img src=x onerror=alert(1)>.log" : "gateway/edge.log",
+            startLine: start,
+            rows: [],
+            wrappedRowCount: 0,
+            nextStartLine: null,
+            bounded: false,
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+    render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_A)))).toBe(true),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open late evidence" }));
+    await waitFor(() =>
+      expect(pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=4190&"))).toBe(true),
+    );
+    expect(
+      pageRequests.some((url) => url.includes(encodeURIComponent(EVIDENCE_B)) && url.includes("startLine=1&")),
+    ).toBe(false);
+    resolveTarget(jsonResponse({
+      evidenceId: EVIDENCE_B,
+      relativePath: "<img src=x onerror=alert(1)>.log",
+      startLine: 4190,
+      rows: Array.from({ length: 80 }, (_, index) => ({
+        evidenceId: EVIDENCE_B,
+        relativePath: "<img src=x onerror=alert(1)>.log",
+        rotationFamily: "<img src=x onerror=alert(1)>.log",
+        lineNumber: 4190 + index,
+        byteOffset: 0,
+        text: index === 10 ? "late bookmark line" : `line ${4190 + index}`,
+        wrapped: false,
+        originalTimestamp: null,
+        normalizedUtc: null,
+        parseClass: "missing",
+        contextBefore: [],
+        contextAfter: [],
+      })),
+      wrappedRowCount: 0,
+      nextStartLine: null,
+      bounded: false,
+    }));
+    expect(await screen.findByText("late bookmark line")).toBeTruthy();
   });
 
   it("saves a changed view under the same name instead of colliding on the key", async () => {
