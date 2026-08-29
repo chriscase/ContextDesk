@@ -60,8 +60,8 @@
     },
     {
       "path": "docs/media/gallery/war-room-analyze.png",
-      "gitBlob": "9a97ee6d0a6912f13495ef82c216e58934d32bb0",
-      "sourceSha": "af3ab0ae88ddb9fa143149f52f38e9e0704e625c",
+      "gitBlob": "0ec792a9b1fe22e3de36bdb55164c86bf4e2c222",
+      "sourceSha": "cddc38fb0088f377b124fc30cf5c76c0c4234cb4",
       "privacyReview": "publishable",
       "modelInventoryVisible": false,
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
