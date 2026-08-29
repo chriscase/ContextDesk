@@ -169,6 +169,13 @@ export function validatePublicMedia(
     for (const field of REQUIRED_TEXT_FIELDS) {
       assertNonEmptyText(asset[field], field, source);
     }
+    if (
+      !Array.isArray(asset.altRequiredTerms) ||
+      asset.altRequiredTerms.length === 0 ||
+      asset.altRequiredTerms.some((term) => typeof term !== "string" || term.trim() === "")
+    ) {
+      throw new Error(`${source}: altRequiredTerms must be a non-empty array of non-empty strings`);
+    }
 
     const absolute = path.resolve(root, ...assetPath.split("/"));
     if (!isInside(mediaRoot, absolute)) {

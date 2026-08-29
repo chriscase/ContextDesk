@@ -10,6 +10,7 @@
       "fixture": "Bundled offline Help content and synthetic demo-dataset documentation",
       "theme": "Slate with the public appearance picker visible",
       "claim": "Bundled demo-dataset guidance with five public appearance choices",
+      "altRequiredTerms": ["Help", "appearance"],
       "reviewedBy": "Agent: Codex · Model: gpt-5.6-sol"
     },
     {
@@ -21,6 +22,7 @@
       "fixture": "Synthetic 250,000-event triage-stress corpus with the bundled seven-day operational-metrics fixture",
       "theme": "Slate",
       "claim": "Two exact-time evidence lanes with a durable corpus attachment, aligned CPU, heap, and client tracks, source provenance, payload-focused rows, and both side rails collapsed",
+      "altRequiredTerms": ["Log Explorer", "synthetic"],
       "reviewedBy": "Agent: Codex · Model: gpt-5.6-sol"
     },
     {
@@ -32,6 +34,7 @@
       "fixture": "Bundled synthetic 25,000-event Log Lab demonstration corpus",
       "theme": "Slate",
       "claim": "Synthetic Logs library summary with 25,000 events, 10 imported files, level counts, and learned templates",
+      "altRequiredTerms": ["Logs library", "synthetic"],
       "reviewedBy": "Agent: Codex · Model: gpt-5.6-sol"
     },
     {
@@ -43,6 +46,7 @@
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
       "claim": "Overview activity feed, recorded status counts, and active investigation entry point",
+      "altRequiredTerms": ["Overview"],
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     },
@@ -55,6 +59,7 @@
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
       "claim": "Capture workspace with human-authored notes, imported unverified output, provenance, and investigation-scoped file intake",
+      "altRequiredTerms": ["Capture"],
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     },
@@ -67,6 +72,7 @@
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
       "claim": "Analyze workspace showing completed synthetic Workstreams and the beginning of the investigation-owned Log workbench with one of four panes open",
+      "altRequiredTerms": ["Analyze", "Workstreams", "Log workbench"],
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     },
@@ -79,6 +85,7 @@
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
       "claim": "Compare workspace with historical artifacts, copyable deep-link sections, and lane-focus controls",
+      "altRequiredTerms": ["Compare"],
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     },
@@ -91,6 +98,7 @@
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
       "claim": "Human decision journal, recorded comparison context, and the share-safe export boundary",
+      "altRequiredTerms": ["decision", "share-safe"],
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     },
@@ -103,6 +111,7 @@
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
       "claim": "Portable archive download and dry-run controls with an explicit exact-restore warning",
+      "altRequiredTerms": ["portable", "dry-run", "exact-restore"],
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     }

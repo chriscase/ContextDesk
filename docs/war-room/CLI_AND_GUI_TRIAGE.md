@@ -511,7 +511,7 @@ Open **Decide** and record the human-owned outcome:
 A model lane may propose an action, but it cannot approve the human decision.
 The decision and its revisions remain part of the investigation history.
 
-![Synthetic portable archive download and dry-run controls with an exact-restore warning](../media/gallery/war-room-decide-export.png)
+![Synthetic human decision journal with recorded comparison context and a share-safe export boundary](../media/gallery/war-room-decide-export.png)
 
 Use the appropriate export after review: a triage brief for a readable
 handoff, a selected-evidence package for another analysis tool, or a portable

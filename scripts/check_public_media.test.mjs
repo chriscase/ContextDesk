@@ -35,6 +35,7 @@ function asset(pathname, gitBlob) {
     fixture: "synthetic",
     theme: "dark",
     claim: "Synthetic product frame",
+    altRequiredTerms: ["synthetic"],
     reviewedBy: "Test Agent",
   };
 }
@@ -166,6 +167,24 @@ test("unsafe privacy metadata fails closed", () => {
     const inventory = run(root);
     assert.notEqual(inventory.status, 0);
     assert.match(inventory.stderr, /modelInventoryVisible must be false/);
+  });
+});
+
+test("missing or malformed alt semantics fail closed", () => {
+  withRepository(({ root, pathname, gitBlob }) => {
+    const missing = asset(pathname, gitBlob);
+    delete missing.altRequiredTerms;
+    writeManifest(root, [missing]);
+    const absent = run(root);
+    assert.notEqual(absent.status, 0);
+    assert.match(absent.stderr, /altRequiredTerms must be a non-empty array/);
+
+    const malformed = asset(pathname, gitBlob);
+    malformed.altRequiredTerms = ["synthetic", ""];
+    writeManifest(root, [malformed]);
+    const blank = run(root);
+    assert.notEqual(blank.status, 0);
+    assert.match(blank.stderr, /altRequiredTerms must be a non-empty array/);
   });
 });
 

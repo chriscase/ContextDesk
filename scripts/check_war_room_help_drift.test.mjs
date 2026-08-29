@@ -14,6 +14,7 @@ function fixture() {
     "docs/help",
     "docs/assets/war-room",
     "docs/media/gallery",
+    "docs/media/public-assets.json",
     "docs/benchmarks",
     "collab/web/public/help/war-room",
     "collab/web/src/HelpCenter.tsx",
@@ -53,4 +54,19 @@ test("a mislabeled PNG and duplicate canonical anchor fail closed", () => {
   assert.match(errors, /not PNG data/);
   assert.match(errors, /exactly one canonical triage-log-time id/);
   assert.match(errors, /Administration media must prove the current Entities and Attribution navigation/);
+});
+
+test("a stale Markdown description of public media fails closed", () => {
+  const root = fixture();
+  const guide = join(root, "docs", "war-room", "CLI_AND_GUI_TRIAGE.md");
+  writeFileSync(
+    guide,
+    readFileSync(guide, "utf8").replace(
+      "Synthetic human decision journal with recorded comparison context and a share-safe export boundary",
+      "Synthetic portable archive download and dry-run controls with an exact-restore warning",
+    ),
+  );
+  const errors = validateWarRoomHelpDrift(root).errors.join("\n");
+  assert.match(errors, /alt for docs\/media\/gallery\/war-room-decide-export\.png must include 'decision'/);
+  assert.match(errors, /alt for docs\/media\/gallery\/war-room-decide-export\.png must include 'share-safe'/);
 });

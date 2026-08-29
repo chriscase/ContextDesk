@@ -42,6 +42,12 @@ function mediaDimensions(path, format) {
 export function validateWarRoomHelpDrift(repositoryRoot = ownRoot) {
   const root = resolve(repositoryRoot);
   const errors = [];
+  const publicMedia = JSON.parse(
+    readFileSync(join(root, "docs", "media", "public-assets.json"), "utf8"),
+  );
+  const publicAltTerms = new Map(
+    (publicMedia.assets ?? []).map((row) => [row.path, row.altRequiredTerms ?? []]),
+  );
   const markdownRoots = [
     join(root, "docs", "war-room"),
     join(root, "docs", "help", "war-room"),
@@ -57,6 +63,16 @@ export function validateWarRoomHelpDrift(repositoryRoot = ownRoot) {
       const asset = resolve(dirname(markdown), target);
       if (!asset.startsWith(`${root}/`) || !existsSync(asset) || !statSync(asset).isFile()) {
         fail(errors, `${relative(root, markdown)} references missing image ${target}`);
+        continue;
+      }
+      const assetPath = relative(root, asset).split("\\").join("/");
+      for (const term of publicAltTerms.get(assetPath) ?? []) {
+        if (!alt.toLocaleLowerCase("en-US").includes(term.toLocaleLowerCase("en-US"))) {
+          fail(
+            errors,
+            `${relative(root, markdown)} alt for ${assetPath} must include '${term}' from the public-media ledger`,
+          );
+        }
       }
     }
   }
