@@ -84,6 +84,8 @@ async function runLanes(page: Page): Promise<void> {
     ),
     page.getByRole("button", { name: "Freeze selected evidence (1)" }).click(),
   ]);
+  await page.getByRole("checkbox", { name: /gpt-oss-120b .*contributor/ }).check();
+  await page.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512 .*challenger/ }).check();
   await page.getByRole("button", { name: "Run synthetic triage" }).click();
   await expect(page.locator(".triage-runs__status--completed").first()).toBeVisible({
     timeout: 30_000,

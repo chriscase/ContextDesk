@@ -207,8 +207,11 @@ test.describe("complete war-room operator journey", () => {
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]?.fingerprint).toBe(frozenBody.fingerprint);
 
+    const analyze = page.locator("#stage-analyze");
     await expect(page.locator(".triage-runs__mode")).toHaveText("synthetic / offline");
     await expect(page.getByRole("button", { name: "Run synthetic triage" })).toBeEnabled();
+    await analyze.getByRole("checkbox", { name: /gpt-oss-120b .*contributor/ }).check();
+    await analyze.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512 .*challenger/ }).check();
     await page.getByRole("button", { name: "Run synthetic triage" }).click();
     await expect(page.locator(".triage-runs__status--completed").first()).toBeVisible({
       timeout: 30_000,
@@ -223,7 +226,6 @@ test.describe("complete war-room operator journey", () => {
     await expect(identifiers).toBeVisible();
     await identifiers.locator("summary").click();
     await expect(identifiers.getByText(frozenBody.fingerprint, { exact: true })).toBeVisible();
-    const analyze = page.locator("#stage-analyze");
     const completedLanes = analyze.locator(".triage-runs__job .triage-runs__candidate");
     await expect(completedLanes).toHaveCount(3);
     await expect(completedLanes.filter({ hasText: "qwen-3.6-27b" })).toContainText("settled");

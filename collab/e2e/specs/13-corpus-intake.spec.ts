@@ -114,6 +114,8 @@ test.describe("investigation-scoped corpus intake", () => {
     expect(secondSnapshot.evidence).toHaveLength(2);
     await expect(analyze.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
     await expect(analyze.getByRole("combobox", { name: "Snapshot", exact: true })).toHaveValue(secondSnapshot.id);
+    await analyze.getByRole("checkbox", { name: /gpt-oss-120b .*contributor/ }).check();
+    await analyze.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512 .*challenger/ }).check();
     await expect(analyze.getByRole("button", { name: "Run synthetic triage" })).toBeEnabled();
     const [launchedResponse] = await Promise.all([
       page.waitForResponse(

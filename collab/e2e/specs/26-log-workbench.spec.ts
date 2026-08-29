@@ -69,6 +69,7 @@ test.describe("investigation log workbench", () => {
       return "Log workbench listed investigation files by human names";
     });
 
+    await workbench.getByRole("button", { name: "Clear open files" }).click();
     await workbench.getByLabel("Show edge.log in a pane", { exact: true }).check();
     await workbench.getByLabel("Show batch.log in a pane", { exact: true }).check();
     await expect(workbench.locator("[data-workbench-pane]")).toHaveCount(2);
@@ -140,6 +141,8 @@ test.describe("investigation log workbench", () => {
       await expect(workbench.getByText("pasted-chat.txt", { exact: true })).toBeVisible();
       return "email and chat listed in the workbench";
     });
+    await workbench.getByRole("button", { name: "Clear open files" }).click();
+    await workbench.getByLabel("Show support-thread.eml in a pane", { exact: true }).check();
     await workbench.getByLabel("Find in logs").fill("human conversation");
     await workbench.getByRole("button", { name: "Search" }).click();
     await record.check("workbench-chat-not-a-log", async () => {
@@ -237,6 +240,8 @@ test.describe("investigation log workbench", () => {
     await importWorkbenchZip(page);
     await gotoStage(page, "Analyze");
     const workbench = page.locator("#log-workbench");
+    await workbench.getByRole("button", { name: "Clear open files" }).click();
+    await workbench.getByLabel("Show edge.log in a pane", { exact: true }).check();
     const advanced = workbench.locator("details.log-workbench__search-advanced");
     await expect(advanced).not.toHaveAttribute("open", "");
     await expect(workbench.getByText("Details", { exact: true })).toHaveCount(7);
