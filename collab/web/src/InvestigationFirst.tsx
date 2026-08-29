@@ -208,6 +208,7 @@ export function InvestigationFirst(props: {
   const [selected, setSelected] = useState<InvestigationRow | null>(null);
   const [evidence, setEvidence] = useState<EvidenceRow[]>([]);
   const [contributions, setContributions] = useState<ContributionRow[]>([]);
+  const [evidenceLoadError, setEvidenceLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -246,6 +247,7 @@ export function InvestigationFirst(props: {
     detailGeneration.current = generation;
     setDetailLoading(true);
     setSelectedEvidence([]);
+    setEvidenceLoadError(null);
     try {
       const [caseResponse, evidenceResponse, contributionsResponse] = await Promise.all([
         protectedApiFetch(`/api/cases/${caseId}`),
@@ -254,15 +256,22 @@ export function InvestigationFirst(props: {
       ]);
       if (generation !== detailGeneration.current || caseId !== activeFocusCaseId.current) return;
       if (!caseResponse.ok) throw new Error(await errorMessage(caseResponse, "This investigation could not be opened."));
+      const evidenceBodyPromise: Promise<{ artifacts?: EvidenceRow[]; loadError?: string }> = evidenceResponse.ok
+        ? evidenceResponse.json()
+        : errorMessage(evidenceResponse, "Evidence inventory could not be loaded.").then((loadError) => ({ artifacts: [], loadError }));
+      const contributionsBodyPromise: Promise<{ contributions?: ContributionRow[]; loadError?: string }> = contributionsResponse.ok
+        ? contributionsResponse.json()
+        : errorMessage(contributionsResponse, "Evidence annotations could not be loaded.").then((loadError) => ({ contributions: [], loadError }));
       const [caseBody, evidenceBody, contributionsBody] = await Promise.all([
         caseResponse.json() as Promise<InvestigationRow>,
-        evidenceResponse.ok ? evidenceResponse.json() as Promise<{ artifacts?: EvidenceRow[] }> : Promise.resolve({ artifacts: [] }),
-        contributionsResponse.ok ? contributionsResponse.json() as Promise<{ contributions?: ContributionRow[] }> : Promise.resolve({ contributions: [] }),
+        evidenceBodyPromise,
+        contributionsBodyPromise,
       ]);
       if (generation !== detailGeneration.current || caseId !== activeFocusCaseId.current) return;
       setSelected(caseBody);
       setEvidence(evidenceBody.artifacts ?? []);
       setContributions(contributionsBody.contributions ?? []);
+      setEvidenceLoadError(evidenceBody.loadError ?? contributionsBody.loadError ?? null);
       props.onFocusedCaseTitle?.(caseBody.title);
       setError(null);
     } catch (cause) {
@@ -270,6 +279,7 @@ export function InvestigationFirst(props: {
       setSelected(null);
       setEvidence([]);
       setContributions([]);
+      setEvidenceLoadError(null);
       setError(cause instanceof Error ? cause.message : "This investigation could not be opened.");
       props.onFocusedCaseTitle?.(null);
     } finally {
@@ -288,6 +298,7 @@ export function InvestigationFirst(props: {
       setSelected(null);
       setEvidence([]);
       setContributions([]);
+      setEvidenceLoadError(null);
       props.onFocusedCaseTitle?.(null);
     }
   }, [props.focusCaseId, refreshDetail, props.onFocusedCaseTitle]);
@@ -469,7 +480,7 @@ export function InvestigationFirst(props: {
           <label><span>Status</span><select className="login__input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter investigations by status"><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label>
         </div>
         {loading ? <p className="investigation-first__empty">Loading investigations…</p> : null}
-        {!loading && filteredCases.length === 0 ? <p className="investigation-first__empty">No investigations match this view. Try a different search or create a new one.</p> : null}
+        {!loading && filteredCases.length === 0 ? <p className="investigation-first__empty">{props.canWrite && !props.readOnly ? "No investigations match this view. Try a different search or create a new one." : "No investigations match this view. Try a different search."}</p> : null}
         <ul className="investigation-first__list">
           {filteredCases.map((row) => {
             const missing = [row.problemStatement, row.affectedParties, row.impact].filter((value) => !text(value)).length;
@@ -506,7 +517,8 @@ export function InvestigationFirst(props: {
         </div>
         <section className="investigation-first__card investigation-first__evidence" aria-labelledby="investigation-first-evidence-title">
           <div className="investigation-first__card-heading"><div><h3 id="investigation-first-evidence-title">Evidence inventory</h3><p>Files and references stay governed by the shared evidence and permission boundary.</p></div><span>{evidence.length} {evidence.length === 1 ? "item" : "items"}</span></div>
-          {evidence.length === 0 ? <p className="investigation-first__muted">No evidence has been registered yet.</p> : <ul className="investigation-first__evidence-list">{evidence.map((artifact) => { const annotation = artifact.summaryContributionId ? summaryById.get(artifact.summaryContributionId)?.body : null; return <li key={artifact.id}><label className="investigation-first__evidence-select"><input type="checkbox" checked={selectedEvidence.includes(artifact.id)} onChange={(event) => setSelectedEvidence((current) => event.target.checked ? [...new Set([...current, artifact.id])] : current.filter((id) => id !== artifact.id))} /><span><strong>{artifact.filename || artifact.uri || "Unnamed evidence"}</strong><small>{annotation || "Annotation not available"}</small></span></label><details><summary>Metadata</summary><dl className="investigation-first__evidence-meta"><div><dt>Kind</dt><dd>{display(artifact.kind)}</dd></div><div><dt>Media type</dt><dd>{display(artifact.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(artifact.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(artifact.privacyClass)}</dd></div><div><dt>Hash</dt><dd>{display(artifact.contentHash || artifact.expectedHash)}</dd></div><div><dt>Size</dt><dd>{artifact.byteLength == null ? "Not recorded" : `${artifact.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(artifact.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(artifact.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(artifact.relativePath)}</dd></div></dl></details></li>; })}</ul>}
+          {evidenceLoadError ? <p className="investigation-first__error" role="alert">{evidenceLoadError}</p> : null}
+          {evidence.length === 0 ? (evidenceLoadError ? null : <p className="investigation-first__muted">No evidence has been registered yet.</p>) : <ul className="investigation-first__evidence-list">{evidence.map((artifact) => { const annotation = artifact.summaryContributionId ? summaryById.get(artifact.summaryContributionId)?.body : null; return <li key={artifact.id}><label className="investigation-first__evidence-select"><input type="checkbox" checked={selectedEvidence.includes(artifact.id)} onChange={(event) => setSelectedEvidence((current) => event.target.checked ? [...new Set([...current, artifact.id])] : current.filter((id) => id !== artifact.id))} /><span><strong>{artifact.filename || artifact.uri || "Unnamed evidence"}</strong><small>{annotation || "Annotation not available"}</small></span></label><details><summary>Metadata</summary><dl className="investigation-first__evidence-meta"><div><dt>Kind</dt><dd>{display(artifact.kind)}</dd></div><div><dt>Media type</dt><dd>{display(artifact.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(artifact.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(artifact.privacyClass)}</dd></div><div><dt>Hash</dt><dd>{display(artifact.contentHash || artifact.expectedHash)}</dd></div><div><dt>Size</dt><dd>{artifact.byteLength == null ? "Not recorded" : `${artifact.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(artifact.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(artifact.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(artifact.relativePath)}</dd></div></dl></details></li>; })}</ul>}
           <div className="investigation-first__bulk-actions"><span>{selectedEvidence.length} selected</span><button type="button" disabled title="Recoverable trash is not enabled in this slice">Move selected to trash</button><button type="button" onClick={() => setSelectedEvidence([])} disabled={!selectedEvidence.length}>Clear selection</button><small>Bulk trash is reserved for a recoverable, audited lifecycle workflow; no file is deleted here.</small></div>
           {props.canWrite && !props.readOnly ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment"><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option><option value="file_server_ref">File reference</option></select></label><label>Privacy<select name="privacyClass" defaultValue="owner_only"><option value="owner_only">Owner only</option><option value="share_safe">Share safe</option></select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={uploading}>{uploading ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
         </section>
@@ -515,5 +527,5 @@ export function InvestigationFirst(props: {
     );
   }
 
-  return <div className="investigation-first"><header className="investigation-first__hero"><div><p className="investigation-first__eyebrow">Investigation First</p><h1>Make the next useful action obvious.</h1><p>Capture a clear starting point quickly, then open a calm view of what is known, missing, and ready for deeper technical work.</p></div><div className="investigation-first__hero-note"><strong>One shared record</strong><span>Presentation changes here never change evidence, permissions, audit history, or triage integrity.</span></div></header>{error && !selected ? <p className="investigation-first__error" role="alert">{error}</p> : null}{selected ? renderDetail() : <>{renderCreateForm()}{renderList()}</>}</div>;
+  return <div className="investigation-first"><header className="investigation-first__hero"><div><p className="investigation-first__eyebrow">Investigation First</p><h1>Make the next useful action obvious.</h1><p>Capture a clear starting point quickly, then open a calm view of what is known, missing, and ready for deeper technical work.</p></div><div className="investigation-first__hero-note"><strong>One shared record</strong><span>Presentation changes here never change evidence, permissions, audit history, or triage integrity.</span></div></header>{error && !selected && !props.focusCaseId ? <p className="investigation-first__error" role="alert">{error}</p> : null}{props.focusCaseId ? renderDetail() : <>{renderCreateForm()}{renderList()}</>}</div>;
 }

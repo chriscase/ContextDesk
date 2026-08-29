@@ -118,11 +118,44 @@ describe("Investigation First", () => {
   });
 
   it("does not expose creation to a viewer", async () => {
-    stubFetch();
+    stubFetch({ cases: [] });
     render(<InvestigationFirst {...commonProps} canWrite={false} />);
     await screen.findByRole("heading", { name: "Investigations" });
     expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Create investigation" })).toBeNull();
+    expect(screen.getByText("No investigations match this view. Try a different search.")).toBeTruthy();
+  });
+
+  it("shows focused loading and unavailable states with a way back", async () => {
+    let resolveCase: ((value: unknown) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [] }) };
+      if (url === "/api/cases/missing") return new Promise((resolve) => { resolveCase = resolve; });
+      if (url.endsWith("/evidence") || url.endsWith("/contributions")) return { ok: true, json: async () => ({ artifacts: [], contributions: [] }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    render(<InvestigationFirst {...commonProps} focusCaseId="missing" />);
+    expect(await screen.findByText("Opening investigation…")).toBeTruthy();
+    resolveCase?.({ ok: false, status: 404, json: async () => ({}) });
+    expect(await screen.findByText("This investigation is unavailable or you no longer have access to it.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back to investigations" })).toBeTruthy();
+  });
+
+  it("does not describe a failed evidence read as an empty inventory", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [baseCase] }) };
+      if (url === "/api/cases/case-1") return { ok: true, json: async () => baseCase };
+      if (url.endsWith("/evidence")) return { ok: false, status: 503, json: async () => ({}) };
+      if (url.endsWith("/contributions")) return { ok: true, json: async () => ({ contributions: [] }) };
+      if (url.endsWith("/lifecycle")) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    render(<InvestigationFirst {...commonProps} focusCaseId="case-1" />);
+    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Evidence inventory could not be loaded.");
+    expect(screen.queryByText("No evidence has been registered yet.")).toBeNull();
   });
 
   it("ignores a detail response that belongs to an investigation no longer in the URL", async () => {
