@@ -10,7 +10,7 @@
  * It never proposes a zone. There is no default, no "detected" value, and no
  * pre-selected option in the picker.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { protectedApiFetch } from "./protected-api.js";
 
 const MAX_ERROR_LENGTH = 240;
@@ -180,6 +180,11 @@ export function LogTimeReviewPanel(props: {
   canWrite: boolean;
   readOnly: boolean;
 }) {
+  const instanceId = useId().replace(/:/g, "");
+  const panelId = `log-time-${instanceId}`;
+  const headingId = `${panelId}-heading`;
+  const sourceFilterId = `${panelId}-source-filter`;
+  const zoneOptionsId = `${panelId}-zone-options`;
   const [state, setState] = useState<CorpusState | null>(null);
   const [dependents, setDependents] = useState<Dependent[]>([]);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
@@ -481,7 +486,7 @@ export function LogTimeReviewPanel(props: {
 
   const heading = (
     <header className="log-time__head">
-      <h4 id="log-time-heading">When did these log lines happen?</h4>
+      <h4 id={headingId}>When did these log lines happen?</h4>
       {state?.corpusId ? (
         <span className="log-time__badge">
           revision {state.corpusRevision}
@@ -493,7 +498,7 @@ export function LogTimeReviewPanel(props: {
 
   if (unavailable) {
     return (
-      <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+      <section className="log-time" id={panelId} aria-labelledby={headingId}>
         {heading}
         <p className="log-time__copy" role="status">
           Timezone review needs the trusted ContextDesk timestamp host on this installation.
@@ -506,7 +511,7 @@ export function LogTimeReviewPanel(props: {
 
   if (!state) {
     return (
-      <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+      <section className="log-time" id={panelId} aria-labelledby={headingId}>
         {heading}
         <p className="log-time__copy">
           {busy === "load" ? "Loading time review…" : (error ?? "Time review unavailable.")}
@@ -517,7 +522,7 @@ export function LogTimeReviewPanel(props: {
 
   if (!state.corpusId) {
     return (
-      <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+      <section className="log-time" id={panelId} aria-labelledby={headingId}>
         {heading}
         <p className="log-time__copy">
           Once you have added log files to this investigation, build a log corpus
@@ -543,7 +548,7 @@ export function LogTimeReviewPanel(props: {
   }
 
   return (
-    <section className="log-time" id="log-time" aria-labelledby="log-time-heading">
+    <section className="log-time" id={panelId} aria-labelledby={headingId}>
       {heading}
 
       {outstanding.length > 0 ? (
@@ -574,10 +579,10 @@ export function LogTimeReviewPanel(props: {
 
       {state.sources.length > 0 ? (
         <div className="log-time__tools">
-          <label htmlFor="log-time-source-filter">
+          <label htmlFor={sourceFilterId}>
             Find a log file
             <input
-              id="log-time-source-filter"
+              id={sourceFilterId}
               type="search"
               value={sourceFilter}
               placeholder="Filename or timezone"
@@ -597,6 +602,7 @@ export function LogTimeReviewPanel(props: {
         {renderedSources.map((source) => {
           const isSelected = selectedSource === source.source;
           const showPreview = preview && preview.source === source.source;
+          const zoneInputId = `${panelId}-zone-${encodeURIComponent(source.source)}`;
           return (
             <li
               key={source.source}
@@ -684,12 +690,12 @@ export function LogTimeReviewPanel(props: {
 
               {isSelected && !source.declaration ? (
                 <div className="log-time__declare">
-                  <label htmlFor={`log-time-zone-${source.source}`}>
+                  <label htmlFor={zoneInputId}>
                     Which timezone was this file written in?
                   </label>
                   <input
-                    id={`log-time-zone-${source.source}`}
-                    list="log-time-zone-options"
+                    id={zoneInputId}
+                    list={zoneOptionsId}
                     value={zone}
                     placeholder="Start typing, e.g. America/Chicago"
                     onChange={(event) => {
@@ -697,7 +703,7 @@ export function LogTimeReviewPanel(props: {
                       setPreview(null);
                     }}
                   />
-                  <datalist id="log-time-zone-options">
+                  <datalist id={zoneOptionsId}>
                     {COMMON_ZONES.map((option) => (
                       <option key={option} value={option} />
                     ))}

@@ -55,8 +55,8 @@ credential, private path, or non-synthetic corpus is visible.
 | `gallery/war-room-capture-analyze.png` | Capture provenance, imported-output boundary, and corpus intake | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-analyze.png` | Workstreams and investigation-owned Log workbench | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-compare-decide.png` | Comparison lab, evidence, deep links, and lane focus | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-decide-export.png` | Portable archive export, dry-run, and exact-restore boundary | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-export.png` | Portable archive export, dry-run, and exact-restore boundary | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-decide-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 
 **Known residual — this is not a single-build gallery.** The War Room set is a
 current, single-SHA browser capture, while the three native desktop frames
@@ -144,7 +144,8 @@ that an untested model or provider was used.
    git status --short
    ```
 
-   The media validator must report exactly three assets. Render the README once
+   The media validator must report the complete checked-in ledger with every
+   path, source record, and published reference valid. Render the README once
    more and visually inspect every referenced image and caption before
    publication.
 

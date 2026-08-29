@@ -66,7 +66,7 @@
       "modelInventoryVisible": false,
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
-      "claim": "Analyze workspace with recognizable evidence, frozen snapshot lineage, and selectable synthetic model lanes",
+      "claim": "Analyze workspace showing completed synthetic Workstreams and the beginning of the investigation-owned Log workbench",
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     },
@@ -90,7 +90,7 @@
       "modelInventoryVisible": false,
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
-      "claim": "Decide export tools with portable archive preflight and exact-restore trust boundary",
+      "claim": "Portable archive download and dry-run controls with an explicit exact-restore warning",
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     },
@@ -102,7 +102,7 @@
       "modelInventoryVisible": false,
       "fixture": "Synthetic checkout-timeout War Room demo, memory-backed and offline",
       "theme": "Dark War Room default theme",
-      "claim": "Portable archive export, dry-run preflight, and explicit exact-restore boundary",
+      "claim": "Portable archive download and dry-run controls with an explicit exact-restore warning",
       "dimensions": { "width": 1440, "height": 1000 },
       "reviewedBy": "Agent: Codex · visual review · synthetic only"
     }

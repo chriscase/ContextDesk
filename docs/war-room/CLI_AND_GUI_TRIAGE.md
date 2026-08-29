@@ -337,9 +337,10 @@ last command is the one that starts it. The default demo intentionally prints
 that local log chronology is hidden until both `COLLAB_BRIDGE_BIN` (or the
 fallback `COLLAB_TRIAGE_RUNNER`) and `COLLAB_LOG_CORPUS_ROOT` point to a trusted
 ContextDesk timestamp host and its corpus cache. Without those host settings,
-the normal synthetic triage flow still works, but **Timezone review** and
-**Normalized log chronology** are unavailable. A UTC-range search still runs,
-but only timestamps that already carry an offset can be compared reliably; treat
+the normal synthetic triage flow still works. **Timezone review** says it
+"needs the trusted ContextDesk timestamp host on this installation," and
+**Normalized log chronology** stays hidden. A UTC-range search still runs, but
+only timestamps that already carry an offset can be compared reliably; treat
 that result as incomplete rather than guessing around the missing host.
 
 Open the local address printed by the service and sign in as:
@@ -419,7 +420,7 @@ continuation is bound to the selected files, scope, and timezone revision; a
 stale continuation is refused rather than silently reused. A later evidence or
 timezone revision does not silently change an already frozen snapshot.
 
-![Synthetic Analyze page with evidence and triage controls](../media/gallery/war-room-analyze.png)
+![Synthetic Analyze page showing completed Workstreams and the beginning of the Log workbench](../media/gallery/war-room-analyze.png)
 
 ### 5. Freeze the question's evidence basis
 
@@ -457,8 +458,6 @@ The button and status text are deliberate: a gateway selection is a request,
 not proof that a provider was reached. Credentials and endpoints stay on the
 War Room host. The browser receives only the bounded model/profile choices
 needed to make the selection.
-
-![Synthetic Analyze launcher and snapshot](../media/gallery/war-room-analyze.png)
 
 One lane is a complete triage. Selecting two or more lanes is an optional
 comparison and changes the button to **Run gateway comparison** where
@@ -512,7 +511,7 @@ Open **Decide** and record the human-owned outcome:
 A model lane may propose an action, but it cannot approve the human decision.
 The decision and its revisions remain part of the investigation history.
 
-![Synthetic decision and export view](../media/gallery/war-room-decide-export.png)
+![Synthetic portable archive download and dry-run controls with an exact-restore warning](../media/gallery/war-room-decide-export.png)
 
 Use the appropriate export after review: a triage brief for a readable
 handoff, a selected-evidence package for another analysis tool, or a portable

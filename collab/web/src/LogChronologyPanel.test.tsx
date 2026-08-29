@@ -201,6 +201,32 @@ describe("LogChronologyPanel", () => {
     expect(screen.queryByText(/revision 2/)).toBeNull();
   });
 
+  it("invalidates a hidden chronology without reloading it until Analyze becomes active", async () => {
+    const refreshed = page({
+      rows: [row({ message: "fresh chronology after returning to Analyze" })],
+      totalMatched: 1,
+      orderOnlyCount: 0,
+      timeQuality: "wall",
+    });
+    stubFetch([page(), refreshed]);
+    const view = render(<LogChronologyPanel caseId={CASE_ID} active />);
+    expect(await screen.findByText("edge accepted synthetic request")).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    view.rerender(<LogChronologyPanel caseId={CASE_ID} active={false} />);
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", { detail: { caseId: CASE_ID } }),
+      );
+    });
+    expect(screen.queryByText("edge accepted synthetic request")).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    view.rerender(<LogChronologyPanel caseId={CASE_ID} active />);
+    expect(await screen.findByText("fresh chronology after returning to Analyze")).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("does not publish a delayed chronology from a previous investigation", async () => {
     const oldCaseLoad = deferred<Response>();
     vi.stubGlobal(

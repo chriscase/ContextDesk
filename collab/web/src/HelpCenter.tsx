@@ -118,7 +118,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           {
             src: "/help/war-room/war-room-evidence-deep-link.png",
             alt: "Analyze page showing the investigation workstreams section",
-            caption: "Follow citations into Analyze, then inspect the cited item in its workstream context.",
+            caption: "Open Analyze to review completed workstreams in their investigation context.",
           },
           {
             src: "/help/war-room/war-room-compare.png",

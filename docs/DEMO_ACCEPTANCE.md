@@ -42,9 +42,10 @@ Synthetic / public fixtures only. No private or company corpora.
 - [ ] When the trusted timezone host is installed and configured, complete
   timezone review; use **apply-all** (or Settings default TZ) so every
   ambiguous source resolves honestly — no silent guessing.
-- [ ] Without that host, verify the UI reports timezone review/normalized
-  chronology as unavailable and leaves zone-less timestamps unresolved. Do not
-  mark the default provider-free demo as proof of successful normalization.
+- [ ] Without that host, verify Timezone review says it "needs the trusted
+  ContextDesk timestamp host on this installation," normalized chronology stays
+  hidden, and zone-less timestamps remain unresolved. Do not mark the default
+  provider-free demo as proof of successful normalization.
 
 ### 2. Explicit one-turn Context (~1 min)
 - [ ] In chat, attach or select an explicit one-turn **Context** (selection /

@@ -371,7 +371,7 @@ test.describe("host-backed log workbench chronology", () => {
     await page.getByRole("button", { name: "Preview intake" }).click();
     await page.getByRole("button", { name: "Commit accepted files" }).click();
     await gotoStage(page, "Analyze");
-    const panel = page.locator("#log-time");
+    const panel = page.locator("#stage-analyze .log-time");
     await panel.getByRole("button", { name: "Build the log corpus" }).click();
     await expect(panel.getByText(/timezone not stated/)).toBeVisible();
     const workerRow = panel.locator('[data-route-item="worker/batch.log"]');

@@ -666,7 +666,7 @@ parsing free-form progress or error strings.
 | Search excerpt                         |                                      160 characters | UTF-8-safe truncate                                    |
 | Bounded regex scan                     | 50,000 resident/candidate events in the proven path | Refuse/limit broader work                              |
 | Workbench search page                   |          50,000 corpus lines scanned per request | Stop at an exact position; return a resume cursor      |
-| Workbench resident rows                 |                    2,000 rows per read window | Stream each file; never materialize a corpus           |
+| Workbench resident rows                 |                    2,000 rows per read window | Decode one selected file at a time, then window its rows; never materialize an investigation corpus |
 | Tool reported-time window              |                                              7 days | Both bounds required; lower inclusive, upper exclusive |
 | View selected identities               |                                                  64 | Sort/deduplicate/truncate for model hint               |
 | Bookmark exact refs/item               |                                                 512 | Reject larger save                                     |

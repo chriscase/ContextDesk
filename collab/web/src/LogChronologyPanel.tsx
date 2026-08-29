@@ -219,9 +219,9 @@ export function LogChronologyPanel(props: {
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId && detail.caseId !== props.caseId) return;
-      if (props.active === false) return;
       setPage(null);
       setRows([]);
+      if (props.active === false) return;
       void load(null, false);
     };
     window.addEventListener("contextdesk:log-time-changed", refresh);

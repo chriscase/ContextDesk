@@ -160,7 +160,7 @@ not resumed against different bytes or timestamps. The current local server
 materializes one selected evidence file in memory before building line windows;
 paging is not constant-memory proof for one extremely large file.
 
-![Synthetic Analyze surface with evidence, snapshot, and lane controls](../media/gallery/war-room-analyze.png)
+![Synthetic Analyze surface showing completed Workstreams and the beginning of the Log workbench](../media/gallery/war-room-analyze.png)
 
 ### 4. Compare: inspect findings, not votes
 

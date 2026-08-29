@@ -409,6 +409,18 @@ describe("LogTimeReviewPanel", () => {
         <div data-testid="analyze-time-review">{panel()}</div>
       </>,
     );
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("heading", { name: "When did these log lines happen?" }),
+      ).toHaveLength(2);
+    });
+    const ids = Array.from(document.querySelectorAll<HTMLElement>("[id]"), (node) => node.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const review of document.querySelectorAll<HTMLElement>("section.log-time")) {
+      const labelledBy = review.getAttribute("aria-labelledby");
+      expect(labelledBy).toBeTruthy();
+      expect(review.querySelector(`#${labelledBy}`)).toBeTruthy();
+    }
     const capture = within(screen.getByTestId("capture-time-review"));
     fireEvent.click(await capture.findByRole("button", { name: /declare a timezone/i }));
     fireEvent.change(capture.getByLabelText(/which timezone was this file written in/i), {

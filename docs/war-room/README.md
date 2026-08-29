@@ -142,11 +142,11 @@ handoffs:
 
 ![Synthetic Capture stage with human notes, imported output, and investigation-scoped file intake](../media/gallery/war-room-capture-analyze.png)
 
-![Synthetic Analyze stage with evidence board, frozen snapshot lineage, and model lanes](../media/gallery/war-room-analyze.png)
+![Synthetic Analyze stage showing completed Workstreams and the beginning of the Log workbench](../media/gallery/war-room-analyze.png)
 
 ![Synthetic Compare stage with historical artifacts, deep links, and lane focus](../media/gallery/war-room-compare-decide.png)
 
-![Synthetic Decide stage with an accepted human decision and export boundary](../media/gallery/war-room-export.png)
+![Synthetic portable archive download and dry-run controls with an exact-restore warning](../media/gallery/war-room-export.png)
 
 ## Entities and Attribution answer different questions
 
@@ -264,7 +264,7 @@ The dry run creates no investigation, user, membership, role, or capability.
 An exact reconstruction can then be restored after typing RESTORE. Historical
 people remain attribution only. Archive signatures are recorded, not verified.
 
-![Synthetic portable investigation archive export and restore workspace](../media/gallery/war-room-export.png)
+![Synthetic portable archive download and dry-run controls with an exact-restore warning](../media/gallery/war-room-export.png)
 
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 
@@ -300,10 +300,10 @@ No live provider or external material is required. Continue with the
 
 The default demo does not install the separate trusted timezone host. Lines
 that already include an offset remain comparable, but zone-less timestamps
-stay explicitly unresolved. Timezone review reports that the host is
-unavailable, while normalized chronology stays hidden because it has no host
-result to display. Exercise successful normalization only in a host-backed
-rehearsal with that service configured.
+stay explicitly unresolved. Timezone review says it "needs the trusted
+ContextDesk timestamp host on this installation," while normalized chronology
+stays hidden because it has no host result to display. Exercise successful
+normalization only in a host-backed rehearsal with that service configured.
 
 ## Shipped boundaries and honest limits
 

@@ -187,6 +187,32 @@ function stubFetch() {
 }
 
 describe("Log workbench", () => {
+  it("does not load or event-reload while Analyze is mounted but inactive", async () => {
+    stubFetch();
+    const view = render(
+      <LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active={false} />,
+    );
+    await waitFor(() => expect(fetch).not.toHaveBeenCalled());
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:evidence-changed", { detail: { caseId: CASE_ID } }),
+      );
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", { detail: { caseId: CASE_ID } }),
+      );
+    });
+    await waitFor(() => expect(fetch).not.toHaveBeenCalled());
+
+    view.rerender(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} active />);
+    await waitFor(() => {
+      const inventoryReads = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([input, init]) => String(input).endsWith("/workbench") && !init?.method,
+      );
+      expect(inventoryReads).toHaveLength(1);
+    });
+  });
+
   it("shows investigation logs with human labels and keeps HTML filenames as text", async () => {
     stubFetch();
     render(<LogWorkbench caseId={CASE_ID} canWrite readOnly={false} />);

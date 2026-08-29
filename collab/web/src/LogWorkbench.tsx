@@ -556,6 +556,7 @@ export function LogWorkbench(props: {
     const reload = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId && detail.caseId !== props.caseId) return;
+      if (props.active === false) return;
       void load({ invalidateResults: true });
     };
     window.addEventListener("contextdesk:corpus-intake-committed", reload);
@@ -569,7 +570,7 @@ export function LogWorkbench(props: {
       window.removeEventListener("contextdesk:evidence-changed", reload);
       window.removeEventListener("contextdesk:log-time-changed", reload);
     };
-  }, [load, props.caseId]);
+  }, [load, props.active, props.caseId]);
 
   const loadPane = useCallback(
     async (evidenceId: string, startLine = 1) => {
