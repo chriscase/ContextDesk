@@ -297,6 +297,15 @@ export function LogTimeReviewPanel(props: {
       // the one reload path for every instance, including the panel that made
       // the durable change, so neither stage can retain the prior revision.
       requestVersion.current += 1;
+      // A preview is advisory and bound to the revision it inspected. If the
+      // sibling panel changes that revision while a preview is pending, fence
+      // its continuation and release the local busy state. Durable writes are
+      // not cancelled here: they must settle against the server and publish
+      // their own completion event (or surface the server's conflict).
+      if (busy === "preview") {
+        actionVersion.current += 1;
+        setBusy(null);
+      }
       setState(null);
       setDependents([]);
       setPreview(null);
@@ -307,7 +316,7 @@ export function LogTimeReviewPanel(props: {
     };
     window.addEventListener("contextdesk:log-time-changed", refresh);
     return () => window.removeEventListener("contextdesk:log-time-changed", refresh);
-  }, [load, props.caseId]);
+  }, [busy, load, props.caseId]);
 
   const outstanding = useMemo(
     () => (state?.sources ?? []).filter((s) => s.unresolvedLocalRecords > 0),

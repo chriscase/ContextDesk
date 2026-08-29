@@ -44,16 +44,16 @@ recorded in `docs/media/public-assets.json`.
 ## War Room web capture set
 
 The War Room frames are captured from the loopback synthetic web demo, not
-from a live provider or a customer installation. They all use the same exact
-source SHA and the deterministic, memory-backed checkout-timeout fixture. The
-browser viewport is 1440 × 1000; no provider/model inventory,
+from a live provider or a customer installation. Each frame records its exact
+source SHA below and uses the deterministic, memory-backed checkout-timeout
+fixture. The browser viewport is 1440 × 1000; no provider/model inventory,
 credential, private path, or non-synthetic corpus is visible.
 
 | File | Surface | Dimensions | Source SHA | Fixture |
 | --- | --- | --- | --- | --- |
 | `gallery/war-room-overview.png` | Overview activity feed and active investigation | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-capture-analyze.png` | Capture provenance, imported-output boundary, and corpus intake | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
-| `gallery/war-room-analyze.png` | Workstreams and current default-selected checkout.log in the investigation-owned Log workbench | 1440 × 1000 PNG | `af3ab0ae88ddb9fa143149f52f38e9e0704e625c` | Synthetic checkout-timeout War Room demo |
+| `gallery/war-room-analyze.png` | Workstreams and the beginning of the investigation-owned Log workbench, including its current open-pane count | 1440 × 1000 PNG | `af3ab0ae88ddb9fa143149f52f38e9e0704e625c` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-compare-decide.png` | Comparison lab, evidence, deep links, and lane focus | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-decide-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |
 | `gallery/war-room-export.png` | Portable archive download and dry-run controls with exact-restore warning | 1440 × 1000 PNG | `5508e9e63b540d1ba5080fc7d70eecd74f08e332` | Synthetic checkout-timeout War Room demo |

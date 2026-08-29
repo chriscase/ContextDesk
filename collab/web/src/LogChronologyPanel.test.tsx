@@ -227,6 +227,49 @@ describe("LogChronologyPanel", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("does not publish a chronology reply that finishes after Analyze becomes inactive", async () => {
+    const pending = deferred<Response>();
+    let reads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        reads += 1;
+        if (reads === 1) return pending.promise;
+        return jsonResponse(
+          page({
+            rows: [row({ message: "fresh chronology after returning to Analyze" })],
+            totalMatched: 1,
+            orderOnlyCount: 0,
+            timeQuality: "wall",
+          }),
+        );
+      }),
+    );
+
+    const view = render(<LogChronologyPanel caseId={CASE_ID} active />);
+    await waitFor(() => expect(reads).toBe(1));
+    view.rerender(<LogChronologyPanel caseId={CASE_ID} active={false} />);
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          page({
+            rows: [row({ message: "stale chronology completed while hidden" })],
+            totalMatched: 1,
+          }),
+        ),
+      );
+      await pending.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByText("stale chronology completed while hidden")).toBeNull();
+    expect(screen.queryByText("Loading chronology…")).toBeNull();
+    expect(reads).toBe(1);
+
+    view.rerender(<LogChronologyPanel caseId={CASE_ID} active />);
+    expect(await screen.findByText("fresh chronology after returning to Analyze")).toBeTruthy();
+    expect(reads).toBe(2);
+  });
+
   it("does not publish a delayed chronology from a previous investigation", async () => {
     const oldCaseLoad = deferred<Response>();
     vi.stubGlobal(

@@ -438,6 +438,77 @@ describe("LogTimeReviewPanel", () => {
     expect(stateReads).toBe(4);
   });
 
+  it("fences a deferred preview when the sibling panel publishes a newer revision", async () => {
+    const previewGate = deferred<Response>();
+    let stateReads = 0;
+    let previewReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/log-time/preview")) {
+          previewReads += 1;
+          return previewGate.promise;
+        }
+        if (url.endsWith("/log-time")) {
+          stateReads += 1;
+          return jsonResponse(
+            stateReads <= 2
+              ? stateBody()
+              : stateBody({ corpusRevision: 2 }),
+          );
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      }),
+    );
+
+    render(
+      <>
+        <div data-testid="capture-time-review">{panel()}</div>
+        <div data-testid="analyze-time-review">{panel()}</div>
+      </>,
+    );
+    await waitFor(() => expect(stateReads).toBe(2));
+    const capture = within(screen.getByTestId("capture-time-review"));
+    fireEvent.click(await capture.findByRole("button", { name: /declare a timezone/i }));
+    fireEvent.change(capture.getByLabelText(/which timezone was this file written in/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(capture.getByRole("button", { name: /show me what this would do/i }));
+    await waitFor(() => expect(previewReads).toBe(1));
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:log-time-changed", {
+          detail: { caseId: CASE_ID, notice: "A sibling panel published revision 2." },
+        }),
+      );
+    });
+    await waitFor(() => {
+      const revisionBadges = document.querySelectorAll(".log-time__badge");
+      expect(revisionBadges).toHaveLength(2);
+      for (const badge of revisionBadges) {
+        expect(badge.textContent).toContain("revision 2");
+      }
+    });
+    expect(
+      capture.getByRole("button", { name: /show me what this would do/i }),
+    ).toHaveProperty("disabled", false);
+
+    await act(async () => {
+      previewGate.resolve(jsonResponse(PREVIEW));
+      await previewGate.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      screen.queryByRole("heading", { name: "What America/Chicago would do" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /apply America\/Chicago to this file/i }),
+    ).toBeNull();
+    expect(screen.queryByText(/could not be previewed/i)).toBeNull();
+  });
+
   it("does not let a delayed write update or reload a later investigation", async () => {
     const applyGate = deferred<Response>();
     const caseBLoad = deferred<Response>();

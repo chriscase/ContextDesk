@@ -210,7 +210,14 @@ export function LogChronologyPanel(props: {
   // keystroke turns a long word into a burst of full-corpus reads; one settled
   // pause is enough for a filter this cheap to change.
   useEffect(() => {
-    if (props.active === false) return;
+    if (props.active === false) {
+      // The panel remains mounted while Analyze is hidden. Invalidate any
+      // read already in flight so it cannot repopulate a projection that the
+      // next activation has not refreshed yet.
+      requestVersion.current += 1;
+      setBusy(false);
+      return;
+    }
     const timer = setTimeout(() => void load(null, false), FILTER_SETTLE_MS);
     return () => clearTimeout(timer);
   }, [load, props.active]);
@@ -219,6 +226,8 @@ export function LogChronologyPanel(props: {
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId && detail.caseId !== props.caseId) return;
+      requestVersion.current += 1;
+      setBusy(false);
       setPage(null);
       setRows([]);
       if (props.active === false) return;

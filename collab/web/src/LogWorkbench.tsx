@@ -548,9 +548,18 @@ export function LogWorkbench(props: {
   }, [invalidateEvidencePages, invalidateScopedResults, isCurrentCase, props.caseId]);
 
   useEffect(() => {
-    if (props.active === false) return;
+    if (props.active === false) {
+      // Analyze remains mounted while another investigation stage is visible.
+      // Fence every continuation that began before the stage was hidden so a
+      // delayed inventory, search, chronology, or pane reply cannot repopulate
+      // state that will be exposed briefly on the next activation.
+      loadRequestGeneration.current += 1;
+      invalidateScopedResults();
+      invalidateEvidencePages();
+      return;
+    }
     void load({ invalidateResults: true });
-  }, [load, props.active]);
+  }, [invalidateEvidencePages, invalidateScopedResults, load, props.active]);
 
   useEffect(() => {
     const reload = (event: Event) => {
