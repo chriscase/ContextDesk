@@ -35,6 +35,12 @@ const CONTEXT_FIELDS: readonly [keyof InvestigationContext, string][] = [
 
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function display(value: unknown): string { return text(value) || "Not recorded"; }
+function compactByteLabel(value: number | null | undefined): string | null {
+  if (value == null) return null;
+  if (value < 1_024) return `${value.toLocaleString()} B`;
+  if (value < 1_048_576) return `${(value / 1_024).toFixed(value < 10_240 ? 1 : 0)} KB`;
+  return `${(value / 1_048_576).toFixed(value < 10_485_760 ? 1 : 0)} MB`;
+}
 function listQuestions(value: string): string[] { return value.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean); }
 function contextPayload(value: InvestigationContext): InvestigationContext | null {
   return Object.values(value).some((item) => text(item)) ? { ...value } : null;
@@ -309,7 +315,43 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       {annotations.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(annotations.error, "annotations")}</p><button type="button" onClick={runtime.refresh.contributions}>Retry evidence annotations</button></div> : null}
       {annotations.availability === "available" && annotations.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(annotations.refreshError, "annotations")}</p><button type="button" onClick={runtime.refresh.contributions}>Retry evidence annotations</button></div> : null}
       {inventory.availability === "available" && inventory.value.length === 0 ? <p className="investigation-first__muted">No evidence has been registered yet.</p> : null}
-      {inventory.availability === "available" && inventory.value.length > 0 ? <ul className="investigation-first__evidence-list">{inventory.value.map(({ evidence, annotation }) => { const annotationFallback = annotationsPending ? "Annotation loading…" : "Annotation not available"; return <li key={evidence.id}><label className="investigation-first__evidence-select"><input type="checkbox" checked={selectedEvidence.includes(evidence.id)} onChange={(event) => setSelectedEvidence((current) => event.target.checked ? [...new Set([...current, evidence.id])] : current.filter((id) => id !== evidence.id))} /><span><strong>{evidence.filename || evidence.uri || "Unnamed evidence"}</strong><small>{annotation?.body || annotationFallback}</small></span></label><details><summary>Metadata</summary><dl className="investigation-first__evidence-meta"><div><dt>Kind</dt><dd>{display(evidence.kind)}</dd></div><div><dt>Media type</dt><dd>{display(evidence.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(evidence.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(evidence.privacyClass)}</dd></div><div><dt>Hash</dt><dd>{display(evidence.contentHash || evidence.expectedHash)}</dd></div><div><dt>Size</dt><dd>{evidence.byteLength == null ? "Not recorded" : `${evidence.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(evidence.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(evidence.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(evidence.relativePath)}</dd></div><div><dt>Intake batch</dt><dd>{display(evidence.intakeBatchId)}</dd></div><div><dt>Annotation author</dt><dd>{annotation ? display(annotation.authorUsername) : annotationFallback}</dd></div><div><dt>Annotated</dt><dd>{annotation ? dateLabel(annotation.createdAt) : annotationFallback}</dd></div></dl></details></li>; })}</ul> : null}
+      {inventory.availability === "available" && inventory.value.length > 0 ? (
+        <ul className="investigation-first__evidence-list">
+          {inventory.value.map(({ evidence, annotation }) => {
+            const annotationFallback = annotationsPending ? "Annotation loading…" : "Annotation not available";
+            const size = compactByteLabel(evidence.byteLength);
+            return (
+              <li key={evidence.id}>
+                <label className="investigation-first__evidence-select">
+                  <input
+                    type="checkbox"
+                    checked={selectedEvidence.includes(evidence.id)}
+                    onChange={(event) => setSelectedEvidence((current) => event.target.checked
+                      ? [...new Set([...current, evidence.id])]
+                      : current.filter((id) => id !== evidence.id))}
+                  />
+                  <span className="investigation-first__evidence-copy">
+                    <span className="investigation-first__evidence-title-row">
+                      <strong>{evidence.filename || evidence.uri || "Unnamed evidence"}</strong>
+                      <span className="investigation-first__evidence-facts" aria-label="Evidence summary">
+                        <span>{display(evidence.kind)}</span>
+                        {evidence.mediaType ? <span>{evidence.mediaType}</span> : null}
+                        {size ? <span>{size}</span> : null}
+                        <span>{display(evidence.verificationStatus)}</span>
+                      </span>
+                    </span>
+                    <small>{annotation?.body || annotationFallback}</small>
+                  </span>
+                </label>
+                <details>
+                  <summary>More details</summary>
+                  <dl className="investigation-first__evidence-meta"><div><dt>Kind</dt><dd>{display(evidence.kind)}</dd></div><div><dt>Media type</dt><dd>{display(evidence.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(evidence.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(evidence.privacyClass)}</dd></div><div><dt>Hash</dt><dd>{display(evidence.contentHash || evidence.expectedHash)}</dd></div><div><dt>Size</dt><dd>{evidence.byteLength == null ? "Not recorded" : `${evidence.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(evidence.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(evidence.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(evidence.relativePath)}</dd></div><div><dt>Intake batch</dt><dd>{display(evidence.intakeBatchId)}</dd></div><div><dt>Annotation author</dt><dd>{annotation ? display(annotation.authorUsername) : annotationFallback}</dd></div><div><dt>Annotated</dt><dd>{annotation ? dateLabel(annotation.createdAt) : annotationFallback}</dd></div></dl>
+                </details>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
       <div className="investigation-first__bulk-actions"><span>{selectedEvidence.length} selected</span><button type="button" disabled aria-describedby="investigation-first-trash-description">Move selected to trash</button><button type="button" onClick={() => setSelectedEvidence([])} disabled={!selectedEvidence.length}>Clear selection</button><small id="investigation-first-trash-description">Bulk trash is reserved for a recoverable, audited lifecycle workflow; no file is deleted here.</small></div>
       {upload.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
       {uploadCommand !== null ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment"><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option><option value="file_server_ref">File reference</option></select></label><label>Privacy<select name="privacyClass" defaultValue="owner_only"><option value="owner_only">Owner only</option><option value="share_safe">Share safe</option></select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running"}>{upload.status === "running" ? "Adding…" : "Add to evidence inventory"}</button></form> : null}

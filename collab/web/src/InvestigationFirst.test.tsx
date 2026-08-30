@@ -141,6 +141,24 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(screen.getByRole("button", { name: "Retry evidence annotations" })).toBeTruthy();
   });
 
+  it("keeps each evidence row compact while making the full metadata available on demand", async () => {
+    renderStrategy({ shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    const filename = await screen.findByText("checkout-timeout.log");
+    const row = filename.closest("li");
+    expect(row).toBeTruthy();
+    const summary = row?.querySelector<HTMLElement>("[aria-label='Evidence summary']");
+    expect(summary?.textContent).toContain("log");
+    expect(summary?.textContent).toContain("text/plain");
+    expect(summary?.textContent).toContain("1.8 KB");
+    expect(summary?.textContent).toContain("verified");
+    const details = row?.querySelector("details");
+    expect(details?.open).toBe(false);
+    fireEvent.click(screen.getAllByText("More details")[0]!);
+    expect(details?.open).toBe(true);
+    expect(row?.textContent).toContain("Annotation author");
+    expect(row?.textContent).toContain("Intake batch");
+  });
+
   it("describes annotations as loading until their independent lane settles", async () => {
     const contributions = createDeferred<GatewayResult<readonly ContributionV1[]>>();
     const gateway = createInvestigationGatewayDouble({ listContributions: vi.fn(() => contributions.promise) });
