@@ -261,8 +261,21 @@ export type {
   ProvenanceV1,
 } from "./contribution.js";
 
-export { ARTIFACT_KINDS, ARTIFACT_SCHEMA_ID, parseArtifact } from "./artifact.js";
-export type { ArtifactKind, ArtifactV1 } from "./artifact.js";
+export {
+  ARTIFACT_KINDS,
+  ARTIFACT_SCHEMA_ID,
+  EVIDENCE_LIST_SCHEMA_ID,
+  EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
+  parseArtifact,
+  parseEvidenceList,
+  parseEvidenceUploadSuccess,
+} from "./artifact.js";
+export type {
+  ArtifactKind,
+  ArtifactV1,
+  EvidenceListV1,
+  EvidenceUploadSuccessV1,
+} from "./artifact.js";
 
 export {
   CORPUS_ALLOWED_EXTENSIONS,
