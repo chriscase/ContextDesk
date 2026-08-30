@@ -26,7 +26,7 @@ function view(overrides: Partial<LifecycleView> = {}): LifecycleView {
 
 function renderPanel(
   lifecycle: LifecycleView,
-  options: { canLead?: boolean; onChanged?: () => void } = {},
+  options: { canLead?: boolean; readOnly?: boolean; onChanged?: () => void } = {},
 ) {
   const onChanged = options.onChanged ?? vi.fn();
   render(
@@ -34,6 +34,7 @@ function renderPanel(
       caseId="case-1"
       status={lifecycle.status}
       canLead={options.canLead ?? true}
+      readOnly={options.readOnly ?? false}
       onChanged={onChanged}
       loadLifecycle={() => Promise.resolve(lifecycle)}
     />,
@@ -179,6 +180,14 @@ describe("what the panel refuses to imply", () => {
       await screen.findByText(/Only a case lead can archive or restore/i),
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
+  });
+
+  it("names a static snapshot instead of misreporting the reader's role", async () => {
+    renderPanel(view(), { canLead: true, readOnly: true });
+    expect(
+      await screen.findByText("Static read-only view: archiving and restoring are unavailable."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Only a case lead/i)).toBeNull();
   });
 
   it("still offers the archive when the lifecycle read is unavailable", async () => {

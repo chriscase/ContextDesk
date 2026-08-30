@@ -304,7 +304,9 @@ export function App() {
   const [preferredUiStrategy, setPreferredUiStrategy] = useState<UiStrategyDescriptor>(() =>
     resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }),
   );
-  const [transientUiStrategyId, setTransientUiStrategyId] = useState<UiStrategyId | null>(null);
+  const [transientUiStrategyId, setTransientUiStrategyId] = useState<UiStrategyId | null>(() =>
+    historyUiStrategyId(window.history.state),
+  );
   const [uiStrategyOwner, setUiStrategyOwner] = useState<string | null>(null);
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
@@ -369,16 +371,18 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (!ready) return;
     if (!session?.username) {
       setUiStrategyOwner(null);
       setPreferredUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
       setTransientUiStrategyId(null);
       return;
     }
+    const changedAuthenticatedUser = uiStrategyOwner !== null && uiStrategyOwner !== session.username;
     setUiStrategyOwner(session.username);
     setPreferredUiStrategy(savedUiStrategy(session.username));
-    setTransientUiStrategyId(null);
-  }, [session?.username]);
+    if (changedAuthenticatedUser) setTransientUiStrategyId(null);
+  }, [ready, session?.username, uiStrategyOwner]);
 
   useEffect(() => {
     if (!session?.username || uiStrategyOwner !== session.username) return;

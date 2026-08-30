@@ -2839,6 +2839,7 @@ export function Cases(props: {
                   caseId={current.id}
                   status={current.status}
                   canLead={canRunStrategies}
+                  readOnly={readOnly}
                   onChanged={() => Promise.all([refresh(), refreshActivity()]).then(() => undefined)}
                 />
               ) : null}

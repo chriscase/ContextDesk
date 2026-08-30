@@ -122,6 +122,48 @@ describe("strategy selection in the shell", () => {
     expect(window.localStorage.getItem("cd-ui-strategy:alice")).toBe("investigation-first");
   });
 
+  it("restores a technical-tools history override after reload without replacing the saved strategy", async () => {
+    const caseId = "00000000-0000-4000-8000-000000000003";
+    const values = new Map<string, string>();
+    const storage: Storage = {
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key) => values.get(key) ?? null,
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => { values.delete(key); },
+      setItem: (key, value) => { values.set(key, value); },
+    };
+    vi.stubGlobal("localStorage", storage);
+    window.localStorage.setItem("cd-ui-strategy:alice", "investigation-first");
+    window.history.replaceState(
+      { uiStrategyId: "war-room" },
+      "",
+      `/investigations/${caseId}/analyze`,
+    );
+    const investigation = {
+      id: caseId,
+      title: "Reloaded technical review",
+      status: "open",
+      severity: "medium",
+      participants: [],
+      createdAt: "2026-08-29T12:00:00.000Z",
+      createdBy: "alice",
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
+      if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["case-lead"], capabilities: ["investigation:read", "run:strategies"] }) };
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [investigation] }) };
+      if (url === `/api/cases/${caseId}`) return { ok: true, json: async () => investigation };
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room"));
+    expect(window.location.pathname).toBe(`/investigations/${caseId}/analyze`);
+    expect(window.localStorage.getItem("cd-ui-strategy:alice")).toBe("investigation-first");
+  });
+
   it("does not turn a decision-only grant into lifecycle authority", async () => {
     const caseId = "00000000-0000-4000-8000-000000000002";
     const values = new Map<string, string>();

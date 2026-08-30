@@ -147,7 +147,7 @@ describe("Investigation First", () => {
     render(<InvestigationFirst {...commonProps} canLead readOnly focusCaseId="case-1" />);
     expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
-    expect(screen.getByText("Only a case lead can archive or restore this investigation.")).toBeTruthy();
+    expect(screen.getByText("Static read-only view: archiving and restoring are unavailable.")).toBeTruthy();
   });
 
   it("does not describe a failed evidence read as an empty inventory", async () => {

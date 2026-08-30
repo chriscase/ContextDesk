@@ -22,9 +22,10 @@ deletion. Strategy changes preserve the canonical investigation URL and case
 identifier. The explicit technical-tools action opens the reference War Room
 for specialist log exploration; it does not duplicate or weaken that tool.
 That presentation-only handoff is stored in browser history, so Back and
-Forward restore the expected strategy without changing the user's saved
-preference. Both presentations expose lifecycle mutations from the same
-server-authoritative `run:strategies` capability.
+Forward—and a reload of that history entry—restore the expected strategy
+without changing the user's saved preference. Both presentations expose
+lifecycle mutations from the same server-authoritative `run:strategies`
+capability.
 Browser-local preferences are namespaced by authenticated username so a shared
 browser does not hand one user's selected presentation to another user. The
 browser title follows the active presentation, while Investigation First omits
@@ -52,9 +53,9 @@ The focused `InvestigationFirst.test.tsx` and shell strategy suites cover the
 fast form, shared create payload, sparse detail, evidence annotation/inventory,
 explicit War Room technical-tool handoff, viewer restrictions, safe selection,
 stale-detail suppression, truthful list/detail failures, shared lifecycle
-authority, static read-only lifecycle gating, reversible non-persistent
+authority, honest static read-only lifecycle copy, reversible non-persistent
 technical handoff, strategy switching, and strategy-aware titles. The full web
-suite passes 671 tests across 43 files;
+suite passes 673 tests across 43 files;
 collaboration typecheck, lint, and the production build are green. The three
 loopback-dependent LDAP transport tests also pass outside the filesystem/network
 sandbox that prevents binding a local test port.

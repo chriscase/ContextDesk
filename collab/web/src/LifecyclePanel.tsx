@@ -67,6 +67,8 @@ export function LifecyclePanel(props: {
   /** Current status from the loaded case, so the panel renders before its fetch lands. */
   status: string;
   canLead: boolean;
+  /** Static snapshots suppress mutations regardless of the reader's ordinary role. */
+  readOnly?: boolean;
   /** Runs after a successful archive or restore so the caller can refetch. */
   onChanged: () => void | Promise<void>;
   /** Test seam: supplies the view without a network round trip. */
@@ -139,10 +141,12 @@ export function LifecyclePanel(props: {
     }
   }
 
-  if (!props.canLead) {
+  if (!props.canLead || props.readOnly) {
     return (
       <p className="triage-step__note">
-        Only a case lead can archive or restore this investigation.
+        {props.readOnly
+          ? "Static read-only view: archiving and restoring are unavailable."
+          : "Only a case lead can archive or restore this investigation."}
       </p>
     );
   }
