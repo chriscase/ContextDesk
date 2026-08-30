@@ -127,6 +127,27 @@ describe("useUpdateSituation", () => {
     expect(result.current.state).toEqual({ status: "idle" });
   });
 
+  it("bounds a throwing command getter as an unexpected outcome", async () => {
+    const updateSituation = vi.fn();
+    const { result } = renderHook(() => useUpdateSituation(options({
+      gateway: gatewayWithUpdate(updateSituation),
+    })));
+    const command = {} as { impact: string };
+    Object.defineProperty(command, "impact", {
+      configurable: true,
+      get() {
+        throw new Error("malformed strategy input");
+      },
+    });
+
+    await expect(result.current.update(command)).resolves.toEqual({
+      status: "failed",
+      error: { kind: "unexpected" },
+    });
+    expect(updateSituation).not.toHaveBeenCalled();
+    expect(result.current.state).toEqual({ status: "idle" });
+  });
+
   it("refuses to edit with a version belonging to another case", async () => {
     const updateSituation = vi.fn();
     const { result } = renderHook(() => useUpdateSituation(options({

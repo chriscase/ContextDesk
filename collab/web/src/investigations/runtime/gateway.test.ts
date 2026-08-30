@@ -1301,10 +1301,15 @@ describe("write-seam resolution", () => {
   });
 
   it("keeps an existing read-shaped gateway valid and fails its writes closed", async () => {
-    // The shipped double predates the V1.1 seams and stays a complete gateway.
-    const readOnlyDouble = createInvestigationGatewayDouble();
-    expect(readOnlyDouble.createContribution).toBeUndefined();
-    expect(readOnlyDouble.updateSituation).toBeUndefined();
+    // Model a pre-V1.1 consumer explicitly: the shared test double now
+    // exposes both optional seams, while an older read-only transport does not.
+    const {
+      createContribution: _createContribution,
+      updateSituation: _updateSituation,
+      ...readOnlyDouble
+    } = createInvestigationGatewayDouble();
+    expect(readOnlyDouble).not.toHaveProperty("createContribution");
+    expect(readOnlyDouble).not.toHaveProperty("updateSituation");
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
     const writes = investigationWriteGateway(readOnlyDouble);
@@ -1327,9 +1332,13 @@ describe("write-seam resolution", () => {
   });
 
   it("fails both seams closed when a transport implements only one of them", async () => {
+    const {
+      updateSituation: _updateSituation,
+      ...readOnlyTransport
+    } = createInvestigationGatewayDouble();
     const createContribution = vi.fn();
     const halfImplemented: InvestigationGateway = {
-      ...createInvestigationGatewayDouble(),
+      ...readOnlyTransport,
       createContribution,
     };
 

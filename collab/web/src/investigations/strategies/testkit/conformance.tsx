@@ -314,6 +314,8 @@ const GATEWAY_READS = [
 const GATEWAY_WRITES = [
   "createInvestigation",
   "uploadEvidence",
+  "createContribution",
+  "updateSituation",
   "applyLifecycleAction",
 ] as const;
 

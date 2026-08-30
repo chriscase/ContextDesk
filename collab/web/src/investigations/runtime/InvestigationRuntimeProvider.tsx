@@ -333,6 +333,15 @@ export function InvestigationRuntimeProvider({
     }
   }, [activeCaseId, activeInvestigation.refreshLifecycle]);
 
+  // A write callback must be revocable at the controller boundary, not only
+  // hidden from the published command object. During a refresh the active
+  // case may still be the same id while its authoritative record is loading;
+  // expose no writable scope until that record is ready again.
+  const activeReadyCaseId =
+    activeScopeUnavailable || activeInvestigation.investigation.status !== "ready"
+      ? null
+      : activeCaseId;
+
   const createController = useCreateInvestigation({
     gateway,
     identityKey,
@@ -360,7 +369,7 @@ export function InvestigationRuntimeProvider({
     gateway: writeGateway,
     identityKey,
     authorityKey,
-    investigationId: activeScopeUnavailable ? null : activeCaseId,
+    investigationId: activeReadyCaseId,
     canContribute: canContribute && !activeScopeUnavailable,
     readOnly,
     onContributed: activeInvestigation.publishContribution,

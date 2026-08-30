@@ -1,4 +1,7 @@
-import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
+import type {
+  CaseV1,
+  ContributionV1,
+} from "@cd-collab/contracts/investigation-runtime";
 import { vi } from "vitest";
 import type { GatewayResult, InvestigationGateway } from "../gateway.js";
 import { InvestigationRuntimeGatewayHarness } from "../InvestigationRuntimeProvider.js";
@@ -45,6 +48,8 @@ export function createInvestigationGatewayDouble(
     listEvidence: vi.fn(async () => gatewayOk(makeEvidenceList().artifacts)),
     listContributions: vi.fn(async () => gatewayOk(makeContributionList().contributions)),
     uploadEvidence: vi.fn(() => unexpected<never>()),
+    createContribution: vi.fn(() => unexpected<ContributionV1>()),
+    updateSituation: vi.fn(() => unexpected<CaseV1>()),
     getLifecycle: vi.fn(async () => gatewayOk(makeArchiveAllowedLifecycle())),
     applyLifecycleAction: vi.fn(() => unexpected<never>()),
     ...overrides,

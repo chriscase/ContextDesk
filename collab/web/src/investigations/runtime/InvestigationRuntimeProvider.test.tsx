@@ -990,6 +990,47 @@ describe("InvestigationRuntimeProvider", () => {
     expect(gateway.updateSituation).not.toHaveBeenCalled();
   });
 
+  it("revokes a retained contribution callback while the active case is revalidating", async () => {
+    const investigation = makePopulatedCase();
+    const refreshed = createDeferred<GatewayResult<CaseV1>>();
+    let reads = 0;
+    const gateway = makeGateway({
+      getInvestigation: vi.fn(() => {
+        reads += 1;
+        return reads === 1 ? Promise.resolve(succeeded(investigation)) : refreshed.promise;
+      }),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    const retained = currentRuntime().commands.createContribution;
+    expect(retained).not.toBeNull();
+
+    act(() => currentRuntime().refresh.investigation());
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("loading"));
+    await act(async () => {
+      await expect(retained?.({ kind: "note", body: "must not write while loading" }))
+        .resolves.toEqual({ status: "ignored", reason: "not_ready" });
+    });
+    expect(gateway.createContribution).not.toHaveBeenCalled();
+
+    await act(async () => refreshed.resolve(succeeded(investigation)));
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+  });
+
   it("withholds both write seams from a reader who may not write", async () => {
     const gateway = makeGateway();
     render(

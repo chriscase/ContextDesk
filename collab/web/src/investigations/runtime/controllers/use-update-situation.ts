@@ -144,7 +144,14 @@ export function useUpdateSituation(
       return { status: "ignored", reason: "not_ready" };
     }
 
-    const situation = suppliedSituation(command);
+    let situation: Partial<UpdateSituationInput>;
+    try {
+      situation = suppliedSituation(command);
+    } catch {
+      // A strategy controls the command object. Keep even hostile getters
+      // inside the bounded command-outcome contract; never leak a raw throw.
+      return unexpected();
+    }
     if (Object.keys(situation).length === 0) {
       return { status: "ignored", reason: "not_ready" };
     }
