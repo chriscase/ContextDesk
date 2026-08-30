@@ -13,10 +13,12 @@ type CoveredRuntimeOperation =
   | "GET cases"
   | "POST cases"
   | "GET contributions"
+  | "POST contributions"
   | "GET evidence"
   | "POST evidence"
   | "GET lifecycle"
-  | "POST lifecycle";
+  | "POST lifecycle"
+  | "PATCH situation";
 
 /**
  * Runtime V1 deliberately leaves these existing War Room calls for later
@@ -27,8 +29,14 @@ const LEGACY_WAR_ROOM_RUNTIME_CALLS: Readonly<
   Record<string, readonly CoveredRuntimeOperation[]>
 > = Object.freeze({
   "collab/web/src/CaseBoardPanel.tsx": ["GET evidence", "POST evidence"],
-  "collab/web/src/CaseDiscussion.tsx": ["GET contributions"],
-  "collab/web/src/Cases.tsx": ["GET cases", "POST cases", "GET contributions"],
+  "collab/web/src/CaseDiscussion.tsx": ["GET contributions", "POST contributions"],
+  "collab/web/src/Cases.tsx": [
+    "GET cases",
+    "POST cases",
+    "GET contributions",
+    "POST contributions",
+    "PATCH situation",
+  ],
   "collab/web/src/ExperimentLab.tsx": ["GET evidence"],
   "collab/web/src/TriageRunPanel.tsx": ["GET evidence"],
 });
@@ -149,8 +157,11 @@ function coveredOperation(
   if (/^\/api\/cases\/\$\{\}\/evidence$/.test(route)) {
     if (method === "GET" || method === "POST") return `${method} evidence`;
   }
-  if (/^\/api\/cases\/\$\{\}\/contributions$/.test(route) && method === "GET") {
-    return "GET contributions";
+  if (/^\/api\/cases\/\$\{\}\/contributions$/.test(route)) {
+    if (method === "GET" || method === "POST") return `${method} contributions`;
+  }
+  if (/^\/api\/cases\/\$\{\}\/situation$/.test(route) && method === "PATCH") {
+    return "PATCH situation";
   }
   if (/^\/api\/cases\/\$\{\}\/lifecycle$/.test(route)) {
     if (method === "GET" || method === "POST") return `${method} lifecycle`;

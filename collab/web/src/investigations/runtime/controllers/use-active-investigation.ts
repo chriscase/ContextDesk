@@ -53,6 +53,8 @@ export interface ActiveInvestigationController {
   readonly publishInvestigation: (investigation: CaseV1) => void;
   /** Publish the linked, server-confirmed members of an evidence upload. */
   readonly publishEvidence: (artifact: ArtifactV1, summary: ContributionV1) => void;
+  /** Publish one server-confirmed contribution only for the active case. */
+  readonly publishContribution: (contribution: ContributionV1) => void;
   /** Publish a server-confirmed lifecycle snapshot only for the active case. */
   readonly publishLifecycle: (lifecycle: InvestigationLifecycleV1) => void;
   readonly refreshInvestigation: () => void;
@@ -265,6 +267,11 @@ export function useActiveInvestigation({
     publishContributionResource((items) => mergeById(items, summary));
   }, [publishContributionResource, publishEvidenceResource, scope]);
 
+  const publishContribution = useCallback((published: ContributionV1) => {
+    if (scope === null || published.caseId !== scope.investigationId) return;
+    publishContributionResource((items) => mergeById(items, published));
+  }, [publishContributionResource, scope]);
+
   const publishLifecycle = useCallback((published: InvestigationLifecycleV1) => {
     if (scope === null || published.investigationId !== scope.investigationId) return;
     publishLifecycleResource(() => published);
@@ -304,6 +311,7 @@ export function useActiveInvestigation({
     denyScope,
     publishInvestigation,
     publishEvidence,
+    publishContribution,
     publishLifecycle,
     refreshInvestigation: scopeDenied ? retryDeniedScope : refreshInvestigation,
     refreshEvidence: scopeDenied ? retryDeniedScope : refreshEvidence,
