@@ -116,8 +116,13 @@ or refresh for case A cannot select, refresh, or reopen A after navigation to
 case B. Create navigation uses only the identifier returned by the successful,
 parsed server response.
 
-The runtime exposes distinct states for loading, empty, denied, not found,
-validation failure, conflict, network failure, and unexpected failure. A failed
+The runtime classifies loading, empty, denied, not found, validation failure,
+conflict, network failure, abort, protocol failure, and unexpected failure. It
+does not bypass `protectedApiFetch`: a `401` or `403` still emits the global
+authentication-loss event and invalidates the complete protected React tree.
+Consequently, strategies do not promise a durable in-page case-level denied
+surface after those responses. An inaccessible or missing case is expressed by
+the server's `404` response without invalidating the session. A failed
 collection or evidence request is never represented as an empty collection.
 
 ## Capabilities and read-only behavior
@@ -147,6 +152,20 @@ Specialist log exploration remains an explicit handoff to War Room. Permanent
 deletion, recoverable trash implementation, storage-provider migration, plugin
 execution, and server-side strategy governance are not Runtime V1 operations.
 
+### Transport prerequisites
+
+The gateway implementation starts only after the authoritative contracts can
+parse every successful Runtime V1 response. In particular, the contracts layer
+must provide:
+
+- a parser for `InvestigationLifecycleV1`, including its allowed/refused
+  verdicts, restore target, and deletion alternatives; and
+- a versioned evidence-list envelope and parser, with the case service emitting
+  that envelope from `GET /api/cases/:id/evidence`.
+
+The gateway must not compensate for either omission with a local cast or a
+second hand-written wire parser.
+
 ## Conformance gate
 
 Every strategy consumer must prove, using deterministic synthetic fixtures:
@@ -168,7 +187,8 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 
 Runtime V1 is delivered in dependency order:
 
-1. typed transport contracts and parsers;
+1. typed transport contracts and parsers, including lifecycle and the
+   versioned evidence-list envelope;
 2. deterministic fixtures and the dependency-boundary guard;
 3. gateway, bounded errors, capability projections, and pure selectors;
 4. provider and race-safe controllers;
