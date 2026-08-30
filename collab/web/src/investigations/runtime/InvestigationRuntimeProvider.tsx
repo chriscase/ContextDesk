@@ -264,11 +264,7 @@ export function InvestigationRuntimeProvider({
     ? null
     : activeInvestigation.lifecycle.status === "ready"
     ? activeInvestigation.lifecycle.value
-    : activeInvestigation.lifecycle.status === "loading"
-      ? activeInvestigation.lifecycle.previous ?? null
-      : activeInvestigation.lifecycle.status === "failed"
-        ? activeInvestigation.lifecycle.previous ?? null
-        : null;
+    : null;
   const lifecycleController = useLifecycleAction({
     gateway,
     identityKey,

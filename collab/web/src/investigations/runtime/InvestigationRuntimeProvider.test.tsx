@@ -624,6 +624,7 @@ describe("InvestigationRuntimeProvider", () => {
       status: "loading",
       previous: makeArchiveAllowedLifecycle(),
     });
+    expect(currentRuntime().commands.applyLifecycle).toBeNull();
 
     const changed = makeArchiveRefusedLifecycle();
     const changedGateway = makeGateway({

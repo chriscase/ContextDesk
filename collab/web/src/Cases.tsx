@@ -1104,6 +1104,10 @@ export function Cases(props: {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ status, ...(resolution ? { resolution } : {}) }),
     });
+    // A refusal or conflict can mean the server's status, legal hold, or
+    // restore target changed while this presentation was open. Invalidate the
+    // shared lifecycle preview for every completed response, not only success.
+    props.lifecycleBinding?.retryLifecycle();
     if (!response.ok) {
       const detail = (await response.json().catch(() => ({}))) as {
         error?: string;
@@ -1137,10 +1141,6 @@ export function Cases(props: {
     }
     setResolutionOpen(false);
     setResolutionPrompted(false);
-    // This legacy War Room status control still writes outside Runtime V1.
-    // Revalidate the shared case/list/lifecycle view before a strategy switch
-    // or an archive/restore action can rely on the prior preview.
-    props.lifecycleBinding?.retryLifecycle();
     await Promise.all([refresh(), refreshActivity()]);
   }
 

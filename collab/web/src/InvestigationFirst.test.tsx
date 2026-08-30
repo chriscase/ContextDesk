@@ -6,7 +6,7 @@ import {
   type InvestigationLifecycleActionSuccessV1,
   type InvestigationLifecycleV1,
 } from "@cd-collab/contracts";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationFirst } from "./InvestigationFirst.js";
 import { InvestigationRuntimeProvider } from "./investigations/runtime/public.js";
@@ -288,7 +288,15 @@ describe("Investigation First Runtime V1 presentation", () => {
         appliedStatus: "archived",
         case: archived,
     };
+    const lifecycleRefresh = createDeferred<GatewayResult<InvestigationLifecycleV1>>();
+    let lifecycleReads = 0;
     const gateway = makeGateway({
+      getLifecycle: vi.fn(() => {
+        lifecycleReads += 1;
+        return lifecycleReads === 1
+          ? Promise.resolve(succeeded(makeLifecycle(current)))
+          : lifecycleRefresh.promise;
+      }),
       applyLifecycleAction: vi.fn(async () => succeeded(success)),
     });
     renderStrategy({ gateway, shell: { focusCaseId: current.id } });
@@ -297,6 +305,16 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Confirm archive investigation" }));
     await waitFor(() => expect(gateway.applyLifecycleAction).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("Refreshing lifecycle options…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
+    await act(async () => {
+      lifecycleRefresh.resolve(unavailable<InvestigationLifecycleV1>());
+    });
+    expect(await screen.findByRole("button", { name: "Retry lifecycle information" })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Lifecycle information could not be loaded");
+    expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
     const input = vi.mocked(gateway.applyLifecycleAction).mock.calls[0]?.[1];
     expect(input).toEqual({ action: "archive", expected: { status: "monitoring", legalHold: false, restoreTarget: "monitoring" } });
     expect(input).not.toHaveProperty("targetStatus");

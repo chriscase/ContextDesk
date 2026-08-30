@@ -1579,6 +1579,45 @@ describe("focused investigation view", () => {
     await waitFor(() => expect(retryLifecycle).toHaveBeenCalledTimes(1));
   });
 
+  it("revalidates the shared lifecycle when a legacy status update is refused", async () => {
+    const retryLifecycle = vi.fn();
+    const binding = {
+      ...lifecycleBinding("archive", vi.fn(async () => lifecycleSuccess("archive"))),
+      retryLifecycle,
+    };
+    stubCaseFetch({
+      onRequest: (url, init) =>
+        url.endsWith("/status") && init?.method === "POST"
+          ? Promise.resolve({
+              ok: false,
+              json: async () => ({
+                error: "lifecycle_refused",
+                detail: "The investigation changed while this view was open.",
+              }),
+            })
+          : null,
+    });
+    render(
+      <Cases
+        roles={["case-lead"]}
+        capabilities={["run:strategies"]}
+        lifecycleBinding={binding}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    const stageNav = await screen.findByRole("navigation", { name: "Investigation stages" });
+    fireEvent.click(within(stageNav).getByRole("button", { name: /Decide/ }));
+    await screen.findByRole("heading", { name: "Decision journal" });
+
+    fireEvent.change(screen.getByLabelText("Case status"), {
+      target: { value: "monitoring" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Update status" }));
+
+    expect(await screen.findByText("The investigation changed while this view was open.")).toBeTruthy();
+    expect(retryLifecycle).toHaveBeenCalledTimes(1);
+  });
+
   it("reviews unresolved log time beside Capture intake and applies only the exact preview", async () => {
     const fingerprint = "a".repeat(64);
     const mutations: Array<{ url: string; body: Record<string, unknown> }> = [];

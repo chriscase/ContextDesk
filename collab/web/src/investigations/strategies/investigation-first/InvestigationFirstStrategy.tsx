@@ -89,6 +89,8 @@ function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
   if (investigation.status !== "archived" && !runtime.capabilities.canManageLifecycle) return null;
   if (lifecycle.availability === "idle" || lifecycle.availability === "loading") return <section className="investigation-first__card investigation-first__lifecycle" aria-busy="true"><p role="status">Loading lifecycle options…</p></section>;
   if (lifecycle.availability === "unavailable") return <section className="investigation-first__card investigation-first__lifecycle"><h3>Archive and restore</h3><p className="investigation-first__error" role="alert">{failureCopy(lifecycle.error, "lifecycle")}</p><button type="button" onClick={runtime.refresh.lifecycle}>Retry lifecycle information</button></section>;
+  if (lifecycle.refresh === "loading") return <section className="investigation-first__card investigation-first__lifecycle" aria-busy="true"><h3>Archive and restore</h3><p role="status">Refreshing lifecycle options…</p></section>;
+  if (lifecycle.refresh === "failed") return <section className="investigation-first__card investigation-first__lifecycle"><h3>Archive and restore</h3><p className="investigation-first__error" role="alert">{failureCopy(lifecycle.refreshError, "lifecycle")}</p><button type="button" onClick={runtime.refresh.lifecycle}>Retry lifecycle information</button></section>;
   const verdict = action === "archive" ? lifecycle.value.archive : lifecycle.value.restore;
   const mutation = runtime.mutations.lifecycle;
   const command = runtime.commands.applyLifecycle;
@@ -100,7 +102,6 @@ function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
   }
   return <section className="investigation-first__card investigation-first__lifecycle" aria-labelledby="investigation-first-lifecycle-title" aria-busy={working}>
     <h3 id="investigation-first-lifecycle-title">Archive and restore</h3><p id={descriptionId}>{lifecycle.value.deletion.detail}</p>
-    {lifecycle.refresh === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(lifecycle.refreshError, "lifecycle")}</p> : null}
     {mutation.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(mutation.error, "lifecycle")}</p> : null}
     {!runtime.capabilities.canManageLifecycle || command === null ? <p className="investigation-first__muted" role="status">Archiving and restoring are unavailable in this view.</p>
       : !verdict.allowed ? <p className="investigation-first__muted" role="status">{verdict.detail}</p>
