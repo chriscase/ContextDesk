@@ -161,7 +161,10 @@ must provide:
 - a parser for `InvestigationLifecycleV1`, including its allowed/refused
   verdicts, restore target, and deletion alternatives; and
 - a versioned evidence-list envelope and parser, with the case service emitting
-  that envelope from `GET /api/cases/:id/evidence`.
+  that envelope from `GET /api/cases/:id/evidence`; and
+- a versioned evidence-upload-success envelope and parser for the returned
+  artifact and summary contribution, with the case service emitting it from
+  `POST /api/cases/:id/evidence`.
 
 The gateway must not compensate for either omission with a local cast or a
 second hand-written wire parser.
@@ -188,7 +191,7 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 Runtime V1 is delivered in dependency order:
 
 1. typed transport contracts and parsers, including lifecycle and the
-   versioned evidence-list envelope;
+   versioned evidence list/upload envelopes;
 2. deterministic fixtures and the dependency-boundary guard;
 3. gateway, bounded errors, capability projections, and pure selectors;
 4. provider and race-safe controllers;
