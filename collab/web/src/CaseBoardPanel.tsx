@@ -520,7 +520,11 @@ export function CaseBoardPanel(props: {
                 {renderedArtifacts.map((artifact) => (
                   <li
                     key={artifact.id}
-                    className="case-memory__item"
+                    className={
+                      props.readOnly || !props.canLead
+                        ? "case-memory__item"
+                        : "case-memory__item case-memory__item--selectable"
+                    }
                     data-route-item={artifact.id}
                     data-route-kind="evidence"
                     tabIndex={-1}
@@ -542,15 +546,18 @@ export function CaseBoardPanel(props: {
                     <div className="case-memory__item-body">
                       <div className="case-memory__item-heading">
                         <strong>{artifact.filename ?? artifact.kind}</strong>
-                        <span className="case-memory__item-kind">{artifact.kind}</span>
                       </div>
                       {/* Keep the complete recorded metadata visible at a glance,
                           but group it into one wrapping line so each artifact is
                           scannable without making the inventory needlessly tall. */}
-                      <div className="case-memory__item-meta" aria-label="Evidence metadata">
-                        <span>{artifact.verificationStatus ?? "verification unknown"}</span>
-                        <span>uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}</span>
-                        <span>{artifact.privacyClass}</span>
+                      <div className="case-memory__item-meta">
+                        <span className="case-memory__meta">
+                          <span className="case-memory__item-kind">{artifact.kind}</span>
+                          <span>
+                            {artifact.verificationStatus ?? "verification unknown"} · uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}
+                          </span>
+                        </span>
+                        <span className="case-memory__meta">{artifact.privacyClass}</span>
                       </div>
                       <div className="case-memory__item-actions">
                         {/* The privacy class is a decision a reader acts on; the
