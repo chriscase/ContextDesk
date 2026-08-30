@@ -3,6 +3,14 @@
 Pinned to commit `02e66ddf755165be45092fabafd96b3153a5628f`.
 Design artifact only. No implementation. PR #1108 was deliberately not read.
 
+> **Current integration note (2026-08-29).** This historical design survey was
+> imported after Investigation First shipped on main at `e37464de`. Use
+> [`INVESTIGATION_RUNTIME_V1.md`](../development/INVESTIGATION_RUNTIME_V1.md)
+> as the authority for what a selectable strategy may consume. Ledger editing,
+> Casebook entry promotion, evidence annotation, and snapshot freezing remain
+> concepts until their server-backed contracts and capabilities exist; a UI
+> strategy must not synthesize those writes locally.
+
 ## 0. Binding, scope, and the boundaries treated as immutable
 
 Bound to `02e66ddf755165be45092fabafd96b3153a5628f`; working tree clean at
