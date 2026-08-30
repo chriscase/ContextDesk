@@ -21,9 +21,11 @@ export type {
 export {
   CONTRIBUTION_LIST_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
+  parseContribution,
   parseContributionList,
 } from "./contribution.js";
 export type {
+  ContributionKind,
   ContributionListV1,
   ContributionV1,
 } from "./contribution.js";

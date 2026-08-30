@@ -5,6 +5,7 @@ import {
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
   parseCase,
   parseCaseList,
+  parseContribution,
   parseContributionList,
   parseEvidenceList,
   parseEvidenceUploadSuccess,
@@ -15,6 +16,7 @@ import {
   type ArtifactKind,
   type ArtifactV1,
   type CaseV1,
+  type ContributionKind,
   type ContributionV1,
   type EvidenceUploadSuccessV1,
   type InvestigationLifecycleActionSuccessV1,
@@ -70,13 +72,66 @@ export interface UploadEvidenceInput {
   readonly sourceId?: string;
 }
 
+/** Transport-ready contribution create input. Body composition is a controller concern. */
+export interface CreateContributionInput {
+  readonly kind: ContributionKind;
+  readonly body: string;
+  readonly privacyClass?: PrivacyClass;
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+}
+
+/**
+ * Transport-ready situation update input.
+ *
+ * `expectedVersion` is required so the server, not the browser, arbitrates a
+ * concurrent edit. A controller derives it from the case it is editing; this
+ * seam never defaults or infers one.
+ */
+export interface UpdateSituationInput {
+  readonly expectedVersion: number;
+  readonly problemStatement?: string;
+  readonly affectedParties?: string;
+  readonly impact?: string;
+  readonly scope?: string;
+  readonly openQuestions?: readonly string[];
+  readonly investigationContext?: CaseV1["investigationContext"];
+  readonly clientTime?: string;
+}
+
 export interface ApplyLifecycleActionInput {
   readonly action: LifecycleAction;
   readonly expected: InvestigationLifecycleExpectedV1;
   readonly clientTime?: string;
 }
 
-export interface InvestigationGateway {
+/**
+ * The Runtime V1.1 write seams, kept as their own contract.
+ *
+ * They are deliberately not required members of `InvestigationGateway`: a
+ * read-shaped transport double written before these seams existed stays a
+ * valid gateway, and nothing is silently assumed about it. A caller resolves
+ * this contract through `investigationWriteGateway`, which fails closed when
+ * the underlying transport does not implement it.
+ */
+export interface InvestigationWriteGateway {
+  createContribution(
+    investigationId: string,
+    input: CreateContributionInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<ContributionV1>>;
+  updateSituation(
+    investigationId: string,
+    input: UpdateSituationInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<CaseV1>>;
+}
+
+/** A transport that carries both the read surface and the V1.1 write seams. */
+export type InvestigationGatewayWithWrites =
+  InvestigationGateway & InvestigationWriteGateway;
+
+export interface InvestigationGateway extends Partial<InvestigationWriteGateway> {
   listInvestigations(
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<readonly CaseV1[]>>;
@@ -190,6 +245,43 @@ function uploadEvidenceBody(input: UploadEvidenceInput): Record<string, unknown>
   if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
   if (input.clientTime !== undefined) body.clientTime = input.clientTime;
   if (input.sourceId !== undefined) body.sourceId = input.sourceId;
+  return body;
+}
+
+function createContributionBody(input: CreateContributionInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    kind: input.kind,
+    body: input.body,
+  };
+  if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  if (input.sourceId !== undefined) body.sourceId = input.sourceId;
+  return body;
+}
+
+function updateSituationBody(input: UpdateSituationInput): Record<string, unknown> {
+  const body: Record<string, unknown> = { expectedVersion: input.expectedVersion };
+  if (input.problemStatement !== undefined) body.problemStatement = input.problemStatement;
+  if (input.affectedParties !== undefined) body.affectedParties = input.affectedParties;
+  if (input.impact !== undefined) body.impact = input.impact;
+  if (input.scope !== undefined) body.scope = input.scope;
+  if (input.openQuestions !== undefined) {
+    body.openQuestions = Array.from(input.openQuestions, (question) => question);
+  }
+  if (input.investigationContext !== undefined) {
+    const context = input.investigationContext;
+    body.investigationContext = context === null
+      ? null
+      : {
+          productName: context.productName,
+          version: context.version,
+          build: context.build,
+          component: context.component,
+          environment: context.environment,
+          organization: context.organization,
+        };
+  }
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
   return body;
 }
 
@@ -415,7 +507,51 @@ async function parseLifecycleConflict(
   }
 }
 
-export const investigationGateway: InvestigationGateway = {
+/**
+ * The answer every write seam gives when the transport does not implement it.
+ *
+ * A missing seam is reported, never ignored: the command still runs, still
+ * fences, and still publishes a bounded failure, so an absent capability can
+ * never be mistaken for a completed write.
+ */
+const WRITE_SEAM_UNAVAILABLE: RuntimeFailure = Object.freeze({
+  kind: "unavailable",
+  status: 503,
+});
+
+const UNAVAILABLE_WRITE_GATEWAY: InvestigationWriteGateway = Object.freeze({
+  createContribution: () =>
+    Promise.resolve(failed<ContributionV1>(WRITE_SEAM_UNAVAILABLE)),
+  updateSituation: () => Promise.resolve(failed<CaseV1>(WRITE_SEAM_UNAVAILABLE)),
+});
+
+/**
+ * Resolve the write seams a gateway actually implements.
+ *
+ * Both seams are checked together, so a half-implemented transport cannot
+ * expose one write while the other silently disappears. Nothing here asserts a
+ * shape it has not observed: unless the gateway carries both seams, every
+ * write resolves to the fail-closed adapter above.
+ */
+export function investigationWriteGateway(
+  gateway: InvestigationGateway,
+): InvestigationWriteGateway {
+  const { createContribution, updateSituation } = gateway;
+  if (createContribution === undefined || updateSituation === undefined) {
+    return UNAVAILABLE_WRITE_GATEWAY;
+  }
+  const resolved: InvestigationWriteGateway = {
+    createContribution(investigationId, input, options) {
+      return createContribution.call(gateway, investigationId, input, options);
+    },
+    updateSituation(investigationId, input, options) {
+      return updateSituation.call(gateway, investigationId, input, options);
+    },
+  };
+  return Object.freeze(resolved);
+}
+
+export const investigationGateway: InvestigationGatewayWithWrites = {
   async listInvestigations({ signal }) {
     const result = await requestParsed(
       "/api/cases",
@@ -500,6 +636,38 @@ export const investigationGateway: InvestigationGateway = {
         && value.summary.caseId === investigationId
         && value.artifact.id.length > 0
         && value.summary.id.length > 0,
+    );
+  },
+
+  createContribution(investigationId, input, { signal }) {
+    const serialized = serializeMutationBody(signal, () => createContributionBody(input));
+    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
+    return requestParsed(
+      caseRoute(investigationId, "/contributions"),
+      {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: serialized.value,
+      },
+      signal,
+      parseContribution,
+      (value) => value.caseId === investigationId && value.id.length > 0,
+    );
+  },
+
+  updateSituation(investigationId, input, { signal }) {
+    const serialized = serializeMutationBody(signal, () => updateSituationBody(input));
+    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
+    return requestParsed(
+      caseRoute(investigationId, "/situation"),
+      {
+        method: "PATCH",
+        headers: JSON_HEADERS,
+        body: serialized.value,
+      },
+      signal,
+      parseCase,
+      (value) => value.id === investigationId,
     );
   },
 

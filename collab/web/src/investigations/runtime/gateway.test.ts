@@ -8,10 +8,17 @@ import {
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
   type CaseV1,
+  type ContributionV1,
 } from "@cd-collab/contracts/investigation-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUTH_LOST_EVENT } from "../../protected-api.js";
-import { investigationGateway } from "./gateway.js";
+import {
+  investigationGateway,
+  investigationWriteGateway,
+  type InvestigationGateway,
+  type InvestigationWriteGateway,
+} from "./gateway.js";
+import { createInvestigationGatewayDouble } from "./testkit/gateway-double.js";
 import {
   RUNTIME_FIXTURE_IDS,
   makeArchiveAllowedLifecycle,
@@ -41,6 +48,25 @@ function options(controller = new AbortController()) {
 
 function archivedCase(): CaseV1 {
   return { ...makePopulatedCase(), status: "archived" };
+}
+
+/** The one authoritative contribution a create answers with. */
+function createdContribution(): ContributionV1 {
+  const found = makeContributionList().contributions.find(
+    ({ id }) => id === RUNTIME_FIXTURE_IDS.note,
+  );
+  if (found === undefined) throw new Error("the note contribution fixture is missing");
+  return found;
+}
+
+/** The case a situation update answers with, one version ahead of the fixture. */
+function revisedSituationCase(): CaseV1 {
+  const current = makePopulatedCase();
+  return {
+    ...current,
+    problemStatement: "Checkout requests exceed the objective after the pool change.",
+    situationVersion: current.situationVersion + 1,
+  };
 }
 
 function lifecycleSuccess() {
@@ -76,7 +102,7 @@ function lifecycleRefused() {
 }
 
 describe("the complete Runtime V1 transport surface", () => {
-  it("uses the eight protected routes and publishes only parsed values", async () => {
+  it("uses the ten protected routes and publishes only parsed values", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input, init) => {
         const route = String(input);
@@ -87,7 +113,13 @@ describe("the complete Runtime V1 transport surface", () => {
           return jsonResponse(makeEvidenceUploadSuccess());
         }
         if (route.endsWith("/evidence")) return jsonResponse(makeEvidenceList());
+        if (route.endsWith("/contributions") && method === "POST") {
+          return jsonResponse(createdContribution());
+        }
         if (route.endsWith("/contributions")) return jsonResponse(makeContributionList());
+        if (route.endsWith("/situation") && method === "PATCH") {
+          return jsonResponse(revisedSituationCase());
+        }
         if (route.endsWith("/lifecycle") && method === "POST") {
           return jsonResponse(lifecycleSuccess());
         }
@@ -143,6 +175,39 @@ describe("the complete Runtime V1 transport surface", () => {
         extraUploadField: "must-not-cross",
       },
     );
+    const contributionInput = Object.assign(
+      Object.create({ inheritedContributionField: "must-not-cross" }) as Record<string, unknown>,
+      {
+        kind: "note",
+        body: "  Queue time rises immediately after the connection-pool rollout.  ",
+        privacyClass: "share_safe",
+        clientTime: "2026-02-03T19:59:45.000Z",
+        sourceId: "source-human-note",
+        extraContributionField: "must-not-cross",
+      },
+    );
+    const situationInput = Object.assign(
+      Object.create({ inheritedSituationField: "must-not-cross" }) as Record<string, unknown>,
+      {
+        expectedVersion: 4,
+        problemStatement: "Checkout requests exceed the objective after the pool change.",
+        openQuestions: ["Did the connection-pool change increase queue time?"],
+        investigationContext: Object.assign(
+          Object.create({ inheritedContextField: "must-not-cross" }) as Record<string, unknown>,
+          {
+            productName: "ContextDesk Storefront",
+            version: "4.8.0",
+            build: "2026.02.03.4",
+            component: "checkout-api",
+            environment: "production",
+            organization: "Retail operations",
+            extraContextField: "must-not-cross",
+          },
+        ),
+        clientTime: "2026-02-03T19:59:50.000Z",
+        extraSituationField: "must-not-cross",
+      },
+    );
     const lifecycleInput = Object.assign(
       Object.create({ inheritedLifecycleField: "must-not-cross" }) as Record<string, unknown>,
       {
@@ -177,6 +242,20 @@ describe("the complete Runtime V1 transport surface", () => {
         uploadInput as unknown as Parameters<typeof investigationGateway.uploadEvidence>[1],
         signalOptions,
       ),
+      investigationGateway.createContribution(
+        investigationId,
+        contributionInput as unknown as Parameters<
+          typeof investigationGateway.createContribution
+        >[1],
+        signalOptions,
+      ),
+      investigationGateway.updateSituation(
+        investigationId,
+        situationInput as unknown as Parameters<
+          typeof investigationGateway.updateSituation
+        >[1],
+        signalOptions,
+      ),
       investigationGateway.getLifecycle(investigationId, signalOptions),
       investigationGateway.applyLifecycleAction(
         investigationId,
@@ -197,14 +276,29 @@ describe("the complete Runtime V1 transport surface", () => {
     const created = results[2];
     const contributions = results[4];
     const uploaded = results[5];
-    const lifecycle = results[6];
-    const lifecycleAction = results[7];
+    const contributed = results[6];
+    const situation = results[7];
+    const lifecycle = results[8];
+    const lifecycleAction = results[9];
     expect(listed.ok && Object.isFrozen(listed.value[0])).toBe(true);
     expect(listed.ok && Object.isFrozen(listed.value[1]?.openQuestions)).toBe(true);
     expect(created.ok && Object.isFrozen(created.value.investigationContext)).toBe(true);
     expect(contributions.ok && Object.isFrozen(contributions.value[0])).toBe(true);
     expect(uploaded.ok && Object.isFrozen(uploaded.value.artifact)).toBe(true);
     expect(uploaded.ok && Object.isFrozen(uploaded.value.summary)).toBe(true);
+    expect(contributed.ok && contributed.value).toEqual(createdContribution());
+    expect(situation.ok && situation.value).toEqual(revisedSituationCase());
+    expect(situation.ok && Object.isFrozen(situation.value.openQuestions)).toBe(true);
+    if (contributed.ok) {
+      expect(() => {
+        (contributed.value as { body: string | null }).body = "contaminated";
+      }).toThrow();
+    }
+    if (situation.ok) {
+      expect(() => {
+        (situation.value as { situationVersion: number }).situationVersion = 99;
+      }).toThrow();
+    }
     expect(lifecycle.ok && Object.isFrozen(lifecycle.value.deletion.alternatives)).toBe(true);
     expect(lifecycle.ok && Object.isFrozen(lifecycle.value.archive)).toBe(true);
     expect(lifecycle.ok && Object.isFrozen(lifecycle.value.restore)).toBe(true);
@@ -235,7 +329,7 @@ describe("the complete Runtime V1 transport surface", () => {
         (lifecycleAction.value.case as { title: string }).title = "contaminated";
       }).toThrow();
     }
-    expect(fetchMock).toHaveBeenCalledTimes(8);
+    expect(fetchMock).toHaveBeenCalledTimes(10);
     expect(fetchMock.mock.calls.map(([route, init]) => [String(route), init?.method ?? "GET"]))
       .toEqual([
         ["/api/cases", "GET"],
@@ -244,11 +338,13 @@ describe("the complete Runtime V1 transport surface", () => {
         [`/api/cases/${investigationId}/evidence`, "GET"],
         [`/api/cases/${investigationId}/contributions`, "GET"],
         [`/api/cases/${investigationId}/evidence`, "POST"],
+        [`/api/cases/${investigationId}/contributions`, "POST"],
+        [`/api/cases/${investigationId}/situation`, "PATCH"],
         [`/api/cases/${investigationId}/lifecycle`, "GET"],
         [`/api/cases/${investigationId}/lifecycle`, "POST"],
       ]);
 
-    const actionInit = fetchMock.mock.calls[7]?.[1];
+    const actionInit = fetchMock.mock.calls[9]?.[1];
     const actionBody = JSON.parse(String(actionInit?.body)) as Record<string, unknown>;
     expect(actionBody).toEqual({
       schemaId: "cd-collab.investigation_lifecycle_action_request.v1",
@@ -300,7 +396,32 @@ describe("the complete Runtime V1 transport surface", () => {
       sourceId: "source-browser-upload",
     });
 
-    for (const callIndex of [2, 5, 7]) {
+    const contributionInit = fetchMock.mock.calls[6]?.[1];
+    expect(JSON.parse(String(contributionInit?.body))).toEqual({
+      kind: "note",
+      body: "  Queue time rises immediately after the connection-pool rollout.  ",
+      privacyClass: "share_safe",
+      clientTime: "2026-02-03T19:59:45.000Z",
+      sourceId: "source-human-note",
+    });
+
+    const situationInit = fetchMock.mock.calls[7]?.[1];
+    expect(JSON.parse(String(situationInit?.body))).toEqual({
+      expectedVersion: 4,
+      problemStatement: "Checkout requests exceed the objective after the pool change.",
+      openQuestions: ["Did the connection-pool change increase queue time?"],
+      investigationContext: {
+        productName: "ContextDesk Storefront",
+        version: "4.8.0",
+        build: "2026.02.03.4",
+        component: "checkout-api",
+        environment: "production",
+        organization: "Retail operations",
+      },
+      clientTime: "2026-02-03T19:59:50.000Z",
+    });
+
+    for (const callIndex of [2, 5, 6, 7, 9]) {
       expect(fetchMock.mock.calls[callIndex]?.[1]?.headers).toEqual({
         "content-type": "application/json",
         [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
@@ -956,5 +1077,306 @@ describe("typed lifecycle action conflicts", () => {
     );
     expect(result).toEqual({ ok: false, error: { kind: "conflict", status: 409 } });
     expect(JSON.stringify(result)).not.toContain("not-published");
+  });
+});
+
+describe("Runtime V1.1 write seams", () => {
+  it("sends only supplied situation fields and keeps an explicit context erasure", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse(revisedSituationCase()));
+
+    await investigationGateway.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 0, impact: "", investigationContext: null },
+      options(),
+    );
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      expectedVersion: 0,
+      impact: "",
+      investigationContext: null,
+    });
+  });
+
+  it("URL-encodes the contribution and situation routes instead of interpolating text", async () => {
+    const investigationId = "case /?# owned";
+    const contribution = { ...createdContribution(), caseId: investigationId };
+    const investigation = { ...revisedSituationCase(), id: investigationId };
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse(contribution));
+    fetchMock.mockResolvedValueOnce(jsonResponse(investigation));
+
+    expect(await investigationGateway.createContribution(
+      investigationId,
+      { kind: "note", body: "Synthetic" },
+      options(),
+    )).toEqual({ ok: true, value: contribution });
+    expect(await investigationGateway.updateSituation(
+      investigationId,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(),
+    )).toEqual({ ok: true, value: investigation });
+    expect(fetchMock.mock.calls.map(([route]) => String(route))).toEqual([
+      "/api/cases/case%20%2F%3F%23%20owned/contributions",
+      "/api/cases/case%20%2F%3F%23%20owned/situation",
+    ]);
+  });
+
+  it("rejects a contribution or case answered for another case or without identity", async () => {
+    const other = "case-other";
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ...createdContribution(), caseId: other }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ...createdContribution(), id: "" }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ...revisedSituationCase(), id: other }));
+    const identityFailure = { ok: false, error: { kind: "protocol", reason: "identity" } };
+
+    for (const _attempt of [0, 1]) {
+      expect(await investigationGateway.createContribution(
+        RUNTIME_FIXTURE_IDS.populatedCase,
+        { kind: "note", body: "Synthetic" },
+        options(),
+      )).toEqual(identityFailure);
+    }
+    expect(await investigationGateway.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(),
+    )).toEqual(identityFailure);
+  });
+
+  it("reports a stale expectedVersion as a bounded conflict without reading the body", async () => {
+    const response = jsonResponse(
+      { error: "situation_conflict", currentVersion: 9, private: "must-not-escape" },
+      409,
+    );
+    const json = vi.spyOn(response, "json");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    const result = await investigationGateway.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(),
+    );
+
+    expect(result).toEqual({ ok: false, error: { kind: "conflict", status: 409 } });
+    expect(json).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("must-not-escape");
+  });
+
+  it.each([401, 403] as const)(
+    "preserves protectedApiFetch auth loss for %i on both write seams",
+    async (status) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch");
+      fetchMock.mockResolvedValue(jsonResponse({ error: "forbidden" }, status));
+      const listener = vi.fn();
+      window.addEventListener(AUTH_LOST_EVENT, listener);
+      try {
+        expect(await investigationGateway.createContribution(
+          RUNTIME_FIXTURE_IDS.populatedCase,
+          { kind: "note", body: "Synthetic" },
+          options(),
+        )).toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        expect(await investigationGateway.updateSituation(
+          RUNTIME_FIXTURE_IDS.populatedCase,
+          { expectedVersion: 4, impact: "Synthetic" },
+          options(),
+        )).toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        expect(listener).toHaveBeenCalledTimes(2);
+      } finally {
+        window.removeEventListener(AUTH_LOST_EVENT, listener);
+      }
+    },
+  );
+
+  it("does not fetch either write when the caller's signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    expect(await investigationGateway.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "note", body: "Synthetic" },
+      options(controller),
+    )).toEqual({ ok: false, error: { kind: "aborted" } });
+    expect(await investigationGateway.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(controller),
+    )).toEqual({ ok: false, error: { kind: "aborted" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a write answered after cancellation", async () => {
+    const controller = new AbortController();
+    const deferred = createDeferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => deferred.promise);
+
+    const pending = investigationGateway.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "note", body: "Synthetic" },
+      options(controller),
+    );
+    controller.abort();
+    deferred.resolve(jsonResponse(createdContribution()));
+
+    expect(await pending).toEqual({ ok: false, error: { kind: "aborted" } });
+  });
+
+  it("contains write-body getter failures without fetching or publishing detail", async () => {
+    const secret = "private situation detail";
+    const contributionInput = {} as Record<string, unknown>;
+    Object.defineProperty(contributionInput, "kind", {
+      enumerable: true,
+      get: () => {
+        throw new Error(secret);
+      },
+    });
+    const situationInput = { expectedVersion: 4 } as Record<string, unknown>;
+    Object.defineProperty(situationInput, "impact", {
+      enumerable: true,
+      get: () => {
+        throw new Error(secret);
+      },
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const contribution = await investigationGateway.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      contributionInput as unknown as Parameters<
+        typeof investigationGateway.createContribution
+      >[1],
+      options(),
+    );
+    const situation = await investigationGateway.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      situationInput as unknown as Parameters<typeof investigationGateway.updateSituation>[1],
+      options(),
+    );
+
+    expect(contribution).toEqual({ ok: false, error: { kind: "unexpected" } });
+    expect(situation).toEqual({ ok: false, error: { kind: "unexpected" } });
+    expect(JSON.stringify([contribution, situation])).not.toContain(secret);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a write answered with a broken contract or the wrong media type", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ...createdContribution(), revision: -1 }));
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(revisedSituationCase())));
+
+    expect(await investigationGateway.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "note", body: "Synthetic" },
+      options(),
+    )).toEqual({ ok: false, error: { kind: "protocol", reason: "contract" } });
+    expect(await investigationGateway.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(),
+    )).toEqual({ ok: false, error: { kind: "protocol", reason: "content_type" } });
+  });
+});
+
+describe("write-seam resolution", () => {
+  it("resolves the concrete production seams and keeps the read contract intact", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse(createdContribution()));
+    fetchMock.mockResolvedValueOnce(jsonResponse(revisedSituationCase()));
+    const writes = investigationWriteGateway(investigationGateway);
+
+    expect(await writes.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "note", body: "Synthetic" },
+      options(),
+    )).toEqual({ ok: true, value: createdContribution() });
+    expect(await writes.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(),
+    )).toEqual({ ok: true, value: revisedSituationCase() });
+    expect(fetchMock.mock.calls.map(([route, init]) => [String(route), init?.method])).toEqual([
+      [`/api/cases/${RUNTIME_FIXTURE_IDS.populatedCase}/contributions`, "POST"],
+      [`/api/cases/${RUNTIME_FIXTURE_IDS.populatedCase}/situation`, "PATCH"],
+    ]);
+  });
+
+  it("keeps an existing read-shaped gateway valid and fails its writes closed", async () => {
+    // The shipped double predates the V1.1 seams and stays a complete gateway.
+    const readOnlyDouble = createInvestigationGatewayDouble();
+    expect(readOnlyDouble.createContribution).toBeUndefined();
+    expect(readOnlyDouble.updateSituation).toBeUndefined();
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const writes = investigationWriteGateway(readOnlyDouble);
+    const unavailable = { ok: false, error: { kind: "unavailable", status: 503 } };
+    expect(await writes.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "note", body: "Synthetic" },
+      options(),
+    )).toEqual(unavailable);
+    expect(await writes.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(),
+    )).toEqual(unavailable);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await readOnlyDouble.listContributions(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).toEqual({ ok: true, value: makeContributionList().contributions });
+  });
+
+  it("fails both seams closed when a transport implements only one of them", async () => {
+    const createContribution = vi.fn();
+    const halfImplemented: InvestigationGateway = {
+      ...createInvestigationGatewayDouble(),
+      createContribution,
+    };
+
+    const writes = investigationWriteGateway(halfImplemented);
+    const unavailable = { ok: false, error: { kind: "unavailable", status: 503 } };
+    expect(await writes.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "note", body: "Synthetic" },
+      options(),
+    )).toEqual(unavailable);
+    expect(await writes.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(),
+    )).toEqual(unavailable);
+    expect(createContribution).not.toHaveBeenCalled();
+  });
+
+  it("delegates on the owning gateway so a stateful transport keeps its receiver", async () => {
+    const contribution = createdContribution();
+    const investigation = revisedSituationCase();
+    const receivers: unknown[] = [];
+    const stateful: InvestigationGateway = {
+      ...createInvestigationGatewayDouble(),
+      createContribution(this: InvestigationGateway) {
+        receivers.push(this);
+        return Promise.resolve({ ok: true as const, value: contribution });
+      },
+      updateSituation(this: InvestigationGateway) {
+        receivers.push(this);
+        return Promise.resolve({ ok: true as const, value: investigation });
+      },
+    };
+
+    const writes: InvestigationWriteGateway = investigationWriteGateway(stateful);
+    await writes.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "note", body: "Synthetic" },
+      options(),
+    );
+    await writes.updateSituation(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { expectedVersion: 4, impact: "Synthetic" },
+      options(),
+    );
+
+    expect(receivers).toEqual([stateful, stateful]);
+    expect(Object.isFrozen(writes)).toBe(true);
   });
 });
