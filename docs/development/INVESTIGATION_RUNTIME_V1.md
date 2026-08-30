@@ -166,7 +166,7 @@ must provide:
   artifact and summary contribution, with the case service emitting it from
   `POST /api/cases/:id/evidence`.
 
-The gateway must not compensate for either omission with a local cast or a
+The gateway must not compensate for any omission with a local cast or a
 second hand-written wire parser.
 
 ## Conformance gate
