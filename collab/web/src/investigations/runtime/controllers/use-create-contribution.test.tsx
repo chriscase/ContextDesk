@@ -154,6 +154,30 @@ describe("useCreateContribution", () => {
     expect(opts.onRefreshContributions).not.toHaveBeenCalled();
   });
 
+  it.each(["message", "note", "action"] as const)(
+    "rejects hypothesis links on a %s contribution before transport",
+    async (kind) => {
+      const createContribution = vi.fn();
+      const opts = options({ gateway: gatewayWithCreate(createContribution) });
+      const { result } = renderHook(() => useCreateContribution(opts));
+
+      await act(async () => {
+        await expect(result.current.create({
+          kind,
+          body: "Links must remain hypothesis-only.",
+          hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+        })).resolves.toEqual({
+          status: "failed",
+          error: { kind: "unexpected" },
+        });
+      });
+
+      expect(createContribution).not.toHaveBeenCalled();
+      expect(opts.onContributed).not.toHaveBeenCalled();
+      expect(opts.onRefreshContributions).not.toHaveBeenCalled();
+    },
+  );
+
   it("contains a hostile nested link getter without publishing its detail", async () => {
     const secret = "private link getter detail";
     const link = { kind: "artifact" } as Record<string, unknown>;

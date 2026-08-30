@@ -261,6 +261,9 @@ function createContributionBody(input: CreateContributionInput): Record<string, 
   };
   const hypothesisLinks = input.hypothesisLinks;
   if (hypothesisLinks !== undefined) {
+    if (input.kind !== "hypothesis") {
+      throw new TypeError("hypothesis links require a hypothesis contribution");
+    }
     if (!Array.isArray(hypothesisLinks)) throw new TypeError("invalid hypothesis links");
     body.hypothesisLinks = Array.from(hypothesisLinks, (candidate) => {
       if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
