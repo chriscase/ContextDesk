@@ -72,8 +72,12 @@ function unexpected(): { status: "failed"; error: { kind: "unexpected" } } {
 
 function snapshotHypothesisLinks(
   raw: unknown,
+  contributionKind: ContributionKind,
 ): Array<{ kind: "artifact" | "contribution"; id: string }> | undefined {
   if (raw === undefined) return undefined;
+  if (contributionKind !== "hypothesis") {
+    throw new TypeError("hypothesis links require a hypothesis contribution");
+  }
   if (!Array.isArray(raw)) throw new TypeError("invalid hypothesis links");
   return Array.from(raw, (candidate) => {
     if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
@@ -172,7 +176,7 @@ export function useCreateContribution(
     };
 
     try {
-      const linkSnapshot = snapshotHypothesisLinks(command.hypothesisLinks);
+      const linkSnapshot = snapshotHypothesisLinks(command.hypothesisLinks, command.kind);
       const result = await start.gateway.createContribution(
         scope.investigationId,
         {
