@@ -110,13 +110,13 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByText("Advanced context"));
     const product = screen.getByRole("combobox", { name: "Product or software" });
     fireEvent.change(product, { target: { value: "ContextDesk Storefront" } });
-    expect(screen.getByText("Using an existing recorded value.")).toBeTruthy();
+    expect(screen.getByText("Matches a recorded value after removing outer whitespace; that value will be reused.")).toBeTruthy();
     fireEvent.change(product, { target: { value: "contextdesk storefront" } });
-    expect(screen.getByText("New value — it will be recorded exactly as entered.")).toBeTruthy();
+    expect(screen.getByText("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.")).toBeTruthy();
     fireEvent.change(product, { target: { value: "  ContextDesk Storefront  " } });
-    expect(screen.getByText("Using an existing recorded value.")).toBeTruthy();
+    expect(screen.getByText("Matches a recorded value after removing outer whitespace; that value will be reused.")).toBeTruthy();
     fireEvent.change(product, { target: { value: "A new product" } });
-    expect(screen.getByText("New value — it will be recorded exactly as entered.")).toBeTruthy();
+    expect(screen.getByText("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Filter investigations by status"), { target: { value: "monitoring" } });
     expect(screen.getByRole("button", { name: /Checkout latency/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Imported investigation/ })).toBeNull();
@@ -161,26 +161,42 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(vi.mocked(gateway.createInvestigation).mock.calls[0]?.[0]).not.toHaveProperty("occurredAt");
   });
 
-  it("submits the exact trimmed context literal that the combo calls existing", async () => {
+  it("normalizes padded recorded and new context values before comparison and submission", async () => {
     const created = { ...makeSparseImportedCase(), id: "case-trimmed-context", title: "Trimmed context" };
-    const gateway = createInvestigationGatewayDouble({ createInvestigation: vi.fn(async () => gatewayOk(created)) });
+    const recorded = makePopulatedCase();
+    const gateway = createInvestigationGatewayDouble({
+      listInvestigations: vi.fn(async () => gatewayOk([{
+        ...recorded,
+        investigationContext: {
+          ...recorded.investigationContext!,
+          productName: "  ContextDesk Storefront  ",
+        },
+      }])),
+      createInvestigation: vi.fn(async () => gatewayOk(created)),
+    });
     const onOpenCase = vi.fn();
     renderStrategy({ gateway, shell: { onOpenCase } });
     await screen.findByRole("heading", { name: "Create an investigation" });
     fireEvent.change(screen.getByPlaceholderText("Short investigation title"), { target: { value: "Trimmed context" } });
     fireEvent.click(screen.getByText("Advanced context"));
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "  ContextDesk Storefront  " } });
-    expect(comboHint("Product or software")).toBe("Using an existing recorded value.");
+    expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused.");
+    fireEvent.change(screen.getByRole("combobox", { name: "Build" }), { target: { value: "  never-recorded-build  " } });
+    expect(comboHint("Build")).toBe("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.");
     fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
 
     await waitFor(() => expect(onOpenCase).toHaveBeenCalledWith("case-trimmed-context"));
     expect(gateway.createInvestigation).toHaveBeenCalledWith(
       expect.objectContaining({
-        investigationContext: expect.objectContaining({ productName: "ContextDesk Storefront" }),
+        investigationContext: expect.objectContaining({
+          productName: "ContextDesk Storefront",
+          build: "never-recorded-build",
+        }),
       }),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(vi.mocked(gateway.createInvestigation).mock.calls[0]?.[0].investigationContext?.productName).not.toMatch(/^\s|\s$/u);
+    expect(vi.mocked(gateway.createInvestigation).mock.calls[0]?.[0].investigationContext?.build).not.toMatch(/^\s|\s$/u);
   });
 
   it("passes occurred-at through for server validation and explains accepted examples", async () => {
@@ -221,6 +237,34 @@ describe("Investigation First Runtime V1 presentation", () => {
       { kind: "network" as const },
       "The connection failed before ContextDesk could confirm the result. Check the investigation list before trying again.",
     ],
+    [
+      { kind: "auth_lost" as const, status: 403 as const },
+      "Your access changed before the investigation could be created. Sign in again to continue.",
+    ],
+    [
+      { kind: "unavailable" as const, status: 503 as const },
+      "The service could not complete the create request right now. Check the investigation list before trying again.",
+    ],
+    [
+      { kind: "server_failure" as const, status: 500 },
+      "The service could not complete the create request right now. Check the investigation list before trying again.",
+    ],
+    [
+      { kind: "aborted" as const },
+      "The create request was canceled before it finished. Check the investigation list before trying again.",
+    ],
+    [
+      { kind: "unexpected_response" as const, status: 418 },
+      "The server response could not be verified. Check the investigation list before trying again.",
+    ],
+    [
+      { kind: "protocol" as const, reason: "contract" as const },
+      "The server response could not be verified. Check the investigation list before trying again.",
+    ],
+    [
+      { kind: "unexpected" as const },
+      "ContextDesk could not confirm the create result safely. Check the investigation list before trying again.",
+    ],
   ])("uses truthful create-specific copy for %s failures", async (error, expected) => {
     const gateway = createInvestigationGatewayDouble({
       createInvestigation: vi.fn(async () => ({ ok: false as const, error })),
@@ -256,10 +300,10 @@ describe("Investigation First Runtime V1 presentation", () => {
       authorityKey: "bob-authority-v1",
       identity: { id: "bob", username: "bob", displayName: "Bob Alvarez" },
     });
-    await waitFor(() => expect((screen.getByPlaceholderText("Short investigation title") as HTMLInputElement).value).toBe(""));
+    expect((screen.getByPlaceholderText("Short investigation title") as HTMLInputElement).value).toBe("");
     expect((screen.getByLabelText("Severity") as HTMLSelectElement).value).toBe("medium");
     expect((screen.getByPlaceholderText("Describe the problem without assuming its cause.") as HTMLTextAreaElement).value).toBe("");
-    await waitFor(() => expect(document.querySelector(".investigation-first__advanced")?.hasAttribute("open")).toBe(false));
+    expect(document.querySelector(".investigation-first__advanced")?.hasAttribute("open")).toBe(false);
     fireEvent.click(screen.getByText("Advanced context"));
     expect((screen.getByRole("combobox", { name: "Product or software" }) as HTMLInputElement).value).toBe("");
   });
@@ -619,9 +663,9 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.keyDown(product, { key: "Enter" });
     expect((product as HTMLInputElement).value).toBe("");
     expect(document.activeElement).toBe(product);
-    expect(comboHint("Product or software")).toBe("Choose a recorded value or enter a new one.");
+    expect(comboHint("Product or software")).toBe("Choose a recorded value or enter a new one. Outer whitespace will be removed when saved.");
     fireEvent.change(product, { target: { value: "ContextDesk Storefront" } });
-    expect(comboHint("Product or software")).toBe("Using an existing recorded value.");
+    expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused.");
   });
 
   it("stops calling a typed value new when the recorded values could not be read", async () => {
@@ -637,17 +681,17 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByText("Advanced context"));
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "ContextDesk Storefront" } });
 
-    expect(comboHint("Product or software")).toBe("Recorded values are unavailable, so this cannot be compared with them. It will be recorded exactly as entered.");
-    expect(screen.queryByText("New value — it will be recorded exactly as entered.")).toBeNull();
-    expect(screen.queryByText("Using an existing recorded value.")).toBeNull();
+    expect(comboHint("Product or software")).toBe("Recorded values are unavailable, so this cannot be compared. Outer whitespace will be removed when it is saved.");
+    expect(screen.queryByText(/saved as a new value/iu)).toBeNull();
+    expect(screen.queryByText(/value will be reused/iu)).toBeNull();
     const retry = screen.getByRole("button", { name: "Retry recorded values" });
     expect(screen.getByText(/Recorded values could not be loaded/).textContent).toContain("Creating an investigation still works.");
 
     fireEvent.click(retry);
-    await waitFor(() => expect(comboHint("Product or software")).toBe("Using an existing recorded value."));
+    await waitFor(() => expect(comboHint("Product or software")).toBe("Matches a recorded value after removing outer whitespace; that value will be reused."));
     expect(screen.queryByRole("button", { name: "Retry recorded values" })).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "A product nobody recorded" } });
-    expect(comboHint("Product or software")).toBe("New value — it will be recorded exactly as entered.");
+    expect(comboHint("Product or software")).toBe("No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.");
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
   });
 
@@ -659,14 +703,14 @@ describe("Investigation First Runtime V1 presentation", () => {
     renderStrategy({ gateway });
     await screen.findByRole("heading", { name: "Create an investigation" });
     fireEvent.click(screen.getByText("Advanced context"));
-    expect(comboHint("Product or software")).toBe("Recorded values are still loading, so this cannot be compared with them yet. It will be recorded exactly as entered.");
+    expect(comboHint("Product or software")).toBe("Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.");
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "ContextDesk Storefront" } });
-    expect(comboHint("Product or software")).toBe("Recorded values are still loading, so this cannot be compared with them yet. It will be recorded exactly as entered.");
+    expect(comboHint("Product or software")).toBe("Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.");
 
     pending.resolve(gatewayOk([]));
-    await waitFor(() => expect(comboHint("Product or software")).toBe("New value — it will be recorded exactly as entered."));
+    await waitFor(() => expect(comboHint("Product or software")).toBe("No recorded values yet. This will be saved as a new value after removing outer whitespace."));
     fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "" } });
-    expect(comboHint("Product or software")).toBe("Choose a recorded value or enter a new one.");
+    expect(comboHint("Product or software")).toBe("No recorded values yet; enter a new value. Outer whitespace will be removed when saved.");
   });
 
   it("still captures an investigation while the recorded values are unavailable", async () => {

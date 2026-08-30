@@ -315,6 +315,17 @@ test.describe("Investigation First accessibility and browser conformance", () =>
         advancedSummaryLayout.scrollWidth,
         `advanced-context summary overflows at ${requirement}`,
       ).toBeLessThanOrEqual(advancedSummaryLayout.clientWidth + 1);
+      if (requirement === "reflow-390") {
+        await advancedSummary.click();
+        await expect(page.locator(".investigation-first__advanced")).toHaveAttribute("open", "");
+        observed.push(`open advanced context: ${await expectReflow(page, requirement, [
+          page.getByRole("combobox", { name: "Product or software" }),
+          page.getByRole("combobox", { name: "Build" }),
+          page.getByLabel(/When did it happen/u),
+          page.getByPlaceholder("What is in or out of scope?"),
+          page.getByPlaceholder("What still needs to be learned?"),
+        ])}`);
+      }
 
       const result = page.locator(".investigation-first__list-button").filter({ hasText: title });
       await activate(result, page);

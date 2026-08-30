@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   selectEvidenceInventory,
   selectResourceView,
@@ -102,18 +102,25 @@ function failureCopy(error: RuntimeFailure, subject: "list" | "detail" | "eviden
 }
 
 /** Whether the recorded-value catalog behind the combo fields can be trusted. */
-type CatalogState = "available" | "loading" | "unavailable";
+type CatalogState = "available" | "empty" | "loading" | "unavailable";
 
 function comboHint(catalog: CatalogState, value: string, options: readonly string[]): string {
   // A comparison against a catalog that was never read is not a fact. Say what
-  // is actually known instead of calling an unchecked value new.
-  if (catalog === "loading") return "Recorded values are still loading, so this cannot be compared with them yet. It will be recorded exactly as entered.";
-  if (catalog === "unavailable") return "Recorded values are unavailable, so this cannot be compared with them. It will be recorded exactly as entered.";
+  // is actually known instead of calling an unchecked value new. Context
+  // payloads and catalog options share the same outer-whitespace normalization,
+  // so the comparison copy also names that behavior explicitly.
+  if (catalog === "loading") return "Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.";
+  if (catalog === "unavailable") return "Recorded values are unavailable, so this cannot be compared. Outer whitespace will be removed when it is saved.";
   const submittedLiteral = text(value);
-  if (!submittedLiteral) return "Choose a recorded value or enter a new one.";
+  if (catalog === "empty" || options.length === 0) {
+    return submittedLiteral
+      ? "No recorded values yet. This will be saved as a new value after removing outer whitespace."
+      : "No recorded values yet; enter a new value. Outer whitespace will be removed when saved.";
+  }
+  if (!submittedLiteral) return "Choose a recorded value or enter a new one. Outer whitespace will be removed when saved.";
   return options.some((option) => option === submittedLiteral)
-    ? "Using an existing recorded value."
-    : "New value — it will be recorded exactly as entered.";
+    ? "Matches a recorded value after removing outer whitespace; that value will be reused."
+    : "No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.";
 }
 
 /**
@@ -210,7 +217,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           ? `available:${props.focusCaseId}`
           : null;
   const catalog: CatalogState = investigations.availability === "available"
-    ? "available"
+    ? cases.length > 0 ? "available" : "empty"
     : investigations.availability === "unavailable"
       ? "unavailable"
       : "loading";
@@ -239,7 +246,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       inline: "nearest",
     });
   }, [props.startSignal]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (priorDraftOwnerKey.current === draftOwnerKey) return;
     priorDraftOwnerKey.current = draftOwnerKey;
     setTitle("");
