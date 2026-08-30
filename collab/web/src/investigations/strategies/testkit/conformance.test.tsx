@@ -1,6 +1,10 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { cleanup } from "@testing-library/react";
 import { useEffect, useRef } from "react";
 import { afterEach, describe, expect, it } from "vitest";
+import { UI_STRATEGY_IDS, type UiStrategyId } from "../../../ui-strategy.js";
 import {
   selectResourceView,
   useInvestigationRuntime,
@@ -305,4 +309,248 @@ describe("investigation strategy conformance runner", () => {
     },
     60_000,
   );
+});
+
+const TESTKIT_DIR = dirname(fileURLToPath(import.meta.url));
+const REPOSITORY_ROOT = resolve(TESTKIT_DIR, "../../../../../..");
+
+/** The shipped strategy catalogue this manifest must stay exhaustive against. */
+const UI_STRATEGY_SOURCE_PATH = "collab/web/src/ui-strategy.ts";
+
+function repositorySource(path: string): string {
+  return readFileSync(resolve(REPOSITORY_ROOT, path), "utf8");
+}
+
+/**
+ * The shipped identifiers as the catalogue file itself declares them.
+ *
+ * The import above is already the module the shell consumes, so it is the
+ * shipped vocabulary rather than a copy. Reading the declaration as text as
+ * well is cheap and fails closed: it proves the required key set is anchored
+ * to the catalogue under review, not to whatever this test happens to import.
+ */
+function shippedStrategyIdsFromSource(): string[] {
+  const source = repositorySource(UI_STRATEGY_SOURCE_PATH);
+  const body = /export const UI_STRATEGY_IDS\s*=\s*\[([\s\S]*?)\]/u.exec(source)?.[1];
+  if (body === undefined) {
+    throw new Error(
+      `${UI_STRATEGY_SOURCE_PATH} no longer declares UI_STRATEGY_IDS as a literal array`,
+    );
+  }
+  return [...body.matchAll(/"([^"]+)"/gu)]
+    .map((match) => match[1])
+    .filter((id): id is string => id !== undefined);
+}
+
+/**
+ * How a shipped strategy earns its conformance coverage.
+ *
+ * The two kinds are deliberately not interchangeable. `shared-conformance` is
+ * the strong claim: the strategy is mounted by the strategy-neutral runner in
+ * this file and answered on the browser surface by the shared harness.
+ * `dedicated-coverage` is the weaker, honest one: the strategy has its own
+ * accessibility spec and makes no claim about the shared profile at all.
+ */
+type StrategyCoverageKind = "shared-conformance" | "dedicated-coverage";
+
+interface SharedConformanceEnrollment {
+  readonly kind: "shared-conformance";
+  /** The exact target the shared component runner is given above. */
+  readonly componentTarget: StrategyConformanceTarget;
+  /** Repository-relative spec that drives the shared browser-surface harness. */
+  readonly browserSpec: string;
+  readonly evidence: string;
+}
+
+interface DedicatedCoverageEnrollment {
+  readonly kind: "dedicated-coverage";
+  /** Repository-relative specs carrying this strategy's own coverage. */
+  readonly dedicatedSpecs: readonly string[];
+  readonly evidence: string;
+  /** Why the shared runner is not the claim being made. */
+  readonly notSharedBecause: string;
+}
+
+type StrategyCoverageEnrollment =
+  | SharedConformanceEnrollment
+  | DedicatedCoverageEnrollment;
+
+/**
+ * Test-only proof that every shipped presentation strategy has explicit,
+ * truthful conformance coverage.
+ *
+ * The runner above holds one strategy to the profile; until now nothing said
+ * which strategies must be held to anything. This manifest closes that gap
+ * without a production registry seam: it names, per shipped strategy ID, where
+ * that strategy's coverage actually lives and what kind of claim it is. The
+ * `Record<UiStrategyId, …>` annotation makes a newly shipped strategy a
+ * compile error here until it is enrolled, and the assertions below reject an
+ * entry for a strategy the app does not ship.
+ *
+ * Recording the weaker claim honestly is the point: listing the reference
+ * surface as shared-profile conformant would be worse than no manifest at all.
+ */
+const STRATEGY_COVERAGE_MANIFEST: Readonly<
+  Record<UiStrategyId, StrategyCoverageEnrollment>
+> = {
+  "investigation-first": {
+    kind: "shared-conformance",
+    componentTarget: investigationFirstTarget,
+    browserSpec: "collab/e2e/specs/27-investigation-first-accessibility.spec.ts",
+    evidence:
+      "Held to every component-surface requirement by runComponentConformance in this file, and to the browser-surface requirements by the shared harness the named spec drives.",
+  },
+  "war-room": {
+    kind: "dedicated-coverage",
+    dedicatedSpecs: [
+      "collab/e2e/specs/22-war-room-a11y-responsive.spec.ts",
+    ],
+    evidence:
+      "Accessibility and responsive coverage for the War Room scenario surfaces: phone reflow without horizontal scroll, accessible names on intake and evidence controls, landmarks with a working skip link, a keyboard-operable evidence log disclosure, and a comparison matrix that scrolls inside its own wrapper.",
+    notSharedBecause:
+      "The reference surface is not mounted by the strategy-neutral component runner, so this manifest records the dedicated spec it does have rather than a shared-profile pass it has not earned.",
+  },
+};
+
+// The annotation is a compile-time promise only. Freeze the manifest and each
+// enrollment for real, so a test cannot rewrite the claim it is about to check.
+for (const enrollment of Object.values(STRATEGY_COVERAGE_MANIFEST)) {
+  if (enrollment.kind === "dedicated-coverage") Object.freeze(enrollment.dedicatedSpecs);
+  Object.freeze(enrollment);
+}
+Object.freeze(STRATEGY_COVERAGE_MANIFEST);
+
+function enrolledIds(kind: StrategyCoverageKind): string[] {
+  return Object.entries(STRATEGY_COVERAGE_MANIFEST)
+    .filter(([, enrollment]) => enrollment.kind === kind)
+    .map(([id]) => id)
+    .sort();
+}
+
+function sharedEnrollment(id: UiStrategyId): SharedConformanceEnrollment {
+  const enrollment = STRATEGY_COVERAGE_MANIFEST[id];
+  if (enrollment.kind !== "shared-conformance") {
+    throw new Error(`${id} is not enrolled in the shared conformance profile`);
+  }
+  return enrollment;
+}
+
+function dedicatedEnrollment(id: UiStrategyId): DedicatedCoverageEnrollment {
+  const enrollment = STRATEGY_COVERAGE_MANIFEST[id];
+  if (enrollment.kind !== "dedicated-coverage") {
+    throw new Error(`${id} is not recorded as dedicated coverage`);
+  }
+  return enrollment;
+}
+
+function coveragePaths(enrollment: StrategyCoverageEnrollment): readonly string[] {
+  return enrollment.kind === "shared-conformance"
+    ? [enrollment.browserSpec]
+    : enrollment.dedicatedSpecs;
+}
+
+describe("shipped strategy conformance coverage", () => {
+  it("enrolls exactly the shipped strategy catalogue, with no unknown or missing entry", () => {
+    expect(Object.isFrozen(STRATEGY_COVERAGE_MANIFEST)).toBe(true);
+
+    // The required keys come from the shipped catalogue, never from the
+    // manifest itself, so a strategy cannot be dropped from the requirement by
+    // being dropped from the manifest.
+    expect(shippedStrategyIdsFromSource()).toEqual([...UI_STRATEGY_IDS]);
+    const shipped: string[] = [...UI_STRATEGY_IDS].sort();
+    const enrolled = Object.keys(STRATEGY_COVERAGE_MANIFEST).sort();
+
+    expect(enrolled).toEqual(shipped);
+    expect(
+      enrolled.filter((id) => !shipped.includes(id)),
+      "the manifest registers a strategy the app does not ship",
+    ).toEqual([]);
+    expect(
+      shipped.filter((id) => !enrolled.includes(id)),
+      "a shipped strategy has no declared conformance coverage",
+    ).toEqual([]);
+  });
+
+  it("separates a shared-profile claim from dedicated coverage", () => {
+    expect(enrolledIds("shared-conformance")).toEqual(["investigation-first"]);
+    expect(enrolledIds("dedicated-coverage")).toEqual(["war-room"]);
+  });
+
+  it("backs every enrollment with non-empty evidence and a coverage file that exists", () => {
+    for (const [id, enrollment] of Object.entries(STRATEGY_COVERAGE_MANIFEST)) {
+      expect(Object.isFrozen(enrollment), `${id} enrollment is mutable`).toBe(true);
+      expect(
+        enrollment.evidence.trim().length,
+        `${id} records no coverage evidence`,
+      ).toBeGreaterThan(0);
+
+      const paths = coveragePaths(enrollment);
+      expect(paths.length, `${id} names no coverage file`).toBeGreaterThan(0);
+      for (const path of paths) {
+        expect(
+          existsSync(resolve(REPOSITORY_ROOT, path)),
+          `${id} names a coverage file that does not exist: ${path}`,
+        ).toBe(true);
+        expect(
+          repositorySource(path).trim().length,
+          `${id} names an empty coverage file: ${path}`,
+        ).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("enrolls Investigation First in the shared runner this file actually runs", () => {
+    const enrollment = sharedEnrollment("investigation-first");
+
+    // Identity, not a look-alike: the manifest points at the very target the
+    // shared component runner is given above, so the enrollment cannot drift
+    // away from the run that earns it.
+    expect(enrollment.componentTarget).toBe(investigationFirstTarget);
+    expect(enrollment.componentTarget.component).toBe(InvestigationFirstStrategy);
+    expect(enrollment.componentTarget.label).toBe("Investigation First");
+
+    // Exactly one shared component target exists, and it is that one.
+    const sharedTargets = Object.values(STRATEGY_COVERAGE_MANIFEST)
+      .filter(
+        (candidate): candidate is SharedConformanceEnrollment =>
+          candidate.kind === "shared-conformance",
+      )
+      .map((candidate) => candidate.componentTarget);
+    expect(sharedTargets).toEqual([investigationFirstTarget]);
+
+    // The browser half is the same shared profile, not a bespoke spec.
+    expect(
+      repositorySource(enrollment.browserSpec),
+      `${enrollment.browserSpec} does not drive the shared browser harness`,
+    ).toContain("../src/investigation-strategy/conformance.js");
+  });
+
+  it("labels War Room as dedicated accessibility coverage without claiming the shared runner", () => {
+    const enrollment = dedicatedEnrollment("war-room");
+
+    expect(Object.isFrozen(enrollment.dedicatedSpecs)).toBe(true);
+    expect([...enrollment.dedicatedSpecs]).toEqual([
+      "collab/e2e/specs/22-war-room-a11y-responsive.spec.ts",
+    ]);
+    expect(enrollment.notSharedBecause.trim().length).toBeGreaterThan(0);
+
+    // The claim is structurally impossible to overstate: a dedicated
+    // enrollment carries no component target, so nothing here can be read as
+    // "War Room passed the shared component runner".
+    expect(Object.hasOwn(enrollment, "componentTarget")).toBe(false);
+    expect(enrolledIds("shared-conformance")).not.toContain("war-room");
+
+    for (const path of enrollment.dedicatedSpecs) {
+      const spec = repositorySource(path);
+      expect(
+        /^\s*test(?:\.describe)?\(/mu.test(spec),
+        `${path} declares no test, so it is not coverage`,
+      ).toBe(true);
+      expect(spec, `${path} is not War Room coverage`).toContain("War Room");
+      expect(
+        spec,
+        `${path} borrows the shared harness, so "dedicated" mislabels it`,
+      ).not.toContain("investigation-strategy/conformance.js");
+    }
+  });
 });
