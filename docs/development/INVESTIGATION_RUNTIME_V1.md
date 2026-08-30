@@ -164,10 +164,33 @@ must provide:
   that envelope from `GET /api/cases/:id/evidence`; and
 - a versioned evidence-upload-success envelope and parser for the returned
   artifact and summary contribution, with the case service emitting it from
-  `POST /api/cases/:id/evidence`.
+  `POST /api/cases/:id/evidence`; and
+- versioned lifecycle-action request, success, and changed-state conflict
+  envelopes and parsers for `POST /api/cases/:id/lifecycle`.
 
 The gateway must not compensate for any omission with a local cast or a
 second hand-written wire parser.
+
+### Lifecycle command integrity
+
+The lifecycle read is a preview, not a mutation token by itself. A Runtime V1
+consumer must never post the preview's `targetStatus` to the generic status
+route: legal hold, status history, or the current status may change between the
+read and the write, and the caller-selected target can then describe an action
+the server would no longer authorize.
+
+The lifecycle action request carries the action and the expected lifecycle
+state from the parsed preview; it does not carry a caller-selected target
+status. The case service executes the action inside one atomic case lock. It
+reloads status, legal hold, and status history; compares them with the expected
+state; re-evaluates the requested action; and writes only the allowed verdict's
+server-derived target. Changed state returns a bounded, versioned conflict with
+the current parsed lifecycle view and writes no case, timeline, or audit row.
+
+The existing `run:strategies` capability, case-access concealment, audit shape,
+and `401`/`403` authentication-loss behavior remain unchanged. Ordinary working
+status changes may continue through the generic status route, but the Runtime
+V1 archive and restore commands use only the action-specific lifecycle route.
 
 ## Conformance gate
 
@@ -190,8 +213,8 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 
 Runtime V1 is delivered in dependency order:
 
-1. typed transport contracts and parsers, including lifecycle and the
-   versioned evidence list/upload envelopes;
+1. typed transport contracts and parsers, including lifecycle read/action and
+   the versioned evidence list/upload envelopes;
 2. deterministic fixtures and the dependency-boundary guard;
 3. gateway, bounded errors, capability projections, and pure selectors;
 4. provider and race-safe controllers;
