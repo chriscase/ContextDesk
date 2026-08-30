@@ -63,28 +63,122 @@ describe("useCreateContribution", () => {
 
     await act(async () => {
       await expect(result.current.create({
-        kind: "note",
+        kind: "hypothesis",
         body: "  Queue time rises after the rollout.  ",
+        hypothesisLinks: [
+          { kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence },
+          { kind: "contribution", id: RUNTIME_FIXTURE_IDS.note },
+        ],
         privacyClass: "share_safe",
         clientTime: "2026-02-03T20:10:00.000Z",
         sourceId: "source-human-note",
+        idempotencyKey: "hypothesis-ui-20260830-001",
       })).resolves.toEqual({ status: "succeeded", value: created });
     });
 
     expect(createContribution).toHaveBeenCalledWith(
       RUNTIME_FIXTURE_IDS.populatedCase,
       {
-        kind: "note",
+        kind: "hypothesis",
         body: "  Queue time rises after the rollout.  ",
+        hypothesisLinks: [
+          { kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence },
+          { kind: "contribution", id: RUNTIME_FIXTURE_IDS.note },
+        ],
         privacyClass: "share_safe",
         clientTime: "2026-02-03T20:10:00.000Z",
         sourceId: "source-human-note",
+        idempotencyKey: "hypothesis-ui-20260830-001",
       },
       { signal: expect.any(AbortSignal) },
     );
     expect(opts.onContributed).toHaveBeenCalledWith(created);
     expect(opts.onRefreshContributions).toHaveBeenCalledWith(RUNTIME_FIXTURE_IDS.populatedCase);
     expect(result.current.state).toEqual({ status: "succeeded", value: created });
+  });
+
+  it("snapshots link identities before delegating and strips non-contract fields", async () => {
+    const created = contribution();
+    let observedInput: Parameters<InvestigationWriteGateway["createContribution"]>[1] | undefined;
+    const createContribution = vi.fn(async (_caseId, input) => {
+      observedInput = input;
+      return { ok: true as const, value: created };
+    });
+    const opts = options({ gateway: gatewayWithCreate(createContribution) });
+    const { result } = renderHook(() => useCreateContribution(opts));
+    const link = {
+      kind: "artifact" as const,
+      id: RUNTIME_FIXTURE_IDS.evidence as string,
+      privateAnnotation: "must-not-cross",
+    };
+
+    await act(async () => {
+      await result.current.create({
+        kind: "hypothesis",
+        body: "Recorded evidence supports the queue-time hypothesis.",
+        hypothesisLinks: [link],
+      });
+    });
+    link.id = "mutated-after-write";
+
+    expect(observedInput).toEqual({
+      kind: "hypothesis",
+      body: "Recorded evidence supports the queue-time hypothesis.",
+      hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+    });
+    expect(observedInput?.hypothesisLinks?.[0]).not.toBe(link);
+  });
+
+  it.each([
+    ["a non-array collection", { hypothesisLinks: "artifact" }],
+    ["an invalid link kind", { hypothesisLinks: [{ kind: "case", id: "case-a" }] }],
+    ["a non-string link identity", { hypothesisLinks: [{ kind: "artifact", id: 7 }] }],
+  ])("fails %s closed before calling the gateway", async (_label, malformed) => {
+    const createContribution = vi.fn();
+    const opts = options({ gateway: gatewayWithCreate(createContribution) });
+    const { result } = renderHook(() => useCreateContribution(opts));
+
+    await act(async () => {
+      await expect(result.current.create({
+        kind: "hypothesis",
+        body: "Malformed links must not cross the controller.",
+        ...malformed,
+      } as never)).resolves.toEqual({
+        status: "failed",
+        error: { kind: "unexpected" },
+      });
+    });
+
+    expect(createContribution).not.toHaveBeenCalled();
+    expect(opts.onContributed).not.toHaveBeenCalled();
+    expect(opts.onRefreshContributions).not.toHaveBeenCalled();
+  });
+
+  it("contains a hostile nested link getter without publishing its detail", async () => {
+    const secret = "private link getter detail";
+    const link = { kind: "artifact" } as Record<string, unknown>;
+    Object.defineProperty(link, "id", {
+      enumerable: true,
+      get: () => {
+        throw new Error(secret);
+      },
+    });
+    const createContribution = vi.fn();
+    const opts = options({ gateway: gatewayWithCreate(createContribution) });
+    const { result } = renderHook(() => useCreateContribution(opts));
+
+    let outcome;
+    await act(async () => {
+      outcome = await result.current.create({
+        kind: "hypothesis",
+        body: "Hostile input",
+        hypothesisLinks: [link],
+      } as never);
+    });
+
+    expect(outcome).toEqual({ status: "failed", error: { kind: "unexpected" } });
+    expect(JSON.stringify(outcome)).not.toContain(secret);
+    expect(createContribution).not.toHaveBeenCalled();
   });
 
   it("writes nothing without contribute authority, an active case, or outside read-only", async () => {
@@ -98,17 +192,29 @@ describe("useCreateContribution", () => {
       { initialProps: { value: base } },
     );
 
-    await expect(result.current.create({ kind: "note", body: "x" })).resolves.toEqual({
+    await expect(result.current.create({
+      kind: "hypothesis",
+      body: "x",
+      hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+    })).resolves.toEqual({
       status: "ignored",
       reason: "not_ready",
     });
     rerender({ value: { ...base, canContribute: true, investigationId: null } });
-    await expect(result.current.create({ kind: "note", body: "x" })).resolves.toEqual({
+    await expect(result.current.create({
+      kind: "hypothesis",
+      body: "x",
+      hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+    })).resolves.toEqual({
       status: "ignored",
       reason: "not_ready",
     });
     rerender({ value: { ...base, canContribute: true, readOnly: true } });
-    await expect(result.current.create({ kind: "note", body: "x" })).resolves.toEqual({
+    await expect(result.current.create({
+      kind: "hypothesis",
+      body: "x",
+      hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+    })).resolves.toEqual({
       status: "ignored",
       reason: "not_ready",
     });
@@ -216,7 +322,11 @@ describe("useCreateContribution", () => {
 
     let pending!: ReturnType<typeof result.current.create>;
     await act(async () => {
-      pending = result.current.create({ kind: "note", body: "late" });
+      pending = result.current.create({
+        kind: "hypothesis",
+        body: "late",
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+      });
       await Promise.resolve();
     });
     await waitFor(() => expect(observedSignal).toBeDefined());
@@ -253,7 +363,11 @@ describe("useCreateContribution", () => {
 
       let pending!: ReturnType<typeof result.current.create>;
       await act(async () => {
-        pending = result.current.create({ kind: "note", body: "late" });
+        pending = result.current.create({
+          kind: "hypothesis",
+          body: "late",
+          hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+        });
         await Promise.resolve();
       });
       rerender({ value: { ...first, ...change } });
@@ -277,7 +391,11 @@ describe("useCreateContribution", () => {
 
     let pending!: ReturnType<typeof result.current.create>;
     await act(async () => {
-      pending = result.current.create({ kind: "note", body: "late" });
+      pending = result.current.create({
+        kind: "hypothesis",
+        body: "late",
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+      });
       await Promise.resolve();
     });
     unmount();

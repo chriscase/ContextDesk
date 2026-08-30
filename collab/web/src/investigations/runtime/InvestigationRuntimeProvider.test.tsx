@@ -756,14 +756,21 @@ describe("InvestigationRuntimeProvider", () => {
 
     await act(async () => {
       await currentRuntime().commands.createContribution?.({
-        kind: "note",
+        kind: "hypothesis",
         body: "Queue time rises after the rollout.",
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+        idempotencyKey: "hypothesis-ui-20260830-003",
       });
     });
 
     expect(gateway.createContribution).toHaveBeenCalledWith(
       RUNTIME_FIXTURE_IDS.populatedCase,
-      { kind: "note", body: "Queue time rises after the rollout." },
+      {
+        kind: "hypothesis",
+        body: "Queue time rises after the rollout.",
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+        idempotencyKey: "hypothesis-ui-20260830-003",
+      },
       { signal: expect.any(AbortSignal) },
     );
     expect(currentRuntime().resources.contributions).toEqual({
@@ -1022,7 +1029,11 @@ describe("InvestigationRuntimeProvider", () => {
     act(() => currentRuntime().refresh.investigation());
     await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("loading"));
     await act(async () => {
-      await expect(retained?.({ kind: "note", body: "must not write while loading" }))
+      await expect(retained?.({
+        kind: "hypothesis",
+        body: "must not write while loading",
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+      }))
         .resolves.toEqual({ status: "ignored", reason: "not_ready" });
     });
     expect(gateway.createContribution).not.toHaveBeenCalled();
@@ -1064,6 +1075,30 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().mutations.updateSituation).toEqual({ status: "idle" });
     expect(gateway.createContribution).not.toHaveBeenCalled();
     expect(gateway.updateSituation).not.toHaveBeenCalled();
+  });
+
+  it("withholds an evidence-linked contribution in static read-only mode", async () => {
+    const gateway = makeGateway();
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-read-only"
+        capabilities={FULL_CAPABILITIES}
+        readOnly
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    expect(currentRuntime().commands.createContribution).toBeNull();
+    expect(currentRuntime().mutations.createContribution).toEqual({ status: "idle" });
+    expect(gateway.createContribution).not.toHaveBeenCalled();
   });
 
   it("fails a write closed as unavailable when the transport omits the seam", async () => {

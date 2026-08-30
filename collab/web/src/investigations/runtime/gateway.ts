@@ -76,9 +76,15 @@ export interface UploadEvidenceInput {
 export interface CreateContributionInput {
   readonly kind: ContributionKind;
   readonly body: string;
+  readonly hypothesisLinks?: readonly {
+    readonly kind: "artifact" | "contribution";
+    readonly id: string;
+  }[];
   readonly privacyClass?: PrivacyClass;
   readonly clientTime?: string;
   readonly sourceId?: string;
+  /** Caller-generated token; the server owns validation and replay semantics. */
+  readonly idempotencyKey?: string;
 }
 
 /**
@@ -253,9 +259,25 @@ function createContributionBody(input: CreateContributionInput): Record<string, 
     kind: input.kind,
     body: input.body,
   };
+  const hypothesisLinks = input.hypothesisLinks;
+  if (hypothesisLinks !== undefined) {
+    if (!Array.isArray(hypothesisLinks)) throw new TypeError("invalid hypothesis links");
+    body.hypothesisLinks = Array.from(hypothesisLinks, (candidate) => {
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+        throw new TypeError("invalid hypothesis link");
+      }
+      const kind: unknown = candidate.kind;
+      const id: unknown = candidate.id;
+      if ((kind !== "artifact" && kind !== "contribution") || typeof id !== "string") {
+        throw new TypeError("invalid hypothesis link");
+      }
+      return { kind, id };
+    });
+  }
   if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
   if (input.clientTime !== undefined) body.clientTime = input.clientTime;
   if (input.sourceId !== undefined) body.sourceId = input.sourceId;
+  if (input.idempotencyKey !== undefined) body.idempotencyKey = input.idempotencyKey;
   return body;
 }
 
