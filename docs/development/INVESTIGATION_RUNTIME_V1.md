@@ -2,8 +2,8 @@
 
 ## Status
 
-**Integration candidate** on `integrate/investigation-runtime-v1` at
-`66f4db14a43656c5ad08207b770076ae30710df9`, based on
+**Integration candidate** on `integrate/investigation-runtime-v1` with source
+checkpoint `a76bb13d`, based on
 `e37464de39ac5cfbae4d7abf106eb26d763f1a96`. It is not yet on `main`, and the
 public runtime contract is not frozen until the remaining exact-head
 independent review and full collaboration CI gates close.
@@ -77,16 +77,25 @@ The following rules are enforced by tests rather than convention alone:
 
 1. New strategy modules import investigation behavior only from
    `investigations/runtime/public.ts` and the strategy contract.
-2. Only `runtime/gateway.ts` may import `protected-api.ts` for endpoints covered
-   by Runtime V1.
+2. For Runtime V1-covered endpoints, only `runtime/gateway.ts` may add protected
+   API access. Existing War Room calls are limited to the exact, shrink-only
+   legacy allowlist enforced by `investigations/dependency-boundary.test.ts`.
 3. No raw `Response` or unchecked JSON value leaves the gateway.
 4. Runtime modules do not import strategy modules, strategy CSS, or `App.tsx`.
 5. Strategies do not import server modules, raw investigation route strings,
    other strategies, or the gateway implementation.
 6. Strategy styles are scoped beneath their strategy root and use the shared
    design tokens.
-7. The registry declares runtime and case-schema compatibility, maturity,
-   status, and supported optional features.
+7. The registry declares exact shared-runtime compatibility, case-schema
+   compatibility, maturity, status, and a closed list of supported optional
+   features. The strategy renderer rejects descriptor-shaped values with an
+   unknown runtime version, feature identifier, or duplicate feature claim.
+
+The dependency guard also reserves direct browser transport names and exact
+transport string keys (`fetch` and `XMLHttpRequest`) inside strategy source, so
+direct calls, aliases, computed access, and reflected access fail the build.
+This is a strong repository boundary, not a JavaScript sandbox; the protected
+server routes remain the final authorization authority.
 
 ### Incremental legacy allowlist
 
@@ -122,7 +131,18 @@ not merely around the initial fetch.
 Mutation completion is fenced independently. A late upload, lifecycle action,
 or refresh for case A cannot select, refresh, or reopen A after navigation to
 case B. Create navigation uses only the identifier returned by the successful,
-parsed server response.
+parsed server response. A retained create callback rechecks the latest identity,
+authority, read-only state, capability, and canonical location before it may
+issue a request, and it runs only at the null-case investigations origin. A
+create already in flight may merge its authoritative result after navigation,
+but it may navigate only while the user remains at that origin.
+
+Successful parsed gateway values, structured lifecycle-conflict state, and the
+provider's assembled Runtime V1 graph are frozen before publication. Arrays and
+plain DTO objects are recursively protected, and strategy-facing callbacks are
+shallow-frozen. One strategy therefore cannot mutate shared browser state that
+a later strategy receives; class instances and browser host objects remain
+outside this DTO-specific guarantee.
 
 The runtime classifies loading, empty, denied, not found, validation failure,
 conflict, network failure, abort, protocol failure, and unexpected failure. It
@@ -197,6 +217,11 @@ state; re-evaluates the requested action; and writes only the allowed verdict's
 server-derived target. Changed state returns a bounded, versioned conflict with
 the current parsed lifecycle view and writes no case, timeline, or audit row.
 
+Restore ordering uses the greatest valid monotonic sequence in that case's
+timeline, never the recording clock or array order. Unknown statuses and
+malformed clocks or sequences are skipped. Equal server timestamps therefore
+cannot cause an older working status to win.
+
 The existing `run:strategies` capability, case-access concealment, audit shape,
 and `401`/`403` authentication-loss behavior remain unchanged. Ordinary working
 status changes may continue through the generic status route, but the Runtime
@@ -216,12 +241,13 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 - selection is scoped to the active case and exposes no permanent deletion;
 - lifecycle actions use the shared audited authority;
 - specialist tools are optional and explicitly opened;
-- keyboard, screen reader, zoom/reflow, contrast, reduced motion, and non-drag
-  operation meet the shared accessibility baseline.
+- keyboard operation, screen-reader-facing names/landmarks/order,
+  zoom-equivalent reflow, forced-colors/high-contrast operability, reduced
+  motion, and non-drag operation meet the shared accessibility baseline.
 
 ## Delivery and freeze
 
-At candidate `66f4db14a43656c5ad08207b770076ae30710df9`, delivery steps 1–6 are
+At source checkpoint `a76bb13d`, delivery steps 1–6 are
 implemented: typed transport contracts, deterministic fixtures and dependency
 guard, gateway and bounded errors, race-safe controllers and provider,
 versioned strategy renderer, and the Investigation First migration. War Room
@@ -230,20 +256,24 @@ non-growing legacy allowlist.
 
 Local acceptance evidence at that candidate:
 
-- contracts: 52 files and 671 tests passed;
-- web: 62 files and 830 tests passed;
-- contracts and web lint/typecheck passed;
+- contracts: 52 files and 672 tests passed;
+- web: 63 files and 845 tests passed;
+- contracts, server, web, and browser typechecks passed; contracts, server, and
+  web lint passed;
 - the production web build passed;
-- the complete collaboration test command passed: contracts 671 tests, server
-  805 tests with 81 environment-backed cases intentionally skipped, and web
-  830 tests; and
+- the complete collaboration test command passed: contracts 672 tests, server
+  806 tests with 81 environment-backed cases intentionally skipped, and web
+  845 tests; and
 - hands-on synthetic-demo acceptance passed for fast create, reusable context
   values, sparse detail, evidence selection and metadata, reversible technical
   handoff, focus, strategy-aware titles, and 390-pixel reflow without
   horizontal overflow or console warnings; and
-- browser automation passed 87 scenarios, with eight documented
-  environment-specific scenarios intentionally skipped, including the complete
-  archive/restore journey after the final list-freshness correction.
+- browser automation passed 91 scenarios, with eight documented
+  environment-specific scenarios intentionally skipped. The Investigation
+  First conformance suite covers semantic names and landmarks, keyboard-only
+  create/browse/evidence/lifecycle work, 200%-equivalent reflow across list and
+  detail, forced-colors focus and control boundaries, reduced motion, and
+  non-drag operation.
 
 Known non-blockers are the existing production chunk-size warning and the
 intentional, non-growing War Room legacy allowlist. Freeze still requires a
