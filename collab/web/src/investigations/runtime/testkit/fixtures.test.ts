@@ -3,7 +3,7 @@ import {
   EVIDENCE_LIST_SCHEMA_ID,
   EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_SCHEMA_ID,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { describe, expect, it } from "vitest";
 import {
   READ_ONLY_CAPABILITY_FIXTURE,

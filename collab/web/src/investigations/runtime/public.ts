@@ -40,4 +40,4 @@ export type {
   InvestigationLifecycleV1,
   LifecycleAction,
   PrivacyClass,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";

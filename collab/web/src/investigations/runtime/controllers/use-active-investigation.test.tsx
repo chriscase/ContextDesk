@@ -3,7 +3,7 @@ import type {
   CaseV1,
   ContributionV1,
   InvestigationLifecycleV1,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
@@ -422,6 +422,66 @@ describe("useActiveInvestigation", () => {
       error: { kind: "network" },
       previous: makePopulatedCase(),
     });
+  });
+
+  it("atomically denies every lane when one endpoint proves concealed access loss", async () => {
+    let refresh = false;
+    const denied = { ok: false, error: { kind: "not_found", status: 404 } } as const;
+    const lateCase = createDeferred<GatewayResult<CaseV1>>();
+    const lateContributions = createDeferred<GatewayResult<readonly ContributionV1[]>>();
+    const lateLifecycle = createDeferred<GatewayResult<InvestigationLifecycleV1>>();
+    const siblingSignals: AbortSignal[] = [];
+    const gateway = gatewayWith({
+      getInvestigation: (_id, { signal }) => {
+        if (!refresh) return Promise.resolve({ ok: true, value: makePopulatedCase() });
+        siblingSignals.push(signal);
+        return lateCase.promise;
+      },
+      listEvidence: async () => refresh
+        ? denied
+        : { ok: true, value: makeEvidenceList().artifacts },
+      listContributions: (_id, { signal }) => {
+        if (!refresh) {
+          return Promise.resolve({ ok: true, value: makeContributionList().contributions });
+        }
+        siblingSignals.push(signal);
+        return lateContributions.promise;
+      },
+      getLifecycle: (_id, { signal }) => {
+        if (!refresh) {
+          return Promise.resolve({ ok: true, value: makeArchiveAllowedLifecycle() });
+        }
+        siblingSignals.push(signal);
+        return lateLifecycle.promise;
+      },
+    });
+    const { result } = renderHook(() => useController(gateway, {
+      investigationId: makePopulatedCase().id,
+      active: true,
+      identityKey: "alice",
+      authorityKey: "authority-v1",
+    }));
+    await waitFor(() => expect(result.current.lifecycle.status).toBe("ready"));
+
+    refresh = true;
+    act(() => result.current.refreshAll());
+    await waitFor(() => expect(result.current.lifecycle.status).toBe("failed"));
+
+    const terminal = { status: "failed", error: { kind: "not_found", status: 404 } };
+    expect(result.current.investigation).toEqual(terminal);
+    expect(result.current.evidence).toEqual(terminal);
+    expect(result.current.contributions).toEqual(terminal);
+    expect(result.current.lifecycle).toEqual(terminal);
+    expect(siblingSignals).toHaveLength(3);
+    expect(siblingSignals.every((signal) => signal.aborted)).toBe(true);
+
+    await act(async () => {
+      lateCase.resolve({ ok: true, value: makeSparseImportedCase() });
+      lateContributions.resolve({ ok: true, value: [] });
+      lateLifecycle.resolve({ ok: true, value: makeRestoreAllowedLifecycle() });
+    });
+    expect(result.current.investigation).toEqual(terminal);
+    expect(result.current.lifecycle).toEqual(terminal);
   });
 
   it.each(["identityKey", "authorityKey"] as const)(

@@ -3,11 +3,18 @@ import type {
   InvestigationLifecycleActionSuccessV1,
   InvestigationLifecycleV1,
   LifecycleAction,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { InvestigationGateway } from "../gateway.js";
+import type { RuntimeFailure } from "../errors.js";
 import type { CommandOutcome, MutationState } from "../types.js";
 import { RequestSlot, type RequestToken } from "./request-slot.js";
+import {
+  emptyScopedMutationState,
+  mutationScopeKey,
+  scopedMutationState,
+  visibleMutationState,
+} from "./scoped-mutation-state.js";
 
 interface LifecycleScope {
   readonly identityKey: string;
@@ -28,6 +35,8 @@ export interface UseLifecycleActionOptions {
   readonly onRefreshInvestigation: (investigationId: string) => void;
   readonly onRefreshInvestigations: () => void;
   readonly onRefreshLifecycle: (investigationId: string) => void;
+  /** Atomically deny the active case when a mutation proves access loss. */
+  readonly onScopeDenied: (investigationId: string, error: RuntimeFailure) => void;
 }
 
 export interface LifecycleActionController {
@@ -46,9 +55,9 @@ function unexpected(): { status: "failed"; error: { kind: "unexpected" } } {
 export function useLifecycleAction(
   options: UseLifecycleActionOptions,
 ): LifecycleActionController {
-  const [state, setState] = useState<MutationState<InvestigationLifecycleActionSuccessV1>>({
-    status: "idle",
-  });
+  const [storedState, setStoredState] = useState(() =>
+    emptyScopedMutationState<InvestigationLifecycleActionSuccessV1>()
+  );
   const slotRef = useRef(new RequestSlot<LifecycleScope>());
   const activeRef = useRef<RequestToken<LifecycleScope> | null>(null);
   const mountedRef = useRef(true);
@@ -58,7 +67,7 @@ export function useLifecycleAction(
   const invalidate = useCallback(() => {
     slotRef.current.invalidate();
     activeRef.current = null;
-    if (mountedRef.current) setState({ status: "idle" });
+    if (mountedRef.current) setStoredState(emptyScopedMutationState());
   }, []);
 
   useEffect(() => {
@@ -104,9 +113,14 @@ export function useLifecycleAction(
       authorityKey: start.authorityKey,
       investigationId: start.investigationId,
     };
+    const scopeKey = mutationScopeKey([
+      scope.identityKey,
+      scope.authorityKey,
+      scope.investigationId,
+    ]);
     const token = slotRef.current.begin(scope);
     activeRef.current = token;
-    setState({ status: "running" });
+    setStoredState(scopedMutationState(scopeKey, { status: "running" }));
 
     const isCurrent = (): boolean => {
       const latest = latestRef.current;
@@ -136,7 +150,9 @@ export function useLifecycleAction(
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
 
       if (!result.ok) {
-        if (result.error.kind === "lifecycle_changed") {
+        if (result.error.kind === "not_found" || result.error.kind === "auth_lost") {
+          latestRef.current.onScopeDenied(scope.investigationId, result.error);
+        } else if (result.error.kind === "lifecycle_changed") {
           latestRef.current.onLifecyclePublished(result.error.current);
           if (!isCurrent()) return { status: "ignored", reason: "stale" };
           latestRef.current.onRefreshInvestigation(scope.investigationId);
@@ -151,7 +167,10 @@ export function useLifecycleAction(
           status: "failed",
           error: result.error,
         };
-        setState({ status: "failed", error: result.error });
+        setStoredState(scopedMutationState(scopeKey, {
+          status: "failed",
+          error: result.error,
+        }));
         return outcome;
       }
 
@@ -164,17 +183,32 @@ export function useLifecycleAction(
       latestRef.current.onRefreshLifecycle(scope.investigationId);
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
 
-      setState({ status: "succeeded", value: result.value });
+      setStoredState(scopedMutationState(scopeKey, {
+        status: "succeeded",
+        value: result.value,
+      }));
       return { status: "succeeded", value: result.value };
     } catch {
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
       const outcome = unexpected();
-      setState({ status: "failed", error: outcome.error });
+      setStoredState(scopedMutationState(scopeKey, {
+        status: "failed",
+        error: outcome.error,
+      }));
       return outcome;
     } finally {
       if (activeRef.current === token) activeRef.current = null;
     }
   }, []);
 
-  return { state, apply };
+  const currentScopeKey = options.readOnly
+    || !options.canManageLifecycle
+    || options.investigationId === null
+    ? null
+    : mutationScopeKey([
+        options.identityKey,
+        options.authorityKey,
+        options.investigationId,
+      ]);
+  return { state: visibleMutationState(storedState, currentScopeKey), apply };
 }

@@ -1,12 +1,14 @@
 import {
-  CASE_LIST_SCHEMA_ID,
   COLLAB_CSRF_HEADER,
   COLLAB_CSRF_HEADER_VALUE,
+} from "@cd-collab/contracts/admin";
+import {
+  CASE_LIST_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
   type CaseV1,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUTH_LOST_EVENT } from "../../protected-api.js";
 import { investigationGateway } from "./gateway.js";

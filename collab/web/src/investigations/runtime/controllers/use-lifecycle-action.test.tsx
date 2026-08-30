@@ -1,7 +1,7 @@
 import {
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   type InvestigationLifecycleActionSuccessV1,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InvestigationGateway } from "../gateway.js";
@@ -52,6 +52,7 @@ function options(
     onRefreshInvestigation: vi.fn(),
     onRefreshInvestigations: vi.fn(),
     onRefreshLifecycle: vi.fn(),
+    onScopeDenied: vi.fn(),
     ...overrides,
   };
 }
@@ -204,5 +205,47 @@ describe("useLifecycleAction", () => {
     expect(first.onRefreshInvestigation).not.toHaveBeenCalled();
     expect(first.onRefreshInvestigations).not.toHaveBeenCalled();
     expect(first.onRefreshLifecycle).not.toHaveBeenCalled();
+  });
+
+  it("does not expose case A failure during the first render of case B", async () => {
+    const applyLifecycleAction = vi.fn(async () => ({
+      ok: false as const,
+      error: {
+        kind: "lifecycle_refused" as const,
+        status: 409 as const,
+        action: "archive" as const,
+        reason: "legal_hold" as const,
+        detail: "Clear the legal hold before archiving.",
+      },
+    }));
+    const first = options({ gateway: gatewayWithLifecycle(applyLifecycleAction) });
+    const renderedStates: Array<ReturnType<typeof useLifecycleAction>["state"]> = [];
+    const { result, rerender } = renderHook(
+      ({ value }: { value: UseLifecycleActionOptions }) => {
+        const controller = useLifecycleAction(value);
+        renderedStates.push(controller.state);
+        return controller;
+      },
+      { initialProps: { value: first } },
+    );
+
+    await act(async () => {
+      await result.current.apply("archive");
+    });
+    expect(result.current.state).toMatchObject({
+      status: "failed",
+      error: { kind: "lifecycle_refused" },
+    });
+
+    renderedStates.length = 0;
+    rerender({
+      value: {
+        ...first,
+        investigationId: "case-b",
+        lifecycle: { ...makeArchiveAllowedLifecycle(), investigationId: "case-b" },
+      },
+    });
+    expect(renderedStates[0]).toEqual({ status: "idle" });
+    expect(result.current.state).toEqual({ status: "idle" });
   });
 });

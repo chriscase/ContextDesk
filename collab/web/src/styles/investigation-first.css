@@ -81,6 +81,8 @@
 .investigation-first__list-button { display: grid; gap: 0.35rem; width: 100%; padding: 0.8rem 0.9rem; border: 0; background: transparent; color: var(--fg); text-align: left; }
 .investigation-first__list-button:hover { background: var(--accent-soft); }
 .investigation-first__list-title { font-weight: 700; }
+.investigation-first__list-title,
+.investigation-first__detail-header h2 { overflow-wrap: anywhere; }
 .investigation-first__list-meta { display: flex; gap: 0.65rem; flex-wrap: wrap; color: var(--muted); font-size: 0.78rem; }
 .investigation-first__list-hint { color: var(--muted); font-size: 0.75rem; }
 .investigation-first .status-pill, .investigation-first .severity-pill { display: inline-flex; align-items: center; width: fit-content; padding: 0.18rem 0.45rem; border-radius: 999px; background: var(--accent-soft); color: var(--fg); font-size: 0.7rem; font-weight: 700; text-transform: capitalize; }
@@ -131,6 +133,20 @@
 .investigation-first__upload-grid label { display: grid; gap: 0.3rem; color: var(--muted); font-size: 0.78rem; }
 .investigation-first__upload-grid input, .investigation-first__upload-grid select { min-width: 0; padding: 0.42rem; border: 1px solid var(--border); border-radius: 0.4rem; background: var(--surface-input); color: var(--fg); }
 .investigation-first .lifecycle-panel { margin-top: 0.8rem; }
+.investigation-first__lifecycle { margin-top: 0.8rem; }
+.investigation-first__lifecycle > p { max-width: 60rem; color: var(--muted); line-height: 1.5; }
+.investigation-first__lifecycle > button,
+.investigation-first__confirm button {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.48rem 0.7rem;
+  background: transparent;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.investigation-first__confirm { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: center; }
+.investigation-first__confirm p { flex-basis: 100%; margin: 0; color: var(--muted); line-height: 1.5; }
 
 @media (max-width: 800px) {
   .investigation-first__hero, .investigation-first__detail-grid { grid-template-columns: 1fr; }
@@ -142,4 +158,6 @@
   .investigation-first__section-heading, .investigation-first__detail-header { display: grid; }
   .investigation-first__detail-actions { justify-content: start; }
   .investigation-first__evidence-meta { grid-template-columns: 1fr; }
+  .investigation-first__form-actions,
+  .investigation-first__confirm { align-items: stretch; flex-direction: column; }
 }

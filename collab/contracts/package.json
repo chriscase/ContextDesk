@@ -32,6 +32,10 @@
       "types": "./dist/investigation-workbench.d.ts",
       "import": "./dist/investigation-workbench.js"
     },
+    "./investigation-runtime": {
+      "types": "./dist/investigation-runtime-browser.d.ts",
+      "import": "./dist/investigation-runtime-browser.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

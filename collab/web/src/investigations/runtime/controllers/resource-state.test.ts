@@ -44,6 +44,20 @@ describe("keyed resource state", () => {
     expect(failResourceLoad(failedA, "case-b", network)).toBe(failedA);
   });
 
+  it.each([
+    { kind: "not_found", status: 404 } as const,
+    { kind: "auth_lost", status: 403 } as const,
+  ])("evicts previously published bytes after terminal $kind failure", (error) => {
+    const loading = beginResourceLoad(createResourceState<string, string>(), "case-a");
+    const ready = succeedResourceLoad(loading, "case-a", "sensitive A");
+    const refreshing = beginResourceLoad(ready, "case-a");
+
+    expect(failResourceLoad(refreshing, "case-a", error)).toEqual({
+      key: "case-a",
+      state: { status: "failed", error },
+    });
+  });
+
   it("reset removes both the resource identity and its published value", () => {
     expect(resetResource<string, string>()).toEqual({
       key: null,

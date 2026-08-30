@@ -6,11 +6,12 @@ import type {
   InvestigationLifecycleActionSuccessV1,
   InvestigationLifecycleV1,
   LifecycleAction,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   type ReactNode,
 } from "react";
@@ -86,6 +87,12 @@ export interface InvestigationRuntime {
 
 export interface InvestigationRuntimeProviderProps {
   readonly identityKey: string;
+  /**
+   * Opaque shell-owned authorization snapshot. Rotate it whenever roles,
+   * grants, case-access scope, static mode, or the authenticated session is
+   * re-evaluated, even when the projected Runtime V1 booleans stay the same.
+   */
+  readonly authorityKey: string;
   readonly capabilities: readonly string[];
   readonly readOnly: boolean;
   /** True only while the shell's canonical location is in the investigation area. */
@@ -100,25 +107,13 @@ export interface InvestigationRuntimeProviderProps {
 
 const InvestigationRuntimeContext = createContext<InvestigationRuntime | null>(null);
 
-function authorityEpoch(
-  capabilities: InvestigationRuntimeCapabilities,
-  readOnly: boolean,
-): string {
-  return [
-    readOnly ? "read-only" : "interactive",
-    capabilities.canRead ? "read" : "no-read",
-    capabilities.canCreate ? "create" : "no-create",
-    capabilities.canUpload ? "upload" : "no-upload",
-    capabilities.canManageLifecycle ? "lifecycle" : "no-lifecycle",
-  ].join(":");
-}
-
 /**
  * Mounts browser orchestration above replaceable strategy presentations.
  * Canonical location and identity remain shell-owned inputs.
  */
 export function InvestigationRuntimeProvider({
   identityKey,
+  authorityKey,
   capabilities: rawCapabilities,
   readOnly,
   active,
@@ -140,7 +135,6 @@ export function InvestigationRuntimeProvider({
     projected.canRead,
     projected.canUpload,
   ]);
-  const authorityKey = authorityEpoch(capabilities, readOnly);
   const canCreate = capabilities.canRead && capabilities.canCreate;
   const canUpload = capabilities.canRead && capabilities.canUpload;
   const canManageLifecycle = capabilities.canRead && capabilities.canManageLifecycle;
@@ -159,6 +153,20 @@ export function InvestigationRuntimeProvider({
     identityKey,
     authorityKey,
   });
+  const activeMissingFromAuthoritativeList = activeCaseId !== null
+    && investigationList.investigations.status === "ready"
+    && !investigationList.investigations.value.some(({ id }) => id === activeCaseId);
+  const activeScopeUnavailable = activeInvestigation.scopeDenied
+    || activeMissingFromAuthoritativeList;
+  useEffect(() => {
+    if (activeMissingFromAuthoritativeList && activeCaseId !== null) {
+      activeInvestigation.denyScope(activeCaseId, { kind: "not_found", status: 404 });
+    }
+  }, [
+    activeCaseId,
+    activeInvestigation.denyScope,
+    activeMissingFromAuthoritativeList,
+  ]);
 
   const publishInvestigation = useCallback((investigation: CaseV1) => {
     investigationList.publishInvestigation(investigation);
@@ -206,14 +214,17 @@ export function InvestigationRuntimeProvider({
     gateway,
     identityKey,
     authorityKey,
-    investigationId: activeCaseId,
-    canUpload,
+    investigationId: activeScopeUnavailable ? null : activeCaseId,
+    canUpload: canUpload && !activeScopeUnavailable,
     readOnly,
     onUploaded: activeInvestigation.publishEvidence,
     onRefreshEvidence: refreshEvidenceFor,
     onRefreshInvestigations: investigationList.refresh,
+    onScopeDenied: activeInvestigation.denyScope,
   });
-  const lifecycleValue = activeInvestigation.lifecycle.status === "ready"
+  const lifecycleValue = activeScopeUnavailable
+    ? null
+    : activeInvestigation.lifecycle.status === "ready"
     ? activeInvestigation.lifecycle.value
     : activeInvestigation.lifecycle.status === "loading"
       ? activeInvestigation.lifecycle.previous ?? null
@@ -224,25 +235,34 @@ export function InvestigationRuntimeProvider({
     gateway,
     identityKey,
     authorityKey,
-    investigationId: activeCaseId,
+    investigationId: activeScopeUnavailable ? null : activeCaseId,
     lifecycle: lifecycleValue,
-    canManageLifecycle,
+    canManageLifecycle: canManageLifecycle && !activeScopeUnavailable,
     readOnly,
     onInvestigationPublished: publishInvestigation,
     onLifecyclePublished: activeInvestigation.publishLifecycle,
     onRefreshInvestigation: refreshInvestigationFor,
     onRefreshInvestigations: investigationList.refresh,
     onRefreshLifecycle: refreshLifecycleFor,
+    onScopeDenied: activeInvestigation.denyScope,
   });
 
   const value = useMemo<InvestigationRuntime>(() => ({
     capabilities,
     resources: {
       investigations: investigationList.investigations,
-      investigation: activeInvestigation.investigation,
-      evidence: activeInvestigation.evidence,
-      contributions: activeInvestigation.contributions,
-      lifecycle: activeInvestigation.lifecycle,
+      investigation: activeMissingFromAuthoritativeList
+        ? { status: "failed", error: { kind: "not_found", status: 404 } }
+        : activeInvestigation.investigation,
+      evidence: activeMissingFromAuthoritativeList
+        ? { status: "failed", error: { kind: "not_found", status: 404 } }
+        : activeInvestigation.evidence,
+      contributions: activeMissingFromAuthoritativeList
+        ? { status: "failed", error: { kind: "not_found", status: 404 } }
+        : activeInvestigation.contributions,
+      lifecycle: activeMissingFromAuthoritativeList
+        ? { status: "failed", error: { kind: "not_found", status: 404 } }
+        : activeInvestigation.lifecycle,
     },
     mutations: {
       create: createController.state,
@@ -261,8 +281,15 @@ export function InvestigationRuntimeProvider({
       createInvestigation: canCreate && active && isInvestigationLocation
         ? createController.create
         : null,
-      uploadEvidence: canUpload && activeCaseId !== null ? uploadController.upload : null,
+      uploadEvidence: canUpload
+        && activeCaseId !== null
+        && activeInvestigation.investigation.status === "ready"
+        && !activeScopeUnavailable
+        ? uploadController.upload
+        : null,
       applyLifecycle: canManageLifecycle && activeCaseId !== null
+        && lifecycleValue !== null
+        && !activeScopeUnavailable
         ? lifecycleController.apply
         : null,
     },
@@ -276,6 +303,9 @@ export function InvestigationRuntimeProvider({
     activeInvestigation.refreshEvidence,
     activeInvestigation.refreshInvestigation,
     activeInvestigation.refreshLifecycle,
+    activeInvestigation.scopeDenied,
+    activeMissingFromAuthoritativeList,
+    activeScopeUnavailable,
     active,
     activeCaseId,
     canCreate,

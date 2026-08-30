@@ -22,7 +22,7 @@ import {
   type InvestigationLifecycleV1,
   type LifecycleAction,
   type PrivacyClass,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { protectedApiFetch } from "../../protected-api.js";
 import {
   classifyHttpFailure,

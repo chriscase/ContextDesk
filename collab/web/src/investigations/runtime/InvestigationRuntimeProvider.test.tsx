@@ -2,7 +2,7 @@ import {
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   type CaseV1,
   type InvestigationLifecycleActionSuccessV1,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -82,6 +82,7 @@ describe("InvestigationRuntimeProvider", () => {
     const gateway = makeGateway();
     const common = {
       identityKey: "alice",
+      authorityKey: "alice-authority-v1",
       capabilities: FULL_CAPABILITIES,
       readOnly: false,
       active: true,
@@ -129,6 +130,7 @@ describe("InvestigationRuntimeProvider", () => {
     render(
       <InvestigationRuntimeProvider
         identityKey="viewer"
+        authorityKey="viewer-authority-v1"
         capabilities={["investigation:write", "run:strategies"]}
         readOnly={false}
         active
@@ -161,6 +163,7 @@ describe("InvestigationRuntimeProvider", () => {
     render(
       <InvestigationRuntimeProvider
         identityKey="lead"
+        authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
         readOnly
         active
@@ -190,6 +193,128 @@ describe("InvestigationRuntimeProvider", () => {
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
   });
 
+  it("removes case mutation commands when any case endpoint conceals lost access", async () => {
+    let evidenceReads = 0;
+    const gateway = makeGateway({
+      listEvidence: vi.fn(async () => {
+        evidenceReads += 1;
+        return evidenceReads === 1
+          ? succeeded(makeEvidenceList().artifacts)
+          : { ok: false, error: { kind: "not_found", status: 404 } } as const;
+      }),
+    });
+    render(
+      <InvestigationRuntimeProvider
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
+    expect(currentRuntime().commands.uploadEvidence).not.toBeNull();
+    expect(currentRuntime().commands.applyLifecycle).not.toBeNull();
+
+    act(() => currentRuntime().refresh.evidence());
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("failed"));
+    expect(currentRuntime().resources.investigation).toEqual({
+      status: "failed",
+      error: { kind: "not_found", status: 404 },
+    });
+    expect(currentRuntime().resources.lifecycle).toEqual({
+      status: "failed",
+      error: { kind: "not_found", status: 404 },
+    });
+    expect(currentRuntime().commands.uploadEvidence).toBeNull();
+    expect(currentRuntime().commands.applyLifecycle).toBeNull();
+  });
+
+  it("denies the active scope when an authoritative collection no longer includes it", async () => {
+    let listReads = 0;
+    const gateway = makeGateway({
+      listInvestigations: vi.fn(async () => {
+        listReads += 1;
+        return succeeded(listReads === 1 ? makeCaseList().cases : []);
+      }),
+    });
+    render(
+      <InvestigationRuntimeProvider
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
+
+    act(() => currentRuntime().refresh.investigations());
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("failed"));
+    expect(currentRuntime().resources.investigation).toEqual({
+      status: "failed",
+      error: { kind: "not_found", status: 404 },
+    });
+    expect(currentRuntime().resources.evidence).toEqual({
+      status: "failed",
+      error: { kind: "not_found", status: 404 },
+    });
+    expect(currentRuntime().commands.uploadEvidence).toBeNull();
+    expect(currentRuntime().commands.applyLifecycle).toBeNull();
+  });
+
+  it("atomically clears the active scope when an upload mutation proves lost access", async () => {
+    const gateway = makeGateway({
+      uploadEvidence: vi.fn(async () => ({
+        ok: false,
+        error: { kind: "not_found", status: 404 },
+      } as const)),
+    });
+    render(
+      <InvestigationRuntimeProvider
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
+
+    await act(async () => {
+      await currentRuntime().commands.uploadEvidence?.({
+        file: new Blob(["revoked"]),
+        summary: "Access changed",
+      });
+    });
+
+    const denied = { status: "failed", error: { kind: "not_found", status: 404 } };
+    expect(currentRuntime().resources.investigation).toEqual(denied);
+    expect(currentRuntime().resources.evidence).toEqual(denied);
+    expect(currentRuntime().resources.contributions).toEqual(denied);
+    expect(currentRuntime().resources.lifecycle).toEqual(denied);
+    expect(currentRuntime().commands.uploadEvidence).toBeNull();
+    expect(currentRuntime().commands.applyLifecycle).toBeNull();
+  });
+
   it("publishes a created investigation into the collection and opens only its server identity", async () => {
     const created: CaseV1 = {
       ...makeSparseImportedCase(),
@@ -213,6 +338,7 @@ describe("InvestigationRuntimeProvider", () => {
     render(
       <InvestigationRuntimeProvider
         identityKey="lead"
+        authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
         readOnly={false}
         active
@@ -276,6 +402,7 @@ describe("InvestigationRuntimeProvider", () => {
     render(
       <InvestigationRuntimeProvider
         identityKey="lead"
+        authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
         readOnly={false}
         active
@@ -354,6 +481,7 @@ describe("InvestigationRuntimeProvider", () => {
     const view = render(
       <InvestigationRuntimeProvider
         identityKey="lead"
+        authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
         readOnly={false}
         active
@@ -400,6 +528,7 @@ describe("InvestigationRuntimeProvider", () => {
     view.rerender(
       <InvestigationRuntimeProvider
         identityKey="lead-2"
+        authorityKey="lead-2-authority-v1"
         capabilities={FULL_CAPABILITIES}
         readOnly={false}
         active
@@ -428,6 +557,7 @@ describe("InvestigationRuntimeProvider", () => {
     });
     function Harness() {
       const [identityKey, setIdentityKey] = useState("lead");
+      const [authorityKey, setAuthorityKey] = useState("lead-authority-v1");
       const [caseId, setCaseId] = useState<string | null>(RUNTIME_FIXTURE_IDS.populatedCase);
       const [active, setActive] = useState(true);
       return (
@@ -438,9 +568,13 @@ describe("InvestigationRuntimeProvider", () => {
           <button type="button" onClick={() => setIdentityKey("other-lead")}>
             change identity
           </button>
+          <button type="button" onClick={() => setAuthorityKey("lead-authority-v2")}>
+            change authority
+          </button>
           <button type="button" onClick={() => setActive(false)}>leave</button>
           <InvestigationRuntimeProvider
             identityKey={identityKey}
+            authorityKey={authorityKey}
             capabilities={FULL_CAPABILITIES}
             readOnly={false}
             active={active}
@@ -462,14 +596,20 @@ describe("InvestigationRuntimeProvider", () => {
     expect(caseRequests[0]!.signal.aborted).toBe(true);
     expect(caseRequests[1]!.id).toBe(RUNTIME_FIXTURE_IDS.sparseCase);
 
-    act(() => screen.getByRole("button", { name: "change identity" }).click());
+    act(() => screen.getByRole("button", { name: "change authority" }).click());
     await waitFor(() => expect(caseRequests).toHaveLength(3));
     expect(caseRequests[1]!.signal.aborted).toBe(true);
     expect(caseRequests[2]!.id).toBe(RUNTIME_FIXTURE_IDS.sparseCase);
     expect(currentRuntime().resources.investigation).toEqual({ status: "loading" });
 
-    act(() => screen.getByRole("button", { name: "leave" }).click());
+    act(() => screen.getByRole("button", { name: "change identity" }).click());
+    await waitFor(() => expect(caseRequests).toHaveLength(4));
     expect(caseRequests[2]!.signal.aborted).toBe(true);
+    expect(caseRequests[3]!.id).toBe(RUNTIME_FIXTURE_IDS.sparseCase);
+    expect(currentRuntime().resources.investigation).toEqual({ status: "loading" });
+
+    act(() => screen.getByRole("button", { name: "leave" }).click());
+    expect(caseRequests[3]!.signal.aborted).toBe(true);
     expect(currentRuntime().resources.investigation).toEqual({ status: "idle" });
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
@@ -477,6 +617,6 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycle: null,
     });
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
-    expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
+    expect(gateway.listInvestigations).toHaveBeenCalledTimes(3);
   });
 });

@@ -153,6 +153,44 @@ describe("useCreateInvestigation", () => {
     expect(first.onOpenCreated).not.toHaveBeenCalled();
   });
 
+  it("hides completed and failed state during the first render of a new identity or authority", async () => {
+    const created = makePopulatedCase();
+    const gateway = gatewayWithCreate(vi.fn(async () => ({ ok: true as const, value: created })));
+    const first = options({ gateway });
+    const renderedStates: Array<ReturnType<typeof useCreateInvestigation>["state"]> = [];
+    const { result, rerender } = renderHook(
+      ({ value }: { value: UseCreateInvestigationOptions }) => {
+        const controller = useCreateInvestigation(value);
+        renderedStates.push(controller.state);
+        return controller;
+      },
+      { initialProps: { value: first } },
+    );
+
+    await act(async () => {
+      await result.current.create({ title: "Created by Alice" });
+    });
+    expect(result.current.state).toEqual({ status: "succeeded", value: created });
+
+    renderedStates.length = 0;
+    rerender({ value: { ...first, identityKey: "bob" } });
+    expect(renderedStates[0]).toEqual({ status: "idle" });
+    expect(result.current.state).toEqual({ status: "idle" });
+
+    await act(async () => {
+      await result.current.create({ title: "   " });
+    });
+    expect(result.current.state).toEqual({
+      status: "failed",
+      error: { kind: "input", field: "title", reason: "required" },
+    });
+
+    renderedStates.length = 0;
+    rerender({ value: { ...first, identityKey: "bob", authorityKey: "lead-v2" } });
+    expect(renderedStates[0]).toEqual({ status: "idle" });
+    expect(result.current.state).toEqual({ status: "idle" });
+  });
+
   it("publishes a late create but does not hijack navigation after the user leaves", async () => {
     const deferred = createDeferred<Awaited<ReturnType<InvestigationGateway["createInvestigation"]>>>();
     const gateway = gatewayWithCreate(vi.fn(() => deferred.promise));

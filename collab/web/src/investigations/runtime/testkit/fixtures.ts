@@ -1,4 +1,8 @@
 import {
+  ROLE_CAPABILITIES,
+  type Capability,
+} from "@cd-collab/contracts/admin";
+import {
   ARTIFACT_SCHEMA_ID,
   CASE_LIST_SCHEMA_ID,
   CASE_SCHEMA_ID,
@@ -7,21 +11,19 @@ import {
   EVIDENCE_LIST_SCHEMA_ID,
   EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_SCHEMA_ID,
-  ROLE_CAPABILITIES,
   parseCase,
   parseCaseList,
   parseContributionList,
   parseEvidenceList,
   parseEvidenceUploadSuccess,
   parseInvestigationLifecycle,
-  type Capability,
   type CaseListV1,
   type CaseV1,
   type ContributionListV1,
   type EvidenceListV1,
   type EvidenceUploadSuccessV1,
   type InvestigationLifecycleV1,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 
 /** Stable identities used by Runtime V1 conformance tests. */
 export const RUNTIME_FIXTURE_IDS = Object.freeze({

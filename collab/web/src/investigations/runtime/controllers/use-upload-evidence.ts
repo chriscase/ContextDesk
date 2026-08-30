@@ -4,12 +4,19 @@ import type {
   ContributionV1,
   EvidenceUploadSuccessV1,
   PrivacyClass,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { InvestigationGateway } from "../gateway.js";
+import type { RuntimeFailure } from "../errors.js";
 import type { CommandOutcome, MutationState } from "../types.js";
 import { prepareEvidenceUpload } from "./file-base64.js";
 import { RequestSlot, type RequestToken } from "./request-slot.js";
+import {
+  emptyScopedMutationState,
+  mutationScopeKey,
+  scopedMutationState,
+  visibleMutationState,
+} from "./scoped-mutation-state.js";
 
 interface UploadScope {
   readonly identityKey: string;
@@ -39,6 +46,8 @@ export interface UseUploadEvidenceOptions {
   readonly onRefreshEvidence: (investigationId: string) => void;
   /** Refresh collection metadata/counts after the authoritative upload. */
   readonly onRefreshInvestigations: () => void;
+  /** Atomically deny the active case when a mutation proves access loss. */
+  readonly onScopeDenied: (investigationId: string, error: RuntimeFailure) => void;
 }
 
 export interface UploadEvidenceController {
@@ -56,7 +65,9 @@ function unexpected(): { status: "failed"; error: { kind: "unexpected" } } {
 export function useUploadEvidence(
   options: UseUploadEvidenceOptions,
 ): UploadEvidenceController {
-  const [state, setState] = useState<MutationState<EvidenceUploadSuccessV1>>({ status: "idle" });
+  const [storedState, setStoredState] = useState(() =>
+    emptyScopedMutationState<EvidenceUploadSuccessV1>()
+  );
   const slotRef = useRef(new RequestSlot<UploadScope>());
   const activeRef = useRef<RequestToken<UploadScope> | null>(null);
   const mountedRef = useRef(true);
@@ -66,7 +77,7 @@ export function useUploadEvidence(
   const invalidate = useCallback(() => {
     slotRef.current.invalidate();
     activeRef.current = null;
-    if (mountedRef.current) setState({ status: "idle" });
+    if (mountedRef.current) setStoredState(emptyScopedMutationState());
   }, []);
 
   useEffect(() => {
@@ -105,9 +116,14 @@ export function useUploadEvidence(
       authorityKey: start.authorityKey,
       investigationId: start.investigationId,
     };
+    const scopeKey = mutationScopeKey([
+      scope.identityKey,
+      scope.authorityKey,
+      scope.investigationId,
+    ]);
     const token = slotRef.current.begin(scope);
     activeRef.current = token;
-    setState({ status: "running" });
+    setStoredState(scopedMutationState(scopeKey, { status: "running" }));
 
     const isCurrent = (): boolean => {
       const latest = latestRef.current;
@@ -131,7 +147,10 @@ export function useUploadEvidence(
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
       if (prepared.status !== "succeeded") {
         if (prepared.status === "failed") {
-          setState({ status: "failed", error: prepared.error });
+          setStoredState(scopedMutationState(scopeKey, {
+            status: "failed",
+            error: prepared.error,
+          }));
         }
         return prepared;
       }
@@ -144,11 +163,17 @@ export function useUploadEvidence(
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
 
       if (!result.ok) {
+        if (result.error.kind === "not_found" || result.error.kind === "auth_lost") {
+          latestRef.current.onScopeDenied(scope.investigationId, result.error);
+        }
         const outcome: CommandOutcome<EvidenceUploadSuccessV1> = {
           status: "failed",
           error: result.error,
         };
-        setState({ status: "failed", error: result.error });
+        setStoredState(scopedMutationState(scopeKey, {
+          status: "failed",
+          error: result.error,
+        }));
         return outcome;
       }
 
@@ -159,17 +184,30 @@ export function useUploadEvidence(
       latestRef.current.onRefreshInvestigations();
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
 
-      setState({ status: "succeeded", value: result.value });
+      setStoredState(scopedMutationState(scopeKey, {
+        status: "succeeded",
+        value: result.value,
+      }));
       return { status: "succeeded", value: result.value };
     } catch {
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
       const outcome = unexpected();
-      setState({ status: "failed", error: outcome.error });
+      setStoredState(scopedMutationState(scopeKey, {
+        status: "failed",
+        error: outcome.error,
+      }));
       return outcome;
     } finally {
       if (activeRef.current === token) activeRef.current = null;
     }
   }, []);
 
-  return { state, upload };
+  const currentScopeKey = options.readOnly || !options.canUpload || options.investigationId === null
+    ? null
+    : mutationScopeKey([
+        options.identityKey,
+        options.authorityKey,
+        options.investigationId,
+      ]);
+  return { state: visibleMutationState(storedState, currentScopeKey), upload };
 }

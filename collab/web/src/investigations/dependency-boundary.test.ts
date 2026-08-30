@@ -30,35 +30,12 @@ const LEGACY_WAR_ROOM_RUNTIME_CALLS: Readonly<
   "collab/web/src/CaseDiscussion.tsx": ["GET contributions"],
   "collab/web/src/Cases.tsx": ["GET cases", "POST cases", "GET contributions"],
   "collab/web/src/ExperimentLab.tsx": ["GET evidence"],
-  "collab/web/src/LifecyclePanel.tsx": ["GET lifecycle"],
   "collab/web/src/TriageRunPanel.tsx": ["GET evidence"],
-});
-
-/**
- * Temporary pre-Runtime V1 debt, kept separate so Investigation First is not
- * mistaken for legacy War Room. DELETE this entire entry as part of moving
- * InvestigationFirst.tsx behind runtime/public.ts. No strategy-directory
- * module is allowed here, now or later.
- */
-const INVESTIGATION_FIRST_MIGRATION_DEBT: Readonly<
-  Record<string, readonly CoveredRuntimeOperation[]>
-> = Object.freeze({
-  "collab/web/src/InvestigationFirst.tsx": [
-    "GET case",
-    "GET cases",
-    "POST cases",
-    "GET contributions",
-    "GET evidence",
-    "POST evidence",
-  ],
 });
 
 const EXPECTED_COVERED_OPERATION_DEBT: Readonly<
   Record<string, readonly CoveredRuntimeOperation[]>
-> = Object.freeze({
-  ...LEGACY_WAR_ROOM_RUNTIME_CALLS,
-  ...INVESTIGATION_FIRST_MIGRATION_DEBT,
-});
+> = LEGACY_WAR_ROOM_RUNTIME_CALLS;
 
 interface SourceUnderReview {
   readonly path: string;
@@ -368,10 +345,6 @@ describe("Investigation Runtime V1 dependency boundary", () => {
       EXPECTED_COVERED_OPERATION_DEBT,
     );
 
-    expect(
-      Object.keys(INVESTIGATION_FIRST_MIGRATION_DEBT),
-      "Delete the temporary Investigation First debt entry when its root module moves behind runtime/public.ts",
-    ).toEqual(["collab/web/src/InvestigationFirst.tsx"]);
     expect(drift, drift.join("\n")).toEqual([]);
   });
 

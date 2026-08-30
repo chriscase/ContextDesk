@@ -52,6 +52,12 @@ export function failResourceLoad<TKey, TValue>(
   error: RuntimeFailure,
 ): KeyedResourceState<TKey, TValue> {
   if (current.key !== key) return current;
+  // A concealed 404 can mean that live case membership was revoked. Never
+  // keep publishing bytes whose authority has just been denied. Auth loss is
+  // terminal for the same reason, even though the shell will also tear down.
+  if (error.kind === "not_found" || error.kind === "auth_lost") {
+    return { key, state: { status: "failed", error } };
+  }
   const previous = publishedValue(current.state);
   return previous === undefined
     ? { key, state: { status: "failed", error } }

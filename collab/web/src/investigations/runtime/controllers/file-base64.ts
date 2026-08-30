@@ -1,4 +1,4 @@
-import type { ArtifactKind, PrivacyClass } from "@cd-collab/contracts";
+import type { ArtifactKind, PrivacyClass } from "@cd-collab/contracts/investigation-runtime";
 import type { UploadEvidenceInput } from "../gateway.js";
 import {
   MAX_EVIDENCE_UPLOAD_BYTES,

@@ -1,251 +1,304 @@
+import {
+  INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+  type ArtifactV1,
+  type CaseV1,
+  type ContributionV1,
+  type InvestigationLifecycleActionSuccessV1,
+  type InvestigationLifecycleV1,
+} from "@cd-collab/contracts";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationFirst } from "./InvestigationFirst.js";
+import { InvestigationRuntimeProvider } from "./investigations/runtime/public.js";
+import type {
+  GatewayResult,
+  InvestigationGateway,
+} from "./investigations/runtime/gateway.js";
+import {
+  makeArchiveAllowedLifecycle,
+  makeCaseList,
+  makeContributionList,
+  makeEvidenceList,
+  makeEvidenceUploadSuccess,
+  makePopulatedCase,
+  makeRestoreAllowedLifecycle,
+  makeSparseImportedCase,
+  RUNTIME_FIXTURE_IDS,
+} from "./investigations/runtime/testkit/index.js";
+import { createDeferred } from "./investigations/runtime/testkit/promises.js";
+import type { InvestigationStrategyShellProps } from "./investigations/strategies/contract.js";
 
-afterEach(() => {
-  cleanup();
-  vi.unstubAllGlobals();
-});
+const FULL_CAPABILITIES = ["investigation:read", "investigation:write", "run:strategies"] as const;
 
-const baseCase = {
-  id: "case-1",
-  title: "Checkout pauses",
-  status: "open",
-  severity: "high",
-  problemStatement: "Requests pause while the worker restarts.",
-  affectedParties: "Checkout operators",
-  impact: "Manual replay is required.",
-  scope: "One worker group",
-  openQuestions: ["Did the queue stall first?"],
-  investigationContext: { productName: "ContextDesk", build: "build-42" },
-  occurredAt: null,
-  occurredAtPrecision: "unknown",
-  occurredAtZone: "unknown",
-  participants: [],
-  createdAt: "2026-08-29T12:00:00.000Z",
-  createdBy: "alice",
-};
+function succeeded<T>(value: T): GatewayResult<T> { return { ok: true, value }; }
+function unexpected<T>(): Promise<GatewayResult<T>> { return Promise.resolve({ ok: false, error: { kind: "unexpected" } }); }
+function unavailable<T>(): GatewayResult<T> { return { ok: false, error: { kind: "unavailable", status: 503 } }; }
 
-function stubFetch(options?: { cases?: unknown[]; created?: unknown; artifacts?: unknown[] }) {
-  const requests: { url: string; init?: RequestInit }[] = [];
-  const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
-    const url = String(input);
-    requests.push(init === undefined ? { url } : { url, init });
-    if (url === "/api/cases" && (init?.method ?? "GET") === "POST") {
-      return { ok: true, json: async () => options?.created ?? { ...baseCase, id: "case-new", title: "New investigation" } };
-    }
-    if (url === "/api/cases") return { ok: true, json: async () => ({ cases: options?.cases ?? [baseCase] }) };
-    if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: options?.artifacts ?? [] }) };
-    if (url.endsWith("/contributions")) return { ok: true, json: async () => ({ contributions: options?.artifacts ? [{ id: "summary-1", body: "Collected by the import" }] : [] }) };
-    if (url === "/api/cases/sparse") return { ok: true, json: async () => ({ id: "sparse", title: "Imported record", status: "open", severity: "low" }) };
-    if (url.startsWith("/api/cases/")) return { ok: true, json: async () => baseCase };
-    return { ok: false, status: 404, json: async () => ({}) };
-  });
-  vi.stubGlobal("fetch", stub);
-  return { stub, requests };
+function makeLifecycle(investigation: CaseV1): InvestigationLifecycleV1 {
+  const template = investigation.status === "archived" ? makeRestoreAllowedLifecycle() : makeArchiveAllowedLifecycle();
+  return { ...template, investigationId: investigation.id, status: investigation.status };
 }
 
-const commonProps = {
-  canWrite: true,
-  canLead: true,
-  readOnly: false,
-  view: "investigations" as const,
+function makeGateway(overrides: Partial<InvestigationGateway> = {}): InvestigationGateway {
+  const populated = makePopulatedCase();
+  return {
+    listInvestigations: vi.fn(async () => succeeded(makeCaseList().cases)),
+    getInvestigation: vi.fn(async () => succeeded(populated)),
+    createInvestigation: vi.fn(() => unexpected<CaseV1>()),
+    listEvidence: vi.fn(async () => succeeded(makeEvidenceList().artifacts)),
+    listContributions: vi.fn(async () => succeeded(makeContributionList().contributions)),
+    uploadEvidence: vi.fn(() => unexpected<never>()),
+    getLifecycle: vi.fn(async () => succeeded(makeLifecycle(populated))),
+    applyLifecycleAction: vi.fn(() => unexpected<never>()),
+    ...overrides,
+  };
+}
+
+const shellDefaults: InvestigationStrategyShellProps = {
+  view: "investigations",
   focusCaseId: null,
-  stage: "situation" as const,
+  stage: "situation",
   onOpenCase: vi.fn(),
   onExitFocus: vi.fn(),
 };
 
-describe("Investigation First", () => {
-  it("puts fast capture above the browse list and keeps technical fields progressive", async () => {
-    stubFetch();
-    render(<InvestigationFirst {...commonProps} />);
-    expect(await screen.findByRole("heading", { name: "Create an investigation" })).toBeTruthy();
-    expect(screen.getByPlaceholderText("Short investigation title")).toBeTruthy();
-    expect(screen.getByText("Advanced context")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Investigations" })).toBeTruthy();
-    expect(document.querySelector('#investigation-first-productName-options option[value="ContextDesk"]')).toBeTruthy();
+function renderStrategy(options: {
+  gateway?: InvestigationGateway;
+  capabilities?: readonly string[];
+  readOnly?: boolean;
+  shell?: Partial<InvestigationStrategyShellProps>;
+} = {}) {
+  const gateway = options.gateway ?? makeGateway();
+  const shell = { ...shellDefaults, ...options.shell };
+  const capabilities = options.capabilities ?? FULL_CAPABILITIES;
+  const readOnly = options.readOnly ?? false;
+  const view = render(
+    <InvestigationRuntimeProvider
+      identityKey="alice"
+      authorityKey="alice-authority-v1"
+      capabilities={capabilities}
+      readOnly={readOnly}
+      active
+      focusCaseId={shell.focusCaseId}
+      isInvestigationLocation
+      onOpenCreated={shell.onOpenCase}
+      gateway={gateway}
+    >
+      <InvestigationFirst {...shell} />
+    </InvestigationRuntimeProvider>,
+  );
+  return {
+    gateway,
+    rerender(shellOverrides: Partial<InvestigationStrategyShellProps>) {
+      const nextShell = { ...shell, ...shellOverrides };
+      view.rerender(
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          authorityKey="alice-authority-v1"
+          capabilities={capabilities}
+          readOnly={readOnly}
+          active
+          focusCaseId={nextShell.focusCaseId}
+          isInvestigationLocation
+          onOpenCreated={nextShell.onOpenCase}
+          gateway={gateway}
+        >
+          <InvestigationFirst {...nextShell} />
+        </InvestigationRuntimeProvider>,
+      );
+    },
+  };
+}
+
+afterEach(() => cleanup());
+
+describe("Investigation First Runtime V1 presentation", () => {
+  it("keeps fast capture above browse and distinguishes existing from new combo values", async () => {
+    renderStrategy();
+    const create = await screen.findByRole("heading", { name: "Create an investigation" });
+    const browse = screen.getByRole("heading", { name: "Investigations" });
+    expect(create.compareDocumentPosition(browse) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(screen.getByText("Advanced context"));
+    const product = screen.getByRole("combobox", { name: "Product or software" });
+    fireEvent.change(product, { target: { value: "ContextDesk Storefront" } });
+    expect(screen.getByText("Using an existing recorded value.")).toBeTruthy();
+    fireEvent.change(product, { target: { value: "A new product" } });
+    expect(screen.getByText("New value — it will be recorded exactly as entered.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Filter investigations by status"), { target: { value: "monitoring" } });
+    expect(screen.getByRole("button", { name: /Checkout latency/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Imported investigation/ })).toBeNull();
   });
 
-  it("posts the shared case payload and opens the server-confirmed record", async () => {
-    const { requests } = stubFetch();
+  it("creates exactly once and lets the provider open the server-confirmed identity", async () => {
+    const created = { ...makeSparseImportedCase(), id: "case-server-id", title: "New investigation" };
+    const gateway = makeGateway({ createInvestigation: vi.fn(async () => succeeded(created)) });
     const onOpenCase = vi.fn();
-    render(<InvestigationFirst {...commonProps} onOpenCase={onOpenCase} />);
+    renderStrategy({ gateway, shell: { onOpenCase } });
     await screen.findByRole("heading", { name: "Create an investigation" });
     fireEvent.change(screen.getByPlaceholderText("Short investigation title"), { target: { value: "New investigation" } });
     fireEvent.change(screen.getByPlaceholderText("Describe the problem without assuming its cause."), { target: { value: "A clear observation" } });
     fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
-    await waitFor(() => expect(onOpenCase).toHaveBeenCalledWith("case-new"));
-    const createRequest = requests.find((request) => request.url === "/api/cases" && request.init?.method === "POST");
-    expect(createRequest).toBeTruthy();
-    expect(JSON.parse(String(createRequest?.init?.body))).toMatchObject({ title: "New investigation", problemStatement: "A clear observation", severity: "medium" });
+    await waitFor(() => expect(onOpenCase).toHaveBeenCalledWith("case-server-id"));
+    expect(gateway.createInvestigation).toHaveBeenCalledTimes(1);
+    expect(gateway.createInvestigation).toHaveBeenCalledWith(expect.objectContaining({ title: "New investigation", problemStatement: "A clear observation", severity: "medium" }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
 
-  it("renders sparse records honestly and inventories annotated evidence", async () => {
-    stubFetch({
-      cases: [{ id: "sparse", title: "Imported record", status: "open", severity: "low" }],
-      artifacts: [{ id: "e1", kind: "log", filename: "worker.log", contentHash: "abc", verificationStatus: "unverified", privacyClass: "owner_only", byteLength: 12, summaryContributionId: "summary-1" }],
+  it("renders a sparse imported detail and preserves the explicit technical handoff", async () => {
+    const sparse = makeSparseImportedCase();
+    const gateway = makeGateway({
+      getInvestigation: vi.fn(async () => succeeded(sparse)),
+      listEvidence: vi.fn(async () => succeeded([])),
+      listContributions: vi.fn(async () => succeeded([])),
+      getLifecycle: vi.fn(async () => succeeded(makeLifecycle(sparse))),
     });
     const onOpenAdvancedTools = vi.fn();
-    const { rerender } = render(<InvestigationFirst {...commonProps} onOpenAdvancedTools={onOpenAdvancedTools} />);
-    await screen.findByRole("button", { name: /Imported record/ });
-    rerender(<InvestigationFirst {...commonProps} focusCaseId="sparse" onOpenAdvancedTools={onOpenAdvancedTools} />);
-    expect(await screen.findByRole("heading", { name: "Imported record" })).toBeTruthy();
-    expect(screen.getAllByText("Not recorded").length).toBeGreaterThan(0);
-    expect(screen.getByText("worker.log")).toBeTruthy();
-    expect(screen.getByText("Collected by the import")).toBeTruthy();
+    renderStrategy({ gateway, shell: { focusCaseId: sparse.id, onOpenAdvancedTools } });
+    const heading = await screen.findByRole("heading", { name: "Imported investigation" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    expect(screen.getAllByText("Not recorded").length).toBeGreaterThan(5);
     fireEvent.click(screen.getByRole("button", { name: "Open War Room technical tools" }));
-    expect(onOpenAdvancedTools).toHaveBeenCalledWith("sparse", "analyze");
+    expect(onOpenAdvancedTools).toHaveBeenCalledWith(sparse.id, "analyze");
   });
 
-  it("keeps evidence selection safe and sends file annotations through the protected route", async () => {
-    const { requests } = stubFetch({
-      cases: [{ ...baseCase, id: "case-1" }],
-      artifacts: [{ id: "e1", kind: "attachment", filename: "notes.txt", contentHash: null, verificationStatus: "unverified", privacyClass: "owner_only" }],
-    });
-    render(<InvestigationFirst {...commonProps} focusCaseId="case-1" />);
-    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
-    const checkbox = screen.getByRole("checkbox");
-    fireEvent.click(checkbox);
-    expect((screen.getByRole("button", { name: "Move selected to trash" }) as HTMLButtonElement).disabled).toBe(true);
-    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
-    fireEvent.change(screen.getByLabelText("File"), { target: { files: [file] } });
-    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), { target: { value: "Operator notes" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
-    await waitFor(() => expect(requests.some((request) => request.url.endsWith("/evidence") && request.init?.method === "POST")).toBe(true));
-    const uploadRequest = requests.find((request) => request.url.endsWith("/evidence") && request.init?.method === "POST");
-    expect(JSON.parse(String(uploadRequest?.init?.body))).toMatchObject({ filename: "notes.txt", summary: "Operator notes", kind: "attachment" });
+  it("keeps evidence visible when annotations fail independently", async () => {
+    const gateway = makeGateway({ listContributions: vi.fn(async () => unavailable<readonly ContributionV1[]>()) });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    expect(await screen.findByText("checkout-timeout.log")).toBeTruthy();
+    expect(screen.getAllByText("Annotation not available").length).toBeGreaterThan(0);
+    expect(screen.getByRole("alert").textContent).toContain("Evidence annotations could not be loaded");
+    expect(screen.getByRole("button", { name: "Retry evidence annotations" })).toBeTruthy();
   });
 
-  it("does not expose creation to a viewer", async () => {
-    stubFetch({ cases: [] });
-    render(<InvestigationFirst {...commonProps} canWrite={false} />);
-    await screen.findByRole("heading", { name: "Investigations" });
-    expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Create investigation" })).toBeNull();
-    expect(screen.getByText("No investigations match this view. Try a different search.")).toBeTruthy();
+  it("describes annotations as loading until their independent lane settles", async () => {
+    const contributions = createDeferred<GatewayResult<readonly ContributionV1[]>>();
+    const gateway = makeGateway({ listContributions: vi.fn(() => contributions.promise) });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    expect(await screen.findByText("checkout-timeout.log")).toBeTruthy();
+    expect(screen.getByText("Loading evidence annotations…")).toBeTruthy();
+    expect(screen.getAllByText("Annotation loading…").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Annotation not available")).toBeNull();
+
+    contributions.resolve(succeeded([]));
+    await waitFor(() => expect(screen.queryByText("Loading evidence annotations…")).toBeNull());
+    expect(screen.getAllByText("Annotation not available").length).toBeGreaterThan(0);
   });
 
-  it("shows focused loading and unavailable states with a way back", async () => {
-    let resolveCase: ((value: unknown) => void) | undefined;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
-      const url = String(input);
-      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [] }) };
-      if (url === "/api/cases/missing") return new Promise((resolve) => { resolveCase = resolve; });
-      if (url.endsWith("/evidence") || url.endsWith("/contributions")) return { ok: true, json: async () => ({ artifacts: [], contributions: [] }) };
-      return { ok: false, status: 404, json: async () => ({}) };
-    }));
-    render(<InvestigationFirst {...commonProps} focusCaseId="missing" />);
-    expect(await screen.findByText("Opening investigation…")).toBeTruthy();
-    resolveCase?.({ ok: false, status: 404, json: async () => ({}) });
-    expect(await screen.findByText("This investigation could not be found.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Back to investigations" })).toBeTruthy();
-  });
-
-  it("keeps lifecycle mutations unavailable in static read-only mode", async () => {
-    stubFetch();
-    render(<InvestigationFirst {...commonProps} canLead readOnly focusCaseId="case-1" />);
-    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
-    expect(screen.getByText("Static read-only view: archiving and restoring are unavailable.")).toBeTruthy();
-  });
-
-  it("does not describe a failed evidence read as an empty inventory", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
-      const url = String(input);
-      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [baseCase] }) };
-      if (url === "/api/cases/case-1") return { ok: true, json: async () => baseCase };
-      if (url.endsWith("/evidence")) return { ok: false, status: 503, json: async () => ({}) };
-      if (url.endsWith("/contributions")) return { ok: true, json: async () => ({ contributions: [] }) };
-      if (url.endsWith("/lifecycle")) return { ok: false, status: 404, json: async () => ({}) };
-      return { ok: false, status: 404, json: async () => ({}) };
-    }));
-    render(<InvestigationFirst {...commonProps} focusCaseId="case-1" />);
-    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toContain("Evidence inventory could not be loaded.");
+  it("never describes a failed evidence inventory as empty", async () => {
+    const gateway = makeGateway({ listEvidence: vi.fn(async () => unavailable<readonly ArtifactV1[]>()) });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    expect(await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Evidence inventory could not be loaded");
+    expect(screen.getByText("Count unavailable")).toBeTruthy();
+    expect(screen.queryByText("0 items")).toBeNull();
     expect(screen.queryByText("No evidence has been registered yet.")).toBeNull();
   });
 
-  it("keeps a failed list load honest after detail success and supports retry", async () => {
-    let listAttempts = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
-      const url = String(input);
-      if (url === "/api/cases") {
-        listAttempts += 1;
-        return listAttempts === 1
-          ? { ok: false, status: 503, json: async () => ({}) }
-          : { ok: true, json: async () => ({ cases: [baseCase] }) };
-      }
-      if (url === "/api/cases/case-1") return { ok: true, json: async () => baseCase };
-      if (url.endsWith("/evidence") || url.endsWith("/contributions")) {
-        return { ok: true, json: async () => ({ artifacts: [], contributions: [] }) };
-      }
-      return { ok: false, status: 404, json: async () => ({}) };
-    }));
-    const { rerender } = render(<InvestigationFirst {...commonProps} focusCaseId="case-1" />);
-    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
-    rerender(<InvestigationFirst {...commonProps} focusCaseId={null} />);
-    expect((await screen.findByRole("alert")).textContent).toContain("Investigations could not be loaded.");
-    expect(screen.queryByText(/No investigations match this view/)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Retry loading investigations" }));
-    expect(await screen.findByRole("button", { name: /Checkout pauses/ })).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("ignores a detail response that belongs to an investigation no longer in the URL", async () => {
-    let resolveA: ((value: unknown) => void) | undefined;
-    let resolveB: ((value: unknown) => void) | undefined;
-    const caseA = { ...baseCase, id: "a", title: "Investigation A" };
-    const caseB = { ...baseCase, id: "b", title: "Investigation B" };
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
-      const url = String(input);
-      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [caseA, caseB] }) };
-      if (url === "/api/cases/a") return { ok: true, json: () => new Promise((resolve) => { resolveA = resolve; }) };
-      if (url === "/api/cases/b") return { ok: true, json: () => new Promise((resolve) => { resolveB = resolve; }) };
-      if (url.endsWith("/evidence") || url.endsWith("/contributions")) return { ok: true, json: async () => ({ artifacts: [], contributions: [] }) };
-      if (url.endsWith("/lifecycle")) return { ok: false, status: 404, json: async () => ({}) };
-      return { ok: false, status: 404, json: async () => ({}) };
-    }));
-    const { rerender } = render(<InvestigationFirst {...commonProps} focusCaseId="a" />);
-    await waitFor(() => expect(resolveA).toBeTypeOf("function"));
-    rerender(<InvestigationFirst {...commonProps} focusCaseId="b" />);
-    await waitFor(() => expect(resolveB).toBeTypeOf("function"));
-    resolveB?.(caseB);
-    expect(await screen.findByRole("heading", { name: "Investigation B" })).toBeTruthy();
-    resolveA?.(caseA);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(screen.getByRole("heading", { name: "Investigation B" })).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Investigation A" })).toBeNull();
-  });
-
-  it("does not reopen an old investigation when its evidence upload finishes late", async () => {
-    let resolveUpload: ((value: unknown) => void) | undefined;
-    const caseA = { ...baseCase, id: "a", title: "Investigation A" };
-    const caseB = { ...baseCase, id: "b", title: "Investigation B" };
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo, init?: RequestInit) => {
-      const url = String(input);
-      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [caseA, caseB] }) };
-      if (url === "/api/cases/a/evidence" && init?.method === "POST") {
-        return new Promise((resolve) => { resolveUpload = resolve; });
-      }
-      if (url === "/api/cases/a") return { ok: true, json: async () => caseA };
-      if (url === "/api/cases/b") return { ok: true, json: async () => caseB };
-      if (url.endsWith("/evidence") || url.endsWith("/contributions")) return { ok: true, json: async () => ({ artifacts: [], contributions: [] }) };
-      if (url.endsWith("/lifecycle")) return { ok: false, status: 404, json: async () => ({}) };
-      return { ok: false, status: 404, json: async () => ({}) };
-    }));
-    const { rerender } = render(<InvestigationFirst {...commonProps} focusCaseId="a" />);
-    expect(await screen.findByRole("heading", { name: "Investigation A" })).toBeTruthy();
+  it("submits one file intent and leaves encoding and limits to the runtime controller", async () => {
+    const upload = makeEvidenceUploadSuccess();
+    const gateway = makeGateway({ uploadEvidence: vi.fn(async () => succeeded(upload)) });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
     const file = new File(["hello"], "notes.txt", { type: "text/plain" });
     fireEvent.change(screen.getByLabelText("File"), { target: { files: [file] } });
     fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), { target: { value: "Operator notes" } });
     fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
-    await waitFor(() => expect(resolveUpload).toBeTypeOf("function"));
-    rerender(<InvestigationFirst {...commonProps} focusCaseId="b" />);
-    expect(await screen.findByRole("heading", { name: "Investigation B" })).toBeTruthy();
-    resolveUpload?.({ ok: true, json: async () => ({}) });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(screen.getByRole("heading", { name: "Investigation B" })).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Investigation A" })).toBeNull();
+    await waitFor(() => expect(gateway.uploadEvidence).toHaveBeenCalledTimes(1));
+    expect(gateway.uploadEvidence).toHaveBeenCalledWith(RUNTIME_FIXTURE_IDS.populatedCase, expect.objectContaining({ filename: "notes.txt", mediaType: "text/plain", summary: "Operator notes", kind: "attachment", privacyClass: "owner_only", contentBase64: "aGVsbG8=" }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it("suppresses every mutation affordance for viewers and static read-only builds", async () => {
+    renderStrategy({ capabilities: ["investigation:read"], shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    expect(screen.queryByRole("heading", { name: "Add evidence" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
+    cleanup();
+    const archived = { ...makePopulatedCase(), status: "archived" as const };
+    renderStrategy({
+      readOnly: true,
+      gateway: makeGateway({ getInvestigation: vi.fn(async () => succeeded(archived)), getLifecycle: vi.fn(async () => succeeded(makeLifecycle(archived))) }),
+      shell: { focusCaseId: archived.id },
+    });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    expect(screen.queryByRole("heading", { name: "Add evidence" })).toBeNull();
+    expect(screen.getByText("Archiving and restoring are unavailable in this view.")).toBeTruthy();
+  });
+
+  it("shows loading, distinguishes not-found, and retries the focused read", async () => {
+    const first = createDeferred<GatewayResult<CaseV1>>();
+    let attempts = 0;
+    const gateway = makeGateway({
+      getInvestigation: vi.fn(() => {
+        attempts += 1;
+        return attempts === 1 ? first.promise : Promise.resolve(succeeded(makePopulatedCase()));
+      }),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    expect(await screen.findByText("Opening investigation…")).toBeTruthy();
+    first.resolve({ ok: false, error: { kind: "not_found", status: 404 } });
+    expect(await screen.findByText("This investigation could not be found.")).toBeTruthy();
+    const unavailableHeading = screen.getByRole("heading", { name: "Investigation unavailable" });
+    await waitFor(() => expect(document.activeElement).toBe(unavailableHeading));
+    fireEvent.click(screen.getByRole("button", { name: "Retry opening investigation" }));
+    expect(await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" })).toBeTruthy();
+    expect(gateway.getInvestigation).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a failed browse load distinct from an empty result and retries it", async () => {
+    let attempts = 0;
+    const gateway = makeGateway({
+      listInvestigations: vi.fn(async () => {
+        attempts += 1;
+        return attempts === 1 ? unavailable<readonly CaseV1[]>() : succeeded([]);
+      }),
+    });
+    renderStrategy({ gateway });
+    expect((await screen.findByRole("alert")).textContent).toContain("Investigations could not be loaded");
+    expect(screen.getByText("Count unavailable")).toBeTruthy();
+    expect(screen.queryByText("0 shown · 0 total")).toBeNull();
+    expect(screen.queryByText(/No investigations match this view/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading investigations" }));
+    expect(await screen.findByText("No investigations match this view. Try a different search or create a new one.")).toBeTruthy();
+    expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps selection case-scoped and associates the disabled trash explanation", async () => {
+    const { rerender } = renderStrategy({ shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByText("checkout-timeout.log");
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByText("1 selected")).toBeTruthy();
+    const trash = screen.getByRole("button", { name: "Move selected to trash" });
+    expect((trash as HTMLButtonElement).disabled).toBe(true);
+    expect(trash.getAttribute("aria-describedby")).toBe("investigation-first-trash-description");
+    rerender({ focusCaseId: null });
+    const browseHeading = await screen.findByRole("heading", { name: "Investigations" });
+    expect(document.activeElement).toBe(browseHeading);
+    rerender({ focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase });
+    await screen.findByText("checkout-timeout.log");
+    expect(screen.getByText("0 selected")).toBeTruthy();
+  });
+
+  it("requires two clicks and sends only lifecycle action intent", async () => {
+    const current = makePopulatedCase();
+    const archived = { ...current, status: "archived" as const };
+    const success: InvestigationLifecycleActionSuccessV1 = {
+        schemaId: INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+        investigationId: current.id,
+        action: "archive",
+        previousStatus: current.status,
+        appliedStatus: "archived",
+        case: archived,
+    };
+    const gateway = makeGateway({
+      applyLifecycleAction: vi.fn(async () => succeeded(success)),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: current.id } });
+    await screen.findByRole("button", { name: "Archive investigation" });
+    fireEvent.click(screen.getByRole("button", { name: "Archive investigation" }));
+    expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm archive investigation" }));
+    await waitFor(() => expect(gateway.applyLifecycleAction).toHaveBeenCalledTimes(1));
+    const input = vi.mocked(gateway.applyLifecycleAction).mock.calls[0]?.[1];
+    expect(input).toEqual({ action: "archive", expected: { status: "monitoring", legalHold: false, restoreTarget: "monitoring" } });
+    expect(input).not.toHaveProperty("targetStatus");
   });
 });

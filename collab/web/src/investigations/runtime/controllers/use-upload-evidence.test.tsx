@@ -32,6 +32,7 @@ function options(
     onUploaded: vi.fn(),
     onRefreshEvidence: vi.fn(),
     onRefreshInvestigations: vi.fn(),
+    onScopeDenied: vi.fn(),
     ...overrides,
   };
 }
@@ -175,5 +176,30 @@ describe("useUploadEvidence", () => {
     expect(first.onUploaded).not.toHaveBeenCalled();
     expect(first.onRefreshEvidence).not.toHaveBeenCalled();
     expect(first.onRefreshInvestigations).not.toHaveBeenCalled();
+  });
+
+  it("does not expose case A completion during the first render of case B", async () => {
+    const success = makeEvidenceUploadSuccess();
+    const gateway = gatewayWithUpload(vi.fn(async () => ({ ok: true as const, value: success })));
+    const first = options({ gateway });
+    const renderedStates: Array<ReturnType<typeof useUploadEvidence>["state"]> = [];
+    const { result, rerender } = renderHook(
+      ({ value }: { value: UseUploadEvidenceOptions }) => {
+        const controller = useUploadEvidence(value);
+        renderedStates.push(controller.state);
+        return controller;
+      },
+      { initialProps: { value: first } },
+    );
+
+    await act(async () => {
+      await result.current.upload({ file: new Blob(["case-a"]), summary: "Case A" });
+    });
+    expect(result.current.state).toEqual({ status: "succeeded", value: success });
+
+    renderedStates.length = 0;
+    rerender({ value: { ...first, investigationId: "case-b" } });
+    expect(renderedStates[0]).toEqual({ status: "idle" });
+    expect(result.current.state).toEqual({ status: "idle" });
   });
 });

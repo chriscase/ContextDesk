@@ -1,4 +1,4 @@
-import type { CaseV1 } from "@cd-collab/contracts";
+import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { InvestigationGateway } from "../gateway.js";
 import type { ResourceState } from "../types.js";

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   APP_ROLES,
   hasCapability,
@@ -45,6 +52,18 @@ import { SelfProfilePanel } from "./SelfProfilePanel.js";
 import { BrandMark } from "./graphics.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
 import {
+  InvestigationRuntimeProvider,
+  useInvestigationRuntime,
+} from "./investigations/runtime/public.js";
+import {
+  InvestigationStrategyRenderer,
+} from "./investigations/strategies/StrategyRenderer.js";
+import {
+  INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT,
+  defineInvestigationStrategyRegistrations,
+  type InvestigationStrategyShellProps,
+} from "./investigations/strategies/contract.js";
+import {
   DEFAULT_UI_STRATEGY_ID,
   UI_STRATEGIES,
   resolveUiStrategy,
@@ -53,10 +72,12 @@ import {
 } from "./ui-strategy.js";
 
 interface SessionView {
+  identityId: string;
   username: string;
   displayName: string;
   roles: string[];
   capabilities?: string[];
+  authorityGeneration: number;
 }
 
 function asAppRoles(roles: readonly string[]): AppRole[] {
@@ -69,6 +90,89 @@ function sessionCapabilities(session: SessionView): Capability[] {
   }
   return roleCapabilities(asAppRoles(session.roles));
 }
+
+function investigationAuthorityKey(session: SessionView, readOnly: boolean): string {
+  return JSON.stringify([
+    "cd-investigation-authority.v1",
+    session.identityId,
+    session.authorityGeneration,
+    readOnly ? "read-only" : "interactive",
+    [...session.roles].sort(),
+    [...(session.capabilities ?? [])].sort(),
+  ]);
+}
+
+interface WarRoomStrategyBindings {
+  readonly roles: string[];
+  readonly capabilities: readonly string[];
+  readonly readOnly: boolean;
+  readonly participant: { username: string; roles: string[] };
+  readonly onStageChange: (stage: WorkLocation["stage"]) => void;
+  readonly onDeepNavigate: (stage: WorkLocation["stage"], focus: NonNullable<WorkLocation["focus"]>) => void;
+  readonly onActivityOpen: (
+    caseId: string,
+    stage: WorkLocation["stage"],
+    focus: NonNullable<WorkLocation["focus"]>,
+  ) => void;
+  readonly onExitFocus: (target: "overview" | "investigations") => void;
+}
+
+const WarRoomStrategyContext = createContext<WarRoomStrategyBindings | null>(null);
+
+/** Reference presentation adapter; all investigation authority comes from Runtime V1. */
+function WarRoomStrategy(props: InvestigationStrategyShellProps) {
+  const bindings = useContext(WarRoomStrategyContext);
+  const runtime = useInvestigationRuntime();
+  if (bindings === null) return null;
+
+  return (
+    <Cases
+      roles={bindings.roles}
+      capabilities={bindings.capabilities}
+      readOnly={bindings.readOnly}
+      participant={bindings.participant}
+      view={props.view}
+      focusCaseId={props.focusCaseId}
+      stage={props.stage}
+      {...(props.focus ? { focus: props.focus } : {})}
+      {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })}
+      onOpenCase={props.onOpenCase}
+      onStageChange={bindings.onStageChange}
+      onDeepNavigate={bindings.onDeepNavigate}
+      onActivityOpen={bindings.onActivityOpen}
+      onExitFocus={bindings.onExitFocus}
+      {...(props.onFocusedCaseTitle
+        ? { onFocusedCaseTitle: props.onFocusedCaseTitle }
+        : {})}
+      lifecycleBinding={{
+        lifecycle: runtime.resources.lifecycle,
+        lifecycleMutation: runtime.mutations.lifecycle,
+        canManage: runtime.capabilities.canManageLifecycle,
+        readOnly: bindings.readOnly,
+        applyAction: runtime.commands.applyLifecycle,
+        retryLifecycle: runtime.refresh.lifecycle,
+      }}
+    />
+  );
+}
+
+/** Investigation First is intentionally only a Runtime V1 presentation. */
+function InvestigationFirstStrategy(props: InvestigationStrategyShellProps) {
+  return <InvestigationFirst {...props} />;
+}
+
+const INVESTIGATION_STRATEGY_REGISTRATIONS = defineInvestigationStrategyRegistrations({
+  "war-room": {
+    id: "war-room",
+    presentationContract: INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT,
+    component: WarRoomStrategy,
+  },
+  "investigation-first": {
+    id: "investigation-first",
+    presentationContract: INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT,
+    component: InvestigationFirstStrategy,
+  },
+});
 
 // The stored ids stay stable so existing saved preferences keep resolving;
 // only the display names are user-facing. "Command" is the gold-accent skin
@@ -139,7 +243,9 @@ function AccountMenu(props: {
   profileActive: boolean;
   onOpenProfile: () => void;
   onThemeChange: (theme: ThemeName) => void;
+  /** Saved personal preference, distinct from a history-scoped handoff. */
   strategy: UiStrategyDescriptor;
+  temporaryStrategy: UiStrategyDescriptor | null;
   onStrategyChange: (strategy: UiStrategyId) => void;
   onSignOut: (() => void) | null;
 }) {
@@ -228,6 +334,12 @@ function AccountMenu(props: {
               Presentation and navigation only. Your case data, evidence, permissions, and audit
               history stay shared.
             </p>
+            {props.temporaryStrategy ? (
+              <p className="account__strategy-note" role="status">
+                Temporarily using {props.temporaryStrategy.name} for this history entry. Your saved
+                preference remains {props.strategy.name}.
+              </p>
+            ) : null}
             {UI_STRATEGIES.map((strategy) => (
               <label key={strategy.id} className="account__strategy-option">
                 <input
@@ -333,6 +445,7 @@ export function App() {
   const mainRef = useRef<HTMLElement>(null);
   const sessionRef = useRef(session);
   sessionRef.current = session;
+  const authorityGenerationRef = useRef(0);
   const uiStrategy = transientUiStrategyId
     ? resolveUiStrategy({ preferred: transientUiStrategyId })
     : preferredUiStrategy;
@@ -410,16 +523,19 @@ export function App() {
       return;
     }
     const body = (await res.json()) as {
-      identity?: { username?: string; displayName?: string };
+      identity?: { id?: string; username?: string; displayName?: string };
       roles?: string[];
       capabilities?: string[];
     };
     const username = body.identity?.username ?? "";
+    authorityGenerationRef.current += 1;
     setSession({
+      identityId: body.identity?.id?.trim() || username,
       username,
       displayName: body.identity?.displayName?.trim() || username,
       roles: body.roles ?? [],
       ...(body.capabilities ? { capabilities: body.capabilities } : {}),
+      authorityGeneration: authorityGenerationRef.current,
     });
     setSessionIssue(null);
     setReady(true);
@@ -465,6 +581,14 @@ export function App() {
     setNavOpen(false);
     writeHistory(next, mode, historyStrategyId);
   }, [transientUiStrategyId]);
+
+  const openCreatedInvestigation = useCallback((investigationId: string) => {
+    navigate({
+      area: "investigations",
+      caseId: investigationId,
+      stage: "situation",
+    });
+  }, [navigate]);
 
   const requestLeave = useCallback((
     action: { kind: "navigate"; next: ShellLocation; mode: "push" | "replace" } | { kind: "logout" },
@@ -684,7 +808,6 @@ export function App() {
   const roles = session.roles;
   const capabilities = sessionCapabilities(session);
   const canWrite = !staticReadOnly && hasCapability(capabilities, "investigation:write");
-  const canLeadCases = !staticReadOnly && hasCapability(capabilities, "run:strategies");
   const canLeadCatalog =
     !staticReadOnly &&
     (hasCapability(capabilities, "run:strategies") ||
@@ -694,6 +817,33 @@ export function App() {
   const inCasesArea = work.area === "overview" || work.area === "investigations";
   const unknown = isUnknownLocation(location);
   const currentArea = unknown ? null : work.area;
+  const warRoomBindings: WarRoomStrategyBindings = {
+    roles,
+    capabilities,
+    readOnly: staticReadOnly,
+    participant: { username: session.username, roles },
+    onStageChange: (stage) =>
+      isWorkLocation(locationRef.current) && locationRef.current.caseId
+        ? navigate({
+            area: "investigations",
+            caseId: locationRef.current.caseId,
+            stage,
+          })
+        : undefined,
+    onDeepNavigate: (stage, focus) =>
+      isWorkLocation(locationRef.current) && locationRef.current.caseId
+        ? navigate({
+            area: "investigations",
+            caseId: locationRef.current.caseId,
+            stage,
+            focus,
+          })
+        : undefined,
+    onActivityOpen: (caseId, stage, focus) =>
+      navigate({ area: "investigations", caseId, stage, focus }),
+    onExitFocus: (target) =>
+      navigate({ area: target, caseId: null, stage: "situation" }),
+  };
 
   function startInvestigation() {
     guardedNavigate({ area: "investigations", caseId: null, stage: "situation" });
@@ -764,7 +914,8 @@ export function App() {
               displayName={session.displayName}
               roles={roles}
               theme={theme}
-              strategy={uiStrategy}
+              strategy={preferredUiStrategy}
+              temporaryStrategy={transientUiStrategyId ? uiStrategy : null}
               profileActive={work.area === "profile"}
               onOpenProfile={() => guardedNavigate(PROFILE)}
               onThemeChange={setTheme}
@@ -810,69 +961,46 @@ export function App() {
         ) : (
           <>
             <section className="app__area" aria-label="Investigations" hidden={!inCasesArea}>
-              {uiStrategy.id === "investigation-first" ? (
-                <InvestigationFirst
-                  canWrite={canWrite}
-                  canLead={canLeadCases}
-                  readOnly={staticReadOnly}
-                  view={work.area === "investigations" ? "investigations" : "overview"}
-                  focusCaseId={inCasesArea ? work.caseId : null}
-                  stage={work.stage}
-                  {...(work.focus ? { focus: work.focus } : {})}
-                  startSignal={startSignal}
-                  onOpenCase={(id) => navigate({ area: "investigations", caseId: id, stage: "situation" })}
-                  onExitFocus={() => navigate({ area: "investigations", caseId: null, stage: "situation" })}
-                  onOpenAdvancedTools={(caseId, stage) => {
-                    // Specialist tools remain in the reference War Room. The
-                    // switch is explicit in the button label and preserves the
-                    // canonical case/stage URL and all shared record state.
-                    setTransientUiStrategyId(DEFAULT_UI_STRATEGY_ID);
-                    navigate({ area: "investigations", caseId, stage }, "push", DEFAULT_UI_STRATEGY_ID);
-                  }}
-                  onFocusedCaseTitle={setFocusedCaseTitle}
-                />
-              ) : (
-                <Cases
-                  onFocusedCaseTitle={setFocusedCaseTitle}
-                  roles={roles}
-                  capabilities={capabilities}
-                  readOnly={staticReadOnly}
-                  participant={{ username: session.username, roles }}
-                  view={work.area === "investigations" ? "investigations" : "overview"}
-                  focusCaseId={inCasesArea ? work.caseId : null}
-                  stage={work.stage}
-                  {...(work.focus ? { focus: work.focus } : {})}
-                  startSignal={startSignal}
-                  onOpenCase={(id) =>
-                    navigate({ area: "investigations", caseId: id, stage: "situation" })
-                  }
-                  onStageChange={(stage) =>
-                    isWorkLocation(locationRef.current) && locationRef.current.caseId
-                      ? navigate({
-                          area: "investigations",
-                          caseId: locationRef.current.caseId,
-                          stage,
-                        })
-                      : undefined
-                  }
-                  onDeepNavigate={(stage, focus) =>
-                    isWorkLocation(locationRef.current) && locationRef.current.caseId
-                      ? navigate({
-                          area: "investigations",
-                          caseId: locationRef.current.caseId,
-                          stage,
-                          focus,
-                        })
-                      : undefined
-                  }
-                  onActivityOpen={(caseId, stage, focus) =>
-                    navigate({ area: "investigations", caseId, stage, focus })
-                  }
-                  onExitFocus={(target) =>
-                    navigate({ area: target, caseId: null, stage: "situation" })
-                  }
-                />
-              )}
+              <InvestigationRuntimeProvider
+                identityKey={session.identityId}
+                authorityKey={investigationAuthorityKey(session, staticReadOnly)}
+                capabilities={capabilities}
+                readOnly={staticReadOnly}
+                active={inCasesArea}
+                focusCaseId={inCasesArea ? work.caseId : null}
+                isInvestigationLocation={inCasesArea}
+                onOpenCreated={openCreatedInvestigation}
+              >
+                <WarRoomStrategyContext.Provider value={warRoomBindings}>
+                  <InvestigationStrategyRenderer
+                    strategy={uiStrategy}
+                    registrations={INVESTIGATION_STRATEGY_REGISTRATIONS}
+                    view={work.area === "investigations" ? "investigations" : "overview"}
+                    focusCaseId={inCasesArea ? work.caseId : null}
+                    stage={work.stage}
+                    {...(work.focus ? { focus: work.focus } : {})}
+                    startSignal={startSignal}
+                    onOpenCase={(id) =>
+                      navigate({ area: "investigations", caseId: id, stage: "situation" })
+                    }
+                    onExitFocus={() =>
+                      navigate({ area: "investigations", caseId: null, stage: "situation" })
+                    }
+                    onOpenAdvancedTools={(caseId, stage) => {
+                      // Specialist tools remain in the reference War Room. The
+                      // switch is explicit in the button label and preserves the
+                      // canonical case/stage URL and all shared record state.
+                      setTransientUiStrategyId(DEFAULT_UI_STRATEGY_ID);
+                      navigate(
+                        { area: "investigations", caseId, stage },
+                        "push",
+                        DEFAULT_UI_STRATEGY_ID,
+                      );
+                    }}
+                    onFocusedCaseTitle={setFocusedCaseTitle}
+                  />
+                </WarRoomStrategyContext.Provider>
+              </InvestigationRuntimeProvider>
             </section>
             <section
               className="app__area"

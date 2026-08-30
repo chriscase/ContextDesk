@@ -2,7 +2,7 @@ import type {
   InvestigationLifecycleV1,
   LifecycleAction,
   LifecycleRefusal,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 
 export const RUNTIME_PROTOCOL_REASONS = [
   "content_type",
@@ -100,10 +100,23 @@ export function protocolFailure(reason: RuntimeProtocolReason): RuntimeFailure {
 }
 
 function exceptionName(cause: unknown): string | undefined {
-  if (typeof cause !== "object" || cause === null || !("name" in cause)) {
+  if (typeof cause !== "object" || cause === null) return undefined;
+  try {
+    if (!("name" in cause)) return undefined;
+    return typeof cause.name === "string" ? cause.name : undefined;
+  } catch {
+    // A thrown value can be a hostile Proxy or expose a throwing getter. Its
+    // properties are never trusted or allowed to escape the bounded failure.
     return undefined;
   }
-  return typeof cause.name === "string" ? cause.name : undefined;
+}
+
+function isTypeError(cause: unknown): boolean {
+  try {
+    return cause instanceof TypeError;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -116,7 +129,7 @@ export function classifyRequestException(
 ): RuntimeFailure {
   const name = exceptionName(cause);
   if (aborted || name === "AbortError") return { kind: "aborted" };
-  if (cause instanceof TypeError || name === "NetworkError") {
+  if (isTypeError(cause) || name === "NetworkError") {
     return { kind: "network" };
   }
   return { kind: "unexpected" };

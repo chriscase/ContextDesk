@@ -3,9 +3,10 @@ import type {
   CaseV1,
   ContributionV1,
   InvestigationLifecycleV1,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/investigation-runtime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GatewayResult, InvestigationGateway } from "../gateway.js";
+import type { RuntimeFailure } from "../errors.js";
 import type { ResourceState } from "../types.js";
 import { RequestSlot } from "./request-slot.js";
 import {
@@ -44,6 +45,10 @@ export interface ActiveInvestigationController {
   readonly evidence: ResourceState<readonly ArtifactV1[]>;
   readonly contributions: ResourceState<readonly ContributionV1[]>;
   readonly lifecycle: ResourceState<InvestigationLifecycleV1>;
+  /** True after any case-bound endpoint proves this scope inaccessible. */
+  readonly scopeDenied: boolean;
+  /** Fail closed when a case-bound mutation proves this scope inaccessible. */
+  readonly denyScope: (investigationId: string, error: RuntimeFailure) => void;
   /** Publish a server-confirmed case only for the currently active case. */
   readonly publishInvestigation: (investigation: CaseV1) => void;
   /** Publish the linked, server-confirmed members of an evidence upload. */
@@ -89,6 +94,7 @@ function mergeById<T extends { readonly id: string }>(
 function useResourceLane<T>(
   scope: ActiveInvestigationScope | null,
   load: (signal: AbortSignal) => Promise<GatewayResult<T>>,
+  onTerminalFailure: (error: RuntimeFailure) => void,
 ): ResourceLane<T> {
   const requestSlot = useRef(new RequestSlot<ActiveInvestigationScope>());
   const [resource, setResource] = useState(() =>
@@ -108,6 +114,12 @@ function useResourceLane<T>(
     void load(token.signal)
       .then((result) => {
         if (!requestSlot.current.isCurrent(token)) return;
+        if (
+          !result.ok
+          && (result.error.kind === "not_found" || result.error.kind === "auth_lost")
+        ) {
+          onTerminalFailure(result.error);
+        }
         setResource((current) => result.ok
           ? succeedResourceLoad(current, scope, result.value)
           : failResourceLoad(current, scope, result.error));
@@ -124,7 +136,7 @@ function useResourceLane<T>(
     return () => {
       requestSlot.current.invalidate();
     };
-  }, [load, refreshGeneration, scope]);
+  }, [load, onTerminalFailure, refreshGeneration, scope]);
 
   const refresh = useCallback(() => {
     setRefreshGeneration((current) => current + 1);
@@ -164,6 +176,29 @@ export function useActiveInvestigation({
       : null,
     [active, authorityKey, identityKey, investigationId],
   );
+  const scopeKey = scope === null
+    ? null
+    : JSON.stringify([scope.identityKey, scope.authorityKey, scope.investigationId]);
+  const [terminalFailure, setTerminalFailure] = useState<{
+    readonly scopeKey: string;
+    readonly error: RuntimeFailure;
+  } | null>(null);
+  const scopeDenied = scopeKey !== null && terminalFailure?.scopeKey === scopeKey;
+  const effectiveScope = scopeDenied ? null : scope;
+  const denyScope = useCallback((deniedInvestigationId: string, error: RuntimeFailure) => {
+    if (
+      scopeKey === null
+      || scope?.investigationId !== deniedInvestigationId
+      || (error.kind !== "not_found" && error.kind !== "auth_lost")
+    ) {
+      return;
+    }
+    setTerminalFailure({ scopeKey, error });
+  }, [scope, scopeKey]);
+  const onTerminalFailure = useCallback((error: RuntimeFailure) => {
+    if (scope === null) return;
+    denyScope(scope.investigationId, error);
+  }, [denyScope, scope]);
 
   const loadInvestigation = useCallback(
     (signal: AbortSignal) => scope === null
@@ -199,10 +234,10 @@ export function useActiveInvestigation({
     [gateway, scope],
   );
 
-  const investigation = useResourceLane(scope, loadInvestigation);
-  const evidence = useResourceLane(scope, loadEvidence);
-  const contributions = useResourceLane(scope, loadContributions);
-  const lifecycle = useResourceLane(scope, loadLifecycle);
+  const investigation = useResourceLane(effectiveScope, loadInvestigation, onTerminalFailure);
+  const evidence = useResourceLane(effectiveScope, loadEvidence, onTerminalFailure);
+  const contributions = useResourceLane(effectiveScope, loadContributions, onTerminalFailure);
+  const lifecycle = useResourceLane(effectiveScope, loadLifecycle, onTerminalFailure);
   const refreshInvestigation = investigation.refresh;
   const refreshEvidence = evidence.refresh;
   const refreshContributions = contributions.refresh;
@@ -235,25 +270,45 @@ export function useActiveInvestigation({
     publishLifecycleResource(() => published);
   }, [publishLifecycleResource, scope]);
 
+  const retryDeniedScope = useCallback(() => {
+    setTerminalFailure((current) => current?.scopeKey === scopeKey ? null : current);
+  }, [scopeKey]);
   const refreshAll = useCallback(() => {
+    if (scopeDenied) {
+      retryDeniedScope();
+      return;
+    }
     refreshInvestigation();
     refreshEvidence();
     refreshContributions();
     refreshLifecycle();
-  }, [refreshContributions, refreshEvidence, refreshInvestigation, refreshLifecycle]);
+  }, [
+    refreshContributions,
+    refreshEvidence,
+    refreshInvestigation,
+    refreshLifecycle,
+    retryDeniedScope,
+    scopeDenied,
+  ]);
+
+  const deniedState = scopeDenied && terminalFailure
+    ? { status: "failed" as const, error: terminalFailure.error }
+    : null;
 
   return {
-    investigation: investigation.state,
-    evidence: evidence.state,
-    contributions: contributions.state,
-    lifecycle: lifecycle.state,
+    investigation: deniedState ?? investigation.state,
+    evidence: deniedState ?? evidence.state,
+    contributions: deniedState ?? contributions.state,
+    lifecycle: deniedState ?? lifecycle.state,
+    scopeDenied,
+    denyScope,
     publishInvestigation,
     publishEvidence,
     publishLifecycle,
-    refreshInvestigation,
-    refreshEvidence,
-    refreshContributions,
-    refreshLifecycle,
+    refreshInvestigation: scopeDenied ? retryDeniedScope : refreshInvestigation,
+    refreshEvidence: scopeDenied ? retryDeniedScope : refreshEvidence,
+    refreshContributions: scopeDenied ? retryDeniedScope : refreshContributions,
+    refreshLifecycle: scopeDenied ? retryDeniedScope : refreshLifecycle,
     refreshAll,
   };
 }

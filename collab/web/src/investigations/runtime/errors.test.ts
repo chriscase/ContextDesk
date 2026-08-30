@@ -92,6 +92,28 @@ describe("runtime failure classification", () => {
     expect(JSON.stringify(classifyRequestException(new Error(secret)))).not.toContain(secret);
   });
 
+  it("bounds hostile exception name access without throwing", () => {
+    const getter = Object.defineProperty({}, "name", {
+      get() {
+        throw new Error("private getter detail");
+      },
+    });
+    const proxy = new Proxy({}, {
+      has() {
+        throw new Error("private proxy detail");
+      },
+    });
+    const prototypeProxy = new Proxy({}, {
+      getPrototypeOf() {
+        throw new Error("private prototype detail");
+      },
+    });
+
+    expect(classifyRequestException(getter)).toEqual({ kind: "unexpected" });
+    expect(classifyRequestException(proxy)).toEqual({ kind: "unexpected" });
+    expect(classifyRequestException(prototypeProxy)).toEqual({ kind: "unexpected" });
+  });
+
   it("recognizes explicit and platform-style cancellation before network errors", () => {
     expect(classifyRequestException(new TypeError("cancelled"), true)).toEqual({
       kind: "aborted",

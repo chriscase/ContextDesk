@@ -1,4 +1,4 @@
-import type { CaseV1 } from "@cd-collab/contracts";
+import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it } from "vitest";

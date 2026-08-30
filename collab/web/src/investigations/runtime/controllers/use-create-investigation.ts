@@ -1,4 +1,4 @@
-import type { CaseV1 } from "@cd-collab/contracts";
+import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   CreateInvestigationInput,
@@ -6,6 +6,12 @@ import type {
 } from "../gateway.js";
 import type { CommandOutcome, MutationState } from "../types.js";
 import { RequestSlot, type RequestToken } from "./request-slot.js";
+import {
+  emptyScopedMutationState,
+  mutationScopeKey,
+  scopedMutationState,
+  visibleMutationState,
+} from "./scoped-mutation-state.js";
 
 interface CreateScope {
   readonly identityKey: string;
@@ -49,7 +55,7 @@ function unexpected(): { status: "failed"; error: { kind: "unexpected" } } {
 export function useCreateInvestigation(
   options: UseCreateInvestigationOptions,
 ): CreateInvestigationController {
-  const [state, setState] = useState<MutationState<CaseV1>>({ status: "idle" });
+  const [storedState, setStoredState] = useState(() => emptyScopedMutationState<CaseV1>());
   const slotRef = useRef(new RequestSlot<CreateScope>());
   const activeRef = useRef<RequestToken<CreateScope> | null>(null);
   const mountedRef = useRef(true);
@@ -59,7 +65,7 @@ export function useCreateInvestigation(
   const invalidate = useCallback(() => {
     slotRef.current.invalidate();
     activeRef.current = null;
-    if (mountedRef.current) setState({ status: "idle" });
+    if (mountedRef.current) setStoredState(emptyScopedMutationState());
   }, []);
 
   useEffect(() => {
@@ -89,23 +95,28 @@ export function useCreateInvestigation(
       return { status: "ignored", reason: "not_ready" };
     }
 
+    const scope: CreateScope = {
+      identityKey: start.identityKey,
+      authorityKey: start.authorityKey,
+    };
+    const scopeKey = mutationScopeKey([scope.identityKey, scope.authorityKey]);
+
     const title = input.title.trim();
     if (title.length === 0) {
       const outcome: CommandOutcome<CaseV1> = {
         status: "failed",
         error: { kind: "input", field: "title", reason: "required" },
       };
-      setState({ status: "failed", error: outcome.error });
+      setStoredState(scopedMutationState(scopeKey, {
+        status: "failed",
+        error: outcome.error,
+      }));
       return outcome;
     }
 
-    const scope: CreateScope = {
-      identityKey: start.identityKey,
-      authorityKey: start.authorityKey,
-    };
     const token = slotRef.current.begin(scope);
     activeRef.current = token;
-    setState({ status: "running" });
+    setStoredState(scopedMutationState(scopeKey, { status: "running" }));
 
     const isCurrent = (): boolean => {
       const latest = latestRef.current;
@@ -127,7 +138,10 @@ export function useCreateInvestigation(
 
       if (!result.ok) {
         const outcome: CommandOutcome<CaseV1> = { status: "failed", error: result.error };
-        setState({ status: "failed", error: result.error });
+        setStoredState(scopedMutationState(scopeKey, {
+          status: "failed",
+          error: result.error,
+        }));
         return outcome;
       }
 
@@ -140,17 +154,26 @@ export function useCreateInvestigation(
       }
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
 
-      setState({ status: "succeeded", value: result.value });
+      setStoredState(scopedMutationState(scopeKey, {
+        status: "succeeded",
+        value: result.value,
+      }));
       return { status: "succeeded", value: result.value };
     } catch {
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
       const outcome = unexpected();
-      setState({ status: "failed", error: outcome.error });
+      setStoredState(scopedMutationState(scopeKey, {
+        status: "failed",
+        error: outcome.error,
+      }));
       return outcome;
     } finally {
       if (activeRef.current === token) activeRef.current = null;
     }
   }, []);
 
-  return { state, create };
+  const currentScopeKey = options.readOnly || !options.canCreate
+    ? null
+    : mutationScopeKey([options.identityKey, options.authorityKey]);
+  return { state: visibleMutationState(storedState, currentScopeKey), create };
 }
