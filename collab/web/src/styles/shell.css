@@ -277,6 +277,17 @@
   box-shadow: 0 10px 28px rgb(0 0 0 / 0.35);
 }
 
+.account__strategies { display: grid; gap: 0.5rem; margin: 0; padding: 0.6rem; border: 1px solid var(--border); border-radius: 0.45rem; }
+.account__strategies legend { padding: 0 0.25rem; color: var(--muted); font-size: 0.78rem; }
+.account__strategy-note { margin: 0; color: var(--muted); font-size: 0.72rem; line-height: 1.35; }
+.account__strategy-option { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 0.45rem; align-items: start; padding: 0.4rem; border-radius: 0.35rem; cursor: pointer; }
+.account__strategy-option:has(input:checked) { background: var(--accent-soft); }
+.account__strategy-option span { display: grid; gap: 0.1rem; }
+.account__strategy-preview { width: 1.35rem; height: 1.35rem; border: 1px solid var(--border); border-radius: 0.3rem; background: linear-gradient(145deg, var(--accent), var(--surface-deep)); }
+.account__strategy-preview[data-preview="strategy-war-room"] { background: linear-gradient(145deg, #7aa2f7, #302f62); }
+.account__strategy-preview[data-preview="strategy-investigation-first"] { background: linear-gradient(145deg, #f0b429, #2e6a58); }
+.account__strategy-option small { color: var(--muted); font-size: 0.68rem; line-height: 1.3; }
+
 .account__identity {
   margin: 0;
   font-size: 0.95rem;

@@ -34,6 +34,7 @@ import {
   type WorkLocation,
 } from "./app-location.js";
 import { Cases } from "./Cases.js";
+import { InvestigationFirst } from "./InvestigationFirst.js";
 import { Catalog } from "./Catalog.js";
 import { Entities } from "./Entities.js";
 import { Administration } from "./Administration.js";
@@ -43,6 +44,13 @@ import { SetupWizard } from "./SetupWizard.js";
 import { SelfProfilePanel } from "./SelfProfilePanel.js";
 import { BrandMark } from "./graphics.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
+import {
+  DEFAULT_UI_STRATEGY_ID,
+  UI_STRATEGIES,
+  resolveUiStrategy,
+  type UiStrategyDescriptor,
+  type UiStrategyId,
+} from "./ui-strategy.js";
 
 interface SessionView {
   username: string;
@@ -93,6 +101,21 @@ function savedTheme(): ThemeName {
   }
 }
 
+const UI_STRATEGY_STORAGE_PREFIX = "cd-ui-strategy:";
+
+function uiStrategyStorageKey(username: string): string {
+  return `${UI_STRATEGY_STORAGE_PREFIX}${encodeURIComponent(username)}`;
+}
+
+function savedUiStrategy(username: string): UiStrategyDescriptor {
+  try {
+    const preferred = window.localStorage?.getItem(uiStrategyStorageKey(username));
+    return resolveUiStrategy({ preferred });
+  } catch {
+    return resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID });
+  }
+}
+
 declare global {
   interface Window {
     __CONTEXTDESK_STATIC_READ_ONLY__?: boolean;
@@ -116,6 +139,8 @@ function AccountMenu(props: {
   profileActive: boolean;
   onOpenProfile: () => void;
   onThemeChange: (theme: ThemeName) => void;
+  strategy: UiStrategyDescriptor;
+  onStrategyChange: (strategy: UiStrategyId) => void;
   onSignOut: (() => void) | null;
 }) {
   const [open, setOpen] = useState(false);
@@ -197,6 +222,31 @@ function AccountMenu(props: {
               ))}
             </select>
           </label>
+          <fieldset className="account__strategies">
+            <legend>Investigation experience</legend>
+            <p className="account__strategy-note">
+              Presentation and navigation only. Your case data, evidence, permissions, and audit
+              history stay shared.
+            </p>
+            {UI_STRATEGIES.map((strategy) => (
+              <label key={strategy.id} className="account__strategy-option">
+                <input
+                  type="radio"
+                  name="ui-strategy"
+                  value={strategy.id}
+                  checked={props.strategy.id === strategy.id}
+                  onChange={() => props.onStrategyChange(strategy.id)}
+                />
+                <span className="account__strategy-preview" data-preview={strategy.previewToken} aria-hidden="true" />
+                <span>
+                  <strong>{strategy.name}</strong>
+                  <small>{strategy.description}</small>
+                  <small>{strategy.maturity === "reference" ? "Reference" : "Pilot"} · {strategy.status} · v{strategy.version}</small>
+                  <small>Compatible with {strategy.compatibility.schemaId} {strategy.compatibility.version}</small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
           {props.onSignOut ? (
             <button
               className="account__signout"
@@ -217,13 +267,26 @@ function AccountMenu(props: {
   );
 }
 
-function writeHistory(location: ShellLocation, mode: "push" | "replace") {
+function historyUiStrategyId(value: unknown): UiStrategyId | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = (value as { uiStrategyId?: unknown }).uiStrategyId;
+  return UI_STRATEGIES.some((strategy) => strategy.id === candidate)
+    ? candidate as UiStrategyId
+    : null;
+}
+
+function writeHistory(
+  location: ShellLocation,
+  mode: "push" | "replace",
+  uiStrategyId?: UiStrategyId,
+) {
   const url = historyUrl(location, window.location.pathname);
+  const state = uiStrategyId === undefined ? location : { ...location, uiStrategyId };
   try {
     if (mode === "replace") {
-      window.history.replaceState(location, "", url);
+      window.history.replaceState(state, "", url);
     } else {
-      window.history.pushState(location, "", url);
+      window.history.pushState(state, "", url);
     }
   } catch {
     // History can be unavailable in embedded shells; in-app state still works.
@@ -238,6 +301,13 @@ export function App() {
   const [ready, setReady] = useState(false);
   const [setupAvailable, setSetupAvailable] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
+  const [preferredUiStrategy, setPreferredUiStrategy] = useState<UiStrategyDescriptor>(() =>
+    resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }),
+  );
+  const [transientUiStrategyId, setTransientUiStrategyId] = useState<UiStrategyId | null>(() =>
+    historyUiStrategyId(window.history.state),
+  );
+  const [uiStrategyOwner, setUiStrategyOwner] = useState<string | null>(null);
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
@@ -263,10 +333,16 @@ export function App() {
   const mainRef = useRef<HTMLElement>(null);
   const sessionRef = useRef(session);
   sessionRef.current = session;
+  const uiStrategy = transientUiStrategyId
+    ? resolveUiStrategy({ preferred: transientUiStrategyId })
+    : preferredUiStrategy;
 
   useEffect(() => {
-    document.title = titleFor(location, focusedCaseTitle);
-  }, [location, focusedCaseTitle]);
+    document.title = titleFor(location, focusedCaseTitle, {
+      surfaceName: uiStrategy.name,
+      includeInvestigationStage: uiStrategy.id === DEFAULT_UI_STRATEGY_ID,
+    });
+  }, [location, focusedCaseTitle, uiStrategy.id, uiStrategy.name]);
 
   useEffect(() => {
     const invalidate = () => {
@@ -293,6 +369,29 @@ export function App() {
       // A blocked or unavailable browser store should not disable the app.
     }
   }, [theme]);
+
+  useEffect(() => {
+    if (!ready) return;
+    if (!session?.username) {
+      setUiStrategyOwner(null);
+      setPreferredUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
+      setTransientUiStrategyId(null);
+      return;
+    }
+    const changedAuthenticatedUser = uiStrategyOwner !== null && uiStrategyOwner !== session.username;
+    setUiStrategyOwner(session.username);
+    setPreferredUiStrategy(savedUiStrategy(session.username));
+    if (changedAuthenticatedUser) setTransientUiStrategyId(null);
+  }, [ready, session?.username, uiStrategyOwner]);
+
+  useEffect(() => {
+    if (!session?.username || uiStrategyOwner !== session.username) return;
+    try {
+      window.localStorage?.setItem(uiStrategyStorageKey(session.username), preferredUiStrategy.id);
+    } catch {
+      // A blocked browser store should not prevent the selected surface from working this session.
+    }
+  }, [session?.username, preferredUiStrategy.id, uiStrategyOwner]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/auth/me");
@@ -352,7 +451,11 @@ export function App() {
     };
   }, [refresh]);
 
-  const navigate = useCallback((next: ShellLocation, mode: "push" | "replace" = "push") => {
+  const navigate = useCallback((
+    next: ShellLocation,
+    mode: "push" | "replace" = "push",
+    historyStrategyId: UiStrategyId | undefined = transientUiStrategyId ?? undefined,
+  ) => {
     setLocation((current) => {
       if (sameLocation(current, next)) {
         return current;
@@ -360,8 +463,8 @@ export function App() {
       return next;
     });
     setNavOpen(false);
-    writeHistory(next, mode);
-  }, []);
+    writeHistory(next, mode, historyStrategyId);
+  }, [transientUiStrategyId]);
 
   const requestLeave = useCallback((
     action: { kind: "navigate"; next: ShellLocation; mode: "push" | "replace" } | { kind: "logout" },
@@ -439,6 +542,8 @@ export function App() {
         requestLeave({ kind: "navigate", next, mode: "push" });
         return;
       }
+      const historyStrategyId = historyUiStrategyId(event.state);
+      setTransientUiStrategyId(historyStrategyId);
       setLocation(next);
       setNavOpen(false);
     };
@@ -579,6 +684,7 @@ export function App() {
   const roles = session.roles;
   const capabilities = sessionCapabilities(session);
   const canWrite = !staticReadOnly && hasCapability(capabilities, "investigation:write");
+  const canLeadCases = !staticReadOnly && hasCapability(capabilities, "run:strategies");
   const canLeadCatalog =
     !staticReadOnly &&
     (hasCapability(capabilities, "run:strategies") ||
@@ -604,7 +710,7 @@ export function App() {
           <BrandMark />
           <h1 className="topbar__title">
             <span className="topbar__title-product">ContextDesk</span>{" "}
-            <span className="topbar__title-app">War Room</span>
+            <span className="topbar__title-app">{uiStrategy.name}</span>
           </h1>
         </div>
         <button
@@ -658,9 +764,15 @@ export function App() {
               displayName={session.displayName}
               roles={roles}
               theme={theme}
+              strategy={uiStrategy}
               profileActive={work.area === "profile"}
               onOpenProfile={() => guardedNavigate(PROFILE)}
               onThemeChange={setTheme}
+              onStrategyChange={(strategyId) => {
+                setPreferredUiStrategy(resolveUiStrategy({ preferred: strategyId }));
+                setTransientUiStrategyId(null);
+                writeHistory(locationRef.current, "replace");
+              }}
               onSignOut={staticReadOnly ? null : () => guardedLogout()}
             />
           </div>
@@ -698,46 +810,69 @@ export function App() {
         ) : (
           <>
             <section className="app__area" aria-label="Investigations" hidden={!inCasesArea}>
-              <Cases
-                onFocusedCaseTitle={setFocusedCaseTitle}
-                roles={roles}
-                capabilities={capabilities}
-                readOnly={staticReadOnly}
-                participant={{ username: session.username, roles }}
-                view={work.area === "investigations" ? "investigations" : "overview"}
-                focusCaseId={inCasesArea ? work.caseId : null}
-                stage={work.stage}
-                {...(work.focus ? { focus: work.focus } : {})}
-                startSignal={startSignal}
-                onOpenCase={(id) =>
-                  navigate({ area: "investigations", caseId: id, stage: "situation" })
-                }
-                onStageChange={(stage) =>
-                  isWorkLocation(locationRef.current) && locationRef.current.caseId
-                    ? navigate({
-                        area: "investigations",
-                        caseId: locationRef.current.caseId,
-                        stage,
-                      })
-                    : undefined
-                }
-                onDeepNavigate={(stage, focus) =>
-                  isWorkLocation(locationRef.current) && locationRef.current.caseId
-                    ? navigate({
-                        area: "investigations",
-                        caseId: locationRef.current.caseId,
-                        stage,
-                        focus,
-                      })
-                    : undefined
-                }
-                onActivityOpen={(caseId, stage, focus) =>
-                  navigate({ area: "investigations", caseId, stage, focus })
-                }
-                onExitFocus={(target) =>
-                  navigate({ area: target, caseId: null, stage: "situation" })
-                }
-              />
+              {uiStrategy.id === "investigation-first" ? (
+                <InvestigationFirst
+                  canWrite={canWrite}
+                  canLead={canLeadCases}
+                  readOnly={staticReadOnly}
+                  view={work.area === "investigations" ? "investigations" : "overview"}
+                  focusCaseId={inCasesArea ? work.caseId : null}
+                  stage={work.stage}
+                  {...(work.focus ? { focus: work.focus } : {})}
+                  startSignal={startSignal}
+                  onOpenCase={(id) => navigate({ area: "investigations", caseId: id, stage: "situation" })}
+                  onExitFocus={() => navigate({ area: "investigations", caseId: null, stage: "situation" })}
+                  onOpenAdvancedTools={(caseId, stage) => {
+                    // Specialist tools remain in the reference War Room. The
+                    // switch is explicit in the button label and preserves the
+                    // canonical case/stage URL and all shared record state.
+                    setTransientUiStrategyId(DEFAULT_UI_STRATEGY_ID);
+                    navigate({ area: "investigations", caseId, stage }, "push", DEFAULT_UI_STRATEGY_ID);
+                  }}
+                  onFocusedCaseTitle={setFocusedCaseTitle}
+                />
+              ) : (
+                <Cases
+                  onFocusedCaseTitle={setFocusedCaseTitle}
+                  roles={roles}
+                  capabilities={capabilities}
+                  readOnly={staticReadOnly}
+                  participant={{ username: session.username, roles }}
+                  view={work.area === "investigations" ? "investigations" : "overview"}
+                  focusCaseId={inCasesArea ? work.caseId : null}
+                  stage={work.stage}
+                  {...(work.focus ? { focus: work.focus } : {})}
+                  startSignal={startSignal}
+                  onOpenCase={(id) =>
+                    navigate({ area: "investigations", caseId: id, stage: "situation" })
+                  }
+                  onStageChange={(stage) =>
+                    isWorkLocation(locationRef.current) && locationRef.current.caseId
+                      ? navigate({
+                          area: "investigations",
+                          caseId: locationRef.current.caseId,
+                          stage,
+                        })
+                      : undefined
+                  }
+                  onDeepNavigate={(stage, focus) =>
+                    isWorkLocation(locationRef.current) && locationRef.current.caseId
+                      ? navigate({
+                          area: "investigations",
+                          caseId: locationRef.current.caseId,
+                          stage,
+                          focus,
+                        })
+                      : undefined
+                  }
+                  onActivityOpen={(caseId, stage, focus) =>
+                    navigate({ area: "investigations", caseId, stage, focus })
+                  }
+                  onExitFocus={(target) =>
+                    navigate({ area: target, caseId: null, stage: "situation" })
+                  }
+                />
+              )}
             </section>
             <section
               className="app__area"
