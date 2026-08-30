@@ -49,8 +49,7 @@
 
 .investigation-first__create,
 .investigation-first__browse,
-.investigation-first__detail,
-.investigation-first .lifecycle-panel { margin-top: 1rem; padding: 1.2rem; border: 1px solid var(--line-soft); border-radius: var(--radius-panel); background: var(--surface); }
+.investigation-first__detail { margin-top: 1rem; padding: 1.2rem; border: 1px solid var(--line-soft); border-radius: var(--radius-panel); background: var(--surface); }
 .investigation-first__section-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: 1rem; }
 .investigation-first__section-heading h2 { font-size: 1.25rem; }
 .investigation-first__section-heading p { margin: 0.35rem 0 0; font-size: 0.9rem; }
@@ -132,7 +131,6 @@
 .investigation-first__upload-grid { display: grid; grid-template-columns: 1.6fr 1fr 1fr; gap: 0.7rem; }
 .investigation-first__upload-grid label { display: grid; gap: 0.3rem; color: var(--muted); font-size: 0.78rem; }
 .investigation-first__upload-grid input, .investigation-first__upload-grid select { min-width: 0; padding: 0.42rem; border: 1px solid var(--border); border-radius: 0.4rem; background: var(--surface-input); color: var(--fg); }
-.investigation-first .lifecycle-panel { margin-top: 0.8rem; }
 .investigation-first__lifecycle { margin-top: 0.8rem; }
 .investigation-first__lifecycle > p { max-width: 60rem; color: var(--muted); line-height: 1.5; }
 .investigation-first__lifecycle > button,
@@ -160,4 +158,38 @@
   .investigation-first__evidence-meta { grid-template-columns: 1fr; }
   .investigation-first__form-actions,
   .investigation-first__confirm { align-items: stretch; flex-direction: column; }
+}
+
+/* Forced colors discards the token palette, so the surfaces that carry meaning
+   through background alone are restated with system colors and the focus ring
+   is drawn with Highlight rather than the forced accent. */
+@media (forced-colors: active) {
+  .investigation-first__list-item,
+  .investigation-first__card,
+  .investigation-first .status-pill,
+  .investigation-first .severity-pill {
+    border: 1px solid CanvasText;
+  }
+
+  .investigation-first button:focus-visible,
+  .investigation-first input:focus-visible,
+  .investigation-first textarea:focus-visible,
+  .investigation-first select:focus-visible,
+  .investigation-first summary:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+
+/* Investigation First declares no motion of its own, but it reuses shell and
+   login controls. Answer the reduced-motion preference explicitly for
+   everything inside the strategy rather than inheriting a shared transition. */
+@media (prefers-reduced-motion: reduce) {
+  .investigation-first,
+  .investigation-first *,
+  .investigation-first *::before,
+  .investigation-first *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

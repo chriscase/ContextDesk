@@ -209,16 +209,21 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   }
 
   function renderList() {
-    const busy = investigations.availability === "loading" || (investigations.availability === "available" && investigations.refresh === "loading");
+    // Without read authority the runtime requests nothing and the collection
+    // stays idle. Reporting that as loading would promise an arrival that the
+    // shared permission boundary has already refused.
+    const denied = !runtime.capabilities.canRead;
+    const busy = !denied && (investigations.availability === "loading" || (investigations.availability === "available" && investigations.refresh === "loading"));
     const countLabel = investigations.availability === "available"
       ? `${filteredCases.length} shown · ${cases.length} total`
-      : investigations.availability === "unavailable"
+      : denied || investigations.availability === "unavailable"
         ? "Count unavailable"
         : "Counting investigations…";
     return <section className="investigation-first__browse" aria-labelledby="investigation-first-browse-title" aria-busy={busy}>
       <div className="investigation-first__section-heading"><div><p className="investigation-first__eyebrow">Browse work</p><h2 id="investigation-first-browse-title" ref={browseHeadingRef} tabIndex={-1}>Investigations</h2><p>Open a record to see what is known, what is missing, and what can happen next.</p></div><span className="investigation-first__count" aria-live="polite">{countLabel}</span></div>
       <div className="investigation-first__filters"><label><span>Search</span><input className="login__input" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Title, product, build, or problem" aria-label="Search investigations" /></label><label><span>Status</span><select className="login__input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter investigations by status"><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label></div>
-      {investigations.availability === "idle" || investigations.availability === "loading" ? <p className="investigation-first__empty" role="status">Loading investigations…</p> : null}
+      {denied ? <p className="investigation-first__empty" role="status">Your current access does not include reading investigations, so this list is unavailable. No investigation data was requested.</p> : null}
+      {!denied && (investigations.availability === "idle" || investigations.availability === "loading") ? <p className="investigation-first__empty" role="status">Loading investigations…</p> : null}
       {investigations.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(investigations.error, "list")}</p><button type="button" onClick={runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
       {investigations.availability === "available" && investigations.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(investigations.refreshError, "list")}</p><button type="button" onClick={runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
       {investigations.availability === "available" && filteredCases.length === 0 ? <p className="investigation-first__empty">{runtime.capabilities.canCreate ? "No investigations match this view. Try a different search or create a new one." : "No investigations match this view. Try a different search."}</p> : null}

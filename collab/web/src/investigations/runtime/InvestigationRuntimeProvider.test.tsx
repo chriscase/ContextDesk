@@ -8,8 +8,10 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayResult, InvestigationGateway } from "./gateway.js";
 import {
+  InvestigationRuntimeGatewayHarness,
   InvestigationRuntimeProvider,
   type InvestigationRuntime,
+  type InvestigationRuntimeProviderProps,
   useInvestigationRuntime,
 } from "./InvestigationRuntimeProvider.js";
 import {
@@ -54,6 +56,21 @@ function makeGateway(overrides: Partial<InvestigationGateway> = {}): Investigati
   };
 }
 
+/**
+ * Runtime V1 offers strategies no transport prop, so every mount pairs the
+ * public provider with the internal harness that supplies its gateway.
+ */
+function ProviderUnderTest({
+  gateway,
+  ...props
+}: InvestigationRuntimeProviderProps & { readonly gateway: InvestigationGateway }) {
+  return (
+    <InvestigationRuntimeGatewayHarness gateway={gateway}>
+      <InvestigationRuntimeProvider {...props} />
+    </InvestigationRuntimeGatewayHarness>
+  );
+}
+
 let observedRuntime: InvestigationRuntime | null = null;
 
 afterEach(() => {
@@ -92,9 +109,9 @@ describe("InvestigationRuntimeProvider", () => {
       gateway,
     } as const;
     const view = render(
-      <InvestigationRuntimeProvider {...common}>
+      <ProviderUnderTest {...common}>
         <RuntimeProbe label="strategy one" />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
 
     await waitFor(() => {
@@ -106,9 +123,9 @@ describe("InvestigationRuntimeProvider", () => {
     const lifecycleCommand = currentRuntime().commands.applyLifecycle;
 
     view.rerender(
-      <InvestigationRuntimeProvider {...common}>
+      <ProviderUnderTest {...common}>
         <RuntimeProbe label="strategy two" />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
 
     expect(screen.getByText("strategy two")).toBeTruthy();
@@ -139,9 +156,9 @@ describe("InvestigationRuntimeProvider", () => {
       gateway,
     } as const;
     const view = render(
-      <InvestigationRuntimeProvider {...common}>
+      <ProviderUnderTest {...common}>
         <RuntimeProbe label="strategy one" />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
 
@@ -206,9 +223,9 @@ describe("InvestigationRuntimeProvider", () => {
     }).toThrow();
 
     view.rerender(
-      <InvestigationRuntimeProvider {...common}>
+      <ProviderUnderTest {...common}>
         <RuntimeProbe label="strategy two" />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     expect(screen.getByText("strategy two")).toBeTruthy();
     const second = currentRuntime().resources.investigation;
@@ -231,19 +248,19 @@ describe("InvestigationRuntimeProvider", () => {
       gateway,
     } as const;
     const view = render(
-      <InvestigationRuntimeProvider {...common} focusCaseId={null}>
+      <ProviderUnderTest {...common} focusCaseId={null}>
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     expect(currentRuntime().commands.createInvestigation).not.toBeNull();
 
     view.rerender(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         {...common}
         focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     expect(currentRuntime().commands.createInvestigation).toBeNull();
   });
@@ -251,7 +268,7 @@ describe("InvestigationRuntimeProvider", () => {
   it("does no transport work and exposes no commands without read authority", async () => {
     const gateway = makeGateway();
     render(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="viewer"
         authorityKey="viewer-authority-v1"
         capabilities={["investigation:write", "run:strategies"]}
@@ -263,7 +280,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={gateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
 
     await act(async () => undefined);
@@ -284,7 +301,7 @@ describe("InvestigationRuntimeProvider", () => {
   it("keeps reads available but removes every mutation command in read-only mode", async () => {
     const gateway = makeGateway();
     render(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="lead"
         authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
@@ -296,7 +313,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={gateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
 
     await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
@@ -327,7 +344,7 @@ describe("InvestigationRuntimeProvider", () => {
       }),
     });
     render(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="lead"
         authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
@@ -339,7 +356,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={gateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
     expect(currentRuntime().commands.uploadEvidence).not.toBeNull();
@@ -368,7 +385,7 @@ describe("InvestigationRuntimeProvider", () => {
       }),
     });
     render(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="lead"
         authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
@@ -380,7 +397,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={gateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
 
@@ -432,16 +449,16 @@ describe("InvestigationRuntimeProvider", () => {
       gateway,
     } as const;
     const view = render(
-      <InvestigationRuntimeProvider {...common} focusCaseId={null}>
+      <ProviderUnderTest {...common} focusCaseId={null}>
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
 
     view.rerender(
-      <InvestigationRuntimeProvider {...common} focusCaseId={created.id}>
+      <ProviderUnderTest {...common} focusCaseId={created.id}>
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(gateway.listInvestigations).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
@@ -489,16 +506,16 @@ describe("InvestigationRuntimeProvider", () => {
       gateway,
     } as const;
     const view = render(
-      <InvestigationRuntimeProvider {...common} focusCaseId={null}>
+      <ProviderUnderTest {...common} focusCaseId={null}>
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
 
     view.rerender(
-      <InvestigationRuntimeProvider {...common} focusCaseId={created.id}>
+      <ProviderUnderTest {...common} focusCaseId={created.id}>
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("failed"));
     await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
@@ -519,7 +536,7 @@ describe("InvestigationRuntimeProvider", () => {
       } as const)),
     });
     render(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="lead"
         authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
@@ -531,7 +548,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={gateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
 
@@ -572,7 +589,7 @@ describe("InvestigationRuntimeProvider", () => {
       }),
     });
     render(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="lead"
         authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
@@ -584,7 +601,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={gateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(gateway.listInvestigations).toHaveBeenCalledTimes(1));
     expect(currentRuntime().resources.investigations.status).toBe("loading");
@@ -636,7 +653,7 @@ describe("InvestigationRuntimeProvider", () => {
       uploadEvidence: vi.fn(async () => succeeded(upload)),
     });
     render(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="lead"
         authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
@@ -648,7 +665,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={gateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.evidence.status).toBe("ready"));
 
@@ -724,7 +741,7 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycleAction: vi.fn(async () => succeeded(success)),
     });
     const view = render(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="lead"
         authorityKey="lead-authority-v1"
         capabilities={FULL_CAPABILITIES}
@@ -736,7 +753,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={gateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
 
@@ -780,7 +797,7 @@ describe("InvestigationRuntimeProvider", () => {
       } as const)),
     });
     view.rerender(
-      <InvestigationRuntimeProvider
+      <ProviderUnderTest
         identityKey="lead-2"
         authorityKey="lead-2-authority-v1"
         capabilities={FULL_CAPABILITIES}
@@ -792,7 +809,7 @@ describe("InvestigationRuntimeProvider", () => {
         gateway={changedGateway}
       >
         <RuntimeProbe />
-      </InvestigationRuntimeProvider>,
+      </ProviderUnderTest>,
     );
     await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
     let changedOutcome: Awaited<ReturnType<NonNullable<InvestigationRuntime["commands"]["applyLifecycle"]>>> | undefined;
@@ -845,7 +862,7 @@ describe("InvestigationRuntimeProvider", () => {
             change authority
           </button>
           <button type="button" onClick={() => setActive(false)}>leave</button>
-          <InvestigationRuntimeProvider
+          <ProviderUnderTest
             identityKey={identityKey}
             authorityKey={authorityKey}
             capabilities={FULL_CAPABILITIES}
@@ -857,7 +874,7 @@ describe("InvestigationRuntimeProvider", () => {
             gateway={gateway}
           >
             <RuntimeProbe />
-          </InvestigationRuntimeProvider>
+          </ProviderUnderTest>
         </>
       );
     }

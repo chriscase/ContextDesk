@@ -103,12 +103,33 @@ export interface InvestigationRuntimeProviderProps {
   readonly focusCaseId: string | null;
   readonly isInvestigationLocation: boolean;
   readonly onOpenCreated: (investigationId: string) => void;
-  /** Test-only transport injection. Production callers should omit it. */
-  readonly gateway?: InvestigationGateway;
   readonly children: ReactNode;
 }
 
 const InvestigationRuntimeContext = createContext<InvestigationRuntime | null>(null);
+const InjectedGatewayContext = createContext<InvestigationGateway | null>(null);
+
+/**
+ * The only transport seam, reserved for the runtime's own tests and the runtime
+ * testkit. It is deliberately absent from `runtime/public.ts`, and strategies
+ * may import nothing else, so a presentation layer can neither name nor inject
+ * transport. Production mounts no harness and always resolves the real gateway.
+ *
+ * @internal
+ */
+export function InvestigationRuntimeGatewayHarness({
+  gateway,
+  children,
+}: {
+  readonly gateway: InvestigationGateway;
+  readonly children: ReactNode;
+}) {
+  return (
+    <InjectedGatewayContext.Provider value={gateway}>
+      {children}
+    </InjectedGatewayContext.Provider>
+  );
+}
 
 /**
  * Mounts browser orchestration above replaceable strategy presentations.
@@ -123,9 +144,9 @@ export function InvestigationRuntimeProvider({
   focusCaseId,
   isInvestigationLocation,
   onOpenCreated,
-  gateway = investigationGateway,
   children,
 }: InvestigationRuntimeProviderProps) {
+  const gateway = useContext(InjectedGatewayContext) ?? investigationGateway;
   const projected = projectInvestigationCapabilities(rawCapabilities, readOnly);
   const capabilities = useMemo<InvestigationRuntimeCapabilities>(() => Object.freeze({
     canRead: projected.canRead,

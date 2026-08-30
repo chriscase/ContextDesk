@@ -10,48 +10,29 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationFirst } from "./InvestigationFirst.js";
 import { InvestigationRuntimeProvider } from "./investigations/runtime/public.js";
-import type {
-  GatewayResult,
-  InvestigationGateway,
-} from "./investigations/runtime/gateway.js";
 import {
+  createDeferred,
+  createInvestigationGatewayDouble,
+  gatewayOk,
+  gatewayUnavailable,
+  InvestigationRuntimeGatewayHarness,
   makeArchiveAllowedLifecycle,
-  makeCaseList,
-  makeContributionList,
-  makeEvidenceList,
   makeEvidenceUploadSuccess,
   makePopulatedCase,
   makeRestoreAllowedLifecycle,
   makeSparseImportedCase,
   RUNTIME_FIXTURE_IDS,
+  VIEWER_CAPABILITY_FIXTURE,
+  type GatewayResult,
+  type InvestigationGateway,
 } from "./investigations/runtime/testkit/index.js";
-import { createDeferred } from "./investigations/runtime/testkit/promises.js";
 import type { InvestigationStrategyShellProps } from "./investigations/strategies/contract.js";
 
 const FULL_CAPABILITIES = ["investigation:read", "investigation:write", "run:strategies"] as const;
 
-function succeeded<T>(value: T): GatewayResult<T> { return { ok: true, value }; }
-function unexpected<T>(): Promise<GatewayResult<T>> { return Promise.resolve({ ok: false, error: { kind: "unexpected" } }); }
-function unavailable<T>(): GatewayResult<T> { return { ok: false, error: { kind: "unavailable", status: 503 } }; }
-
 function makeLifecycle(investigation: CaseV1): InvestigationLifecycleV1 {
   const template = investigation.status === "archived" ? makeRestoreAllowedLifecycle() : makeArchiveAllowedLifecycle();
   return { ...template, investigationId: investigation.id, status: investigation.status };
-}
-
-function makeGateway(overrides: Partial<InvestigationGateway> = {}): InvestigationGateway {
-  const populated = makePopulatedCase();
-  return {
-    listInvestigations: vi.fn(async () => succeeded(makeCaseList().cases)),
-    getInvestigation: vi.fn(async () => succeeded(populated)),
-    createInvestigation: vi.fn(() => unexpected<CaseV1>()),
-    listEvidence: vi.fn(async () => succeeded(makeEvidenceList().artifacts)),
-    listContributions: vi.fn(async () => succeeded(makeContributionList().contributions)),
-    uploadEvidence: vi.fn(() => unexpected<never>()),
-    getLifecycle: vi.fn(async () => succeeded(makeLifecycle(populated))),
-    applyLifecycleAction: vi.fn(() => unexpected<never>()),
-    ...overrides,
-  };
 }
 
 const shellDefaults: InvestigationStrategyShellProps = {
@@ -68,44 +49,33 @@ function renderStrategy(options: {
   readOnly?: boolean;
   shell?: Partial<InvestigationStrategyShellProps>;
 } = {}) {
-  const gateway = options.gateway ?? makeGateway();
+  const gateway = options.gateway ?? createInvestigationGatewayDouble();
   const shell = { ...shellDefaults, ...options.shell };
   const capabilities = options.capabilities ?? FULL_CAPABILITIES;
   const readOnly = options.readOnly ?? false;
-  const view = render(
-    <InvestigationRuntimeProvider
-      identityKey="alice"
-      authorityKey="alice-authority-v1"
-      capabilities={capabilities}
-      readOnly={readOnly}
-      active
-      focusCaseId={shell.focusCaseId}
-      isInvestigationLocation
-      onOpenCreated={shell.onOpenCase}
-      gateway={gateway}
-    >
-      <InvestigationFirst {...shell} />
-    </InvestigationRuntimeProvider>,
+  // Runtime V1 hands strategies no transport seam, so the testkit harness
+  // supplies the double from outside the public provider contract.
+  const mount = (nextShell: InvestigationStrategyShellProps) => (
+    <InvestigationRuntimeGatewayHarness gateway={gateway}>
+      <InvestigationRuntimeProvider
+        identityKey="alice"
+        authorityKey="alice-authority-v1"
+        capabilities={capabilities}
+        readOnly={readOnly}
+        active
+        focusCaseId={nextShell.focusCaseId}
+        isInvestigationLocation
+        onOpenCreated={nextShell.onOpenCase}
+      >
+        <InvestigationFirst {...nextShell} />
+      </InvestigationRuntimeProvider>
+    </InvestigationRuntimeGatewayHarness>
   );
+  const view = render(mount(shell));
   return {
     gateway,
     rerender(shellOverrides: Partial<InvestigationStrategyShellProps>) {
-      const nextShell = { ...shell, ...shellOverrides };
-      view.rerender(
-        <InvestigationRuntimeProvider
-          identityKey="alice"
-          authorityKey="alice-authority-v1"
-          capabilities={capabilities}
-          readOnly={readOnly}
-          active
-          focusCaseId={nextShell.focusCaseId}
-          isInvestigationLocation
-          onOpenCreated={nextShell.onOpenCase}
-          gateway={gateway}
-        >
-          <InvestigationFirst {...nextShell} />
-        </InvestigationRuntimeProvider>,
-      );
+      view.rerender(mount({ ...shell, ...shellOverrides }));
     },
   };
 }
@@ -131,7 +101,7 @@ describe("Investigation First Runtime V1 presentation", () => {
 
   it("creates exactly once and lets the provider open the server-confirmed identity", async () => {
     const created = { ...makeSparseImportedCase(), id: "case-server-id", title: "New investigation" };
-    const gateway = makeGateway({ createInvestigation: vi.fn(async () => succeeded(created)) });
+    const gateway = createInvestigationGatewayDouble({ createInvestigation: vi.fn(async () => gatewayOk(created)) });
     const onOpenCase = vi.fn();
     renderStrategy({ gateway, shell: { onOpenCase } });
     await screen.findByRole("heading", { name: "Create an investigation" });
@@ -145,11 +115,11 @@ describe("Investigation First Runtime V1 presentation", () => {
 
   it("renders a sparse imported detail and preserves the explicit technical handoff", async () => {
     const sparse = makeSparseImportedCase();
-    const gateway = makeGateway({
-      getInvestigation: vi.fn(async () => succeeded(sparse)),
-      listEvidence: vi.fn(async () => succeeded([])),
-      listContributions: vi.fn(async () => succeeded([])),
-      getLifecycle: vi.fn(async () => succeeded(makeLifecycle(sparse))),
+    const gateway = createInvestigationGatewayDouble({
+      getInvestigation: vi.fn(async () => gatewayOk(sparse)),
+      listEvidence: vi.fn(async () => gatewayOk([])),
+      listContributions: vi.fn(async () => gatewayOk([])),
+      getLifecycle: vi.fn(async () => gatewayOk(makeLifecycle(sparse))),
     });
     const onOpenAdvancedTools = vi.fn();
     renderStrategy({ gateway, shell: { focusCaseId: sparse.id, onOpenAdvancedTools } });
@@ -161,7 +131,7 @@ describe("Investigation First Runtime V1 presentation", () => {
   });
 
   it("keeps evidence visible when annotations fail independently", async () => {
-    const gateway = makeGateway({ listContributions: vi.fn(async () => unavailable<readonly ContributionV1[]>()) });
+    const gateway = createInvestigationGatewayDouble({ listContributions: vi.fn(async () => gatewayUnavailable<readonly ContributionV1[]>()) });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     expect(await screen.findByText("checkout-timeout.log")).toBeTruthy();
     expect(screen.getAllByText("Annotation not available").length).toBeGreaterThan(0);
@@ -171,20 +141,20 @@ describe("Investigation First Runtime V1 presentation", () => {
 
   it("describes annotations as loading until their independent lane settles", async () => {
     const contributions = createDeferred<GatewayResult<readonly ContributionV1[]>>();
-    const gateway = makeGateway({ listContributions: vi.fn(() => contributions.promise) });
+    const gateway = createInvestigationGatewayDouble({ listContributions: vi.fn(() => contributions.promise) });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     expect(await screen.findByText("checkout-timeout.log")).toBeTruthy();
     expect(screen.getByText("Loading evidence annotations…")).toBeTruthy();
     expect(screen.getAllByText("Annotation loading…").length).toBeGreaterThan(0);
     expect(screen.queryByText("Annotation not available")).toBeNull();
 
-    contributions.resolve(succeeded([]));
+    contributions.resolve(gatewayOk([]));
     await waitFor(() => expect(screen.queryByText("Loading evidence annotations…")).toBeNull());
     expect(screen.getAllByText("Annotation not available").length).toBeGreaterThan(0);
   });
 
   it("never describes a failed evidence inventory as empty", async () => {
-    const gateway = makeGateway({ listEvidence: vi.fn(async () => unavailable<readonly ArtifactV1[]>()) });
+    const gateway = createInvestigationGatewayDouble({ listEvidence: vi.fn(async () => gatewayUnavailable<readonly ArtifactV1[]>()) });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     expect(await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" })).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("Evidence inventory could not be loaded");
@@ -195,7 +165,7 @@ describe("Investigation First Runtime V1 presentation", () => {
 
   it("submits one file intent and leaves encoding and limits to the runtime controller", async () => {
     const upload = makeEvidenceUploadSuccess();
-    const gateway = makeGateway({ uploadEvidence: vi.fn(async () => succeeded(upload)) });
+    const gateway = createInvestigationGatewayDouble({ uploadEvidence: vi.fn(async () => gatewayOk(upload)) });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
     const file = new File(["hello"], "notes.txt", { type: "text/plain" });
@@ -215,7 +185,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     const archived = { ...makePopulatedCase(), status: "archived" as const };
     renderStrategy({
       readOnly: true,
-      gateway: makeGateway({ getInvestigation: vi.fn(async () => succeeded(archived)), getLifecycle: vi.fn(async () => succeeded(makeLifecycle(archived))) }),
+      gateway: createInvestigationGatewayDouble({ getInvestigation: vi.fn(async () => gatewayOk(archived)), getLifecycle: vi.fn(async () => gatewayOk(makeLifecycle(archived))) }),
       shell: { focusCaseId: archived.id },
     });
     await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
@@ -223,13 +193,27 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(screen.getByText("Archiving and restoring are unavailable in this view.")).toBeTruthy();
   });
 
+  it("offers a viewer browsing the list no create heading and no submit control", async () => {
+    renderStrategy({
+      capabilities: VIEWER_CAPABILITY_FIXTURE.capabilities,
+      readOnly: VIEWER_CAPABILITY_FIXTURE.staticReadOnly,
+      shell: { focusCaseId: null },
+    });
+    await screen.findByRole("button", { name: /Checkout latency/ });
+    expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create investigation" })).toBeNull();
+    expect(screen.queryByPlaceholderText("Short investigation title")).toBeNull();
+    expect(document.querySelectorAll("button[type=\"submit\"]")).toHaveLength(0);
+    expect(document.querySelectorAll("form")).toHaveLength(0);
+  });
+
   it("shows loading, distinguishes not-found, and retries the focused read", async () => {
     const first = createDeferred<GatewayResult<CaseV1>>();
     let attempts = 0;
-    const gateway = makeGateway({
+    const gateway = createInvestigationGatewayDouble({
       getInvestigation: vi.fn(() => {
         attempts += 1;
-        return attempts === 1 ? first.promise : Promise.resolve(succeeded(makePopulatedCase()));
+        return attempts === 1 ? first.promise : Promise.resolve(gatewayOk(makePopulatedCase()));
       }),
     });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
@@ -245,10 +229,10 @@ describe("Investigation First Runtime V1 presentation", () => {
 
   it("keeps a failed browse load distinct from an empty result and retries it", async () => {
     let attempts = 0;
-    const gateway = makeGateway({
+    const gateway = createInvestigationGatewayDouble({
       listInvestigations: vi.fn(async () => {
         attempts += 1;
-        return attempts === 1 ? unavailable<readonly CaseV1[]>() : succeeded([]);
+        return attempts === 1 ? gatewayUnavailable<readonly CaseV1[]>() : gatewayOk([]);
       }),
     });
     renderStrategy({ gateway });
@@ -259,6 +243,20 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry loading investigations" }));
     expect(await screen.findByText("No investigations match this view. Try a different search or create a new one.")).toBeTruthy();
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
+  });
+
+  it("calls the list unavailable rather than loading when read authority is absent", async () => {
+    const gateway = createInvestigationGatewayDouble();
+    renderStrategy({ gateway, capabilities: ["investigation:write", "run:strategies"] });
+    const notice = await screen.findByText(/does not include reading investigations/);
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.textContent).toContain("No investigation data was requested.");
+    expect(screen.queryByText("Loading investigations…")).toBeNull();
+    expect(screen.queryByText("Counting investigations…")).toBeNull();
+    expect(screen.getByText("Count unavailable")).toBeTruthy();
+    const browse = screen.getByRole("heading", { name: "Investigations" }).closest("section");
+    expect(browse?.getAttribute("aria-busy")).toBe("false");
+    expect(gateway.listInvestigations).not.toHaveBeenCalled();
   });
 
   it("keeps selection case-scoped and associates the disabled trash explanation", async () => {
@@ -290,14 +288,14 @@ describe("Investigation First Runtime V1 presentation", () => {
     };
     const lifecycleRefresh = createDeferred<GatewayResult<InvestigationLifecycleV1>>();
     let lifecycleReads = 0;
-    const gateway = makeGateway({
+    const gateway = createInvestigationGatewayDouble({
       getLifecycle: vi.fn(() => {
         lifecycleReads += 1;
         return lifecycleReads === 1
-          ? Promise.resolve(succeeded(makeLifecycle(current)))
+          ? Promise.resolve(gatewayOk(makeLifecycle(current)))
           : lifecycleRefresh.promise;
       }),
-      applyLifecycleAction: vi.fn(async () => succeeded(success)),
+      applyLifecycleAction: vi.fn(async () => gatewayOk(success)),
     });
     renderStrategy({ gateway, shell: { focusCaseId: current.id } });
     await screen.findByRole("button", { name: "Archive investigation" });
@@ -309,7 +307,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
     await act(async () => {
-      lifecycleRefresh.resolve(unavailable<InvestigationLifecycleV1>());
+      lifecycleRefresh.resolve(gatewayUnavailable<InvestigationLifecycleV1>());
     });
     expect(await screen.findByRole("button", { name: "Retry lifecycle information" })).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("Lifecycle information could not be loaded");
