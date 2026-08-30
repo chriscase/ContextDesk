@@ -2,6 +2,13 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CaseDiscussion } from "./CaseDiscussion.js";
 import { Cases, activityLabel } from "./Cases.js";
+import type { LifecyclePanelProps, LifecycleView } from "./LifecyclePanel.js";
+import type {
+  CommandOutcome,
+  InvestigationLifecycleActionSuccessV1,
+  LifecycleAction,
+} from "./investigations/runtime/public.js";
+import { makePopulatedCase } from "./investigations/runtime/testkit/fixtures.js";
 
 afterEach(() => {
   cleanup();
@@ -36,6 +43,71 @@ const fixtureCases = [
 ];
 
 const ACTIVITY_CASE_ID = "11111111-1111-4111-8111-111111111111";
+
+const LIFECYCLE_DELETION = {
+  supported: false as const,
+  detail: "Investigations are archived, never deleted.",
+  alternatives: ["archive"] as const,
+};
+
+function lifecycleView(action: LifecycleAction): LifecycleView {
+  const restoring = action === "restore";
+  return {
+    schemaId: "cd-collab.investigation_lifecycle.v1",
+    investigationId: "c1",
+    status: restoring ? "archived" : "open",
+    legalHold: false,
+    archive: restoring
+      ? {
+          allowed: false,
+          action: "archive",
+          reason: "already_archived",
+          detail: "This investigation is already archived.",
+        }
+      : { allowed: true, action: "archive", targetStatus: "archived" },
+    restore: restoring
+      ? { allowed: true, action: "restore", targetStatus: "open" }
+      : {
+          allowed: false,
+          action: "restore",
+          reason: "not_archived",
+          detail: "This investigation is not archived.",
+        },
+    restoreTarget: "open",
+    deletion: LIFECYCLE_DELETION,
+  };
+}
+
+function lifecycleSuccess(
+  action: LifecycleAction,
+): CommandOutcome<InvestigationLifecycleActionSuccessV1> {
+  const appliedStatus = action === "archive" ? "archived" : "open";
+  return {
+    status: "succeeded",
+    value: {
+      schemaId: "cd-collab.investigation_lifecycle_action_success.v1",
+      investigationId: "c1",
+      action,
+      previousStatus: action === "archive" ? "open" : "archived",
+      appliedStatus,
+      case: { ...makePopulatedCase(), id: "c1", status: appliedStatus },
+    },
+  };
+}
+
+function lifecycleBinding(
+  action: LifecycleAction,
+  applyAction: NonNullable<LifecyclePanelProps["applyAction"]>,
+): Omit<LifecyclePanelProps, "onChanged"> {
+  return {
+    lifecycle: { status: "ready", value: lifecycleView(action) },
+    lifecycleMutation: { status: "idle" },
+    canManage: true,
+    readOnly: false,
+    applyAction,
+    retryLifecycle: vi.fn(),
+  };
+}
 
 function stubCaseFetch(options?: {
   cases?: unknown[];
@@ -1412,8 +1484,8 @@ describe("focused investigation view", () => {
     expect(screen.queryByRole("heading", { name: "Experiment lab" })).toBeNull();
   });
 
-  it("does not expose lifecycle mutations from a decision-only capability", async () => {
-    stubCaseFetch();
+  it("does not infer lifecycle authority from a decision-only capability", async () => {
+    const stub = stubCaseFetch();
     render(<Cases roles={["case-lead"]} capabilities={["decision:accept"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
     const stageNav = await screen.findByRole("navigation", { name: "Investigation stages" });
@@ -1422,8 +1494,58 @@ describe("focused investigation view", () => {
     expect(screen.queryByRole("button", { name: "Update status" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
     expect(screen.getByText("Only a case lead can change the case status.")).toBeTruthy();
-    expect(screen.getByText("Only a case lead can archive or restore this investigation.")).toBeTruthy();
+    expect(document.querySelector(".lifecycle-panel")).toBeNull();
+    expect(stub.mock.calls.some(([input]) => String(input).includes("/lifecycle"))).toBe(false);
   });
+
+  it.each(["archive", "restore"] as const)(
+    "uses the injected lifecycle binding for %s and refreshes after success",
+    async (action) => {
+      const applyAction = vi.fn(async (requested: LifecycleAction) => lifecycleSuccess(requested));
+      const stub = stubCaseFetch();
+      render(
+        <Cases
+          roles={["case-lead"]}
+          capabilities={["decision:accept"]}
+          lifecycleBinding={lifecycleBinding(action, applyAction)}
+        />,
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+      const stageNav = await screen.findByRole("navigation", { name: "Investigation stages" });
+      fireEvent.click(within(stageNav).getByRole("button", { name: /Decide/ }));
+      expect(await screen.findByRole("heading", { name: "Decision journal" })).toBeTruthy();
+
+      const countRequest = (url: string) =>
+        stub.mock.calls.filter(([input]) => String(input) === url).length;
+      await waitFor(() => {
+        expect(countRequest("/api/cases")).toBeGreaterThan(0);
+        expect(countRequest("/api/investigation-activity?limit=30")).toBeGreaterThan(0);
+      });
+      const caseReadsBefore = countRequest("/api/cases");
+      const activityReadsBefore = countRequest("/api/investigation-activity?limit=30");
+
+      fireEvent.click(screen.getByRole("button", {
+        name: action === "archive" ? "Archive investigation" : "Restore investigation",
+      }));
+      fireEvent.click(screen.getByRole("button", {
+        name: action === "archive" ? "Yes, archive it" : "Yes, restore to open",
+      }));
+
+      await waitFor(() => expect(applyAction).toHaveBeenCalledWith(action));
+      expect(applyAction).toHaveBeenCalledTimes(1);
+      await waitFor(() => {
+        expect(countRequest("/api/cases")).toBeGreaterThan(caseReadsBefore);
+        expect(countRequest("/api/investigation-activity?limit=30")).toBeGreaterThan(
+          activityReadsBefore,
+        );
+      });
+      expect(
+        stub.mock.calls.some(([input, init]) =>
+          String(input).endsWith("/status") && init?.method === "POST"),
+      ).toBe(false);
+      expect(stub.mock.calls.some(([input]) => String(input).includes("/lifecycle"))).toBe(false);
+    },
+  );
 
   it("reviews unresolved log time beside Capture intake and applies only the exact preview", async () => {
     const fingerprint = "a".repeat(64);

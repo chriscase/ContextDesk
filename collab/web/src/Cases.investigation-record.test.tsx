@@ -252,16 +252,20 @@ describe("resolving an investigation", () => {
     ).toBeTruthy();
   });
 
-  it("leaves monitoring and archived as plain status changes", async () => {
+  it("keeps ordinary monitoring updates on status and excludes archive", async () => {
     const posted: Recorded[] = [];
     stubFetch({ posted });
     render(<Cases roles={["case-lead"]} />);
     await openDecideStage();
-    fireEvent.change(screen.getByLabelText("Case status"), { target: { value: "archived" } });
+    expect(screen.queryByRole("option", { name: "archived" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Case status"), { target: { value: "monitoring" } });
     fireEvent.click(screen.getByRole("button", { name: "Update status" }));
     await waitFor(() =>
       expect(posted.filter((row) => row.url.endsWith("/status"))).toHaveLength(1),
     );
+    expect(posted.find((row) => row.url.endsWith("/status"))?.body).toEqual({
+      status: "monitoring",
+    });
     expect(screen.queryByRole("form", { name: "Record why this is resolved" })).toBeNull();
   });
 });

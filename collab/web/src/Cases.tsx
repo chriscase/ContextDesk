@@ -29,7 +29,7 @@ import {
   statusCounts as investigationStatusCounts,
   visibleInvestigations,
 } from "./investigation-search.js";
-import { LifecyclePanel } from "./LifecyclePanel.js";
+import { LifecyclePanel, type LifecyclePanelProps } from "./LifecyclePanel.js";
 import { ResolutionForm } from "./ResolutionForm.js";
 import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
 import { loadEntities, type EntityRow } from "./Entities.js";
@@ -757,6 +757,7 @@ export function Cases(props: {
   onActivityOpen?: (caseId: string, stage: StageId, focus: WorkFocus) => void;
   onExitFocus?: (target: "overview" | "investigations") => void;
   onFocusedCaseTitle?: (title: string | null) => void;
+  lifecycleBinding?: Omit<LifecyclePanelProps, "onChanged">;
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
@@ -2834,12 +2835,9 @@ export function Cases(props: {
               ) : !readOnly && current.status !== "archived" ? (
                 <p className="triage-step__note">Only a case lead can change the case status.</p>
               ) : null}
-              {!readOnly ? (
+              {props.lifecycleBinding ? (
                 <LifecyclePanel
-                  caseId={current.id}
-                  status={current.status}
-                  canLead={canRunStrategies}
-                  readOnly={readOnly}
+                  {...props.lifecycleBinding}
                   onChanged={() => Promise.all([refresh(), refreshActivity()]).then(() => undefined)}
                 />
               ) : null}
