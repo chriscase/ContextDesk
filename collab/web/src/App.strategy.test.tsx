@@ -125,6 +125,7 @@ describe("strategy selection in the shell", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /Alice/ }));
     fireEvent.click(screen.getByRole("radio", { name: /Investigation First/ }));
+    expect(screen.getByText(/This choice applies inside Investigations; Overview remains the War Room activity dashboard\./u)).toBeTruthy();
     expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room");
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
