@@ -3,7 +3,7 @@
 ## Status
 
 **Integration candidate** on `integrate/investigation-runtime-v1` at
-`caa16500ba29e1ec6c754143d73916b26586ae90`, based on
+`66f4db14a43656c5ad08207b770076ae30710df9`, based on
 `e37464de39ac5cfbae4d7abf106eb26d763f1a96`. It is not yet on `main`, and the
 public runtime contract is not frozen until the remaining exact-head
 independent review and full collaboration CI gates close.
@@ -221,7 +221,7 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 
 ## Delivery and freeze
 
-At candidate `caa16500ba29e1ec6c754143d73916b26586ae90`, delivery steps 1–6 are
+At candidate `66f4db14a43656c5ad08207b770076ae30710df9`, delivery steps 1–6 are
 implemented: typed transport contracts, deterministic fixtures and dependency
 guard, gateway and bounded errors, race-safe controllers and provider,
 versioned strategy renderer, and the Investigation First migration. War Room
@@ -231,12 +231,12 @@ non-growing legacy allowlist.
 Local acceptance evidence at that candidate:
 
 - contracts: 52 files and 671 tests passed;
-- web: 62 files and 829 tests passed;
+- web: 62 files and 830 tests passed;
 - contracts and web lint/typecheck passed;
 - the production web build passed;
-- the server suite passed except for three loopback LDAP transport cases that
-  the filesystem/network sandbox prevented from binding; the same three cases
-  passed in a permitted loopback rerun; and
+- the complete collaboration test command passed: contracts 671 tests, server
+  805 tests with 81 environment-backed cases intentionally skipped, and web
+  830 tests; and
 - hands-on synthetic-demo acceptance passed for fast create, reusable context
   values, sparse detail, evidence selection and metadata, reversible technical
   handoff, focus, strategy-aware titles, and 390-pixel reflow without
