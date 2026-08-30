@@ -10,7 +10,7 @@ import {
   parseInvestigationLifecycleChanged,
   type InvestigationLifecycleV1,
 } from "@cd-collab/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
@@ -24,7 +24,7 @@ import {
 } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
-import { CaseService } from "./service.js";
+import { CaseService, type StatusResolutionGuard } from "./service.js";
 
 const ALICE = "fixture-alice-secret";
 const DAVE = "fixture-dave-secret";
@@ -83,12 +83,13 @@ async function withApp(
     domain: CaseService;
     audit: MemoryAuditStore;
   }) => Promise<void>,
+  resolutionGuard?: StatusResolutionGuard,
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-lifecycle-"));
   const store = new FilesystemEvidenceStore({ rootDir: root });
   const audit = new MemoryAuditStore();
   const catalog = new CatalogService(undefined, audit);
-  const domain = new CaseService(store, audit, undefined, catalog);
+  const domain = new CaseService(store, audit, undefined, catalog, resolutionGuard);
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(roleMap));
   const app = await buildApp({
     config: testConfig({ evidenceRoot: root }),
@@ -422,6 +423,26 @@ describe("generic status and lifecycle boundaries", () => {
       expect(moved.statusCode).toBe(200);
       expect(parseCase(JSON.parse(moved.body))).toMatchObject({ status: "monitoring", legalHold: true });
     });
+  });
+
+  it("never consults the resolution guard for generic archive or restore attempts", async () => {
+    const authorizeStatus = vi.fn<StatusResolutionGuard["authorizeStatus"]>(async () => undefined);
+    await withApp(async ({ app }) => {
+      const dave = await login(app, "dave", DAVE);
+      const caseId = await openCase(app, dave);
+
+      expect((await setStatus(app, dave, caseId, "archived")).statusCode).toBe(400);
+      expect(authorizeStatus).not.toHaveBeenCalled();
+
+      const preview = await lifecycle(app, dave, caseId);
+      expect(
+        (await applyAction(app, dave, caseId, actionPayload(preview, "archive"))).statusCode,
+      ).toBe(200);
+      expect(authorizeStatus).not.toHaveBeenCalled();
+
+      expect((await setStatus(app, dave, caseId, "monitoring")).statusCode).toBe(400);
+      expect(authorizeStatus).not.toHaveBeenCalled();
+    }, { authorizeStatus });
   });
 });
 

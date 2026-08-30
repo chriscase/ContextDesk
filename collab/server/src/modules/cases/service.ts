@@ -918,6 +918,28 @@ export class CaseService {
         );
       }
       const appliedStatus = verdict.targetStatus;
+      // Restoring to a status that claims the investigation is resolved must
+      // still be backed by an active resolution at the moment the lifecycle
+      // command owns the case lock. This guard call does not accept a new
+      // resolution; it can only confirm the record that archive deliberately
+      // preserved. Resolution reads do not acquire the case row lock, so the
+      // check is safe while PostgreSQL holds FOR UPDATE on the case.
+      //
+      // Archive and non-resolved restores intentionally skip the guard. In
+      // particular, archiving a resolved investigation must not supersede the
+      // reasoning that a later restore needs in order to return to resolved.
+      if (request.action === "restore" && statusRequiresResolution(appliedStatus)) {
+        if (!this.resolutionGuard) {
+          throw new ResolutionRequiredError(appliedStatus);
+        }
+        await this.resolutionGuard.authorizeStatus({
+          caseId: request.investigationId,
+          status: appliedStatus,
+          previousStatus: row.status,
+          actor,
+          origin,
+        });
+      }
       await this.store.updateCaseMeta({ id: request.investigationId, status: appliedStatus });
       await this.store.appendTimeline(request.investigationId, {
         kind: "case_status",

@@ -797,6 +797,169 @@ describe("human-only resolution and the resolved-status guard", () => {
         .toBe("archived");
     });
   });
+
+  it("preserves the active resolution through archive and restores to resolved", async () => {
+    await withRecordApp(async ({ app, resolutions }) => {
+      const alice = await login(app, "alice");
+      const investigation = parseCase(
+        await createInvestigation(app, alice, { title: "Synthetic resolved archive" }),
+      );
+      const resolved = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/status`,
+        headers: { cookie: alice },
+        payload: {
+          status: "resolved",
+          resolution: {
+            basis: "human_only",
+            rationale: "The synthetic evidence supports the recorded conclusion.",
+          },
+        },
+      });
+      expect(resolved.statusCode).toBe(200);
+      const activeBeforeArchive = await resolutions.active(investigation.id);
+      expect(activeBeforeArchive).toMatchObject({ revision: 1, supersededAt: null });
+
+      const beforeArchive = parseInvestigationLifecycle(body(await app.inject({
+        method: "GET",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+      })));
+      const archived = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+        payload: {
+          schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+          investigationId: investigation.id,
+          action: "archive",
+          expected: {
+            status: beforeArchive.status,
+            legalHold: beforeArchive.legalHold,
+            restoreTarget: beforeArchive.restoreTarget,
+          },
+        },
+      });
+      expect(archived.statusCode).toBe(200);
+      expect(await resolutions.active(investigation.id)).toEqual(activeBeforeArchive);
+
+      const beforeRestore = parseInvestigationLifecycle(body(await app.inject({
+        method: "GET",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+      })));
+      expect(beforeRestore.restore).toMatchObject({ allowed: true, targetStatus: "resolved" });
+      const restored = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+        payload: {
+          schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+          investigationId: investigation.id,
+          action: "restore",
+          expected: {
+            status: beforeRestore.status,
+            legalHold: beforeRestore.legalHold,
+            restoreTarget: beforeRestore.restoreTarget,
+          },
+        },
+      });
+      expect(restored.statusCode).toBe(200);
+      expect(parseInvestigationLifecycleActionSuccess(body(restored))).toMatchObject({
+        action: "restore",
+        appliedStatus: "resolved",
+        case: { status: "resolved" },
+      });
+      expect(await resolutions.active(investigation.id)).toEqual(activeBeforeArchive);
+    });
+  });
+
+  it("fails a resolved restore closed when the archived resolution was superseded", async () => {
+    await withRecordApp(async ({ app, audit, domain, resolutions }) => {
+      const alice = await login(app, "alice");
+      const investigation = parseCase(
+        await createInvestigation(app, alice, { title: "Synthetic missing archived resolution" }),
+      );
+      const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      expect((await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/status`,
+        headers: { cookie: alice },
+        payload: {
+          status: "resolved",
+          resolution: {
+            basis: "human_only",
+            rationale: "A synthetic conclusion that will be withdrawn before restore.",
+          },
+        },
+      })).statusCode).toBe(200);
+
+      const beforeArchive = parseInvestigationLifecycle(body(await app.inject({
+        method: "GET",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+      })));
+      expect((await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+        payload: {
+          schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+          investigationId: investigation.id,
+          action: "archive",
+          expected: {
+            status: beforeArchive.status,
+            legalHold: beforeArchive.legalHold,
+            restoreTarget: beforeArchive.restoreTarget,
+          },
+        },
+      })).statusCode).toBe(200);
+
+      // Simulate an independently superseded resolution while the case stays
+      // archived. The restore target remains resolved in status history, but
+      // the guard can no longer find active reasoning to authorize it.
+      await resolutions.authorizeStatus({
+        caseId: investigation.id,
+        status: "open",
+        previousStatus: "resolved",
+        actor,
+        origin: "test",
+      });
+      expect(await resolutions.active(investigation.id)).toBeNull();
+      const beforeRestore = parseInvestigationLifecycle(body(await app.inject({
+        method: "GET",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+      })));
+      expect(beforeRestore.restore).toMatchObject({ allowed: true, targetStatus: "resolved" });
+      const timelineBefore = await domain.listTimeline(investigation.id);
+      const successAuditBefore = (await audit.list({ action: "case_status" }))
+        .filter((row) => row.outcome === "success");
+
+      const refused = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+        payload: {
+          schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+          investigationId: investigation.id,
+          action: "restore",
+          expected: {
+            status: beforeRestore.status,
+            legalHold: beforeRestore.legalHold,
+            restoreTarget: beforeRestore.restoreTarget,
+          },
+        },
+      });
+      expect(refused.statusCode).toBe(409);
+      expect(body(refused)).toMatchObject({ error: "resolution_required", status: "resolved" });
+      expect((await domain.getCase(investigation.id, actor, true))?.status).toBe("archived");
+      expect(await domain.listTimeline(investigation.id)).toEqual(timelineBefore);
+      expect(
+        (await audit.list({ action: "case_status" })).filter((row) => row.outcome === "success"),
+      ).toEqual(successAuditBefore);
+    });
+  });
 });
 
 describe("investigation-scoped software impact", () => {

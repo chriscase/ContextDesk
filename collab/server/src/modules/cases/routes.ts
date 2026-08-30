@@ -441,6 +441,8 @@ export async function registerCaseRoutes(
       }
       return await deps.domain.applyLifecycleAction(body, ctx.actor, request.ip);
     } catch (err) {
+      const mapped = resolutionDomainError(reply, err);
+      if (mapped) return mapped;
       return domainError(reply, err);
     }
   });
