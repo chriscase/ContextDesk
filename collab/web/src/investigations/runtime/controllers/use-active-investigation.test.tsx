@@ -15,7 +15,9 @@ import {
   makeCaseList,
   makeContributionList,
   makeEvidenceList,
+  makeEvidenceUploadSuccess,
   makePopulatedCase,
+  makeRestoreAllowedLifecycle,
   makeSparseImportedCase,
 } from "../testkit/fixtures.js";
 import { createDeferred, type Deferred } from "../testkit/promises.js";
@@ -100,6 +102,175 @@ function useController(
 }
 
 describe("useActiveInvestigation", () => {
+  it("publishes authoritative case, upload members, and lifecycle into current resources", async () => {
+    const originalEvidence = makeEvidenceList().artifacts;
+    const originalContributions = makeContributionList().contributions;
+    const gateway = gatewayWith({
+      getInvestigation: async () => ({ ok: true, value: makePopulatedCase() }),
+      listEvidence: async () => ({ ok: true, value: originalEvidence }),
+      listContributions: async () => ({ ok: true, value: originalContributions }),
+      getLifecycle: async () => ({ ok: true, value: makeArchiveAllowedLifecycle() }),
+    });
+    const { result } = renderHook(() => useController(gateway, {
+      investigationId: makePopulatedCase().id,
+      active: true,
+      identityKey: "alice",
+      authorityKey: "interactive:lead",
+    }));
+    await waitFor(() => expect(result.current.lifecycle.status).toBe("ready"));
+
+    const publishedCase = { ...makePopulatedCase(), title: "Server-confirmed title" };
+    const upload = makeEvidenceUploadSuccess();
+    const publishedArtifact = { ...upload.artifact, filename: "server-confirmed.log" };
+    const publishedSummary = { ...upload.summary, body: "Server-confirmed summary" };
+    const publishedLifecycle = makeRestoreAllowedLifecycle();
+    act(() => {
+      result.current.publishInvestigation(publishedCase);
+      result.current.publishEvidence(publishedArtifact, publishedSummary);
+      result.current.publishLifecycle(publishedLifecycle);
+    });
+
+    expect(result.current.investigation).toEqual({ status: "ready", value: publishedCase });
+    expect(result.current.evidence.status).toBe("ready");
+    if (result.current.evidence.status !== "ready") throw new Error("expected evidence");
+    expect(result.current.evidence.value).toHaveLength(originalEvidence.length);
+    expect(result.current.evidence.value).toContainEqual(publishedArtifact);
+    expect(result.current.contributions.status).toBe("ready");
+    if (result.current.contributions.status !== "ready") throw new Error("expected contributions");
+    expect(result.current.contributions.value).toHaveLength(originalContributions.length);
+    expect(result.current.contributions.value).toContainEqual(publishedSummary);
+    expect(result.current.lifecycle).toEqual({ status: "ready", value: publishedLifecycle });
+    expect(originalEvidence).toEqual(makeEvidenceList().artifacts);
+    expect(originalContributions).toEqual(makeContributionList().contributions);
+  });
+
+  it("keeps loading and refresh-failure visible while publishing prior data", async () => {
+    const evidenceRefresh = createDeferred<GatewayResult<readonly ArtifactV1[]>>();
+    const lifecycleRefresh = createDeferred<GatewayResult<InvestigationLifecycleV1>>();
+    let evidenceReads = 0;
+    let lifecycleReads = 0;
+    const gateway = gatewayWith({
+      getInvestigation: async () => ({ ok: true, value: makePopulatedCase() }),
+      listEvidence: () => ++evidenceReads === 1
+        ? Promise.resolve({ ok: true, value: makeEvidenceList().artifacts })
+        : evidenceRefresh.promise,
+      listContributions: async () => ({
+        ok: true,
+        value: makeContributionList().contributions,
+      }),
+      getLifecycle: () => ++lifecycleReads === 1
+        ? Promise.resolve({ ok: true, value: makeArchiveAllowedLifecycle() })
+        : lifecycleRefresh.promise,
+    });
+    const { result } = renderHook(() => useController(gateway, {
+      investigationId: makePopulatedCase().id,
+      active: true,
+      identityKey: "alice",
+      authorityKey: "interactive:lead",
+    }));
+    await waitFor(() => expect(result.current.lifecycle.status).toBe("ready"));
+
+    act(() => {
+      result.current.refreshEvidence();
+      result.current.refreshLifecycle();
+    });
+    await waitFor(() => expect(result.current.evidence.status).toBe("loading"));
+    const upload = makeEvidenceUploadSuccess();
+    const publishedArtifact = { ...upload.artifact, filename: "published-while-loading.log" };
+    const publishedSummary = { ...upload.summary, body: "Published while loading" };
+    const publishedLifecycle = makeRestoreAllowedLifecycle();
+    act(() => {
+      result.current.publishEvidence(publishedArtifact, publishedSummary);
+      result.current.publishLifecycle(publishedLifecycle);
+    });
+
+    expect(result.current.evidence).toEqual({
+      status: "loading",
+      previous: [publishedArtifact],
+    });
+    expect(result.current.lifecycle).toEqual({
+      status: "loading",
+      previous: publishedLifecycle,
+    });
+
+    await act(async () => {
+      evidenceRefresh.resolve({ ok: false, error: { kind: "network" } });
+      lifecycleRefresh.resolve({ ok: false, error: { kind: "unavailable", status: 503 } });
+    });
+    expect(result.current.evidence).toEqual({
+      status: "failed",
+      error: { kind: "network" },
+      previous: [publishedArtifact],
+    });
+    expect(result.current.lifecycle).toEqual({
+      status: "failed",
+      error: { kind: "unavailable", status: 503 },
+      previous: publishedLifecycle,
+    });
+  });
+
+  it("ignores idle, mismatched, unlinked, and stale-scope publications", async () => {
+    const { gateway, requests } = deferredReadGateway();
+    const initialProps = {
+      investigationId: "case-a",
+      active: false,
+      identityKey: "alice",
+      authorityKey: "interactive:lead",
+    };
+    const { result, rerender } = renderHook(
+      (props) => useController(gateway, props),
+      { initialProps },
+    );
+    const upload = makeEvidenceUploadSuccess();
+    act(() => {
+      result.current.publishInvestigation({ ...makePopulatedCase(), id: "case-a" });
+      result.current.publishEvidence(
+        { ...upload.artifact, caseId: "case-a" },
+        { ...upload.summary, caseId: "case-a" },
+      );
+      result.current.publishLifecycle({
+        ...makeArchiveAllowedLifecycle(),
+        investigationId: "case-a",
+      });
+    });
+    expect(result.current.investigation).toEqual({ status: "idle" });
+    expect(result.current.evidence).toEqual({ status: "idle" });
+    expect(result.current.lifecycle).toEqual({ status: "idle" });
+
+    rerender({ ...initialProps, active: true });
+    await waitFor(() => expect(requests.lifecycle).toHaveLength(1));
+    const stalePublishCase = result.current.publishInvestigation;
+    const stalePublishEvidence = result.current.publishEvidence;
+    const stalePublishLifecycle = result.current.publishLifecycle;
+    rerender({ ...initialProps, active: true, investigationId: "case-b" });
+    await waitFor(() => expect(requests.lifecycle).toHaveLength(2));
+
+    act(() => {
+      stalePublishCase({ ...makePopulatedCase(), id: "case-a" });
+      stalePublishEvidence(
+        { ...upload.artifact, caseId: "case-a" },
+        { ...upload.summary, caseId: "case-a" },
+      );
+      stalePublishLifecycle({
+        ...makeArchiveAllowedLifecycle(),
+        investigationId: "case-a",
+      });
+      result.current.publishInvestigation({ ...makePopulatedCase(), id: "case-a" });
+      result.current.publishLifecycle({
+        ...makeArchiveAllowedLifecycle(),
+        investigationId: "case-a",
+      });
+      result.current.publishEvidence(
+        { ...upload.artifact, caseId: "case-b", summaryContributionId: "different-summary" },
+        { ...upload.summary, caseId: "case-b" },
+      );
+    });
+    expect(result.current.investigation).toEqual({ status: "loading" });
+    expect(result.current.evidence).toEqual({ status: "loading" });
+    expect(result.current.contributions).toEqual({ status: "loading" });
+    expect(result.current.lifecycle).toEqual({ status: "loading" });
+  });
+
   it("contains one rejected lane without collapsing the other resources", async () => {
     const gateway = gatewayWith({
       getInvestigation: async () => ({ ok: true, value: makePopulatedCase() }),
@@ -340,6 +511,7 @@ describe("useActiveInvestigation", () => {
       ({ active }) => ({
         list: useInvestigationList({
           gateway,
+          enabled: true,
           identityKey: "alice",
           authorityKey: "interactive:lead",
         }),

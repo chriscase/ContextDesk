@@ -24,6 +24,7 @@ interface ActiveInvestigationScope {
 
 interface ResourceLane<T> {
   readonly state: ResourceState<T>;
+  readonly publish: (publish: (value: T) => T) => void;
   readonly refresh: () => void;
 }
 
@@ -43,11 +44,46 @@ export interface ActiveInvestigationController {
   readonly evidence: ResourceState<readonly ArtifactV1[]>;
   readonly contributions: ResourceState<readonly ContributionV1[]>;
   readonly lifecycle: ResourceState<InvestigationLifecycleV1>;
+  /** Publish a server-confirmed case only for the currently active case. */
+  readonly publishInvestigation: (investigation: CaseV1) => void;
+  /** Publish the linked, server-confirmed members of an evidence upload. */
+  readonly publishEvidence: (artifact: ArtifactV1, summary: ContributionV1) => void;
+  /** Publish a server-confirmed lifecycle snapshot only for the active case. */
+  readonly publishLifecycle: (lifecycle: InvestigationLifecycleV1) => void;
   readonly refreshInvestigation: () => void;
   readonly refreshEvidence: () => void;
   readonly refreshContributions: () => void;
   readonly refreshLifecycle: () => void;
   readonly refreshAll: () => void;
+}
+
+function publishIntoState<T>(
+  state: ResourceState<T>,
+  publish: (value: T) => T,
+): ResourceState<T> {
+  switch (state.status) {
+    case "ready":
+      return { status: "ready", value: publish(state.value) };
+    case "loading":
+      return state.previous === undefined
+        ? state
+        : { status: "loading", previous: publish(state.previous) };
+    case "failed":
+      return state.previous === undefined
+        ? state
+        : { status: "failed", error: state.error, previous: publish(state.previous) };
+    case "idle":
+      return state;
+  }
+}
+
+function mergeById<T extends { readonly id: string }>(
+  records: readonly T[],
+  record: T,
+): readonly T[] {
+  const existingIndex = records.findIndex(({ id }) => id === record.id);
+  if (existingIndex === -1) return [...records, record];
+  return records.map((current, index) => index === existingIndex ? record : current);
 }
 
 function useResourceLane<T>(
@@ -94,8 +130,18 @@ function useResourceLane<T>(
     setRefreshGeneration((current) => current + 1);
   }, []);
 
+  const publish = useCallback((publication: (value: T) => T) => {
+    if (scope === null) return;
+    setResource((current) => {
+      if (current.key !== scope) return current;
+      const state = publishIntoState(current.state, publication);
+      return state === current.state ? current : { key: scope, state };
+    });
+  }, [scope]);
+
   return {
     state: scope !== null && resource.key === scope ? resource.state : { status: "idle" },
+    publish,
     refresh,
   };
 }
@@ -161,6 +207,33 @@ export function useActiveInvestigation({
   const refreshEvidence = evidence.refresh;
   const refreshContributions = contributions.refresh;
   const refreshLifecycle = lifecycle.refresh;
+  const publishInvestigationResource = investigation.publish;
+  const publishEvidenceResource = evidence.publish;
+  const publishContributionResource = contributions.publish;
+  const publishLifecycleResource = lifecycle.publish;
+
+  const publishInvestigation = useCallback((published: CaseV1) => {
+    if (scope === null || published.id !== scope.investigationId) return;
+    publishInvestigationResource(() => published);
+  }, [publishInvestigationResource, scope]);
+
+  const publishEvidence = useCallback((artifact: ArtifactV1, summary: ContributionV1) => {
+    if (
+      scope === null
+      || artifact.caseId !== scope.investigationId
+      || summary.caseId !== scope.investigationId
+      || artifact.summaryContributionId !== summary.id
+    ) {
+      return;
+    }
+    publishEvidenceResource((artifacts) => mergeById(artifacts, artifact));
+    publishContributionResource((items) => mergeById(items, summary));
+  }, [publishContributionResource, publishEvidenceResource, scope]);
+
+  const publishLifecycle = useCallback((published: InvestigationLifecycleV1) => {
+    if (scope === null || published.investigationId !== scope.investigationId) return;
+    publishLifecycleResource(() => published);
+  }, [publishLifecycleResource, scope]);
 
   const refreshAll = useCallback(() => {
     refreshInvestigation();
@@ -174,6 +247,9 @@ export function useActiveInvestigation({
     evidence: evidence.state,
     contributions: contributions.state,
     lifecycle: lifecycle.state,
+    publishInvestigation,
+    publishEvidence,
+    publishLifecycle,
     refreshInvestigation,
     refreshEvidence,
     refreshContributions,
