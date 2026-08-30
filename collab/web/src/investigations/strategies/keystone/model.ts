@@ -93,12 +93,17 @@ export function contributionsLinkedToEvidence(
   annotation: ContributionV1 | null,
   contributions: readonly ContributionV1[],
 ): readonly ContributionV1[] {
-  if (evidence === null) return contributions;
-  const linkedIds = new Set([evidence.id]);
-  if (annotation !== null) linkedIds.add(annotation.id);
+  if (evidence === null) return contributions.filter((contribution) => !contribution.tombstoned);
   return contributions.filter((contribution) => {
+    // Tombstoned rows remain available to audit surfaces, but never as live
+    // reasoning in the working record. Link kinds are authoritative too: an
+    // artifact id must not accidentally match a contribution id collision.
+    if (contribution.tombstoned) return false;
     if (contribution.id === annotation?.id) return true;
-    return contribution.hypothesisLinks?.some((link) => linkedIds.has(link.id)) ?? false;
+    return contribution.hypothesisLinks?.some((link) =>
+      (link.kind === "artifact" && link.id === evidence.id)
+      || (link.kind === "contribution" && annotation !== null && link.id === annotation.id),
+    ) ?? false;
   });
 }
 

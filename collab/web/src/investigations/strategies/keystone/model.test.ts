@@ -41,4 +41,35 @@ describe("Keystone presentation model", () => {
     expect(contributionsLinkedToEvidence(evidence, annotation, contributions)).toEqual([annotation]);
     expect(reconcileWorkingSet([evidence.id, "missing"], rows)).toEqual([evidence.id]);
   });
+
+  it("excludes tombstoned reasoning and honors hypothesis link kinds", () => {
+    const evidence = makeEvidenceList().artifacts[0];
+    const annotation = makeContributionList().contributions[0];
+    if (!evidence || !annotation) throw new Error("missing evidence fixture");
+    const tombstoned = { ...annotation, tombstoned: true };
+    const artifactHypothesis = {
+      ...annotation,
+      id: "artifact-hypothesis",
+      kind: "hypothesis" as const,
+      body: "The pool is exhausted.",
+      hypothesisStatus: "proposed" as const,
+      hypothesisLinks: [{ kind: "artifact" as const, id: evidence.id }],
+    };
+    const crossKindCollision = {
+      ...annotation,
+      id: "cross-kind-collision",
+      kind: "hypothesis" as const,
+      body: "This must not be linked by an id collision.",
+      hypothesisStatus: "proposed" as const,
+      hypothesisLinks: [{ kind: "contribution" as const, id: evidence.id }],
+    };
+
+    expect(contributionsLinkedToEvidence(evidence, annotation, [
+      annotation,
+      tombstoned,
+      artifactHypothesis,
+      crossKindCollision,
+    ])).toEqual([annotation, artifactHypothesis]);
+    expect(contributionsLinkedToEvidence(evidence, tombstoned, [tombstoned])).toEqual([]);
+  });
 });
