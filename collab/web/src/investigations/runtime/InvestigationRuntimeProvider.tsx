@@ -79,8 +79,35 @@ export interface InvestigationRuntimeCommands {
   ) => Promise<CommandOutcome<InvestigationLifecycleActionSuccessV1>>) | null;
 }
 
+/**
+ * The signed-in person, as a strategy is allowed to see them.
+ *
+ * It exists so a presentation can key browser-local drafts to whoever is
+ * signed in instead of inferring that from record data. It is descriptive
+ * only: `capabilities` and the server's own checks remain the sole
+ * authorization source, and request fencing keeps using `identityKey`.
+ */
+export interface InvestigationRuntimeIdentity {
+  readonly id: string;
+  readonly username: string;
+  readonly displayName: string;
+}
+
+/**
+ * Published when the shell projects no authenticated session. The empty
+ * strings are deliberate: the runtime neither invents a person nor reads one
+ * out of `identityKey`.
+ */
+const ANONYMOUS_IDENTITY: InvestigationRuntimeIdentity = Object.freeze({
+  id: "",
+  username: "",
+  displayName: "",
+});
+
 /** The complete presentation-safe Runtime V1 surface. */
 export interface InvestigationRuntime {
+  /** Descriptive only. Never consult it to decide what a strategy may do. */
+  readonly identity: InvestigationRuntimeIdentity;
   readonly capabilities: InvestigationRuntimeCapabilities;
   readonly resources: InvestigationRuntimeResources;
   readonly mutations: InvestigationRuntimeMutations;
@@ -90,6 +117,13 @@ export interface InvestigationRuntime {
 
 export interface InvestigationRuntimeProviderProps {
   readonly identityKey: string;
+  /**
+   * The already sanitized authenticated identity from the shell session,
+   * carrying nothing but the three descriptive fields. Omit it where the
+   * shell projects no session; the runtime then publishes the anonymous
+   * identity. It grants no authority and never participates in fencing.
+   */
+  readonly identity?: InvestigationRuntimeIdentity;
   /**
    * Opaque shell-owned authorization snapshot. Rotate it whenever roles,
    * grants, case-access scope, static mode, or the authenticated session is
@@ -137,6 +171,7 @@ export function InvestigationRuntimeGatewayHarness({
  */
 export function InvestigationRuntimeProvider({
   identityKey,
+  identity: sessionIdentity = ANONYMOUS_IDENTITY,
   authorityKey,
   capabilities: rawCapabilities,
   readOnly,
@@ -159,6 +194,15 @@ export function InvestigationRuntimeProvider({
     projected.canRead,
     projected.canUpload,
   ]);
+  // Narrowed field by field so that whatever else the shell's session object
+  // happens to carry — roles, grants, tokens — cannot reach a strategy, and so
+  // that a descriptive-only change such as a new display name republishes the
+  // identity without disturbing any request scope.
+  const identity = useMemo<InvestigationRuntimeIdentity>(() => Object.freeze({
+    id: sessionIdentity.id,
+    username: sessionIdentity.username,
+    displayName: sessionIdentity.displayName,
+  }), [sessionIdentity.displayName, sessionIdentity.id, sessionIdentity.username]);
   const canCreate = capabilities.canRead && capabilities.canCreate;
   const canUpload = capabilities.canRead && capabilities.canUpload;
   const canManageLifecycle = capabilities.canRead && capabilities.canManageLifecycle;
@@ -304,6 +348,7 @@ export function InvestigationRuntimeProvider({
   });
 
   const value = useMemo<InvestigationRuntime>(() => deepFreezeDto({
+    identity,
     capabilities,
     resources: {
       investigations: investigationList.investigations,
@@ -371,6 +416,7 @@ export function InvestigationRuntimeProvider({
     capabilities,
     createController.create,
     createController.state,
+    identity,
     investigationList.investigations,
     investigationList.refresh,
     isInvestigationLocation,

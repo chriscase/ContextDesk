@@ -1,11 +1,30 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { StrictMode } from "react";
+import { createElement, StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID, DEFAULT_DIRECTORY_ATTRIBUTE_MAP, LDAP_PUBLIC_CONFIG_SCHEMA_ID } from "@cd-collab/contracts/admin";
 import { App } from "./App.js";
+import type { InvestigationRuntimeProviderProps } from "./investigations/runtime/public.js";
 import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLocation } from "./app-location.js";
 
+/**
+ * Records what the shell hands the shared investigation runtime while still
+ * mounting the real provider, so these tests exercise the actual wiring rather
+ * than a stand-in for it.
+ */
+const runtimeMounts = vi.hoisted(() => [] as InvestigationRuntimeProviderProps[]);
+vi.mock("./investigations/runtime/public.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./investigations/runtime/public.js")>();
+  return {
+    ...actual,
+    InvestigationRuntimeProvider: (props: InvestigationRuntimeProviderProps) => {
+      runtimeMounts.push(props);
+      return createElement(actual.InvestigationRuntimeProvider, props);
+    },
+  };
+});
+
 afterEach(() => {
+  runtimeMounts.length = 0;
   cleanup();
   vi.unstubAllGlobals();
   delete window.__CONTEXTDESK_STATIC_READ_ONLY__;
@@ -26,7 +45,13 @@ function stubSignedOutFetch(): FetchStub {
 }
 
 function stubSignedInFetch(
-  identity: { username: string; displayName?: string; roles: string[]; capabilities?: string[] },
+  identity: {
+    username: string;
+    id?: string;
+    displayName?: string;
+    roles: string[];
+    capabilities?: string[];
+  },
   extra?: (url: string, init?: RequestInit) => Promise<Response> | null,
 ): FetchStub {
   const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
@@ -38,6 +63,7 @@ function stubSignedInFetch(
         ok: true,
         json: async () => ({
           identity: {
+            ...(identity.id === undefined ? {} : { id: identity.id }),
             username: identity.username,
             displayName: identity.displayName ?? identity.username,
           },
@@ -634,6 +660,53 @@ describe("authenticated application shell", () => {
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Situation" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Operating picture" })).toBeNull();
+  });
+
+  it("hands the investigation runtime only the sanitized session identity", async () => {
+    stubSignedInFetch({
+      username: "dave",
+      displayName: "Dave Okafor",
+      roles: ["case-lead"],
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "Operating picture" });
+
+    const mounted = runtimeMounts.at(-1);
+    // The directory sent no id, so the shell's own username fallback is what
+    // reaches the runtime — never anything inferred from investigation data.
+    expect(mounted?.identity).toEqual({
+      id: "dave",
+      username: "dave",
+      displayName: "Dave Okafor",
+    });
+    expect(Object.keys(mounted?.identity ?? {}).sort()).toEqual([
+      "displayName",
+      "id",
+      "username",
+    ]);
+    // Roles and capabilities travel the capability projection, never identity.
+    expect(mounted?.identity).not.toHaveProperty("roles");
+    expect(mounted?.identity).not.toHaveProperty("capabilities");
+    expect(mounted?.capabilities).toContain("investigation:read");
+  });
+
+  it("projects the trimmed directory identity rather than the raw session payload", async () => {
+    stubSignedInFetch({
+      id: "  directory-uid-77  ",
+      username: "dave",
+      displayName: "  Dave Okafor  ",
+      roles: ["case-lead"],
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "Operating picture" });
+
+    const mounted = runtimeMounts.at(-1);
+    expect(mounted?.identity).toEqual({
+      id: "directory-uid-77",
+      username: "dave",
+      displayName: "Dave Okafor",
+    });
+    expect(mounted?.identityKey).toBe("directory-uid-77");
   });
 });
 
