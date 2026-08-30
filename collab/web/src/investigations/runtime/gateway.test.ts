@@ -1150,6 +1150,26 @@ describe("Runtime V1.1 write seams", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each(["message", "note", "action"] as const)(
+    "rejects hypothesis links on a %s contribution before fetching",
+    async (kind) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch");
+
+      const result = await investigationGateway.createContribution(
+        RUNTIME_FIXTURE_IDS.populatedCase,
+        {
+          kind,
+          body: "Links must remain hypothesis-only.",
+          hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+        },
+        options(),
+      );
+
+      expect(result).toEqual({ ok: false, error: { kind: "unexpected" } });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
   it("sends only supplied situation fields and keeps an explicit context erasure", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValue(jsonResponse(revisedSituationCase()));
