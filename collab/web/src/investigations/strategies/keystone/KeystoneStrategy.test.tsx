@@ -30,6 +30,7 @@ const SHELL: InvestigationStrategyShellProps = {
   focusCaseId: null,
   stage: "situation",
   onOpenCase: vi.fn(),
+  onNavigateInvestigation: vi.fn(),
   onExitFocus: vi.fn(),
 };
 
@@ -120,7 +121,13 @@ describe("Keystone K1 read-only strategy", () => {
   });
 
   it("shows the evidence grid, linked reasoning, and canonical record without write controls", async () => {
-    const mounted = mountStrategy({ shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    const onNavigateInvestigation = vi.fn();
+    const mounted = mountStrategy({
+      shell: {
+        focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase,
+        onNavigateInvestigation,
+      },
+    });
     const detailHeading = await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
     await waitFor(() => expect(document.activeElement).toBe(detailHeading));
     expect(await screen.findByRole("button", { name: "checkout-timeout.log" })).toBeTruthy();
@@ -128,13 +135,26 @@ describe("Keystone K1 read-only strategy", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "checkout-timeout.log" }));
     expect(screen.getByText("text/plain")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Details" }));
+    expect(onNavigateInvestigation).toHaveBeenLastCalledWith({
+      investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
+      stage: "capture",
+    });
     const detailsTab = screen.getByRole("tab", { name: "Details" });
     act(() => detailsTab.focus());
     fireEvent.keyDown(detailsTab, { key: "ArrowRight" });
     expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Reasoning" }));
     expect(screen.getByRole("tab", { name: "Reasoning" }).getAttribute("aria-selected")).toBe("true");
+    expect(onNavigateInvestigation).toHaveBeenLastCalledWith({
+      investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
+      stage: "analyze",
+    });
     expect(screen.getAllByText("Gateway timeout excerpt captured during the affected interval.").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("tab", { name: "Record" }));
+    expect(onNavigateInvestigation).toHaveBeenLastCalledWith({
+      investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
+      stage: "situation",
+    });
     expect(screen.getByText("Checkout requests exceed the recorded latency objective.")).toBeTruthy();
     expect(screen.getByText("2026.02.03.4")).toBeTruthy();
     expect(document.querySelectorAll("form")).toHaveLength(0);

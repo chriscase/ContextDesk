@@ -53,6 +53,7 @@ const shellProps: InvestigationStrategyShellProps = {
   },
   startSignal: 4,
   onOpenCase: vi.fn(),
+  onNavigateInvestigation: vi.fn(),
   onExitFocus: vi.fn(),
   onOpenAdvancedTools: vi.fn(),
   onFocusedCaseTitle: vi.fn(),
@@ -182,6 +183,7 @@ describe("InvestigationStrategyRenderer", () => {
     for (const props of received) {
       expect(props.focus).toBe(shellProps.focus);
       expect(props.onOpenCase).toBe(shellProps.onOpenCase);
+      expect(props.onNavigateInvestigation).toBe(shellProps.onNavigateInvestigation);
       expect(props.onExitFocus).toBe(shellProps.onExitFocus);
       expect(props.onOpenAdvancedTools).toBe(shellProps.onOpenAdvancedTools);
       expect(props.onFocusedCaseTitle).toBe(shellProps.onFocusedCaseTitle);

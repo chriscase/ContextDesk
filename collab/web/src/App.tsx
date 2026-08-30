@@ -1010,6 +1010,14 @@ export function App() {
                     onOpenCase={(id) =>
                       navigate({ area: "investigations", caseId: id, stage: "situation" })
                     }
+                    onNavigateInvestigation={({ investigationId, stage, focus }) =>
+                      navigate({
+                        area: "investigations",
+                        caseId: investigationId,
+                        stage,
+                        ...(focus ? { focus } : {}),
+                      })
+                    }
                     onExitFocus={() =>
                       navigate({ area: "investigations", caseId: null, stage: "situation" })
                     }

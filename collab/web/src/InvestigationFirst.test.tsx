@@ -41,6 +41,7 @@ const shellDefaults: InvestigationStrategyShellProps = {
   focusCaseId: null,
   stage: "situation",
   onOpenCase: vi.fn(),
+  onNavigateInvestigation: vi.fn(),
   onExitFocus: vi.fn(),
 };
 

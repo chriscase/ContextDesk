@@ -472,6 +472,7 @@ function mountStrategy(options: MountOptions): MountedStrategy {
   const Strategy = options.component;
   const gateway = options.gateway;
   const onOpenCase = vi.fn();
+  const onNavigateInvestigation = vi.fn();
   const onExitFocus = vi.fn();
   const runtimeSink: { current: InvestigationRuntime | null } = { current: null };
   const focusLog: string[] = [];
@@ -494,6 +495,7 @@ function mountStrategy(options: MountOptions): MountedStrategy {
           focusCaseId={focusCaseId}
           stage="situation"
           onOpenCase={onOpenCase}
+          onNavigateInvestigation={onNavigateInvestigation}
           onExitFocus={onExitFocus}
         />
       </InvestigationRuntimeProvider>

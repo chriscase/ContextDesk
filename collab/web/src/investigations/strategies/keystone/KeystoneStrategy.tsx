@@ -61,6 +61,10 @@ interface ScopedEvidenceSelection {
   readonly evidenceId: string | null;
 }
 
+function tabForStage(stage: InvestigationStrategyShellProps["stage"]): KeystoneInspectorTab {
+  return stage === "analyze" ? "reasoning" : stage === "situation" ? "record" : "details";
+}
+
 /**
  * Keystone K1 is an evidence-dense, read-only engineer view. It consumes only
  * Runtime V1 reads and shell callbacks. `startSignal` is intentionally inert:
@@ -82,10 +86,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<KeystoneStatusFilter>("all");
   const [evidenceQuery, setEvidenceQuery] = useState("");
-  // K1 keeps inspector position local. Once the versioned presentation
-  // contract exposes shell-owned outbound stage/focus navigation, integration
-  // may adapt these tabs without letting the strategy write history itself.
-  const [inspectorTab, setInspectorTab] = useState<KeystoneInspectorTab>("details");
+  const [inspectorTab, setInspectorTab] = useState<KeystoneInspectorTab>(() => tabForStage(props.stage));
   const [workingSetState, setWorkingSetState] = useState<ScopedIds>({ scope: "", ids: [] });
   const [selectionState, setSelectionState] = useState<ScopedEvidenceSelection>({
     scope: "",
@@ -144,8 +145,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
 
   useEffect(() => {
     setEvidenceQuery("");
-    setInspectorTab("details");
-  }, [scope]);
+    setInspectorTab(tabForStage(props.stage));
+  }, [scope, props.stage]);
 
   useEffect(() => {
     const previous = priorFocusId.current;
@@ -182,6 +183,15 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   function inspectEvidence(evidenceId: string) {
     setSelectionState({ scope, evidenceId });
     setInspectorTab("details");
+  }
+
+  function changeInspectorTab(tab: KeystoneInspectorTab) {
+    setInspectorTab(tab);
+    if (props.focusCaseId === null) return;
+    props.onNavigateInvestigation({
+      investigationId: props.focusCaseId,
+      stage: tab === "reasoning" ? "analyze" : tab === "record" ? "situation" : "capture",
+    });
   }
 
   function renderCollection() {
@@ -442,7 +452,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 ? "unavailable"
                 : "loading"}
             tab={inspectorTab}
-            onTabChange={setInspectorTab}
+            onTabChange={changeInspectorTab}
           />
         </div>
       </StrategyPanel>
