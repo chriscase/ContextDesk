@@ -166,6 +166,32 @@ describe("Investigation First", () => {
     expect(screen.queryByText("No evidence has been registered yet.")).toBeNull();
   });
 
+  it("keeps a failed list load honest after detail success and supports retry", async () => {
+    let listAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases") {
+        listAttempts += 1;
+        return listAttempts === 1
+          ? { ok: false, status: 503, json: async () => ({}) }
+          : { ok: true, json: async () => ({ cases: [baseCase] }) };
+      }
+      if (url === "/api/cases/case-1") return { ok: true, json: async () => baseCase };
+      if (url.endsWith("/evidence") || url.endsWith("/contributions")) {
+        return { ok: true, json: async () => ({ artifacts: [], contributions: [] }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    const { rerender } = render(<InvestigationFirst {...commonProps} focusCaseId="case-1" />);
+    expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
+    rerender(<InvestigationFirst {...commonProps} focusCaseId={null} />);
+    expect((await screen.findByRole("alert")).textContent).toContain("Investigations could not be loaded.");
+    expect(screen.queryByText(/No investigations match this view/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading investigations" }));
+    expect(await screen.findByRole("button", { name: /Checkout pauses/ })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("ignores a detail response that belongs to an investigation no longer in the URL", async () => {
     let resolveA: ((value: unknown) => void) | undefined;
     let resolveB: ((value: unknown) => void) | undefined;

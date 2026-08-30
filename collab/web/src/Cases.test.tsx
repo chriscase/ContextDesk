@@ -1412,6 +1412,19 @@ describe("focused investigation view", () => {
     expect(screen.queryByRole("heading", { name: "Experiment lab" })).toBeNull();
   });
 
+  it("does not expose lifecycle mutations from a decision-only capability", async () => {
+    stubCaseFetch();
+    render(<Cases roles={["case-lead"]} capabilities={["decision:accept"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    const stageNav = await screen.findByRole("navigation", { name: "Investigation stages" });
+    fireEvent.click(within(stageNav).getByRole("button", { name: /Decide/ }));
+    expect(await screen.findByRole("heading", { name: "Decision journal" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Update status" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
+    expect(screen.getByText("Only a case lead can change the case status.")).toBeTruthy();
+    expect(screen.getByText("Only a case lead can archive or restore this investigation.")).toBeTruthy();
+  });
+
   it("reviews unresolved log time beside Capture intake and applies only the exact preview", async () => {
     const fingerprint = "a".repeat(64);
     const mutations: Array<{ url: string; body: Record<string, unknown> }> = [];

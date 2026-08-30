@@ -210,6 +210,7 @@ export function InvestigationFirst(props: {
   const [contributions, setContributions] = useState<ContributionRow[]>([]);
   const [evidenceLoadError, setEvidenceLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -229,14 +230,15 @@ export function InvestigationFirst(props: {
 
   const refreshCases = useCallback(async () => {
     setLoading(true);
+    setListError(null);
     try {
       const response = await protectedApiFetch("/api/cases");
       if (!response.ok) throw new Error(await errorMessage(response, "Investigations could not be loaded."));
       const body = (await response.json()) as { cases?: InvestigationRow[] };
       setCases(body.cases ?? []);
-      setError(null);
+      setListError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Investigations could not be loaded.");
+      setListError(cause instanceof Error ? cause.message : "Investigations could not be loaded.");
     } finally {
       setLoading(false);
     }
@@ -283,7 +285,6 @@ export function InvestigationFirst(props: {
       setEvidenceLoadError(evidenceBody.loadError ?? contributionsBody.loadError ?? null);
       props.onFocusedCaseTitle?.(caseBody.title);
       setDetailError(null);
-      setError(null);
     } catch (cause) {
       if (generation !== detailGeneration.current || caseId !== activeFocusCaseId.current) return;
       setSelected(null);
@@ -490,8 +491,9 @@ export function InvestigationFirst(props: {
           <label><span>Search</span><input className="login__input" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Title, product, build, or problem" aria-label="Search investigations" /></label>
           <label><span>Status</span><select className="login__input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter investigations by status"><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label>
         </div>
-        {loading ? <p className="investigation-first__empty">Loading investigations…</p> : null}
-        {!loading && filteredCases.length === 0 ? <p className="investigation-first__empty">{props.canWrite && !props.readOnly ? "No investigations match this view. Try a different search or create a new one." : "No investigations match this view. Try a different search."}</p> : null}
+        {loading ? <p className="investigation-first__empty" role="status">Loading investigations…</p> : null}
+        {!loading && listError ? <div className="investigation-first__error" role="alert"><p>{listError}</p><button type="button" onClick={() => void refreshCases()}>Retry loading investigations</button></div> : null}
+        {!loading && !listError && filteredCases.length === 0 ? <p className="investigation-first__empty">{props.canWrite && !props.readOnly ? "No investigations match this view. Try a different search or create a new one." : "No investigations match this view. Try a different search."}</p> : null}
         <ul className="investigation-first__list">
           {filteredCases.map((row) => {
             const missing = [row.problemStatement, row.affectedParties, row.impact].filter((value) => !text(value)).length;

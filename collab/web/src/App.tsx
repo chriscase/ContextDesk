@@ -267,13 +267,26 @@ function AccountMenu(props: {
   );
 }
 
-function writeHistory(location: ShellLocation, mode: "push" | "replace") {
+function historyUiStrategyId(value: unknown): UiStrategyId | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = (value as { uiStrategyId?: unknown }).uiStrategyId;
+  return UI_STRATEGIES.some((strategy) => strategy.id === candidate)
+    ? candidate as UiStrategyId
+    : null;
+}
+
+function writeHistory(
+  location: ShellLocation,
+  mode: "push" | "replace",
+  uiStrategyId?: UiStrategyId,
+) {
   const url = historyUrl(location, window.location.pathname);
+  const state = uiStrategyId === undefined ? location : { ...location, uiStrategyId };
   try {
     if (mode === "replace") {
-      window.history.replaceState(location, "", url);
+      window.history.replaceState(state, "", url);
     } else {
-      window.history.pushState(location, "", url);
+      window.history.pushState(state, "", url);
     }
   } catch {
     // History can be unavailable in embedded shells; in-app state still works.
@@ -288,9 +301,10 @@ export function App() {
   const [ready, setReady] = useState(false);
   const [setupAvailable, setSetupAvailable] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
-  const [uiStrategy, setUiStrategy] = useState<UiStrategyDescriptor>(() =>
+  const [preferredUiStrategy, setPreferredUiStrategy] = useState<UiStrategyDescriptor>(() =>
     resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }),
   );
+  const [transientUiStrategyId, setTransientUiStrategyId] = useState<UiStrategyId | null>(null);
   const [uiStrategyOwner, setUiStrategyOwner] = useState<string | null>(null);
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
@@ -302,7 +316,6 @@ export function App() {
   const [leaveRequest, setLeaveRequest] = useState(false);
   const locationRef = useRef(location);
   locationRef.current = location;
-  const suppressNextUiStrategyPersistence = useRef(false);
   const profileDirtyRef = useRef(false);
   profileDirtyRef.current = profileDirty;
   const pendingLeaveRef = useRef<
@@ -318,6 +331,9 @@ export function App() {
   const mainRef = useRef<HTMLElement>(null);
   const sessionRef = useRef(session);
   sessionRef.current = session;
+  const uiStrategy = transientUiStrategyId
+    ? resolveUiStrategy({ preferred: transientUiStrategyId })
+    : preferredUiStrategy;
 
   useEffect(() => {
     document.title = titleFor(location, focusedCaseTitle, {
@@ -355,25 +371,23 @@ export function App() {
   useEffect(() => {
     if (!session?.username) {
       setUiStrategyOwner(null);
-      setUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
+      setPreferredUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
+      setTransientUiStrategyId(null);
       return;
     }
     setUiStrategyOwner(session.username);
-    setUiStrategy(savedUiStrategy(session.username));
+    setPreferredUiStrategy(savedUiStrategy(session.username));
+    setTransientUiStrategyId(null);
   }, [session?.username]);
 
   useEffect(() => {
     if (!session?.username || uiStrategyOwner !== session.username) return;
-    if (suppressNextUiStrategyPersistence.current) {
-      suppressNextUiStrategyPersistence.current = false;
-      return;
-    }
     try {
-      window.localStorage?.setItem(uiStrategyStorageKey(session.username), uiStrategy.id);
+      window.localStorage?.setItem(uiStrategyStorageKey(session.username), preferredUiStrategy.id);
     } catch {
       // A blocked browser store should not prevent the selected surface from working this session.
     }
-  }, [session?.username, uiStrategy.id, uiStrategyOwner]);
+  }, [session?.username, preferredUiStrategy.id, uiStrategyOwner]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/auth/me");
@@ -433,7 +447,11 @@ export function App() {
     };
   }, [refresh]);
 
-  const navigate = useCallback((next: ShellLocation, mode: "push" | "replace" = "push") => {
+  const navigate = useCallback((
+    next: ShellLocation,
+    mode: "push" | "replace" = "push",
+    historyStrategyId: UiStrategyId | undefined = transientUiStrategyId ?? undefined,
+  ) => {
     setLocation((current) => {
       if (sameLocation(current, next)) {
         return current;
@@ -441,8 +459,8 @@ export function App() {
       return next;
     });
     setNavOpen(false);
-    writeHistory(next, mode);
-  }, []);
+    writeHistory(next, mode, historyStrategyId);
+  }, [transientUiStrategyId]);
 
   const requestLeave = useCallback((
     action: { kind: "navigate"; next: ShellLocation; mode: "push" | "replace" } | { kind: "logout" },
@@ -520,6 +538,8 @@ export function App() {
         requestLeave({ kind: "navigate", next, mode: "push" });
         return;
       }
+      const historyStrategyId = historyUiStrategyId(event.state);
+      setTransientUiStrategyId(historyStrategyId);
       setLocation(next);
       setNavOpen(false);
     };
@@ -744,7 +764,11 @@ export function App() {
               profileActive={work.area === "profile"}
               onOpenProfile={() => guardedNavigate(PROFILE)}
               onThemeChange={setTheme}
-              onStrategyChange={(strategyId) => setUiStrategy(resolveUiStrategy({ preferred: strategyId }))}
+              onStrategyChange={(strategyId) => {
+                setPreferredUiStrategy(resolveUiStrategy({ preferred: strategyId }));
+                setTransientUiStrategyId(null);
+                writeHistory(locationRef.current, "replace");
+              }}
               onSignOut={staticReadOnly ? null : () => guardedLogout()}
             />
           </div>
@@ -798,9 +822,8 @@ export function App() {
                     // Specialist tools remain in the reference War Room. The
                     // switch is explicit in the button label and preserves the
                     // canonical case/stage URL and all shared record state.
-                    suppressNextUiStrategyPersistence.current = true;
-                    setUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
-                    navigate({ area: "investigations", caseId, stage });
+                    setTransientUiStrategyId(DEFAULT_UI_STRATEGY_ID);
+                    navigate({ area: "investigations", caseId, stage }, "push", DEFAULT_UI_STRATEGY_ID);
                   }}
                   onFocusedCaseTitle={setFocusedCaseTitle}
                 />

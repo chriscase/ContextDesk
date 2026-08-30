@@ -761,6 +761,9 @@ export function Cases(props: {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
   const capabilitySet = props.capabilities ? new Set(props.capabilities) : null;
+  const canRunStrategies = !readOnly && (capabilitySet
+    ? capabilitySet.has("run:strategies")
+    : roles.includes("case-lead") || roles.includes("admin"));
   const canLead = !readOnly && (capabilitySet
     ? capabilitySet.has("run:strategies") ||
       capabilitySet.has("decision:accept") ||
@@ -2778,7 +2781,7 @@ export function Cases(props: {
                   : {})}
                 {...(props.participant ? { participant: props.participant } : {})}
               />
-              {canLead && resolutionOpen ? (
+              {canRunStrategies && resolutionOpen ? (
                 <ResolutionForm
                   prompted={resolutionPrompted}
                   error={resolutionError}
@@ -2795,7 +2798,7 @@ export function Cases(props: {
                   Offering the ordinary select here would default to `open`
                   because `archived` is deliberately not one of its options, and
                   a submit would then silently un-archive the case. */}
-              {canLead && current.status !== "archived" ? (
+              {canRunStrategies && current.status !== "archived" ? (
                 <form
                   key={current.id}
                   className="composer"
@@ -2835,7 +2838,7 @@ export function Cases(props: {
                 <LifecyclePanel
                   caseId={current.id}
                   status={current.status}
-                  canLead={canLead}
+                  canLead={canRunStrategies}
                   onChanged={() => Promise.all([refresh(), refreshActivity()]).then(() => undefined)}
                 />
               ) : null}
