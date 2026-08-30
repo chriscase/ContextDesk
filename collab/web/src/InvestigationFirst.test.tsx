@@ -504,7 +504,7 @@ describe("Investigation First Runtime V1 presentation", () => {
 
     // The record was renamed under the reader; focus stays where they put it.
     expect(document.activeElement).toBe(back);
-    expect(onFocusedCaseTitle).toHaveBeenCalledWith(renamed.title);
+    await waitFor(() => expect(onFocusedCaseTitle).toHaveBeenCalledWith(renamed.title));
   });
 
   it("never offers lifecycle loading or retry where lifecycle management is unavailable", async () => {
