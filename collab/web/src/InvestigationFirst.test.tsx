@@ -278,6 +278,21 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(screen.queryByText(/could not be loaded right now/iu)).toBeNull();
   });
 
+  it("explains a whitespace-only title without issuing a create request", async () => {
+    const gateway = createInvestigationGatewayDouble();
+    renderStrategy({ gateway });
+    await screen.findByRole("heading", { name: "Create an investigation" });
+    fireEvent.change(screen.getByPlaceholderText("Short investigation title"), {
+      target: { value: "   " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Add a title before creating the investigation.",
+    );
+    expect(gateway.createInvestigation).not.toHaveBeenCalled();
+  });
+
   it("keeps a draft across ordinary rerenders but clears it when the authenticated person changes", async () => {
     const { rerender } = renderStrategy();
     await screen.findByRole("heading", { name: "Create an investigation" });
