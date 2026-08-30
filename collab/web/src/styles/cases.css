@@ -1531,11 +1531,8 @@
 }
 
 .case-memory__item-heading {
-  display: flex;
+  display: block;
   min-width: 0;
-  align-items: baseline;
-  gap: 0.5rem;
-  flex-wrap: wrap;
 }
 
 .case-memory__item-heading strong {
@@ -1579,6 +1576,10 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 0.45rem 0.7rem;
+}
+
+.case-memory__item-actions .technical-id {
+  margin-top: 0;
 }
 
 .case-memory__meta,
