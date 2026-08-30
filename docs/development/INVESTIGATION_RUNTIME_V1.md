@@ -3,7 +3,7 @@
 ## Status
 
 **Integration candidate** on `integrate/investigation-runtime-v1` with source
-checkpoint `a76bb13d`, based on
+checkpoint `96fa5a7d`, based on
 `e37464de39ac5cfbae4d7abf106eb26d763f1a96`. It is not yet on `main`, and the
 public runtime contract is not frozen until the remaining exact-head
 independent review and full collaboration CI gates close.
@@ -247,7 +247,7 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 
 ## Delivery and freeze
 
-At source checkpoint `a76bb13d`, delivery steps 1–6 are
+At source checkpoint `96fa5a7d`, delivery steps 1–6 are
 implemented: typed transport contracts, deterministic fixtures and dependency
 guard, gateway and bounded errors, race-safe controllers and provider,
 versioned strategy renderer, and the Investigation First migration. War Room
@@ -257,13 +257,13 @@ non-growing legacy allowlist.
 Local acceptance evidence at that candidate:
 
 - contracts: 52 files and 672 tests passed;
-- web: 63 files and 845 tests passed;
+- web: 63 files and 855 tests passed;
 - contracts, server, web, and browser typechecks passed; contracts, server, and
   web lint passed;
 - the production web build passed;
 - the complete collaboration test command passed: contracts 672 tests, server
   806 tests with 81 environment-backed cases intentionally skipped, and web
-  845 tests; and
+  855 tests; and
 - hands-on synthetic-demo acceptance passed for fast create, reusable context
   values, sparse detail, evidence selection and metadata, reversible technical
   handoff, focus, strategy-aware titles, and 390-pixel reflow without
