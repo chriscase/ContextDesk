@@ -342,7 +342,8 @@ function AccountMenu(props: {
             <legend>Investigation experience</legend>
             <p className="account__strategy-note">
               Presentation and navigation only. Your case data, evidence, permissions, and audit
-              history stay shared.
+              history stay shared. This choice applies inside Investigations; Overview remains the
+              War Room activity dashboard.
             </p>
             {props.temporaryStrategy ? (
               <p className="account__strategy-note" role="status">
