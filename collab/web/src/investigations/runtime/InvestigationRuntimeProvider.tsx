@@ -34,6 +34,7 @@ import {
   type CreateInvestigationInput,
   type InvestigationGateway,
 } from "./gateway.js";
+import { deepFreezeDto } from "./deep-freeze.js";
 import type {
   CommandOutcome,
   MutationState,
@@ -281,7 +282,7 @@ export function InvestigationRuntimeProvider({
     onScopeDenied: activeInvestigation.denyScope,
   });
 
-  const value = useMemo<InvestigationRuntime>(() => ({
+  const value = useMemo<InvestigationRuntime>(() => deepFreezeDto({
     capabilities,
     resources: {
       investigations: investigationList.investigations,
@@ -313,6 +314,7 @@ export function InvestigationRuntimeProvider({
     },
     commands: {
       createInvestigation: canCreate && active && isInvestigationLocation
+        && focusCaseId === null
         ? createController.create
         : null,
       uploadEvidence: canUpload

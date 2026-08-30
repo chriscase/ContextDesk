@@ -1,7 +1,11 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import type { ComponentType } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { UiStrategyDescriptor } from "../../ui-strategy.js";
+import {
+  INVESTIGATION_RUNTIME_COMPATIBILITY,
+  UI_STRATEGIES,
+  type UiStrategyDescriptor,
+} from "../../ui-strategy.js";
 import {
   INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT,
   defineInvestigationStrategyRegistrations,
@@ -67,13 +71,32 @@ describe("InvestigationStrategyRenderer", () => {
     expect(screen.getByTestId("investigation-first")).not.toBeNull();
     expect(screen.queryByTestId("war-room")).toBeNull();
 
-    const descriptor = {
-      id: "war-room",
-      name: "War Room",
-    } as UiStrategyDescriptor;
+    const descriptor = UI_STRATEGIES.find((strategy) => strategy.id === "war-room")!;
     view.rerender(
       <InvestigationStrategyRenderer
         strategy={descriptor}
+        registrations={registrations}
+        {...shellProps}
+      />,
+    );
+
+    expect(screen.getByTestId("war-room")).not.toBeNull();
+    expect(screen.queryByTestId("investigation-first")).toBeNull();
+  });
+
+  it("fails closed when descriptor metadata requires another runtime contract", () => {
+    const strategy = UI_STRATEGIES.find((candidate) => candidate.id === "investigation-first")!;
+    const incompatible = {
+      ...strategy,
+      compatibility: {
+        ...strategy.compatibility,
+        runtime: { ...INVESTIGATION_RUNTIME_COMPATIBILITY, version: 2 },
+      },
+    } as unknown as UiStrategyDescriptor;
+
+    render(
+      <InvestigationStrategyRenderer
+        strategy={incompatible}
         registrations={registrations}
         {...shellProps}
       />,

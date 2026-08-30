@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_UI_STRATEGY_ID,
+  INVESTIGATION_RUNTIME_COMPATIBILITY,
   UI_STRATEGIES,
+  UI_STRATEGY_OPTIONAL_FEATURE_IDS,
+  isUiStrategyRuntimeCompatible,
   resolveUiStrategy,
   type UiStrategyId,
 } from "./ui-strategy.js";
@@ -19,7 +22,30 @@ describe("UI strategy catalogue", () => {
       expect(strategy.previewToken).toBeTruthy();
       expect(strategy.compatibility.schemaId).toBe("cd-collab.case.v1");
       expect(strategy.compatibility.version).toMatch(/^\^\d+\.\d+\.\d+$/);
+      expect(strategy.compatibility.runtime).toEqual(INVESTIGATION_RUNTIME_COMPATIBILITY);
+      expect(strategy.optionalFeatures).toEqual(UI_STRATEGY_OPTIONAL_FEATURE_IDS);
+      expect(isUiStrategyRuntimeCompatible(strategy)).toBe(true);
     }
+  });
+
+  it("fails closed for unknown runtime contracts and optional features", () => {
+    const strategy = UI_STRATEGIES[1]!;
+
+    expect(isUiStrategyRuntimeCompatible({
+      ...strategy,
+      compatibility: {
+        ...strategy.compatibility,
+        runtime: { ...INVESTIGATION_RUNTIME_COMPATIBILITY, version: 2 },
+      },
+    })).toBe(false);
+    expect(isUiStrategyRuntimeCompatible({
+      ...strategy,
+      optionalFeatures: [...strategy.optionalFeatures, "future-authority"],
+    })).toBe(false);
+    expect(isUiStrategyRuntimeCompatible({
+      ...strategy,
+      optionalFeatures: ["evidence-upload", "evidence-upload"],
+    })).toBe(false);
   });
 });
 
@@ -63,4 +89,3 @@ describe("resolveUiStrategy", () => {
     expect(resolveUiStrategy({ allowedIds: [] }).id).toBe(DEFAULT_UI_STRATEGY_ID);
   });
 });
-

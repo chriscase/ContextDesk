@@ -102,13 +102,14 @@ export interface LifecycleSubject {
 }
 
 /**
- * A recorded status change, oldest or newest first — `restoreTarget` does not
- * care about the order it is handed, only that each row carries the status
- * that was written and when it was recorded.
+ * A recorded status change. Timeline sequence is the authoritative order;
+ * recording clocks can legitimately collide at millisecond precision.
  */
 export interface StatusHistoryEntry {
   status: string;
-  /** Server recording clock. Compared as an instant, never displayed here. */
+  /** Monotonic sequence within this investigation's timeline. */
+  recordedSequence: number;
+  /** Server recording clock. Validated as an instant, never used for ordering. */
   recordedAt: string;
 }
 
@@ -129,13 +130,16 @@ function isCaseStatus(value: string): value is CaseStatus {
  * guessing at it would be worse than landing on `open`.
  */
 export function restoreTarget(history: readonly StatusHistoryEntry[]): CaseStatus {
-  let best: { status: CaseStatus; at: number } | null = null;
+  let best: { status: CaseStatus; sequence: number } | null = null;
   for (const entry of history) {
     if (entry.status === ARCHIVED_STATUS) continue;
     if (!isCaseStatus(entry.status)) continue;
     const at = Date.parse(entry.recordedAt);
     if (!Number.isFinite(at)) continue;
-    if (best === null || at > best.at) best = { status: entry.status, at };
+    if (!Number.isSafeInteger(entry.recordedSequence) || entry.recordedSequence < 1) continue;
+    if (best === null || entry.recordedSequence > best.sequence) {
+      best = { status: entry.status, sequence: entry.recordedSequence };
+    }
   }
   return best?.status ?? DEFAULT_RESTORE_STATUS;
 }

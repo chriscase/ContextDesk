@@ -273,6 +273,41 @@ describe("atomic lifecycle command", () => {
     });
   });
 
+  it("restores the latest timeline status when server recording clocks are equal", async () => {
+    await withApp(async ({ app }) => {
+      const dave = await login(app, "dave", DAVE);
+      const caseId = await openCase(app, dave);
+      const recordedAt = "2026-08-30T12:00:00.000Z";
+      const clock = vi.spyOn(Date.prototype, "toISOString").mockReturnValue(recordedAt);
+      try {
+        expect((await setStatus(app, dave, caseId, "monitoring")).statusCode).toBe(200);
+        expect((await setStatus(app, dave, caseId, "open")).statusCode).toBe(200);
+
+        const beforeArchive = await lifecycle(app, dave, caseId);
+        expect(beforeArchive.restoreTarget).toBe("open");
+        expect(
+          (await applyAction(app, dave, caseId, actionPayload(beforeArchive, "archive"))).statusCode,
+        ).toBe(200);
+
+        const beforeRestore = await lifecycle(app, dave, caseId);
+        expect(beforeRestore.restore).toMatchObject({ allowed: true, targetStatus: "open" });
+        const restoreResponse = await applyAction(
+          app,
+          dave,
+          caseId,
+          actionPayload(beforeRestore, "restore"),
+        );
+        expect(restoreResponse.statusCode).toBe(200);
+        const restored = parseInvestigationLifecycleActionSuccess(
+          JSON.parse(restoreResponse.body),
+        );
+        expect(restored).toMatchObject({ action: "restore", appliedStatus: "open" });
+      } finally {
+        clock.mockRestore();
+      }
+    });
+  });
+
   it("returns a parsed changed-state conflict after legal hold changes and writes no action rows", async () => {
     await withApp(async ({ app, domain, audit }) => {
       const dave = await login(app, "dave", DAVE);

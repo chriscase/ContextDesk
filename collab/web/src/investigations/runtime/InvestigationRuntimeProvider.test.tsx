@@ -125,6 +125,129 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().commands.applyLifecycle).toBe(lifecycleCommand);
   });
 
+  it("deep-freezes shared runtime DTOs so one strategy cannot contaminate the next", async () => {
+    const gateway = makeGateway();
+    const common = {
+      identityKey: "alice",
+      authorityKey: "alice-authority-v1",
+      capabilities: FULL_CAPABILITIES,
+      readOnly: false,
+      active: true,
+      focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      isInvestigationLocation: true,
+      onOpenCreated: vi.fn(),
+      gateway,
+    } as const;
+    const view = render(
+      <InvestigationRuntimeProvider {...common}>
+        <RuntimeProbe label="strategy one" />
+      </InvestigationRuntimeProvider>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    const firstRuntime = currentRuntime();
+    expect(Object.isFrozen(firstRuntime)).toBe(true);
+    expect(Object.isFrozen(firstRuntime.resources)).toBe(true);
+    expect(Object.isFrozen(firstRuntime.refresh)).toBe(true);
+    expect(Object.isFrozen(firstRuntime.commands)).toBe(true);
+    expect(Object.isFrozen(firstRuntime.refresh.investigations)).toBe(true);
+    expect(Object.isFrozen(firstRuntime.refresh.activeInvestigation)).toBe(true);
+    expect(Object.isFrozen(firstRuntime.commands.uploadEvidence)).toBe(true);
+    expect(Object.isFrozen(firstRuntime.commands.applyLifecycle)).toBe(true);
+    if (firstRuntime.resources.investigation.status !== "ready") {
+      throw new Error("expected a ready investigation");
+    }
+    const investigation = firstRuntime.resources.investigation.value;
+    expect(Object.isFrozen(investigation)).toBe(true);
+    expect(Object.isFrozen(investigation.openQuestions)).toBe(true);
+    expect(Object.isFrozen(investigation.investigationContext)).toBe(true);
+    const investigations = firstRuntime.resources.investigations;
+    const evidence = firstRuntime.resources.evidence;
+    const contributions = firstRuntime.resources.contributions;
+    const lifecycle = firstRuntime.resources.lifecycle;
+    expect(investigations.status).toBe("ready");
+    expect(evidence.status).toBe("ready");
+    expect(contributions.status).toBe("ready");
+    expect(lifecycle.status).toBe("ready");
+    if (investigations.status === "ready") {
+      expect(Object.isFrozen(investigations.value)).toBe(true);
+      expect(Object.isFrozen(investigations.value[0])).toBe(true);
+      expect(() => {
+        (investigations.value as CaseV1[]).push(makeSparseImportedCase());
+      }).toThrow();
+    }
+    if (evidence.status === "ready") {
+      expect(Object.isFrozen(evidence.value)).toBe(true);
+      expect(Object.isFrozen(evidence.value[0])).toBe(true);
+      expect(() => {
+        (evidence.value[0] as { filename: string | null }).filename = "contaminated.log";
+      }).toThrow();
+    }
+    if (contributions.status === "ready") {
+      expect(Object.isFrozen(contributions.value)).toBe(true);
+      expect(Object.isFrozen(contributions.value[0])).toBe(true);
+      expect(() => {
+        (contributions.value[0] as { body: string | null }).body = "contaminated";
+      }).toThrow();
+    }
+    if (lifecycle.status === "ready") {
+      expect(Object.isFrozen(lifecycle.value.archive)).toBe(true);
+      expect(Object.isFrozen(lifecycle.value.restore)).toBe(true);
+      expect(Object.isFrozen(lifecycle.value.deletion.alternatives)).toBe(true);
+      expect(() => {
+        (lifecycle.value.deletion.alternatives as string[]).push("delete");
+      }).toThrow();
+    }
+    expect(() => {
+      (investigation.openQuestions as string[]).push("Injected by strategy one");
+    }).toThrow();
+    expect(() => {
+      (firstRuntime.capabilities as { canRead: boolean }).canRead = false;
+    }).toThrow();
+
+    view.rerender(
+      <InvestigationRuntimeProvider {...common}>
+        <RuntimeProbe label="strategy two" />
+      </InvestigationRuntimeProvider>,
+    );
+    expect(screen.getByText("strategy two")).toBeTruthy();
+    const second = currentRuntime().resources.investigation;
+    expect(second.status).toBe("ready");
+    if (second.status === "ready") {
+      expect(second.value.openQuestions).not.toContain("Injected by strategy one");
+    }
+  });
+
+  it("exposes create only at the null-focus investigations origin", async () => {
+    const gateway = makeGateway();
+    const common = {
+      identityKey: "lead",
+      authorityKey: "lead-authority-v1",
+      capabilities: FULL_CAPABILITIES,
+      readOnly: false,
+      active: true,
+      isInvestigationLocation: true,
+      onOpenCreated: vi.fn(),
+      gateway,
+    } as const;
+    const view = render(
+      <InvestigationRuntimeProvider {...common} focusCaseId={null}>
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    expect(currentRuntime().commands.createInvestigation).not.toBeNull();
+
+    view.rerender(
+      <InvestigationRuntimeProvider
+        {...common}
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+      >
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    expect(currentRuntime().commands.createInvestigation).toBeNull();
+  });
+
   it("does no transport work and exposes no commands without read authority", async () => {
     const gateway = makeGateway();
     render(
@@ -549,6 +672,15 @@ describe("InvestigationRuntimeProvider", () => {
       status: "succeeded",
       value: upload,
     });
+    const uploadMutation = currentRuntime().mutations.uploadEvidence;
+    if (uploadMutation.status === "succeeded") {
+      expect(Object.isFrozen(uploadMutation.value)).toBe(true);
+      expect(Object.isFrozen(uploadMutation.value.artifact)).toBe(true);
+      expect(Object.isFrozen(uploadMutation.value.summary)).toBe(true);
+      expect(() => {
+        (uploadMutation.value.summary as { body: string | null }).body = "contaminated";
+      }).toThrow();
+    }
     expect(gateway.listEvidence).toHaveBeenCalledTimes(2);
     expect(gateway.listContributions).toHaveBeenCalledTimes(2);
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
@@ -625,6 +757,14 @@ describe("InvestigationRuntimeProvider", () => {
       previous: makeArchiveAllowedLifecycle(),
     });
     expect(currentRuntime().commands.applyLifecycle).toBeNull();
+    const lifecycleMutation = currentRuntime().mutations.lifecycle;
+    if (lifecycleMutation.status === "succeeded") {
+      expect(Object.isFrozen(lifecycleMutation.value)).toBe(true);
+      expect(Object.isFrozen(lifecycleMutation.value.case)).toBe(true);
+      expect(() => {
+        (lifecycleMutation.value.case as { title: string }).title = "contaminated";
+      }).toThrow();
+    }
 
     const changed = makeArchiveRefusedLifecycle();
     const changedGateway = makeGateway({
@@ -655,9 +795,28 @@ describe("InvestigationRuntimeProvider", () => {
       </InvestigationRuntimeProvider>,
     );
     await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
+    let changedOutcome: Awaited<ReturnType<NonNullable<InvestigationRuntime["commands"]["applyLifecycle"]>>> | undefined;
     await act(async () => {
-      await currentRuntime().commands.applyLifecycle?.("archive");
+      changedOutcome = await currentRuntime().commands.applyLifecycle?.("archive");
     });
+    expect(currentRuntime().resources.lifecycle).toEqual({ status: "ready", value: changed });
+    expect(Object.isFrozen(changed)).toBe(true);
+    expect(Object.isFrozen(changed.archive)).toBe(true);
+    expect(Object.isFrozen(changed.restore)).toBe(true);
+    expect(changedOutcome).toMatchObject({
+      status: "failed",
+      error: { kind: "lifecycle_changed", current: changed },
+    });
+    const outcome = changedOutcome;
+    if (outcome === undefined || outcome.status !== "failed"
+      || outcome.error.kind !== "lifecycle_changed") {
+      throw new Error("expected a lifecycle-changed command outcome");
+    }
+    const current = outcome.error.current;
+    expect(Object.isFrozen(current)).toBe(true);
+    expect(() => {
+      (current as { legalHold: boolean }).legalHold = true;
+    }).toThrow();
     expect(currentRuntime().resources.lifecycle).toEqual({ status: "ready", value: changed });
   });
 

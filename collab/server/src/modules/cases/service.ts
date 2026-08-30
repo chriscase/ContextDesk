@@ -825,9 +825,9 @@ export class CaseService {
    * The recorded status changes for this investigation, oldest first.
    *
    * Read from the timeline rather than a dedicated column: `case_status` rows
-   * already carry the status that was written and the clock it was written
-   * on, so restore reads history that has always been there instead of
-   * requiring a migration to record it a second time.
+   * already carry the status that was written, its per-case sequence, and the
+   * clock it was written on, so restore reads history that has always been
+   * there instead of requiring a migration to record it a second time.
    *
    * A row whose payload cannot be read is skipped rather than guessed at —
    * `restoreTarget` treats an absent history as "land on open", which is the
@@ -845,7 +845,11 @@ export class CaseService {
         continue;
       }
       if (typeof status !== "string") continue;
-      history.push({ status, recordedAt: row.serverTime });
+      history.push({
+        status,
+        recordedSequence: row.seq,
+        recordedAt: row.serverTime,
+      });
     }
     return history;
   }

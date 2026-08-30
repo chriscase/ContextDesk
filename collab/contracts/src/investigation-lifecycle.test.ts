@@ -98,7 +98,11 @@ describe("archiving is refused under legal hold", () => {
 
   it("still allows a restore, so a held record is never trapped out of the list", () => {
     const verdict = evaluateRestore({ status: ARCHIVED_STATUS, legalHold: true }, [
-      { status: "monitoring", recordedAt: "2026-01-02T00:00:00.000Z" },
+      {
+        status: "monitoring",
+        recordedSequence: 1,
+        recordedAt: "2026-01-02T00:00:00.000Z",
+      },
     ]);
     expect(verdict.allowed).toBe(true);
     if (!verdict.allowed) throw new Error("expected an allowance");
@@ -135,37 +139,70 @@ describe("restore lands where the investigation actually came from", () => {
   it("returns to the most recent non-archived status, not a flattened default", () => {
     expect(
       restoreTarget([
-        { status: "open", recordedAt: "2026-01-01T00:00:00.000Z" },
-        { status: "monitoring", recordedAt: "2026-01-02T00:00:00.000Z" },
-        { status: ARCHIVED_STATUS, recordedAt: "2026-01-03T00:00:00.000Z" },
+        { status: "open", recordedSequence: 1, recordedAt: "2026-01-01T00:00:00.000Z" },
+        {
+          status: "monitoring",
+          recordedSequence: 2,
+          recordedAt: "2026-01-02T00:00:00.000Z",
+        },
+        {
+          status: ARCHIVED_STATUS,
+          recordedSequence: 3,
+          recordedAt: "2026-01-03T00:00:00.000Z",
+        },
       ]),
     ).toBe("monitoring");
   });
 
-  it("reads recency from the recorded clock, not from array order", () => {
+  it("reads recency from timeline sequence, not from array order", () => {
     expect(
       restoreTarget([
-        { status: ARCHIVED_STATUS, recordedAt: "2026-01-03T00:00:00.000Z" },
-        { status: "monitoring", recordedAt: "2026-01-02T00:00:00.000Z" },
-        { status: "open", recordedAt: "2026-01-01T00:00:00.000Z" },
+        {
+          status: ARCHIVED_STATUS,
+          recordedSequence: 3,
+          recordedAt: "2026-01-03T00:00:00.000Z",
+        },
+        {
+          status: "monitoring",
+          recordedSequence: 2,
+          recordedAt: "2026-01-02T00:00:00.000Z",
+        },
+        { status: "open", recordedSequence: 1, recordedAt: "2026-01-01T00:00:00.000Z" },
       ]),
     ).toBe("monitoring");
+  });
+
+  it("uses the later timeline sequence when recording clocks are equal", () => {
+    const recordedAt = "2026-01-02T00:00:00.000Z";
+    expect(
+      restoreTarget([
+        { status: "monitoring", recordedSequence: 7, recordedAt },
+        { status: "open", recordedSequence: 8, recordedAt },
+        { status: ARCHIVED_STATUS, recordedSequence: 9, recordedAt },
+      ]),
+    ).toBe("open");
   });
 
   it("restores a resolved investigation to resolved", () => {
     expect(
       restoreTarget([
-        { status: "resolved", recordedAt: "2026-02-01T00:00:00.000Z" },
-        { status: ARCHIVED_STATUS, recordedAt: "2026-02-02T00:00:00.000Z" },
+        { status: "resolved", recordedSequence: 1, recordedAt: "2026-02-01T00:00:00.000Z" },
+        { status: ARCHIVED_STATUS, recordedSequence: 2, recordedAt: "2026-02-02T00:00:00.000Z" },
       ]),
     ).toBe("resolved");
   });
 
   it("falls back to open when history says nothing", () => {
     expect(restoreTarget([])).toBe(DEFAULT_RESTORE_STATUS);
-    expect(restoreTarget([{ status: ARCHIVED_STATUS, recordedAt: "2026-01-03T00:00:00.000Z" }])).toBe(
-      DEFAULT_RESTORE_STATUS,
-    );
+    expect(
+      restoreTarget([
+        {
+          status: ARCHIVED_STATUS,
+          recordedSequence: 1,
+          recordedAt: "2026-01-03T00:00:00.000Z",
+        },
+      ]),
+    ).toBe(DEFAULT_RESTORE_STATUS);
   });
 
   it("never resurrects a conclusion that history does not record", () => {
@@ -177,9 +214,17 @@ describe("restore lands where the investigation actually came from", () => {
   it("skips rows whose status this build does not recognise", () => {
     expect(
       restoreTarget([
-        { status: "monitoring", recordedAt: "2026-01-01T00:00:00.000Z" },
-        { status: "quantum_superposition", recordedAt: "2026-01-09T00:00:00.000Z" },
-        { status: ARCHIVED_STATUS, recordedAt: "2026-01-10T00:00:00.000Z" },
+        { status: "monitoring", recordedSequence: 1, recordedAt: "2026-01-01T00:00:00.000Z" },
+        {
+          status: "quantum_superposition",
+          recordedSequence: 2,
+          recordedAt: "2026-01-09T00:00:00.000Z",
+        },
+        {
+          status: ARCHIVED_STATUS,
+          recordedSequence: 3,
+          recordedAt: "2026-01-10T00:00:00.000Z",
+        },
       ]),
     ).toBe("monitoring");
   });
@@ -187,8 +232,8 @@ describe("restore lands where the investigation actually came from", () => {
   it("skips rows with an unparsable recorded clock", () => {
     expect(
       restoreTarget([
-        { status: "monitoring", recordedAt: "2026-01-01T00:00:00.000Z" },
-        { status: "open", recordedAt: "not a date" },
+        { status: "monitoring", recordedSequence: 1, recordedAt: "2026-01-01T00:00:00.000Z" },
+        { status: "open", recordedSequence: 2, recordedAt: "not a date" },
       ]),
     ).toBe("monitoring");
   });

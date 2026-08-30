@@ -30,6 +30,7 @@ import {
   protocolFailure,
   type RuntimeFailure,
 } from "./errors.js";
+import { deepFreezeDto } from "./deep-freeze.js";
 
 export type GatewayResult<T> =
   | { ok: true; value: T }
@@ -273,7 +274,7 @@ async function parseSuccessfulResponse<T>(
   if (signal.aborted) return aborted();
   if (!identityMatches) return failed(protocolFailure("identity"));
   if (signal.aborted) return aborted();
-  return { ok: true, value: parsed };
+  return { ok: true, value: deepFreezeDto(parsed) };
 }
 
 async function requestParsed<T>(
@@ -390,7 +391,7 @@ async function parseLifecycleConflict(
         status: 409,
         investigationId: changed.investigationId,
         action: changed.action,
-        current: changed.current,
+        current: deepFreezeDto(changed.current),
       });
     }
 
@@ -423,7 +424,9 @@ export const investigationGateway: InvestigationGateway = {
       parseCaseList,
       (value) => caseCollectionIdentity(value.cases),
     );
-    return result.ok ? { ok: true, value: [...result.value.cases] } : result;
+    return result.ok
+      ? { ok: true, value: deepFreezeDto([...result.value.cases]) }
+      : result;
   },
 
   getInvestigation(investigationId, { signal }) {
@@ -461,7 +464,9 @@ export const investigationGateway: InvestigationGateway = {
       (value) => value.caseId === investigationId
         && evidenceCollectionIdentity(investigationId, value.artifacts),
     );
-    return result.ok ? { ok: true, value: [...result.value.artifacts] } : result;
+    return result.ok
+      ? { ok: true, value: deepFreezeDto([...result.value.artifacts]) }
+      : result;
   },
 
   async listContributions(investigationId, { signal }) {
@@ -473,7 +478,9 @@ export const investigationGateway: InvestigationGateway = {
       (value) => value.caseId === investigationId
         && contributionCollectionIdentity(investigationId, value.contributions),
     );
-    return result.ok ? { ok: true, value: [...result.value.contributions] } : result;
+    return result.ok
+      ? { ok: true, value: deepFreezeDto([...result.value.contributions]) }
+      : result;
   },
 
   uploadEvidence(investigationId, input, { signal }) {

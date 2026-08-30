@@ -1,6 +1,8 @@
 import {
   DEFAULT_UI_STRATEGY_ID,
+  UI_STRATEGIES,
   UI_STRATEGY_IDS,
+  isUiStrategyRuntimeCompatible,
   type UiStrategyDescriptor,
   type UiStrategyId,
 } from "../../ui-strategy.js";
@@ -18,7 +20,11 @@ export interface InvestigationStrategyRendererProps
 }
 
 function selectedId(value: UiStrategyId | UiStrategyDescriptor): UiStrategyId | null {
-  const candidate = typeof value === "string" ? value : value?.id;
+  const descriptor = typeof value === "string"
+    ? UI_STRATEGIES.find((strategy) => strategy.id === value)
+    : value;
+  if (!isUiStrategyRuntimeCompatible(descriptor)) return null;
+  const candidate = descriptor?.id;
   return UI_STRATEGY_IDS.some((id) => id === candidate)
     ? (candidate as UiStrategyId)
     : null;

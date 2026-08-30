@@ -188,6 +188,53 @@ describe("the complete Runtime V1 transport surface", () => {
     ]);
 
     expect(results.every((result) => result.ok)).toBe(true);
+    for (const result of results) {
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(Object.isFrozen(result.value)).toBe(true);
+    }
+    const listed = results[0];
+    const created = results[2];
+    const contributions = results[4];
+    const uploaded = results[5];
+    const lifecycle = results[6];
+    const lifecycleAction = results[7];
+    expect(listed.ok && Object.isFrozen(listed.value[0])).toBe(true);
+    expect(listed.ok && Object.isFrozen(listed.value[1]?.openQuestions)).toBe(true);
+    expect(created.ok && Object.isFrozen(created.value.investigationContext)).toBe(true);
+    expect(contributions.ok && Object.isFrozen(contributions.value[0])).toBe(true);
+    expect(uploaded.ok && Object.isFrozen(uploaded.value.artifact)).toBe(true);
+    expect(uploaded.ok && Object.isFrozen(uploaded.value.summary)).toBe(true);
+    expect(lifecycle.ok && Object.isFrozen(lifecycle.value.deletion.alternatives)).toBe(true);
+    expect(lifecycle.ok && Object.isFrozen(lifecycle.value.archive)).toBe(true);
+    expect(lifecycle.ok && Object.isFrozen(lifecycle.value.restore)).toBe(true);
+    expect(lifecycleAction.ok && Object.isFrozen(lifecycleAction.value.case)).toBe(true);
+    if (contributions.ok) {
+      expect(() => {
+        (contributions.value[0] as { body: string | null }).body = "contaminated";
+      }).toThrow();
+    }
+    if (uploaded.ok) {
+      expect(() => {
+        (uploaded.value.artifact as { filename: string | null }).filename = "contaminated.log";
+      }).toThrow();
+      expect(() => {
+        (uploaded.value.summary as { body: string | null }).body = "contaminated";
+      }).toThrow();
+    }
+    if (lifecycle.ok) {
+      expect(() => {
+        (lifecycle.value.deletion.alternatives as string[]).push("delete");
+      }).toThrow();
+      expect(() => {
+        (lifecycle.value.archive as { allowed: boolean }).allowed = false;
+      }).toThrow();
+    }
+    if (lifecycleAction.ok) {
+      expect(() => {
+        (lifecycleAction.value.case as { title: string }).title = "contaminated";
+      }).toThrow();
+    }
     expect(fetchMock).toHaveBeenCalledTimes(8);
     expect(fetchMock.mock.calls.map(([route, init]) => [String(route), init?.method ?? "GET"]))
       .toEqual([
@@ -747,6 +794,16 @@ describe("typed lifecycle action conflicts", () => {
         current: makeArchiveRefusedLifecycle(),
       },
     });
+    if (result.ok || result.error.kind !== "lifecycle_changed") {
+      throw new Error("expected a lifecycle-changed conflict");
+    }
+    const current = result.error.current;
+    expect(Object.isFrozen(current)).toBe(true);
+    expect(Object.isFrozen(current.archive)).toBe(true);
+    expect(Object.isFrozen(current.restore)).toBe(true);
+    expect(() => {
+      (current as { legalHold: boolean }).legalHold = true;
+    }).toThrow();
   });
 
   it("preserves only the contract-bounded lifecycle refusal", async () => {

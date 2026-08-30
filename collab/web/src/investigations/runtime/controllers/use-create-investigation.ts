@@ -91,7 +91,12 @@ export function useCreateInvestigation(
     if (activeRef.current !== null) return { status: "ignored", reason: "busy" };
 
     const start = latestRef.current;
-    if (start.readOnly || !start.canCreate) {
+    if (
+      start.readOnly
+      || !start.canCreate
+      || !start.isInvestigationLocation
+      || start.locationInvestigationId !== null
+    ) {
       return { status: "ignored", reason: "not_ready" };
     }
 

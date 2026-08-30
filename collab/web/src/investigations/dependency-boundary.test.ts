@@ -227,10 +227,39 @@ function sameModule(path: string, expectedWithoutExtension: string): boolean {
   return withoutExtension === expectedWithoutExtension;
 }
 
+const RESERVED_BROWSER_TRANSPORT_NAMES = new Set(["fetch", "XMLHttpRequest"]);
+
+function reservedBrowserTransportReference(node: ts.Node): string | null {
+  // Strategies have zero direct browser-transport authority. Reserve the exact
+  // identifier and string-literal names anywhere in strategy source, even when
+  // they are merely referenced or extracted, so aliases and indirect property
+  // access cannot hide a later call. This deliberately also rejects an unrelated
+  // local identifier, property, or exact string named `fetch` or
+  // `XMLHttpRequest`; use a non-reserved name for local behavior and copy.
+  if (ts.isIdentifier(node) && RESERVED_BROWSER_TRANSPORT_NAMES.has(node.text)) {
+    return node.text;
+  }
+  if (
+    ts.isStringLiteralLike(node)
+    && RESERVED_BROWSER_TRANSPORT_NAMES.has(node.text)
+  ) {
+    return node.text;
+  }
+  return null;
+}
+
 function strategyRouteViolations(path: string, source: ts.SourceFile): string[] {
   const violations: string[] = [];
   const fetchNames = protectedFetchNames(source);
   visit(source, (node) => {
+    const reservedTransport = reservedBrowserTransportReference(node);
+    if (reservedTransport) {
+      const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+      violations.push(
+        `${repositoryPath(path)}:${line} references reserved browser transport ${reservedTransport} from a strategy`,
+      );
+    }
+
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
       if (fetchNames.has(node.expression.text)) {
         const routeArgument = node.arguments[0];
@@ -374,6 +403,73 @@ describe("Investigation Runtime V1 dependency boundary", () => {
     expect(strategyRouteViolations(strategyPath, dynamicStrategy)).toEqual([
       "collab/web/src/investigations/strategies/example/Example.tsx:2 uses a dynamic protectedApiFetch route in a strategy",
       "collab/web/src/investigations/strategies/example/Example.tsx:3 uses an unrecognized protectedApiFetch route in a strategy",
+    ]);
+  });
+
+  it("rejects direct browser transports and aliases at their source", () => {
+    const strategyPath = resolve(INVESTIGATIONS_ROOT, "strategies/example/Example.tsx");
+    const source = parseSourceText(
+      strategyPath,
+      [
+        "export const direct = (route: string) => fetch(route);",
+        "const send = globalThis.fetch;",
+        "const { fetch: destructuredSend } = globalThis;",
+        "export const memberCall = (route: string) => globalThis.fetch.call(globalThis, route);",
+        'const parenthesized = (window["fetch"]);',
+        "const XhrAlias = globalThis.XMLHttpRequest;",
+        'const ComputedXhrAlias = window["XMLHttpRequest"];',
+        'const key = "fetch";',
+        "const variableKeyAlias = globalThis[key];",
+        'const reflectedXhr = Reflect.get(globalThis, "XMLHttpRequest");',
+        'const quotedObject = { "fetch": send };',
+        'const computedObject = { ["fetch"]: send };',
+        'const { "XMLHttpRequest": quotedXhr } = globalThis;',
+        "export const aliases = [send, destructuredSend, parenthesized, XhrAlias, ComputedXhrAlias, variableKeyAlias, reflectedXhr, quotedObject, computedObject, quotedXhr];",
+      ].join("\n"),
+    );
+
+    expect(strategyRouteViolations(strategyPath, source)).toEqual([
+      "collab/web/src/investigations/strategies/example/Example.tsx:1 references reserved browser transport fetch from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:2 references reserved browser transport fetch from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:3 references reserved browser transport fetch from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:4 references reserved browser transport fetch from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:5 references reserved browser transport fetch from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:6 references reserved browser transport XMLHttpRequest from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:7 references reserved browser transport XMLHttpRequest from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:8 references reserved browser transport fetch from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:10 references reserved browser transport XMLHttpRequest from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:11 references reserved browser transport fetch from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:12 references reserved browser transport fetch from a strategy",
+      "collab/web/src/investigations/strategies/example/Example.tsx:13 references reserved browser transport XMLHttpRequest from a strategy",
+    ]);
+  });
+
+  it("allows protected runtime transport names and ordinary words containing fetch", () => {
+    const strategyPath = resolve(INVESTIGATIONS_ROOT, "strategies/example/Example.tsx");
+    const source = parseSourceText(
+      strategyPath,
+      [
+        'import { useInvestigationRuntime } from "../../runtime/public.js";',
+        "const protectedApiFetch = useInvestigationRuntime;",
+        "const prefetchLabel = \"Prefetch investigation\";",
+        "const fetchingLabel = \"fetch later\";",
+        "const xhrLabel = \"XMLHttpRequest wrapper\";",
+        "export const clean = [protectedApiFetch, prefetchLabel, fetchingLabel, xhrLabel];",
+      ].join("\n"),
+    );
+
+    expect(strategyRouteViolations(strategyPath, source)).toEqual([]);
+  });
+
+  it("deliberately reserves exact transport names even for unrelated local declarations", () => {
+    const strategyPath = resolve(INVESTIGATIONS_ROOT, "strategies/example/Example.tsx");
+    const source = parseSourceText(
+      strategyPath,
+      "export const fetch = () => 'local-only';",
+    );
+
+    expect(strategyRouteViolations(strategyPath, source)).toEqual([
+      "collab/web/src/investigations/strategies/example/Example.tsx:1 references reserved browser transport fetch from a strategy",
     ]);
   });
 });

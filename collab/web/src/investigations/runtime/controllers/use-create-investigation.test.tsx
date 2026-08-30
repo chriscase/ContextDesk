@@ -104,6 +104,33 @@ describe("useCreateInvestigation", () => {
     expect(createInvestigation).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { label: "after leaving investigations", location: false, investigationId: null },
+    { label: "after opening a detail", location: true, investigationId: "case-detail" },
+  ])("rejects a retained create callback $label", async ({ location, investigationId }) => {
+    const createInvestigation = vi.fn();
+    const first = options({ gateway: gatewayWithCreate(createInvestigation) });
+    const { result, rerender } = renderHook(
+      ({ value }: { value: UseCreateInvestigationOptions }) => useCreateInvestigation(value),
+      { initialProps: { value: first } },
+    );
+    const retainedCreate = result.current.create;
+
+    rerender({
+      value: {
+        ...first,
+        isInvestigationLocation: location,
+        locationInvestigationId: investigationId,
+      },
+    });
+
+    await expect(retainedCreate({ title: "Stale surface" })).resolves.toEqual({
+      status: "ignored",
+      reason: "not_ready",
+    });
+    expect(createInvestigation).not.toHaveBeenCalled();
+  });
+
   it("allows only one in-flight create", async () => {
     const deferred = createDeferred<Awaited<ReturnType<InvestigationGateway["createInvestigation"]>>>();
     const gateway = gatewayWithCreate(vi.fn(() => deferred.promise));
