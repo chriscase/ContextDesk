@@ -164,6 +164,8 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(row?.textContent).toContain("Gateway timeout excerpt captured during the affected interval.");
     expect(row?.textContent).toContain("Annotation author");
     expect(row?.textContent).toContain("Intake batch");
+    expect(row?.textContent).toContain("Content hash");
+    expect(row?.textContent).toContain("Expected hash");
   });
 
   it("describes annotations as loading until their independent lane settles", async () => {
