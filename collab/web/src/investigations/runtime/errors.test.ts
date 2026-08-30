@@ -6,6 +6,20 @@ import {
 } from "./errors.js";
 
 describe("runtime failure classification", () => {
+  it("represents controller input failures without free-form details", () => {
+    const failures = [
+      { kind: "input", field: "title", reason: "required" },
+      { kind: "input", field: "file", reason: "too_large" },
+      { kind: "input", field: "summary", reason: "unreadable" },
+    ] as const;
+
+    expect(failures).toEqual([
+      { kind: "input", field: "title", reason: "required" },
+      { kind: "input", field: "file", reason: "too_large" },
+      { kind: "input", field: "summary", reason: "unreadable" },
+    ]);
+  });
+
   it.each([401, 403] as const)(
     "classifies %i as authentication loss before consulting known body fields",
     (status) => {

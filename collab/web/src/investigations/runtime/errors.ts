@@ -13,6 +13,9 @@ export const RUNTIME_PROTOCOL_REASONS = [
 
 export type RuntimeProtocolReason = (typeof RUNTIME_PROTOCOL_REASONS)[number];
 
+export type RuntimeInputField = "title" | "file" | "summary";
+export type RuntimeInputReason = "required" | "too_large" | "unreadable";
+
 /**
  * A deliberately bounded failure vocabulary for presentation consumers.
  *
@@ -21,6 +24,7 @@ export type RuntimeProtocolReason = (typeof RUNTIME_PROTOCOL_REASONS)[number];
  * these discriminants.
  */
 export type RuntimeFailure =
+  | { kind: "input"; field: RuntimeInputField; reason: RuntimeInputReason }
   | { kind: "auth_lost"; status: 401 | 403 }
   | { kind: "not_found"; status: 404 }
   | { kind: "validation"; status: 400 }

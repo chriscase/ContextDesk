@@ -1,5 +1,15 @@
 import type { RuntimeFailure } from "./errors.js";
 
+export const MAX_EVIDENCE_UPLOAD_BYTES = 1_000_000;
+
+export type CommandIgnoredReason = "busy" | "stale" | "not_ready";
+
+/** The bounded result of a controller command. */
+export type CommandOutcome<T> =
+  | { status: "succeeded"; value: T }
+  | { status: "failed"; error: RuntimeFailure }
+  | { status: "ignored"; reason: CommandIgnoredReason };
+
 /**
  * The complete public state of one runtime read.
  *
