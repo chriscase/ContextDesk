@@ -60,6 +60,7 @@ function renderStrategy(options: {
     <InvestigationRuntimeGatewayHarness gateway={gateway}>
       <InvestigationRuntimeProvider
         identityKey="alice"
+        identity={{ id: "alice", username: "alice", displayName: "Alice Nguyen" }}
         authorityKey="alice-authority-v1"
         capabilities={capabilities}
         readOnly={readOnly}

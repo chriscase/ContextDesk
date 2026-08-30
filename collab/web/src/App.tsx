@@ -967,6 +967,14 @@ export function App() {
             <section className="app__area" aria-label="Investigations" hidden={!inCasesArea}>
               <InvestigationRuntimeProvider
                 identityKey={session.identityId}
+                // Descriptive only, and deliberately just these three already
+                // sanitized fields: roles and capabilities reach the runtime
+                // through the capability projection below, never through here.
+                identity={{
+                  id: session.identityId,
+                  username: session.username,
+                  displayName: session.displayName,
+                }}
                 authorityKey={investigationAuthorityKey(session, staticReadOnly)}
                 capabilities={capabilities}
                 readOnly={staticReadOnly}

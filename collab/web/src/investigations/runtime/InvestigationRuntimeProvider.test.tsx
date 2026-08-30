@@ -11,6 +11,7 @@ import {
   InvestigationRuntimeGatewayHarness,
   InvestigationRuntimeProvider,
   type InvestigationRuntime,
+  type InvestigationRuntimeIdentity,
   type InvestigationRuntimeProviderProps,
   useInvestigationRuntime,
 } from "./InvestigationRuntimeProvider.js";
@@ -25,7 +26,7 @@ import {
   makeSparseImportedCase,
   RUNTIME_FIXTURE_IDS,
 } from "./testkit/fixtures.js";
-import { createDeferred } from "./testkit/promises.js";
+import { createDeferred, type Deferred } from "./testkit/promises.js";
 
 const FULL_CAPABILITIES = [
   "investigation:read",
@@ -910,5 +911,327 @@ describe("InvestigationRuntimeProvider", () => {
     // One initial read, one freshness read for the case transition, and one
     // newly scoped read for each authority/identity transition.
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(4);
+  });
+
+  describe("authenticated identity projection", () => {
+    const LEAD: InvestigationRuntimeIdentity = Object.freeze({
+      id: "identity-lead-1",
+      username: "lead",
+      displayName: "Lead Investigator",
+    });
+    // Deliberately unlike every identity field: identityKey is an opaque
+    // fencing token, and nothing may be read back out of it.
+    const FENCING_KEY = "authority-scope-9f3a";
+
+    it("projects exactly the sanitized identity the shell hands it", async () => {
+      render(
+        <ProviderUnderTest
+          identityKey={FENCING_KEY}
+          identity={LEAD}
+          authorityKey="lead-authority-v1"
+          capabilities={FULL_CAPABILITIES}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={makeGateway()}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+
+      expect(currentRuntime().identity).toEqual({
+        id: "identity-lead-1",
+        username: "lead",
+        displayName: "Lead Investigator",
+      });
+      expect(Object.keys(currentRuntime().identity).sort()).toEqual([
+        "displayName",
+        "id",
+        "username",
+      ]);
+      expect(Object.values(currentRuntime().identity)).not.toContain(FENCING_KEY);
+    });
+
+    it("publishes the anonymous identity, not the fencing key, without a shell session", async () => {
+      render(
+        <ProviderUnderTest
+          identityKey={FENCING_KEY}
+          authorityKey="lead-authority-v1"
+          capabilities={FULL_CAPABILITIES}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={makeGateway()}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+
+      expect(currentRuntime().identity).toEqual({ id: "", username: "", displayName: "" });
+    });
+
+    it("deep-freezes the identity with the rest of the runtime graph", async () => {
+      render(
+        <ProviderUnderTest
+          identityKey="identity-lead-1"
+          identity={LEAD}
+          authorityKey="lead-authority-v1"
+          capabilities={FULL_CAPABILITIES}
+          readOnly={false}
+          active
+          focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={makeGateway()}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+      const runtime = currentRuntime();
+      expect(Object.isFrozen(runtime)).toBe(true);
+      expect(Object.isFrozen(runtime.identity)).toBe(true);
+      expect(() => {
+        (runtime.identity as { displayName: string }).displayName = "Impersonated Lead";
+      }).toThrow();
+      expect(() => {
+        (runtime.identity as unknown as Record<string, unknown>)["roles"] = ["admin"];
+      }).toThrow();
+      expect(runtime.identity.displayName).toBe("Lead Investigator");
+      // The frozen identity does not come at the cost of the rest of the graph.
+      expect(Object.isFrozen(runtime.capabilities)).toBe(true);
+      expect(Object.isFrozen(runtime.resources)).toBe(true);
+      expect(Object.isFrozen(runtime.mutations)).toBe(true);
+      expect(Object.isFrozen(runtime.refresh)).toBe(true);
+      expect(Object.isFrozen(runtime.commands)).toBe(true);
+    });
+
+    it("drops roles, capabilities, and private material an over-sharing shell attaches", async () => {
+      const overSharing = {
+        ...LEAD,
+        roles: ["admin"],
+        capabilities: ["investigation:write", "admin:users"],
+        sessionToken: "cd-session-secret",
+      } as InvestigationRuntimeIdentity;
+      render(
+        <ProviderUnderTest
+          identityKey="identity-lead-1"
+          identity={overSharing}
+          authorityKey="lead-authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={makeGateway()}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+
+      const runtime = currentRuntime();
+      expect(Object.keys(runtime.identity).sort()).toEqual(["displayName", "id", "username"]);
+      expect("roles" in runtime.identity).toBe(false);
+      expect("capabilities" in runtime.identity).toBe(false);
+      expect("sessionToken" in runtime.identity).toBe(false);
+      expect(JSON.stringify(runtime)).not.toContain("cd-session-secret");
+      // Whatever the shell attached grants nothing: authority still comes only
+      // from the capability projection.
+      expect(runtime.capabilities).toEqual({
+        canRead: true,
+        canCreate: false,
+        canUpload: false,
+        canManageLifecycle: false,
+      });
+      expect(runtime.commands).toEqual({
+        createInvestigation: null,
+        uploadEvidence: null,
+        applyLifecycle: null,
+      });
+    });
+
+    it("republishes a renamed display name without re-fencing or granting capability", async () => {
+      const gateway = makeGateway();
+      // Stable across mounts so that the display name is the only thing that
+      // changes between renders.
+      const onOpenCreated = vi.fn();
+      const capabilities = ["investigation:read"] as const;
+      const mount = (displayName: string) => (
+        <ProviderUnderTest
+          identityKey="identity-lead-1"
+          identity={{ id: LEAD.id, username: LEAD.username, displayName }}
+          authorityKey="lead-authority-v1"
+          capabilities={capabilities}
+          readOnly={false}
+          active
+          focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+          isInvestigationLocation
+          onOpenCreated={onOpenCreated}
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>
+      );
+      const view = render(mount("Lead Investigator"));
+      await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+      const before = currentRuntime();
+
+      // An unrelated re-render hands the provider a fresh session object. The
+      // projection is keyed on the field values, so the published identity has
+      // to be the very same frozen object rather than an equal copy.
+      view.rerender(mount("Lead Investigator"));
+      expect(currentRuntime().identity).toBe(before.identity);
+
+      view.rerender(mount("Lead Investigator (on call)"));
+      await waitFor(() =>
+        expect(currentRuntime().identity.displayName).toBe("Lead Investigator (on call)"));
+
+      const after = currentRuntime();
+      expect(after.identity).toEqual({
+        id: "identity-lead-1",
+        username: "lead",
+        displayName: "Lead Investigator (on call)",
+      });
+      // A descriptive rename is not an authority event and not a scope change:
+      // the projected authority and every published lane survive untouched.
+      expect(after.capabilities).toBe(before.capabilities);
+      expect(after.resources.investigations).toBe(before.resources.investigations);
+      expect(after.resources.investigation).toBe(before.resources.investigation);
+      expect(after.commands.createInvestigation).toBeNull();
+      expect(after.commands.uploadEvidence).toBeNull();
+      expect(after.commands.applyLifecycle).toBeNull();
+      expect(gateway.listInvestigations).toHaveBeenCalledTimes(1);
+      expect(gateway.getInvestigation).toHaveBeenCalledTimes(1);
+    });
+
+    it("publishes only the new identity when the authenticated person changes", async () => {
+      const listReads: Array<{
+        readonly signal: AbortSignal;
+        readonly deferred: Deferred<GatewayResult<readonly CaseV1[]>>;
+      }> = [];
+      const gateway = makeGateway({
+        listInvestigations: vi.fn(({ signal }) => {
+          const deferred = createDeferred<GatewayResult<readonly CaseV1[]>>();
+          listReads.push({ signal, deferred });
+          return deferred.promise;
+        }),
+      });
+      const ANALYST: InvestigationRuntimeIdentity = Object.freeze({
+        id: "identity-analyst-2",
+        username: "analyst",
+        displayName: "Second Analyst",
+      });
+      function Harness() {
+        const [identity, setIdentity] = useState(LEAD);
+        return (
+          <>
+            <button type="button" onClick={() => setIdentity(ANALYST)}>
+              reauthenticate
+            </button>
+            <ProviderUnderTest
+              identityKey={identity.id}
+              identity={identity}
+              authorityKey={`${identity.id}-authority-v1`}
+              capabilities={FULL_CAPABILITIES}
+              readOnly={false}
+              active
+              focusCaseId={null}
+              isInvestigationLocation
+              onOpenCreated={vi.fn()}
+              gateway={gateway}
+            >
+              <RuntimeProbe />
+            </ProviderUnderTest>
+          </>
+        );
+      }
+      render(<Harness />);
+      await waitFor(() => expect(listReads).toHaveLength(1));
+      expect(currentRuntime().identity).toEqual(LEAD);
+
+      act(() => screen.getByRole("button", { name: "reauthenticate" }).click());
+      await waitFor(() => expect(listReads).toHaveLength(2));
+
+      // Only the new identity is published, and nothing of the old one is kept.
+      expect(currentRuntime().identity).toEqual(ANALYST);
+      expect(Object.values(currentRuntime().identity)).not.toContain(LEAD.id);
+      expect(Object.values(currentRuntime().identity)).not.toContain(LEAD.username);
+      expect(Object.values(currentRuntime().identity)).not.toContain(LEAD.displayName);
+      expect(listReads[0]!.signal.aborted).toBe(true);
+      expect(currentRuntime().resources.investigations).toEqual({ status: "loading" });
+
+      // The previous identity's read finishes late. Existing fencing must keep
+      // it from publishing into the newly signed-in runtime.
+      await act(async () => {
+        listReads[0]!.deferred.resolve(succeeded(makeCaseList().cases));
+        await listReads[0]!.deferred.promise;
+      });
+      expect(currentRuntime().resources.investigations).toEqual({ status: "loading" });
+      expect(currentRuntime().identity).toEqual(ANALYST);
+
+      // The new identity's own read still publishes normally.
+      await act(async () => {
+        listReads[1]!.deferred.resolve(succeeded(makeCaseList().cases));
+        await listReads[1]!.deferred.promise;
+      });
+      await waitFor(() =>
+        expect(currentRuntime().resources.investigations.status).toBe("ready"));
+      expect(currentRuntime().identity).toEqual(ANALYST);
+    });
+
+    it("still publishes the identity in static read-only mode without granting anything", async () => {
+      render(
+        <ProviderUnderTest
+          identityKey="identity-lead-1"
+          identity={LEAD}
+          authorityKey="lead-authority-read-only"
+          capabilities={FULL_CAPABILITIES}
+          readOnly
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={makeGateway()}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+
+      const runtime = currentRuntime();
+      expect(runtime.identity).toEqual(LEAD);
+      expect(Object.isFrozen(runtime.identity)).toBe(true);
+      // Knowing who is signed in is not permission to act as them.
+      expect(runtime.capabilities).toEqual({
+        canRead: true,
+        canCreate: false,
+        canUpload: false,
+        canManageLifecycle: false,
+      });
+      expect(runtime.commands).toEqual({
+        createInvestigation: null,
+        uploadEvidence: null,
+        applyLifecycle: null,
+      });
+    });
+
+    it("offers a strategy no identity outside the shared provider", () => {
+      function IdentityProbe() {
+        const { identity } = useInvestigationRuntime();
+        return <div>{identity.username}</div>;
+      }
+      expect(() => render(<IdentityProbe />)).toThrow(
+        "useInvestigationRuntime must be used within InvestigationRuntimeProvider",
+      );
+    });
   });
 });

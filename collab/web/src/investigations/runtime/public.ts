@@ -10,6 +10,7 @@ export {
   type InvestigationEvidenceUploadCommand,
   type InvestigationRuntime,
   type InvestigationRuntimeCommands,
+  type InvestigationRuntimeIdentity,
   type InvestigationRuntimeMutations,
   type InvestigationRuntimeProviderProps,
   type InvestigationRuntimeRefresh,
