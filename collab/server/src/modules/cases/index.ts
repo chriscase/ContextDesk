@@ -5,9 +5,13 @@ export {
   CaseService,
   ContributionConflictError,
   CorpusIntakeConflictError,
+  LifecycleActionRequiredError,
+  LifecycleChangedError,
+  LifecycleRefusedError,
   LegalHoldError,
   MemoryCaseStore,
   PgCaseStore,
+  StatusChangedError,
   SituationConflictError,
 } from "./service.js";
 export type {

@@ -1,0 +1,545 @@
+import {
+  ContractViolation,
+  INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+  parseCase,
+  parseCaseList,
+  parseContributionList,
+  parseEvidenceList,
+  parseEvidenceUploadSuccess,
+  parseInvestigationLifecycle,
+  parseInvestigationLifecycleActionRefused,
+  parseInvestigationLifecycleActionSuccess,
+  parseInvestigationLifecycleChanged,
+  type ArtifactKind,
+  type ArtifactV1,
+  type CaseV1,
+  type ContributionV1,
+  type EvidenceUploadSuccessV1,
+  type InvestigationLifecycleActionSuccessV1,
+  type InvestigationLifecycleExpectedV1,
+  type InvestigationLifecycleV1,
+  type LifecycleAction,
+  type PrivacyClass,
+} from "@cd-collab/contracts/investigation-runtime";
+import { protectedApiFetch } from "../../protected-api.js";
+import {
+  classifyHttpFailure,
+  classifyRequestException,
+  protocolFailure,
+  type RuntimeFailure,
+} from "./errors.js";
+import { deepFreezeDto } from "./deep-freeze.js";
+
+export type GatewayResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: RuntimeFailure };
+
+export interface GatewayRequestOptions {
+  /** Required so every caller makes cancellation and publication intentional. */
+  readonly signal: AbortSignal;
+}
+
+export interface CreateInvestigationInput {
+  readonly title: string;
+  readonly severity?: CaseV1["severity"];
+  readonly clientTime?: string;
+  readonly problemStatement?: string;
+  readonly affectedParties?: string;
+  readonly impact?: string;
+  readonly scope?: string;
+  readonly openQuestions?: readonly string[];
+  readonly investigationContext?: CaseV1["investigationContext"];
+  readonly occurredAt?: string | null;
+  readonly occurredAtPrecision?: CaseV1["occurredAtPrecision"];
+  readonly occurredAtZone?: CaseV1["occurredAtZone"];
+}
+
+/** Transport-ready upload input. File reading and size limits belong to a controller. */
+export interface UploadEvidenceInput {
+  readonly kind: ArtifactKind;
+  readonly summary: string;
+  readonly filename?: string;
+  readonly mediaType?: string;
+  readonly contentBase64?: string;
+  readonly uri?: string;
+  readonly expectedHash?: string | null;
+  readonly privacyClass?: PrivacyClass;
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+}
+
+export interface ApplyLifecycleActionInput {
+  readonly action: LifecycleAction;
+  readonly expected: InvestigationLifecycleExpectedV1;
+  readonly clientTime?: string;
+}
+
+export interface InvestigationGateway {
+  listInvestigations(
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<readonly CaseV1[]>>;
+  getInvestigation(
+    investigationId: string,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<CaseV1>>;
+  createInvestigation(
+    input: CreateInvestigationInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<CaseV1>>;
+  listEvidence(
+    investigationId: string,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<readonly ArtifactV1[]>>;
+  listContributions(
+    investigationId: string,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<readonly ContributionV1[]>>;
+  uploadEvidence(
+    investigationId: string,
+    input: UploadEvidenceInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<EvidenceUploadSuccessV1>>;
+  getLifecycle(
+    investigationId: string,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<InvestigationLifecycleV1>>;
+  applyLifecycleAction(
+    investigationId: string,
+    input: ApplyLifecycleActionInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<InvestigationLifecycleActionSuccessV1>>;
+}
+
+type Parser<T> = (raw: unknown) => T;
+type IdentityCheck<T> = (value: T) => boolean;
+
+type ResponseResult =
+  | { ok: true; response: Response }
+  | { ok: false; error: RuntimeFailure };
+
+type SerializedBodyResult = GatewayResult<string>;
+
+const JSON_HEADERS = Object.freeze({ "content-type": "application/json" });
+
+function failed<T>(error: RuntimeFailure): GatewayResult<T> {
+  return { ok: false, error };
+}
+
+function aborted<T>(): GatewayResult<T> {
+  return failed({ kind: "aborted" });
+}
+
+function serializeMutationBody(
+  signal: AbortSignal,
+  snapshot: () => Record<string, unknown>,
+): SerializedBodyResult {
+  if (signal.aborted) return aborted();
+  try {
+    const body = JSON.stringify(snapshot());
+    if (signal.aborted) return aborted();
+    return { ok: true, value: body };
+  } catch {
+    return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+  }
+}
+
+function createInvestigationBody(input: CreateInvestigationInput): Record<string, unknown> {
+  const body: Record<string, unknown> = { title: input.title };
+  if (input.severity !== undefined) body.severity = input.severity;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  if (input.problemStatement !== undefined) body.problemStatement = input.problemStatement;
+  if (input.affectedParties !== undefined) body.affectedParties = input.affectedParties;
+  if (input.impact !== undefined) body.impact = input.impact;
+  if (input.scope !== undefined) body.scope = input.scope;
+  if (input.openQuestions !== undefined) {
+    body.openQuestions = Array.from(input.openQuestions, (question) => question);
+  }
+  if (input.investigationContext !== undefined) {
+    const context = input.investigationContext;
+    body.investigationContext = context === null
+      ? null
+      : {
+          productName: context.productName,
+          version: context.version,
+          build: context.build,
+          component: context.component,
+          environment: context.environment,
+          organization: context.organization,
+        };
+  }
+  if (input.occurredAt !== undefined) body.occurredAt = input.occurredAt;
+  if (input.occurredAtPrecision !== undefined) {
+    body.occurredAtPrecision = input.occurredAtPrecision;
+  }
+  if (input.occurredAtZone !== undefined) body.occurredAtZone = input.occurredAtZone;
+  return body;
+}
+
+function uploadEvidenceBody(input: UploadEvidenceInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    kind: input.kind,
+    summary: input.summary,
+  };
+  if (input.filename !== undefined) body.filename = input.filename;
+  if (input.mediaType !== undefined) body.mediaType = input.mediaType;
+  if (input.contentBase64 !== undefined) body.contentBase64 = input.contentBase64;
+  if (input.uri !== undefined) body.uri = input.uri;
+  if (input.expectedHash !== undefined) body.expectedHash = input.expectedHash;
+  if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  if (input.sourceId !== undefined) body.sourceId = input.sourceId;
+  return body;
+}
+
+function lifecycleActionBody(
+  investigationId: string,
+  input: ApplyLifecycleActionInput,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+    investigationId,
+    action: input.action,
+    expected: {
+      status: input.expected.status,
+      legalHold: input.expected.legalHold,
+      restoreTarget: input.expected.restoreTarget,
+    },
+  };
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  return body;
+}
+
+function isJsonResponse(response: Response): boolean {
+  const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  return mediaType === "application/json"
+    || (mediaType?.startsWith("application/") === true && mediaType.endsWith("+json"));
+}
+
+async function fetchProtected(
+  route: string,
+  init: RequestInit,
+  signal: AbortSignal,
+): Promise<ResponseResult> {
+  if (signal.aborted) return { ok: false, error: { kind: "aborted" } };
+  try {
+    const response = await protectedApiFetch(route, { ...init, signal });
+    if (signal.aborted) return { ok: false, error: { kind: "aborted" } };
+    return { ok: true, response };
+  } catch (cause) {
+    return {
+      ok: false,
+      error: classifyRequestException(cause, signal.aborted),
+    };
+  }
+}
+
+async function parseSuccessfulResponse<T>(
+  response: Response,
+  signal: AbortSignal,
+  parser: Parser<T>,
+  identity: IdentityCheck<T>,
+): Promise<GatewayResult<T>> {
+  if (!isJsonResponse(response)) return failed(protocolFailure("content_type"));
+  if (signal.aborted) return aborted();
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    return signal.aborted ? aborted() : failed(protocolFailure("json"));
+  }
+  if (signal.aborted) return aborted();
+
+  let parsed: T;
+  try {
+    if (signal.aborted) return aborted();
+    parsed = parser(raw);
+  } catch (cause) {
+    if (signal.aborted) return aborted();
+    return cause instanceof ContractViolation
+      ? failed(protocolFailure("contract"))
+      : failed({ kind: "unexpected" });
+  }
+  if (signal.aborted) return aborted();
+
+  let identityMatches: boolean;
+  try {
+    if (signal.aborted) return aborted();
+    identityMatches = identity(parsed);
+  } catch {
+    return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+  }
+  if (signal.aborted) return aborted();
+  if (!identityMatches) return failed(protocolFailure("identity"));
+  if (signal.aborted) return aborted();
+  return { ok: true, value: deepFreezeDto(parsed) };
+}
+
+async function requestParsed<T>(
+  route: string,
+  init: RequestInit,
+  signal: AbortSignal,
+  parser: Parser<T>,
+  identity: IdentityCheck<T>,
+): Promise<GatewayResult<T>> {
+  const fetched = await fetchProtected(route, init, signal);
+  if (!fetched.ok) return failed(fetched.error);
+  if (!fetched.response.ok) {
+    return failed(classifyHttpFailure(fetched.response.status));
+  }
+  return parseSuccessfulResponse(fetched.response, signal, parser, identity);
+}
+
+function caseCollectionIdentity(cases: readonly CaseV1[]): boolean {
+  const identities = new Set<string>();
+  for (const investigation of cases) {
+    if (investigation.id.length === 0 || identities.has(investigation.id)) return false;
+    identities.add(investigation.id);
+  }
+  return true;
+}
+
+function evidenceCollectionIdentity(
+  investigationId: string,
+  artifacts: readonly ArtifactV1[],
+): boolean {
+  const identities = new Set<string>();
+  for (const artifact of artifacts) {
+    if (
+      artifact.caseId !== investigationId
+      || artifact.id.length === 0
+      || identities.has(artifact.id)
+    ) return false;
+    identities.add(artifact.id);
+  }
+  return true;
+}
+
+function contributionCollectionIdentity(
+  investigationId: string,
+  contributions: readonly ContributionV1[],
+): boolean {
+  const identities = new Set<string>();
+  for (const contribution of contributions) {
+    if (
+      contribution.caseId !== investigationId
+      || contribution.id.length === 0
+      || identities.has(contribution.id)
+    ) return false;
+    identities.add(contribution.id);
+  }
+  return true;
+}
+
+function caseRoute(investigationId: string, suffix = ""): string {
+  return `/api/cases/${encodeURIComponent(investigationId)}${suffix}`;
+}
+
+async function parseLifecycleConflict(
+  response: Response,
+  investigationId: string,
+  action: LifecycleAction,
+  signal: AbortSignal,
+): Promise<GatewayResult<InvestigationLifecycleActionSuccessV1>> {
+  const genericConflict = (): GatewayResult<InvestigationLifecycleActionSuccessV1> =>
+    failed({ kind: "conflict", status: 409 });
+  if (!isJsonResponse(response)) return signal.aborted ? aborted() : genericConflict();
+  if (signal.aborted) return aborted();
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    return signal.aborted ? aborted() : genericConflict();
+  }
+  if (signal.aborted) return aborted();
+
+  let schemaId: unknown;
+  let error: unknown;
+  try {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return genericConflict();
+    }
+    const record = raw as Record<string, unknown>;
+    schemaId = record.schemaId;
+    error = record.error;
+  } catch {
+    return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+  }
+  if (signal.aborted) return aborted();
+
+  const claimsChanged = schemaId === INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID
+    || error === "lifecycle_changed";
+  const claimsRefused = schemaId === INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID
+    || error === "lifecycle_refused";
+  if (!claimsChanged && !claimsRefused) return genericConflict();
+  if (claimsChanged && claimsRefused) return failed(protocolFailure("contract"));
+
+  try {
+    if (signal.aborted) return aborted();
+    if (claimsChanged) {
+      const changed = parseInvestigationLifecycleChanged(raw);
+      if (signal.aborted) return aborted();
+      if (changed.investigationId !== investigationId || changed.action !== action) {
+        return failed(protocolFailure("identity"));
+      }
+      if (signal.aborted) return aborted();
+      return failed({
+        kind: "lifecycle_changed",
+        status: 409,
+        investigationId: changed.investigationId,
+        action: changed.action,
+        current: deepFreezeDto(changed.current),
+      });
+    }
+
+    const refusal = parseInvestigationLifecycleActionRefused(raw);
+    if (signal.aborted) return aborted();
+    if (refusal.investigationId !== investigationId || refusal.action !== action) {
+      return failed(protocolFailure("identity"));
+    }
+    if (signal.aborted) return aborted();
+    return failed(classifyHttpFailure(409, {
+      kind: "lifecycle_refused",
+      action: refusal.action,
+      reason: refusal.reason,
+      detail: refusal.detail,
+    }));
+  } catch (cause) {
+    if (signal.aborted) return aborted();
+    return cause instanceof ContractViolation
+      ? failed(protocolFailure("contract"))
+      : failed({ kind: "unexpected" });
+  }
+}
+
+export const investigationGateway: InvestigationGateway = {
+  async listInvestigations({ signal }) {
+    const result = await requestParsed(
+      "/api/cases",
+      {},
+      signal,
+      parseCaseList,
+      (value) => caseCollectionIdentity(value.cases),
+    );
+    return result.ok
+      ? { ok: true, value: deepFreezeDto([...result.value.cases]) }
+      : result;
+  },
+
+  getInvestigation(investigationId, { signal }) {
+    return requestParsed(
+      caseRoute(investigationId),
+      {},
+      signal,
+      parseCase,
+      (value) => value.id === investigationId,
+    );
+  },
+
+  createInvestigation(input, { signal }) {
+    const serialized = serializeMutationBody(signal, () => createInvestigationBody(input));
+    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
+    return requestParsed(
+      "/api/cases",
+      {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: serialized.value,
+      },
+      signal,
+      parseCase,
+      (value) => value.id.length > 0,
+    );
+  },
+
+  async listEvidence(investigationId, { signal }) {
+    const result = await requestParsed(
+      caseRoute(investigationId, "/evidence"),
+      {},
+      signal,
+      parseEvidenceList,
+      (value) => value.caseId === investigationId
+        && evidenceCollectionIdentity(investigationId, value.artifacts),
+    );
+    return result.ok
+      ? { ok: true, value: deepFreezeDto([...result.value.artifacts]) }
+      : result;
+  },
+
+  async listContributions(investigationId, { signal }) {
+    const result = await requestParsed(
+      caseRoute(investigationId, "/contributions"),
+      {},
+      signal,
+      parseContributionList,
+      (value) => value.caseId === investigationId
+        && contributionCollectionIdentity(investigationId, value.contributions),
+    );
+    return result.ok
+      ? { ok: true, value: deepFreezeDto([...result.value.contributions]) }
+      : result;
+  },
+
+  uploadEvidence(investigationId, input, { signal }) {
+    const serialized = serializeMutationBody(signal, () => uploadEvidenceBody(input));
+    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
+    return requestParsed(
+      caseRoute(investigationId, "/evidence"),
+      {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: serialized.value,
+      },
+      signal,
+      parseEvidenceUploadSuccess,
+      (value) => value.caseId === investigationId
+        && value.artifact.caseId === investigationId
+        && value.summary.caseId === investigationId
+        && value.artifact.id.length > 0
+        && value.summary.id.length > 0,
+    );
+  },
+
+  getLifecycle(investigationId, { signal }) {
+    return requestParsed(
+      caseRoute(investigationId, "/lifecycle"),
+      {},
+      signal,
+      parseInvestigationLifecycle,
+      (value) => value.investigationId === investigationId,
+    );
+  },
+
+  async applyLifecycleAction(investigationId, input, { signal }) {
+    const serialized = serializeMutationBody(
+      signal,
+      () => lifecycleActionBody(investigationId, input),
+    );
+    if (!serialized.ok) return failed(serialized.error);
+    const fetched = await fetchProtected(
+      caseRoute(investigationId, "/lifecycle"),
+      {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: serialized.value,
+      },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    if (fetched.response.status === 409) {
+      return parseLifecycleConflict(fetched.response, investigationId, input.action, signal);
+    }
+    if (!fetched.response.ok) {
+      return failed(classifyHttpFailure(fetched.response.status));
+    }
+    return parseSuccessfulResponse(
+      fetched.response,
+      signal,
+      parseInvestigationLifecycleActionSuccess,
+      (value) => value.investigationId === investigationId && value.action === input.action,
+    );
+  },
+};

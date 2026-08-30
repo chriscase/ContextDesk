@@ -7,6 +7,8 @@ import {
   parseCaseList,
   parseContributionList,
   parseContribution,
+  parseEvidenceList,
+  parseEvidenceUploadSuccess,
   parseProvenance,
   parseSourceList,
   parseTimeline,
@@ -154,6 +156,57 @@ async function login(
 }
 
 describe("cases timeline evidence provenance", () => {
+  it("serves versioned, identity-checked evidence list and upload envelopes", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Synthetic evidence envelope" },
+      })).body));
+
+      const emptyResponse = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence`,
+        headers: { cookie: alice },
+      });
+      expect(emptyResponse.statusCode).toBe(200);
+      expect(parseEvidenceList(JSON.parse(emptyResponse.body))).toMatchObject({
+        caseId: created.id,
+        artifacts: [],
+      });
+
+      const uploadResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "attachment",
+          filename: "envelope.txt",
+          mediaType: "text/plain",
+          contentBase64: Buffer.from("synthetic evidence envelope").toString("base64"),
+          summary: "Versioned upload envelope",
+        },
+      });
+      expect(uploadResponse.statusCode).toBe(200);
+      const uploaded = parseEvidenceUploadSuccess(JSON.parse(uploadResponse.body));
+      expect(uploaded.caseId).toBe(created.id);
+      expect(uploaded.artifact.caseId).toBe(created.id);
+      expect(uploaded.summary.caseId).toBe(created.id);
+
+      const populatedResponse = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence`,
+        headers: { cookie: alice },
+      });
+      expect(populatedResponse.statusCode).toBe(200);
+      const populated = parseEvidenceList(JSON.parse(populatedResponse.body));
+      expect(populated.caseId).toBe(created.id);
+      expect(populated.artifacts.map((artifact) => artifact.id)).toEqual([uploaded.artifact.id]);
+    });
+  });
+
   it("rejects malformed clientTime values before creating durable state", async () => {
     await withApp(async ({ app, audit }) => {
       const alice = await login(app, "alice", ALICE);

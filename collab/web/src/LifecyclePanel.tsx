@@ -1,56 +1,45 @@
 /**
- * Archiving and restoring an investigation, as a deliberate act.
+ * Archive/restore presentation for one already-bound investigation runtime.
  *
- * Archiving used to be one option in the same dropdown as `open` and
- * `monitoring`: a single unconfirmed change of a select, indistinguishable
- * from moving a case to monitoring, that took the investigation out of the
- * working list. Restoring was the same control run backwards, which meant the
- * operator had to remember what the investigation had been before.
- *
- * Three things are wrong with that, and this panel exists to fix them:
- *
- * 1. **It read as deletion to anyone who had not been told otherwise.** A
- *    support user archiving a case had no way to know the evidence, the
- *    timeline, and the audit trail all survive. So the panel says what
- *    archiving does, in words, before offering it.
- * 2. **It could not be refused legibly.** A legal hold refuses an archive, but
- *    the dropdown had no way to say so until after the click. The panel reads
- *    the recorded verdict first and disables the control with the reason
- *    attached, so the refusal arrives before the attempt.
- * 3. **Restore was a guess.** The panel names the status the investigation
- *    will return to, read from its recorded history rather than from memory.
- *
- * Confirmation is a second explicit click rather than a `window.confirm`: the
- * dialog cannot be styled, cannot be read by the component tests, and gives
- * the operator no room to state what will happen.
+ * Transport, route construction, lifecycle authority, and refresh behavior
+ * remain outside this component. The panel renders parsed state and emits only
+ * an archive or restore intent after an explicit second click.
  */
-import { useCallback, useEffect, useState } from "react";
-import { protectedApiFetch } from "./protected-api.js";
+import { useEffect, useState } from "react";
+import type {
+  CommandOutcome,
+  InvestigationLifecycleActionSuccessV1,
+  InvestigationLifecycleV1,
+  LifecycleAction,
+  MutationState,
+  ResourceState,
+} from "./investigations/runtime/public.js";
 
-/** Mirrors the server's lifecycle verdict without importing its internals. */
-export interface LifecycleVerdictView {
-  allowed: boolean;
-  action?: string;
-  reason?: string;
-  detail?: string;
-  targetStatus?: string;
+export type LifecycleView = InvestigationLifecycleV1;
+
+type LifecycleCommand = (
+  action: LifecycleAction,
+) => Promise<CommandOutcome<InvestigationLifecycleActionSuccessV1>>;
+
+type LifecycleFailure = Extract<
+  CommandOutcome<InvestigationLifecycleActionSuccessV1>,
+  { status: "failed" }
+>["error"];
+
+export interface LifecyclePanelProps {
+  lifecycle: ResourceState<InvestigationLifecycleV1>;
+  lifecycleMutation: MutationState<InvestigationLifecycleActionSuccessV1>;
+  canManage: boolean;
+  /** Static snapshots suppress mutations regardless of ordinary role. */
+  readOnly?: boolean;
+  /** Action intent only. Runtime code derives and verifies expected state. */
+  applyAction: LifecycleCommand | null;
+  /** Requests a fresh parsed lifecycle view after a read failure. */
+  retryLifecycle: () => void;
+  /** Optional caller refresh after a confirmed successful action. */
+  onChanged?: () => void | Promise<void>;
 }
 
-export interface LifecycleView {
-  status: string;
-  legalHold: boolean;
-  archive: LifecycleVerdictView;
-  restore: LifecycleVerdictView;
-  restoreTarget: string;
-  deletion: { supported: boolean; detail: string };
-}
-
-/**
- * What each status is called where a reader meets it.
- *
- * The raw status is still shown elsewhere; this is the phrase that makes a
- * restore destination read as a place rather than as a token.
- */
 const STATUS_PHRASE: Readonly<Record<string, string>> = {
   open: "open",
   monitoring: "monitoring",
@@ -62,86 +51,33 @@ function statusPhrase(status: string): string {
   return STATUS_PHRASE[status] ?? status;
 }
 
-export function LifecyclePanel(props: {
-  caseId: string;
-  /** Current status from the loaded case, so the panel renders before its fetch lands. */
-  status: string;
-  canLead: boolean;
-  /** Static snapshots suppress mutations regardless of the reader's ordinary role. */
-  readOnly?: boolean;
-  /** Runs after a successful archive or restore so the caller can refetch. */
-  onChanged: () => void | Promise<void>;
-  /** Test seam: supplies the view without a network round trip. */
-  loadLifecycle?: (caseId: string) => Promise<LifecycleView | null>;
-}) {
-  const { caseId, loadLifecycle } = props;
-  const [view, setView] = useState<LifecycleView | null>(null);
-  const [confirming, setConfirming] = useState<"archive" | "restore" | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+function lifecyclePreview(
+  state: ResourceState<InvestigationLifecycleV1>,
+): InvestigationLifecycleV1 | null {
+  if (state.status === "ready") return state.value;
+  if (state.status === "loading" || state.status === "failed") {
+    return state.previous ?? null;
+  }
+  return null;
+}
 
-  const load = useCallback(async () => {
-    if (loadLifecycle) {
-      setView(await loadLifecycle(caseId));
-      return;
-    }
-    // A lifecycle read that fails is not worth an error banner: the panel
-    // simply has nothing extra to say, and the ordinary status path still
-    // works. Failing loudly here would put a red message on every
-    // investigation in an installation that has not deployed the route yet.
-    try {
-      const response = await protectedApiFetch(`/api/cases/${caseId}/lifecycle`);
-      if (!response.ok) {
-        setView(null);
-        return;
-      }
-      setView((await response.json()) as LifecycleView);
-    } catch {
-      setView(null);
-    }
-  }, [caseId, loadLifecycle]);
+function failureCopy(failure: LifecycleFailure): string {
+  if (failure.kind === "lifecycle_refused") return failure.detail;
+  if (failure.kind === "lifecycle_changed") {
+    return "The investigation changed before this action could be applied. Review the latest lifecycle state and try again if the action is still appropriate.";
+  }
+  return "The lifecycle action could not be completed. Review the current investigation state before trying again.";
+}
+
+export function LifecyclePanel(props: LifecyclePanelProps) {
+  const [confirming, setConfirming] = useState<LifecycleAction | null>(null);
+  const view = lifecyclePreview(props.lifecycle);
 
   useEffect(() => {
     setConfirming(null);
-    setError(null);
-    void load();
-  }, [load]);
+  }, [view?.investigationId, view?.status]);
 
-  async function commit(action: "archive" | "restore", targetStatus: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      const response = await protectedApiFetch(`/api/cases/${caseId}/status`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status: targetStatus }),
-      });
-      if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as {
-          error?: string;
-          detail?: string;
-        };
-        // A lifecycle refusal already reads as a complete sentence naming what
-        // to do about it, so it is shown as written rather than wrapped in a
-        // generic failure line that would bury it.
-        setError(
-          body.detail
-            ?? (action === "archive"
-              ? "This investigation could not be archived."
-              : "This investigation could not be restored."),
-        );
-        await load();
-        return;
-      }
-      setConfirming(null);
-      await load();
-      await props.onChanged();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (!props.canLead || props.readOnly) {
+  if (!props.canManage || props.readOnly) {
     return (
       <p className="triage-step__note">
         {props.readOnly
@@ -151,35 +87,87 @@ export function LifecyclePanel(props: {
     );
   }
 
-  const status = view?.status ?? props.status;
-  const isArchived = status === "archived";
-  const archive = view?.archive;
+  const isArchived = view?.status === "archived";
+  const action: LifecycleAction = isArchived ? "restore" : "archive";
+  const verdict = isArchived ? view?.restore : view?.archive;
   const restoreTarget = view?.restoreTarget ?? "open";
-  // Until the verdict lands the control stays available and the server stays
-  // the authority: an optimistic disable would hide a legitimate action behind
-  // a slow request, and an optimistic enable is corrected by the refusal.
-  const archiveRefusal = archive && !archive.allowed ? (archive.detail ?? null) : null;
+  const refusal = verdict && !verdict.allowed ? verdict.detail : null;
+  const readReady = props.lifecycle.status === "ready" && view !== null;
+  const busy = props.lifecycleMutation.status === "running";
+  const actionReady = readReady
+    && props.applyAction !== null
+    && verdict?.allowed === true;
+  const mutationFailure = props.lifecycleMutation.status === "failed"
+    ? props.lifecycleMutation.error
+    : null;
+
+  async function commit(requestedAction: LifecycleAction) {
+    if (!actionReady || props.applyAction === null || requestedAction !== action) return;
+    const outcome = await props.applyAction(requestedAction);
+    if (outcome.status === "succeeded") {
+      setConfirming(null);
+      await props.onChanged?.();
+    }
+  }
 
   return (
     <section className="lifecycle-panel" aria-label="Archive and restore">
       <h4 className="lifecycle-panel__title">
-        {isArchived ? "Restore this investigation" : "Archive this investigation"}
+        {view === null
+          ? "Archive or restore this investigation"
+          : isArchived
+            ? "Restore this investigation"
+            : "Archive this investigation"}
       </h4>
-      <p className="lifecycle-panel__explainer">
-        {isArchived
-          ? `Restoring puts this investigation back in the working list as ${statusPhrase(restoreTarget)} — the status it held before it was archived.`
-          : "Archiving takes this investigation out of the working list. Nothing is deleted: the evidence, the timeline, and the audit trail stay exactly as they are, and it can be restored later."}
-      </p>
 
-      {archiveRefusal && !isArchived ? (
-        <p className="lifecycle-panel__refusal" role="status">
-          {archiveRefusal}
+      {view ? (
+        <p className="lifecycle-panel__explainer">
+          {isArchived
+            ? `Restoring puts this investigation back in the working list as ${statusPhrase(restoreTarget)} — the status it held before it was archived.`
+            : "Archiving takes this investigation out of the working list. Nothing is deleted: the evidence, the timeline, and the audit trail stay exactly as they are, and it can be restored later."}
+        </p>
+      ) : (
+        <p className="lifecycle-panel__explainer">
+          Current lifecycle details are required before an investigation can be archived or restored.
+        </p>
+      )}
+
+      {props.lifecycle.status === "loading" ? (
+        <p className="triage-step__note" role="status">
+          Checking the current archive and restore state…
         </p>
       ) : null}
 
-      {error ? (
+      {props.lifecycle.status === "idle" ? (
+        <p className="triage-step__note" role="status">
+          Lifecycle details are not ready for this investigation.
+        </p>
+      ) : null}
+
+      {props.lifecycle.status === "failed" ? (
+        <div className="lifecycle-panel__read-failure">
+          <p className="lifecycle-panel__error" role="alert">
+            Lifecycle details could not be loaded. Archive and restore remain unavailable until the current state is available.
+          </p>
+          <button
+            type="button"
+            className="lifecycle-panel__action"
+            onClick={props.retryLifecycle}
+          >
+            Retry lifecycle details
+          </button>
+        </div>
+      ) : null}
+
+      {refusal ? (
+        <p className="lifecycle-panel__refusal" role="status">
+          {refusal}
+        </p>
+      ) : null}
+
+      {mutationFailure ? (
         <p className="lifecycle-panel__error" role="alert">
-          {error}
+          {failureCopy(mutationFailure)}
         </p>
       ) : null}
 
@@ -187,8 +175,8 @@ export function LifecyclePanel(props: {
         <button
           type="button"
           className="lifecycle-panel__action"
-          disabled={busy || Boolean(archiveRefusal && !isArchived)}
-          onClick={() => setConfirming(isArchived ? "restore" : "archive")}
+          disabled={!actionReady || busy}
+          onClick={() => setConfirming(action)}
         >
           {isArchived ? "Restore investigation" : "Archive investigation"}
         </button>
@@ -202,10 +190,8 @@ export function LifecyclePanel(props: {
           <button
             type="button"
             className="lifecycle-panel__confirm-yes"
-            disabled={busy}
-            onClick={() =>
-              void commit(confirming, confirming === "archive" ? "archived" : restoreTarget)
-            }
+            disabled={!actionReady || busy}
+            onClick={() => void commit(confirming)}
           >
             {busy
               ? "Working…"

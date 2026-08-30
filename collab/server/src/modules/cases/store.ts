@@ -314,6 +314,13 @@ export interface ParticipantVisibilityScope {
 export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
+  /**
+   * Lock and reload one case inside `withAtomic`.
+   *
+   * Mutation decisions that depend on case metadata must use this read rather
+   * than a preview obtained before the atomic boundary.
+   */
+  lockCase(id: string): Promise<CaseRow | null>;
   insertCase(row: CaseRow): Promise<void>;
   updateCaseMeta(row: { id: string; status?: CaseRow["status"]; legalHold?: boolean }): Promise<void>;
   updateOccurredAt(
@@ -397,6 +404,7 @@ export class MemoryCaseStore implements CaseStore {
   private readonly intakeBatches = new Map<string, IntakeBatchRow>();
   private readonly contributionIntents = new Map<string, ContributionWriteIntent>();
   private readonly atomicBoundary: AtomicBoundary;
+  private readonly atomicContext = new AsyncLocalStorage<boolean>();
 
   constructor(boundary: AtomicBoundary = async (operation) => operation()) {
     this.atomicBoundary = serializedAtomicBoundary(boundary);
@@ -446,6 +454,16 @@ export class MemoryCaseStore implements CaseStore {
 
   async getCase(id: string): Promise<CaseRow | null> {
     const row = this.cases.get(id);
+    return row ? cloneCase(row) : null;
+  }
+
+  async lockCase(id: string): Promise<CaseRow | null> {
+    if (!this.atomicContext.getStore()) {
+      throw new Error("case lock requires an atomic boundary");
+    }
+    const row = this.cases.get(id);
+    // The serialized atomic boundary is the memory lock. Return a clone so a
+    // decision cannot mutate the stored row without an explicit store write.
     return row ? cloneCase(row) : null;
   }
 
@@ -736,7 +754,10 @@ export class MemoryCaseStore implements CaseStore {
       }
     };
     return this.atomicBoundary(() =>
-      (audit instanceof MemoryAuditStore ? audit.runTracked(run) : run()),
+      this.atomicContext.run(
+        true,
+        () => (audit instanceof MemoryAuditStore ? audit.runTracked(run) : run()),
+      ),
     );
   }
 
@@ -905,6 +926,21 @@ export class PgCaseStore implements CaseStore {
     const result = await this.db.query(`${CASE_SELECT} WHERE c.id = $1 GROUP BY c.id`, [id]);
     const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? asCase(row) : null;
+  }
+
+  async lockCase(id: string): Promise<CaseRow | null> {
+    const transaction = pgCaseTx.getStore();
+    if (!transaction) {
+      throw new Error("case lock requires an atomic boundary");
+    }
+    const locked = await transaction.query(
+      `SELECT id FROM cases WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    if (locked.rowCount === 0) return null;
+    // Reload after acquiring the row lock. The decision must use values from
+    // this transaction, never values observed before it waited for the lock.
+    return getPgCase(transaction, id);
   }
 
   async insertCase(row: CaseRow): Promise<void> {

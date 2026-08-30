@@ -60,6 +60,8 @@ import { MemoryModelPurposePolicyStore, ModelPurposePolicyService } from "./modu
 import {
   CORPUS_INTAKE_COMMIT_SCHEMA_ID,
   CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+  type InvestigationLifecycleV1,
   type ComponentHealthProjectorInputV1,
   type CorpusIntakeBatchV1,
   type CorpusIntakePreviewReportV1,
@@ -529,11 +531,25 @@ async function seedArchivedCase(app: FastifyInstance, cookie: string): Promise<s
     cookie,
     payload: { status: "monitoring" },
   });
+  const lifecycle = await okJson<InvestigationLifecycleV1>(app, {
+    method: "GET",
+    url: `/api/cases/${created.id}/lifecycle`,
+    cookie,
+  });
   await okJson(app, {
     method: "POST",
-    url: `/api/cases/${created.id}/status`,
+    url: `/api/cases/${created.id}/lifecycle`,
     cookie,
-    payload: { status: "archived" },
+    payload: {
+      schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+      investigationId: created.id,
+      action: "archive",
+      expected: {
+        status: lifecycle.status,
+        legalHold: lifecycle.legalHold,
+        restoreTarget: lifecycle.restoreTarget,
+      },
+    },
   });
   return created.id;
 }

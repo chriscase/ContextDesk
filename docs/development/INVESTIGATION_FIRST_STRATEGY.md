@@ -2,10 +2,10 @@
 
 ## Status
 
-**Pull request integration** on `codex/investigation-first-strategy-v1` in
-[#1108](https://github.com/chriscase/ContextDesk/pull/1108). This slice is not a
-replacement for the War Room and is not yet a claim about the default
-experience on `main`.
+**Shipped on `main`** in
+[#1108](https://github.com/chriscase/ContextDesk/pull/1108), merge commit
+`e37464de39ac5cfbae4d7abf106eb26d763f1a96`. This slice is not a replacement
+for the War Room and does not make Investigation First the instance default.
 
 ## Boundary
 
@@ -45,9 +45,10 @@ War Room-only stage wording from its title.
   verification/privacy/hash/size metadata, safe selection, and a disabled
   trash placeholder until an audited recoverable-trash contract exists;
 - bounded file upload through the existing protected evidence route;
-- recoverable archive/restore through the existing explained lifecycle panel.
+- recoverable archive/restore through strategy-local controls backed solely by
+  the shared Runtime V1 lifecycle resource and action command.
 
-## Proof
+## Original #1108 proof
 
 The focused `InvestigationFirst.test.tsx` and shell strategy suites cover the
 fast form, shared create payload, sparse detail, evidence annotation/inventory,
@@ -70,7 +71,11 @@ discarded when the demo server stopped.
 
 ## Follow-up
 
-Instance/role governance, server-persisted user preferences, a first-class
-trash/deletion workflow, canonical product/build catalogs, and additional UI
-strategies remain separate milestones. Storage-provider migration, plugins,
-branding, and LDAP administration are intentionally outside this slice.
+Investigation First has been migrated as the first presentation-only Shared
+Investigation Runtime V1 consumer on integration candidate
+`66f4db14a43656c5ad08207b770076ae30710df9`; exact-head external acceptance and
+the runtime freeze remain in progress. Instance/role
+governance, server-persisted user preferences, a first-class trash/deletion
+workflow, canonical product/build catalogs, and additional UI strategies remain
+separate milestones. Storage-provider migration, plugins, branding, and LDAP
+administration are intentionally outside this slice.

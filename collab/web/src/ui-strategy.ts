@@ -16,11 +16,35 @@ export type UiStrategyId = (typeof UI_STRATEGY_IDS)[number];
 export type UiStrategyMaturity = "reference" | "pilot";
 export type UiStrategyStatus = "available" | "preview";
 
+/**
+ * The browser-side investigation boundary a strategy is built against.
+ * This is deliberately separate from the shell/presentation registration
+ * contract: the latter controls mounting, while this metadata tells policy
+ * and governance surfaces which shared investigation runtime the strategy
+ * consumes.
+ */
+export const INVESTIGATION_RUNTIME_COMPATIBILITY = Object.freeze({
+  schemaId: "cd-collab.investigation_runtime.v1",
+  version: 1,
+} as const);
+
+export const UI_STRATEGY_OPTIONAL_FEATURE_IDS = Object.freeze([
+  "investigation-create",
+  "evidence-inventory",
+  "evidence-annotations",
+  "evidence-upload",
+  "lifecycle-actions",
+  "specialist-log-exploration",
+] as const);
+export type UiStrategyOptionalFeature = (typeof UI_STRATEGY_OPTIONAL_FEATURE_IDS)[number];
+
 export interface UiStrategyCompatibility {
-  /** The authoritative investigation record contract consumed by the UI. */
+  /** The authoritative investigation record contract consumed by the strategy. */
   schemaId: "cd-collab.case.v1";
-  /** Semver-style UI compatibility range for this strategy contract. */
+  /** Semver-style compatibility range for the case record contract. */
   version: string;
+  /** Exact shared browser runtime contract required by the strategy. */
+  runtime: typeof INVESTIGATION_RUNTIME_COMPATIBILITY;
 }
 
 export interface UiStrategyDescriptor {
@@ -35,6 +59,8 @@ export interface UiStrategyDescriptor {
   status: UiStrategyStatus;
   version: string;
   compatibility: UiStrategyCompatibility;
+  /** Optional experiences this presentation exposes. */
+  optionalFeatures: readonly UiStrategyOptionalFeature[];
 }
 
 /**
@@ -56,7 +82,9 @@ export const UI_STRATEGIES: readonly UiStrategyDescriptor[] = [
     compatibility: {
       schemaId: "cd-collab.case.v1",
       version: "^1.0.0",
+      runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
     },
+    optionalFeatures: UI_STRATEGY_OPTIONAL_FEATURE_IDS,
   },
   {
     id: "investigation-first",
@@ -71,9 +99,35 @@ export const UI_STRATEGIES: readonly UiStrategyDescriptor[] = [
     compatibility: {
       schemaId: "cd-collab.case.v1",
       version: "^1.0.0",
+      runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
     },
+    optionalFeatures: UI_STRATEGY_OPTIONAL_FEATURE_IDS,
   },
 ] as const;
+
+/**
+ * Runtime checks complement the closed TypeScript vocabulary for callers
+ * that receive descriptor-shaped values dynamically. Unknown contracts or
+ * feature identifiers never qualify as compatible strategy metadata.
+ */
+export function isUiStrategyRuntimeCompatible(candidate: unknown): boolean {
+  if (typeof candidate !== "object" || candidate === null) return false;
+  const strategy = candidate as Partial<UiStrategyDescriptor>;
+  const compatibility = strategy.compatibility;
+  if (typeof compatibility !== "object" || compatibility === null) return false;
+  if (
+    compatibility.schemaId !== "cd-collab.case.v1" ||
+    compatibility.version !== "^1.0.0" ||
+    compatibility.runtime?.schemaId !== INVESTIGATION_RUNTIME_COMPATIBILITY.schemaId ||
+    compatibility.runtime.version !== INVESTIGATION_RUNTIME_COMPATIBILITY.version
+  ) return false;
+  if (!Array.isArray(strategy.optionalFeatures)) return false;
+  const features = strategy.optionalFeatures as readonly unknown[];
+  return new Set(features).size === features.length && features.every(
+    (feature) => typeof feature === "string" &&
+      UI_STRATEGY_OPTIONAL_FEATURE_IDS.some((known) => known === feature),
+  );
+}
 
 const STRATEGY_BY_ID: ReadonlyMap<UiStrategyId, UiStrategyDescriptor> = new Map(
   UI_STRATEGIES.map((strategy) => [strategy.id, strategy]),
@@ -129,4 +183,3 @@ export function resolveUiStrategy(
   // the policy contained no usable IDs, use the reference as the safest UI.
   return allowed[0] ?? reference!;
 }
-
