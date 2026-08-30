@@ -3,14 +3,76 @@ import { CASE_STATUSES } from "./case.js";
 import {
   ARCHIVED_STATUS,
   DEFAULT_RESTORE_STATUS,
+  INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_SCHEMA_ID,
   LIFECYCLE_ACTIONS,
   LIFECYCLE_REFUSALS,
   describeDeleteRequest,
   evaluateArchive,
   evaluateRestore,
   isLifecycleTransition,
+  parseInvestigationLifecycle,
+  parseInvestigationLifecycleActionRequest,
+  parseInvestigationLifecycleActionSuccess,
+  parseInvestigationLifecycleChanged,
   restoreTarget,
 } from "./investigation-lifecycle.js";
+
+const baseCase = {
+  schemaId: "cd-collab.case.v1",
+  id: "case-lifecycle-1",
+  title: "Lifecycle contract fixture",
+  severity: "medium",
+  status: "archived",
+  legalHold: false,
+  retentionClass: "standard",
+  participants: [],
+  createdAt: "2026-08-29T12:00:00.000Z",
+  createdBy: "fixture-alice",
+};
+
+function workingLifecycle(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    schemaId: INVESTIGATION_LIFECYCLE_SCHEMA_ID,
+    investigationId: "case-lifecycle-1",
+    status: "open",
+    legalHold: false,
+    archive: { allowed: true, action: "archive", targetStatus: "archived" },
+    restore: {
+      allowed: false,
+      action: "restore",
+      reason: "not_archived",
+      detail: "This investigation is not archived.",
+    },
+    restoreTarget: "monitoring",
+    deletion: {
+      supported: false,
+      detail: "Investigations are archived, never deleted.",
+      alternatives: ["archive"],
+    },
+    ...overrides,
+  };
+}
+
+function archivedLifecycle(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return workingLifecycle({
+    status: "archived",
+    archive: {
+      allowed: false,
+      action: "archive",
+      reason: "already_archived",
+      detail: "This investigation is already archived.",
+    },
+    restore: { allowed: true, action: "restore", targetStatus: "monitoring" },
+    ...overrides,
+  });
+}
 
 describe("archiving is refused under legal hold", () => {
   it("refuses the archive and names the hold as the blocker", () => {
@@ -181,5 +243,332 @@ describe("vocabulary stays closed", () => {
       expect(LIFECYCLE_REFUSALS).toContain(verdict.reason);
       expect(verdict.detail.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("authoritative lifecycle preview parser", () => {
+  it("parses allowed and refused verdicts together with restore and deletion guidance", () => {
+    const parsed = parseInvestigationLifecycle(workingLifecycle());
+    expect(parsed).toMatchObject({
+      schemaId: INVESTIGATION_LIFECYCLE_SCHEMA_ID,
+      investigationId: "case-lifecycle-1",
+      status: "open",
+      archive: { allowed: true, action: "archive", targetStatus: "archived" },
+      restore: { allowed: false, action: "restore", reason: "not_archived" },
+      restoreTarget: "monitoring",
+      deletion: { supported: false, alternatives: ["archive"] },
+    });
+  });
+
+  it("accepts the legal-hold refusal and a held archived record that remains restorable", () => {
+    expect(
+      parseInvestigationLifecycle(
+        workingLifecycle({
+          legalHold: true,
+          archive: {
+            allowed: false,
+            action: "archive",
+            reason: "legal_hold",
+            detail: "Clear the legal hold first.",
+          },
+        }),
+      ).archive,
+    ).toMatchObject({ allowed: false, reason: "legal_hold" });
+
+    const heldArchived = parseInvestigationLifecycle(
+      archivedLifecycle({
+        legalHold: true,
+        archive: {
+          allowed: false,
+          action: "archive",
+          reason: "legal_hold",
+          detail: "Clear the legal hold first.",
+        },
+      }),
+    );
+    expect(heldArchived.restore).toEqual({
+      allowed: true,
+      action: "restore",
+      targetStatus: "monitoring",
+    });
+  });
+
+  it("rejects malformed verdicts, wrong schemas, and unknown keys at every level", () => {
+    expect(() =>
+      parseInvestigationLifecycle(
+        workingLifecycle({
+          archive: { allowed: "yes", action: "archive", targetStatus: "archived" },
+        }),
+      ),
+    ).toThrow(/archive\.allowed.*boolean/);
+    expect(() =>
+      parseInvestigationLifecycle({
+        ...workingLifecycle(),
+        schemaId: "cd-collab.investigation_lifecycle.v2",
+      }),
+    ).toThrow(/schemaId/);
+    expect(() => parseInvestigationLifecycle({ ...workingLifecycle(), surprise: true })).toThrow(
+      /surprise.*unknown key/,
+    );
+    expect(() =>
+      parseInvestigationLifecycle(
+        workingLifecycle({
+          archive: {
+            allowed: true,
+            action: "archive",
+            targetStatus: "archived",
+            reason: "legal_hold",
+          },
+        }),
+      ),
+    ).toThrow(/archive\.reason.*unknown key/);
+    expect(() =>
+      parseInvestigationLifecycle(
+        workingLifecycle({
+          deletion: {
+            supported: false,
+            detail: "No deletion.",
+            alternatives: ["archive"],
+            purge: true,
+          },
+        }),
+      ),
+    ).toThrow(/deletion\.purge.*unknown key/);
+  });
+
+  it("rejects verdict, restore-target, and deletion alternatives that contradict the state", () => {
+    expect(() =>
+      parseInvestigationLifecycle(
+        workingLifecycle({
+          archive: { allowed: true, action: "restore", targetStatus: "archived" },
+        }),
+      ),
+    ).toThrow(/archive\.action/);
+    expect(() =>
+      parseInvestigationLifecycle(
+        workingLifecycle({
+          restore: { allowed: true, action: "restore", targetStatus: "monitoring" },
+        }),
+      ),
+    ).toThrow(/restore\.allowed/);
+    expect(() =>
+      parseInvestigationLifecycle(archivedLifecycle({ restoreTarget: "archived" })),
+    ).toThrow(/restoreTarget/);
+    expect(() =>
+      parseInvestigationLifecycle(
+        workingLifecycle({
+          deletion: {
+            supported: false,
+            detail: "No deletion.",
+            alternatives: ["restore"],
+          },
+        }),
+      ),
+    ).toThrow(/only supported alternative/);
+  });
+});
+
+describe("versioned lifecycle action request", () => {
+  const request = {
+    schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+    investigationId: "case-lifecycle-1",
+    action: "archive",
+    expected: { status: "open", legalHold: false, restoreTarget: "monitoring" },
+  };
+
+  it("parses the expected lifecycle tuple and optional client clock", () => {
+    expect(
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        clientTime: "2026-08-29T12:01:00.000Z",
+      }),
+    ).toEqual({ ...request, clientTime: "2026-08-29T12:01:00.000Z" });
+    expect(
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        action: "restore",
+        expected: { status: "archived", legalHold: true, restoreTarget: "resolved" },
+      }),
+    ).toMatchObject({ action: "restore", expected: { legalHold: true } });
+  });
+
+  it("never accepts a caller-selected target status", () => {
+    expect(() =>
+      parseInvestigationLifecycleActionRequest({ ...request, targetStatus: "archived" }),
+    ).toThrow(/targetStatus.*unknown key/);
+    expect(() =>
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        expected: { ...request.expected, targetStatus: "archived" },
+      }),
+    ).toThrow(/expected\.targetStatus.*unknown key/);
+  });
+
+  it("rejects schema drift, malformed expected state, and action/state contradictions", () => {
+    expect(() =>
+      parseInvestigationLifecycleActionRequest({ ...request, schemaId: "wrong" }),
+    ).toThrow(/schemaId/);
+    expect(() =>
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        expected: { ...request.expected, legalHold: "no" },
+      }),
+    ).toThrow(/expected\.legalHold/);
+    expect(() =>
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        expected: { ...request.expected, status: "archived" },
+      }),
+    ).toThrow(/archive request.*working/);
+    expect(() =>
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        expected: { ...request.expected, legalHold: true },
+      }),
+    ).toThrow(/legal hold/);
+    expect(() =>
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        action: "restore",
+      }),
+    ).toThrow(/restore request.*archived/);
+  });
+});
+
+describe("versioned lifecycle action success", () => {
+  it("parses archive and restore completions through the authoritative case parser", () => {
+    const archived = parseInvestigationLifecycleActionSuccess({
+      schemaId: INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId: "case-lifecycle-1",
+      action: "archive",
+      previousStatus: "monitoring",
+      appliedStatus: "archived",
+      case: baseCase,
+    });
+    expect(archived.case.problemStatement).toBe("");
+
+    const restored = parseInvestigationLifecycleActionSuccess({
+      schemaId: INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId: "case-lifecycle-1",
+      action: "restore",
+      previousStatus: "archived",
+      appliedStatus: "monitoring",
+      case: { ...baseCase, status: "monitoring" },
+    });
+    expect(restored).toMatchObject({
+      action: "restore",
+      previousStatus: "archived",
+      appliedStatus: "monitoring",
+      case: { id: "case-lifecycle-1", status: "monitoring" },
+    });
+  });
+
+  it("rejects schema and unknown-key drift in the envelope or nested case", () => {
+    const success = {
+      schemaId: INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId: "case-lifecycle-1",
+      action: "archive",
+      previousStatus: "open",
+      appliedStatus: "archived",
+      case: baseCase,
+    };
+    expect(() =>
+      parseInvestigationLifecycleActionSuccess({ ...success, schemaId: "wrong" }),
+    ).toThrow(/schemaId/);
+    expect(() => parseInvestigationLifecycleActionSuccess({ ...success, extra: true })).toThrow(
+      /extra.*unknown key/,
+    );
+    expect(() =>
+      parseInvestigationLifecycleActionSuccess({
+        ...success,
+        case: { ...baseCase, unparsed: true },
+      }),
+    ).toThrow(/case\.unparsed.*unknown key/);
+  });
+
+  it("rejects identity, nested status, and direction mismatches", () => {
+    const success = {
+      schemaId: INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId: "case-lifecycle-1",
+      action: "archive",
+      previousStatus: "open",
+      appliedStatus: "archived",
+      case: baseCase,
+    };
+    expect(() =>
+      parseInvestigationLifecycleActionSuccess({
+        ...success,
+        investigationId: "case-other",
+      }),
+    ).toThrow(/case\.id.*different investigation/);
+    expect(() =>
+      parseInvestigationLifecycleActionSuccess({
+        ...success,
+        appliedStatus: "monitoring",
+      }),
+    ).toThrow(/case\.status/);
+    expect(() =>
+      parseInvestigationLifecycleActionSuccess({
+        ...success,
+        action: "restore",
+      }),
+    ).toThrow(/restore must move/);
+    expect(() =>
+      parseInvestigationLifecycleActionSuccess({
+        ...success,
+        previousStatus: "archived",
+      }),
+    ).toThrow(/archive must move/);
+  });
+});
+
+describe("versioned changed-state conflict", () => {
+  it("parses a bounded conflict carrying the current authoritative lifecycle", () => {
+    const parsed = parseInvestigationLifecycleChanged({
+      schemaId: INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+      error: "lifecycle_changed",
+      investigationId: "case-lifecycle-1",
+      action: "restore",
+      current: archivedLifecycle(),
+    });
+    expect(parsed).toMatchObject({
+      error: "lifecycle_changed",
+      investigationId: "case-lifecycle-1",
+      action: "restore",
+      current: { status: "archived", restore: { allowed: true } },
+    });
+  });
+
+  it("rejects schema, error, unknown-key, identity, and action inconsistency", () => {
+    const conflict = {
+      schemaId: INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+      error: "lifecycle_changed",
+      investigationId: "case-lifecycle-1",
+      action: "archive",
+      current: workingLifecycle(),
+    };
+    expect(() => parseInvestigationLifecycleChanged({ ...conflict, schemaId: "wrong" })).toThrow(
+      /schemaId/,
+    );
+    expect(() => parseInvestigationLifecycleChanged({ ...conflict, error: "conflict" })).toThrow(
+      /error/,
+    );
+    expect(() => parseInvestigationLifecycleChanged({ ...conflict, extra: true })).toThrow(
+      /extra.*unknown key/,
+    );
+    expect(() =>
+      parseInvestigationLifecycleChanged({
+        ...conflict,
+        current: workingLifecycle({ investigationId: "case-other" }),
+      }),
+    ).toThrow(/current\.investigationId.*different investigation/);
+    expect(() =>
+      parseInvestigationLifecycleChanged({
+        ...conflict,
+        current: workingLifecycle({
+          archive: { allowed: true, action: "restore", targetStatus: "archived" },
+        }),
+      }),
+    ).toThrow(/current\.archive\.action/);
   });
 });

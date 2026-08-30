@@ -40,7 +40,13 @@
  * writes the timeline and audit rows. This module only answers "is this
  * transition allowed, and where does restore land".
  */
-import { CASE_STATUSES, type CaseStatus } from "./case.js";
+import {
+  CASE_STATUSES,
+  parseCase,
+  type CaseStatus,
+  type CaseV1,
+} from "./case.js";
+import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 
 /**
  * The status an investigation holds while archived. Named rather than spelled
@@ -221,13 +227,473 @@ export const INVESTIGATION_LIFECYCLE_SCHEMA_ID =
 export interface InvestigationLifecycleV1 {
   schemaId: typeof INVESTIGATION_LIFECYCLE_SCHEMA_ID;
   investigationId: string;
-  status: string;
+  status: CaseStatus;
   legalHold: boolean;
   archive: LifecycleVerdict;
   restore: LifecycleVerdict;
   /** Where a restore would land, whether or not one is currently allowed. */
   restoreTarget: CaseStatus;
   deletion: DeleteRequestAnswer;
+}
+
+const lifecycleAllowedShape: ObjectShape = {
+  allowed: f.req(f.bool),
+  action: f.req(f.en(...LIFECYCLE_ACTIONS)),
+  targetStatus: f.req(f.en(...CASE_STATUSES)),
+};
+
+const lifecycleRefusedShape: ObjectShape = {
+  allowed: f.req(f.bool),
+  action: f.req(f.en(...LIFECYCLE_ACTIONS)),
+  reason: f.req(f.en(...LIFECYCLE_REFUSALS)),
+  detail: f.req(f.nstr),
+};
+
+const lifecycleVerdictDiscriminatorShape: ObjectShape = {
+  allowed: f.req(f.bool),
+  action: f.opt(f.en(...LIFECYCLE_ACTIONS)),
+  targetStatus: f.opt(f.en(...CASE_STATUSES)),
+  reason: f.opt(f.en(...LIFECYCLE_REFUSALS)),
+  detail: f.opt(f.nstr),
+};
+
+const deleteRequestAnswerShape: ObjectShape = {
+  supported: f.req(f.bool),
+  detail: f.req(f.nstr),
+  alternatives: f.req(f.arr(f.en(...LIFECYCLE_ACTIONS))),
+};
+
+const investigationLifecycleEnvelopeShape: ObjectShape = {
+  schemaId: f.req(f.en(INVESTIGATION_LIFECYCLE_SCHEMA_ID)),
+  investigationId: f.req(f.nstr),
+  status: f.req(f.en(...CASE_STATUSES)),
+  legalHold: f.req(f.bool),
+  // Nested values are replaced with an opaque marker before this shallow
+  // envelope check. Their authoritative parsers validate the real values.
+  archive: f.req(f.str),
+  restore: f.req(f.str),
+  restoreTarget: f.req(f.en(...CASE_STATUSES)),
+  deletion: f.req(f.str),
+};
+
+function recordAt(raw: unknown, path: string): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ContractViolation(path, "expected object");
+  }
+  return raw as Record<string, unknown>;
+}
+
+/**
+ * Validate an envelope without duplicating the nested contract's shape.
+ * Replacing only present nested fields preserves required-field checks while
+ * letting the nested authoritative parser own every key below that field.
+ */
+function checkEnvelope(
+  raw: unknown,
+  path: string,
+  shape: ObjectShape,
+  nestedFields: readonly string[],
+): Record<string, unknown> {
+  const record = recordAt(raw, path);
+  const shallow: Record<string, unknown> = { ...record };
+  for (const field of nestedFields) {
+    if (Object.prototype.hasOwnProperty.call(shallow, field)) shallow[field] = "nested";
+  }
+  checkObject(path, shape, shallow);
+  return record;
+}
+
+function lifecycleActionValue(value: unknown, path: string): LifecycleAction {
+  if (value === "archive" || value === "restore") return value;
+  throw new ContractViolation(path, "expected archive or restore");
+}
+
+function caseStatusValue(value: unknown, path: string): CaseStatus {
+  if (
+    value === "open" ||
+    value === "monitoring" ||
+    value === "resolved" ||
+    value === ARCHIVED_STATUS
+  ) {
+    return value;
+  }
+  throw new ContractViolation(path, `expected one of [${CASE_STATUSES.join(", ")}]`);
+}
+
+function lifecycleRefusalValue(value: unknown, path: string): LifecycleRefusal {
+  if (
+    value === "legal_hold" ||
+    value === "already_archived" ||
+    value === "not_archived" ||
+    value === "unknown_status"
+  ) {
+    return value;
+  }
+  throw new ContractViolation(
+    path,
+    `expected one of [${LIFECYCLE_REFUSALS.join(", ")}]`,
+  );
+}
+
+function nonEmptyStringValue(value: unknown, path: string): string {
+  if (typeof value === "string" && value.length > 0) return value;
+  throw new ContractViolation(path, "expected non-empty string");
+}
+
+function parseLifecycleVerdict(raw: unknown, path: string): LifecycleVerdict {
+  const record = recordAt(raw, path);
+  if (record.allowed === true) {
+    checkObject(path, lifecycleAllowedShape, raw);
+    return {
+      allowed: true,
+      action: lifecycleActionValue(record.action, `${path}.action`),
+      targetStatus: caseStatusValue(record.targetStatus, `${path}.targetStatus`),
+    };
+  }
+  if (record.allowed === false) {
+    checkObject(path, lifecycleRefusedShape, raw);
+    return {
+      allowed: false,
+      action: lifecycleActionValue(record.action, `${path}.action`),
+      reason: lifecycleRefusalValue(record.reason, `${path}.reason`),
+      detail: nonEmptyStringValue(record.detail, `${path}.detail`),
+    };
+  }
+  checkObject(path, lifecycleVerdictDiscriminatorShape, raw);
+  throw new ContractViolation(`${path}.allowed`, "expected boolean");
+}
+
+function parseDeleteRequestAnswer(raw: unknown, path: string): DeleteRequestAnswer {
+  checkObject(path, deleteRequestAnswerShape, raw);
+  const record = recordAt(raw, path);
+  if (record.supported !== false) {
+    throw new ContractViolation(`${path}.supported`, "investigation deletion is not supported");
+  }
+  if (!Array.isArray(record.alternatives)) {
+    throw new ContractViolation(`${path}.alternatives`, "expected array");
+  }
+  const alternatives = record.alternatives.map((value, index) =>
+    lifecycleActionValue(value, `${path}.alternatives[${index}]`),
+  );
+  if (alternatives.length !== 1 || alternatives[0] !== "archive") {
+    throw new ContractViolation(
+      `${path}.alternatives`,
+      "archive is the only supported alternative to deletion",
+    );
+  }
+  return {
+    supported: false,
+    detail: nonEmptyStringValue(record.detail, `${path}.detail`),
+    alternatives,
+  };
+}
+
+function assertLifecycleSemantics(parsed: InvestigationLifecycleV1, path: string): void {
+  if (parsed.restoreTarget === ARCHIVED_STATUS) {
+    throw new ContractViolation(
+      `${path}.restoreTarget`,
+      "a restore target must be a working investigation status",
+    );
+  }
+
+  if (parsed.archive.action !== "archive") {
+    throw new ContractViolation(`${path}.archive.action`, "archive verdict must name archive");
+  }
+  const expectedArchive = evaluateArchive(parsed);
+  if (parsed.archive.allowed !== expectedArchive.allowed) {
+    throw new ContractViolation(
+      `${path}.archive.allowed`,
+      "archive verdict does not match status and legal hold",
+    );
+  }
+  if (parsed.archive.allowed) {
+    if (parsed.archive.targetStatus !== ARCHIVED_STATUS) {
+      throw new ContractViolation(
+        `${path}.archive.targetStatus`,
+        "an allowed archive must target archived",
+      );
+    }
+  } else if (
+    expectedArchive.allowed ||
+    parsed.archive.reason !== expectedArchive.reason
+  ) {
+    throw new ContractViolation(
+      `${path}.archive.reason`,
+      "archive refusal does not match status and legal hold",
+    );
+  }
+
+  if (parsed.restore.action !== "restore") {
+    throw new ContractViolation(`${path}.restore.action`, "restore verdict must name restore");
+  }
+  const restoreShouldBeAllowed = parsed.status === ARCHIVED_STATUS;
+  if (parsed.restore.allowed !== restoreShouldBeAllowed) {
+    throw new ContractViolation(
+      `${path}.restore.allowed`,
+      "restore verdict does not match the current status",
+    );
+  }
+  if (parsed.restore.allowed) {
+    if (parsed.restore.targetStatus !== parsed.restoreTarget) {
+      throw new ContractViolation(
+        `${path}.restore.targetStatus`,
+        "allowed restore must use the authoritative restore target",
+      );
+    }
+  } else if (parsed.restore.reason !== "not_archived") {
+    throw new ContractViolation(
+      `${path}.restore.reason`,
+      "a working investigation must refuse restore as not_archived",
+    );
+  }
+}
+
+/** Parse and semantically validate the authoritative lifecycle preview. */
+export function parseInvestigationLifecycle(
+  raw: unknown,
+  path = "$",
+): InvestigationLifecycleV1 {
+  const record = checkEnvelope(
+    raw,
+    path,
+    investigationLifecycleEnvelopeShape,
+    ["archive", "restore", "deletion"],
+  );
+  const parsed: InvestigationLifecycleV1 = {
+    schemaId: INVESTIGATION_LIFECYCLE_SCHEMA_ID,
+    investigationId: nonEmptyStringValue(record.investigationId, `${path}.investigationId`),
+    status: caseStatusValue(record.status, `${path}.status`),
+    legalHold: record.legalHold === true,
+    archive: parseLifecycleVerdict(record.archive, `${path}.archive`),
+    restore: parseLifecycleVerdict(record.restore, `${path}.restore`),
+    restoreTarget: caseStatusValue(record.restoreTarget, `${path}.restoreTarget`),
+    deletion: parseDeleteRequestAnswer(record.deletion, `${path}.deletion`),
+  };
+  assertLifecycleSemantics(parsed, path);
+  return parsed;
+}
+
+export const INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID =
+  "cd-collab.investigation_lifecycle_action_request.v1" as const;
+export const INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID =
+  "cd-collab.investigation_lifecycle_action_success.v1" as const;
+export const INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID =
+  "cd-collab.investigation_lifecycle_changed.v1" as const;
+
+/** The lifecycle state a caller observed before requesting one action. */
+export interface InvestigationLifecycleExpectedV1 {
+  status: CaseStatus;
+  legalHold: boolean;
+  restoreTarget: CaseStatus;
+}
+
+export interface InvestigationLifecycleActionRequestV1 {
+  schemaId: typeof INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID;
+  investigationId: string;
+  action: LifecycleAction;
+  expected: InvestigationLifecycleExpectedV1;
+  clientTime?: string;
+}
+
+export interface InvestigationLifecycleActionSuccessV1 {
+  schemaId: typeof INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID;
+  investigationId: string;
+  action: LifecycleAction;
+  previousStatus: CaseStatus;
+  appliedStatus: CaseStatus;
+  case: CaseV1;
+}
+
+export interface InvestigationLifecycleChangedV1 {
+  schemaId: typeof INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID;
+  error: "lifecycle_changed";
+  investigationId: string;
+  action: LifecycleAction;
+  current: InvestigationLifecycleV1;
+}
+
+const lifecycleExpectedShape: ObjectShape = {
+  status: f.req(f.en(...CASE_STATUSES)),
+  legalHold: f.req(f.bool),
+  restoreTarget: f.req(f.en(...CASE_STATUSES)),
+};
+
+const lifecycleActionRequestEnvelopeShape: ObjectShape = {
+  schemaId: f.req(f.en(INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID)),
+  investigationId: f.req(f.nstr),
+  action: f.req(f.en(...LIFECYCLE_ACTIONS)),
+  expected: f.req(f.str),
+  clientTime: f.opt(f.nstr),
+};
+
+const lifecycleActionSuccessEnvelopeShape: ObjectShape = {
+  schemaId: f.req(f.en(INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID)),
+  investigationId: f.req(f.nstr),
+  action: f.req(f.en(...LIFECYCLE_ACTIONS)),
+  previousStatus: f.req(f.en(...CASE_STATUSES)),
+  appliedStatus: f.req(f.en(...CASE_STATUSES)),
+  case: f.req(f.str),
+};
+
+const lifecycleChangedEnvelopeShape: ObjectShape = {
+  schemaId: f.req(f.en(INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID)),
+  error: f.req(f.en("lifecycle_changed")),
+  investigationId: f.req(f.nstr),
+  action: f.req(f.en(...LIFECYCLE_ACTIONS)),
+  current: f.req(f.str),
+};
+
+function parseLifecycleExpected(
+  raw: unknown,
+  path: string,
+): InvestigationLifecycleExpectedV1 {
+  checkObject(path, lifecycleExpectedShape, raw);
+  const record = recordAt(raw, path);
+  const expected: InvestigationLifecycleExpectedV1 = {
+    status: caseStatusValue(record.status, `${path}.status`),
+    legalHold: record.legalHold === true,
+    restoreTarget: caseStatusValue(record.restoreTarget, `${path}.restoreTarget`),
+  };
+  if (expected.restoreTarget === ARCHIVED_STATUS) {
+    throw new ContractViolation(
+      `${path}.restoreTarget`,
+      "a restore target must be a working investigation status",
+    );
+  }
+  return expected;
+}
+
+/**
+ * Parse an action request. The destination status is deliberately absent:
+ * only the server may derive it after comparing and reloading lifecycle state.
+ */
+export function parseInvestigationLifecycleActionRequest(
+  raw: unknown,
+): InvestigationLifecycleActionRequestV1 {
+  const record = checkEnvelope(
+    raw,
+    "$",
+    lifecycleActionRequestEnvelopeShape,
+    ["expected"],
+  );
+  const action = lifecycleActionValue(record.action, "$.action");
+  const expected = parseLifecycleExpected(record.expected, "$.expected");
+  if (action === "archive") {
+    if (expected.status === ARCHIVED_STATUS) {
+      throw new ContractViolation(
+        "$.expected.status",
+        "an archive request must start from a working investigation status",
+      );
+    }
+    if (expected.legalHold) {
+      throw new ContractViolation(
+        "$.expected.legalHold",
+        "a lifecycle preview under legal hold cannot authorize archive",
+      );
+    }
+  } else if (expected.status !== ARCHIVED_STATUS) {
+    throw new ContractViolation(
+      "$.expected.status",
+      "a restore request must start from archived",
+    );
+  }
+  return {
+    schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+    investigationId: nonEmptyStringValue(record.investigationId, "$.investigationId"),
+    action,
+    expected,
+    ...(typeof record.clientTime === "string" ? { clientTime: record.clientTime } : {}),
+  };
+}
+
+function parseNestedCase(raw: unknown, path: string): CaseV1 {
+  try {
+    return parseCase(raw);
+  } catch (error) {
+    if (error instanceof ContractViolation) {
+      const suffix = error.path === "$" ? "" : error.path.slice(1);
+      throw new ContractViolation(`${path}${suffix}`, error.detail);
+    }
+    throw error;
+  }
+}
+
+/** Parse a completed action and prove the returned case describes that action. */
+export function parseInvestigationLifecycleActionSuccess(
+  raw: unknown,
+): InvestigationLifecycleActionSuccessV1 {
+  const record = checkEnvelope(
+    raw,
+    "$",
+    lifecycleActionSuccessEnvelopeShape,
+    ["case"],
+  );
+  const action = lifecycleActionValue(record.action, "$.action");
+  const previousStatus = caseStatusValue(record.previousStatus, "$.previousStatus");
+  const appliedStatus = caseStatusValue(record.appliedStatus, "$.appliedStatus");
+  const parsedCase = parseNestedCase(record.case, "$.case");
+  const investigationId = nonEmptyStringValue(record.investigationId, "$.investigationId");
+
+  if (parsedCase.id !== investigationId) {
+    throw new ContractViolation("$.case.id", "case belongs to a different investigation");
+  }
+  if (parsedCase.status !== appliedStatus) {
+    throw new ContractViolation(
+      "$.case.status",
+      "case status must equal the applied lifecycle status",
+    );
+  }
+  if (action === "archive") {
+    if (previousStatus === ARCHIVED_STATUS || appliedStatus !== ARCHIVED_STATUS) {
+      throw new ContractViolation(
+        "$.appliedStatus",
+        "archive must move a working investigation to archived",
+      );
+    }
+  } else if (previousStatus !== ARCHIVED_STATUS || appliedStatus === ARCHIVED_STATUS) {
+    throw new ContractViolation(
+      "$.appliedStatus",
+      "restore must move an archived investigation to a working status",
+    );
+  }
+
+  return {
+    schemaId: INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+    investigationId,
+    action,
+    previousStatus,
+    appliedStatus,
+    case: parsedCase,
+  };
+}
+
+/** Parse an optimistic-state conflict carrying the server's current preview. */
+export function parseInvestigationLifecycleChanged(
+  raw: unknown,
+): InvestigationLifecycleChangedV1 {
+  const record = checkEnvelope(raw, "$", lifecycleChangedEnvelopeShape, ["current"]);
+  const investigationId = nonEmptyStringValue(record.investigationId, "$.investigationId");
+  const action = lifecycleActionValue(record.action, "$.action");
+  const current = parseInvestigationLifecycle(record.current, "$.current");
+  if (current.investigationId !== investigationId) {
+    throw new ContractViolation(
+      "$.current.investigationId",
+      "current lifecycle belongs to a different investigation",
+    );
+  }
+  if (current[action].action !== action) {
+    throw new ContractViolation(
+      `$.current.${action}.action`,
+      "current lifecycle verdict does not match the requested action",
+    );
+  }
+  return {
+    schemaId: INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+    error: "lifecycle_changed",
+    investigationId,
+    action,
+    current,
+  };
 }
 
 /**
