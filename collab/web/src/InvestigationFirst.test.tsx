@@ -19,6 +19,7 @@ import {
   makeArchiveAllowedLifecycle,
   makeCaseList,
   makeEvidenceUploadSuccess,
+  makeEvidenceList,
   makePopulatedCase,
   makeRestoreAllowedLifecycle,
   makeSparseImportedCase,
@@ -143,7 +144,14 @@ describe("Investigation First Runtime V1 presentation", () => {
   });
 
   it("keeps each evidence row compact while making the full metadata available on demand", async () => {
-    renderStrategy({ shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    const evidence = makeEvidenceList().artifacts.map((artifact) => ({
+      ...artifact,
+      expectedHash: "sha256:expected-checksum",
+    }));
+    const gateway = createInvestigationGatewayDouble({
+      listEvidence: vi.fn(async () => gatewayOk(evidence)),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     const filename = await screen.findByText("checkout-timeout.log");
     const row = filename.closest("li");
     expect(row).toBeTruthy();
@@ -166,6 +174,8 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(row?.textContent).toContain("Intake batch");
     expect(row?.textContent).toContain("Content hash");
     expect(row?.textContent).toContain("Expected hash");
+    expect(row?.textContent).toContain("sha256:24b005aa8796e5655d4c9cc728fdbcd24542d1ee4eab264b8308efcd350a23d1");
+    expect(row?.textContent).toContain("sha256:expected-checksum");
   });
 
   it("describes annotations as loading until their independent lane settles", async () => {
