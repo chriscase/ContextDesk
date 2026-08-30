@@ -2,11 +2,14 @@
 
 ## Status
 
-**Integration candidate** on `integrate/investigation-runtime-v1` with source
-checkpoint `96fa5a7d`, based on
-`e37464de39ac5cfbae4d7abf106eb26d763f1a96`. It is not yet on `main`, and the
-public runtime contract is not frozen until the remaining exact-head
-independent review and full collaboration CI gates close.
+**Frozen on `main`** through
+[#1109](https://github.com/chriscase/ContextDesk/pull/1109), squash merge
+`e3dc3a5676c9234bcae2314d64fcf06d037c8934`. The accepted candidate was
+`6cabdc7b293959e808681bbbd2030c81faee8819`, tree
+`d9aeafce731f7de6fbe9962d1953bc532ddcb5e9`, based on
+`e37464de39ac5cfbae4d7abf106eb26d763f1a96`. The merge commit has that exact
+accepted tree; Runtime V1 additions now require additive, versioned evolution
+of the public surface rather than imports from implementation modules.
 
 Runtime V1 is the shared browser-side boundary that lets ContextDesk ship more
 than one investigation presentation without creating competing authorities for
@@ -247,36 +250,47 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 
 ## Delivery and freeze
 
-At source checkpoint `96fa5a7d`, delivery steps 1–6 are
-implemented: typed transport contracts, deterministic fixtures and dependency
-guard, gateway and bounded errors, race-safe controllers and provider,
-versioned strategy renderer, and the Investigation First migration. War Room
-lifecycle also uses Runtime V1; its remaining direct calls are held to a
-non-growing legacy allowlist.
+At accepted candidate `6cabdc7b`, delivery steps 1–6 are implemented: typed
+transport contracts, deterministic fixtures and dependency guard, gateway and
+bounded errors, race-safe controllers and provider, versioned strategy
+renderer, and the Investigation First migration. War Room lifecycle also uses
+Runtime V1; its remaining direct calls are held to a non-growing legacy
+allowlist.
 
-Local acceptance evidence at that candidate:
+Local acceptance evidence at that exact candidate:
 
 - contracts: 52 files and 672 tests passed;
-- web: 63 files and 855 tests passed;
+- web: 63 files and 856 tests passed;
 - contracts, server, web, and browser typechecks passed; contracts, server, and
   web lint passed;
 - the production web build passed;
 - the complete collaboration test command passed: contracts 672 tests, server
   806 tests with 81 environment-backed cases intentionally skipped, and web
-  855 tests; and
+  856 tests; and
 - hands-on synthetic-demo acceptance passed for fast create, reusable context
   values, sparse detail, evidence selection and metadata, reversible technical
   handoff, focus, strategy-aware titles, and 390-pixel reflow without
   horizontal overflow or console warnings; and
-- browser automation passed 91 scenarios, with eight documented
+- exact-head hosted browser automation passed 91 scenarios, with eight documented
   environment-specific scenarios intentionally skipped. The Investigation
   First conformance suite covers semantic names and landmarks, keyboard-only
   create/browse/evidence/lifecycle work, 200%-equivalent reflow across list and
   detail, forced-colors focus and control boundaries, reduced motion, and
   non-drag operation.
 
+The exact candidate passed all 53 hosted PR checks: 51 succeeded and two were
+intentionally skipped. The full CI workflow completed successfully, including
+the required `rust tests (ubuntu aggregate)` check, in
+[run 33307838835](https://github.com/chriscase/ContextDesk/actions/runs/33307838835).
+Fresh exact-head Claude, Grok Build, and Cursor reviews each reported no P0 or
+P1 blocker. Their remaining findings were non-blocking test-depth, wording, and
+checkpoint-documentation observations; none identified an authority, data,
+permission, lifecycle, transport, or accessibility-boundary defect. Those
+reviews did not independently rerun every suite, so the command and browser
+claims above rely on the recorded local and hosted evidence rather than model
+review alone.
+
 Known non-blockers are the existing production chunk-size warning and the
-intentional, non-growing War Room legacy allowlist. Freeze still requires a
-complete exact-head external acceptance verdict and full collaboration CI.
-Later strategies may be designed now, but implementation must wait for that
-frozen public surface rather than importing candidate internals.
+intentional, non-growing War Room legacy allowlist. Runtime V1 is now the
+frozen public surface for later strategies. Extensions must remain additive and
+versioned; a strategy must not import candidate or private runtime internals.

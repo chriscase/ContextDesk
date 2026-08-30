@@ -71,10 +71,14 @@ discarded when the demo server stopped.
 
 ## Follow-up
 
-Investigation First has been migrated as the first presentation-only Shared
-Investigation Runtime V1 consumer on integration candidate
-`66f4db14a43656c5ad08207b770076ae30710df9`; exact-head external acceptance and
-the runtime freeze remain in progress. Instance/role
+Investigation First is the first presentation-only Shared Investigation Runtime
+V1 consumer frozen on `main` through
+[#1109](https://github.com/chriscase/ContextDesk/pull/1109), merge commit
+`e3dc3a5676c9234bcae2314d64fcf06d037c8934`. The accepted candidate
+`6cabdc7b293959e808681bbbd2030c81faee8819` also closes the no-read detail case:
+a user without investigation-read authority receives a truthful, non-busy
+denied view, no investigation request is issued, Back remains available, and
+arrival focus is not stolen on a same-record rerender. Instance/role
 governance, server-persisted user preferences, a first-class trash/deletion
 workflow, canonical product/build catalogs, and additional UI strategies remain
 separate milestones. Storage-provider migration, plugins, branding, and LDAP
