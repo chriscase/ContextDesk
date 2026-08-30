@@ -6,6 +6,8 @@ import {
   CASE_SEVERITIES,
   CASE_STATUSES,
   CONTRIBUTION_LIST_SCHEMA_ID,
+  EVIDENCE_LIST_SCHEMA_ID,
+  EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
   INVESTIGATION_LIFECYCLE_SCHEMA_ID,
   PRIVACY_CLASSES,
@@ -919,7 +921,12 @@ export async function registerCaseRoutes(
     const evidenceSource = str(body.sourceId);
     if (evidenceSource) evidence.sourceId = evidenceSource;
     try {
-      return await deps.domain.addEvidence(id, ctx.actor, evidence, request.ip);
+      const uploaded = await deps.domain.addEvidence(id, ctx.actor, evidence, request.ip);
+      return {
+        schemaId: EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
+        caseId: id,
+        ...uploaded,
+      };
     } catch (err) {
       return domainError(reply, err);
     }
@@ -933,7 +940,11 @@ export async function registerCaseRoutes(
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
     }
-    return { caseId: id, artifacts: await deps.domain.listArtifacts(id, ctx.actor, ctx.isAdmin) };
+    return {
+      schemaId: EVIDENCE_LIST_SCHEMA_ID,
+      caseId: id,
+      artifacts: await deps.domain.listArtifacts(id, ctx.actor, ctx.isAdmin),
+    };
   });
 
   app.get("/api/cases/:id/evidence/:eid", async (request, reply) => {
