@@ -161,6 +161,28 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(vi.mocked(gateway.createInvestigation).mock.calls[0]?.[0]).not.toHaveProperty("occurredAt");
   });
 
+  it("submits the exact trimmed context literal that the combo calls existing", async () => {
+    const created = { ...makeSparseImportedCase(), id: "case-trimmed-context", title: "Trimmed context" };
+    const gateway = createInvestigationGatewayDouble({ createInvestigation: vi.fn(async () => gatewayOk(created)) });
+    const onOpenCase = vi.fn();
+    renderStrategy({ gateway, shell: { onOpenCase } });
+    await screen.findByRole("heading", { name: "Create an investigation" });
+    fireEvent.change(screen.getByPlaceholderText("Short investigation title"), { target: { value: "Trimmed context" } });
+    fireEvent.click(screen.getByText("Advanced context"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "  ContextDesk Storefront  " } });
+    expect(comboHint("Product or software")).toBe("Using an existing recorded value.");
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+
+    await waitFor(() => expect(onOpenCase).toHaveBeenCalledWith("case-trimmed-context"));
+    expect(gateway.createInvestigation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        investigationContext: expect.objectContaining({ productName: "ContextDesk Storefront" }),
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(vi.mocked(gateway.createInvestigation).mock.calls[0]?.[0].investigationContext?.productName).not.toMatch(/^\s|\s$/u);
+  });
+
   it("passes occurred-at through for server validation and explains accepted examples", async () => {
     const gateway = createInvestigationGatewayDouble({
       createInvestigation: vi.fn(async () => ({ ok: false as const, error: { kind: "validation" as const, status: 400 as const } })),

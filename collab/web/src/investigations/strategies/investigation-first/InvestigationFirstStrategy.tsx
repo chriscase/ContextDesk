@@ -43,7 +43,15 @@ function compactByteLabel(value: number | null | undefined): string | null {
 }
 function listQuestions(value: string): string[] { return value.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean); }
 function contextPayload(value: InvestigationContext): InvestigationContext | null {
-  return Object.values(value).some((item) => text(item)) ? { ...value } : null;
+  const normalized: InvestigationContext = {
+    productName: text(value.productName),
+    version: text(value.version),
+    build: text(value.build),
+    component: text(value.component),
+    environment: text(value.environment),
+    organization: text(value.organization),
+  };
+  return Object.values(normalized).some(Boolean) ? normalized : null;
 }
 function dateLabel(value: string | null | undefined): string {
   if (!value) return "Not recorded";
