@@ -1150,7 +1150,7 @@ describe("Runtime V1.1 write seams", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it.each(["message", "note", "action"] as const)(
+  it.each(["message", "note", "action", "upload", "external_run"] as const)(
     "rejects hypothesis links on a %s contribution before fetching",
     async (kind) => {
       const fetchMock = vi.spyOn(globalThis, "fetch");

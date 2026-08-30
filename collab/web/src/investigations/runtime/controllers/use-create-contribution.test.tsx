@@ -133,6 +133,7 @@ describe("useCreateContribution", () => {
     ["a non-array collection", { hypothesisLinks: "artifact" }],
     ["an invalid link kind", { hypothesisLinks: [{ kind: "case", id: "case-a" }] }],
     ["a non-string link identity", { hypothesisLinks: [{ kind: "artifact", id: 7 }] }],
+    ["a null link", { hypothesisLinks: [null] }],
   ])("fails %s closed before calling the gateway", async (_label, malformed) => {
     const createContribution = vi.fn();
     const opts = options({ gateway: gatewayWithCreate(createContribution) });
@@ -154,7 +155,7 @@ describe("useCreateContribution", () => {
     expect(opts.onRefreshContributions).not.toHaveBeenCalled();
   });
 
-  it.each(["message", "note", "action"] as const)(
+  it.each(["message", "note", "action", "upload", "external_run"] as const)(
     "rejects hypothesis links on a %s contribution before transport",
     async (kind) => {
       const createContribution = vi.fn();
