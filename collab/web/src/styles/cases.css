@@ -1542,18 +1542,21 @@
 
 .case-memory__item-kind {
   flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
   padding: 0.12rem 0.35rem;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted);
   font-size: 0.62rem;
   letter-spacing: 0.03em;
-  text-transform: uppercase;
+  overflow-wrap: anywhere;
 }
 
 .case-memory__item-meta {
   display: flex;
   flex-wrap: wrap;
+  min-width: 0;
   gap: 0.15rem 0.65rem;
   color: var(--muted);
   font-size: 0.68rem;
@@ -1574,12 +1577,20 @@
 .case-memory__item-actions {
   display: flex;
   flex-wrap: wrap;
+  min-width: 0;
   align-items: center;
   gap: 0.45rem 0.7rem;
 }
 
 .case-memory__item-actions .technical-id {
+  min-width: 0;
+  max-width: 100%;
   margin-top: 0;
+}
+
+.case-memory__item-actions .technical-id__list {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .case-memory__meta,
