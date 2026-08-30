@@ -478,7 +478,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     if (investigation.availability === "idle" || investigation.availability === "loading") {
       return (
         <StrategySurface className="keystone-strategy">
-          <StrategyStateNotice busy>Opening investigation…</StrategyStateNotice>
+          <StrategyStateNotice busy title="Opening investigation">Opening investigation…</StrategyStateNotice>
         </StrategySurface>
       );
     }

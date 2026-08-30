@@ -163,6 +163,24 @@ describe("Keystone K1 read-only strategy", () => {
     expect(mounted.gateway.applyLifecycleAction).not.toHaveBeenCalled();
   });
 
+  it("labels focused loading state as a status before the record arrives", async () => {
+    const pending = createDeferred<GatewayResult<CaseV1>>();
+    const gateway = createInvestigationGatewayDouble({
+      getInvestigation: vi.fn(() => pending.promise),
+    });
+    mountStrategy({
+      gateway,
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("Opening investigation");
+    expect(status.closest(".strategy-kit__notice")?.getAttribute("aria-busy")).toBe("true");
+
+    pending.resolve(gatewayOk(makeCaseList().cases[0]!));
+    expect(await screen.findByRole("heading", { name: "Imported investigation" })).toBeTruthy();
+  });
+
   it("fences the in-memory working set by identity and investigation", async () => {
     const mounted = mountStrategy({ shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     const checkbox = await screen.findByRole("checkbox", {
