@@ -1,0 +1,199 @@
+.strategy-kit {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+  color: var(--fg);
+}
+
+.strategy-kit__hero,
+.strategy-kit__panel-heading,
+.strategy-kit__notice,
+.strategy-kit__actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.strategy-kit__hero {
+  padding: 1.15rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-panel);
+  background:
+    linear-gradient(120deg, var(--accent-soft), transparent 58%),
+    var(--surface);
+}
+
+.strategy-kit__hero-copy,
+.strategy-kit__panel-heading > div,
+.strategy-kit__notice > div {
+  min-width: 0;
+}
+
+.strategy-kit__hero h2,
+.strategy-kit__panel h3,
+.strategy-kit__notice-title,
+.strategy-kit__description p,
+.strategy-kit__panel-description p,
+.strategy-kit__notice-copy p {
+  margin: 0;
+}
+
+.strategy-kit__hero h2,
+.strategy-kit__panel h3 {
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__eyebrow {
+  margin: 0 0 0.35rem;
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.strategy-kit__description,
+.strategy-kit__panel-description {
+  margin-top: 0.45rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.strategy-kit__hero-actions,
+.strategy-kit__panel-actions,
+.strategy-kit__notice-action {
+  flex: 0 0 auto;
+}
+
+.strategy-kit__panel {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.strategy-kit__panel-heading {
+  margin-bottom: 0.85rem;
+}
+
+.strategy-kit__notice {
+  align-items: center;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--line-soft);
+  border-inline-start: 0.25rem solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.strategy-kit__notice--warning { border-inline-start-color: var(--warning); }
+.strategy-kit__notice--danger { border-inline-start-color: var(--danger); }
+.strategy-kit__notice--success { border-inline-start-color: var(--success); }
+
+.strategy-kit__notice-title {
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.strategy-kit__notice-copy {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.strategy-kit__badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 0.22rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__badge--accent { border-color: var(--accent); color: var(--accent); }
+.strategy-kit__badge--success { border-color: var(--success); color: var(--success); }
+.strategy-kit__badge--warning { border-color: var(--warning); color: var(--warning); }
+.strategy-kit__badge--danger { border-color: var(--danger); color: var(--danger); }
+
+.strategy-kit__actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.strategy-kit button,
+.strategy-kit input,
+.strategy-kit select {
+  font: inherit;
+}
+
+.strategy-kit button {
+  min-height: 2.35rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-deep);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.strategy-kit button:hover {
+  border-color: var(--accent);
+}
+
+.strategy-kit button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.strategy-kit :where(button, input, select, summary):focus-visible {
+  outline: 0.18rem solid var(--accent);
+  outline-offset: 0.14rem;
+}
+
+@media (max-width: 560px) {
+  .strategy-kit__hero,
+  .strategy-kit__panel-heading,
+  .strategy-kit__notice {
+    flex-direction: column;
+  }
+
+  .strategy-kit__hero-actions,
+  .strategy-kit__panel-actions,
+  .strategy-kit__notice-action {
+    width: 100%;
+  }
+
+  .strategy-kit__hero-actions > button,
+  .strategy-kit__notice-action > button {
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .strategy-kit__hero,
+  .strategy-kit__panel,
+  .strategy-kit__notice,
+  .strategy-kit__badge,
+  .strategy-kit button {
+    border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+
+  .strategy-kit :where(button, input, select, summary):focus-visible {
+    outline-color: Highlight;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .strategy-kit,
+  .strategy-kit * {
+    animation-duration: 0s !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0s !important;
+  }
+}

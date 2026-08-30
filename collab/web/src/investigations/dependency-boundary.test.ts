@@ -363,6 +363,8 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
   const publicModule = resolve(runtimeRoot, "public");
   const gatewayModule = resolve(runtimeRoot, "gateway");
   const contractModule = resolve(strategiesRoot, "contract");
+  const sharedRoot = resolve(strategiesRoot, "shared");
+  const sharedIndexModule = resolve(sharedRoot, "index");
 
   const relativeInvestigationPath = relative(INVESTIGATIONS_ROOT, path).split(sep).join("/");
   const inRuntime = relativeInvestigationPath.startsWith("runtime/");
@@ -420,10 +422,21 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
         resolvedModule.startsWith(`${ownStrategyRoot}${sep}`);
       const isPublicRuntime = sameModule(resolvedModule, publicModule);
       const isStrategyContract = sameModule(resolvedModule, contractModule);
+      const isSharedIndex = sameModule(resolvedModule, sharedIndexModule);
 
-      if (!isOwnModule && !isPublicRuntime && !isStrategyContract) {
+      if (
+        strategyId === "shared"
+        && !isOwnModule
+      ) {
         violations.push(
-          `${location} imports investigation behavior outside runtime/public.ts or strategies/contract.ts`,
+          `${location} imports authority or strategy behavior into the presentation-only shared kit`,
+        );
+        continue;
+      }
+
+      if (!isOwnModule && !isPublicRuntime && !isStrategyContract && !isSharedIndex) {
+        violations.push(
+          `${location} imports investigation behavior outside runtime/public.ts, strategies/contract.ts, or the exact shared/index.ts presentation surface`,
         );
       }
     }
@@ -675,6 +688,53 @@ describe("Investigation Runtime V1 dependency boundary", () => {
       ].join("\n"),
     );
     expect(investigationImportViolations(runtimePath, runtime)).toEqual([]);
+  });
+
+  it("allows only the exact shared presentation surface and keeps the kit authority-free", () => {
+    const keystonePath = resolve(
+      INVESTIGATIONS_ROOT,
+      "strategies/keystone/KeystoneStrategy.tsx",
+    );
+    const approvedStrategy = parseSourceText(
+      keystonePath,
+      [
+        'import { useInvestigationRuntime } from "../../runtime/public.js";',
+        'import type { InvestigationStrategyShellProps } from "../contract.js";',
+        'import { StrategyPanel } from "../shared/index.js";',
+        'import { localModel } from "./model.js";',
+        "export const used = [useInvestigationRuntime, StrategyPanel, localModel];",
+        "export type Props = InvestigationStrategyShellProps;",
+      ].join("\n"),
+    );
+    expect(investigationImportViolations(keystonePath, approvedStrategy)).toEqual([]);
+
+    const privateSharedImport = parseSourceText(
+      keystonePath,
+      'import { StrategyPanel } from "../shared/presentation.js";\nexport { StrategyPanel };',
+    );
+    expect(investigationImportViolations(keystonePath, privateSharedImport)).toEqual([
+      "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.tsx:1 imports investigation behavior outside runtime/public.ts, strategies/contract.ts, or the exact shared/index.ts presentation surface",
+    ]);
+
+    const sharedPath = resolve(
+      INVESTIGATIONS_ROOT,
+      "strategies/shared/presentation.tsx",
+    );
+    const authorityImports = parseSourceText(
+      sharedPath,
+      [
+        'import { useInvestigationRuntime } from "../../runtime/public.js";',
+        'import type { InvestigationStrategyShellProps } from "../contract.js";',
+        'import { KeystoneStrategy } from "../keystone/KeystoneStrategy.js";',
+        "export const used = [useInvestigationRuntime, KeystoneStrategy];",
+        "export type Props = InvestigationStrategyShellProps;",
+      ].join("\n"),
+    );
+    expect(investigationImportViolations(sharedPath, authorityImports)).toEqual([
+      "collab/web/src/investigations/strategies/shared/presentation.tsx:1 imports authority or strategy behavior into the presentation-only shared kit",
+      "collab/web/src/investigations/strategies/shared/presentation.tsx:2 imports authority or strategy behavior into the presentation-only shared kit",
+      "collab/web/src/investigations/strategies/shared/presentation.tsx:3 imports authority or strategy behavior into the presentation-only shared kit",
+    ]);
   });
 
   it("rejects a production import of either testkit and allows test-only use", () => {
