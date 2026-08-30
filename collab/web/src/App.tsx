@@ -42,6 +42,7 @@ import {
 } from "./app-location.js";
 import { Cases } from "./Cases.js";
 import { InvestigationFirst } from "./InvestigationFirst.js";
+import { KeystoneStrategy } from "./investigations/strategies/keystone/index.js";
 import { Catalog } from "./Catalog.js";
 import { Entities } from "./Entities.js";
 import { Administration } from "./Administration.js";
@@ -175,6 +176,11 @@ const INVESTIGATION_STRATEGY_REGISTRATIONS = defineInvestigationStrategyRegistra
     id: "investigation-first",
     presentationContract: INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT,
     component: InvestigationFirstStrategy,
+  },
+  "keystone": {
+    id: "keystone",
+    presentationContract: INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT,
+    component: KeystoneStrategy,
   },
 });
 

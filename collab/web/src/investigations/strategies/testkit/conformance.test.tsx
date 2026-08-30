@@ -400,6 +400,16 @@ const STRATEGY_COVERAGE_MANIFEST: Readonly<
     evidence:
       "Held to every component-surface requirement by runComponentConformance in this file, and to the browser-surface requirements by the shared harness the named spec drives.",
   },
+  "keystone": {
+    kind: "dedicated-coverage",
+    dedicatedSpecs: [
+      "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.conformance.test.tsx",
+    ],
+    evidence:
+      "The Keystone K1 component is held to every shared component-surface requirement by its dedicated runComponentConformance suite; browser qualification is not claimed by this preview.",
+    notSharedBecause:
+      "The preview has component-level shared-profile coverage but no dedicated browser journey, so this manifest records only the coverage it has earned.",
+  },
   "war-room": {
     kind: "dedicated-coverage",
     dedicatedSpecs: [
@@ -473,7 +483,19 @@ describe("shipped strategy conformance coverage", () => {
 
   it("separates a shared-profile claim from dedicated coverage", () => {
     expect(enrolledIds("shared-conformance")).toEqual(["investigation-first"]);
-    expect(enrolledIds("dedicated-coverage")).toEqual(["war-room"]);
+    expect(enrolledIds("dedicated-coverage")).toEqual(["keystone", "war-room"]);
+  });
+
+  it("records Keystone's shared component-profile suite without claiming browser coverage", () => {
+    const enrollment = dedicatedEnrollment("keystone");
+
+    expect([...enrollment.dedicatedSpecs]).toEqual([
+      "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.conformance.test.tsx",
+    ]);
+    expect(enrollment.notSharedBecause).toContain("no dedicated browser journey");
+    expect(repositorySource(enrollment.dedicatedSpecs[0]!)).toContain(
+      "runComponentConformance",
+    );
   });
 
   it("backs every enrollment with non-empty evidence and a coverage file that exists", () => {
