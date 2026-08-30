@@ -479,6 +479,15 @@ export const INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID =
   "cd-collab.investigation_lifecycle_action_success.v1" as const;
 export const INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID =
   "cd-collab.investigation_lifecycle_changed.v1" as const;
+export const INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID =
+  "cd-collab.investigation_lifecycle_action_refused.v1" as const;
+
+/**
+ * Refusal copy is operator-facing guidance, not an unbounded server error.
+ * Six hundred characters leaves room for one actionable sentence while
+ * keeping a malformed response from becoming an arbitrary payload surface.
+ */
+export const LIFECYCLE_REFUSAL_DETAIL_MAX_LENGTH = 600;
 
 /** The lifecycle state a caller observed before requesting one action. */
 export interface InvestigationLifecycleExpectedV1 {
@@ -512,6 +521,16 @@ export interface InvestigationLifecycleChangedV1 {
   current: InvestigationLifecycleV1;
 }
 
+export interface InvestigationLifecycleActionRefusedV1 {
+  schemaId: typeof INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID;
+  error: "lifecycle_refused";
+  investigationId: string;
+  action: LifecycleAction;
+  reason: LifecycleRefusal;
+  /** A bounded operator-facing explanation that says what can be done next. */
+  detail: string;
+}
+
 const lifecycleExpectedShape: ObjectShape = {
   status: f.req(f.en(...CASE_STATUSES)),
   legalHold: f.req(f.bool),
@@ -541,6 +560,15 @@ const lifecycleChangedEnvelopeShape: ObjectShape = {
   investigationId: f.req(f.nstr),
   action: f.req(f.en(...LIFECYCLE_ACTIONS)),
   current: f.req(f.str),
+};
+
+const lifecycleActionRefusedEnvelopeShape: ObjectShape = {
+  schemaId: f.req(f.en(INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID)),
+  error: f.req(f.en("lifecycle_refused")),
+  investigationId: f.req(f.nstr),
+  action: f.req(f.en(...LIFECYCLE_ACTIONS)),
+  reason: f.req(f.en(...LIFECYCLE_REFUSALS)),
+  detail: f.req(f.nstr),
 };
 
 function parseLifecycleExpected(
@@ -693,6 +721,60 @@ export function parseInvestigationLifecycleChanged(
     investigationId,
     action,
     current,
+  };
+}
+
+function boundedLifecycleRefusalDetail(value: unknown, path: string): string {
+  if (typeof value !== "string") {
+    throw new ContractViolation(path, "expected string");
+  }
+  if (value.length > LIFECYCLE_REFUSAL_DETAIL_MAX_LENGTH) {
+    throw new ContractViolation(
+      path,
+      `detail exceeds ${LIFECYCLE_REFUSAL_DETAIL_MAX_LENGTH} characters`,
+    );
+  }
+  const detail = value.trim();
+  if (detail.length === 0) {
+    throw new ContractViolation(path, "expected non-empty actionable detail");
+  }
+  return detail;
+}
+
+/** Parse an action refusal without admitting an arbitrary server error body. */
+export function parseInvestigationLifecycleActionRefused(
+  raw: unknown,
+): InvestigationLifecycleActionRefusedV1 {
+  checkObject("$", lifecycleActionRefusedEnvelopeShape, raw);
+  const record = recordAt(raw, "$");
+  const investigationId = nonEmptyStringValue(record.investigationId, "$.investigationId");
+  const action = lifecycleActionValue(record.action, "$.action");
+  const reason = lifecycleRefusalValue(record.reason, "$.reason");
+  const detail = boundedLifecycleRefusalDetail(record.detail, "$.detail");
+
+  if (
+    (reason === "legal_hold" || reason === "already_archived") &&
+    action !== "archive"
+  ) {
+    throw new ContractViolation(
+      "$.reason",
+      `${reason} can only refuse an archive action`,
+    );
+  }
+  if (reason === "not_archived" && action !== "restore") {
+    throw new ContractViolation(
+      "$.reason",
+      "not_archived can only refuse a restore action",
+    );
+  }
+
+  return {
+    schemaId: INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
+    error: "lifecycle_refused",
+    investigationId,
+    action,
+    reason,
+    detail,
   };
 }
 

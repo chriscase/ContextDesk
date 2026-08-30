@@ -3,17 +3,20 @@ import { CASE_STATUSES } from "./case.js";
 import {
   ARCHIVED_STATUS,
   DEFAULT_RESTORE_STATUS,
+  INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_SCHEMA_ID,
   LIFECYCLE_ACTIONS,
+  LIFECYCLE_REFUSAL_DETAIL_MAX_LENGTH,
   LIFECYCLE_REFUSALS,
   describeDeleteRequest,
   evaluateArchive,
   evaluateRestore,
   isLifecycleTransition,
   parseInvestigationLifecycle,
+  parseInvestigationLifecycleActionRefused,
   parseInvestigationLifecycleActionRequest,
   parseInvestigationLifecycleActionSuccess,
   parseInvestigationLifecycleChanged,
@@ -570,5 +573,105 @@ describe("versioned changed-state conflict", () => {
         }),
       }),
     ).toThrow(/current\.archive\.action/);
+  });
+});
+
+describe("versioned lifecycle action refusal", () => {
+  const refusal = {
+    schemaId: INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
+    error: "lifecycle_refused",
+    investigationId: "case-lifecycle-1",
+    action: "archive",
+    reason: "legal_hold",
+    detail: "Clear the legal hold before archiving this investigation.",
+  };
+
+  it("parses a bounded refusal and preserves its identity and action", () => {
+    expect(parseInvestigationLifecycleActionRefused(refusal)).toEqual(refusal);
+    expect(
+      parseInvestigationLifecycleActionRefused({
+        ...refusal,
+        action: "restore",
+        reason: "not_archived",
+        detail: "Archive the investigation before trying to restore it.",
+      }),
+    ).toMatchObject({
+      investigationId: "case-lifecycle-1",
+      action: "restore",
+      reason: "not_archived",
+    });
+  });
+
+  it("rejects schema, error, and unknown-key drift", () => {
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({ ...refusal, schemaId: "wrong" }),
+    ).toThrow(/schemaId/);
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({ ...refusal, error: "lifecycle_changed" }),
+    ).toThrow(/error/);
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({ ...refusal, retryable: true }),
+    ).toThrow(/retryable.*unknown key/);
+  });
+
+  it("rejects malformed identity, action, and refusal reason", () => {
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({ ...refusal, investigationId: "" }),
+    ).toThrow(/investigationId/);
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({ ...refusal, action: "delete" }),
+    ).toThrow(/action/);
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({ ...refusal, reason: "permission_denied" }),
+    ).toThrow(/reason/);
+  });
+
+  it("rejects blank or oversized detail instead of exposing an arbitrary error body", () => {
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({ ...refusal, detail: "  \n\t " }),
+    ).toThrow(/detail.*non-empty/);
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({
+        ...refusal,
+        detail: "x".repeat(LIFECYCLE_REFUSAL_DETAIL_MAX_LENGTH + 1),
+      }),
+    ).toThrow(/detail.*exceeds/);
+  });
+
+  it("rejects action and reason combinations the lifecycle model cannot produce", () => {
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({
+        ...refusal,
+        action: "restore",
+        reason: "legal_hold",
+      }),
+    ).toThrow(/legal_hold.*archive/);
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({
+        ...refusal,
+        reason: "already_archived",
+        action: "restore",
+      }),
+    ).toThrow(/already_archived.*archive/);
+    expect(() =>
+      parseInvestigationLifecycleActionRefused({
+        ...refusal,
+        reason: "not_archived",
+        action: "archive",
+      }),
+    ).toThrow(/not_archived.*restore/);
+  });
+
+  it("permits unknown-status refusals in either direction", () => {
+    for (const action of LIFECYCLE_ACTIONS) {
+      expect(
+        parseInvestigationLifecycleActionRefused({
+          ...refusal,
+          action,
+          reason: "unknown_status",
+          detail: "Refresh the investigation before trying this action again.",
+        }),
+      ).toMatchObject({ action, reason: "unknown_status" });
+    }
   });
 });
