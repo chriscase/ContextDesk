@@ -539,36 +539,45 @@ export function CaseBoardPanel(props: {
                         }
                       />
                     ) : null}
-                    <div>
-                      <strong>{artifact.filename ?? artifact.kind}</strong>
-                      <span className="case-memory__meta">
-                        {artifact.kind} · {artifact.verificationStatus ?? "verification unknown"} · uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}
-                      </span>
-                      {/* The privacy class is a decision a reader acts on; the
-                          content digest is how the record is addressed. Leading
-                          with a truncated digest spent the first line of every
-                          card on a value nobody can act on — it is too short to
-                          match against another system and means nothing on its
-                          own. It stays available in full, one disclosure away. */}
-                      <span className="case-memory__meta">{artifact.privacyClass}</span>
-                      <TechnicalIdentifiers
-                        record={artifact.filename ?? artifact.kind}
-                        items={[
-                          {
-                            label: "Content hash",
-                            value: artifact.contentHash,
-                            hint: "matches this exact evidence against another system",
-                          },
-                          { label: "Evidence id", value: artifact.id },
-                        ]}
-                      />
-                      <button
-                        type="button"
-                        className="case-memory__inspect"
-                        onClick={() => void inspectArtifact(artifact)}
-                      >
-                        {inspecting === artifact.id ? "Hide log" : "Inspect log"}
-                      </button>
+                    <div className="case-memory__item-body">
+                      <div className="case-memory__item-heading">
+                        <strong>{artifact.filename ?? artifact.kind}</strong>
+                        <span className="case-memory__item-kind">{artifact.kind}</span>
+                      </div>
+                      {/* Keep the complete recorded metadata visible at a glance,
+                          but group it into one wrapping line so each artifact is
+                          scannable without making the inventory needlessly tall. */}
+                      <div className="case-memory__item-meta" aria-label="Evidence metadata">
+                        <span>{artifact.verificationStatus ?? "verification unknown"}</span>
+                        <span>uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}</span>
+                        <span>{artifact.privacyClass}</span>
+                      </div>
+                      <div className="case-memory__item-actions">
+                        {/* The privacy class is a decision a reader acts on; the
+                            content digest is how the record is addressed. Leading
+                            with a truncated digest spent the first line of every
+                            card on a value nobody can act on — it is too short to
+                            match against another system and means nothing on its
+                            own. It stays available in full, one disclosure away. */}
+                        <TechnicalIdentifiers
+                          record={artifact.filename ?? artifact.kind}
+                          items={[
+                            {
+                              label: "Content hash",
+                              value: artifact.contentHash,
+                              hint: "matches this exact evidence against another system",
+                            },
+                            { label: "Evidence id", value: artifact.id },
+                          ]}
+                        />
+                        <button
+                          type="button"
+                          className="case-memory__inspect"
+                          onClick={() => void inspectArtifact(artifact)}
+                        >
+                          {inspecting === artifact.id ? "Hide log" : "Inspect log"}
+                        </button>
+                      </div>
                       {inspecting === artifact.id ? (
                         inspectMetaOnly ? (
                           <p className="case-memory__note">Metadata only — bytes are not decoded as text.</p>
