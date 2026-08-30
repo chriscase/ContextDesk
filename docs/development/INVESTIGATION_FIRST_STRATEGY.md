@@ -2,10 +2,10 @@
 
 ## Status
 
-**Pull request integration** on `codex/investigation-first-strategy-v1` in
-[#1108](https://github.com/chriscase/ContextDesk/pull/1108). This slice is not a
-replacement for the War Room and is not yet a claim about the default
-experience on `main`.
+**Shipped on `main`** in
+[#1108](https://github.com/chriscase/ContextDesk/pull/1108), merge commit
+`e37464de39ac5cfbae4d7abf106eb26d763f1a96`. This slice is not a replacement
+for the War Room and does not make Investigation First the instance default.
 
 ## Boundary
 
@@ -70,7 +70,10 @@ discarded when the demo server stopped.
 
 ## Follow-up
 
-Instance/role governance, server-persisted user preferences, a first-class
-trash/deletion workflow, canonical product/build catalogs, and additional UI
-strategies remain separate milestones. Storage-provider migration, plugins,
-branding, and LDAP administration are intentionally outside this slice.
+Shared Investigation Runtime V1 is the next active integration: it moves
+Investigation First behind a typed gateway and race-safe mounted controller
+boundary before additional UI strategies are implemented. Instance/role
+governance, server-persisted user preferences, a first-class trash/deletion
+workflow, canonical product/build catalogs, and additional UI strategies remain
+separate milestones. Storage-provider migration, plugins, branding, and LDAP
+administration are intentionally outside this slice.
