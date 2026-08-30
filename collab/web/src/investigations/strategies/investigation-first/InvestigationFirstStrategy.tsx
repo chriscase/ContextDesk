@@ -163,7 +163,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const focusedTitle = props.focusCaseId !== null
     && investigation.availability === "available"
     && investigation.value.id === props.focusCaseId
-      ? investigation.value.title
+      ? investigation.value.title || "Untitled investigation"
       : null;
   /**
    * Identifies one arrival at the focused record: a different case, or the

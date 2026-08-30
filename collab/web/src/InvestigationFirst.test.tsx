@@ -134,6 +134,21 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(onOpenAdvancedTools).toHaveBeenCalledWith(sparse.id, "analyze");
   });
 
+  it("uses the visible sparse-title fallback for focused shell chrome", async () => {
+    const sparse = { ...makeSparseImportedCase(), title: "" };
+    const onFocusedCaseTitle = vi.fn();
+    const gateway = createInvestigationGatewayDouble({
+      getInvestigation: vi.fn(async () => gatewayOk(sparse)),
+      listEvidence: vi.fn(async () => gatewayOk([])),
+      listContributions: vi.fn(async () => gatewayOk([])),
+      getLifecycle: vi.fn(async () => gatewayOk(makeLifecycle(sparse))),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: sparse.id, onFocusedCaseTitle } });
+    const heading = await screen.findByRole("heading", { name: "Untitled investigation" });
+    await waitFor(() => expect(onFocusedCaseTitle).toHaveBeenLastCalledWith("Untitled investigation"));
+    expect(document.activeElement).toBe(heading);
+  });
+
   it("keeps evidence visible when annotations fail independently", async () => {
     const gateway = createInvestigationGatewayDouble({ listContributions: vi.fn(async () => gatewayUnavailable<readonly ContributionV1[]>()) });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
