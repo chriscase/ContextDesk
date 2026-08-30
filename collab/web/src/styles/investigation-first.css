@@ -128,6 +128,7 @@
 .investigation-first__evidence-list summary { cursor: pointer; white-space: nowrap; color: var(--accent); }
 .investigation-first__evidence-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.35rem 0.8rem; margin: 0.45rem 0 0; }
 .investigation-first__evidence-meta div { min-width: 0; }
+.investigation-first__evidence-meta .investigation-first__evidence-annotation { grid-column: 1 / -1; }
 .investigation-first__evidence-meta dd { margin: 0.08rem 0 0; overflow-wrap: anywhere; color: var(--fg); }
 .investigation-first__bulk-actions { display: flex; gap: 0.55rem; flex-wrap: wrap; align-items: center; margin-top: 0.8rem; color: var(--muted); font-size: 0.78rem; }
 .investigation-first__bulk-actions button { border: 1px solid var(--border); border-radius: 0.4rem; padding: 0.4rem 0.6rem; background: transparent; color: var(--fg); }

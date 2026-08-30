@@ -146,15 +146,21 @@ describe("Investigation First Runtime V1 presentation", () => {
     const filename = await screen.findByText("checkout-timeout.log");
     const row = filename.closest("li");
     expect(row).toBeTruthy();
-    const summary = row?.querySelector<HTMLElement>("[aria-label='Evidence summary']");
+    const summary = row?.querySelector<HTMLElement>(".investigation-first__evidence-facts");
     expect(summary?.textContent).toContain("log");
     expect(summary?.textContent).toContain("text/plain");
     expect(summary?.textContent).toContain("1.8 KB");
     expect(summary?.textContent).toContain("verified");
+    expect(screen.getByRole("checkbox", {
+      name: /checkout-timeout\.log log text\/plain 1\.8 KB verified/u,
+    })).toBeTruthy();
     const details = row?.querySelector("details");
     expect(details?.open).toBe(false);
-    fireEvent.click(screen.getAllByText("More details")[0]!);
+    const disclosure = row?.querySelector("summary");
+    expect(disclosure?.textContent).toBe("More details about checkout-timeout.log");
+    fireEvent.click(disclosure!);
     expect(details?.open).toBe(true);
+    expect(row?.textContent).toContain("Gateway timeout excerpt captured during the affected interval.");
     expect(row?.textContent).toContain("Annotation author");
     expect(row?.textContent).toContain("Intake batch");
   });

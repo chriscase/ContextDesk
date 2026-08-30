@@ -320,6 +320,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           {inventory.value.map(({ evidence, annotation }) => {
             const annotationFallback = annotationsPending ? "Annotation loading…" : "Annotation not available";
             const size = compactByteLabel(evidence.byteLength);
+            const evidenceName = evidence.filename || evidence.uri || "Unnamed evidence";
             return (
               <li key={evidence.id}>
                 <label className="investigation-first__evidence-select">
@@ -332,8 +333,8 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
                   />
                   <span className="investigation-first__evidence-copy">
                     <span className="investigation-first__evidence-title-row">
-                      <strong>{evidence.filename || evidence.uri || "Unnamed evidence"}</strong>
-                      <span className="investigation-first__evidence-facts" aria-label="Evidence summary">
+                      <strong>{evidenceName}</strong>
+                      <span className="investigation-first__evidence-facts">
                         <span>{display(evidence.kind)}</span>
                         {evidence.mediaType ? <span>{evidence.mediaType}</span> : null}
                         {size ? <span>{size}</span> : null}
@@ -344,8 +345,8 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
                   </span>
                 </label>
                 <details>
-                  <summary>More details</summary>
-                  <dl className="investigation-first__evidence-meta"><div><dt>Kind</dt><dd>{display(evidence.kind)}</dd></div><div><dt>Media type</dt><dd>{display(evidence.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(evidence.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(evidence.privacyClass)}</dd></div><div><dt>Hash</dt><dd>{display(evidence.contentHash || evidence.expectedHash)}</dd></div><div><dt>Size</dt><dd>{evidence.byteLength == null ? "Not recorded" : `${evidence.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(evidence.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(evidence.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(evidence.relativePath)}</dd></div><div><dt>Intake batch</dt><dd>{display(evidence.intakeBatchId)}</dd></div><div><dt>Annotation author</dt><dd>{annotation ? display(annotation.authorUsername) : annotationFallback}</dd></div><div><dt>Annotated</dt><dd>{annotation ? dateLabel(annotation.createdAt) : annotationFallback}</dd></div></dl>
+                  <summary>More details<span className="sr-only"> about {evidenceName}</span></summary>
+                  <dl className="investigation-first__evidence-meta"><div className="investigation-first__evidence-annotation"><dt>Annotation</dt><dd>{annotation?.body || annotationFallback}</dd></div><div><dt>Kind</dt><dd>{display(evidence.kind)}</dd></div><div><dt>Media type</dt><dd>{display(evidence.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(evidence.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(evidence.privacyClass)}</dd></div><div><dt>Hash</dt><dd>{display(evidence.contentHash || evidence.expectedHash)}</dd></div><div><dt>Size</dt><dd>{evidence.byteLength == null ? "Not recorded" : `${evidence.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(evidence.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(evidence.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(evidence.relativePath)}</dd></div><div><dt>Intake batch</dt><dd>{display(evidence.intakeBatchId)}</dd></div><div><dt>Annotation author</dt><dd>{annotation ? display(annotation.authorUsername) : annotationFallback}</dd></div><div><dt>Annotated</dt><dd>{annotation ? dateLabel(annotation.createdAt) : annotationFallback}</dd></div></dl>
                 </details>
               </li>
             );
