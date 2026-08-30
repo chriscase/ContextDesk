@@ -47,7 +47,7 @@ War Room-only stage wording from its title.
 - bounded file upload through the existing protected evidence route;
 - recoverable archive/restore through the existing explained lifecycle panel.
 
-## Proof
+## Original #1108 proof
 
 The focused `InvestigationFirst.test.tsx` and shell strategy suites cover the
 fast form, shared create payload, sparse detail, evidence annotation/inventory,
@@ -70,9 +70,10 @@ discarded when the demo server stopped.
 
 ## Follow-up
 
-Shared Investigation Runtime V1 is the next active integration: it moves
-Investigation First behind a typed gateway and race-safe mounted controller
-boundary before additional UI strategies are implemented. Instance/role
+Investigation First has been migrated as the first presentation-only Shared
+Investigation Runtime V1 consumer on integration candidate
+`caa16500ba29e1ec6c754143d73916b26586ae90`; exact-head external acceptance and
+the runtime freeze remain in progress. Instance/role
 governance, server-persisted user preferences, a first-class trash/deletion
 workflow, canonical product/build catalogs, and additional UI strategies remain
 separate milestones. Storage-provider migration, plugins, branding, and LDAP

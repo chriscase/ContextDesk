@@ -2,8 +2,11 @@
 
 ## Status
 
-**Active integration** on `integrate/investigation-runtime-v1`, based on
-`e37464de39ac5cfbae4d7abf106eb26d763f1a96`.
+**Integration candidate** on `integrate/investigation-runtime-v1` at
+`caa16500ba29e1ec6c754143d73916b26586ae90`, based on
+`e37464de39ac5cfbae4d7abf106eb26d763f1a96`. It is not yet on `main`, and the
+public runtime contract is not frozen until the remaining exact-head
+independent review and full collaboration CI gates close.
 
 Runtime V1 is the shared browser-side boundary that lets ContextDesk ship more
 than one investigation presentation without creating competing authorities for
@@ -52,12 +55,17 @@ collab/web/src/investigations/
     testkit/
   strategies/
     contract.ts
-    registry.ts
     StrategyRenderer.tsx
-    war-room/
     investigation-first/
-    testkit/
 ```
+
+The selectable strategy registry lives in `collab/web/src/ui-strategy.ts`.
+`App.tsx` composes the registered adapters, including the War Room reference;
+replaceable strategy components stay below `strategies/`. Browser consumers
+import transport contracts through the browser-safe
+`@cd-collab/contracts/investigation-runtime` subpath, backed by
+`collab/contracts/src/investigation-runtime-browser.ts`, rather than the
+Node-capable package root.
 
 The dependency direction is one way:
 
@@ -152,11 +160,10 @@ Specialist log exploration remains an explicit handoff to War Room. Permanent
 deletion, recoverable trash implementation, storage-provider migration, plugin
 execution, and server-side strategy governance are not Runtime V1 operations.
 
-### Transport prerequisites
+### Transport contracts
 
-The gateway implementation starts only after the authoritative contracts can
-parse every successful Runtime V1 response. In particular, the contracts layer
-must provide:
+The gateway consumes authoritative parsers for every successful Runtime V1
+response. The delivered contracts layer provides:
 
 - a parser for `InvestigationLifecycleV1`, including its allowed/refused
   verdicts, restore target, and deletion alternatives; and
@@ -167,6 +174,9 @@ must provide:
   `POST /api/cases/:id/evidence`; and
 - versioned lifecycle-action request, success, and changed-state conflict
   envelopes and parsers for `POST /api/cases/:id/lifecycle`.
+
+The case service emits those versioned envelopes, and Runtime V1 accepts only
+their parsed values.
 
 The gateway must not compensate for any omission with a local cast or a
 second hand-written wire parser.
@@ -211,17 +221,32 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 
 ## Delivery and freeze
 
-Runtime V1 is delivered in dependency order:
+At candidate `caa16500ba29e1ec6c754143d73916b26586ae90`, delivery steps 1–6 are
+implemented: typed transport contracts, deterministic fixtures and dependency
+guard, gateway and bounded errors, race-safe controllers and provider,
+versioned strategy renderer, and the Investigation First migration. War Room
+lifecycle also uses Runtime V1; its remaining direct calls are held to a
+non-growing legacy allowlist.
 
-1. typed transport contracts and parsers, including lifecycle read/action and
-   the versioned evidence list/upload envelopes;
-2. deterministic fixtures and the dependency-boundary guard;
-3. gateway, bounded errors, capability projections, and pure selectors;
-4. provider and race-safe controllers;
-5. versioned strategy renderer contract;
-6. Investigation First migration and behavioral-parity proof;
-7. independent exact-head review and full collaboration CI.
+Local acceptance evidence at that candidate:
 
-The contract freezes only after Investigation First is fully migrated and the
-conformance gate passes. New visual-strategy implementation begins against that
-frozen public surface rather than importing unfinished internals.
+- contracts: 52 files and 671 tests passed;
+- web: 62 files and 829 tests passed;
+- contracts and web lint/typecheck passed;
+- the production web build passed;
+- the server suite passed except for three loopback LDAP transport cases that
+  the filesystem/network sandbox prevented from binding; the same three cases
+  passed in a permitted loopback rerun; and
+- hands-on synthetic-demo acceptance passed for fast create, reusable context
+  values, sparse detail, evidence selection and metadata, reversible technical
+  handoff, focus, strategy-aware titles, and 390-pixel reflow without
+  horizontal overflow or console warnings; and
+- browser automation passed 87 scenarios, with eight documented
+  environment-specific scenarios intentionally skipped, including the complete
+  archive/restore journey after the final list-freshness correction.
+
+Known non-blockers are the existing production chunk-size warning and the
+intentional, non-growing War Room legacy allowlist. Freeze still requires a
+complete exact-head external acceptance verdict and full collaboration CI.
+Later strategies may be designed now, but implementation must wait for that
+frozen public surface rather than importing candidate internals.
