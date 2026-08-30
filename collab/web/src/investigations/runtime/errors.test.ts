@@ -13,6 +13,7 @@ describe("runtime failure classification", () => {
         kind: "lifecycle_refused",
         action: "archive",
         reason: "legal_hold",
+        detail: "Clear the legal hold before archiving.",
       })).toEqual({ kind: "auth_lost", status });
     },
   );
@@ -39,11 +40,13 @@ describe("runtime failure classification", () => {
       kind: "lifecycle_refused",
       action: "archive",
       reason: "legal_hold",
+      detail: "Clear the legal hold before archiving.",
     })).toEqual({
       kind: "lifecycle_refused",
       status: 409,
       action: "archive",
       reason: "legal_hold",
+      detail: "Clear the legal hold before archiving.",
     });
   });
 
@@ -52,6 +55,7 @@ describe("runtime failure classification", () => {
       kind: "lifecycle_refused",
       action: "restore",
       reason: "not_archived",
+      detail: "This investigation is not archived.",
     })).toEqual({ kind: "unavailable", status: 503 });
   });
 

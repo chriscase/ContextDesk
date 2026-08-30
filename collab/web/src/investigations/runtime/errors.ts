@@ -1,4 +1,8 @@
-import type { LifecycleAction, LifecycleRefusal } from "@cd-collab/contracts";
+import type {
+  InvestigationLifecycleV1,
+  LifecycleAction,
+  LifecycleRefusal,
+} from "@cd-collab/contracts";
 
 export const RUNTIME_PROTOCOL_REASONS = [
   "content_type",
@@ -25,6 +29,14 @@ export type RuntimeFailure =
       status: 409;
       action: LifecycleAction;
       reason: LifecycleRefusal;
+      detail: string;
+    }
+  | {
+      kind: "lifecycle_changed";
+      status: 409;
+      investigationId: string;
+      action: LifecycleAction;
+      current: InvestigationLifecycleV1;
     }
   | { kind: "conflict"; status: 409 }
   | { kind: "unavailable"; status: 503 }
@@ -40,6 +52,7 @@ export interface KnownLifecycleRefusal {
   kind: "lifecycle_refused";
   action: LifecycleAction;
   reason: LifecycleRefusal;
+  detail: string;
 }
 
 export type KnownHttpFailure = KnownLifecycleRefusal;
@@ -65,6 +78,7 @@ export function classifyHttpFailure(
         status,
         action: known.action,
         reason: known.reason,
+        detail: known.detail,
       };
     }
     return { kind: "conflict", status };
