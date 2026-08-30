@@ -1,6 +1,8 @@
 import {
   ContractViolation,
+  INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
   parseCase,
   parseCaseList,
   parseContributionList,
@@ -15,7 +17,6 @@ import {
   type CaseV1,
   type ContributionV1,
   type EvidenceUploadSuccessV1,
-  type InvestigationLifecycleActionRequestV1,
   type InvestigationLifecycleActionSuccessV1,
   type InvestigationLifecycleExpectedV1,
   type InvestigationLifecycleV1,
@@ -117,6 +118,8 @@ type ResponseResult =
   | { ok: true; response: Response }
   | { ok: false; error: RuntimeFailure };
 
+type SerializedBodyResult = GatewayResult<string>;
+
 const JSON_HEADERS = Object.freeze({ "content-type": "application/json" });
 
 function failed<T>(error: RuntimeFailure): GatewayResult<T> {
@@ -125,6 +128,86 @@ function failed<T>(error: RuntimeFailure): GatewayResult<T> {
 
 function aborted<T>(): GatewayResult<T> {
   return failed({ kind: "aborted" });
+}
+
+function serializeMutationBody(
+  signal: AbortSignal,
+  snapshot: () => Record<string, unknown>,
+): SerializedBodyResult {
+  if (signal.aborted) return aborted();
+  try {
+    const body = JSON.stringify(snapshot());
+    if (signal.aborted) return aborted();
+    return { ok: true, value: body };
+  } catch {
+    return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+  }
+}
+
+function createInvestigationBody(input: CreateInvestigationInput): Record<string, unknown> {
+  const body: Record<string, unknown> = { title: input.title };
+  if (input.severity !== undefined) body.severity = input.severity;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  if (input.problemStatement !== undefined) body.problemStatement = input.problemStatement;
+  if (input.affectedParties !== undefined) body.affectedParties = input.affectedParties;
+  if (input.impact !== undefined) body.impact = input.impact;
+  if (input.scope !== undefined) body.scope = input.scope;
+  if (input.openQuestions !== undefined) {
+    body.openQuestions = Array.from(input.openQuestions, (question) => question);
+  }
+  if (input.investigationContext !== undefined) {
+    const context = input.investigationContext;
+    body.investigationContext = context === null
+      ? null
+      : {
+          productName: context.productName,
+          version: context.version,
+          build: context.build,
+          component: context.component,
+          environment: context.environment,
+          organization: context.organization,
+        };
+  }
+  if (input.occurredAt !== undefined) body.occurredAt = input.occurredAt;
+  if (input.occurredAtPrecision !== undefined) {
+    body.occurredAtPrecision = input.occurredAtPrecision;
+  }
+  if (input.occurredAtZone !== undefined) body.occurredAtZone = input.occurredAtZone;
+  return body;
+}
+
+function uploadEvidenceBody(input: UploadEvidenceInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    kind: input.kind,
+    summary: input.summary,
+  };
+  if (input.filename !== undefined) body.filename = input.filename;
+  if (input.mediaType !== undefined) body.mediaType = input.mediaType;
+  if (input.contentBase64 !== undefined) body.contentBase64 = input.contentBase64;
+  if (input.uri !== undefined) body.uri = input.uri;
+  if (input.expectedHash !== undefined) body.expectedHash = input.expectedHash;
+  if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  if (input.sourceId !== undefined) body.sourceId = input.sourceId;
+  return body;
+}
+
+function lifecycleActionBody(
+  investigationId: string,
+  input: ApplyLifecycleActionInput,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+    investigationId,
+    action: input.action,
+    expected: {
+      status: input.expected.status,
+      legalHold: input.expected.legalHold,
+      restoreTarget: input.expected.restoreTarget,
+    },
+  };
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  return body;
 }
 
 function isJsonResponse(response: Response): boolean {
@@ -217,6 +300,38 @@ function caseCollectionIdentity(cases: readonly CaseV1[]): boolean {
   return true;
 }
 
+function evidenceCollectionIdentity(
+  investigationId: string,
+  artifacts: readonly ArtifactV1[],
+): boolean {
+  const identities = new Set<string>();
+  for (const artifact of artifacts) {
+    if (
+      artifact.caseId !== investigationId
+      || artifact.id.length === 0
+      || identities.has(artifact.id)
+    ) return false;
+    identities.add(artifact.id);
+  }
+  return true;
+}
+
+function contributionCollectionIdentity(
+  investigationId: string,
+  contributions: readonly ContributionV1[],
+): boolean {
+  const identities = new Set<string>();
+  for (const contribution of contributions) {
+    if (
+      contribution.caseId !== investigationId
+      || contribution.id.length === 0
+      || identities.has(contribution.id)
+    ) return false;
+    identities.add(contribution.id);
+  }
+  return true;
+}
+
 function caseRoute(investigationId: string, suffix = ""): string {
   return `/api/cases/${encodeURIComponent(investigationId)}${suffix}`;
 }
@@ -240,27 +355,45 @@ async function parseLifecycleConflict(
   }
   if (signal.aborted) return aborted();
 
+  let schemaId: unknown;
+  let error: unknown;
   try {
-    if (signal.aborted) return aborted();
-    const changed = parseInvestigationLifecycleChanged(raw);
-    if (signal.aborted) return aborted();
-    if (changed.investigationId !== investigationId || changed.action !== action) {
-      return failed(protocolFailure("identity"));
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return genericConflict();
     }
-    if (signal.aborted) return aborted();
-    return failed({
-      kind: "lifecycle_changed",
-      status: 409,
-      investigationId: changed.investigationId,
-      action: changed.action,
-      current: changed.current,
-    });
+    const record = raw as Record<string, unknown>;
+    schemaId = record.schemaId;
+    error = record.error;
   } catch {
-    if (signal.aborted) return aborted();
+    return signal.aborted ? aborted() : failed({ kind: "unexpected" });
   }
+  if (signal.aborted) return aborted();
+
+  const claimsChanged = schemaId === INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID
+    || error === "lifecycle_changed";
+  const claimsRefused = schemaId === INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID
+    || error === "lifecycle_refused";
+  if (!claimsChanged && !claimsRefused) return genericConflict();
+  if (claimsChanged && claimsRefused) return failed(protocolFailure("contract"));
 
   try {
     if (signal.aborted) return aborted();
+    if (claimsChanged) {
+      const changed = parseInvestigationLifecycleChanged(raw);
+      if (signal.aborted) return aborted();
+      if (changed.investigationId !== investigationId || changed.action !== action) {
+        return failed(protocolFailure("identity"));
+      }
+      if (signal.aborted) return aborted();
+      return failed({
+        kind: "lifecycle_changed",
+        status: 409,
+        investigationId: changed.investigationId,
+        action: changed.action,
+        current: changed.current,
+      });
+    }
+
     const refusal = parseInvestigationLifecycleActionRefused(raw);
     if (signal.aborted) return aborted();
     if (refusal.investigationId !== investigationId || refusal.action !== action) {
@@ -273,8 +406,11 @@ async function parseLifecycleConflict(
       reason: refusal.reason,
       detail: refusal.detail,
     }));
-  } catch {
-    return signal.aborted ? aborted() : genericConflict();
+  } catch (cause) {
+    if (signal.aborted) return aborted();
+    return cause instanceof ContractViolation
+      ? failed(protocolFailure("contract"))
+      : failed({ kind: "unexpected" });
   }
 }
 
@@ -301,17 +437,14 @@ export const investigationGateway: InvestigationGateway = {
   },
 
   createInvestigation(input, { signal }) {
+    const serialized = serializeMutationBody(signal, () => createInvestigationBody(input));
+    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
     return requestParsed(
       "/api/cases",
       {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify({
-          ...input,
-          ...(input.openQuestions === undefined
-            ? {}
-            : { openQuestions: [...input.openQuestions] }),
-        }),
+        body: serialized.value,
       },
       signal,
       parseCase,
@@ -326,7 +459,7 @@ export const investigationGateway: InvestigationGateway = {
       signal,
       parseEvidenceList,
       (value) => value.caseId === investigationId
-        && value.artifacts.every((artifact) => artifact.caseId === investigationId),
+        && evidenceCollectionIdentity(investigationId, value.artifacts),
     );
     return result.ok ? { ok: true, value: [...result.value.artifacts] } : result;
   },
@@ -338,24 +471,28 @@ export const investigationGateway: InvestigationGateway = {
       signal,
       parseContributionList,
       (value) => value.caseId === investigationId
-        && value.contributions.every((item) => item.caseId === investigationId),
+        && contributionCollectionIdentity(investigationId, value.contributions),
     );
     return result.ok ? { ok: true, value: [...result.value.contributions] } : result;
   },
 
   uploadEvidence(investigationId, input, { signal }) {
+    const serialized = serializeMutationBody(signal, () => uploadEvidenceBody(input));
+    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
     return requestParsed(
       caseRoute(investigationId, "/evidence"),
       {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify(input),
+        body: serialized.value,
       },
       signal,
       parseEvidenceUploadSuccess,
       (value) => value.caseId === investigationId
         && value.artifact.caseId === investigationId
-        && value.summary.caseId === investigationId,
+        && value.summary.caseId === investigationId
+        && value.artifact.id.length > 0
+        && value.summary.id.length > 0,
     );
   },
 
@@ -370,19 +507,17 @@ export const investigationGateway: InvestigationGateway = {
   },
 
   async applyLifecycleAction(investigationId, input, { signal }) {
-    const request: InvestigationLifecycleActionRequestV1 = {
-      schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
-      investigationId,
-      action: input.action,
-      expected: input.expected,
-      ...(input.clientTime === undefined ? {} : { clientTime: input.clientTime }),
-    };
+    const serialized = serializeMutationBody(
+      signal,
+      () => lifecycleActionBody(investigationId, input),
+    );
+    if (!serialized.ok) return failed(serialized.error);
     const fetched = await fetchProtected(
       caseRoute(investigationId, "/lifecycle"),
       {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify(request),
+        body: serialized.value,
       },
       signal,
     );

@@ -1,5 +1,7 @@
 import {
   CASE_LIST_SCHEMA_ID,
+  COLLAB_CSRF_HEADER,
+  COLLAB_CSRF_HEADER_VALUE,
   INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
@@ -94,33 +96,93 @@ describe("the complete Runtime V1 transport surface", () => {
     const investigationId = RUNTIME_FIXTURE_IDS.populatedCase;
     const signalOptions = options();
 
-    const results = await Promise.all([
-      investigationGateway.listInvestigations(signalOptions),
-      investigationGateway.getInvestigation(investigationId, signalOptions),
-      investigationGateway.createInvestigation({
+    const createInput = Object.assign(
+      Object.create({ inheritedCreateField: "must-not-cross" }) as Record<string, unknown>,
+      {
         title: "Checkout latency after 4.8.0 rollout",
         severity: "high",
+        clientTime: "2026-02-03T19:59:00.000Z",
+        problemStatement: "Checkout latency is above the objective.",
+        affectedParties: "Storefront customers",
+        impact: "Timeouts",
+        scope: "Checkout API",
         openQuestions: ["Are retries amplifying the affected requests?"],
-      }, signalOptions),
-      investigationGateway.listEvidence(investigationId, signalOptions),
-      investigationGateway.listContributions(investigationId, signalOptions),
-      investigationGateway.uploadEvidence(investigationId, {
+        investigationContext: Object.assign(
+          Object.create({ inheritedContextField: "must-not-cross" }) as Record<string, unknown>,
+          {
+            productName: "ContextDesk Storefront",
+            version: "4.8.0",
+            build: "2026.02.03.4",
+            component: "checkout-api",
+            environment: "production",
+            organization: "Retail operations",
+            extraContextField: "must-not-cross",
+          },
+        ),
+        occurredAt: "2026-02-03T19:42:00.000Z",
+        occurredAtPrecision: "second",
+        occurredAtZone: "explicit",
+        extraCreateField: "must-not-cross",
+      },
+    );
+    const uploadInput = Object.assign(
+      Object.create({ inheritedUploadField: "must-not-cross" }) as Record<string, unknown>,
+      {
         kind: "log",
         summary: "Timeout excerpt",
         filename: "checkout.log",
+        mediaType: "text/plain",
         contentBase64: "c3ludGhldGlj",
+        uri: "file:///synthetic/checkout.log",
+        expectedHash: null,
         privacyClass: "owner_only",
-      }, signalOptions),
-      investigationGateway.getLifecycle(investigationId, signalOptions),
-      investigationGateway.applyLifecycleAction(investigationId, {
+        clientTime: "2026-02-03T19:59:30.000Z",
+        sourceId: "source-browser-upload",
+        extraUploadField: "must-not-cross",
+      },
+    );
+    const lifecycleInput = Object.assign(
+      Object.create({ inheritedLifecycleField: "must-not-cross" }) as Record<string, unknown>,
+      {
         action: "archive",
-        expected: {
-          status: "monitoring",
-          legalHold: false,
-          restoreTarget: "monitoring",
-        },
+        expected: Object.assign(
+          Object.create({ inheritedExpectedField: "must-not-cross" }) as Record<string, unknown>,
+          {
+            status: "monitoring",
+            legalHold: false,
+            restoreTarget: "monitoring",
+            extraExpectedField: "must-not-cross",
+          },
+        ),
         clientTime: "2026-02-03T20:00:00.000Z",
-      }, signalOptions),
+        extraLifecycleField: "must-not-cross",
+      },
+    );
+
+    const results = await Promise.all([
+      investigationGateway.listInvestigations(signalOptions),
+      investigationGateway.getInvestigation(investigationId, signalOptions),
+      investigationGateway.createInvestigation(
+        createInput as unknown as Parameters<
+          typeof investigationGateway.createInvestigation
+        >[0],
+        signalOptions,
+      ),
+      investigationGateway.listEvidence(investigationId, signalOptions),
+      investigationGateway.listContributions(investigationId, signalOptions),
+      investigationGateway.uploadEvidence(
+        investigationId,
+        uploadInput as unknown as Parameters<typeof investigationGateway.uploadEvidence>[1],
+        signalOptions,
+      ),
+      investigationGateway.getLifecycle(investigationId, signalOptions),
+      investigationGateway.applyLifecycleAction(
+        investigationId,
+        lifecycleInput as unknown as Parameters<
+          typeof investigationGateway.applyLifecycleAction
+        >[1],
+        signalOptions,
+      ),
     ]);
 
     expect(results.every((result) => result.ok)).toBe(true);
@@ -151,6 +213,50 @@ describe("the complete Runtime V1 transport surface", () => {
       clientTime: "2026-02-03T20:00:00.000Z",
     });
     expect(actionBody).not.toHaveProperty("targetStatus");
+
+    const createInit = fetchMock.mock.calls[2]?.[1];
+    expect(JSON.parse(String(createInit?.body))).toEqual({
+      title: "Checkout latency after 4.8.0 rollout",
+      severity: "high",
+      clientTime: "2026-02-03T19:59:00.000Z",
+      problemStatement: "Checkout latency is above the objective.",
+      affectedParties: "Storefront customers",
+      impact: "Timeouts",
+      scope: "Checkout API",
+      openQuestions: ["Are retries amplifying the affected requests?"],
+      investigationContext: {
+        productName: "ContextDesk Storefront",
+        version: "4.8.0",
+        build: "2026.02.03.4",
+        component: "checkout-api",
+        environment: "production",
+        organization: "Retail operations",
+      },
+      occurredAt: "2026-02-03T19:42:00.000Z",
+      occurredAtPrecision: "second",
+      occurredAtZone: "explicit",
+    });
+
+    const uploadInit = fetchMock.mock.calls[5]?.[1];
+    expect(JSON.parse(String(uploadInit?.body))).toEqual({
+      kind: "log",
+      summary: "Timeout excerpt",
+      filename: "checkout.log",
+      mediaType: "text/plain",
+      contentBase64: "c3ludGhldGlj",
+      uri: "file:///synthetic/checkout.log",
+      expectedHash: null,
+      privacyClass: "owner_only",
+      clientTime: "2026-02-03T19:59:30.000Z",
+      sourceId: "source-browser-upload",
+    });
+
+    for (const callIndex of [2, 5, 7]) {
+      expect(fetchMock.mock.calls[callIndex]?.[1]?.headers).toEqual({
+        "content-type": "application/json",
+        [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
+      });
+    }
   });
 
   it("URL-encodes investigation identities instead of interpolating route text", async () => {
@@ -160,6 +266,88 @@ describe("the complete Runtime V1 transport surface", () => {
 
     expect(result).toEqual({ ok: true, value: investigation });
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/cases/case%20%2F%3F%23%20owned");
+  });
+});
+
+describe("mutation body containment", () => {
+  it("contains getter failures without fetching or publishing thrown detail", async () => {
+    const secret = "private getter detail";
+    const input = {} as Record<string, unknown>;
+    Object.defineProperty(input, "title", {
+      enumerable: true,
+      get: () => {
+        throw new Error(secret);
+      },
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const result = await investigationGateway.createInvestigation(
+      input as unknown as Parameters<typeof investigationGateway.createInvestigation>[0],
+      options(),
+    );
+
+    expect(result).toEqual({ ok: false, error: { kind: "unexpected" } });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("contains cyclic and custom-stringifier failures without fetching", async () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const throwingValue = {
+      toJSON: () => {
+        throw new Error("private stringify detail");
+      },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const cycleResult = await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "log", summary: cyclic } as unknown as Parameters<
+        typeof investigationGateway.uploadEvidence
+      >[1],
+      options(),
+    );
+    const stringifyResult = await investigationGateway.applyLifecycleAction(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        action: "archive",
+        expected: {
+          status: throwingValue,
+          legalHold: false,
+          restoreTarget: "monitoring",
+        },
+      } as unknown as Parameters<typeof investigationGateway.applyLifecycleAction>[1],
+      options(),
+    );
+
+    expect(cycleResult).toEqual({ ok: false, error: { kind: "unexpected" } });
+    expect(stringifyResult).toEqual({ ok: false, error: { kind: "unexpected" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("gives cancellation precedence when a snapshot getter aborts and throws", async () => {
+    const controller = new AbortController();
+    const expected = {
+      get status() {
+        controller.abort();
+        throw new Error("must remain bounded");
+      },
+      legalHold: false,
+      restoreTarget: "monitoring",
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const result = await investigationGateway.applyLifecycleAction(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { action: "archive", expected } as unknown as Parameters<
+        typeof investigationGateway.applyLifecycleAction
+      >[1],
+      options(controller),
+    );
+
+    expect(result).toEqual({ ok: false, error: { kind: "aborted" } });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -181,6 +369,27 @@ describe("status-first bounded failures", () => {
       } finally {
         window.removeEventListener(AUTH_LOST_EVENT, listener);
       }
+    },
+  );
+
+  it.each([401, 403] as const)(
+    "preserves lifecycle auth loss for %i without reading a conflict-shaped body",
+    async (status) => {
+      const response = jsonResponse(lifecycleChanged(), status);
+      const json = vi.spyOn(response, "json");
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+      const result = await investigationGateway.applyLifecycleAction(
+        RUNTIME_FIXTURE_IDS.populatedCase,
+        {
+          action: "archive",
+          expected: { status: "monitoring", legalHold: false, restoreTarget: "monitoring" },
+        },
+        options(),
+      );
+
+      expect(result).toEqual({ ok: false, error: { kind: "auth_lost", status } });
+      expect(json).not.toHaveBeenCalled();
     },
   );
 
@@ -302,6 +511,66 @@ describe("successful response protocol and identity", () => {
       { kind: "attachment", summary: "Synthetic" },
       options(),
     )).toEqual({ ok: false, error: { kind: "protocol", reason: "contract" } });
+  });
+
+  it("requires non-empty unique evidence and contribution identities", async () => {
+    const evidence = makeEvidenceList();
+    const contributions = makeContributionList();
+    const upload = makeEvidenceUploadSuccess();
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...evidence,
+      artifacts: [{ ...evidence.artifacts[0], id: "" }],
+    }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...evidence,
+      artifacts: [evidence.artifacts[0], { ...evidence.artifacts[0] }],
+    }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...contributions,
+      contributions: [{ ...contributions.contributions[0], id: "" }],
+    }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...contributions,
+      contributions: [contributions.contributions[0], { ...contributions.contributions[0] }],
+    }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...upload,
+      artifact: { ...upload.artifact, id: "" },
+    }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...upload,
+      artifact: { ...upload.artifact, summaryContributionId: "" },
+      summary: { ...upload.summary, id: "" },
+    }));
+
+    const identityFailure = { ok: false, error: { kind: "protocol", reason: "identity" } };
+    expect(await investigationGateway.listEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).toEqual(identityFailure);
+    expect(await investigationGateway.listEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).toEqual(identityFailure);
+    expect(await investigationGateway.listContributions(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).toEqual(identityFailure);
+    expect(await investigationGateway.listContributions(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).toEqual(identityFailure);
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "log", summary: "Synthetic" },
+      options(),
+    )).toEqual(identityFailure);
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "log", summary: "Synthetic" },
+      options(),
+    )).toEqual(identityFailure);
   });
 
   it("checks detail, create, lifecycle-preview, and action-success identities", async () => {
@@ -535,6 +804,80 @@ describe("typed lifecycle action conflicts", () => {
     expect(refused).toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
   });
 
+  it("treats a recognized but malformed lifecycle conflict as a contract failure", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+      error: "lifecycle_changed",
+      investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
+      action: "archive",
+    }, 409));
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...lifecycleRefused(),
+      detail: "",
+    }, 409));
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...lifecycleChanged(),
+      schemaId: INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
+    }, 409));
+    const command = {
+      action: "archive" as const,
+      expected: {
+        status: "monitoring" as const,
+        legalHold: false,
+        restoreTarget: "monitoring" as const,
+      },
+    };
+    const contractFailure = {
+      ok: false,
+      error: { kind: "protocol", reason: "contract" },
+    };
+
+    expect(await investigationGateway.applyLifecycleAction(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      command,
+      options(),
+    )).toEqual(contractFailure);
+    expect(await investigationGateway.applyLifecycleAction(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      command,
+      options(),
+    )).toEqual(contractFailure);
+    expect(await investigationGateway.applyLifecycleAction(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      command,
+      options(),
+    )).toEqual(contractFailure);
+  });
+
+  it("gives cancellation precedence while reading a declared conflict", async () => {
+    const controller = new AbortController();
+    const raw = lifecycleChanged() as Record<string, unknown>;
+    Object.defineProperty(raw, "error", {
+      enumerable: true,
+      get: () => {
+        controller.abort();
+        return "lifecycle_changed";
+      },
+    });
+    const response = {
+      ok: false,
+      status: 409,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => raw,
+    } as Response;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    expect(await investigationGateway.applyLifecycleAction(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        action: "archive",
+        expected: { status: "monitoring", legalHold: false, restoreTarget: "monitoring" },
+      },
+      options(controller),
+    )).toEqual({ ok: false, error: { kind: "aborted" } });
+  });
+
   it.each([
     new Response("not json", { status: 409 }),
     new Response("not json", {
@@ -542,7 +885,7 @@ describe("typed lifecycle action conflicts", () => {
       headers: { "content-type": "application/json" },
     }),
     jsonResponse({ error: "future_conflict", private: "not-published" }, 409),
-  ])("keeps an unparsed lifecycle 409 as a generic bounded conflict", async (response) => {
+  ])("keeps an unknown lifecycle 409 as a generic bounded conflict", async (response) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
     const result = await investigationGateway.applyLifecycleAction(
       RUNTIME_FIXTURE_IDS.populatedCase,
