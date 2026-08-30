@@ -178,11 +178,23 @@ describe("the complete Runtime V1 transport surface", () => {
     const contributionInput = Object.assign(
       Object.create({ inheritedContributionField: "must-not-cross" }) as Record<string, unknown>,
       {
-        kind: "note",
+        kind: "hypothesis",
         body: "  Queue time rises immediately after the connection-pool rollout.  ",
+        hypothesisLinks: [
+          Object.assign(
+            Object.create({ inheritedLinkField: "must-not-cross" }) as Record<string, unknown>,
+            {
+              kind: "artifact",
+              id: RUNTIME_FIXTURE_IDS.evidence,
+              extraLinkField: "must-not-cross",
+            },
+          ),
+          { kind: "contribution", id: RUNTIME_FIXTURE_IDS.note },
+        ],
         privacyClass: "share_safe",
         clientTime: "2026-02-03T19:59:45.000Z",
         sourceId: "source-human-note",
+        idempotencyKey: "msg-syn-0001",
         extraContributionField: "must-not-cross",
       },
     );
@@ -398,11 +410,16 @@ describe("the complete Runtime V1 transport surface", () => {
 
     const contributionInit = fetchMock.mock.calls[6]?.[1];
     expect(JSON.parse(String(contributionInit?.body))).toEqual({
-      kind: "note",
+      kind: "hypothesis",
       body: "  Queue time rises immediately after the connection-pool rollout.  ",
+      hypothesisLinks: [
+        { kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence },
+        { kind: "contribution", id: RUNTIME_FIXTURE_IDS.note },
+      ],
       privacyClass: "share_safe",
       clientTime: "2026-02-03T19:59:45.000Z",
       sourceId: "source-human-note",
+      idempotencyKey: "msg-syn-0001",
     });
 
     const situationInit = fetchMock.mock.calls[7]?.[1];
@@ -1081,6 +1098,58 @@ describe("typed lifecycle action conflicts", () => {
 });
 
 describe("Runtime V1.1 write seams", () => {
+  it("serializes a bounded evidence-link snapshot without rewriting the body", async () => {
+    const deferred = createDeferred<Response>();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => deferred.promise);
+    const link = {
+      kind: "artifact" as const,
+      id: RUNTIME_FIXTURE_IDS.evidence as string,
+      privateAnnotation: "must-not-cross",
+    };
+    const pending = investigationGateway.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        kind: "hypothesis",
+        body: "  Evidence points to connection-pool saturation.  ",
+        hypothesisLinks: [link],
+        idempotencyKey: "msg-syn-0002",
+      },
+      options(),
+    );
+    link.id = "mutated-after-request";
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      kind: "hypothesis",
+      body: "  Evidence points to connection-pool saturation.  ",
+      hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+      idempotencyKey: "msg-syn-0002",
+    });
+    deferred.resolve(jsonResponse(createdContribution()));
+    await expect(pending).resolves.toEqual({ ok: true, value: createdContribution() });
+  });
+
+  it.each([
+    ["a non-array collection", { hypothesisLinks: "artifact" }],
+    ["an invalid link kind", { hypothesisLinks: [{ kind: "case", id: "case-a" }] }],
+    ["a non-string link identity", { hypothesisLinks: [{ kind: "artifact", id: 7 }] }],
+    ["a null link", { hypothesisLinks: [null] }],
+  ])("rejects %s before fetching", async (_label, malformed) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const result = await investigationGateway.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        kind: "hypothesis",
+        body: "Malformed links must not cross transport.",
+        ...malformed,
+      } as never,
+      options(),
+    );
+
+    expect(result).toEqual({ ok: false, error: { kind: "unexpected" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("sends only supplied situation fields and keeps an explicit context erasure", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValue(jsonResponse(revisedSituationCase()));
@@ -1231,6 +1300,21 @@ describe("Runtime V1.1 write seams", () => {
         throw new Error(secret);
       },
     });
+    const linkedContributionInput = {
+      kind: "hypothesis",
+      body: "Hostile nested input",
+      hypothesisLinks: [{ kind: "artifact" }],
+    } as Record<string, unknown>;
+    Object.defineProperty(
+      (linkedContributionInput.hypothesisLinks as Record<string, unknown>[])[0],
+      "id",
+      {
+        enumerable: true,
+        get: () => {
+          throw new Error(secret);
+        },
+      },
+    );
     const situationInput = { expectedVersion: 4 } as Record<string, unknown>;
     Object.defineProperty(situationInput, "impact", {
       enumerable: true,
@@ -1252,10 +1336,18 @@ describe("Runtime V1.1 write seams", () => {
       situationInput as unknown as Parameters<typeof investigationGateway.updateSituation>[1],
       options(),
     );
+    const linkedContribution = await investigationGateway.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      linkedContributionInput as unknown as Parameters<
+        typeof investigationGateway.createContribution
+      >[1],
+      options(),
+    );
 
     expect(contribution).toEqual({ ok: false, error: { kind: "unexpected" } });
     expect(situation).toEqual({ ok: false, error: { kind: "unexpected" } });
-    expect(JSON.stringify([contribution, situation])).not.toContain(secret);
+    expect(linkedContribution).toEqual({ ok: false, error: { kind: "unexpected" } });
+    expect(JSON.stringify([contribution, situation, linkedContribution])).not.toContain(secret);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
