@@ -1137,6 +1137,10 @@ export function Cases(props: {
     }
     setResolutionOpen(false);
     setResolutionPrompted(false);
+    // This legacy War Room status control still writes outside Runtime V1.
+    // Revalidate the shared case/list/lifecycle view before a strategy switch
+    // or an archive/restore action can rely on the prior preview.
+    props.lifecycleBinding?.retryLifecycle();
     await Promise.all([refresh(), refreshActivity()]);
   }
 

@@ -150,7 +150,11 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
         canManage: runtime.capabilities.canManageLifecycle,
         readOnly: bindings.readOnly,
         applyAction: runtime.commands.applyLifecycle,
-        retryLifecycle: runtime.refresh.lifecycle,
+        retryLifecycle: () => {
+          runtime.refresh.investigation();
+          runtime.refresh.investigations();
+          runtime.refresh.lifecycle();
+        },
       }}
     />
   );

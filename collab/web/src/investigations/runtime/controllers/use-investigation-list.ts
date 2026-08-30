@@ -27,6 +27,13 @@ export interface UseInvestigationListOptions {
 
 export interface InvestigationListController {
   readonly investigations: ResourceState<readonly CaseV1[]>;
+  /** Advances when an authoritative collection request begins. */
+  readonly latestRequestGeneration: number;
+  /**
+   * Identifies the request that produced the last successful authoritative
+   * snapshot. Local publication and failed refreshes never advance it.
+   */
+  readonly successfulSnapshotGeneration: number;
   /** Merge one server-confirmed investigation into the current published collection. */
   readonly publishInvestigation: (investigation: CaseV1) => void;
   readonly refresh: () => void;
@@ -83,6 +90,15 @@ export function useInvestigationList({
   const [resource, setResource] = useState(() =>
     createResourceState<InvestigationListScope, readonly CaseV1[]>(),
   );
+  const requestGenerationRef = useRef(0);
+  const [latestRequest, setLatestRequest] = useState<{
+    readonly key: InvestigationListScope | null;
+    readonly generation: number;
+  }>({ key: null, generation: 0 });
+  const [successfulSnapshot, setSuccessfulSnapshot] = useState<{
+    readonly key: InvestigationListScope | null;
+    readonly generation: number;
+  }>({ key: null, generation: 0 });
   const [refreshGeneration, setRefreshGeneration] = useState(0);
 
   useEffect(() => {
@@ -93,14 +109,22 @@ export function useInvestigationList({
     }
 
     const token = requestSlot.current.begin(scope);
+    const requestGeneration = ++requestGenerationRef.current;
+    setLatestRequest({ key: scope, generation: requestGeneration });
     setResource((current) => beginResourceLoad(current, scope));
 
     void gateway.listInvestigations({ signal: token.signal })
       .then((result) => {
         if (!requestSlot.current.isCurrent(token)) return;
-        setResource((current) => result.ok
-          ? succeedResourceLoad(current, scope, result.value)
-          : failResourceLoad(current, scope, result.error));
+        if (result.ok) {
+          setResource((current) => succeedResourceLoad(current, scope, result.value));
+          setSuccessfulSnapshot({
+            key: scope,
+            generation: requestGeneration,
+          });
+        } else {
+          setResource((current) => failResourceLoad(current, scope, result.error));
+        }
       })
       .catch(() => {
         if (!requestSlot.current.isCurrent(token)) return;
@@ -134,6 +158,14 @@ export function useInvestigationList({
 
   return {
     investigations: enabled && resource.key === scope ? resource.state : { status: "idle" },
+    latestRequestGeneration:
+      enabled && latestRequest.key === scope
+        ? latestRequest.generation
+        : 0,
+    successfulSnapshotGeneration:
+      enabled && successfulSnapshot.key === scope
+        ? successfulSnapshot.generation
+        : 0,
     publishInvestigation,
     refresh,
   };

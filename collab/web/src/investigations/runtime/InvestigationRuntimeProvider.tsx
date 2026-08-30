@@ -13,6 +13,8 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
+  useState,
   type ReactNode,
 } from "react";
 import {
@@ -146,6 +148,18 @@ export function InvestigationRuntimeProvider({
     identityKey,
     authorityKey,
   });
+  const listSnapshotRef = useRef({
+    latestRequestGeneration: investigationList.latestRequestGeneration,
+    status: investigationList.investigations.status,
+  });
+  listSnapshotRef.current = {
+    latestRequestGeneration: investigationList.latestRequestGeneration,
+    status: investigationList.investigations.status,
+  };
+  const [activeListValidation, setActiveListValidation] = useState<{
+    readonly investigationId: string;
+    readonly baselineGeneration: number;
+  } | null>(null);
   const activeInvestigation = useActiveInvestigation({
     gateway,
     investigationId: activeCaseId,
@@ -153,7 +167,31 @@ export function InvestigationRuntimeProvider({
     identityKey,
     authorityKey,
   });
-  const activeMissingFromAuthoritativeList = activeCaseId !== null
+  useEffect(() => {
+    if (activeCaseId === null) {
+      setActiveListValidation(null);
+      return;
+    }
+    const snapshot = listSnapshotRef.current;
+    setActiveListValidation({
+      investigationId: activeCaseId,
+      baselineGeneration: snapshot.latestRequestGeneration,
+    });
+    // A settled collection predates this route transition. Refresh it before
+    // treating omission as authoritative. The initial idle collection already
+    // has a request scheduled by its controller, so it needs no duplicate read.
+    if (snapshot.status !== "idle") investigationList.refresh();
+  }, [
+    activeCaseId,
+    authorityKey,
+    identityKey,
+    investigationList.refresh,
+  ]);
+  const activeListIsFresh = activeCaseId !== null
+    && activeListValidation?.investigationId === activeCaseId
+    && investigationList.successfulSnapshotGeneration
+      > activeListValidation.baselineGeneration;
+  const activeMissingFromAuthoritativeList = activeListIsFresh
     && investigationList.investigations.status === "ready"
     && !investigationList.investigations.value.some(({ id }) => id === activeCaseId);
   const activeScopeUnavailable = activeInvestigation.scopeDenied

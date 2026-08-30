@@ -85,12 +85,15 @@ describe("useInvestigationList", () => {
       authorityKey: "interactive:contributor",
     }));
     await waitFor(() => expect(result.current.investigations.status).toBe("ready"));
+    expect(result.current.latestRequestGeneration).toBe(1);
+    expect(result.current.successfulSnapshotGeneration).toBe(1);
 
     act(() => result.current.publishInvestigation(created));
     expect(result.current.investigations).toEqual({
       status: "ready",
       value: [created, ...original],
     });
+    expect(result.current.successfulSnapshotGeneration).toBe(1);
     expect(original).toEqual(makeCaseList().cases);
 
     act(() => result.current.publishInvestigation(replacement));
@@ -135,6 +138,40 @@ describe("useInvestigationList", () => {
       error: { kind: "network" },
       previous: [created, ...original],
     });
+    expect(result.current.successfulSnapshotGeneration).toBe(1);
+  });
+
+  it("does not make a pre-focus in-flight request fresh when it completes after the transition", async () => {
+    const beforeFocus = createDeferred<GatewayResult<readonly CaseV1[]>>();
+    const afterFocus = createDeferred<GatewayResult<readonly CaseV1[]>>();
+    const requests = [beforeFocus, afterFocus];
+    let requestIndex = 0;
+    const focused = { ...makeSparseImportedCase(), id: "case-focused-after-request-start" };
+    const gateway = gatewayWith(() => requests[requestIndex++]!.promise);
+    const { result } = renderHook(() => useInvestigationList({
+      gateway,
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "interactive:viewer",
+    }));
+    await waitFor(() => expect(result.current.latestRequestGeneration).toBe(1));
+
+    // Model a route transition while request 1 is already in flight. Its later
+    // success remains generation 1 and therefore cannot validate this focus.
+    const focusBaseline = result.current.latestRequestGeneration;
+    await act(async () => {
+      beforeFocus.resolve({ ok: true, value: makeCaseList().cases });
+    });
+    expect(result.current.successfulSnapshotGeneration).toBe(focusBaseline);
+    expect(result.current.successfulSnapshotGeneration > focusBaseline).toBe(false);
+
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.latestRequestGeneration).toBe(2));
+    await act(async () => {
+      afterFocus.resolve({ ok: true, value: [focused, ...makeCaseList().cases] });
+    });
+    expect(result.current.successfulSnapshotGeneration).toBe(2);
+    expect(result.current.successfulSnapshotGeneration > focusBaseline).toBe(true);
   });
 
   it("ignores publication before data exists and from a stale identity callback", async () => {

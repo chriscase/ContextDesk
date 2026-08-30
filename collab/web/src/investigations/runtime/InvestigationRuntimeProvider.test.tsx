@@ -275,6 +275,119 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().commands.applyLifecycle).toBeNull();
   });
 
+  it("refreshes a settled list before inferring that a newly focused investigation is absent", async () => {
+    const created: CaseV1 = {
+      ...makeSparseImportedCase(),
+      id: "case-created-outside-runtime",
+      title: "Created by the reference presentation",
+    };
+    const refreshedList = createDeferred<GatewayResult<readonly CaseV1[]>>();
+    let listReads = 0;
+    const gateway = makeGateway({
+      listInvestigations: vi.fn(() => {
+        listReads += 1;
+        return listReads === 1
+          ? Promise.resolve(succeeded(makeCaseList().cases))
+          : refreshedList.promise;
+      }),
+      getInvestigation: vi.fn(async () => succeeded(created)),
+      listEvidence: vi.fn(async () => succeeded([])),
+      listContributions: vi.fn(async () => succeeded([])),
+      getLifecycle: vi.fn(async () => succeeded({
+        ...makeArchiveAllowedLifecycle(),
+        investigationId: created.id,
+      })),
+    });
+    const common = {
+      identityKey: "lead",
+      authorityKey: "lead-authority-v1",
+      capabilities: FULL_CAPABILITIES,
+      readOnly: false,
+      active: true,
+      isInvestigationLocation: true,
+      onOpenCreated: vi.fn(),
+      gateway,
+    } as const;
+    const view = render(
+      <InvestigationRuntimeProvider {...common} focusCaseId={null}>
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+
+    view.rerender(
+      <InvestigationRuntimeProvider {...common} focusCaseId={created.id}>
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    await waitFor(() => expect(gateway.listInvestigations).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
+    expect(currentRuntime().resources.investigation).toEqual({ status: "ready", value: created });
+    expect(currentRuntime().commands.applyLifecycle).not.toBeNull();
+
+    await act(async () => {
+      refreshedList.resolve(succeeded([created, ...makeCaseList().cases]));
+    });
+    expect(currentRuntime().resources.investigation).toEqual({ status: "ready", value: created });
+    expect(currentRuntime().resources.lifecycle.status).toBe("ready");
+  });
+
+  it("does not infer absence when the post-focus collection refresh fails", async () => {
+    const created: CaseV1 = {
+      ...makeSparseImportedCase(),
+      id: "case-focused-during-list-failure",
+    };
+    let listReads = 0;
+    const gateway = makeGateway({
+      listInvestigations: vi.fn(async () => {
+        listReads += 1;
+        return listReads === 1
+          ? succeeded(makeCaseList().cases)
+          : listReads === 2
+            ? { ok: false, error: { kind: "network" } } as const
+            : succeeded([created, ...makeCaseList().cases]);
+      }),
+      getInvestigation: vi.fn(async () => succeeded(created)),
+      listEvidence: vi.fn(async () => succeeded([])),
+      listContributions: vi.fn(async () => succeeded([])),
+      getLifecycle: vi.fn(async () => succeeded({
+        ...makeArchiveAllowedLifecycle(),
+        investigationId: created.id,
+      })),
+    });
+    const common = {
+      identityKey: "lead",
+      authorityKey: "lead-authority-v1",
+      capabilities: FULL_CAPABILITIES,
+      readOnly: false,
+      active: true,
+      isInvestigationLocation: true,
+      onOpenCreated: vi.fn(),
+      gateway,
+    } as const;
+    const view = render(
+      <InvestigationRuntimeProvider {...common} focusCaseId={null}>
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+
+    view.rerender(
+      <InvestigationRuntimeProvider {...common} focusCaseId={created.id}>
+        <RuntimeProbe />
+      </InvestigationRuntimeProvider>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("failed"));
+    await waitFor(() => expect(currentRuntime().resources.lifecycle.status).toBe("ready"));
+    expect(currentRuntime().resources.investigation).toEqual({ status: "ready", value: created });
+    expect(currentRuntime().commands.applyLifecycle).not.toBeNull();
+
+    act(() => currentRuntime().refresh.investigations());
+    await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+    expect(currentRuntime().resources.investigation).toEqual({ status: "ready", value: created });
+    expect(currentRuntime().resources.lifecycle.status).toBe("ready");
+  });
+
   it("atomically clears the active scope when an upload mutation proves lost access", async () => {
     const gateway = makeGateway({
       uploadEvidence: vi.fn(async () => ({
@@ -617,6 +730,8 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycle: null,
     });
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
-    expect(gateway.listInvestigations).toHaveBeenCalledTimes(3);
+    // One initial read, one freshness read for the case transition, and one
+    // newly scoped read for each authority/identity transition.
+    expect(gateway.listInvestigations).toHaveBeenCalledTimes(4);
   });
 });
