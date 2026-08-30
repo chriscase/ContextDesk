@@ -17,6 +17,7 @@ import {
   gatewayUnavailable,
   InvestigationRuntimeGatewayHarness,
   makeArchiveAllowedLifecycle,
+  makeCaseList,
   makeEvidenceUploadSuccess,
   makePopulatedCase,
   makeRestoreAllowedLifecycle,
@@ -316,5 +317,174 @@ describe("Investigation First Runtime V1 presentation", () => {
     const input = vi.mocked(gateway.applyLifecycleAction).mock.calls[0]?.[1];
     expect(input).toEqual({ action: "archive", expected: { status: "monitoring", legalHold: false, restoreTarget: "monitoring" } });
     expect(input).not.toHaveProperty("targetStatus");
+  });
+
+  function comboHint(name: string): string {
+    const field = screen.getByRole("combobox", { name });
+    return document.getElementById(field.getAttribute("aria-describedby") ?? "")?.textContent ?? "";
+  }
+
+  it("leaves the context fields on combobox semantics the browser can actually honor", async () => {
+    renderStrategy();
+    await screen.findByRole("heading", { name: "Create an investigation" });
+    fireEvent.click(screen.getByText("Advanced context"));
+    const product = screen.getByRole("combobox", { name: "Product or software" });
+
+    // The datalist popup is the browser's to own, so the markup must not claim
+    // an expanded state, owned options, or an active option it cannot report.
+    expect(product.tagName).toBe("INPUT");
+    expect(product.getAttribute("list")).toBe("investigation-first-productName-options");
+    for (const attribute of ["role", "aria-expanded", "aria-controls", "aria-autocomplete", "aria-activedescendant", "aria-owns"]) {
+      expect(product.getAttribute(attribute)).toBeNull();
+    }
+    const options = document.getElementById("investigation-first-productName-options");
+    expect(options?.tagName).toBe("DATALIST");
+    expect([...options!.querySelectorAll("option")].map((option) => option.getAttribute("value"))).toContain("ContextDesk Storefront");
+    const hint = document.getElementById(product.getAttribute("aria-describedby") ?? "");
+    expect(hint?.getAttribute("aria-live")).toBe("polite");
+
+    // Keyboard: an ordinary focusable text input with nothing intercepting the
+    // keys the native popup needs.
+    (product as HTMLInputElement).focus();
+    expect(document.activeElement).toBe(product);
+    expect(product.getAttribute("tabindex")).toBeNull();
+    expect((product as HTMLInputElement).disabled).toBe(false);
+    fireEvent.keyDown(product, { key: "ArrowDown" });
+    fireEvent.keyDown(product, { key: "Escape" });
+    fireEvent.keyDown(product, { key: "Enter" });
+    expect((product as HTMLInputElement).value).toBe("");
+    expect(document.activeElement).toBe(product);
+    expect(comboHint("Product or software")).toBe("Choose a recorded value or enter a new one.");
+    fireEvent.change(product, { target: { value: "ContextDesk Storefront" } });
+    expect(comboHint("Product or software")).toBe("Using an existing recorded value.");
+  });
+
+  it("stops calling a typed value new when the recorded values could not be read", async () => {
+    let attempts = 0;
+    const gateway = createInvestigationGatewayDouble({
+      listInvestigations: vi.fn(async () => {
+        attempts += 1;
+        return attempts === 1 ? gatewayUnavailable<readonly CaseV1[]>() : gatewayOk(makeCaseList().cases);
+      }),
+    });
+    renderStrategy({ gateway });
+    await screen.findByRole("heading", { name: "Create an investigation" });
+    fireEvent.click(screen.getByText("Advanced context"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "ContextDesk Storefront" } });
+
+    expect(comboHint("Product or software")).toBe("Recorded values are unavailable, so this cannot be compared with them. It will be recorded exactly as entered.");
+    expect(screen.queryByText("New value — it will be recorded exactly as entered.")).toBeNull();
+    expect(screen.queryByText("Using an existing recorded value.")).toBeNull();
+    const retry = screen.getByRole("button", { name: "Retry recorded values" });
+    expect(screen.getByText(/Recorded values could not be loaded/).textContent).toContain("Creating an investigation still works.");
+
+    fireEvent.click(retry);
+    await waitFor(() => expect(comboHint("Product or software")).toBe("Using an existing recorded value."));
+    expect(screen.queryByRole("button", { name: "Retry recorded values" })).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Product or software" }), { target: { value: "A product nobody recorded" } });
+    expect(comboHint("Product or software")).toBe("New value — it will be recorded exactly as entered.");
+    expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
+  });
+
+  it("still captures an investigation while the recorded values are unavailable", async () => {
+    const created = { ...makeSparseImportedCase(), id: "case-created-blind", title: "Captured without the catalog" };
+    const gateway = createInvestigationGatewayDouble({
+      listInvestigations: vi.fn(async () => gatewayUnavailable<readonly CaseV1[]>()),
+      createInvestigation: vi.fn(async () => gatewayOk(created)),
+    });
+    const onOpenCase = vi.fn();
+    renderStrategy({ gateway, shell: { onOpenCase } });
+    await screen.findByRole("heading", { name: "Create an investigation" });
+    fireEvent.click(screen.getByText("Advanced context"));
+    fireEvent.change(screen.getByPlaceholderText("Short investigation title"), { target: { value: "Captured without the catalog" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Build" }), { target: { value: "2026.02.03.9" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+
+    await waitFor(() => expect(onOpenCase).toHaveBeenCalledWith("case-created-blind"));
+    expect(gateway.createInvestigation).toHaveBeenCalledTimes(1);
+    expect(gateway.createInvestigation).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Captured without the catalog", investigationContext: expect.objectContaining({ build: "2026.02.03.9" }) }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("keeps focus in the open record when its title changes under the reader", async () => {
+    const current = makePopulatedCase();
+    const renamed: CaseV1 = { ...current, status: "archived", title: "Checkout latency after 4.8.0 rollout (renamed)" };
+    const success: InvestigationLifecycleActionSuccessV1 = {
+      schemaId: INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId: current.id,
+      action: "archive",
+      previousStatus: current.status,
+      appliedStatus: "archived",
+      case: renamed,
+    };
+    let caseReads = 0;
+    const gateway = createInvestigationGatewayDouble({
+      getInvestigation: vi.fn(async () => {
+        caseReads += 1;
+        return gatewayOk(caseReads === 1 ? current : renamed);
+      }),
+      getLifecycle: vi.fn(async () => gatewayOk(makeLifecycle(current))),
+      applyLifecycleAction: vi.fn(async () => gatewayOk(success)),
+    });
+    const onFocusedCaseTitle = vi.fn();
+    renderStrategy({ gateway, shell: { focusCaseId: current.id, onFocusedCaseTitle } });
+
+    const heading = await screen.findByRole("heading", { name: current.title });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    const back = screen.getByRole("button", { name: /Back to investigations/ });
+    (back as HTMLButtonElement).focus();
+    expect(document.activeElement).toBe(back);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Archive investigation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm archive investigation" }));
+    await screen.findByRole("heading", { name: renamed.title });
+
+    // The record was renamed under the reader; focus stays where they put it.
+    expect(document.activeElement).toBe(back);
+    expect(onFocusedCaseTitle).toHaveBeenCalledWith(renamed.title);
+  });
+
+  it("never offers lifecycle loading or retry where lifecycle management is unavailable", async () => {
+    const archived = { ...makePopulatedCase(), status: "archived" as const };
+    const pending = createDeferred<GatewayResult<InvestigationLifecycleV1>>();
+    const viewerGateway = createInvestigationGatewayDouble({
+      getInvestigation: vi.fn(async () => gatewayOk(archived)),
+      getLifecycle: vi.fn(() => pending.promise),
+    });
+    renderStrategy({
+      gateway: viewerGateway,
+      capabilities: VIEWER_CAPABILITY_FIXTURE.capabilities,
+      shell: { focusCaseId: archived.id },
+    });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const expectTruthfulOnly = () => {
+      expect(screen.getByText("Archiving and restoring are unavailable in this view.")).toBeTruthy();
+      expect(screen.queryByText("Loading lifecycle options…")).toBeNull();
+      expect(screen.queryByText("Refreshing lifecycle options…")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry lifecycle information" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
+    };
+    expectTruthfulOnly();
+
+    await act(async () => {
+      pending.resolve(gatewayUnavailable<InvestigationLifecycleV1>());
+    });
+    expectTruthfulOnly();
+    cleanup();
+
+    renderStrategy({
+      readOnly: true,
+      gateway: createInvestigationGatewayDouble({
+        getInvestigation: vi.fn(async () => gatewayOk(archived)),
+        getLifecycle: vi.fn(async () => gatewayUnavailable<InvestigationLifecycleV1>()),
+      }),
+      shell: { focusCaseId: archived.id },
+    });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    await waitFor(() => expect(screen.getByText("Archiving and restoring are unavailable in this view.")).toBeTruthy());
+    expectTruthfulOnly();
   });
 });

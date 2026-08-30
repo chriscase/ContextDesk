@@ -70,13 +70,31 @@ function failureCopy(error: RuntimeFailure, subject: "list" | "detail" | "eviden
   return `${labels[subject]} could not be processed safely. Try again.`;
 }
 
-function ComboField(props: { field: keyof InvestigationContext; label: string; value: string; options: readonly string[]; onChange: (value: string) => void }) {
+/** Whether the recorded-value catalog behind the combo fields can be trusted. */
+type CatalogState = "available" | "loading" | "unavailable";
+
+function comboHint(catalog: CatalogState, value: string, options: readonly string[]): string {
+  // A comparison against a catalog that was never read is not a fact. Say what
+  // is actually known instead of calling an unchecked value new.
+  if (catalog === "loading") return "Recorded values are still loading, so this cannot be compared with them yet. It will be recorded exactly as entered.";
+  if (catalog === "unavailable") return "Recorded values are unavailable, so this cannot be compared with them. It will be recorded exactly as entered.";
+  const normalized = text(value).toLocaleLowerCase();
+  if (!normalized) return "Choose a recorded value or enter a new one.";
+  return options.some((option) => option.toLocaleLowerCase() === normalized)
+    ? "Using an existing recorded value."
+    : "New value — it will be recorded exactly as entered.";
+}
+
+/**
+ * A native `input[list]`, deliberately without an authored combobox role. The
+ * datalist popup is not scriptable, so expanded state, option ownership, and
+ * selection belong to the browser; declaring them here would promise assistive
+ * technology semantics this markup cannot keep.
+ */
+function ComboField(props: { field: keyof InvestigationContext; label: string; value: string; options: readonly string[]; catalog: CatalogState; onChange: (value: string) => void }) {
   const listId = `investigation-first-${props.field}-options`;
   const hintId = `${listId}-hint`;
-  const normalized = text(props.value).toLocaleLowerCase();
-  const existing = normalized.length > 0 && props.options.some((option) => option.toLocaleLowerCase() === normalized);
-  const hint = !normalized ? "Choose a recorded value or enter a new one." : existing ? "Using an existing recorded value." : "New value — it will be recorded exactly as entered.";
-  return <label className="investigation-first__field"><span>{props.label}</span><input className="login__input" role="combobox" aria-label={props.label} aria-autocomplete="list" aria-controls={listId} aria-describedby={hintId} list={listId} value={props.value} onChange={(event) => props.onChange(event.target.value)} /><datalist id={listId}>{props.options.map((option) => <option key={option} value={option} />)}</datalist><small id={hintId} aria-live="polite">{hint}</small></label>;
+  return <label className="investigation-first__field"><span>{props.label}</span><input className="login__input" type="text" aria-label={props.label} aria-describedby={hintId} list={listId} value={props.value} onChange={(event) => props.onChange(event.target.value)} /><datalist id={listId}>{props.options.map((option) => <option key={option} value={option} />)}</datalist><small id={hintId} aria-live="polite">{comboHint(props.catalog, props.value, props.options)}</small></label>;
 }
 
 function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
@@ -86,7 +104,13 @@ function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
   const action: LifecycleAction = investigation.status === "archived" ? "restore" : "archive";
   const descriptionId = "investigation-first-lifecycle-description";
   useEffect(() => setConfirmation(null), [action, investigation.id]);
-  if (investigation.status !== "archived" && !runtime.capabilities.canManageLifecycle) return null;
+  // Answer the authority question before the transport question. Without
+  // lifecycle authority no lifecycle read can change the outcome, so loading
+  // and retry would offer this viewer work that cannot help them.
+  if (!runtime.capabilities.canManageLifecycle) {
+    if (investigation.status !== "archived") return null;
+    return <section className="investigation-first__card investigation-first__lifecycle" aria-labelledby="investigation-first-lifecycle-title"><h3 id="investigation-first-lifecycle-title">Archive and restore</h3><p className="investigation-first__muted" role="status">Archiving and restoring are unavailable in this view.</p></section>;
+  }
   if (lifecycle.availability === "idle" || lifecycle.availability === "loading") return <section className="investigation-first__card investigation-first__lifecycle" aria-busy="true"><p role="status">Loading lifecycle options…</p></section>;
   if (lifecycle.availability === "unavailable") return <section className="investigation-first__card investigation-first__lifecycle"><h3>Archive and restore</h3><p className="investigation-first__error" role="alert">{failureCopy(lifecycle.error, "lifecycle")}</p><button type="button" onClick={runtime.refresh.lifecycle}>Retry lifecycle information</button></section>;
   if (lifecycle.refresh === "loading") return <section className="investigation-first__card investigation-first__lifecycle" aria-busy="true"><h3>Archive and restore</h3><p role="status">Refreshing lifecycle options…</p></section>;
@@ -103,7 +127,7 @@ function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
   return <section className="investigation-first__card investigation-first__lifecycle" aria-labelledby="investigation-first-lifecycle-title" aria-busy={working}>
     <h3 id="investigation-first-lifecycle-title">Archive and restore</h3><p id={descriptionId}>{lifecycle.value.deletion.detail}</p>
     {mutation.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(mutation.error, "lifecycle")}</p> : null}
-    {!runtime.capabilities.canManageLifecycle || command === null ? <p className="investigation-first__muted" role="status">Archiving and restoring are unavailable in this view.</p>
+    {command === null ? <p className="investigation-first__muted" role="status">Archiving and restoring are unavailable in this view.</p>
       : !verdict.allowed ? <p className="investigation-first__muted" role="status">{verdict.detail}</p>
         : confirmation === action ? <div className="investigation-first__confirm" role="group" aria-label={`Confirm ${action}`}><p>{action === "archive" ? "Archive this investigation? Its record and evidence remain available and it can be restored." : `Restore this investigation to ${lifecycle.value.restoreTarget}?`}</p><button type="button" aria-describedby={descriptionId} disabled={working} onClick={() => void applyAction()}>{working ? `${action === "archive" ? "Archiving" : "Restoring"}…` : `Confirm ${action} investigation`}</button><button type="button" disabled={working} onClick={() => setConfirmation(null)}>Cancel</button></div>
           : <button type="button" aria-describedby={descriptionId} onClick={() => setConfirmation(action)}>{action === "archive" ? "Archive investigation" : "Restore investigation"}</button>}
@@ -128,12 +152,31 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
+  const focusedArrival = useRef<string | null>(null);
   const cases = investigations.availability === "available" ? investigations.value : [];
   const focusedTitle = props.focusCaseId !== null
     && investigation.availability === "available"
     && investigation.value.id === props.focusCaseId
       ? investigation.value.title
       : null;
+  /**
+   * Identifies one arrival at the focused record: a different case, or the
+   * first terminal state that case reaches. It deliberately excludes the
+   * title and the refresh lane, so a rename or a re-read of the open record
+   * is not a new arrival and never pulls focus back to the heading.
+   */
+  const detailArrival = props.focusCaseId === null
+    ? null
+    : investigation.availability === "unavailable"
+      ? `unavailable:${props.focusCaseId}`
+      : investigation.availability === "available" && investigation.value.id === props.focusCaseId
+        ? `available:${props.focusCaseId}`
+        : null;
+  const catalog: CatalogState = investigations.availability === "available"
+    ? "available"
+    : investigations.availability === "unavailable"
+      ? "unavailable"
+      : "loading";
   const evidenceSelectionKey = evidenceInventory.inventory.availability === "available"
     ? evidenceInventory.inventory.value.map(({ evidence }) => evidence.id).join("\u0000")
     : "";
@@ -159,13 +202,16 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   useEffect(() => { const previous = priorFocusId.current; priorFocusId.current = props.focusCaseId; if (previous !== null && props.focusCaseId === null) browseHeadingRef.current?.focus(); }, [props.focusCaseId]);
   useEffect(() => {
     props.onFocusedCaseTitle?.(focusedTitle);
-    if (
-      focusedTitle !== null
-      || (props.focusCaseId !== null && investigation.availability === "unavailable")
-    ) {
-      detailHeadingRef.current?.focus();
+  }, [focusedTitle, props.onFocusedCaseTitle]);
+  useEffect(() => {
+    if (detailArrival === null) {
+      focusedArrival.current = null;
+      return;
     }
-  }, [focusedTitle, investigation.availability, props.focusCaseId, props.onFocusedCaseTitle]);
+    if (focusedArrival.current === detailArrival) return;
+    focusedArrival.current = detailArrival;
+    detailHeadingRef.current?.focus();
+  }, [detailArrival]);
 
   async function createInvestigation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -199,8 +245,10 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         <label className="investigation-first__field investigation-first__field--wide"><span>What was observed?</span><textarea value={situation.problemStatement} onChange={(event) => setSituation((current) => ({ ...current, problemStatement: event.target.value }))} placeholder="Describe the problem without assuming its cause." rows={3} /></label>
         <label className="investigation-first__field"><span>Who or what is affected?</span><textarea value={situation.affectedParties} onChange={(event) => setSituation((current) => ({ ...current, affectedParties: event.target.value }))} placeholder="People, services, or customers" rows={2} /></label>
         <label className="investigation-first__field"><span>What is the impact?</span><textarea value={situation.impact} onChange={(event) => setSituation((current) => ({ ...current, impact: event.target.value }))} placeholder="The recorded operational impact" rows={2} /></label>
-      </div><details className="investigation-first__advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}><summary>Advanced context <span>Product, build, timing, scope, and open questions</span></summary><div className="investigation-first__form-grid">
-        {CONTEXT_FIELDS.map(([field, label]) => <ComboField key={field} field={field} label={label} value={situation.investigationContext[field]} options={contextOptions[field]} onChange={(value) => setSituation((current) => ({ ...current, investigationContext: { ...current.investigationContext, [field]: value } }))} />)}
+      </div><details className="investigation-first__advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}><summary>Advanced context <span>Product, build, timing, scope, and open questions</span></summary>
+      {catalog === "unavailable" ? <div className="investigation-first__muted" role="status"><p>Recorded values could not be loaded, so nothing entered below can be compared with them. Creating an investigation still works.</p><button type="button" onClick={runtime.refresh.investigations}>Retry recorded values</button></div> : null}
+      <div className="investigation-first__form-grid">
+        {CONTEXT_FIELDS.map(([field, label]) => <ComboField key={field} field={field} label={label} value={situation.investigationContext[field]} options={contextOptions[field]} catalog={catalog} onChange={(value) => setSituation((current) => ({ ...current, investigationContext: { ...current.investigationContext, [field]: value } }))} />)}
         <label className="investigation-first__field"><span>When did it happen?</span><input className="login__input" value={situation.occurredAt} onChange={(event) => setSituation((current) => ({ ...current, occurredAt: event.target.value }))} placeholder="2026-08-29 or leave empty" /></label>
         <label className="investigation-first__field"><span>Scope</span><input className="login__input" value={situation.scope} onChange={(event) => setSituation((current) => ({ ...current, scope: event.target.value }))} placeholder="What is in or out of scope?" /></label>
         <label className="investigation-first__field investigation-first__field--wide"><span>Open questions <small>one per line</small></span><textarea value={situation.openQuestions} onChange={(event) => setSituation((current) => ({ ...current, openQuestions: event.target.value }))} placeholder="What still needs to be learned?" rows={3} /></label>
