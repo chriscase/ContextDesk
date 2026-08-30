@@ -260,6 +260,39 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(gateway.listInvestigations).not.toHaveBeenCalled();
   });
 
+  it("refuses the focused record without a request when read authority is absent", async () => {
+    const gateway = createInvestigationGatewayDouble();
+    const onExitFocus = vi.fn();
+    const { rerender } = renderStrategy({
+      gateway,
+      capabilities: ["investigation:write", "run:strategies"],
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase, onExitFocus },
+    });
+
+    const heading = await screen.findByRole("heading", { name: "Investigation unavailable in this view" });
+    // Nothing was asked for, so nothing can be arriving.
+    expect(screen.queryByText("Opening investigation…")).toBeNull();
+    expect(heading.closest("section")?.getAttribute("aria-busy")).toBe("false");
+    const notice = screen.getByText(/does not include reading investigations/);
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.textContent).toContain("No investigation data was requested.");
+    expect(screen.queryByRole("button", { name: "Retry opening investigation" })).toBeNull();
+    expect(gateway.getInvestigation).not.toHaveBeenCalled();
+    expect(gateway.listEvidence).not.toHaveBeenCalled();
+    expect(gateway.listContributions).not.toHaveBeenCalled();
+    expect(gateway.getLifecycle).not.toHaveBeenCalled();
+
+    // A terminal arrival still lands the reader on the heading exactly once.
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    const back = screen.getByRole("button", { name: "Back to investigations" });
+    (back as HTMLButtonElement).focus();
+    rerender({ focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase });
+    expect(document.activeElement).toBe(back);
+
+    fireEvent.click(back);
+    expect(onExitFocus).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps selection case-scoped and associates the disabled trash explanation", async () => {
     const { rerender } = renderStrategy({ shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     await screen.findByText("checkout-timeout.log");

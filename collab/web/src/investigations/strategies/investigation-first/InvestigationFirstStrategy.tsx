@@ -161,17 +161,21 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       : null;
   /**
    * Identifies one arrival at the focused record: a different case, or the
-   * first terminal state that case reaches. It deliberately excludes the
-   * title and the refresh lane, so a rename or a re-read of the open record
-   * is not a new arrival and never pulls focus back to the heading.
+   * first terminal state that case reaches. A refused read is terminal too —
+   * the runtime requests nothing, so no later state can settle it. It
+   * deliberately excludes the title and the refresh lane, so a rename or a
+   * re-read of the open record is not a new arrival and never pulls focus
+   * back to the heading.
    */
   const detailArrival = props.focusCaseId === null
     ? null
-    : investigation.availability === "unavailable"
-      ? `unavailable:${props.focusCaseId}`
-      : investigation.availability === "available" && investigation.value.id === props.focusCaseId
-        ? `available:${props.focusCaseId}`
-        : null;
+    : !runtime.capabilities.canRead
+      ? `denied:${props.focusCaseId}`
+      : investigation.availability === "unavailable"
+        ? `unavailable:${props.focusCaseId}`
+        : investigation.availability === "available" && investigation.value.id === props.focusCaseId
+          ? `available:${props.focusCaseId}`
+          : null;
   const catalog: CatalogState = investigations.availability === "available"
     ? "available"
     : investigations.availability === "unavailable"
@@ -313,6 +317,11 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   }
 
   function renderDetail() {
+    // Without read authority the runtime requests nothing for this record, so
+    // its lane stays idle for good. Calling that opening would promise an
+    // arrival the shared permission boundary already refused, and would strand
+    // the reader in a permanently busy surface with no way back.
+    if (!runtime.capabilities.canRead) return <section className="investigation-first__detail" aria-labelledby="investigation-first-detail-denied-title" aria-busy={false}><h2 id="investigation-first-detail-denied-title" ref={detailHeadingRef} tabIndex={-1}>Investigation unavailable in this view</h2><p className="investigation-first__empty" role="status">Your current access does not include reading investigations, so this investigation cannot be opened. No investigation data was requested.</p><button type="button" onClick={props.onExitFocus}>Back to investigations</button></section>;
     if (investigation.availability === "idle" || investigation.availability === "loading") return <section className="investigation-first__detail" aria-busy="true"><p className="investigation-first__empty" role="status">Opening investigation…</p></section>;
     if (investigation.availability === "unavailable") return <section className="investigation-first__detail" aria-labelledby="investigation-first-detail-unavailable-title"><h2 id="investigation-first-detail-unavailable-title" ref={detailHeadingRef} tabIndex={-1}>Investigation unavailable</h2><div className="investigation-first__error" role="alert"><p>{failureCopy(investigation.error, "detail")}</p><button type="button" onClick={runtime.refresh.investigation}>Retry opening investigation</button></div><button type="button" onClick={props.onExitFocus}>Back to investigations</button></section>;
     const selected = investigation.value;
