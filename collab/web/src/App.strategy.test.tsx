@@ -104,7 +104,7 @@ afterEach(() => {
 });
 
 describe("strategy selection in the shell", () => {
-  it("switches from the default War Room without remounting runtime, refetching, mutating, or changing the route", async () => {
+  it("keeps Overview canonical while applying the selected strategy only to Investigations", async () => {
     if (typeof window.localStorage?.removeItem === "function") {
       window.localStorage.removeItem("cd-ui-strategy:alice");
     }
@@ -125,10 +125,17 @@ describe("strategy selection in the shell", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /Alice/ }));
     fireEvent.click(screen.getByRole("radio", { name: /Investigation First/ }));
+    expect(screen.getByText(/This choice applies inside Investigations; Overview remains the War Room activity dashboard\./u)).toBeTruthy();
+    expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room");
+    expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
+    expect(document.title).toBe("ContextDesk War Room");
+    expect(window.location.pathname).toBe("/");
+    fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
     expect(document.querySelector(".topbar__title-app")?.textContent).toBe("Investigation First");
     expect(screen.getByRole("heading", { name: "Create an investigation" })).toBeTruthy();
-    expect(document.title).toBe("ContextDesk Investigation First");
-    expect(window.location.pathname).toBe("/");
+    expect(document.title).toBe("Investigations · ContextDesk Investigation First");
+    expect(window.location.pathname).toBe("/investigations");
     expect(fetchStub.mock.calls.filter(([input]) => String(input) === "/api/cases")).toHaveLength(2);
     expect(fetchStub.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
@@ -156,12 +163,13 @@ describe("strategy selection in the shell", () => {
       return { ok: false, status: 404, json: async () => ({}) };
     });
 
+    window.history.replaceState(null, "", "/investigations");
     vi.stubGlobal("fetch", signedInFetch("alice"));
     const alice = render(<App />);
     expect(await screen.findByRole("heading", { name: "Create an investigation" })).toBeTruthy();
     expect(document.querySelector(".topbar__title-app")?.textContent).toBe("Investigation First");
     alice.unmount();
-    window.history.replaceState(null, "", "/");
+    window.history.replaceState(null, "", "/investigations");
 
     vi.stubGlobal("fetch", signedInFetch("bob"));
     render(<App />);

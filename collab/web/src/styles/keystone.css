@@ -1,0 +1,491 @@
+.keystone-strategy {
+  width: min(100%, 98rem);
+  margin: 0 auto;
+}
+
+.keystone-strategy__filters,
+.keystone-strategy__workbench-grid {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.keystone-strategy__filters {
+  grid-template-columns: minmax(14rem, 2fr) minmax(11rem, 1fr);
+  margin-bottom: 1rem;
+}
+
+.keystone-strategy__filters label,
+.keystone-strategy__evidence-search {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.keystone-strategy__filters input,
+.keystone-strategy__filters select,
+.keystone-strategy__evidence-search input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.5rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-input);
+  color: var(--fg);
+}
+
+.keystone-strategy__collection-list {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.keystone-strategy__collection-list > li > button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(12rem, 1.3fr) minmax(9rem, 0.7fr);
+  grid-template-areas:
+    "title id"
+    "meta meta"
+    "summary summary";
+  gap: 0.45rem 1rem;
+  padding: 0.85rem;
+  text-align: start;
+}
+
+.keystone-strategy__collection-list > li > button:hover {
+  background: var(--accent-soft);
+}
+
+.keystone-strategy__collection-title {
+  grid-area: title;
+  font-weight: 720;
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__collection-id {
+  grid-area: id;
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.76rem;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__collection-meta {
+  display: flex;
+  grid-area: meta;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.keystone-strategy__collection-summary {
+  grid-area: summary;
+  color: var(--muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__hero-id {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__evidence-search {
+  margin: 0.9rem 0;
+}
+
+.keystone-strategy__evidence-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+}
+
+.keystone-strategy__evidence-table {
+  width: 100%;
+  min-width: 54rem;
+  border-collapse: collapse;
+  background: var(--surface-deep);
+}
+
+.keystone-strategy__evidence-table th,
+.keystone-strategy__evidence-table td {
+  padding: 0.7rem;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: start;
+  vertical-align: top;
+}
+
+.keystone-strategy__evidence-table th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.keystone-strategy__evidence-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.keystone-strategy__evidence-row--current td {
+  background: var(--accent-soft);
+}
+
+.keystone-strategy__working-checkbox {
+  display: inline-flex;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  align-items: center;
+  justify-content: center;
+}
+
+.keystone-strategy__working-checkbox input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.keystone-strategy__evidence-name {
+  display: block;
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 720;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__evidence-name:hover {
+  border-color: transparent;
+  text-decoration: underline;
+}
+
+.keystone-strategy__evidence-table small {
+  display: block;
+  max-width: 34rem;
+  margin-top: 0.3rem;
+  color: var(--muted);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__breakable {
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__working-set {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(12rem, 2fr);
+  gap: 0.8rem 1rem;
+  align-items: start;
+  margin-top: 1rem;
+  padding: 0.85rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.keystone-strategy__working-set h4,
+.keystone-strategy__working-set p,
+.keystone-strategy__workbench-context h4,
+.keystone-strategy__workbench-context p {
+  margin: 0;
+}
+
+.keystone-strategy__working-set p,
+.keystone-strategy__working-set > span,
+.keystone-strategy__workbench-context span {
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.keystone-strategy__working-set ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.keystone-strategy__working-set li {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.3rem 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.keystone-strategy__working-set li span {
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__working-set li button {
+  min-height: 1.75rem;
+  padding: 0.2rem 0.45rem;
+}
+
+.keystone-strategy__workbench-grid {
+  grid-template-columns: minmax(12rem, 0.45fr) minmax(20rem, 1.55fr);
+  margin-top: 1rem;
+}
+
+.keystone-strategy__workbench-context {
+  padding: 0.85rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.keystone-strategy__workbench-context p,
+.keystone-strategy__workbench-context span {
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__inspector {
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+  overflow: hidden;
+}
+
+.keystone-strategy__tabs {
+  display: flex;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.keystone-strategy__tabs button {
+  flex: 1 0 auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.keystone-strategy__tabs button[aria-selected="true"] {
+  color: var(--accent);
+  box-shadow: inset 0 -0.18rem var(--accent);
+}
+
+.keystone-strategy__inspector [role="tabpanel"] {
+  padding: 0.9rem;
+}
+
+.keystone-strategy__metadata,
+.keystone-strategy__record,
+.keystone-strategy__inline-metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem 1rem;
+  margin: 0;
+}
+
+.keystone-strategy__metadata > div,
+.keystone-strategy__record > div,
+.keystone-strategy__inline-metadata > div {
+  min-width: 0;
+}
+
+.keystone-strategy__metadata dt,
+.keystone-strategy__record dt,
+.keystone-strategy__inline-metadata dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.keystone-strategy__metadata dd,
+.keystone-strategy__record dd,
+.keystone-strategy__inline-metadata dd {
+  margin: 0.18rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__record-wide {
+  grid-column: 1 / -1;
+}
+
+.keystone-strategy__record ul {
+  margin: 0;
+  padding-inline-start: 1.25rem;
+}
+
+.keystone-strategy__ledger {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.keystone-strategy__ledger > li {
+  padding: 0.75rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+}
+
+.keystone-strategy__ledger-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.keystone-strategy__ledger p {
+  margin: 0.55rem 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.keystone-strategy__inline-metadata {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.keystone-strategy__visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 760px) {
+  .keystone-strategy__workbench-grid,
+  .keystone-strategy__working-set {
+    grid-template-columns: 1fr;
+  }
+
+  .keystone-strategy__evidence-table-wrap {
+    overflow: visible;
+    border: 0;
+  }
+
+  .keystone-strategy__evidence-table,
+  .keystone-strategy__evidence-table thead,
+  .keystone-strategy__evidence-table tbody,
+  .keystone-strategy__evidence-table tr,
+  .keystone-strategy__evidence-table th,
+  .keystone-strategy__evidence-table td {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .keystone-strategy__evidence-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+
+  .keystone-strategy__evidence-table tr {
+    margin-bottom: 0.7rem;
+    padding: 0.7rem;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-card);
+    background: var(--surface-deep);
+  }
+
+  .keystone-strategy__evidence-table td {
+    display: grid;
+    grid-template-columns: minmax(6.5rem, 0.45fr) minmax(0, 1fr);
+    gap: 0.65rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .keystone-strategy__evidence-table td:last-child {
+    border-bottom: 0;
+  }
+
+  .keystone-strategy__evidence-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+}
+
+@media (max-width: 560px) {
+  .keystone-strategy__filters,
+  .keystone-strategy__collection-list > li > button,
+  .keystone-strategy__metadata,
+  .keystone-strategy__record,
+  .keystone-strategy__inline-metadata {
+    grid-template-columns: 1fr;
+  }
+
+  .keystone-strategy__collection-list > li > button {
+    grid-template-areas: "title" "id" "meta" "summary";
+  }
+
+  .keystone-strategy__collection-id {
+    text-align: start;
+  }
+
+  .keystone-strategy__record-wide {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 390px) {
+  .keystone-strategy__evidence-table td {
+    grid-template-columns: 1fr;
+  }
+
+  .keystone-strategy__tabs button {
+    min-width: 6.4rem;
+  }
+}
+
+@media (forced-colors: active) {
+  .keystone-strategy__collection-list > li > button,
+  .keystone-strategy__evidence-table-wrap,
+  .keystone-strategy__evidence-table tr,
+  .keystone-strategy__working-set,
+  .keystone-strategy__workbench-context,
+  .keystone-strategy__inspector,
+  .keystone-strategy__ledger > li {
+    border-color: CanvasText;
+  }
+
+  .keystone-strategy__tabs button[aria-selected="true"] {
+    color: Highlight;
+    box-shadow: inset 0 -0.18rem Highlight;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .keystone-strategy,
+  .keystone-strategy * {
+    animation-duration: 0s !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0s !important;
+  }
+}

@@ -10,7 +10,7 @@
 
 export const DEFAULT_UI_STRATEGY_ID = "war-room" as const;
 
-export const UI_STRATEGY_IDS = ["war-room", "investigation-first"] as const;
+export const UI_STRATEGY_IDS = ["war-room", "investigation-first", "keystone"] as const;
 export type UiStrategyId = (typeof UI_STRATEGY_IDS)[number];
 
 export type UiStrategyMaturity = "reference" | "pilot";
@@ -102,6 +102,23 @@ export const UI_STRATEGIES: readonly UiStrategyDescriptor[] = [
       runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
     },
     optionalFeatures: UI_STRATEGY_OPTIONAL_FEATURE_IDS,
+  },
+  {
+    id: "keystone",
+    name: "Keystone",
+    description:
+      "A dense, read-only engineer workbench for reviewing evidence, reasoning, and the investigation record together.",
+    previewToken: "strategy-keystone",
+    previewAsset: null,
+    maturity: "pilot",
+    status: "preview",
+    version: "0.1.0",
+    compatibility: {
+      schemaId: "cd-collab.case.v1",
+      version: "^1.0.0",
+      runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
+    },
+    optionalFeatures: ["evidence-inventory", "evidence-annotations"],
   },
 ] as const;
 

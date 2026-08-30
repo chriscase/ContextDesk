@@ -16,6 +16,8 @@ import "./styles/admin-people.css";
 import "./styles/self-profile.css";
 import "./styles/polish.css";
 import "./styles/investigation-first.css";
+import "./styles/investigation-strategy-shared.css";
+import "./styles/keystone.css";
 
 const root = document.getElementById("root");
 if (!root) {

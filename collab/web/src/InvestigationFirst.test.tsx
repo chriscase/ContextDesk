@@ -19,6 +19,7 @@ import {
   makeArchiveAllowedLifecycle,
   makeCaseList,
   makeEvidenceUploadSuccess,
+  makeEvidenceList,
   makePopulatedCase,
   makeRestoreAllowedLifecycle,
   makeSparseImportedCase,
@@ -41,6 +42,7 @@ const shellDefaults: InvestigationStrategyShellProps = {
   focusCaseId: null,
   stage: "situation",
   onOpenCase: vi.fn(),
+  onNavigateInvestigation: vi.fn(),
   onExitFocus: vi.fn(),
 };
 
@@ -132,6 +134,21 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(onOpenAdvancedTools).toHaveBeenCalledWith(sparse.id, "analyze");
   });
 
+  it("uses the visible sparse-title fallback for focused shell chrome", async () => {
+    const sparse = { ...makeSparseImportedCase(), title: "" };
+    const onFocusedCaseTitle = vi.fn();
+    const gateway = createInvestigationGatewayDouble({
+      getInvestigation: vi.fn(async () => gatewayOk(sparse)),
+      listEvidence: vi.fn(async () => gatewayOk([])),
+      listContributions: vi.fn(async () => gatewayOk([])),
+      getLifecycle: vi.fn(async () => gatewayOk(makeLifecycle(sparse))),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: sparse.id, onFocusedCaseTitle } });
+    const heading = await screen.findByRole("heading", { name: "Untitled investigation" });
+    await waitFor(() => expect(onFocusedCaseTitle).toHaveBeenLastCalledWith("Untitled investigation"));
+    expect(document.activeElement).toBe(heading);
+  });
+
   it("keeps evidence visible when annotations fail independently", async () => {
     const gateway = createInvestigationGatewayDouble({ listContributions: vi.fn(async () => gatewayUnavailable<readonly ContributionV1[]>()) });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
@@ -139,6 +156,41 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(screen.getAllByText("Annotation not available").length).toBeGreaterThan(0);
     expect(screen.getByRole("alert").textContent).toContain("Evidence annotations could not be loaded");
     expect(screen.getByRole("button", { name: "Retry evidence annotations" })).toBeTruthy();
+  });
+
+  it("keeps each evidence row compact while making the full metadata available on demand", async () => {
+    const evidence = makeEvidenceList().artifacts.map((artifact) => ({
+      ...artifact,
+      expectedHash: "sha256:expected-checksum",
+    }));
+    const gateway = createInvestigationGatewayDouble({
+      listEvidence: vi.fn(async () => gatewayOk(evidence)),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    const filename = await screen.findByText("checkout-timeout.log");
+    const row = filename.closest("li");
+    expect(row).toBeTruthy();
+    const summary = row?.querySelector<HTMLElement>(".investigation-first__evidence-facts");
+    expect(summary?.textContent).toContain("log");
+    expect(summary?.textContent).toContain("text/plain");
+    expect(summary?.textContent).toContain("1.8 KB");
+    expect(summary?.textContent).toContain("verified");
+    expect(screen.getByRole("checkbox", {
+      name: /checkout-timeout\.log log text\/plain 1\.8 KB verified/u,
+    })).toBeTruthy();
+    const details = row?.querySelector("details");
+    expect(details?.open).toBe(false);
+    const disclosure = row?.querySelector("summary");
+    expect(disclosure?.textContent).toBe("More details about checkout-timeout.log");
+    fireEvent.click(disclosure!);
+    expect(details?.open).toBe(true);
+    expect(row?.textContent).toContain("Gateway timeout excerpt captured during the affected interval.");
+    expect(row?.textContent).toContain("Annotation author");
+    expect(row?.textContent).toContain("Intake batch");
+    expect(row?.textContent).toContain("Content hash");
+    expect(row?.textContent).toContain("Expected hash");
+    expect(row?.textContent).toContain("sha256:24b005aa8796e5655d4c9cc728fdbcd24542d1ee4eab264b8308efcd350a23d1");
+    expect(row?.textContent).toContain("sha256:expected-checksum");
   });
 
   it("describes annotations as loading until their independent lane settles", async () => {
@@ -336,7 +388,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     await screen.findByRole("button", { name: "Archive investigation" });
     fireEvent.click(screen.getByRole("button", { name: "Archive investigation" }));
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm archive investigation" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm archive investigation" }));
     await waitFor(() => expect(gateway.applyLifecycleAction).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("Refreshing lifecycle options…")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
@@ -477,7 +529,7 @@ describe("Investigation First Runtime V1 presentation", () => {
 
     // The record was renamed under the reader; focus stays where they put it.
     expect(document.activeElement).toBe(back);
-    expect(onFocusedCaseTitle).toHaveBeenCalledWith(renamed.title);
+    await waitFor(() => expect(onFocusedCaseTitle).toHaveBeenCalledWith(renamed.title));
   });
 
   it("never offers lifecycle loading or retry where lifecycle management is unavailable", async () => {

@@ -6,6 +6,7 @@
 export {
   InvestigationRuntimeProvider,
   useInvestigationRuntime,
+  type InvestigationContributionCommand,
   type InvestigationCreateInput,
   type InvestigationEvidenceUploadCommand,
   type InvestigationRuntime,
@@ -15,6 +16,7 @@ export {
   type InvestigationRuntimeProviderProps,
   type InvestigationRuntimeRefresh,
   type InvestigationRuntimeResources,
+  type InvestigationSituationCommand,
 } from "./InvestigationRuntimeProvider.js";
 export {
   selectEvidenceInventory,
@@ -35,6 +37,7 @@ export type {
   ArtifactKind,
   ArtifactV1,
   CaseV1,
+  ContributionKind,
   ContributionV1,
   EvidenceUploadSuccessV1,
   InvestigationLifecycleActionSuccessV1,

@@ -23,14 +23,19 @@ import {
 } from "./capabilities.js";
 import {
   useActiveInvestigation,
+  useCreateContribution,
   useCreateInvestigation,
   useInvestigationList,
   useLifecycleAction,
+  useUpdateSituation,
   useUploadEvidence,
+  type CreateContributionCommand,
+  type UpdateSituationCommand,
   type UploadEvidenceCommand,
 } from "./controllers/index.js";
 import {
   investigationGateway,
+  investigationWriteGateway,
   type CreateInvestigationInput,
   type InvestigationGateway,
 } from "./gateway.js";
@@ -43,6 +48,8 @@ import type {
 
 export type InvestigationCreateInput = CreateInvestigationInput;
 export type InvestigationEvidenceUploadCommand = UploadEvidenceCommand;
+export type InvestigationContributionCommand = CreateContributionCommand;
+export type InvestigationSituationCommand = UpdateSituationCommand;
 
 export interface InvestigationRuntimeResources {
   readonly investigations: ResourceState<readonly CaseV1[]>;
@@ -55,6 +62,8 @@ export interface InvestigationRuntimeResources {
 export interface InvestigationRuntimeMutations {
   readonly create: MutationState<CaseV1>;
   readonly uploadEvidence: MutationState<EvidenceUploadSuccessV1>;
+  readonly createContribution: MutationState<ContributionV1>;
+  readonly updateSituation: MutationState<CaseV1>;
   readonly lifecycle: MutationState<InvestigationLifecycleActionSuccessV1>;
 }
 
@@ -74,6 +83,12 @@ export interface InvestigationRuntimeCommands {
   readonly uploadEvidence: ((
     command: InvestigationEvidenceUploadCommand,
   ) => Promise<CommandOutcome<EvidenceUploadSuccessV1>>) | null;
+  readonly createContribution: ((
+    command: InvestigationContributionCommand,
+  ) => Promise<CommandOutcome<ContributionV1>>) | null;
+  readonly updateSituation: ((
+    command: InvestigationSituationCommand,
+  ) => Promise<CommandOutcome<CaseV1>>) | null;
   readonly applyLifecycle: ((
     action: LifecycleAction,
   ) => Promise<CommandOutcome<InvestigationLifecycleActionSuccessV1>>) | null;
@@ -182,14 +197,22 @@ export function InvestigationRuntimeProvider({
   children,
 }: InvestigationRuntimeProviderProps) {
   const gateway = useContext(InjectedGatewayContext) ?? investigationGateway;
+  // Production binds the concrete POST/PATCH methods. A transport without them
+  // resolves to the fail-closed seam, so a write reports `unavailable` instead
+  // of appearing to succeed.
+  const writeGateway = useMemo(() => investigationWriteGateway(gateway), [gateway]);
   const projected = projectInvestigationCapabilities(rawCapabilities, readOnly);
   const capabilities = useMemo<InvestigationRuntimeCapabilities>(() => Object.freeze({
     canRead: projected.canRead,
     canCreate: projected.canCreate,
     canUpload: projected.canUpload,
+    canContribute: projected.canContribute,
+    canEditSituation: projected.canEditSituation,
     canManageLifecycle: projected.canManageLifecycle,
   }), [
+    projected.canContribute,
     projected.canCreate,
+    projected.canEditSituation,
     projected.canManageLifecycle,
     projected.canRead,
     projected.canUpload,
@@ -205,6 +228,8 @@ export function InvestigationRuntimeProvider({
   }), [sessionIdentity.displayName, sessionIdentity.id, sessionIdentity.username]);
   const canCreate = capabilities.canRead && capabilities.canCreate;
   const canUpload = capabilities.canRead && capabilities.canUpload;
+  const canContribute = capabilities.canRead && capabilities.canContribute;
+  const canEditSituation = capabilities.canRead && capabilities.canEditSituation;
   const canManageLifecycle = capabilities.canRead && capabilities.canManageLifecycle;
   const activeCaseId = active && capabilities.canRead ? focusCaseId : null;
 
@@ -292,6 +317,11 @@ export function InvestigationRuntimeProvider({
     activeInvestigation.refreshContributions,
     activeInvestigation.refreshEvidence,
   ]);
+  const refreshContributionsFor = useCallback((investigationId: string) => {
+    if (activeCaseId === investigationId) {
+      activeInvestigation.refreshContributions();
+    }
+  }, [activeCaseId, activeInvestigation.refreshContributions]);
   const refreshInvestigationFor = useCallback((investigationId: string) => {
     if (activeCaseId === investigationId) {
       activeInvestigation.refreshInvestigation();
@@ -302,6 +332,15 @@ export function InvestigationRuntimeProvider({
       activeInvestigation.refreshLifecycle();
     }
   }, [activeCaseId, activeInvestigation.refreshLifecycle]);
+
+  // A write callback must be revocable at the controller boundary, not only
+  // hidden from the published command object. During a refresh the active
+  // case may still be the same id while its authoritative record is loading;
+  // expose no writable scope until that record is ready again.
+  const activeReadyCaseId =
+    activeScopeUnavailable || activeInvestigation.investigation.status !== "ready"
+      ? null
+      : activeCaseId;
 
   const createController = useCreateInvestigation({
     gateway,
@@ -323,6 +362,35 @@ export function InvestigationRuntimeProvider({
     readOnly,
     onUploaded: activeInvestigation.publishEvidence,
     onRefreshEvidence: refreshEvidenceFor,
+    onRefreshInvestigations: investigationList.refresh,
+    onScopeDenied: activeInvestigation.denyScope,
+  });
+  const contributionController = useCreateContribution({
+    gateway: writeGateway,
+    identityKey,
+    authorityKey,
+    investigationId: activeReadyCaseId,
+    canContribute: canContribute && !activeScopeUnavailable,
+    readOnly,
+    onContributed: activeInvestigation.publishContribution,
+    onRefreshContributions: refreshContributionsFor,
+    onScopeDenied: activeInvestigation.denyScope,
+  });
+  const situationCase = activeScopeUnavailable
+    ? null
+    : activeInvestigation.investigation.status === "ready"
+    ? activeInvestigation.investigation.value
+    : null;
+  const situationController = useUpdateSituation({
+    gateway: writeGateway,
+    identityKey,
+    authorityKey,
+    investigationId: activeScopeUnavailable ? null : activeCaseId,
+    investigation: situationCase,
+    canEditSituation: canEditSituation && !activeScopeUnavailable,
+    readOnly,
+    onInvestigationPublished: publishInvestigation,
+    onRefreshInvestigation: refreshInvestigationFor,
     onRefreshInvestigations: investigationList.refresh,
     onScopeDenied: activeInvestigation.denyScope,
   });
@@ -368,6 +436,8 @@ export function InvestigationRuntimeProvider({
     mutations: {
       create: createController.state,
       uploadEvidence: uploadController.state,
+      createContribution: contributionController.state,
+      updateSituation: situationController.state,
       lifecycle: lifecycleController.state,
     },
     refresh: {
@@ -388,6 +458,18 @@ export function InvestigationRuntimeProvider({
         && activeInvestigation.investigation.status === "ready"
         && !activeScopeUnavailable
         ? uploadController.upload
+        : null,
+      createContribution: canContribute
+        && activeCaseId !== null
+        && activeInvestigation.investigation.status === "ready"
+        && !activeScopeUnavailable
+        ? contributionController.create
+        : null,
+      updateSituation: canEditSituation
+        && activeCaseId !== null
+        && situationCase !== null
+        && !activeScopeUnavailable
+        ? situationController.update
         : null,
       applyLifecycle: canManageLifecycle && activeCaseId !== null
         && lifecycleValue !== null
@@ -410,10 +492,14 @@ export function InvestigationRuntimeProvider({
     activeScopeUnavailable,
     active,
     activeCaseId,
+    canContribute,
     canCreate,
+    canEditSituation,
     canManageLifecycle,
     canUpload,
     capabilities,
+    contributionController.create,
+    contributionController.state,
     createController.create,
     createController.state,
     identity,
@@ -422,6 +508,9 @@ export function InvestigationRuntimeProvider({
     isInvestigationLocation,
     lifecycleController.apply,
     lifecycleController.state,
+    situationCase,
+    situationController.state,
+    situationController.update,
     uploadController.state,
     uploadController.upload,
   ]);

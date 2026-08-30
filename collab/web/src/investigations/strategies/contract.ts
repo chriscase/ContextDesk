@@ -18,6 +18,16 @@ export const INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT = Object.freeze({
 
 export type InvestigationStrategyView = "overview" | "investigations";
 
+/**
+ * Shell-owned navigation intent. Strategies may request a canonical
+ * investigation stage/focus, but the shell remains the only history writer.
+ */
+export interface InvestigationStrategyNavigation {
+  readonly investigationId: string;
+  readonly stage: StageId;
+  readonly focus?: WorkFocus;
+}
+
 export interface InvestigationStrategyShellProps {
   readonly view: InvestigationStrategyView;
   readonly focusCaseId: string | null;
@@ -25,6 +35,7 @@ export interface InvestigationStrategyShellProps {
   readonly focus?: WorkFocus;
   readonly startSignal?: number;
   readonly onOpenCase: (caseId: string) => void;
+  readonly onNavigateInvestigation: (target: InvestigationStrategyNavigation) => void;
   readonly onExitFocus: () => void;
   readonly onOpenAdvancedTools?: (caseId: string, stage: StageId) => void;
   readonly onFocusedCaseTitle?: (title: string | null) => void;
@@ -62,4 +73,3 @@ export function defineInvestigationStrategyRegistrations(
 ): InvestigationStrategyRegistrationTable {
   return registrations;
 }
-

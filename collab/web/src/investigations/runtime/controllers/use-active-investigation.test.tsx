@@ -144,6 +144,77 @@ describe("useActiveInvestigation", () => {
     expect(originalContributions).toEqual(makeContributionList().contributions);
   });
 
+  it("merges a contributed note into the active case and replaces a re-published one", async () => {
+    const originalContributions = makeContributionList().contributions;
+    const gateway = gatewayWith({
+      getInvestigation: async () => ({ ok: true, value: makePopulatedCase() }),
+      listEvidence: async () => ({ ok: true, value: makeEvidenceList().artifacts }),
+      listContributions: async () => ({ ok: true, value: originalContributions }),
+      getLifecycle: async () => ({ ok: true, value: makeArchiveAllowedLifecycle() }),
+    });
+    const { result } = renderHook(() => useController(gateway, {
+      investigationId: makePopulatedCase().id,
+      active: true,
+      identityKey: "alice",
+      authorityKey: "interactive:lead",
+    }));
+    await waitFor(() => expect(result.current.contributions.status).toBe("ready"));
+
+    const existing = originalContributions[0];
+    if (existing === undefined) throw new Error("expected a seeded contribution");
+    const added: ContributionV1 = {
+      ...existing,
+      id: "contribution-newly-written",
+      body: "Server-confirmed contribution",
+    };
+    const revisedExisting: ContributionV1 = { ...existing, body: "Server-revised body" };
+    act(() => {
+      result.current.publishContribution(added);
+      result.current.publishContribution(revisedExisting);
+    });
+
+    if (result.current.contributions.status !== "ready") throw new Error("expected contributions");
+    expect(result.current.contributions.value).toHaveLength(originalContributions.length + 1);
+    expect(result.current.contributions.value).toContainEqual(added);
+    expect(result.current.contributions.value).toContainEqual(revisedExisting);
+    expect(result.current.evidence.status).toBe("ready");
+    expect(result.current.investigation).toEqual({ status: "ready", value: makePopulatedCase() });
+    expect(originalContributions).toEqual(makeContributionList().contributions);
+  });
+
+  it("ignores a contribution published for another case or a scope already left", async () => {
+    const { gateway, requests } = deferredReadGateway();
+    const initialProps = {
+      investigationId: "case-a",
+      active: false,
+      identityKey: "alice",
+      authorityKey: "interactive:lead",
+    };
+    const { result, rerender } = renderHook(
+      (props) => useController(gateway, props),
+      { initialProps },
+    );
+    const seed = makeContributionList().contributions[0];
+    if (seed === undefined) throw new Error("expected a seeded contribution");
+
+    act(() => {
+      result.current.publishContribution({ ...seed, caseId: "case-a" });
+    });
+    expect(result.current.contributions).toEqual({ status: "idle" });
+
+    rerender({ ...initialProps, active: true });
+    await waitFor(() => expect(requests.contributions).toHaveLength(1));
+    const stalePublishContribution = result.current.publishContribution;
+    rerender({ ...initialProps, active: true, investigationId: "case-b" });
+    await waitFor(() => expect(requests.contributions).toHaveLength(2));
+
+    act(() => {
+      stalePublishContribution({ ...seed, caseId: "case-a" });
+      result.current.publishContribution({ ...seed, caseId: "case-a" });
+    });
+    expect(result.current.contributions).toEqual({ status: "loading" });
+  });
+
   it("keeps loading and refresh-failure visible while publishing prior data", async () => {
     const evidenceRefresh = createDeferred<GatewayResult<readonly ArtifactV1[]>>();
     const lifecycleRefresh = createDeferred<GatewayResult<InvestigationLifecycleV1>>();

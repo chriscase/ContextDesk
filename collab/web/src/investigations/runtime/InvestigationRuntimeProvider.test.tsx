@@ -1,6 +1,7 @@
 import {
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   type CaseV1,
+  type ContributionV1,
   type InvestigationLifecycleActionSuccessV1,
 } from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
@@ -51,6 +52,8 @@ function makeGateway(overrides: Partial<InvestigationGateway> = {}): Investigati
     listEvidence: vi.fn(async () => succeeded(makeEvidenceList().artifacts)),
     listContributions: vi.fn(async () => succeeded(makeContributionList().contributions)),
     uploadEvidence: vi.fn(() => unexpected<never>()),
+    createContribution: vi.fn(() => unexpected<ContributionV1>()),
+    updateSituation: vi.fn(() => unexpected<CaseV1>()),
     getLifecycle: vi.fn(async () => succeeded(makeArchiveAllowedLifecycle())),
     applyLifecycleAction: vi.fn(() => unexpected<never>()),
     ...overrides,
@@ -137,6 +140,8 @@ describe("InvestigationRuntimeProvider", () => {
     expect(gateway.getLifecycle).toHaveBeenCalledTimes(1);
     expect(gateway.createInvestigation).not.toHaveBeenCalled();
     expect(gateway.uploadEvidence).not.toHaveBeenCalled();
+    expect(gateway.createContribution).not.toHaveBeenCalled();
+    expect(gateway.updateSituation).not.toHaveBeenCalled();
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
     expect(currentRuntime().commands.createInvestigation).toBe(createCommand);
     expect(currentRuntime().commands.uploadEvidence).toBe(uploadCommand);
@@ -290,6 +295,8 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
       uploadEvidence: null,
+      createContribution: null,
+      updateSituation: null,
       applyLifecycle: null,
     });
     expect(gateway.listInvestigations).not.toHaveBeenCalled();
@@ -297,6 +304,11 @@ describe("InvestigationRuntimeProvider", () => {
     expect(gateway.listEvidence).not.toHaveBeenCalled();
     expect(gateway.listContributions).not.toHaveBeenCalled();
     expect(gateway.getLifecycle).not.toHaveBeenCalled();
+    expect(gateway.createInvestigation).not.toHaveBeenCalled();
+    expect(gateway.uploadEvidence).not.toHaveBeenCalled();
+    expect(gateway.createContribution).not.toHaveBeenCalled();
+    expect(gateway.updateSituation).not.toHaveBeenCalled();
+    expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
   });
 
   it("keeps reads available but removes every mutation command in read-only mode", async () => {
@@ -322,15 +334,21 @@ describe("InvestigationRuntimeProvider", () => {
       canRead: true,
       canCreate: false,
       canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
       canManageLifecycle: false,
     });
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
       uploadEvidence: null,
+      createContribution: null,
+      updateSituation: null,
       applyLifecycle: null,
     });
     expect(gateway.createInvestigation).not.toHaveBeenCalled();
     expect(gateway.uploadEvidence).not.toHaveBeenCalled();
+    expect(gateway.createContribution).not.toHaveBeenCalled();
+    expect(gateway.updateSituation).not.toHaveBeenCalled();
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
   });
 
@@ -704,6 +722,401 @@ describe("InvestigationRuntimeProvider", () => {
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
   });
 
+  it("publishes a contribution before refreshing only the active contribution lane", async () => {
+    const written = makeContributionList().contributions[1];
+    if (written === undefined) throw new Error("expected a seeded contribution");
+    const created = { ...written, id: "contribution-newly-written" };
+    const contributionRefresh = createDeferred<GatewayResult<readonly ContributionV1[]>>();
+    let contributionCalls = 0;
+    const gateway = makeGateway({
+      listContributions: vi.fn(() => {
+        contributionCalls += 1;
+        return contributionCalls === 1
+          ? Promise.resolve(succeeded([]))
+          : contributionRefresh.promise;
+      }),
+      createContribution: vi.fn(async () => succeeded(created)),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    await act(async () => {
+      await currentRuntime().commands.createContribution?.({
+        kind: "note",
+        body: "Queue time rises after the rollout.",
+      });
+    });
+
+    expect(gateway.createContribution).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "note", body: "Queue time rises after the rollout." },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(currentRuntime().resources.contributions).toEqual({
+      status: "loading",
+      previous: [created],
+    });
+    expect(currentRuntime().mutations.createContribution).toEqual({
+      status: "succeeded",
+      value: created,
+    });
+    const mutation = currentRuntime().mutations.createContribution;
+    if (mutation.status === "succeeded") {
+      expect(Object.isFrozen(mutation.value)).toBe(true);
+      expect(() => {
+        (mutation.value as { body: string | null }).body = "contaminated";
+      }).toThrow();
+    }
+    expect(gateway.listContributions).toHaveBeenCalledTimes(2);
+    // A contribution is not evidence and does not change the collection.
+    expect(gateway.listEvidence).toHaveBeenCalledTimes(1);
+    expect(gateway.listInvestigations).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes a situation revision into the case and collection lanes", async () => {
+    const current = makePopulatedCase();
+    const revised: CaseV1 = {
+      ...current,
+      impact: "Checkouts now fail before payment confirmation.",
+      situationVersion: current.situationVersion + 1,
+    };
+    const investigationRefresh = createDeferred<GatewayResult<CaseV1>>();
+    const listRefresh = createDeferred<GatewayResult<readonly CaseV1[]>>();
+    let investigationCalls = 0;
+    let listCalls = 0;
+    const gateway = makeGateway({
+      listInvestigations: vi.fn(() => {
+        listCalls += 1;
+        return listCalls === 1
+          ? Promise.resolve(succeeded(makeCaseList().cases))
+          : listRefresh.promise;
+      }),
+      getInvestigation: vi.fn(() => {
+        investigationCalls += 1;
+        return investigationCalls === 1
+          ? Promise.resolve(succeeded(current))
+          : investigationRefresh.promise;
+      }),
+      updateSituation: vi.fn(async () => succeeded(revised)),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    await act(async () => {
+      await currentRuntime().commands.updateSituation?.({
+        impact: "Checkouts now fail before payment confirmation.",
+      });
+    });
+
+    expect(gateway.updateSituation).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        impact: "Checkouts now fail before payment confirmation.",
+        expectedVersion: current.situationVersion,
+      },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(currentRuntime().resources.investigation).toEqual({
+      status: "loading",
+      previous: revised,
+    });
+    expect(currentRuntime().resources.investigations.status).toBe("loading");
+    expect(currentRuntime().mutations.updateSituation).toEqual({
+      status: "succeeded",
+      value: revised,
+    });
+    expect(gateway.getInvestigation).toHaveBeenCalledTimes(2);
+    expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-reads rather than resending after a situation version conflict", async () => {
+    const current = makePopulatedCase();
+    const advanced: CaseV1 = { ...current, situationVersion: current.situationVersion + 3 };
+    let investigationCalls = 0;
+    const gateway = makeGateway({
+      getInvestigation: vi.fn(async () => {
+        investigationCalls += 1;
+        return succeeded(investigationCalls === 1 ? current : advanced);
+      }),
+      updateSituation: vi.fn(async (): Promise<GatewayResult<CaseV1>> => ({
+        ok: false,
+        error: { kind: "conflict", status: 409 },
+      })),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    await act(async () => {
+      await expect(currentRuntime().commands.updateSituation?.({ impact: "x" }))
+        .resolves.toEqual({ status: "failed", error: { kind: "conflict", status: 409 } });
+    });
+    await waitFor(() => expect(currentRuntime().resources.investigation).toEqual({
+      status: "ready",
+      value: advanced,
+    }));
+
+    expect(gateway.updateSituation).toHaveBeenCalledTimes(1);
+    expect(gateway.listInvestigations).toHaveBeenCalledTimes(2);
+    expect(currentRuntime().mutations.updateSituation).toEqual({
+      status: "failed",
+      error: { kind: "conflict", status: 409 },
+    });
+
+    // The next attempt uses the version the server actually holds.
+    await act(async () => {
+      await currentRuntime().commands.updateSituation?.({ impact: "y" });
+    });
+    expect(gateway.updateSituation).toHaveBeenLastCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { impact: "y", expectedVersion: advanced.situationVersion },
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it("atomically clears the active scope when a contribution proves lost access", async () => {
+    const gateway = makeGateway({
+      createContribution: vi.fn(async (): Promise<GatewayResult<ContributionV1>> => ({
+        ok: false,
+        error: { kind: "auth_lost", status: 403 },
+      })),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    await act(async () => {
+      await expect(currentRuntime().commands.createContribution?.({
+        kind: "note",
+        body: "x",
+      })).resolves.toEqual({ status: "failed", error: { kind: "auth_lost", status: 403 } });
+    });
+
+    const denied = { status: "failed", error: { kind: "auth_lost", status: 403 } };
+    expect(currentRuntime().resources.investigation).toEqual(denied);
+    expect(currentRuntime().resources.contributions).toEqual(denied);
+    expect(currentRuntime().resources.evidence).toEqual(denied);
+    expect(currentRuntime().resources.lifecycle).toEqual(denied);
+    expect(currentRuntime().commands.createContribution).toBeNull();
+    expect(currentRuntime().commands.updateSituation).toBeNull();
+    expect(currentRuntime().commands.uploadEvidence).toBeNull();
+    expect(currentRuntime().commands.applyLifecycle).toBeNull();
+  });
+
+  it("offers neither write seam before the active case has been read", async () => {
+    const investigation = createDeferred<GatewayResult<CaseV1>>();
+    const gateway = makeGateway({ getInvestigation: vi.fn(() => investigation.promise) });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("loading"));
+    expect(currentRuntime().commands.createContribution).toBeNull();
+    expect(currentRuntime().commands.updateSituation).toBeNull();
+
+    await act(async () => {
+      investigation.resolve(succeeded(makePopulatedCase()));
+    });
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    expect(currentRuntime().commands.createContribution).not.toBeNull();
+    expect(currentRuntime().commands.updateSituation).not.toBeNull();
+    expect(gateway.createContribution).not.toHaveBeenCalled();
+    expect(gateway.updateSituation).not.toHaveBeenCalled();
+  });
+
+  it("revokes a retained contribution callback while the active case is revalidating", async () => {
+    const investigation = makePopulatedCase();
+    const refreshed = createDeferred<GatewayResult<CaseV1>>();
+    let reads = 0;
+    const gateway = makeGateway({
+      getInvestigation: vi.fn(() => {
+        reads += 1;
+        return reads === 1 ? Promise.resolve(succeeded(investigation)) : refreshed.promise;
+      }),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    const retained = currentRuntime().commands.createContribution;
+    expect(retained).not.toBeNull();
+
+    act(() => currentRuntime().refresh.investigation());
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("loading"));
+    await act(async () => {
+      await expect(retained?.({ kind: "note", body: "must not write while loading" }))
+        .resolves.toEqual({ status: "ignored", reason: "not_ready" });
+    });
+    expect(gateway.createContribution).not.toHaveBeenCalled();
+
+    await act(async () => refreshed.resolve(succeeded(investigation)));
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+  });
+
+  it("withholds both write seams from a reader who may not write", async () => {
+    const gateway = makeGateway();
+    render(
+      <ProviderUnderTest
+        identityKey="viewer"
+        authorityKey="viewer-authority-v1"
+        capabilities={["investigation:read", "run:strategies"]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    expect(currentRuntime().capabilities).toEqual({
+      canRead: true,
+      canCreate: false,
+      canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
+      canManageLifecycle: true,
+    });
+    expect(currentRuntime().commands.createContribution).toBeNull();
+    expect(currentRuntime().commands.updateSituation).toBeNull();
+    expect(currentRuntime().mutations.createContribution).toEqual({ status: "idle" });
+    expect(currentRuntime().mutations.updateSituation).toEqual({ status: "idle" });
+    expect(gateway.createContribution).not.toHaveBeenCalled();
+    expect(gateway.updateSituation).not.toHaveBeenCalled();
+  });
+
+  it("fails a write closed as unavailable when the transport omits the seam", async () => {
+    // A gateway written before the V1.1 seams stays a complete transport. The
+    // runtime must report the missing capability, never treat it as a success.
+    const gateway = makeGateway();
+    delete gateway.createContribution;
+    delete gateway.updateSituation;
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    const unavailable = { status: "failed", error: { kind: "unavailable", status: 503 } };
+    // Authority is still projected truthfully: the commands exist, and it is
+    // the write itself that reports the absent capability.
+    expect(currentRuntime().capabilities.canContribute).toBe(true);
+    expect(currentRuntime().capabilities.canEditSituation).toBe(true);
+    expect(currentRuntime().commands.createContribution).not.toBeNull();
+    expect(currentRuntime().commands.updateSituation).not.toBeNull();
+
+    await act(async () => {
+      await expect(currentRuntime().commands.createContribution?.({
+        kind: "note",
+        body: "x",
+      })).resolves.toEqual(unavailable);
+    });
+    await act(async () => {
+      await expect(currentRuntime().commands.updateSituation?.({ impact: "x" }))
+        .resolves.toEqual(unavailable);
+    });
+
+    expect(currentRuntime().mutations.createContribution).toEqual(unavailable);
+    expect(currentRuntime().mutations.updateSituation).toEqual(unavailable);
+    expect(currentRuntime().resources.contributions.status).toBe("ready");
+    expect(currentRuntime().resources.investigation.status).toBe("ready");
+    expect(gateway.listContributions).toHaveBeenCalledTimes(1);
+    expect(gateway.getInvestigation).toHaveBeenCalledTimes(1);
+    expect(gateway.listInvestigations).toHaveBeenCalledTimes(1);
+  });
+
   it("publishes lifecycle success and changed-state authority into the right lanes", async () => {
     const archivedCase: CaseV1 = { ...makePopulatedCase(), status: "archived" };
     const success: InvestigationLifecycleActionSuccessV1 = {
@@ -905,6 +1318,8 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
       uploadEvidence: null,
+      createContribution: null,
+      updateSituation: null,
       applyLifecycle: null,
     });
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
@@ -1050,11 +1465,15 @@ describe("InvestigationRuntimeProvider", () => {
         canRead: true,
         canCreate: false,
         canUpload: false,
+        canContribute: false,
+        canEditSituation: false,
         canManageLifecycle: false,
       });
       expect(runtime.commands).toEqual({
         createInvestigation: null,
         uploadEvidence: null,
+        createContribution: null,
+        updateSituation: null,
         applyLifecycle: null,
       });
     });
@@ -1215,11 +1634,15 @@ describe("InvestigationRuntimeProvider", () => {
         canRead: true,
         canCreate: false,
         canUpload: false,
+        canContribute: false,
+        canEditSituation: false,
         canManageLifecycle: false,
       });
       expect(runtime.commands).toEqual({
         createInvestigation: null,
         uploadEvidence: null,
+        createContribution: null,
+        updateSituation: null,
         applyLifecycle: null,
       });
     });

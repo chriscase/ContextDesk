@@ -11,6 +11,8 @@ describe("investigation runtime capability projection", () => {
       canRead: true,
       canCreate: true,
       canUpload: true,
+      canContribute: true,
+      canEditSituation: true,
       canManageLifecycle: true,
     });
   });
@@ -25,12 +27,16 @@ describe("investigation runtime capability projection", () => {
       canRead: false,
       canCreate: true,
       canUpload: true,
+      canContribute: true,
+      canEditSituation: true,
       canManageLifecycle: false,
     });
     expect(projectInvestigationCapabilities(["run:strategies"], false)).toEqual({
       canRead: false,
       canCreate: false,
       canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
       canManageLifecycle: true,
     });
   });
@@ -44,6 +50,8 @@ describe("investigation runtime capability projection", () => {
       canRead: true,
       canCreate: false,
       canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
       canManageLifecycle: false,
     });
   });
@@ -58,7 +66,47 @@ describe("investigation runtime capability projection", () => {
       canRead: true,
       canCreate: false,
       canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
       canManageLifecycle: false,
     });
+  });
+
+  it("grants no write affordance to a reader, and never lets lifecycle imply either write seam", () => {
+    expect(projectInvestigationCapabilities(["investigation:read"], false)).toEqual({
+      canRead: true,
+      canCreate: false,
+      canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
+      canManageLifecycle: false,
+    });
+    expect(projectInvestigationCapabilities([
+      "investigation:read",
+      "run:strategies",
+    ], false)).toEqual({
+      canRead: true,
+      canCreate: false,
+      canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
+      canManageLifecycle: true,
+    });
+  });
+
+  it("keeps every projected affordance a plain boolean the caller cannot widen", () => {
+    const projected = projectInvestigationCapabilities([
+      "investigation:read",
+      "investigation:write",
+    ], false);
+    expect(Object.keys(projected).sort()).toEqual([
+      "canContribute",
+      "canCreate",
+      "canEditSituation",
+      "canManageLifecycle",
+      "canRead",
+      "canUpload",
+    ]);
+    expect(Object.values(projected).every((value) => typeof value === "boolean")).toBe(true);
   });
 });

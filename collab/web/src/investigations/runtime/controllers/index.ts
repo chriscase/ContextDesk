@@ -20,6 +20,12 @@ export {
   type UseActiveInvestigationOptions,
 } from "./use-active-investigation.js";
 export {
+  useCreateContribution,
+  type CreateContributionCommand,
+  type CreateContributionController,
+  type UseCreateContributionOptions,
+} from "./use-create-contribution.js";
+export {
   useCreateInvestigation,
   type CreateInvestigationController,
   type UseCreateInvestigationOptions,
@@ -34,6 +40,12 @@ export {
   type LifecycleActionController,
   type UseLifecycleActionOptions,
 } from "./use-lifecycle-action.js";
+export {
+  useUpdateSituation,
+  type UpdateSituationCommand,
+  type UpdateSituationController,
+  type UseUpdateSituationOptions,
+} from "./use-update-situation.js";
 export {
   useUploadEvidence,
   type UploadEvidenceCommand,

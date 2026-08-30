@@ -14,6 +14,7 @@ describe("UI strategy catalogue", () => {
     expect(UI_STRATEGIES.map((strategy) => strategy.id)).toEqual([
       "war-room",
       "investigation-first",
+      "keystone",
     ] satisfies readonly UiStrategyId[]);
 
     for (const strategy of UI_STRATEGIES) {
@@ -23,9 +24,18 @@ describe("UI strategy catalogue", () => {
       expect(strategy.compatibility.schemaId).toBe("cd-collab.case.v1");
       expect(strategy.compatibility.version).toMatch(/^\^\d+\.\d+\.\d+$/);
       expect(strategy.compatibility.runtime).toEqual(INVESTIGATION_RUNTIME_COMPATIBILITY);
-      expect(strategy.optionalFeatures).toEqual(UI_STRATEGY_OPTIONAL_FEATURE_IDS);
+      expect(strategy.optionalFeatures.every((feature) =>
+        UI_STRATEGY_OPTIONAL_FEATURE_IDS.includes(feature)
+      )).toBe(true);
       expect(isUiStrategyRuntimeCompatible(strategy)).toBe(true);
     }
+  });
+
+  it("describes the read-only Keystone preview without claiming unsupported tools", () => {
+    expect(UI_STRATEGIES.find(({ id }) => id === "keystone")?.optionalFeatures).toEqual([
+      "evidence-inventory",
+      "evidence-annotations",
+    ]);
   });
 
   it("fails closed for unknown runtime contracts and optional features", () => {

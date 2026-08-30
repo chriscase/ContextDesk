@@ -2,6 +2,8 @@ export interface InvestigationRuntimeCapabilities {
   canRead: boolean;
   canCreate: boolean;
   canUpload: boolean;
+  canContribute: boolean;
+  canEditSituation: boolean;
   canManageLifecycle: boolean;
 }
 
@@ -9,6 +11,11 @@ export interface InvestigationRuntimeCapabilities {
  * Project server capability strings into the only affordances Runtime V1
  * strategies may consume. Static read-only mode suppresses every mutation,
  * but never invents or removes the underlying read capability.
+ *
+ * `canContribute` and `canEditSituation` are projected separately from
+ * `canCreate` and `canUpload` even though the server currently gates all four
+ * on `investigation:write`. A strategy asks for the affordance it needs, so a
+ * later split of the write capability changes this projection alone.
  */
 export function projectInvestigationCapabilities(
   capabilities: readonly string[],
@@ -20,6 +27,8 @@ export function projectInvestigationCapabilities(
     canRead: effective.has("investigation:read"),
     canCreate: canMutate && effective.has("investigation:write"),
     canUpload: canMutate && effective.has("investigation:write"),
+    canContribute: canMutate && effective.has("investigation:write"),
+    canEditSituation: canMutate && effective.has("investigation:write"),
     canManageLifecycle: canMutate && effective.has("run:strategies"),
   };
 }
