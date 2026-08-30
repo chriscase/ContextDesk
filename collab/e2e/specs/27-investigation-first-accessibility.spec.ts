@@ -200,11 +200,11 @@ test.describe("Investigation First accessibility and browser conformance", () =>
     await activate(evidence, page, "Space");
     await expect(evidence).toBeChecked();
     await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
-    const metadata = page.locator(".investigation-first__evidence-list details > summary", {
-      hasText: "Metadata",
+    const detailsSummary = page.locator(".investigation-first__evidence-list details > summary", {
+      hasText: "More details",
     });
-    await activate(metadata, page);
-    await expect(metadata.locator("..")).toHaveAttribute("open", "");
+    await activate(detailsSummary, page);
+    await expect(detailsSummary.locator("..")).toHaveAttribute("open", "");
 
     const back = page.getByRole("button", { name: /Back to investigations/u });
     await activate(back, page);
