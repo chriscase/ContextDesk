@@ -407,7 +407,37 @@ describe("versioned lifecycle action request", () => {
     ).toThrow(/expected\.targetStatus.*unknown key/);
   });
 
-  it("rejects schema drift, malformed expected state, and action/state contradictions", () => {
+  it("accepts observed tuples from previews that refuse the requested action", () => {
+    expect(
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        expected: { ...request.expected, legalHold: true },
+      }),
+    ).toMatchObject({
+      action: "archive",
+      expected: { status: "open", legalHold: true },
+    });
+    expect(
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        expected: { ...request.expected, status: "archived" },
+      }),
+    ).toMatchObject({
+      action: "archive",
+      expected: { status: "archived", legalHold: false },
+    });
+    expect(
+      parseInvestigationLifecycleActionRequest({
+        ...request,
+        action: "restore",
+      }),
+    ).toMatchObject({
+      action: "restore",
+      expected: { status: "open", legalHold: false },
+    });
+  });
+
+  it("rejects schema drift and malformed expected tuple fields", () => {
     expect(() =>
       parseInvestigationLifecycleActionRequest({ ...request, schemaId: "wrong" }),
     ).toThrow(/schemaId/);
@@ -420,21 +450,15 @@ describe("versioned lifecycle action request", () => {
     expect(() =>
       parseInvestigationLifecycleActionRequest({
         ...request,
-        expected: { ...request.expected, status: "archived" },
+        expected: { ...request.expected, status: "unknown" },
       }),
-    ).toThrow(/archive request.*working/);
+    ).toThrow(/expected\.status/);
     expect(() =>
       parseInvestigationLifecycleActionRequest({
         ...request,
-        expected: { ...request.expected, legalHold: true },
+        expected: { ...request.expected, restoreTarget: "archived" },
       }),
-    ).toThrow(/legal hold/);
-    expect(() =>
-      parseInvestigationLifecycleActionRequest({
-        ...request,
-        action: "restore",
-      }),
-    ).toThrow(/restore request.*archived/);
+    ).toThrow(/restoreTarget.*working/);
   });
 });
 

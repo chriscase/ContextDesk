@@ -594,6 +594,10 @@ function parseLifecycleExpected(
 /**
  * Parse an action request. The destination status is deliberately absent:
  * only the server may derive it after comparing and reloading lifecycle state.
+ *
+ * The observed tuple may describe a refused preview. Structural validation
+ * belongs here, but eligibility does not: accepting that tuple lets the
+ * server re-evaluate it atomically and return the authoritative refusal.
  */
 export function parseInvestigationLifecycleActionRequest(
   raw: unknown,
@@ -606,25 +610,6 @@ export function parseInvestigationLifecycleActionRequest(
   );
   const action = lifecycleActionValue(record.action, "$.action");
   const expected = parseLifecycleExpected(record.expected, "$.expected");
-  if (action === "archive") {
-    if (expected.status === ARCHIVED_STATUS) {
-      throw new ContractViolation(
-        "$.expected.status",
-        "an archive request must start from a working investigation status",
-      );
-    }
-    if (expected.legalHold) {
-      throw new ContractViolation(
-        "$.expected.legalHold",
-        "a lifecycle preview under legal hold cannot authorize archive",
-      );
-    }
-  } else if (expected.status !== ARCHIVED_STATUS) {
-    throw new ContractViolation(
-      "$.expected.status",
-      "a restore request must start from archived",
-    );
-  }
   return {
     schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
     investigationId: nonEmptyStringValue(record.investigationId, "$.investigationId"),
