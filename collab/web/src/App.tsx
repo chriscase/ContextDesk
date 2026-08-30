@@ -453,13 +453,22 @@ export function App() {
   const uiStrategy = transientUiStrategyId
     ? resolveUiStrategy({ preferred: transientUiStrategyId })
     : preferredUiStrategy;
+  // UI strategies are alternate investigation workspaces, not shell themes.
+  // Overview and the rest of the application keep the canonical War Room
+  // identity and dashboard even when the user prefers another investigation
+  // strategy. This prevents a saved investigation preference from replacing
+  // Overview with a second copy of the Investigations surface.
+  const surfaceStrategy =
+    isWorkLocation(location) && location.area === "investigations"
+      ? uiStrategy
+      : resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID });
 
   useEffect(() => {
     document.title = titleFor(location, focusedCaseTitle, {
-      surfaceName: uiStrategy.name,
-      includeInvestigationStage: uiStrategy.id === DEFAULT_UI_STRATEGY_ID,
+      surfaceName: surfaceStrategy.name,
+      includeInvestigationStage: surfaceStrategy.id === DEFAULT_UI_STRATEGY_ID,
     });
-  }, [location, focusedCaseTitle, uiStrategy.id, uiStrategy.name]);
+  }, [location, focusedCaseTitle, surfaceStrategy.id, surfaceStrategy.name]);
 
   useEffect(() => {
     const invalidate = () => {
@@ -864,7 +873,7 @@ export function App() {
           <BrandMark />
           <h1 className="topbar__title">
             <span className="topbar__title-product">ContextDesk</span>{" "}
-            <span className="topbar__title-app">{uiStrategy.name}</span>
+            <span className="topbar__title-app">{surfaceStrategy.name}</span>
           </h1>
         </div>
         <button
@@ -985,7 +994,7 @@ export function App() {
               >
                 <WarRoomStrategyContext.Provider value={warRoomBindings}>
                   <InvestigationStrategyRenderer
-                    strategy={uiStrategy}
+                    strategy={surfaceStrategy}
                     registrations={INVESTIGATION_STRATEGY_REGISTRATIONS}
                     view={work.area === "investigations" ? "investigations" : "overview"}
                     focusCaseId={inCasesArea ? work.caseId : null}
