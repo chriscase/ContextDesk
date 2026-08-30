@@ -9,13 +9,13 @@ import {
   EVIDENCE_LIST_SCHEMA_ID,
   EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
-  INVESTIGATION_LIFECYCLE_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   PRIVACY_CLASSES,
   PROVENANCE_SCHEMA_ID,
   SNAPSHOT_LIST_SCHEMA_ID,
   TIMELINE_SCHEMA_ID,
-  describeDeleteRequest,
   isContributionIdempotencyKey,
+  parseInvestigationLifecycleActionRequest,
   type ArtifactKind,
   type AuthErrorV1,
   type CaseSeverity,
@@ -36,8 +36,11 @@ import {
 } from "../resolutions/index.js";
 import {
   ContributionConflictError,
+  LifecycleActionRequiredError,
+  LifecycleChangedError,
   LifecycleRefusedError,
   LegalHoldError,
+  StatusChangedError,
   SituationConflictError,
   type Actor,
   type CaseService,
@@ -130,19 +133,37 @@ function situationInput(body: Record<string, unknown>):
 function domainError(
   reply: { code: (status: number) => unknown },
   err: unknown,
-): {
-  error: string;
-  detail?: string;
-  currentVersion?: number;
-  currentRevision?: number;
-  reason?: string;
-} {
+) {
+  if (err instanceof LifecycleChangedError) {
+    void reply.code(409);
+    return err.conflict;
+  }
+  if (err instanceof LifecycleActionRequiredError) {
+    void reply.code(400);
+    return {
+      error: "lifecycle_action_required",
+      investigationId: err.investigationId,
+      action: err.action,
+      endpoint: err.endpoint,
+    };
+  }
+  if (err instanceof StatusChangedError) {
+    void reply.code(409);
+    return { error: "status_changed", currentStatus: err.currentStatus };
+  }
   // A refused archive or restore is a conflict with recorded state, not a
   // malformed request. The reason travels with it so the surface can point at
   // the legal-hold control instead of printing an unexplained 400.
   if (err instanceof LifecycleRefusedError) {
     void reply.code(409);
-    return { error: "lifecycle_refused", reason: err.reason, detail: err.detail };
+    return {
+      schemaId: INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
+      error: "lifecycle_refused",
+      investigationId: err.investigationId,
+      action: err.action,
+      reason: err.reason,
+      detail: err.detail,
+    };
   }
   if (err instanceof LegalHoldError) {
     void reply.code(409);
@@ -391,13 +412,34 @@ export async function registerCaseRoutes(
       return { error: "not_found" };
     }
     try {
-      const lifecycle = await deps.domain.lifecycleFor(id);
-      return {
-        schemaId: INVESTIGATION_LIFECYCLE_SCHEMA_ID,
-        investigationId: id,
-        ...lifecycle,
-        deletion: describeDeleteRequest(),
-      };
+      return await deps.domain.lifecycleFor(id);
+    } catch (err) {
+      return domainError(reply, err);
+    }
+  });
+
+  app.post("/api/cases/:id/lifecycle", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("run:strategies")) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return { error: "not_found" };
+    }
+    try {
+      const body = parseInvestigationLifecycleActionRequest(request.body);
+      if (body.investigationId !== id) {
+        void reply.code(400);
+        return {
+          error: "invalid",
+          detail: "$.investigationId: must match the path investigation id",
+        };
+      }
+      return await deps.domain.applyLifecycleAction(body, ctx.actor, request.ip);
     } catch (err) {
       return domainError(reply, err);
     }

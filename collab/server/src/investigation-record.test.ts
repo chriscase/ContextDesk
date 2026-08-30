@@ -9,6 +9,7 @@
  * Every identity, label, and body is synthetic.
  */
 import {
+  INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
   parseCase,
   parseInvestigationEntity,
   parseInvestigationEntityList,
@@ -17,6 +18,8 @@ import {
   parseInvestigationReferenceList,
   parseInvestigationResolution,
   parseInvestigationResolutionList,
+  parseInvestigationLifecycle,
+  parseInvestigationLifecycleActionSuccess,
   parseInvolvementIndex,
   parseSoftwareImpact,
   parseSoftwareImpactList,
@@ -752,22 +755,46 @@ describe("human-only resolution and the resolved-status guard", () => {
     });
   });
 
-  it("leaves monitoring and archived unguarded, because neither claims an answer", async () => {
+  it("leaves monitoring and lifecycle archive unguarded, because neither claims an answer", async () => {
     await withRecordApp(async ({ app }) => {
       const alice = await login(app, "alice");
       const investigation = parseCase(
         await createInvestigation(app, alice, { title: "Synthetic unguarded" }),
       );
-      for (const status of ["monitoring", "archived"] as const) {
-        const res = await app.inject({
-          method: "POST",
-          url: `/api/cases/${investigation.id}/status`,
-          headers: { cookie: alice },
-          payload: { status },
-        });
-        expect(res.statusCode).toBe(200);
-        expect(parseCase(body(res)).status).toBe(status);
-      }
+      const monitoring = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/status`,
+        headers: { cookie: alice },
+        payload: { status: "monitoring" },
+      });
+      expect(monitoring.statusCode).toBe(200);
+      expect(parseCase(body(monitoring)).status).toBe("monitoring");
+
+      const previewResponse = await app.inject({
+        method: "GET",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+      });
+      expect(previewResponse.statusCode).toBe(200);
+      const preview = parseInvestigationLifecycle(body(previewResponse));
+      const archivedResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${investigation.id}/lifecycle`,
+        headers: { cookie: alice },
+        payload: {
+          schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+          investigationId: investigation.id,
+          action: "archive",
+          expected: {
+            status: preview.status,
+            legalHold: preview.legalHold,
+            restoreTarget: preview.restoreTarget,
+          },
+        },
+      });
+      expect(archivedResponse.statusCode).toBe(200);
+      expect(parseInvestigationLifecycleActionSuccess(body(archivedResponse)).case.status)
+        .toBe("archived");
     });
   });
 });

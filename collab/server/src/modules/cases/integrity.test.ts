@@ -1,7 +1,10 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CORPUS_INTAKE_COMMIT_SCHEMA_ID } from "@cd-collab/contracts";
+import {
+  CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+} from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import {
   FilesystemEvidenceStore,
@@ -688,6 +691,70 @@ describe("case write integrity", () => {
       expect((await service.getCase(created.id, actor, true))?.legalHold).toBe(false);
       expect((await service.listTimeline(created.id)).some((event) => event.kind === "legal_hold")).toBe(false);
       expect(await audit.list({ action: "legal_hold" })).toEqual([]);
+    }, new MemoryCaseStore(), boomAudit);
+  });
+
+  it("rolls back lifecycle status, timeline, and audit as one action", async () => {
+    const timelineStore = new InjectedFailureStore();
+    await withService(async ({ service, audit }) => {
+      const created = await service.createCase(
+        actor,
+        { title: "Synthetic lifecycle timeline rollback fixture" },
+        "test",
+      );
+      const preview = await service.lifecycleFor(created.id);
+      timelineStore.failTimelineKind = "case_status";
+      await expect(
+        service.applyLifecycleAction(
+          {
+            schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+            investigationId: created.id,
+            action: "archive",
+            expected: {
+              status: preview.status,
+              legalHold: preview.legalHold,
+              restoreTarget: preview.restoreTarget,
+            },
+          },
+          actor,
+          "test",
+        ),
+      ).rejects.toThrow(/injected timeline failure:case_status/);
+      expect((await service.getCase(created.id, actor, true))?.status).toBe("open");
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "case_status"))
+        .toBe(false);
+      expect(await audit.list({ action: "case_status" })).toEqual([]);
+    }, timelineStore);
+
+    const boomAudit = new InjectedFailureAudit();
+    await withService(async ({ service, audit }) => {
+      const created = await service.createCase(
+        actor,
+        { title: "Synthetic lifecycle audit rollback fixture" },
+        "test",
+      );
+      const preview = await service.lifecycleFor(created.id);
+      boomAudit.failAction = "case_status";
+      await expect(
+        service.applyLifecycleAction(
+          {
+            schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+            investigationId: created.id,
+            action: "archive",
+            expected: {
+              status: preview.status,
+              legalHold: preview.legalHold,
+              restoreTarget: preview.restoreTarget,
+            },
+          },
+          actor,
+          "test",
+        ),
+      ).rejects.toThrow(/injected audit failure:case_status/);
+      expect((await service.getCase(created.id, actor, true))?.status).toBe("open");
+      expect((await service.listTimeline(created.id)).some((event) => event.kind === "case_status"))
+        .toBe(false);
+      expect(await audit.list({ action: "case_status" })).toEqual([]);
     }, new MemoryCaseStore(), boomAudit);
   });
 

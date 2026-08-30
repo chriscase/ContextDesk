@@ -1,7 +1,15 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseCase } from "@cd-collab/contracts";
+import {
+  INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+  parseCase,
+  parseInvestigationLifecycle,
+  parseInvestigationLifecycleActionRefused,
+  parseInvestigationLifecycleActionSuccess,
+  parseInvestigationLifecycleChanged,
+  type InvestigationLifecycleV1,
+} from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
@@ -20,6 +28,7 @@ import { CaseService } from "./service.js";
 
 const ALICE = "fixture-alice-secret";
 const DAVE = "fixture-dave-secret";
+const ERIN = "fixture-erin-secret";
 
 function users() {
   return new Map([
@@ -47,16 +56,32 @@ function users() {
         groups: ["cn=admins,ou=groups,dc=example,dc=test"],
       },
     ],
+    [
+      "erin",
+      {
+        password: ERIN,
+        identity: {
+          id: "uid=erin,ou=people,dc=example,dc=test",
+          username: "erin",
+          displayName: "erin",
+        },
+        groups: ["cn=case-leads,ou=groups,dc=example,dc=test"],
+      },
+    ],
   ]);
 }
 
-const roleMap =
-  "cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin";
+const roleMap = [
+  "cn=contributors,ou=groups,dc=example,dc=test=contributor",
+  "cn=case-leads,ou=groups,dc=example,dc=test=case-lead",
+  "cn=admins,ou=groups,dc=example,dc=test=admin",
+].join(";");
 
 async function withApp(
   fn: (ctx: {
     app: Awaited<ReturnType<typeof buildApp>>;
     domain: CaseService;
+    audit: MemoryAuditStore;
   }) => Promise<void>,
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-lifecycle-"));
@@ -87,7 +112,7 @@ async function withApp(
     },
   });
   try {
-    await fn({ app, domain });
+    await fn({ app, domain, audit });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -161,174 +186,269 @@ async function setHold(
   expect(res.statusCode).toBe(200);
 }
 
-describe("legal hold refuses an archive", () => {
-  it("refuses the transition and leaves the recorded status untouched", async () => {
+async function lifecycle(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  session: string,
+  caseId: string,
+): Promise<InvestigationLifecycleV1> {
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/cases/${caseId}/lifecycle`,
+    headers: { cookie: session },
+  });
+  expect(response.statusCode).toBe(200);
+  return parseInvestigationLifecycle(JSON.parse(response.body));
+}
+
+function actionPayload(
+  preview: InvestigationLifecycleV1,
+  action: "archive" | "restore",
+): Record<string, unknown> {
+  return {
+    schemaId: INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
+    investigationId: preview.investigationId,
+    action,
+    expected: {
+      status: preview.status,
+      legalHold: preview.legalHold,
+      restoreTarget: preview.restoreTarget,
+    },
+  };
+}
+
+async function applyAction(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  session: string,
+  caseId: string,
+  payload: Record<string, unknown>,
+) {
+  return app.inject({
+    method: "POST",
+    url: `/api/cases/${caseId}/lifecycle`,
+    ...(session ? { headers: { cookie: session } } : {}),
+    payload,
+  });
+}
+
+describe("atomic lifecycle command", () => {
+  it("returns contract-parsed archive and restore successes using the server-derived target", async () => {
     await withApp(async ({ app }) => {
       const dave = await login(app, "dave", DAVE);
       const caseId = await openCase(app, dave);
-      await setStatus(app, dave, caseId, "monitoring");
-      await setHold(app, dave, caseId, true);
+      expect((await setStatus(app, dave, caseId, "monitoring")).statusCode).toBe(200);
 
-      const refused = await setStatus(app, dave, caseId, "archived");
-      expect(refused.statusCode).toBe(409);
-      const body = JSON.parse(refused.body) as { error: string; reason: string; detail: string };
-      expect(body.error).toBe("lifecycle_refused");
-      expect(body.reason).toBe("legal_hold");
-      expect(body.detail).toMatch(/legal hold/i);
-
-      // Nothing half-written: the investigation is exactly as it was.
-      const after = parseCase(
-        JSON.parse(
-          (await app.inject({ method: "GET", url: `/api/cases/${caseId}`, headers: { cookie: dave } }))
-            .body,
-        ),
+      const beforeArchive = await lifecycle(app, dave, caseId);
+      const archivedResponse = await applyAction(
+        app,
+        dave,
+        caseId,
+        actionPayload(beforeArchive, "archive"),
       );
-      expect(after.status).toBe("monitoring");
-      expect(after.legalHold).toBe(true);
+      expect(archivedResponse.statusCode).toBe(200);
+      const archived = parseInvestigationLifecycleActionSuccess(JSON.parse(archivedResponse.body));
+      expect(archived).toMatchObject({
+        action: "archive",
+        previousStatus: "monitoring",
+        appliedStatus: "archived",
+        case: { id: caseId, status: "archived" },
+      });
+
+      const beforeRestore = await lifecycle(app, dave, caseId);
+      expect(beforeRestore.restore).toMatchObject({ allowed: true, targetStatus: "monitoring" });
+      const restoredResponse = await applyAction(
+        app,
+        dave,
+        caseId,
+        actionPayload(beforeRestore, "restore"),
+      );
+      expect(restoredResponse.statusCode).toBe(200);
+      const restored = parseInvestigationLifecycleActionSuccess(JSON.parse(restoredResponse.body));
+      expect(restored).toMatchObject({
+        action: "restore",
+        previousStatus: "archived",
+        appliedStatus: "monitoring",
+        case: { id: caseId, status: "monitoring" },
+      });
     });
   });
 
-  it("permits the archive once the hold is cleared", async () => {
-    await withApp(async ({ app }) => {
+  it("returns a parsed changed-state conflict after legal hold changes and writes no action rows", async () => {
+    await withApp(async ({ app, domain, audit }) => {
+      const dave = await login(app, "dave", DAVE);
+      const caseId = await openCase(app, dave);
+      const stale = await lifecycle(app, dave, caseId);
+      await setHold(app, dave, caseId, true);
+      const timelineBefore = await domain.listTimeline(caseId);
+      const actionAuditBefore = await audit.list({ action: "case_status" });
+
+      const response = await applyAction(app, dave, caseId, actionPayload(stale, "archive"));
+      expect(response.statusCode, response.body).toBe(409);
+      const conflict = parseInvestigationLifecycleChanged(JSON.parse(response.body));
+      expect(conflict).toMatchObject({
+        error: "lifecycle_changed",
+        action: "archive",
+        current: { status: "open", legalHold: true, archive: { allowed: false, reason: "legal_hold" } },
+      });
+      expect(await domain.listTimeline(caseId)).toEqual(timelineBefore);
+      expect(await audit.list({ action: "case_status" })).toEqual(actionAuditBefore);
+      expect((await domain.getCase(caseId, { id: "ignored", username: "ignored" }, true))?.status).toBe("open");
+    });
+  });
+
+  it("emits a bounded, versioned refusal with action and investigation identity", async () => {
+    await withApp(async ({ app, domain, audit }) => {
       const dave = await login(app, "dave", DAVE);
       const caseId = await openCase(app, dave);
       await setHold(app, dave, caseId, true);
-      expect((await setStatus(app, dave, caseId, "archived")).statusCode).toBe(409);
-      await setHold(app, dave, caseId, false);
-      const allowed = await setStatus(app, dave, caseId, "archived");
-      expect(allowed.statusCode).toBe(200);
-      expect(parseCase(JSON.parse(allowed.body)).status).toBe("archived");
+      const preview = await lifecycle(app, dave, caseId);
+      const timelineBefore = await domain.listTimeline(caseId);
+      const actionAuditBefore = await audit.list({ action: "case_status" });
+
+      const response = await applyAction(app, dave, caseId, actionPayload(preview, "archive"));
+      expect(response.statusCode, response.body).toBe(409);
+      expect(parseInvestigationLifecycleActionRefused(JSON.parse(response.body))).toMatchObject({
+        error: "lifecycle_refused",
+        investigationId: caseId,
+        action: "archive",
+        reason: "legal_hold",
+      });
+      expect((await domain.getCase(caseId, { id: "ignored", username: "ignored" }, true)))
+        .toMatchObject({ status: "open", legalHold: true });
+      expect(await domain.listTimeline(caseId)).toEqual(timelineBefore);
+      expect(await audit.list({ action: "case_status" })).toEqual(actionAuditBefore);
     });
   });
 
-  it("never traps a held record: restore still works under hold", async () => {
+  it("restores an archived investigation while it is under legal hold", async () => {
     await withApp(async ({ app }) => {
       const dave = await login(app, "dave", DAVE);
       const caseId = await openCase(app, dave);
       await setStatus(app, dave, caseId, "monitoring");
-      expect((await setStatus(app, dave, caseId, "archived")).statusCode).toBe(200);
+      const archivePreview = await lifecycle(app, dave, caseId);
+      expect(
+        (await applyAction(app, dave, caseId, actionPayload(archivePreview, "archive"))).statusCode,
+      ).toBe(200);
       await setHold(app, dave, caseId, true);
 
-      const restored = await setStatus(app, dave, caseId, "monitoring");
-      expect(restored.statusCode).toBe(200);
-      expect(parseCase(JSON.parse(restored.body)).status).toBe("monitoring");
+      const restorePreview = await lifecycle(app, dave, caseId);
+      const response = await applyAction(
+        app,
+        dave,
+        caseId,
+        actionPayload(restorePreview, "restore"),
+      );
+      expect(response.statusCode).toBe(200);
+      expect(parseInvestigationLifecycleActionSuccess(JSON.parse(response.body))).toMatchObject({
+        action: "restore",
+        appliedStatus: "monitoring",
+        case: { legalHold: true },
+      });
+    });
+  });
+
+  it("keeps request contract violations and path/body identity mismatches at 400", async () => {
+    await withApp(async ({ app }) => {
+      const dave = await login(app, "dave", DAVE);
+      const caseId = await openCase(app, dave);
+      const preview = await lifecycle(app, dave, caseId);
+
+      const selectedTarget = await applyAction(app, dave, caseId, {
+        ...actionPayload(preview, "archive"),
+        targetStatus: "archived",
+      });
+      expect(selectedTarget.statusCode).toBe(400);
+      expect(selectedTarget.body).toMatch(/targetStatus/);
+
+      const wrongId = await applyAction(app, dave, caseId, {
+        ...actionPayload(preview, "archive"),
+        investigationId: "case-other",
+      });
+      expect(wrongId.statusCode).toBe(400);
+      expect(wrongId.body).toMatch(/investigationId/);
     });
   });
 });
 
-describe("ordinary status changes are unaffected", () => {
-  it("moves between working statuses without consulting the lifecycle guard", async () => {
+describe("lifecycle route authorization order", () => {
+  it("checks session, run capability, and concealed case access before parsing", async () => {
+    await withApp(async ({ app }) => {
+      const dave = await login(app, "dave", DAVE);
+      const alice = await login(app, "alice", ALICE);
+      const erin = await login(app, "erin", ERIN);
+      const caseId = await openCase(app, dave);
+      const invalid = { targetStatus: "archived" };
+
+      expect((await applyAction(app, "", caseId, invalid)).statusCode).toBe(401);
+      expect((await applyAction(app, alice, caseId, invalid)).statusCode).toBe(403);
+      const concealed = await applyAction(app, erin, caseId, invalid);
+      expect(concealed.statusCode).toBe(404);
+      expect(concealed.body).not.toMatch(/targetStatus|legalHold/);
+    });
+  });
+});
+
+describe("generic status and lifecycle boundaries", () => {
+  it("rejects archive and restore on the generic route with a bounded 400 command pointer", async () => {
     await withApp(async ({ app }) => {
       const dave = await login(app, "dave", DAVE);
       const caseId = await openCase(app, dave);
-      // A hold refuses archiving, and nothing else. An ordinary transition
-      // under hold must still go through, or the hold silently freezes work.
+
+      const genericArchive = await setStatus(app, dave, caseId, "archived");
+      expect(genericArchive.statusCode).toBe(400);
+      expect(JSON.parse(genericArchive.body)).toEqual({
+        error: "lifecycle_action_required",
+        investigationId: caseId,
+        action: "archive",
+        endpoint: `/api/cases/${caseId}/lifecycle`,
+      });
+
+      const preview = await lifecycle(app, dave, caseId);
+      expect((await applyAction(app, dave, caseId, actionPayload(preview, "archive"))).statusCode).toBe(200);
+      const genericRestore = await setStatus(app, dave, caseId, "monitoring");
+      expect(genericRestore.statusCode).toBe(400);
+      expect(JSON.parse(genericRestore.body)).toMatchObject({
+        error: "lifecycle_action_required",
+        action: "restore",
+      });
+    });
+  });
+
+  it("keeps ordinary working status changes available under legal hold", async () => {
+    await withApp(async ({ app }) => {
+      const dave = await login(app, "dave", DAVE);
+      const caseId = await openCase(app, dave);
       await setHold(app, dave, caseId, true);
       const moved = await setStatus(app, dave, caseId, "monitoring");
       expect(moved.statusCode).toBe(200);
-      expect(parseCase(JSON.parse(moved.body)).status).toBe("monitoring");
+      expect(parseCase(JSON.parse(moved.body))).toMatchObject({ status: "monitoring", legalHold: true });
     });
   });
 });
 
-describe("restore lands on the recorded prior status", () => {
-  it("reports monitoring for an investigation archived out of monitoring", async () => {
-    await withApp(async ({ app, domain }) => {
-      const dave = await login(app, "dave", DAVE);
-      const caseId = await openCase(app, dave);
-      await setStatus(app, dave, caseId, "monitoring");
-      await setStatus(app, dave, caseId, "archived");
-      expect((await domain.lifecycleFor(caseId)).restoreTarget).toBe("monitoring");
-    });
-  });
-
-  it("reports open for an investigation archived straight from open", async () => {
-    await withApp(async ({ app, domain }) => {
-      const dave = await login(app, "dave", DAVE);
-      const caseId = await openCase(app, dave);
-      await setStatus(app, dave, caseId, "archived");
-      expect((await domain.lifecycleFor(caseId)).restoreTarget).toBe("open");
-    });
-  });
-});
-
-describe("the lifecycle route answers before the click", () => {
-  it("describes an allowed archive and where a restore would land", async () => {
-    await withApp(async ({ app }) => {
-      const dave = await login(app, "dave", DAVE);
-      const caseId = await openCase(app, dave);
-      await setStatus(app, dave, caseId, "monitoring");
-
-      const res = await app.inject({
-        method: "GET",
-        url: `/api/cases/${caseId}/lifecycle`,
-        headers: { cookie: dave },
-      });
-      expect(res.statusCode).toBe(200);
-      const body = JSON.parse(res.body) as {
-        schemaId: string;
-        status: string;
-        legalHold: boolean;
-        archive: { allowed: boolean };
-        restore: { allowed: boolean; reason?: string };
-        restoreTarget: string;
-        deletion: { supported: boolean; detail: string };
-      };
-      expect(body.schemaId).toBe("cd-collab.investigation_lifecycle.v1");
-      expect(body.status).toBe("monitoring");
-      expect(body.archive.allowed).toBe(true);
-      expect(body.restore.allowed).toBe(false);
-      expect(body.restore.reason).toBe("not_archived");
-      expect(body.restoreTarget).toBe("monitoring");
-      expect(body.deletion.supported).toBe(false);
-    });
-  });
-
-  it("reports the hold as the reason an archive is unavailable", async () => {
-    await withApp(async ({ app }) => {
-      const dave = await login(app, "dave", DAVE);
-      const caseId = await openCase(app, dave);
-      await setHold(app, dave, caseId, true);
-
-      const body = JSON.parse(
-        (
-          await app.inject({
-            method: "GET",
-            url: `/api/cases/${caseId}/lifecycle`,
-            headers: { cookie: dave },
-          })
-        ).body,
-      ) as { legalHold: boolean; archive: { allowed: boolean; reason?: string } };
-      expect(body.legalHold).toBe(true);
-      expect(body.archive.allowed).toBe(false);
-      expect(body.archive.reason).toBe("legal_hold");
-    });
-  });
-
-  it("refuses the read to a caller with no session", async () => {
-    await withApp(async ({ app }) => {
-      const dave = await login(app, "dave", DAVE);
-      const caseId = await openCase(app, dave);
-      const res = await app.inject({ method: "GET", url: `/api/cases/${caseId}/lifecycle` });
-      expect(res.statusCode).toBe(401);
-    });
-  });
-
-  it("reports not_found for an investigation the caller is not a member of", async () => {
+describe("lifecycle preview", () => {
+  it("returns the full parsed contract shape and conceals non-member reads", async () => {
     await withApp(async ({ app }) => {
       const dave = await login(app, "dave", DAVE);
       const alice = await login(app, "alice", ALICE);
       const caseId = await openCase(app, dave);
-      // Alice is a contributor on this installation but not a participant on
-      // this investigation. The lifecycle read must not leak that it exists,
-      // let alone whether it is under hold.
-      const res = await app.inject({
+      await setStatus(app, dave, caseId, "monitoring");
+
+      expect(await lifecycle(app, dave, caseId)).toMatchObject({
+        investigationId: caseId,
+        status: "monitoring",
+        archive: { allowed: true, action: "archive", targetStatus: "archived" },
+        restore: { allowed: false, action: "restore", reason: "not_archived" },
+        restoreTarget: "monitoring",
+        deletion: { supported: false, alternatives: ["archive"] },
+      });
+
+      const concealed = await app.inject({
         method: "GET",
         url: `/api/cases/${caseId}/lifecycle`,
         headers: { cookie: alice },
       });
-      expect(res.statusCode).toBe(404);
-      expect(res.body).not.toMatch(/legalHold/);
+      expect(concealed.statusCode).toBe(404);
+      expect(concealed.body).not.toMatch(/legalHold/);
     });
   });
 });

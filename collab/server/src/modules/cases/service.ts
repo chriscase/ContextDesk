@@ -3,8 +3,12 @@ import {
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+  INVESTIGATION_LIFECYCLE_SCHEMA_ID,
   OVERVIEW_ACTIVITY_CAP,
   OVERVIEW_OPEN_CASE_CAP,
+  describeDeleteRequest,
   isContributionIdempotencyKey,
   normalizeInvestigationContext,
   snapshotFairness,
@@ -21,6 +25,11 @@ import {
   type ContributionV1,
   type HypothesisStatus,
   type InvestigationContextV1,
+  type InvestigationLifecycleActionRequestV1,
+  type InvestigationLifecycleActionSuccessV1,
+  type InvestigationLifecycleChangedV1,
+  type InvestigationLifecycleV1,
+  type LifecycleAction,
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
@@ -59,7 +68,6 @@ import {
   type CorpusIntakeBatchV1,
   type CorpusIntakePreviewReportV1,
   type LifecycleRefusal,
-  type LifecycleVerdict,
   type StatusHistoryEntry,
 } from "@cd-collab/contracts";
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
@@ -159,11 +167,43 @@ export class CorpusIntakeConflictError extends Error {}
  */
 export class LifecycleRefusedError extends Error {
   constructor(
+    readonly investigationId: string,
+    readonly action: LifecycleAction,
     readonly reason: LifecycleRefusal,
     readonly detail: string,
   ) {
     super(detail);
     this.name = "LifecycleRefusedError";
+  }
+}
+
+/** Archive and restore are commands, never caller-selected generic statuses. */
+export class LifecycleActionRequiredError extends Error {
+  readonly endpoint: string;
+
+  constructor(
+    readonly investigationId: string,
+    readonly action: LifecycleAction,
+  ) {
+    super("lifecycle_action_required");
+    this.name = "LifecycleActionRequiredError";
+    this.endpoint = `/api/cases/${investigationId}/lifecycle`;
+  }
+}
+
+/** The preview supplied with a lifecycle action no longer matches locked state. */
+export class LifecycleChangedError extends Error {
+  constructor(readonly conflict: InvestigationLifecycleChangedV1) {
+    super("lifecycle_changed");
+    this.name = "LifecycleChangedError";
+  }
+}
+
+/** Status changed after resolution authorization but before the locked write. */
+export class StatusChangedError extends Error {
+  constructor(readonly currentStatus: CaseStatus) {
+    super("status_changed");
+    this.name = "StatusChangedError";
   }
 }
 
@@ -711,45 +751,57 @@ export class CaseService {
         ? { clientTime: clientTimeOrOptions }
         : (clientTimeOrOptions ?? {});
     const canonicalTime = canonicalClientTime(options.clientTime);
-    const row = await this.requireCase(caseId);
-    const previousStatus = row.status;
-    // Archiving and restoring are the two transitions that move an
-    // investigation in or out of the working list, so they answer to the
-    // lifecycle contract before anything else runs. Ordinary transitions
-    // between working statuses are none of its business and fall straight
-    // through. Evaluated before the resolution guard and before any write, so
-    // a refused archive leaves the investigation exactly as it was.
-    if (isLifecycleTransition(previousStatus, status)) {
-      const subject = { status: previousStatus, legalHold: row.legalHold };
-      const verdict =
-        status === ARCHIVED_STATUS
-          ? evaluateArchive(subject)
-          : evaluateRestore(subject, await this.statusHistory(caseId));
-      if (!verdict.allowed) throw new LifecycleRefusedError(verdict.reason, verdict.detail);
-    }
-    // Fail closed rather than fail open. An installation wired without a
-    // resolution guard cannot reach a status that claims the question was
-    // answered — the absence of a guard is treated as "nothing authorises
-    // this", never as "no check applies".
-    if (!this.resolutionGuard && statusRequiresResolution(status)) {
-      throw new ResolutionRequiredError(status);
-    }
-    // Runs before anything is written: a refused transition must leave the
-    // investigation exactly as it was, with nothing half-recorded.
+    let authorizedPreviousStatus: CaseStatus | null = null;
+    let previewWasLifecycle = false;
+    // Resolution stores are not necessarily bound to the PostgreSQL case
+    // transaction. Authorize before taking FOR UPDATE so an FK insert cannot
+    // self-block on the case row, then require the locked status to match the
+    // status that was authorized. A preview that was already a lifecycle
+    // transition skips the guard entirely so a generic archive/restore
+    // rejection cannot supersede or create a resolution as a side effect.
     if (this.resolutionGuard) {
-      await this.resolutionGuard.authorizeStatus({
-        caseId,
-        status,
-        previousStatus,
-        actor,
-        origin,
-        ...(options.resolution !== undefined ? { resolution: options.resolution } : {}),
-        ...(options.expectedResolutionRevision !== undefined
-          ? { expectedResolutionRevision: options.expectedResolutionRevision }
-          : {}),
-      });
+      const authorizationRow = await this.requireCase(caseId);
+      previewWasLifecycle = isLifecycleTransition(authorizationRow.status, status);
+      if (!previewWasLifecycle) {
+        await this.resolutionGuard.authorizeStatus({
+          caseId,
+          status,
+          previousStatus: authorizationRow.status,
+          actor,
+          origin,
+          ...(options.resolution !== undefined ? { resolution: options.resolution } : {}),
+          ...(options.expectedResolutionRevision !== undefined
+            ? { expectedResolutionRevision: options.expectedResolutionRevision }
+            : {}),
+        });
+        authorizedPreviousStatus = authorizationRow.status;
+      }
     }
     return this.store.withAtomic(async () => {
+      const row = await this.store.lockCase(caseId);
+      if (!row) throw new Error("case not found");
+      const previousStatus = row.status;
+      // Lifecycle mutation must enter through the action-specific command.
+      // The generic status endpoint cannot accept either direction because a
+      // caller-selected target is not an archive/restore authorization token.
+      if (isLifecycleTransition(previousStatus, status)) {
+        throw new LifecycleActionRequiredError(
+          caseId,
+          status === ARCHIVED_STATUS ? "archive" : "restore",
+        );
+      }
+      // Fail closed rather than fail open. An installation wired without a
+      // resolution guard cannot reach a status that claims the question was
+      // answered — the absence of a guard is treated as "nothing authorises
+      // this", never as "no check applies".
+      if (!this.resolutionGuard && statusRequiresResolution(status)) {
+        throw new ResolutionRequiredError(status);
+      }
+      if (this.resolutionGuard) {
+        if (previewWasLifecycle || authorizedPreviousStatus !== previousStatus) {
+          throw new StatusChangedError(previousStatus);
+        }
+      }
       await this.store.updateCaseMeta({ id: caseId, status });
       await this.store.appendTimeline(caseId, {
         kind: "case_status",
@@ -806,23 +858,90 @@ export class CaseService {
    * the answer a surface shows before the click and the answer the write path
    * enforces after it cannot drift apart.
    */
-  async lifecycleFor(caseId: string): Promise<{
-    status: CaseStatus;
-    legalHold: boolean;
-    archive: LifecycleVerdict;
-    restore: LifecycleVerdict;
-    restoreTarget: CaseStatus;
-  }> {
-    const row = await this.requireCase(caseId);
+  private async lifecycleFromLockedRow(
+    caseId: string,
+    row: { status: CaseStatus; legalHold: boolean },
+  ): Promise<InvestigationLifecycleV1> {
     const subject = { status: row.status, legalHold: row.legalHold };
     const history = await this.statusHistory(caseId);
     return {
+      schemaId: INVESTIGATION_LIFECYCLE_SCHEMA_ID,
+      investigationId: caseId,
       status: row.status,
       legalHold: row.legalHold,
       archive: evaluateArchive(subject),
       restore: evaluateRestore(subject, history),
       restoreTarget: restoreTarget(history),
+      deletion: describeDeleteRequest(),
     };
+  }
+
+  async lifecycleFor(caseId: string): Promise<InvestigationLifecycleV1> {
+    return this.store.withAtomic(async () => {
+      const row = await this.store.lockCase(caseId);
+      if (!row) throw new Error("case not found");
+      return this.lifecycleFromLockedRow(caseId, row);
+    });
+  }
+
+  async applyLifecycleAction(
+    request: InvestigationLifecycleActionRequestV1,
+    actor: Actor,
+    origin: string,
+  ): Promise<InvestigationLifecycleActionSuccessV1> {
+    const canonicalTime = canonicalClientTime(request.clientTime);
+    return this.store.withAtomic(async () => {
+      const row = await this.store.lockCase(request.investigationId);
+      if (!row) throw new Error("case not found");
+      const current = await this.lifecycleFromLockedRow(request.investigationId, row);
+      if (
+        request.expected.status !== current.status
+        || request.expected.legalHold !== current.legalHold
+        || request.expected.restoreTarget !== current.restoreTarget
+      ) {
+        throw new LifecycleChangedError({
+          schemaId: INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+          error: "lifecycle_changed",
+          investigationId: request.investigationId,
+          action: request.action,
+          current,
+        });
+      }
+
+      const verdict = current[request.action];
+      if (!verdict.allowed) {
+        throw new LifecycleRefusedError(
+          request.investigationId,
+          request.action,
+          verdict.reason,
+          verdict.detail,
+        );
+      }
+      const appliedStatus = verdict.targetStatus;
+      await this.store.updateCaseMeta({ id: request.investigationId, status: appliedStatus });
+      await this.store.appendTimeline(request.investigationId, {
+        kind: "case_status",
+        actor,
+        targetId: request.investigationId,
+        clientTime: canonicalTime,
+        payload: { status: appliedStatus },
+      });
+      await this.audit.append({
+        identity: actor.id,
+        action: "case_status",
+        target: `${request.investigationId}:${appliedStatus}`,
+        origin,
+        outcome: "success",
+      });
+      return {
+        schemaId: INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+        investigationId: request.investigationId,
+        action: request.action,
+        previousStatus: row.status,
+        appliedStatus,
+        case: this.toCase(await this.requireCase(request.investigationId)),
+      };
+    }, this.audit);
   }
 
   async addParticipant(
@@ -860,23 +979,24 @@ export class CaseService {
     origin: string,
   ): Promise<CaseV1> {
     return this.store.withAtomic(async () => {
-    await this.requireCase(caseId);
-    await this.store.updateCaseMeta({ id: caseId, legalHold });
-    await this.store.appendTimeline(caseId, {
-      kind: "legal_hold",
-      actor,
-      targetId: caseId,
-      clientTime: null,
-      payload: { legalHold },
-    });
-    await this.audit.append({
-      identity: actor.id,
-      action: "legal_hold",
-      target: `${caseId}:${legalHold}`,
-      origin,
-      outcome: "success",
-    });
-    return this.toCase(await this.requireCase(caseId));
+      const row = await this.store.lockCase(caseId);
+      if (!row) throw new Error("case not found");
+      await this.store.updateCaseMeta({ id: caseId, legalHold });
+      await this.store.appendTimeline(caseId, {
+        kind: "legal_hold",
+        actor,
+        targetId: caseId,
+        clientTime: null,
+        payload: { legalHold },
+      });
+      await this.audit.append({
+        identity: actor.id,
+        action: "legal_hold",
+        target: `${caseId}:${legalHold}`,
+        origin,
+        outcome: "success",
+      });
+      return this.toCase(await this.requireCase(caseId));
     }, this.audit);
   }
 
