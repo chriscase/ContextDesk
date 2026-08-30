@@ -248,6 +248,185 @@ function reservedBrowserTransportReference(node: ts.Node): string | null {
   return null;
 }
 
+/**
+ * Bare specifiers each investigation layer may name.
+ *
+ * A relative import is checked by resolving it; a bare or aliased one is not
+ * resolvable here, so it would otherwise pass unexamined. React is the
+ * rendering substrate for both layers. Contract DTOs stay a runtime concern:
+ * a strategy receives them through `runtime/public.ts`, so a presentation
+ * layer never pins itself to a wire contract the runtime is free to reshape,
+ * and never reaches a package the boundary has not reviewed.
+ */
+const APPROVED_BARE_IMPORTS: Readonly<Record<InvestigationLayer, readonly string[]>> =
+  Object.freeze({
+    runtime: ["react", "@cd-collab/contracts"],
+    strategy: ["react"],
+  });
+
+type InvestigationLayer = "runtime" | "strategy";
+
+function approvedBareImport(specifier: string, layer: InvestigationLayer): boolean {
+  return APPROVED_BARE_IMPORTS[layer].some(
+    (approved) => specifier === approved || specifier.startsWith(`${approved}/`),
+  );
+}
+
+/**
+ * Every module reference this boundary cannot resolve statically.
+ *
+ * The one-way dependency path above is a static property of the import graph.
+ * A dynamic `import()`, a `require()`, an `import()` type, or an
+ * `import.meta.resolve` names a module the graph never shows, so each is
+ * rejected outright rather than analysed. No investigation module needs one.
+ */
+function dynamicModuleReferences(
+  source: ts.SourceFile,
+): { form: string; line: number }[] {
+  const found: { form: string; line: number }[] = [];
+  visit(source, (node) => {
+    const at = () => source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      found.push({ form: "a dynamic import()", line: at() });
+      return;
+    }
+    if (ts.isImportTypeNode(node)) {
+      found.push({ form: "an import() type", line: at() });
+      return;
+    }
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "require"
+    ) {
+      found.push({ form: "a require()", line: at() });
+      return;
+    }
+    if (
+      ts.isPropertyAccessExpression(node)
+      && ts.isMetaProperty(node.expression)
+      && node.name.text === "resolve"
+    ) {
+      found.push({ form: "an import.meta.resolve", line: at() });
+    }
+  });
+  return found;
+}
+
+const TESTKIT_SEGMENT = /(?:^|\/)testkit(?:\/|$)/;
+
+/**
+ * A testkit mounts transport doubles and imports a test runner. Production
+ * source must never reach one, in this package or any other, so the check
+ * covers the resolved path and the written specifier alike.
+ */
+function testkitImportViolations(path: string, source: ts.SourceFile): string[] {
+  const roots = [
+    resolve(INVESTIGATIONS_ROOT, "runtime/testkit"),
+    resolve(INVESTIGATIONS_ROOT, "strategies/testkit"),
+  ];
+  const violations: string[] = [];
+  for (const imported of importsOf(source)) {
+    const resolvedModule = modulePath(path, imported.module);
+    const insideTestkit = resolvedModule !== null
+      && roots.some(
+        (root) => resolvedModule === root || resolvedModule.startsWith(`${root}${sep}`),
+      );
+    if (insideTestkit || TESTKIT_SEGMENT.test(imported.module)) {
+      violations.push(
+        `${repositoryPath(path)}:${imported.line} imports the test-only testkit ${imported.module} from production source`,
+      );
+    }
+  }
+  return violations;
+}
+
+/**
+ * Every import rule that applies to one investigation module, in source order,
+ * with dynamic references reported last.
+ */
+function investigationImportViolations(path: string, source: ts.SourceFile): string[] {
+  const violations: string[] = [];
+  const runtimeRoot = resolve(INVESTIGATIONS_ROOT, "runtime");
+  const strategiesRoot = resolve(INVESTIGATIONS_ROOT, "strategies");
+  const publicModule = resolve(runtimeRoot, "public");
+  const gatewayModule = resolve(runtimeRoot, "gateway");
+  const contractModule = resolve(strategiesRoot, "contract");
+
+  const relativeInvestigationPath = relative(INVESTIGATIONS_ROOT, path).split(sep).join("/");
+  const inRuntime = relativeInvestigationPath.startsWith("runtime/");
+  const inStrategies = relativeInvestigationPath.startsWith("strategies/");
+  const layer: InvestigationLayer = inStrategies ? "strategy" : "runtime";
+  const strategyMatch = /^strategies\/([^/]+)\//.exec(relativeInvestigationPath);
+  const strategyId = strategyMatch?.[1] ?? null;
+
+  for (const imported of importsOf(source)) {
+    const resolvedModule = modulePath(path, imported.module);
+    const location = `${repositoryPath(path)}:${imported.line}`;
+    const importsProtectedApi = /(?:^|\/)protected-api(?:\.js)?$/.test(imported.module);
+
+    if (importsProtectedApi && !sameModule(path, gatewayModule)) {
+      violations.push(`${location} imports protected-api outside runtime/gateway.ts`);
+    }
+
+    if (
+      !imported.module.startsWith(".")
+      && !approvedBareImport(imported.module, layer)
+    ) {
+      violations.push(
+        `${location} imports ${imported.module}, which is not an approved ${layer} dependency`,
+      );
+    }
+
+    if (inRuntime) {
+      if (imported.module.endsWith(".css")) {
+        violations.push(`${location} imports CSS from runtime`);
+      }
+      if (resolvedModule && sameModule(resolvedModule, resolve(WEB_SRC, "App"))) {
+        violations.push(`${location} imports App.tsx from runtime`);
+      }
+      if (
+        resolvedModule &&
+        (resolvedModule === strategiesRoot || resolvedModule.startsWith(`${strategiesRoot}${sep}`))
+      ) {
+        violations.push(`${location} imports a strategy from runtime`);
+      }
+    }
+
+    if (inStrategies) {
+      if (/collab\/server|(?:^|\/)server(?:\/|$)/.test(imported.module)) {
+        violations.push(`${location} imports a server module from a strategy`);
+      }
+      if (resolvedModule && sameModule(resolvedModule, gatewayModule)) {
+        violations.push(`${location} imports runtime/gateway directly from a strategy`);
+      }
+    }
+
+    if (strategyId && strategyId !== "testkit" && resolvedModule) {
+      const ownStrategyRoot = resolve(strategiesRoot, strategyId);
+      const isOwnModule =
+        resolvedModule === ownStrategyRoot ||
+        resolvedModule.startsWith(`${ownStrategyRoot}${sep}`);
+      const isPublicRuntime = sameModule(resolvedModule, publicModule);
+      const isStrategyContract = sameModule(resolvedModule, contractModule);
+
+      if (!isOwnModule && !isPublicRuntime && !isStrategyContract) {
+        violations.push(
+          `${location} imports investigation behavior outside runtime/public.ts or strategies/contract.ts`,
+        );
+      }
+    }
+  }
+
+  for (const reference of dynamicModuleReferences(source)) {
+    violations.push(
+      `${repositoryPath(path)}:${reference.line} resolves a module through ${reference.form}, which the static investigation boundary cannot review`,
+    );
+  }
+
+  return violations;
+}
+
 function strategyRouteViolations(path: string, source: ts.SourceFile): string[] {
   const violations: string[] = [];
   const fetchNames = protectedFetchNames(source);
@@ -292,74 +471,24 @@ function strategyRouteViolations(path: string, source: ts.SourceFile): string[] 
 describe("Investigation Runtime V1 dependency boundary", () => {
   it("keeps runtime and strategies on the public one-way dependency path", () => {
     const violations: string[] = [];
-    const runtimeRoot = resolve(INVESTIGATIONS_ROOT, "runtime");
-    const strategiesRoot = resolve(INVESTIGATIONS_ROOT, "strategies");
-    const publicModule = resolve(runtimeRoot, "public");
-    const gatewayModule = resolve(runtimeRoot, "gateway");
-    const contractModule = resolve(strategiesRoot, "contract");
 
     for (const path of sourceFiles(INVESTIGATIONS_ROOT).filter((file) => !isTestOnly(file))) {
       const source = parseSource(path);
       const relativeInvestigationPath = relative(INVESTIGATIONS_ROOT, path).split(sep).join("/");
-      const inRuntime = relativeInvestigationPath.startsWith("runtime/");
-      const strategyMatch = /^strategies\/([^/]+)\//.exec(relativeInvestigationPath);
-      const strategyId = strategyMatch?.[1] ?? null;
 
-      for (const imported of importsOf(source)) {
-        const resolvedModule = modulePath(path, imported.module);
-        const location = `${repositoryPath(path)}:${imported.line}`;
-        const importsProtectedApi = /(?:^|\/)protected-api(?:\.js)?$/.test(imported.module);
-
-        if (importsProtectedApi && !sameModule(path, gatewayModule)) {
-          violations.push(`${location} imports protected-api outside runtime/gateway.ts`);
-        }
-
-        if (inRuntime) {
-          if (imported.module.endsWith(".css")) {
-            violations.push(`${location} imports CSS from runtime`);
-          }
-          if (resolvedModule && sameModule(resolvedModule, resolve(WEB_SRC, "App"))) {
-            violations.push(`${location} imports App.tsx from runtime`);
-          }
-          if (
-            resolvedModule &&
-            (resolvedModule === strategiesRoot || resolvedModule.startsWith(`${strategiesRoot}${sep}`))
-          ) {
-            violations.push(`${location} imports a strategy from runtime`);
-          }
-        }
-
-        if (relativeInvestigationPath.startsWith("strategies/")) {
-          if (/collab\/server|(?:^|\/)server(?:\/|$)/.test(imported.module)) {
-            violations.push(`${location} imports a server module from a strategy`);
-          }
-          if (
-            resolvedModule &&
-            sameModule(resolvedModule, gatewayModule)
-          ) {
-            violations.push(`${location} imports runtime/gateway directly from a strategy`);
-          }
-        }
-
-        if (strategyId && strategyId !== "testkit" && resolvedModule) {
-          const ownStrategyRoot = resolve(strategiesRoot, strategyId);
-          const isOwnModule =
-            resolvedModule === ownStrategyRoot ||
-            resolvedModule.startsWith(`${ownStrategyRoot}${sep}`);
-          const isPublicRuntime = sameModule(resolvedModule, publicModule);
-          const isStrategyContract = sameModule(resolvedModule, contractModule);
-
-          if (!isOwnModule && !isPublicRuntime && !isStrategyContract) {
-            violations.push(
-              `${location} imports investigation behavior outside runtime/public.ts or strategies/contract.ts`,
-            );
-          }
-        }
-      }
-
+      violations.push(...investigationImportViolations(path, source));
       if (relativeInvestigationPath.startsWith("strategies/")) {
         violations.push(...strategyRouteViolations(path, source));
       }
+    }
+
+    expect(violations, violations.join("\n")).toEqual([]);
+  });
+
+  it("keeps every testkit out of production source across the web package", () => {
+    const violations: string[] = [];
+    for (const path of sourceFiles(WEB_SRC).filter((file) => !isTestOnly(file))) {
+      violations.push(...testkitImportViolations(path, parseSource(path)));
     }
 
     expect(violations, violations.join("\n")).toEqual([]);
@@ -471,5 +600,102 @@ describe("Investigation Runtime V1 dependency boundary", () => {
     expect(strategyRouteViolations(strategyPath, source)).toEqual([
       "collab/web/src/investigations/strategies/example/Example.tsx:1 references reserved browser transport fetch from a strategy",
     ]);
+  });
+
+  it("rejects dynamic module resolution and unapproved bare or alias imports", () => {
+    const strategyPath = resolve(INVESTIGATIONS_ROOT, "strategies/example/Example.tsx");
+    const source = parseSourceText(
+      strategyPath,
+      [
+        'import { useInvestigationRuntime } from "../../runtime/public.js";',
+        'import type { InvestigationStrategyShellProps } from "../contract.js";',
+        'import { useState } from "react";',
+        'import { parseCase } from "@cd-collab/contracts/investigation-runtime";',
+        'import secret from "@/secret";',
+        'import helper from "#internal/helper";',
+        'import legacy from "src/legacy.js";',
+        'export * from "node:fs";',
+        'export const lazy = () => import("./Lazy.js");',
+        'export const legacyLoad = () => require("./Legacy.js");',
+        'export const resolved = () => import.meta.resolve("./Late.js");',
+        "export type Late = import(\"./Late.js\").Late;",
+        "export const used = [useInvestigationRuntime, useState, parseCase, secret, helper, legacy];",
+        "export type Props = InvestigationStrategyShellProps;",
+      ].join("\n"),
+    );
+
+    const prefix = "collab/web/src/investigations/strategies/example/Example.tsx";
+    expect(investigationImportViolations(strategyPath, source)).toEqual([
+      `${prefix}:4 imports @cd-collab/contracts/investigation-runtime, which is not an approved strategy dependency`,
+      `${prefix}:5 imports @/secret, which is not an approved strategy dependency`,
+      `${prefix}:6 imports #internal/helper, which is not an approved strategy dependency`,
+      `${prefix}:7 imports src/legacy.js, which is not an approved strategy dependency`,
+      `${prefix}:8 imports node:fs, which is not an approved strategy dependency`,
+      `${prefix}:9 resolves a module through a dynamic import(), which the static investigation boundary cannot review`,
+      `${prefix}:10 resolves a module through a require(), which the static investigation boundary cannot review`,
+      `${prefix}:11 resolves a module through an import.meta.resolve, which the static investigation boundary cannot review`,
+      `${prefix}:12 resolves a module through an import() type, which the static investigation boundary cannot review`,
+    ]);
+  });
+
+  it("allows the approved public imports each investigation layer actually needs", () => {
+    const strategyPath = resolve(INVESTIGATIONS_ROOT, "strategies/example/Example.tsx");
+    const strategy = parseSourceText(
+      strategyPath,
+      [
+        'import { useEffect, type FormEvent } from "react";',
+        'import { selectResourceView, useInvestigationRuntime } from "../../runtime/public.js";',
+        'import type { InvestigationStrategyShellProps } from "../contract.js";',
+        'import { helper } from "./helper.js";',
+        "export const used = [useEffect, selectResourceView, useInvestigationRuntime, helper];",
+        "export type Props = InvestigationStrategyShellProps & { submit: FormEvent };",
+      ].join("\n"),
+    );
+    expect(investigationImportViolations(strategyPath, strategy)).toEqual([]);
+
+    const runtimePath = resolve(INVESTIGATIONS_ROOT, "runtime/example.ts");
+    const runtime = parseSourceText(
+      runtimePath,
+      [
+        'import { useMemo } from "react";',
+        'import { parseCase } from "@cd-collab/contracts/investigation-runtime";',
+        'export { selectResourceView } from "./selectors.js";',
+        "export const used = [useMemo, parseCase];",
+      ].join("\n"),
+    );
+    expect(investigationImportViolations(runtimePath, runtime)).toEqual([]);
+  });
+
+  it("rejects a production import of either testkit and allows test-only use", () => {
+    const productionPath = resolve(WEB_SRC, "App.tsx");
+    const production = parseSourceText(
+      productionPath,
+      [
+        'import { createInvestigationGatewayDouble } from "./investigations/runtime/testkit/index.js";',
+        'import { runComponentConformance } from "./investigations/strategies/testkit/conformance.js";',
+        'import { makeCaseList } from "@cd-collab/contracts/testkit";',
+        'import { App } from "./AppShell.js";',
+        "export const used = [createInvestigationGatewayDouble, runComponentConformance, makeCaseList, App];",
+      ].join("\n"),
+    );
+
+    expect(testkitImportViolations(productionPath, production)).toEqual([
+      "collab/web/src/App.tsx:1 imports the test-only testkit ./investigations/runtime/testkit/index.js from production source",
+      "collab/web/src/App.tsx:2 imports the test-only testkit ./investigations/strategies/testkit/conformance.js from production source",
+      "collab/web/src/App.tsx:3 imports the test-only testkit @cd-collab/contracts/testkit from production source",
+    ]);
+
+    // The shipped conformance kit lives inside a testkit directory, so the
+    // production scan never reaches it and its own imports stay legal.
+    expect(
+      isTestOnly(resolve(INVESTIGATIONS_ROOT, "strategies/testkit/conformance.tsx")),
+      "the strategies testkit must be classified test-only",
+    ).toBe(true);
+    expect(
+      sourceFiles(WEB_SRC).filter((file) => !isTestOnly(file)).some(
+        (file) => file.split(sep).join("/").includes("/testkit/"),
+      ),
+      "a testkit module was scanned as production source",
+    ).toBe(false);
   });
 });

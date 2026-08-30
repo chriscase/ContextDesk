@@ -1,10 +1,43 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { uniqueTitle, loginAs } from "../src/helpers.js";
+import {
+  BrowserConformanceRun,
+  assertBrowserSurfaceCovered,
+  assertProfileParity,
+  expectCanonicalNavigation,
+  expectForcedColors,
+  expectKeyboardEquivalents,
+  expectNoDragOnlyCoreFlow,
+  expectReducedMotion,
+  expectReflow,
+  expectSemanticRolesAndLabels,
+  type BrowserConformanceRequirementId,
+  type ReflowRequirementId,
+} from "../src/investigation-strategy/conformance.js";
 import { FIXTURE_USERS } from "../src/users.js";
 
 const DESKTOP = { width: 1280, height: 900 };
-// A 1,120 CSS-pixel desktop at 200% zoom exposes 560 effective CSS pixels.
-const TWO_HUNDRED_PERCENT_EQUIVALENT = { width: 560, height: 900 };
+
+/**
+ * The browser surface of the shared strategy conformance profile, split across
+ * the journeys below. Each journey owns its slice and fails if it never reaches
+ * one; `assertBrowserSurfaceCovered` proves the slices leave no requirement
+ * unclaimed. Assertions that are specific to Investigation First stay in this
+ * spec — the shared harness only ever asserts the strategy-neutral baseline.
+ */
+const KEYBOARD_SLICE: readonly BrowserConformanceRequirementId[] = [
+  "semantic-roles-and-labels",
+  "canonical-navigation",
+  "keyboard-equivalents",
+  "no-drag-only-core-flow",
+];
+const REFLOW_SLICE: readonly ReflowRequirementId[] = ["reflow-560", "reflow-390"];
+const REDUCED_MOTION_SLICE: readonly BrowserConformanceRequirementId[] = ["reduced-motion"];
+const FORCED_COLORS_SLICE: readonly BrowserConformanceRequirementId[] = ["forced-colors"];
+
+function strategyRoot(page: Page): Locator {
+  return page.locator(".investigation-first");
+}
 
 async function useInvestigationFirst(page: Page): Promise<void> {
   const before = new URL(page.url());
@@ -92,18 +125,6 @@ async function activate(control: Locator, page: Page, key: "Enter" | "Space" = "
   await page.keyboard.press(key);
 }
 
-async function documentWidth(page: Page): Promise<number> {
-  return page.evaluate(() => document.documentElement.scrollWidth);
-}
-
-async function expectInsideViewport(page: Page, locator: Locator): Promise<void> {
-  await expect(locator).toBeVisible();
-  const box = await locator.boundingBox();
-  expect(box, "expected a visible control with a layout box").not.toBeNull();
-  expect(box!.x).toBeGreaterThanOrEqual(0);
-  expect(box!.x + box!.width).toBeLessThanOrEqual((await page.viewportSize())!.width + 1);
-}
-
 test.describe("Investigation First accessibility and browser conformance", () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize(DESKTOP);
@@ -114,7 +135,11 @@ test.describe("Investigation First accessibility and browser conformance", () =>
   });
 
   test("names, landmarks, order, and core workflows are keyboard-operable without drag", async ({ page }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(120_000);
+    const run = new BrowserConformanceRun("Investigation First", KEYBOARD_SLICE);
+    const root = strategyRoot(page);
+    const semantics: string[] = [];
+
     await expect(page.locator("html")).toHaveAttribute("lang", "en");
     await expect(page.getByRole("banner")).toBeVisible();
     await expect(page.getByRole("main")).toBeVisible();
@@ -127,6 +152,7 @@ test.describe("Investigation First accessibility and browser conformance", () =>
       "Create an investigation",
       "Investigations",
     ]);
+    semantics.push(`collection view: ${await expectSemanticRolesAndLabels(page, root)}`);
 
     const skip = page.locator("a.skip-link");
     // Reloading the same canonical route clears Chromium's remembered tab
@@ -142,6 +168,8 @@ test.describe("Investigation First accessibility and browser conformance", () =>
     const caseId = await createWithKeyboard(page, title);
     await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
     await expect(page.getByRole("region", { name: "Evidence inventory" })).toBeVisible();
+    semantics.push(`record view: ${await expectSemanticRolesAndLabels(page, root)}`);
+    run.record("semantic-roles-and-labels", semantics.join("; "));
 
     const file = page.getByRole("button", { name: "File", exact: true });
     await expect(file).toHaveAttribute("type", "file");
@@ -190,6 +218,12 @@ test.describe("Investigation First accessibility and browser conformance", () =>
     await activate(result, page);
     await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
     await expect(page.getByRole("heading", { level: 2, name: title })).toBeFocused();
+    run.record(
+      "canonical-navigation",
+      await expectCanonicalNavigation(page, root, {
+        pathname: /^\/investigations\/[^/]+\/situation$/u,
+      }),
+    );
 
     const archive = page.getByRole("button", { name: "Archive investigation" });
     await activate(archive, page);
@@ -220,113 +254,109 @@ test.describe("Investigation First accessibility and browser conformance", () =>
     ).toHaveCount(0);
     await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
 
+    run.record(
+      "keyboard-equivalents",
+      await expectKeyboardEquivalents(page, [
+        page.getByRole("button", { name: /Back to investigations/u }),
+        page.getByRole("button", { name: "Open War Room technical tools" }),
+        page.getByRole("button", { name: "Add to evidence inventory" }),
+        page.getByRole("button", { name: "Archive investigation" }),
+      ]),
+    );
+    run.record("no-drag-only-core-flow", await expectNoDragOnlyCoreFlow(page, root));
+
     expect(
       await page.locator(".investigation-first [draggable=true]").count(),
       "a core Investigation First action unexpectedly requires a drag target",
     ).toBe(0);
+    expect(run.finish().evaluated.map((evidence) => evidence.id)).toEqual([...KEYBOARD_SLICE]);
   });
 
-  test("reflows at a 200% desktop-zoom equivalent without page-level horizontal scroll", async ({ page }) => {
+  test("reflows at 200% desktop-zoom and handset widths without page-level horizontal scroll", async ({ page }) => {
+    test.setTimeout(120_000);
+    const run = new BrowserConformanceRun("Investigation First", REFLOW_SLICE);
     const title = uniqueTitle("Investigation First reflow proof");
     const caseId = await createWithKeyboard(page, title);
 
     await activate(page.getByRole("button", { name: /Back to investigations/u }), page);
     await expect(page).toHaveURL("/investigations");
 
-    await page.setViewportSize(TWO_HUNDRED_PERCENT_EQUIVALENT);
-    expect(await documentWidth(page)).toBeLessThanOrEqual(TWO_HUNDRED_PERCENT_EQUIVALENT.width);
-    const search = page.getByRole("searchbox", { name: "Search investigations" });
-    const statusFilter = page.getByRole("combobox", { name: "Filter investigations by status" });
-    const createTitle = page.getByLabel("What should the team call this?");
-    const advanced = page.locator(".investigation-first__advanced > summary");
-    const result = page.locator(".investigation-first__list-button").filter({ hasText: title });
-    await expectInsideViewport(page, search);
-    await expectInsideViewport(page, statusFilter);
-    await expectInsideViewport(page, createTitle);
-    await expectInsideViewport(page, advanced);
-    await expectInsideViewport(page, result);
+    const collectionControls = () => [
+      page.getByRole("searchbox", { name: "Search investigations" }),
+      page.getByRole("combobox", { name: "Filter investigations by status" }),
+      page.getByLabel("What should the team call this?"),
+      page.locator(".investigation-first__advanced > summary"),
+      page.locator(".investigation-first__list-button").filter({ hasText: title }),
+    ];
+    const recordControls = () => [
+      page.getByRole("button", { name: /Back to investigations/u }),
+      page.getByRole("button", { name: "Open War Room technical tools" }),
+      page.getByRole("button", { name: "Add to evidence inventory" }),
+      page.getByRole("button", { name: "Archive investigation" }),
+    ];
 
-    await activate(result, page);
-    await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
-    await expect(page.getByRole("heading", { level: 2, name: title })).toBeVisible();
-    expect(await documentWidth(page)).toBeLessThanOrEqual(TWO_HUNDRED_PERCENT_EQUIVALENT.width);
-    await expectInsideViewport(page, page.getByRole("button", { name: /Back to investigations/u }));
-    await expectInsideViewport(page, page.getByRole("button", { name: "Open War Room technical tools" }));
-    await expectInsideViewport(page, page.getByRole("button", { name: "Add to evidence inventory" }));
-    await expectInsideViewport(page, page.getByRole("button", { name: "Archive investigation" }));
+    for (const requirement of REFLOW_SLICE) {
+      const observed: string[] = [];
+      await page.setViewportSize(DESKTOP);
+      await page.goto("/investigations");
+      await expect(page.locator(".investigation-first")).toBeVisible();
+      observed.push(`collection view: ${await expectReflow(page, requirement, collectionControls())}`);
 
-    const uploadColumns = await page.locator(".investigation-first__upload-grid").evaluate((node) =>
-      getComputedStyle(node).gridTemplateColumns,
-    );
-    expect(uploadColumns.split(" ").length).toBe(1);
-    await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
+      const result = page.locator(".investigation-first__list-button").filter({ hasText: title });
+      await activate(result, page);
+      await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
+      await expect(page.getByRole("heading", { level: 2, name: title })).toBeVisible();
+      observed.push(`record view: ${await expectReflow(page, requirement, recordControls())}`);
+
+      // The upload grid is Investigation First's own single-column promise at a
+      // narrow width, so it stays here rather than in the shared harness.
+      const uploadColumns = await page.locator(".investigation-first__upload-grid").evaluate((node) =>
+        getComputedStyle(node).gridTemplateColumns,
+      );
+      expect(uploadColumns.split(" ").length).toBe(1);
+      await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
+      run.record(requirement, observed.join("; "));
+    }
+
+    expect(run.finish().evaluated.map((evidence) => evidence.id)).toEqual([...REFLOW_SLICE]);
   });
 
   test("reduced motion removes nonzero animation and transition durations from the visible strategy", async ({ page }) => {
+    const run = new BrowserConformanceRun("Investigation First", REDUCED_MOTION_SLICE);
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.reload();
     await expect(page.locator(".investigation-first")).toBeVisible();
-    expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
 
-    const motionAudit = await page.locator(".investigation-first").evaluate((root) => {
-      const durationIsNonzero = (value: string) => value.split(",").some((part) => {
-        const duration = part.trim();
-        return duration.endsWith("ms")
-          ? Number.parseFloat(duration) !== 0
-          : duration.endsWith("s") && Number.parseFloat(duration) !== 0;
-      });
-      const visible = [root, ...Array.from(root.querySelectorAll("*"))].filter((node) => {
-        const element = node as HTMLElement;
-        const style = getComputedStyle(element);
-        return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
-      });
-      return {
-        inspected: visible.length,
-        offenders: visible.flatMap((node) => {
-          const style = getComputedStyle(node);
-          return durationIsNonzero(style.animationDuration) || durationIsNonzero(style.transitionDuration)
-            ? [{
-                animationDuration: style.animationDuration,
-                element: (node as HTMLElement).outerHTML.slice(0, 160),
-                transitionDuration: style.transitionDuration,
-              }]
-            : [];
-        }),
-      };
-    });
-    expect(motionAudit.inspected).toBeGreaterThan(20);
-    expect(motionAudit.offenders).toEqual([]);
-    expect(await page.evaluate(() => getComputedStyle(document.documentElement).scrollBehavior)).toBe("auto");
+    run.record("reduced-motion", await expectReducedMotion(page, strategyRoot(page)));
+    expect(run.finish().evaluated.map((evidence) => evidence.id)).toEqual([...REDUCED_MOTION_SLICE]);
   });
 
   test("forced colors retains system control boundaries and a visible keyboard focus indicator", async ({ page }) => {
+    const run = new BrowserConformanceRun("Investigation First", FORCED_COLORS_SLICE);
     await page.emulateMedia({ forcedColors: "active" });
     await page.reload();
     await expect(page.locator(".investigation-first")).toBeVisible();
-    expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
 
-    const controls = [
-      page.getByLabel("What should the team call this?"),
-      page.getByLabel("Severity"),
-      page.getByRole("button", { name: "Create investigation" }),
-    ];
-    for (const control of controls) {
-      const boundary = await control.evaluate((node) => {
-        const style = getComputedStyle(node);
-        return { borderStyle: style.borderStyle, borderWidth: style.borderWidth };
-      });
-      expect(boundary.borderStyle).not.toBe("none");
-      expect(Number.parseFloat(boundary.borderWidth)).toBeGreaterThan(0);
-    }
+    run.record(
+      "forced-colors",
+      await expectForcedColors(page, [
+        page.getByLabel("What should the team call this?"),
+        page.getByLabel("Severity"),
+        page.getByRole("button", { name: "Create investigation" }),
+      ]),
+    );
+    expect(run.finish().evaluated.map((evidence) => evidence.id)).toEqual([...FORCED_COLORS_SLICE]);
+  });
+});
 
-    const create = controls[2]!;
-    await create.focus();
-    await expect(create).toBeFocused();
-    const focus = await create.evaluate((node) => {
-      const style = getComputedStyle(node);
-      return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
-    });
-    expect(focus.outlineStyle).not.toBe("none");
-    expect(Number.parseFloat(focus.outlineWidth)).toBeGreaterThan(0);
+test.describe("Investigation First browser conformance coverage", () => {
+  test("claims every browser-surface requirement the shared profile declares", () => {
+    assertProfileParity();
+    assertBrowserSurfaceCovered([
+      KEYBOARD_SLICE,
+      REFLOW_SLICE,
+      REDUCED_MOTION_SLICE,
+      FORCED_COLORS_SLICE,
+    ]);
   });
 });
