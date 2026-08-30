@@ -301,6 +301,20 @@ test.describe("Investigation First accessibility and browser conformance", () =>
       await page.goto("/investigations");
       await expect(page.locator(".investigation-first")).toBeVisible();
       observed.push(`collection view: ${await expectReflow(page, requirement, collectionControls())}`);
+      const advancedSummary = page.locator(".investigation-first__advanced > summary");
+      const advancedSummaryLayout = await advancedSummary.evaluate((node) => {
+        const style = getComputedStyle(node);
+        return {
+          clientWidth: node.clientWidth,
+          flexWrap: style.flexWrap,
+          scrollWidth: node.scrollWidth,
+        };
+      });
+      expect(advancedSummaryLayout.flexWrap).toBe("wrap");
+      expect(
+        advancedSummaryLayout.scrollWidth,
+        `advanced-context summary overflows at ${requirement}`,
+      ).toBeLessThanOrEqual(advancedSummaryLayout.clientWidth + 1);
 
       const result = page.locator(".investigation-first__list-button").filter({ hasText: title });
       await activate(result, page);
@@ -334,14 +348,34 @@ test.describe("Investigation First accessibility and browser conformance", () =>
   test("forced colors retains system control boundaries and a visible keyboard focus indicator", async ({ page }) => {
     const run = new BrowserConformanceRun("Investigation First", FORCED_COLORS_SLICE);
     await page.emulateMedia({ forcedColors: "active" });
+    await page.route("**/api/cases", async (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        await route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"unavailable"}' });
+        return;
+      }
+      if (method === "POST") {
+        await route.fulfill({ status: 400, contentType: "application/json", body: '{"error":"validation"}' });
+        return;
+      }
+      await route.continue();
+    });
     await page.reload();
     await expect(page.locator(".investigation-first")).toBeVisible();
+    await page.locator(".investigation-first__advanced > summary").click();
+    await expect(page.locator(".investigation-first__create-status")).toBeVisible();
+    await page.getByLabel("What should the team call this?").fill("Forced-colors create failure");
+    await page.getByRole("button", { name: "Create investigation" }).click();
+    await expect(page.locator(".investigation-first__create-error")).toBeVisible();
 
     run.record(
       "forced-colors",
       await expectForcedColors(page, [
         page.getByLabel("What should the team call this?"),
         page.getByLabel("Severity"),
+        page.locator(".investigation-first__advanced"),
+        page.locator(".investigation-first__create-status"),
+        page.locator(".investigation-first__create-error"),
         page.getByRole("button", { name: "Create investigation" }),
       ]),
     );
