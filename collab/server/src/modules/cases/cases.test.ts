@@ -1030,7 +1030,8 @@ describe("cases timeline evidence provenance", () => {
         url: `/api/cases/${caseId}/evidence/${logArt.id}/bytes`,
         headers: { cookie: alice },
       });
-      expect(bytesDeniedMember.statusCode).toBe(403);
+      expect(bytesDeniedMember.statusCode).toBe(404);
+      expect(JSON.parse(bytesDeniedMember.body)).toEqual({ error: "not_found" });
 
       const bytesOk = await app.inject({
         method: "GET",

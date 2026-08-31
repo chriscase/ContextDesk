@@ -1,3 +1,5 @@
+import { Readable } from "node:stream";
+import type { Multipart, MultipartFile } from "@fastify/multipart";
 import {
   ARTIFACT_KINDS,
   AUTH_ERROR_SCHEMA_ID,
@@ -23,7 +25,7 @@ import {
   type HypothesisStatus,
   type PrivacyClass,
 } from "@cd-collab/contracts";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import {
   requireSessionCapability,
@@ -240,6 +242,250 @@ export interface CaseRouteDeps {
   audit: AuditStore;
   domain: CaseService;
   experiments?: AcceptedDecisionSource;
+  maxUploadBytes: number;
+}
+
+const STREAM_TEXT_FIELDS = new Set([
+  "kind",
+  "summary",
+  "filename",
+  "mediaType",
+  "privacyClass",
+  "expectedHash",
+  "clientTime",
+  "sourceId",
+]);
+const STREAM_ARTIFACT_KINDS = new Set(["log", "email", "attachment"]);
+const AUTHENTICATED_TRANSFER_TIMEOUT_MS = 60 * 60 * 1000;
+const STREAM_MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
+class MultipartEvidenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MultipartEvidenceError";
+  }
+}
+
+function armTransferTimeout(request: FastifyRequest, reply: FastifyReply): void {
+  const noop = (): void => undefined;
+  const requestRaw = request.raw as {
+    setTimeout?: (ms: number, cb?: () => void) => void;
+  };
+  const replyRaw = reply.raw as {
+    setTimeout?: (ms: number, cb?: () => void) => void;
+  };
+  requestRaw.setTimeout?.(AUTHENTICATED_TRANSFER_TIMEOUT_MS, noop);
+  replyRaw.setTimeout?.(AUTHENTICATED_TRANSFER_TIMEOUT_MS, noop);
+}
+
+function abortSignalForRequest(request: FastifyRequest): AbortSignal {
+  const controller = new AbortController();
+  const raw = request.raw as {
+    setTimeout?: (ms: number) => void;
+    once?: (event: string, listener: () => void) => void;
+    readableEnded?: boolean;
+    destroyed?: boolean;
+  };
+  // Fastify inject's mock request is not a Node HTTP IncomingMessage.
+  if (typeof raw.setTimeout !== "function" || typeof raw.once !== "function") {
+    return controller.signal;
+  }
+  const abort = (): void => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+  raw.once("aborted", abort);
+  raw.once("close", () => {
+    if (raw.destroyed && !raw.readableEnded) abort();
+  });
+  return controller.signal;
+}
+
+function throwIfTransferAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  throw new Error("evidence stream aborted");
+}
+
+function copyBoundedChunk(chunk: unknown): Uint8Array {
+  if (typeof chunk === "string") return Uint8Array.from(Buffer.from(chunk));
+  if (chunk instanceof Uint8Array) return Uint8Array.from(chunk);
+  throw new MultipartEvidenceError("multipart file chunk must be binary");
+}
+
+function asAsyncByteSource(file: MultipartFile["file"] | undefined): AsyncIterable<unknown> {
+  if (file && typeof (file as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+    return file as AsyncIterable<unknown>;
+  }
+  throw new MultipartEvidenceError("multipart file stream is missing");
+}
+
+async function discardMultipartFile(part: MultipartFile, signal?: AbortSignal): Promise<void> {
+  const file = part.file as Readable | undefined;
+  if (!file || file.readableEnded || file.destroyed) return;
+  try {
+    if (typeof (file as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+      for await (const chunk of file) {
+        void chunk;
+        if (signal?.aborted) break;
+      }
+    } else if (typeof file.resume === "function") {
+      file.resume();
+    }
+  } catch {
+    // File already ended or the parser rejected it.
+  } finally {
+    if (signal?.aborted && !file.destroyed && typeof file.destroy === "function") {
+      file.destroy();
+    }
+  }
+}
+
+async function drainRemainingParts(
+  parts: AsyncIterator<Multipart> | undefined,
+  current?: MultipartFile | null,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (current) await discardMultipartFile(current, signal);
+  if (!parts) return;
+  try {
+    for (;;) {
+      const next = await parts.next();
+      if (next.done) return;
+      const part = next.value as Multipart;
+      if (part.type === "file") await discardMultipartFile(part, signal);
+    }
+  } catch {
+    // Best-effort drain of a rejected multipart body.
+  }
+}
+
+function contentDispositionAttachment(filename: string | null): string {
+  if (!filename) return "attachment";
+  let sanitized = "";
+  for (const char of filename) {
+    const code = char.charCodeAt(0);
+    if (code < 32 || code === 127 || char === '"' || char === "\\") {
+      sanitized += "_";
+    } else {
+      sanitized += char;
+    }
+  }
+  return sanitized ? `attachment; filename="${sanitized}"` : "attachment";
+}
+
+function ifNoneMatchHits(
+  header: string | string[] | undefined,
+  etag: string,
+): boolean {
+  return typeof header === "string" && header.trim() === etag;
+}
+
+type ParsedBytesRange =
+  | { kind: "absent" }
+  | { kind: "unsatisfiable" }
+  | { kind: "satisfiable"; start: number; end: number };
+
+function parseInclusiveBytesRange(
+  header: string | string[] | undefined,
+  size: number,
+): ParsedBytesRange {
+  if (header === undefined) return { kind: "absent" };
+  if (Array.isArray(header) || typeof header !== "string") {
+    return { kind: "unsatisfiable" };
+  }
+  const value = header.trim();
+  if (!value.toLowerCase().startsWith("bytes=")) return { kind: "unsatisfiable" };
+  const spec = value.slice("bytes=".length);
+  if (!spec || spec.includes(",") || spec.startsWith("-")) {
+    return { kind: "unsatisfiable" };
+  }
+  const match = /^(\d+)-(\d+)?$/u.exec(spec);
+  if (!match) return { kind: "unsatisfiable" };
+  const start = Number(match[1]);
+  if (!Number.isSafeInteger(start)) return { kind: "unsatisfiable" };
+  const end = match[2] === undefined ? size - 1 : Number(match[2]);
+  if (!Number.isSafeInteger(end)) return { kind: "unsatisfiable" };
+  if (size <= 0 || start > end || start >= size) return { kind: "unsatisfiable" };
+  return { kind: "satisfiable", start, end: Math.min(end, size - 1) };
+}
+
+function applyContentHeaders(
+  reply: FastifyReply,
+  options: {
+    status: number;
+    etag: string;
+    length: number;
+    contentType: string;
+    filename: string | null;
+    contentRange?: string;
+  },
+): void {
+  void reply.code(options.status);
+  void reply.header("ETag", options.etag);
+  void reply.header("Accept-Ranges", "bytes");
+  void reply.header("Content-Length", String(options.length));
+  void reply.header("Content-Type", options.contentType);
+  void reply.header("Content-Disposition", contentDispositionAttachment(options.filename));
+  void reply.header("Cache-Control", "no-store");
+  void reply.header("X-Content-Type-Options", "nosniff");
+  if (options.contentRange) {
+    void reply.header("Content-Range", options.contentRange);
+  }
+}
+
+function storageUnavailable(reply: FastifyReply): { error: "storage_unavailable" } {
+  void reply.code(503);
+  return { error: "storage_unavailable" };
+}
+
+function streamUploadError(
+  reply: FastifyReply,
+  err: unknown,
+): ReturnType<typeof domainError> | { error: string } {
+  if (err instanceof MultipartEvidenceError) {
+    void reply.code(400);
+    return { error: err.message };
+  }
+  const message = err instanceof Error ? err.message : "invalid";
+  const code = typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code?: unknown }).code)
+    : "";
+  if (/FST_FILES_LIMIT|FST_PARTS_LIMIT|FST_FIELDS_LIMIT/i.test(`${message} ${code}`)) {
+    void reply.code(400);
+    return { error: "exactly one file field named file is required" };
+  }
+  if (
+    message === "evidence stream exceeded maxBytes"
+    || message === "upload exceeds size cap"
+    || /file too large|FST_REQ_FILE_TOO_LARGE|FST_ERR_CTP_BODY_TOO_LARGE/i.test(`${message} ${code}`)
+  ) {
+    void reply.code(413);
+    return { error: "upload exceeds size cap" };
+  }
+  if (/aborted/i.test(message)) {
+    void reply.code(400);
+    return { error: "upload_aborted" };
+  }
+  if (
+    /evidence (blob|metadata)|failed verification|s3 evidence|hash verification failed after storage/i
+      .test(message)
+  ) {
+    return storageUnavailable(reply);
+  }
+  return domainError(reply, err);
+}
+
+async function* multipartFileBytes(
+  file: AsyncIterable<unknown>,
+  signal: AbortSignal,
+): AsyncIterable<Uint8Array> {
+  throwIfTransferAborted(signal);
+  for await (const chunk of file) {
+    throwIfTransferAborted(signal);
+    const bytes = copyBoundedChunk(chunk);
+    if (bytes.byteLength > 0) yield bytes;
+  }
 }
 
 export async function registerCaseRoutes(
@@ -978,6 +1224,144 @@ export async function registerCaseRoutes(
     }
   });
 
+  app.post(
+    "/api/cases/:id/evidence/stream",
+    { bodyLimit: deps.maxUploadBytes + STREAM_MULTIPART_OVERHEAD_BYTES },
+    async (request, reply) => {
+      const loaded = await sessionOf(request, reply);
+      if ("denied" in loaded) return loaded.denied;
+      const ctx = loaded.ctx;
+      if (!ctx.has("investigation:write")) {
+        void reply.code(403);
+        return authError("forbidden");
+      }
+      const id = (request.params as { id: string }).id;
+      if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+        return authError("forbidden");
+      }
+      let parts: AsyncIterator<Multipart> | undefined;
+      let filePart: MultipartFile | null = null;
+      armTransferTimeout(request, reply);
+      const signal = abortSignalForRequest(request);
+      try {
+        parts = (
+          request as FastifyRequest & { parts: () => AsyncIterator<Multipart> }
+        ).parts();
+        const fields: Record<string, string> = {};
+        for (;;) {
+          const next = await parts.next();
+          if (next.done) break;
+          const part = next.value as Multipart;
+          if (part.type === "file") {
+            if (Object.keys(fields).length === 0) {
+              await discardMultipartFile(part, signal);
+              throw new MultipartEvidenceError("multipart file must not appear first");
+            }
+            if (filePart) {
+              await discardMultipartFile(part, signal);
+              throw new MultipartEvidenceError("exactly one file field named file is required");
+            }
+            if (part.fieldname !== "file") {
+              await discardMultipartFile(part, signal);
+              throw new MultipartEvidenceError("file field must be named file");
+            }
+            filePart = part;
+            break;
+          }
+          if (part.type !== "field") {
+            throw new MultipartEvidenceError("malformed multipart part");
+          }
+          if (!STREAM_TEXT_FIELDS.has(part.fieldname)) {
+            throw new MultipartEvidenceError("unknown multipart field");
+          }
+          if (Object.prototype.hasOwnProperty.call(fields, part.fieldname)) {
+            throw new MultipartEvidenceError("duplicate multipart field");
+          }
+          if (typeof part.value !== "string") {
+            throw new MultipartEvidenceError("multipart text field must be a string");
+          }
+          fields[part.fieldname] = part.value;
+        }
+        if (!filePart) {
+          throw new MultipartEvidenceError("exactly one file field named file is required");
+        }
+        const kind = fields.kind;
+        const summary = fields.summary;
+        if (!kind || !summary) {
+          await discardMultipartFile(filePart, signal);
+          throw new MultipartEvidenceError("kind and summary are required");
+        }
+        if (!STREAM_ARTIFACT_KINDS.has(kind)) {
+          await discardMultipartFile(filePart, signal);
+          throw new MultipartEvidenceError(
+            kind === "file_server_ref"
+              ? "streaming evidence does not accept file-server references"
+              : "invalid",
+          );
+        }
+        const evidence: {
+          kind: ArtifactKind;
+          summary: string;
+          filename?: string;
+          mediaType?: string;
+          expectedHash?: string | null;
+          privacyClass?: PrivacyClass;
+          clientTime?: string;
+          sourceId?: string;
+        } = { kind: kind as ArtifactKind, summary };
+        if (fields.filename) evidence.filename = fields.filename;
+        if (fields.mediaType) evidence.mediaType = fields.mediaType;
+        if (Object.prototype.hasOwnProperty.call(fields, "expectedHash") && fields.expectedHash) {
+          evidence.expectedHash = fields.expectedHash;
+        }
+        const privacy = fields.privacyClass;
+        if (privacy && (PRIVACY_CLASSES as readonly string[]).includes(privacy)) {
+          evidence.privacyClass = privacy as PrivacyClass;
+        }
+        if (fields.clientTime !== undefined) evidence.clientTime = fields.clientTime;
+        if (fields.sourceId) evidence.sourceId = fields.sourceId;
+
+        async function* fileSource(): AsyncIterable<Uint8Array> {
+          yield* multipartFileBytes(asAsyncByteSource(filePart!.file), signal);
+          if ((filePart!.file as { truncated?: boolean }).truncated) {
+            throw new Error("upload exceeds size cap");
+          }
+          const trailing = await parts!.next();
+          if (!trailing.done) {
+            const extra = trailing.value as Multipart;
+            if (extra.type === "file") await discardMultipartFile(extra, signal);
+            throw new MultipartEvidenceError(
+              extra.type === "file"
+                ? "exactly one file field named file is required"
+                : "unexpected trailing multipart field",
+            );
+          }
+        }
+
+        const uploaded = await deps.domain.addStreamedEvidence(
+          id,
+          ctx.actor,
+          {
+            ...evidence,
+            source: fileSource(),
+            maxBytes: deps.maxUploadBytes,
+            signal,
+          },
+          request.ip,
+        );
+        return {
+          schemaId: EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
+          caseId: id,
+          ...uploaded,
+        };
+      } catch (err) {
+        await drainRemainingParts(parts, filePart, signal);
+        if (typeof request.raw.resume === "function") request.raw.resume();
+        return streamUploadError(reply, err);
+      }
+    },
+  );
+
   app.get("/api/cases/:id/evidence", async (request, reply) => {
     const loaded = await sessionOf(request, reply);
     if ("denied" in loaded) return loaded.denied;
@@ -1017,19 +1401,139 @@ export async function registerCaseRoutes(
     if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
       return { error: "not_found" };
     }
-    const bytes = await deps.domain.getArtifactBytes(
-      params.id,
-      params.eid,
-      ctx.actor,
-      ctx.isAdmin,
-      ctx.has("evidence:private:read"),
-    );
-    if (!bytes) {
-      void reply.code(403);
-      return authError("forbidden");
+    let result: Awaited<ReturnType<CaseService["getArtifactJsonBytes"]>>;
+    try {
+      result = await deps.domain.getArtifactJsonBytes(
+        params.id,
+        params.eid,
+        ctx.actor,
+        ctx.isAdmin,
+        ctx.has("evidence:private:read"),
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      if (message === "case not found") {
+        void reply.code(404);
+        return { error: "not_found" };
+      }
+      return storageUnavailable(reply);
     }
-    return { contentBase64: Buffer.from(bytes).toString("base64") };
+    if (result.outcome === "not_found") {
+      void reply.code(404);
+      return { error: "not_found" };
+    }
+    if (result.outcome === "too_large") {
+      void reply.code(400);
+      return { error: "too_large_for_json_bytes" };
+    }
+    return { contentBase64: Buffer.from(result.bytes).toString("base64") };
   });
+
+  const contentHandler = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ) => {
+      const loaded = await sessionOf(request, reply);
+      if ("denied" in loaded) return loaded.denied;
+      const ctx = loaded.ctx;
+      const params = request.params as { id: string; eid: string };
+      if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
+        return { error: "not_found" };
+      }
+      const artifact = await deps.domain.getReadableHeldArtifact(
+        params.id,
+        params.eid,
+        ctx.actor,
+        ctx.isAdmin,
+        ctx.has("evidence:private:read"),
+      );
+      if (!artifact?.contentHash || artifact.byteLength === null) {
+        void reply.code(404);
+        return { error: "not_found" };
+      }
+      armTransferTimeout(request, reply);
+      let meta;
+      try {
+        meta = await deps.domain.headEvidence(artifact.contentHash);
+      } catch {
+        return storageUnavailable(reply);
+      }
+      if (!meta || meta.byteLength !== artifact.byteLength || meta.hash !== artifact.contentHash) {
+        return storageUnavailable(reply);
+      }
+      const etag = `"${artifact.contentHash}"`;
+      if (ifNoneMatchHits(request.headers["if-none-match"], etag)) {
+        void reply.code(304);
+        void reply.header("ETag", etag);
+        void reply.header("Accept-Ranges", "bytes");
+        void reply.header("Cache-Control", "no-store");
+        void reply.header("X-Content-Type-Options", "nosniff");
+        return reply.send();
+      }
+      const size = artifact.byteLength;
+      const range = parseInclusiveBytesRange(request.headers.range, size);
+      if (range.kind === "unsatisfiable") {
+        void reply.code(416);
+        void reply.header("Accept-Ranges", "bytes");
+        void reply.header("Content-Range", `bytes */${size}`);
+        void reply.header("Cache-Control", "no-store");
+        void reply.header("X-Content-Type-Options", "nosniff");
+        return reply.send();
+      }
+      const start = range.kind === "satisfiable" ? range.start : 0;
+      const end = range.kind === "satisfiable" ? range.end : Math.max(size - 1, 0);
+      const length = size === 0 ? 0 : end - start + 1;
+      const contentType = artifact.mediaType || "application/octet-stream";
+      const representation = {
+        status: range.kind === "satisfiable" ? 206 : 200,
+        etag,
+        length,
+        contentType,
+        filename: artifact.filename,
+        ...(range.kind === "satisfiable"
+          ? { contentRange: `bytes ${start}-${end}/${size}` }
+          : {}),
+      };
+      if (request.method === "HEAD") {
+        applyContentHeaders(reply, representation);
+        return reply.send();
+      }
+      let handle: Awaited<ReturnType<CaseService["openEvidenceRead"]>>;
+      try {
+        handle = await deps.domain.openEvidenceRead(
+          artifact.contentHash,
+          range.kind === "satisfiable" ? { start, end } : undefined,
+        );
+      } catch {
+        return storageUnavailable(reply);
+      }
+      applyContentHeaders(reply, representation);
+      const cancel = abortSignalForRequest(request);
+      async function* evidenceBytes(): AsyncIterable<Uint8Array> {
+        const iterator = handle.bytes()[Symbol.asyncIterator]();
+        try {
+          for (;;) {
+            if (cancel.aborted) break;
+            const next = await iterator.next();
+            if (next.done) break;
+            const chunk = next.value;
+            if (chunk && chunk.byteLength > 0) yield copyBoundedChunk(chunk);
+          }
+        } finally {
+          if (typeof iterator.return === "function") {
+            await Promise.resolve(iterator.return()).catch(() => undefined);
+          }
+        }
+      }
+      const stream = Readable.from(evidenceBytes(), { objectMode: false });
+      return reply.send(stream);
+  };
+  app.get(
+    "/api/cases/:id/evidence/:eid/content",
+    { exposeHeadRoute: false },
+    contentHandler,
+  );
+  app.head("/api/cases/:id/evidence/:eid/content", contentHandler);
 
   app.post("/api/cases/:id/evidence/:eid/recheck", async (request, reply) => {
     const loaded = await sessionOf(request, reply);

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import {
   HEALTH_SCHEMA_ID,
@@ -152,6 +153,19 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.config.trustProxy === null ? {} : { trustProxy: deps.config.trustProxy }),
   });
   registerBrowserMutationCsrfGuard(app);
+  const maxUploadBytes = deps.config.evidence.maxUploadBytes;
+  await app.register(multipart, {
+    attachFieldsToBody: false,
+    limits: {
+      fieldNameSize: 100,
+      fieldSize: 8192,
+      fields: 8,
+      fileSize: maxUploadBytes,
+      files: 1,
+      parts: 9,
+      headerPairs: 32,
+    },
+  });
   const requiredMigrationVersion = latestMigrationVersion();
 
   app.get("/health", async (): Promise<HealthResponseV1> => {
@@ -294,6 +308,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         sessionAuth,
         audit: security.audit,
         domain: deps.domain,
+        maxUploadBytes,
         ...(deps.experiments ? { experiments: deps.experiments } : {}),
       });
       await registerInvestigationActivityRoutes(app, {

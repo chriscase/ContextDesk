@@ -6,6 +6,7 @@ import {
   DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
   EVIDENCE_STORAGE_ERRORS,
   MAX_EVIDENCE_S3_UPLOAD_BYTES,
+  evidenceMaxUploadBytes,
   loadEvidenceStorageSettings,
   normalizeEvidenceS3Prefix,
 } from "./s3-settings.js";
@@ -56,6 +57,7 @@ describe("evidence storage settings defaults", () => {
       provider: "filesystem",
       controlRoot: CONTROL,
       storage: "postgres",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
     });
     expect(JSON.stringify(settings)).not.toMatch(/secret|token|access key/i);
   });
@@ -83,7 +85,6 @@ describe("evidence storage settings defaults", () => {
       "COLLAB_EVIDENCE_S3_ALLOW_HTTP",
       "COLLAB_EVIDENCE_S3_CA_FILE",
       "COLLAB_EVIDENCE_S3_TIMEOUT_MS",
-      "COLLAB_EVIDENCE_MAX_UPLOAD_BYTES",
       "COLLAB_EVIDENCE_S3_CREDENTIALS_MODE",
       "COLLAB_EVIDENCE_S3_ACCESS_KEY_ID",
       "COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE",
@@ -128,6 +129,7 @@ describe("evidence s3 endpoint and TLS flags", () => {
     expect(garage.s3.forcePathStyle).toBe(true);
     expect(garage.s3.allowHttp).toBe(false);
     expect(garage.s3.timeoutMs).toBe(30_000);
+    expect(garage.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
     expect(garage.s3.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
     expect(garage.s3.caConfigured).toBe(false);
     expect(garage.s3.caFilePath).toBeNull();
@@ -284,16 +286,53 @@ describe("evidence s3 prefix, bucket, timeout, and size", () => {
     }
   });
 
+  it("treats loader output as always having maxUploadBytes", () => {
+    const filesystem = load({});
+    expect(filesystem.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+    const s3 = load(s3Base());
+    expect(s3.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+    expect(evidenceMaxUploadBytes({
+      provider: "filesystem",
+      controlRoot: CONTROL,
+      storage: "postgres",
+    })).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+  });
+
+  it("accepts COLLAB_EVIDENCE_MAX_UPLOAD_BYTES in filesystem mode", () => {
+    const settings = load({ COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "1048576" });
+    expect(settings).toEqual({
+      provider: "filesystem",
+      controlRoot: CONTROL,
+      storage: "postgres",
+      maxUploadBytes: 1_048_576,
+    });
+    expectThrow(
+      { COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "0" },
+      EVIDENCE_STORAGE_ERRORS.maxUpload,
+    );
+    expectThrow(
+      { COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "" },
+      EVIDENCE_STORAGE_ERRORS.maxUpload,
+    );
+    expectThrow(
+      { COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "5368709121" },
+      EVIDENCE_STORAGE_ERRORS.maxUpload,
+    );
+  });
+
   it("bounds timeout and upload size, defaulting upload to 512 MiB", () => {
     const settings = load(s3Base());
     if (settings.provider !== "s3") throw new Error("expected s3");
+    expect(settings.maxUploadBytes).toBe(536_870_912);
     expect(settings.s3.maxUploadBytes).toBe(536_870_912);
     const min = load(s3Base({ COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "1" }));
     const max = load(
       s3Base({ COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: String(MAX_EVIDENCE_S3_UPLOAD_BYTES) }),
     );
     if (min.provider !== "s3" || max.provider !== "s3") throw new Error("expected s3");
+    expect(min.maxUploadBytes).toBe(1);
     expect(min.s3.maxUploadBytes).toBe(1);
+    expect(max.maxUploadBytes).toBe(MAX_EVIDENCE_S3_UPLOAD_BYTES);
     expect(max.s3.maxUploadBytes).toBe(MAX_EVIDENCE_S3_UPLOAD_BYTES);
     expectThrow(
       s3Base({ COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "0" }),

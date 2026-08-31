@@ -28,11 +28,13 @@ describe("runtime configuration", () => {
       provider: "filesystem",
       controlRoot: ".data/evidence",
       storage: "postgres",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
     });
     expect(testConfig({ evidenceRoot: "/tmp/ev", storage: "sqlite" }).evidence).toEqual({
       provider: "filesystem",
       controlRoot: "/tmp/ev",
       storage: "sqlite",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
     });
   });
 
@@ -92,6 +94,7 @@ describe("runtime configuration", () => {
       provider: "filesystem",
       controlRoot: ".data/evidence",
       storage: "postgres",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
     });
     expect(loadEvidenceStorageSettings(database, {
       controlRoot: config.evidenceRoot,
@@ -137,6 +140,7 @@ describe("runtime configuration", () => {
       provider: "s3",
       controlRoot: ".data/evidence",
       storage: "postgres",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
       s3: {
         endpoint: "https://objects.example.test",
         region: "garage",
@@ -157,6 +161,30 @@ describe("runtime configuration", () => {
     expect(json).not.toContain(accessKey);
     expect(json).not.toContain(credentialFile);
     expect(json).not.toMatch(/BEGIN CERTIFICATE/);
+  });
+
+  it("always populates a provider-neutral maxUploadBytes on Config", () => {
+    const filesystem = loadRuntimeConfig(database);
+    expect(filesystem.evidence.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+    expect(testConfig().evidence.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+    expect(
+      testConfig({
+        evidence: { provider: "filesystem", controlRoot: "/tmp/ev", storage: "sqlite" },
+      }).evidence.maxUploadBytes,
+    ).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+  });
+
+  it("accepts COLLAB_EVIDENCE_MAX_UPLOAD_BYTES in filesystem mode", () => {
+    const config = loadRuntimeConfig({
+      ...database,
+      COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "1048576",
+    });
+    expect(config.evidence).toEqual({
+      provider: "filesystem",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+      maxUploadBytes: 1_048_576,
+    });
   });
 
   it("fails closed on s3 credential load without storing credentials on Config", () => {

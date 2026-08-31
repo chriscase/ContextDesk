@@ -19,8 +19,10 @@ export type EvidenceProviderKind =
   | typeof EVIDENCE_PROVIDER_S3;
 
 export const DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES = 536_870_912;
-export const MAX_EVIDENCE_S3_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
-export const MIN_EVIDENCE_S3_UPLOAD_BYTES = 1;
+export const MIN_EVIDENCE_UPLOAD_BYTES = 1;
+export const MAX_EVIDENCE_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+export const MAX_EVIDENCE_S3_UPLOAD_BYTES = MAX_EVIDENCE_UPLOAD_BYTES;
+export const MIN_EVIDENCE_S3_UPLOAD_BYTES = MIN_EVIDENCE_UPLOAD_BYTES;
 export const DEFAULT_EVIDENCE_S3_TIMEOUT_MS = 30_000;
 export const MIN_EVIDENCE_S3_TIMEOUT_MS = 1_000;
 export const MAX_EVIDENCE_S3_TIMEOUT_MS = 120_000;
@@ -107,18 +109,45 @@ export interface EvidenceS3Settings {
   credentialsMode: EvidenceCredentialsMode;
 }
 
+type EvidenceStorageBase = {
+  controlRoot: string;
+  storage: "postgres" | "sqlite";
+};
+
+/**
+ * Secret-free evidence byte-backend settings. `loadEvidenceStorageSettings`
+ * always populates `maxUploadBytes` (default 512 MiB, hard max 5 GiB).
+ * Hand-built test fixtures may omit it; {@link evidenceMaxUploadBytes}
+ * restores the loader default in that case.
+ */
 export type EvidenceStorageSettings =
-  | {
+  | (EvidenceStorageBase & {
       provider: "filesystem";
-      controlRoot: string;
-      storage: "postgres" | "sqlite";
-    }
-  | {
+      maxUploadBytes?: number;
+    })
+  | (EvidenceStorageBase & {
       provider: "s3";
-      controlRoot: string;
-      storage: "postgres" | "sqlite";
+      maxUploadBytes?: number;
       s3: EvidenceS3Settings;
-    };
+    });
+
+/** Loader/runtime settings: the upload ceiling is always present. */
+export type LoadedEvidenceStorageSettings = EvidenceStorageSettings & {
+  maxUploadBytes: number;
+};
+
+export function evidenceMaxUploadBytes(settings: EvidenceStorageSettings): number {
+  if (
+    typeof settings.maxUploadBytes === "number"
+    && Number.isSafeInteger(settings.maxUploadBytes)
+    && settings.maxUploadBytes >= MIN_EVIDENCE_UPLOAD_BYTES
+    && settings.maxUploadBytes <= MAX_EVIDENCE_UPLOAD_BYTES
+  ) {
+    return settings.maxUploadBytes;
+  }
+  if (settings.provider === "s3") return settings.s3.maxUploadBytes;
+  return DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES;
+}
 
 export function envIsPresent(env: NodeJS.ProcessEnv, name: string): boolean {
   return Object.hasOwn(env, name) && env[name] !== undefined;
@@ -148,13 +177,20 @@ function listedS3Leftovers(env: NodeJS.ProcessEnv): string[] {
   const leftovers: string[] = [];
   for (const name of Object.keys(env)) {
     if (!envIsPresent(env, name)) continue;
-    if (name === "COLLAB_EVIDENCE_MAX_UPLOAD_BYTES") {
-      leftovers.push(name);
-      continue;
-    }
     if (name.startsWith("COLLAB_EVIDENCE_S3_")) leftovers.push(name);
   }
   return leftovers;
+}
+
+function parseMaxUploadBytes(env: NodeJS.ProcessEnv): number {
+  return parseOptionalBoundedInt(
+    env,
+    "COLLAB_EVIDENCE_MAX_UPLOAD_BYTES",
+    MIN_EVIDENCE_UPLOAD_BYTES,
+    MAX_EVIDENCE_UPLOAD_BYTES,
+    DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+    EVIDENCE_STORAGE_ERRORS.maxUpload,
+  );
 }
 
 function assertNoUnknownS3Names(env: NodeJS.ProcessEnv): void {
@@ -504,7 +540,7 @@ function parseCaFile(env: NodeJS.ProcessEnv): string | null {
 export function loadEvidenceStorageSettings(
   env: NodeJS.ProcessEnv,
   options: { controlRoot: string; storage: "postgres" | "sqlite" },
-): EvidenceStorageSettings {
+): LoadedEvidenceStorageSettings {
   const provider = parseProvider(env);
   if (provider === EVIDENCE_PROVIDER_FILESYSTEM) {
     if (listedS3Leftovers(env).length > 0) fail(EVIDENCE_STORAGE_ERRORS.leftover);
@@ -512,6 +548,7 @@ export function loadEvidenceStorageSettings(
       provider,
       controlRoot: options.controlRoot,
       storage: options.storage,
+      maxUploadBytes: parseMaxUploadBytes(env),
     };
   }
   assertNoUnknownS3Names(env);
@@ -563,14 +600,7 @@ export function loadEvidenceStorageSettings(
     DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
     EVIDENCE_STORAGE_ERRORS.timeout,
   );
-  const maxUploadBytes = parseOptionalBoundedInt(
-    env,
-    "COLLAB_EVIDENCE_MAX_UPLOAD_BYTES",
-    MIN_EVIDENCE_S3_UPLOAD_BYTES,
-    MAX_EVIDENCE_S3_UPLOAD_BYTES,
-    DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
-    EVIDENCE_STORAGE_ERRORS.maxUpload,
-  );
+  const maxUploadBytes = parseMaxUploadBytes(env);
   const credentialsMode = parseCredentialsMode(env);
   if (credentialsMode === "default_chain") {
     assertDefaultChainHasNoStaticLeftovers(env);
@@ -580,6 +610,7 @@ export function loadEvidenceStorageSettings(
     provider,
     controlRoot: options.controlRoot,
     storage: options.storage,
+    maxUploadBytes,
     s3: {
       endpoint,
       region,

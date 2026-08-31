@@ -10,6 +10,7 @@ import {
   type EvidenceFinalizeOptions,
   type EvidenceStage,
   type EvidenceStore,
+  type EvidenceStreamStage,
   type EvidenceWriteBatch,
 } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
@@ -106,6 +107,40 @@ function instrumentBatch(store: FilesystemEvidenceStore): {
   return { events, batch: () => captured };
 }
 
+function instrumentStream(store: FilesystemEvidenceStore): {
+  events: string[];
+  stage: () => EvidenceStreamStage | null;
+} {
+  const events: string[] = [];
+  let captured: EvidenceStreamStage | null = null;
+  const original = store.stageStream.bind(store);
+  store.stageStream = async (source, opts) => {
+    const stage = await original(source, opts);
+    captured = stage;
+    const promote = stage.promote.bind(stage);
+    const rollback = stage.rollback.bind(stage);
+    const finalize = stage.finalize.bind(stage);
+    stage.promote = async () => {
+      events.push("promote");
+      return promote();
+    };
+    stage.rollback = async () => {
+      events.push("rollback");
+      return rollback();
+    };
+    stage.finalize = async (options?: EvidenceFinalizeOptions) => {
+      events.push(options?.retainPendingJournal ? "finalize:retain" : "finalize");
+      return finalize(options);
+    };
+    return stage;
+  };
+  return { events, stage: () => captured };
+}
+
+async function* bytesSource(bytes: Uint8Array): AsyncIterable<Uint8Array> {
+  yield bytes;
+}
+
 function stageOnlyEvidence(store: FilesystemEvidenceStore): EvidenceStore & {
   events: string[];
 } {
@@ -138,6 +173,8 @@ function stageOnlyEvidence(store: FilesystemEvidenceStore): EvidenceStore & {
     },
     get: store.get.bind(store),
     head: store.head.bind(store),
+    stageStream: store.stageStream.bind(store),
+    openRead: store.openRead.bind(store),
     verify: store.verify.bind(store),
     putFileServerReference: store.putFileServerReference.bind(store),
     getFileServerReference: store.getFileServerReference.bind(store),
@@ -544,6 +581,127 @@ describe("case-store commit outcome fencing", () => {
       expect(instrument.events).not.toContain("rollback");
       expect(await evidence.verify(sha256Hex(bytes))).toBe(true);
       expect(await pendingJournalNames(root)).not.toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a streamed journal and never rolls back on unknown COMMIT after promote", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-commit-outcome-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const cases = new UnknownCommitStore();
+    const instrument = instrumentStream(evidence);
+    const beginWriteBatch = evidence.beginWriteBatch.bind(evidence);
+    const batchCalls: number[] = [];
+    evidence.beginWriteBatch = async () => {
+      batchCalls.push(1);
+      return beginWriteBatch();
+    };
+    const service = new CaseService(evidence, new MemoryAuditStore(), cases, new CatalogService());
+    try {
+      const created = await service.createCase(actor, { title: "Unknown stream commit fixture" }, "test");
+      cases.unknownCommit = true;
+      const bytes = new TextEncoder().encode("unknown-commit-stream\n");
+      const thrown = await service.addStreamedEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "unknown-commit-stream.log",
+          mediaType: "text/plain",
+          source: bytesSource(bytes),
+          summary: "Synthetic unknown stream commit.",
+          privacyClass: "share_safe",
+          maxBytes: bytes.byteLength,
+        },
+        "test",
+      ).then(
+        () => {
+          throw new Error("expected unknown commit outcome");
+        },
+        (error: unknown) => error,
+      );
+      typedUnknown(thrown);
+      expect(batchCalls).toEqual([]);
+      expect(instrument.events).toEqual(["promote", "finalize:retain"]);
+      expect(instrument.events).not.toContain("rollback");
+      expect(await evidence.verify(sha256Hex(bytes))).toBe(true);
+      expect(await pendingJournalNames(root)).not.toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls streamed evidence back for a definite pre-COMMIT failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-commit-outcome-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const instrument = instrumentStream(evidence);
+    const service = new CaseService(
+      evidence,
+      new MemoryAuditStore(),
+      new BoomArtifactStore(),
+      new CatalogService(),
+    );
+    try {
+      const created = await service.createCase(actor, { title: "Stream pre-commit rollback fixture" }, "test");
+      const bytes = new TextEncoder().encode("stream-pre-commit-rollback\n");
+      await expect(
+        service.addStreamedEvidence(
+          created.id,
+          actor,
+          {
+            kind: "log",
+            filename: "stream-pre-commit.log",
+            mediaType: "text/plain",
+            source: bytesSource(bytes),
+            summary: "Synthetic stream pre-commit rollback.",
+            maxBytes: bytes.byteLength,
+          },
+          "test",
+        ),
+      ).rejects.toThrow("artifact store failed");
+      expect(instrument.events).toEqual(["rollback"]);
+      expect(instrument.events).not.toContain("finalize:retain");
+      expect(instrument.events).not.toContain("promote");
+      expect(await evidence.head(sha256Hex(bytes))).toBeNull();
+      expect(await pendingJournalNames(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls streamed evidence back on expected hash mismatch before promotion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-commit-outcome-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const instrument = instrumentStream(evidence);
+    const service = new CaseService(
+      evidence,
+      new MemoryAuditStore(),
+      new MemoryCaseStore(),
+      new CatalogService(),
+    );
+    try {
+      const created = await service.createCase(actor, { title: "Stream hash mismatch fixture" }, "test");
+      const bytes = new TextEncoder().encode("stream-hash-mismatch\n");
+      await expect(
+        service.addStreamedEvidence(
+          created.id,
+          actor,
+          {
+            kind: "attachment",
+            filename: "mismatch.bin",
+            mediaType: "application/octet-stream",
+            source: bytesSource(bytes),
+            expectedHash: "0".repeat(64),
+            summary: "Synthetic stream hash mismatch.",
+            maxBytes: bytes.byteLength,
+          },
+          "test",
+        ),
+      ).rejects.toThrow("held evidence hash mismatch");
+      expect(instrument.events).toEqual(["rollback"]);
+      expect(instrument.events).not.toContain("promote");
+      expect(await evidence.head(sha256Hex(bytes))).toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -5,17 +5,21 @@
  */
 import { loadEvidenceS3Credentials } from "./evidence/s3-secrets.js";
 import {
+  DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+  evidenceMaxUploadBytes,
   loadEvidenceStorageSettings,
-  type EvidenceStorageSettings,
+  type LoadedEvidenceStorageSettings,
 } from "./evidence/s3-settings.js";
 
 export {
+  evidenceMaxUploadBytes,
   loadEvidenceStorageSettings,
 } from "./evidence/s3-settings.js";
 export type {
   EvidenceProviderKind,
   EvidenceS3Settings,
   EvidenceStorageSettings,
+  LoadedEvidenceStorageSettings,
 } from "./evidence/s3-settings.js";
 
 export interface Config {
@@ -36,7 +40,7 @@ export interface Config {
    * Secret-free evidence byte-backend settings. S3 credentials stay in the
    * server credential loader and are never stored on this object.
    */
-  evidence: EvidenceStorageSettings;
+  evidence: LoadedEvidenceStorageSettings;
   /** Built UI assets; null skips static serving (API-only). */
   staticDir: string | null;
   authMode: "ldap" | "local";
@@ -176,6 +180,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       provider: "filesystem",
       controlRoot: ".data/evidence",
       storage: "postgres",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
     },
     staticDir: null,
     authMode: "ldap",
@@ -187,6 +192,12 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       provider: "filesystem",
       controlRoot: config.evidenceRoot,
       storage: config.storage,
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+    };
+  } else {
+    config.evidence = {
+      ...config.evidence,
+      maxUploadBytes: evidenceMaxUploadBytes(config.evidence),
     };
   }
   return config;
