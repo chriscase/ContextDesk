@@ -14,6 +14,8 @@ import {
   type DoctorReportV1,
   type LiveProfileAlias,
 } from "@cd-collab/contracts";
+import { loadEvidenceS3Credentials, redactEvidenceS3Error } from "../../evidence/s3-secrets.js";
+import { loadEvidenceStorageSettings } from "../../evidence/s3-settings.js";
 import { loadLdapConfig } from "../auth/index.js";
 import { nodeOperatorFs, type OperatorFs } from "./fs.js";
 
@@ -164,7 +166,17 @@ function isWritableEvidenceDirectory(path: string, fs: OperatorFs): boolean {
   return fs.isWritableDirectory(path);
 }
 
-function checkEvidence(env: NodeJS.ProcessEnv, cwd: string, intent: Intent, fs: OperatorFs): DoctorCheckV1 {
+function doctorStorage(env: NodeJS.ProcessEnv): "postgres" | "sqlite" {
+  const mode = (env.COLLAB_STORAGE ?? "postgres").trim().toLowerCase();
+  return mode === "sqlite" ? "sqlite" : "postgres";
+}
+
+function checkEvidenceRoot(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  intent: Intent,
+  fs: OperatorFs,
+): DoctorCheckV1 {
   const raw = env.COLLAB_EVIDENCE_ROOT?.trim() || ".data/evidence";
   const path = resolvePath(cwd, raw);
   if (!fs.exists(path)) {
@@ -179,6 +191,57 @@ function checkEvidence(env: NodeJS.ProcessEnv, cwd: string, intent: Intent, fs: 
     return check("evidence_root", "error", "evidence root is not writable");
   }
   return check("evidence_root", "ok", "evidence root is a writable directory");
+}
+
+function checkEvidence(env: NodeJS.ProcessEnv, cwd: string, intent: Intent, fs: OperatorFs): DoctorCheckV1 {
+  const root = checkEvidenceRoot(env, cwd, intent, fs);
+  const controlRoot = env.COLLAB_EVIDENCE_ROOT?.trim() || ".data/evidence";
+  const s3Requested = env.COLLAB_EVIDENCE_PROVIDER?.trim().toLowerCase() === "s3";
+  let provider: "filesystem" | "s3" = "filesystem";
+  try {
+    const settings = loadEvidenceStorageSettings(env, {
+      controlRoot,
+      storage: doctorStorage(env),
+    });
+    provider = settings.provider;
+    if (settings.provider === "s3") {
+      loadEvidenceS3Credentials(env);
+    }
+  } catch (error) {
+    if (root.status === "error" && s3Requested) {
+      return check(
+        "evidence_root",
+        "error",
+        "evidence root and s3 evidence configuration are invalid; bucket not contacted",
+      );
+    }
+    const summary = redactEvidenceS3Error(error);
+    return check(
+      "evidence_root",
+      "error",
+      s3Requested ? `${summary}; bucket not contacted` : summary,
+    );
+  }
+  if (provider === "filesystem") return root;
+  if (root.status !== "ok") {
+    return check(
+      "evidence_root",
+      root.status,
+      `${root.summary}; s3 evidence configuration accepted; DeleteObject is required for rollback cleanup; bucket not contacted`,
+    );
+  }
+  if (doctorStorage(env) === "sqlite") {
+    return check(
+      "evidence_root",
+      "warn",
+      "evidence root is a writable directory; sqlite plus s3 is a single-process evaluation shape; DeleteObject is required for rollback cleanup; bucket not contacted",
+    );
+  }
+  return check(
+    "evidence_root",
+    "ok",
+    "evidence root is a writable directory; s3 evidence configuration accepted; DeleteObject is required for rollback cleanup; bucket not contacted",
+  );
 }
 
 function checkStatic(env: NodeJS.ProcessEnv, cwd: string, fs: OperatorFs): DoctorCheckV1 {

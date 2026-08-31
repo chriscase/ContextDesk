@@ -1,7 +1,19 @@
 /**
  * Process configuration from the environment. No credentials are hardcoded;
  * secret-bearing URLs are secret-store-sourced (see collab/deploy/.env.example).
+ * Evidence S3 credentials stay in the server credential loader, never on Config.
  */
+import { loadEvidenceS3Credentials } from "./evidence/s3-secrets.js";
+import { loadEvidenceStorageSettings } from "./evidence/s3-settings.js";
+
+export {
+  loadEvidenceStorageSettings,
+} from "./evidence/s3-settings.js";
+export type {
+  EvidenceProviderKind,
+  EvidenceS3Settings,
+  EvidenceStorageSettings,
+} from "./evidence/s3-settings.js";
 
 export interface Config {
   host: string;
@@ -113,6 +125,14 @@ export function loadRuntimeConfig(
     ? env.COLLAB_MIGRATE_DATABASE_URL ?? databaseUrl
     : null;
   const sqlitePath = storage === "sqlite" ? must(env, "COLLAB_SQLITE_PATH") : null;
+  const evidenceRoot = env.COLLAB_EVIDENCE_ROOT ?? ".data/evidence";
+  const evidence = loadEvidenceStorageSettings(env, {
+    controlRoot: evidenceRoot,
+    storage,
+  });
+  if (evidence.provider === "s3") {
+    loadEvidenceS3Credentials(env);
+  }
   return {
     host: env.COLLAB_HOST ?? "127.0.0.1",
     port: parsePort(env.COLLAB_PORT),
@@ -123,7 +143,7 @@ export function loadRuntimeConfig(
     databaseUrl,
     migrateDatabaseUrl,
     sqlitePath,
-    evidenceRoot: env.COLLAB_EVIDENCE_ROOT ?? ".data/evidence",
+    evidenceRoot,
     staticDir: env.COLLAB_STATIC_DIR?.trim() || null,
     authMode: authMode(env),
     trustProxy: parseTrustProxy(env.COLLAB_TRUST_PROXY),

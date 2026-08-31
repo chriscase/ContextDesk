@@ -476,6 +476,264 @@ describe("doctor compile-first scripts", () => {
   });
 });
 
+const S3_CANARY_ENDPOINT = "https://s3-canary-host.invalid:8443";
+const S3_CANARY_BUCKET = "canary-bucket-xyz";
+const S3_CANARY_PREFIX = "canary-prefix-xyz";
+const S3_CANARY_ACCESS = "CANARYACCESSKEYIDXX";
+const S3_CANARY_SECRET = "canarySecretAccessKeyValue!!";
+const S3_CANARY_TOKEN = "canarySessionTokenValue!!";
+const S3_CANARY_CA = "CANARYCAPEMCONTENTAAAAAAAAAAAAAAAA";
+
+function s3Canaries() {
+  return {
+    COLLAB_EVIDENCE_PROVIDER: "s3",
+    COLLAB_EVIDENCE_S3_ENDPOINT: S3_CANARY_ENDPOINT,
+    COLLAB_EVIDENCE_S3_REGION: "garage",
+    COLLAB_EVIDENCE_S3_BUCKET: S3_CANARY_BUCKET,
+    COLLAB_EVIDENCE_S3_PREFIX: S3_CANARY_PREFIX,
+    COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE: "1",
+    COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+    COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: S3_CANARY_ACCESS,
+    COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY: S3_CANARY_SECRET,
+    COLLAB_EVIDENCE_S3_SESSION_TOKEN: S3_CANARY_TOKEN,
+  };
+}
+
+function expectNoS3Canaries(report: ReturnType<typeof runDoctor>) {
+  const json = JSON.stringify(report);
+  const human = renderDoctorSummary(report);
+  for (const canary of [
+    S3_CANARY_ENDPOINT,
+    S3_CANARY_BUCKET,
+    S3_CANARY_PREFIX,
+    S3_CANARY_ACCESS,
+    S3_CANARY_SECRET,
+    S3_CANARY_TOKEN,
+    S3_CANARY_CA,
+    "s3-canary-host",
+    "assigned-prefix",
+  ]) {
+    expect(json).not.toContain(canary);
+    expect(human).not.toContain(canary);
+  }
+  expect(json).not.toMatch(/https?:\/\//);
+  expect(json).not.toMatch(/BEGIN CERTIFICATE/);
+}
+
+describe("operator doctor s3 evidence preflight", () => {
+  it("keeps filesystem evidence_root output when s3 is unset", () => {
+    const root = fixtureRoot;
+    const report = runDoctor({
+      env: {
+        COLLAB_AUTH_MODE: "local",
+        COLLAB_COOKIE_SECURE: "0",
+        COLLAB_PORT: "8787",
+        COLLAB_EVIDENCE_ROOT: ".data/evidence",
+      },
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(built(root)),
+    });
+    const evidence = report.checks.find((check) => check.id === "evidence_root");
+    expect(evidence?.status).toBe("ok");
+    expect(evidence?.summary).toBe("evidence root is a writable directory");
+  });
+
+  it("errors on leftover s3 configuration in filesystem mode without echoing values", () => {
+    const root = fixtureRoot;
+    const report = runDoctor({
+      env: {
+        COLLAB_AUTH_MODE: "local",
+        COLLAB_COOKIE_SECURE: "0",
+        COLLAB_EVIDENCE_ROOT: ".data/evidence",
+        COLLAB_EVIDENCE_S3_ENDPOINT: S3_CANARY_ENDPOINT,
+      },
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(built(root)),
+    });
+    expect(statusOf(report, "evidence_root")).toBe("error");
+    expect(report.ok).toBe(false);
+    expectNoS3Canaries(report);
+  });
+
+  it("accepts postgres plus s3 configuration without contacting the bucket", () => {
+    const root = fixtureRoot;
+    const env = {
+      ...parseEnvFile(renderConfigFile("postgres")),
+      ...s3Canaries(),
+    };
+    const report = runDoctor({
+      env,
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(built(root)),
+    });
+    expect(statusOf(report, "evidence_root")).toBe("ok");
+    expect(report.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
+      /bucket not contacted/,
+    );
+    expect(report.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
+      /DeleteObject.*rollback cleanup/,
+    );
+    expect(report.checks.find((check) => check.id === "evidence_root")?.summary).not.toMatch(
+      /sqlite/i,
+    );
+    expectNoS3Canaries(report);
+  });
+
+  it("warns for sqlite plus s3 as a single-process evaluation without blocking", () => {
+    const root = fixtureRoot;
+    const env = {
+      ...parseEnvFile(renderConfigFile("demo")),
+      ...s3Canaries(),
+    };
+    const report = runDoctor({
+      env,
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(built(root)),
+    });
+    expect(statusOf(report, "evidence_root")).toBe("warn");
+    expect(report.ok).toBe(true);
+    const summary = report.checks.find((check) => check.id === "evidence_root")?.summary ?? "";
+    expect(summary).toMatch(/bucket not contacted/);
+    expect(summary).toMatch(/single-process evaluation/);
+    expect(summary).toMatch(/DeleteObject.*rollback cleanup/);
+    expectNoS3Canaries(report);
+  });
+
+  it("still validates s3 and states bucket not contacted when the local root is missing", () => {
+    const root = fixtureRoot;
+    const files = built(root);
+    delete files[resolve(root, ".data/evidence")];
+    const report = runDoctor({
+      env: {
+        ...parseEnvFile(renderConfigFile("demo")),
+        ...s3Canaries(),
+      },
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(files),
+    });
+    const evidence = report.checks.find((check) => check.id === "evidence_root");
+    expect(evidence?.status).toBe("warn");
+    expect(evidence?.summary).toMatch(/bucket not contacted/);
+    expect(evidence?.summary).toMatch(/s3 evidence configuration accepted/);
+    expect(evidence?.summary).toMatch(/DeleteObject.*rollback cleanup/);
+    expectNoS3Canaries(report);
+  });
+
+  it("states bucket not contacted on invalid s3 settings and credentials", () => {
+    const root = fixtureRoot;
+    const invalidEnvironments = [
+      {
+        ...s3Canaries(),
+        COLLAB_EVIDENCE_S3_ENDPOINT: `${S3_CANARY_ENDPOINT}/private-path`,
+      },
+      {
+        ...s3Canaries(),
+        COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: "",
+      },
+    ];
+    for (const invalid of invalidEnvironments) {
+      const report = runDoctor({
+        env: {
+          ...parseEnvFile(renderConfigFile("postgres")),
+          ...invalid,
+        },
+        collabRoot: root,
+        cwd: root,
+        nodeVersion: "22.5.0",
+        fs: memoryFs(built(root)),
+      });
+      const evidence = report.checks.find((check) => check.id === "evidence_root");
+      expect(evidence?.status).toBe("error");
+      expect(evidence?.summary).toMatch(/bucket not contacted/);
+      expectNoS3Canaries(report);
+    }
+  });
+
+  it("redacts endpoint, bucket, prefix, keys, token, paths, and CA content", async () => {
+    const root = fixtureRoot;
+    const dir = await mkdtemp(join(tmpdir(), "cd-collab-doctor-s3-ca-"));
+    const ca = join(dir, "ca.pem");
+    await writeFile(
+      ca,
+      `-----BEGIN CERTIFICATE-----\n${S3_CANARY_CA}\n-----END CERTIFICATE-----\n`,
+    );
+    try {
+      const report = runDoctor({
+        env: {
+          ...parseEnvFile(renderConfigFile("postgres")),
+          ...s3Canaries(),
+          COLLAB_EVIDENCE_S3_CA_FILE: ca,
+        },
+        collabRoot: root,
+        cwd: root,
+        nodeVersion: "22.5.0",
+        fs: memoryFs(built(root)),
+      });
+      expect(statusOf(report, "evidence_root")).toBe("ok");
+      expectNoS3Canaries(report);
+      expect(JSON.stringify(report)).not.toContain(ca);
+      expect(renderDoctorSummary(report)).not.toContain(ca);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("operator config:init s3 examples", () => {
+  it("keeps s3 examples commented, secret-store-oriented, and idempotent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cd-collab-init-s3-"));
+    try {
+      const first = await initConfig({
+        collabRoot,
+        cwd: dir,
+        output: ".env.local",
+        profile: "postgres",
+        nonInteractive: true,
+      });
+      const body = await readFile(first.outputPath, "utf8");
+      expect(body).toMatch(/^# COLLAB_EVIDENCE_PROVIDER=s3$/m);
+      expect(body).not.toMatch(/^COLLAB_EVIDENCE_PROVIDER=/m);
+      expect(body).toMatch(/secret-store-sourced/);
+      expect(body).toMatch(/\/run\/secrets\/evidence-s3-/);
+      expect(body).toMatch(/DeleteObject.*rollback cleanup/);
+      expect(body).not.toMatch(/CORS|ACL|presign|AKIA/i);
+      expect(parseEnvFile(body).COLLAB_EVIDENCE_PROVIDER).toBeUndefined();
+      const again = await initConfig({
+        collabRoot,
+        cwd: dir,
+        output: ".env.local",
+        profile: "postgres",
+        force: true,
+        nonInteractive: true,
+      });
+      expect(await readFile(again.outputPath, "utf8")).toBe(body);
+      expect(again.overwritten).toBe(true);
+      const deployExample = await readFile(join(collabRoot, "deploy/.env.example"), "utf8");
+      expect(deployExample).toMatch(/^# COLLAB_EVIDENCE_PROVIDER=s3$/m);
+      expect(deployExample).toMatch(/DeleteObject.*rollback cleanup/);
+      expect(parseEnvFile(deployExample).COLLAB_EVIDENCE_PROVIDER).toBeUndefined();
+      const compose = await readFile(join(collabRoot, "deploy/docker-compose.example.yml"), "utf8");
+      expect(compose).toMatch(/# COLLAB_EVIDENCE_PROVIDER: s3/);
+      expect(compose).not.toMatch(/^\s+COLLAB_EVIDENCE_PROVIDER:/m);
+      expect(compose).toMatch(/node uid \(1000\)/);
+      expect(compose).toMatch(/mode 0400/);
+      expect(compose).toMatch(/DeleteObject[\s\S]*rollback cleanup/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("real filesystem evidence probe", () => {
   it("proves a real directory is writable without leaving a probe behind", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cd-collab-ev-"));

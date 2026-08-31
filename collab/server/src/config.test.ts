@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadRuntimeConfig, parseTrustProxy, testConfig } from "./config.js";
+import { loadEvidenceStorageSettings, loadRuntimeConfig, parseTrustProxy, testConfig } from "./config.js";
 
 describe("runtime configuration", () => {
   const database = {
@@ -69,5 +69,50 @@ describe("runtime configuration", () => {
       );
     }
     expect(() => parseTrustProxy("17")).toThrow(/hop count must be 0\.\.16/);
+  });
+
+  it("defaults evidence storage to filesystem and keeps the control-state root", () => {
+    const config = loadRuntimeConfig(database);
+    expect(config.evidenceRoot).toBe(".data/evidence");
+    expect(loadEvidenceStorageSettings(database, {
+      controlRoot: config.evidenceRoot,
+      storage: config.storage,
+    }).provider).toBe("filesystem");
+    expect(JSON.stringify(config)).not.toMatch(/COLLAB_EVIDENCE_S3/);
+  });
+
+  it("fails closed on leftover s3 configuration in filesystem mode", () => {
+    const canary = "https://s3-canary-host.invalid:8443";
+    expect(() =>
+      loadRuntimeConfig({ ...database, COLLAB_EVIDENCE_S3_ENDPOINT: canary }),
+    ).toThrow(/leftover s3 configuration/);
+    try {
+      loadRuntimeConfig({ ...database, COLLAB_EVIDENCE_S3_ENDPOINT: canary });
+    } catch (error) {
+      expect(String(error)).not.toContain(canary);
+    }
+  });
+
+  it("accepts s3 evidence settings without placing secrets on Config", () => {
+    const secret = "canarySecretAccessKeyValue!!";
+    const token = "canarySessionTokenValue!!";
+    const config = loadRuntimeConfig({
+      ...database,
+      COLLAB_EVIDENCE_PROVIDER: "s3",
+      COLLAB_EVIDENCE_S3_ENDPOINT: "https://objects.example.test",
+      COLLAB_EVIDENCE_S3_REGION: "garage",
+      COLLAB_EVIDENCE_S3_BUCKET: "war-room-evidence",
+      COLLAB_EVIDENCE_S3_PREFIX: "assigned-prefix",
+      COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+      COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: "GKEXAMPLEKEYID0001",
+      COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY: secret,
+      COLLAB_EVIDENCE_S3_SESSION_TOKEN: token,
+    });
+    expect(config.evidenceRoot).toBe(".data/evidence");
+    expect(config).not.toHaveProperty("s3");
+    const json = JSON.stringify(config);
+    expect(json).not.toContain(secret);
+    expect(json).not.toContain(token);
+    expect(json).not.toContain("GKEXAMPLEKEYID0001");
   });
 });
