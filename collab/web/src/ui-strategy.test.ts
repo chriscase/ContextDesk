@@ -10,7 +10,7 @@ import {
 } from "./ui-strategy.js";
 
 describe("UI strategy catalogue", () => {
-  it("ships exactly the reference strategy and the first alternate", () => {
+  it("ships exactly the registered strategy set", () => {
     expect(UI_STRATEGIES.map((strategy) => strategy.id)).toEqual([
       "war-room",
       "investigation-first",

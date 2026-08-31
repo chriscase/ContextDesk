@@ -49,8 +49,34 @@ export interface KeystoneHypothesisComposerProps {
 
 type SubmissionFeedback =
   | { readonly status: "succeeded"; readonly citationCount: number }
-  | { readonly status: "failed" }
+  | { readonly status: "failed"; readonly error: RuntimeFailure | null }
   | { readonly status: "ignored"; readonly reason: CommandIgnoredReason };
+
+interface SubmissionIntent {
+  readonly fingerprint: string;
+  readonly idempotencyKey: string;
+}
+
+function failureOutcomeIsUnknown(error: RuntimeFailure): boolean {
+  switch (error.kind) {
+    case "unavailable":
+    case "server_failure":
+    case "network":
+    case "aborted":
+    case "unexpected_response":
+    case "protocol":
+    case "unexpected":
+      return true;
+    case "input":
+    case "validation":
+    case "auth_lost":
+    case "not_found":
+    case "conflict":
+    case "lifecycle_changed":
+    case "lifecycle_refused":
+      return false;
+  }
+}
 
 function contributionFailureCopy(error: RuntimeFailure): string {
   switch (error.kind) {
@@ -69,13 +95,13 @@ function contributionFailureCopy(error: RuntimeFailure): string {
     case "unavailable":
     case "server_failure":
     case "network":
-      return "The hypothesis could not be recorded right now. Try again when the service is available.";
+      return "The service may have recorded this hypothesis even though this view did not receive a result. Review the current record before retrying; retrying this unchanged draft is protected from creating a duplicate.";
     case "aborted":
-      return "The hypothesis submission was interrupted before this view received a result.";
+      return "This view stopped waiting before it received a result. The hypothesis may have been recorded; retrying this unchanged draft is protected from creating a duplicate.";
     case "unexpected_response":
     case "protocol":
     case "unexpected":
-      return "The hypothesis could not be processed safely. Review the current investigation before trying again.";
+      return "This view could not confirm the result. The hypothesis may have been recorded; review the current record before retrying this unchanged draft.";
   }
 }
 
@@ -100,6 +126,21 @@ function snapshotArtifactLinks(
     links.push({ kind: "artifact", id: evidence.id });
   }
   return links;
+}
+
+function newHypothesisIdempotencyKey(): string {
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `keystone-hypothesis-${random}`.slice(0, 128);
+}
+
+function fingerprintSubmissionIntent(
+  body: string,
+  links: readonly { readonly kind: "artifact"; readonly id: string }[],
+): string {
+  return JSON.stringify([body, links]);
 }
 
 /**
@@ -130,6 +171,7 @@ function KeystoneHypothesisComposerScope({
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<SubmissionFeedback | null>(null);
   const submittingRef = useRef(false);
+  const submissionIntentRef = useRef<SubmissionIntent | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const links = snapshotArtifactLinks(selectedEvidence);
   const running = submitting || mutationState.status === "running";
@@ -169,6 +211,16 @@ function KeystoneHypothesisComposerScope({
     }
     if (submittedLinks.length === 0) return;
 
+    const fingerprint = fingerprintSubmissionIntent(submittedBody, submittedLinks);
+    const priorIntent = submissionIntentRef.current;
+    const submissionIntent = priorIntent?.fingerprint === fingerprint
+      ? priorIntent
+      : {
+          fingerprint,
+          idempotencyKey: newHypothesisIdempotencyKey(),
+        };
+    submissionIntentRef.current = submissionIntent;
+
     submittingRef.current = true;
     setSubmitting(true);
     setFeedback(null);
@@ -178,9 +230,10 @@ function KeystoneHypothesisComposerScope({
         kind: "hypothesis",
         body: submittedBody,
         hypothesisLinks: submittedLinks,
+        idempotencyKey: submissionIntent.idempotencyKey,
       });
     } catch {
-      if (scopeIsCurrent()) setFeedback({ status: "failed" });
+      if (scopeIsCurrent()) setFeedback({ status: "failed", error: null });
       return;
     } finally {
       submittingRef.current = false;
@@ -189,6 +242,9 @@ function KeystoneHypothesisComposerScope({
 
     if (!scopeIsCurrent()) return;
     if (outcome.status === "succeeded") {
+      if (submissionIntentRef.current?.fingerprint === fingerprint) {
+        submissionIntentRef.current = null;
+      }
       setBody((current) => current === submittedBody ? "" : current);
       setFeedback({ status: "succeeded", citationCount: submittedLinks.length });
       bodyRef.current?.focus();
@@ -199,12 +255,13 @@ function KeystoneHypothesisComposerScope({
       setFeedback({ status: "ignored", reason: outcome.reason });
       return;
     }
-    setFeedback({ status: "failed" });
+    setFeedback({ status: "failed", error: outcome.error });
   }
 
   function clearDraft() {
     setBody("");
     setFeedback(null);
+    submissionIntentRef.current = null;
     bodyRef.current?.focus();
   }
 
@@ -215,11 +272,19 @@ function KeystoneHypothesisComposerScope({
     event.currentTarget.form?.requestSubmit();
   }
 
-  const mutationFailure = mutationState.status === "failed"
-    ? contributionFailureCopy(mutationState.error)
-    : null;
-  const fallbackFailure = mutationFailure === null && feedback?.status === "failed"
-    ? "The hypothesis could not be recorded. This draft remains available."
+  const reportedFailure = mutationState.status === "failed"
+    ? mutationState.error
+    : feedback?.status === "failed"
+      ? feedback.error
+      : null;
+  const mutationFailure = reportedFailure === null
+    ? null
+    : contributionFailureCopy(reportedFailure);
+  const mutationOutcomeUnknown = reportedFailure === null
+    ? false
+    : failureOutcomeIsUnknown(reportedFailure);
+  const fallbackFailure = reportedFailure === null && feedback?.status === "failed"
+    ? "This view could not confirm the result. The hypothesis may have been recorded; retrying this unchanged draft is protected from creating a duplicate."
     : null;
 
   return (
@@ -286,11 +351,15 @@ function KeystoneHypothesisComposerScope({
         <StrategyStateNotice busy>Recording the hypothesis once…</StrategyStateNotice>
       ) : null}
       {mutationFailure !== null ? (
-        <StrategyStateNotice role="alert" tone="danger" title="Hypothesis not recorded">
+        <StrategyStateNotice
+          role="alert"
+          tone="danger"
+          title={mutationOutcomeUnknown ? "Hypothesis outcome unknown" : "Hypothesis not recorded"}
+        >
           {mutationFailure}
         </StrategyStateNotice>
       ) : fallbackFailure !== null ? (
-        <StrategyStateNotice role="alert" tone="danger" title="Hypothesis not recorded">
+        <StrategyStateNotice role="alert" tone="danger" title="Hypothesis outcome unknown">
           {fallbackFailure}
         </StrategyStateNotice>
       ) : feedback?.status === "ignored" ? (

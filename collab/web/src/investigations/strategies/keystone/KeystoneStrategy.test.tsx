@@ -202,11 +202,12 @@ describe("Keystone engineer strategy", () => {
     await waitFor(() => expect(gateway.createContribution).toHaveBeenCalledTimes(1));
     expect(gateway.createContribution).toHaveBeenCalledWith(
       RUNTIME_FIXTURE_IDS.populatedCase,
-      {
+      expect.objectContaining({
         kind: "hypothesis",
         body: contribution.body,
         hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
-      },
+        idempotencyKey: expect.stringMatching(/^keystone-hypothesis-/),
+      }),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
 

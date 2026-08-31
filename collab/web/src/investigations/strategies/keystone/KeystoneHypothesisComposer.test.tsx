@@ -145,17 +145,19 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Record hypothesis" }));
 
     expect(command).toHaveBeenCalledTimes(1);
-    expect(command).toHaveBeenCalledWith({
+    expect(command).toHaveBeenCalledWith(expect.objectContaining({
       kind: "hypothesis",
       body,
       hypothesisLinks: [
         { kind: "artifact", id: "artifact-log-1" },
         { kind: "artifact", id: "artifact-trace-2" },
       ],
-    });
+      idempotencyKey: expect.stringMatching(/^keystone-hypothesis-/),
+    }));
     expect(Object.keys(vi.mocked(command).mock.calls[0]![0]).sort()).toEqual([
       "body",
       "hypothesisLinks",
+      "idempotencyKey",
       "kind",
     ]);
     expect(field.value).toBe(body);
@@ -218,12 +220,55 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(field.value).toBe("Keep this draft on a non-success outcome.");
     expect(onSuccess).not.toHaveBeenCalled();
     if (outcome.status === "failed") {
-      expect(screen.getByRole("alert").textContent).toContain("could not be recorded");
+      expect(screen.getByRole("alert").textContent).toContain("could not be accepted");
     } else {
       expect(screen.getByRole("status").textContent).toContain(
         outcome.reason === "stale" ? "view changed" : "draft remains available",
       );
     }
+  });
+
+  it("reuses one idempotency key after an ambiguous response loss and rotates after success", async () => {
+    const durableByKey = new Map<string, ContributionV1>();
+    let loseFirstResponse = true;
+    const command: CreateContribution = vi.fn(async (input) => {
+      const key = input.idempotencyKey;
+      if (key === undefined) throw new Error("missing duplicate-prevention key");
+      const durable = durableByKey.get(key) ?? authoritativeContribution();
+      durableByKey.set(key, durable);
+      if (loseFirstResponse) {
+        loseFirstResponse = false;
+        throw new Error("response lost after commit");
+      }
+      return { status: "succeeded" as const, value: durable };
+    });
+    mount({ createContribution: command });
+    const field = hypothesisField();
+    fireEvent.change(field, { target: { value: "One durable hypothesis despite a lost response." } });
+
+    fireEvent.submit(hypothesisForm());
+    expect(await screen.findByText("Hypothesis outcome unknown")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("may have been recorded");
+    expect(field.value).toBe("One durable hypothesis despite a lost response.");
+    expect(durableByKey.size).toBe(1);
+
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(field.value).toBe(""));
+    expect(command).toHaveBeenCalledTimes(2);
+    const firstKey = vi.mocked(command).mock.calls[0]?.[0].idempotencyKey;
+    const retryKey = vi.mocked(command).mock.calls[1]?.[0].idempotencyKey;
+    expect(firstKey).toMatch(/^keystone-hypothesis-/);
+    expect(retryKey).toBe(firstKey);
+    expect(durableByKey.size).toBe(1);
+
+    fireEvent.change(field, { target: { value: "A deliberately new hypothesis intent." } });
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(field.value).toBe(""));
+    const nextKey = vi.mocked(command).mock.calls[2]?.[0].idempotencyKey;
+    expect(nextKey).toMatch(/^keystone-hypothesis-/);
+    expect(nextKey).not.toBe(firstKey);
+    expect(durableByKey.size).toBe(2);
   });
 
   it("derives links from the current working set and never retains removed target IDs", async () => {
@@ -243,11 +288,12 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     fireEvent.keyDown(field, { key: "Enter", ctrlKey: true });
 
     await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
-    expect(command).toHaveBeenCalledWith({
+    expect(command).toHaveBeenCalledWith(expect.objectContaining({
       kind: "hypothesis",
       body: "Use only the evidence selected now.",
       hypothesisLinks: [{ kind: "artifact", id: "artifact-current" }],
-    });
+      idempotencyKey: expect.stringMatching(/^keystone-hypothesis-/),
+    }));
     expect(JSON.stringify(vi.mocked(command).mock.calls)).not.toContain("artifact-old");
     expect(screen.queryByText("old.log")).toBeNull();
   });
@@ -268,14 +314,15 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     fireEvent.submit(hypothesisForm());
 
     await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
-    expect(command).toHaveBeenCalledWith({
+    expect(command).toHaveBeenCalledWith(expect.objectContaining({
       kind: "hypothesis",
       body: "Preserve citation order.",
       hypothesisLinks: [
         { kind: "artifact", id: "artifact-second" },
         { kind: "artifact", id: "artifact-first" },
       ],
-    });
+      idempotencyKey: expect.stringMatching(/^keystone-hypothesis-/),
+    }));
   });
 
   it("uses Meta+Enter but never submits a composing Enter chord", async () => {
@@ -356,11 +403,12 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
 
     fireEvent.submit(hypothesisForm());
     await waitFor(() => expect(commandB).toHaveBeenCalledTimes(1));
-    expect(commandB).toHaveBeenCalledWith({
+    expect(commandB).toHaveBeenCalledWith(expect.objectContaining({
       kind: "hypothesis",
       body: "Case B current draft",
       hypothesisLinks: [{ kind: "artifact", id: "artifact-b" }],
-    });
+      idempotencyKey: expect.stringMatching(/^keystone-hypothesis-/),
+    }));
     expect(JSON.stringify(vi.mocked(commandB).mock.calls)).not.toContain("artifact-a");
   });
 
