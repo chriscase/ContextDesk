@@ -278,6 +278,7 @@ export function assertMultipartTextFieldIntact(part: {
 
 interface TransferGuard {
   readonly signal: AbortSignal;
+  abort(message: string): void;
   dispose(): void;
 }
 
@@ -288,6 +289,7 @@ interface TransferEndpoint {
   destroyed?: boolean;
   readableEnded?: boolean;
   writableEnded?: boolean;
+  socket?: { destroy?: () => void };
 }
 
 function armTransferGuard(
@@ -321,6 +323,7 @@ function armTransferGuard(
   timer.unref?.();
   return {
     signal: controller.signal,
+    abort,
     dispose: () => {
       if (disposed) return;
       disposed = true;
@@ -342,6 +345,12 @@ function throwIfTransferAborted(signal: AbortSignal): void {
 function copyBoundedChunk(chunk: unknown): Uint8Array {
   if (typeof chunk === "string") return Uint8Array.from(Buffer.from(chunk));
   if (chunk instanceof Uint8Array) return Uint8Array.from(chunk);
+  throw new MultipartEvidenceError("multipart file chunk must be binary");
+}
+
+function rawMultipartChunkByteLength(chunk: unknown): number {
+  if (typeof chunk === "string") return Buffer.byteLength(chunk);
+  if (chunk instanceof Uint8Array) return chunk.byteLength;
   throw new MultipartEvidenceError("multipart file chunk must be binary");
 }
 
@@ -501,6 +510,26 @@ function storageUnavailable(reply: FastifyReply): { error: "storage_unavailable"
   return { error: "storage_unavailable" };
 }
 
+function sizePolicyViolationMessage(err: unknown): string | undefined {
+  if (err instanceof MultipartEvidenceError) return undefined;
+  const message = err instanceof Error ? err.message : "invalid";
+  const code = typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code?: unknown }).code)
+    : "";
+  if (
+    message === "evidence stream exceeded maxBytes"
+    || message === "upload exceeds size cap"
+    || /file too large|FST_REQ_FILE_TOO_LARGE|FST_ERR_CTP_BODY_TOO_LARGE/i.test(`${message} ${code}`)
+  ) {
+    return "upload exceeds size cap";
+  }
+  return undefined;
+}
+
+function isSizePolicyViolation(err: unknown): boolean {
+  return sizePolicyViolationMessage(err) !== undefined;
+}
+
 function streamUploadError(
   reply: FastifyReply,
   err: unknown,
@@ -517,13 +546,10 @@ function streamUploadError(
     void reply.code(400);
     return { error: "exactly one file field named file is required" };
   }
-  if (
-    message === "evidence stream exceeded maxBytes"
-    || message === "upload exceeds size cap"
-    || /file too large|FST_REQ_FILE_TOO_LARGE|FST_ERR_CTP_BODY_TOO_LARGE/i.test(`${message} ${code}`)
-  ) {
+  const sizePolicy = sizePolicyViolationMessage(err);
+  if (sizePolicy) {
     void reply.code(413);
-    return { error: "upload exceeds size cap" };
+    return { error: sizePolicy };
   }
   if (/aborted/i.test(message)) {
     void reply.code(400);
@@ -538,15 +564,100 @@ function streamUploadError(
   return domainError(reply, err);
 }
 
-async function* multipartFileBytes(
+function destroyMultipartFileStream(part: MultipartFile | null | undefined): void {
+  const file = part?.file as Readable | undefined;
+  if (!file || file.destroyed || typeof file.destroy !== "function") return;
+  file.destroy();
+}
+
+function closeRequestAfterSizePolicyReply(request: FastifyRequest, reply: FastifyReply): void {
+  void reply.header("Connection", "close");
+  const requestRaw = request.raw as TransferEndpoint;
+  const replyRaw = reply.raw as TransferEndpoint;
+  const terminate = (): void => {
+    if (!requestRaw.destroyed) requestRaw.destroy?.();
+    requestRaw.socket?.destroy?.();
+  };
+  if (replyRaw.writableEnded) {
+    terminate();
+    return;
+  }
+  replyRaw.once?.("finish", terminate);
+}
+
+/** @internal Exported only for abort/non-settling iterator regression coverage. */
+export async function* multipartFileBytes(
   file: AsyncIterable<unknown>,
   signal: AbortSignal,
+  maxBytes: number,
 ): AsyncIterable<Uint8Array> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error("upload exceeds size cap");
+  }
   throwIfTransferAborted(signal);
-  for await (const chunk of file) {
-    throwIfTransferAborted(signal);
-    const bytes = copyBoundedChunk(chunk);
-    if (bytes.byteLength > 0) yield bytes;
+  const iterator = file[Symbol.asyncIterator]();
+  const readable = file as Readable & { truncated?: boolean };
+  let rejectLimit: ((err: Error) => void) | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    rejectLimit = reject;
+  });
+  void limit.catch(() => undefined);
+  const onLimit = (): void => {
+    rejectLimit?.(new Error("upload exceeds size cap"));
+  };
+  let rejectAbort: ((err: Error) => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAbort = reject;
+  });
+  void aborted.catch(() => undefined);
+  const onAbort = (): void => {
+    const reason = signal.reason;
+    rejectAbort?.(reason instanceof Error ? reason : new Error("evidence stream aborted"));
+  };
+  readable.once?.("limit", onLimit);
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  let received = 0;
+  let iteratorDone = false;
+  try {
+    if (readable.truncated) throw new Error("upload exceeds size cap");
+    for (;;) {
+      throwIfTransferAborted(signal);
+      if (readable.truncated) throw new Error("upload exceeds size cap");
+      const next = await Promise.race([iterator.next(), limit, aborted]);
+      if (next.done) {
+        iteratorDone = true;
+        if (readable.truncated) throw new Error("upload exceeds size cap");
+        break;
+      }
+      throwIfTransferAborted(signal);
+      const chunk = next.value;
+      const chunkLength = rawMultipartChunkByteLength(chunk);
+      const remaining = maxBytes - received;
+      if (
+        !Number.isSafeInteger(chunkLength)
+        || chunkLength < 0
+        || chunkLength > remaining
+      ) {
+        throw new Error("evidence stream exceeded maxBytes");
+      }
+      const bytes = copyBoundedChunk(chunk);
+      if (bytes.byteLength > 0) {
+        received += chunkLength;
+        yield bytes;
+      }
+      if (readable.truncated) throw new Error("upload exceeds size cap");
+    }
+  } finally {
+    readable.off?.("limit", onLimit);
+    signal.removeEventListener("abort", onAbort);
+    if (!iteratorDone && typeof iterator.return === "function") {
+      try {
+        void Promise.resolve(iterator.return()).catch(() => undefined);
+      } catch {
+        // A hostile iterator cannot postpone HTTP rejection or transfer cleanup.
+      }
+    }
   }
 }
 
@@ -1398,7 +1509,11 @@ export async function registerCaseRoutes(
         if (fields.sourceId) evidence.sourceId = fields.sourceId;
 
         async function* fileSource(): AsyncIterable<Uint8Array> {
-          yield* multipartFileBytes(asAsyncByteSource(filePart!.file), signal);
+          yield* multipartFileBytes(
+            asAsyncByteSource(filePart!.file),
+            signal,
+            deps.maxUploadBytes,
+          );
           if ((filePart!.file as { truncated?: boolean }).truncated) {
             throw new Error("upload exceeds size cap");
           }
@@ -1431,6 +1546,12 @@ export async function registerCaseRoutes(
           ...uploaded,
         };
       } catch (err) {
+        if (isSizePolicyViolation(err)) {
+          transfer.abort("upload exceeds size cap");
+          destroyMultipartFileStream(filePart);
+          closeRequestAfterSizePolicyReply(request, reply);
+          return streamUploadError(reply, err);
+        }
         await drainRemainingParts(parts, filePart, signal);
         if (typeof request.raw.resume === "function") request.raw.resume();
         return streamUploadError(reply, err);

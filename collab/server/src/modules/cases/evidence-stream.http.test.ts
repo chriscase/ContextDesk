@@ -22,7 +22,7 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService, CaseStoreCommitOutcomeUnknownError } from "./service.js";
 import { MemoryCaseStore } from "./store.js";
-import { assertMultipartTextFieldIntact } from "./routes.js";
+import { assertMultipartTextFieldIntact, multipartFileBytes } from "./routes.js";
 
 const ALICE = "fixture-alice-secret";
 const LOG = "2026-08-15T00:00:00Z mailer timeout id=syn-stream-1\n";
@@ -242,6 +242,67 @@ function spyStore(store: FilesystemEvidenceStore) {
 }
 
 describe("POST /api/cases/:id/evidence/stream", () => {
+  it("rejects an oversized raw multipart chunk before attempting to copy it", async () => {
+    let copyAttempted = false;
+    let returned = false;
+    const rawChunk = new Proxy(new Uint8Array(17), {
+      get(target, property) {
+        if (property === Symbol.iterator) copyAttempted = true;
+        return Reflect.get(target, property, target) as unknown;
+      },
+    });
+    let yielded = false;
+    const source: AsyncIterable<unknown> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            if (yielded) return { done: true, value: undefined };
+            yielded = true;
+            return { done: false, value: rawChunk };
+          },
+          return: async () => {
+            returned = true;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    await expect(multipartFileBytes(source, new AbortController().signal, 16).next())
+      .rejects.toThrow("evidence stream exceeded maxBytes");
+    expect(copyAttempted).toBe(false);
+    expect(returned).toBe(true);
+  });
+
+  it("wakes a pending multipart read on abort without awaiting hostile iterator cleanup", async () => {
+    const controller = new AbortController();
+    let nextStarted = false;
+    let returnCalled = false;
+    const source: AsyncIterable<unknown> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => {
+            nextStarted = true;
+            return new Promise<IteratorResult<unknown>>(() => undefined);
+          },
+          return: () => {
+            returnCalled = true;
+            return new Promise<IteratorResult<unknown>>(() => undefined);
+          },
+        };
+      },
+    };
+    const read = multipartFileBytes(source, controller.signal, 16).next();
+    await vi.waitFor(() => expect(nextStarted).toBe(true));
+    controller.abort(new Error("evidence transfer aborted"));
+    await expect(Promise.race([
+      read,
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("abort did not wake pending multipart read")), 250);
+      }),
+    ])).rejects.toThrow("evidence transfer aborted");
+    expect(returnCalled).toBe(true);
+  });
+
   it("does not call store methods before session, write, and case access succeed", async () => {
     await withApp(async ({ app, store }) => {
       const spies = spyStore(store);
@@ -827,6 +888,147 @@ describe("POST /api/cases/:id/evidence/stream", () => {
     }, { transferTimeoutMs: 25 });
   });
 
+  it("returns 413 for a live chunked over-limit upload and closes without consuming the tail", async () => {
+    await withApp(async ({ app, store, root }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Chunked over-limit tail");
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const address = app.server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      let uploadSocket: { readonly bytesRead: number } | undefined;
+      app.server.once("connection", (socket) => {
+        uploadSocket = socket;
+      });
+      const boundary = "----cd-over-limit-chunked";
+      const cap = 16;
+      const atCap = Buffer.alloc(cap, 0x61);
+      const overLimit = Buffer.alloc(8, 0x62);
+      const tail = Buffer.alloc(64 * 1024, 0x63);
+      const presented = Buffer.concat([atCap, overLimit]);
+      const prelude = Buffer.concat([
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="kind"\r\n\r\nlog\r\n`,
+        ),
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="summary"\r\n\r\nover cap\r\n`,
+        ),
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="big.log"\r\nContent-Type: text/plain\r\n\r\n`,
+        ),
+      ]);
+      const outcome = await new Promise<{
+        statusCode: number;
+        headers: http.IncomingHttpHeaders;
+        body: string;
+        tailAttempted: boolean;
+        clientBytesWrittenBeforeTail: number;
+        connectionClosed: boolean;
+      }>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          try {
+            req.destroy();
+          } catch {
+            // already closed
+          }
+          reject(new Error("timed out waiting for over-limit 413"));
+        }, 2_000);
+        const req = http.request({
+          method: "POST",
+          host: "127.0.0.1",
+          port,
+          path: `/api/cases/${caseId}/evidence/stream`,
+          headers: {
+            cookie: alice,
+            "x-cd-collab-csrf": "1",
+            "content-type": `multipart/form-data; boundary=${boundary}`,
+            "transfer-encoding": "chunked",
+          },
+        });
+        let statusCode = 0;
+        let headers: http.IncomingHttpHeaders = {};
+        const bodyChunks: Buffer[] = [];
+        let sawResponse = false;
+        let settled = false;
+        const socketClosed = (): boolean =>
+          req.destroyed
+          || req.socket?.destroyed === true
+          || (req.socket?.readable === false && req.socket?.writable === false);
+        const finish = (
+          tailAttempted: boolean,
+          clientBytesWrittenBeforeTail: number,
+          connectionClosed: boolean,
+        ): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          resolve({
+            statusCode,
+            headers,
+            body: Buffer.concat(bodyChunks).toString("utf8"),
+            tailAttempted,
+            clientBytesWrittenBeforeTail,
+            connectionClosed,
+          });
+        };
+        req.on("response", (res) => {
+          sawResponse = true;
+          statusCode = res.statusCode ?? 0;
+          headers = res.headers;
+          res.on("data", (chunk: Buffer) => {
+            bodyChunks.push(chunk);
+          });
+          res.on("aborted", () => {
+            clearTimeout(timeout);
+            reject(new Error("over-limit 413 response was truncated"));
+          });
+          res.on("error", (err) => {
+            clearTimeout(timeout);
+            reject(err);
+          });
+          res.on("end", () => {
+            const clientBytesWrittenBeforeTail = req.socket?.bytesWritten ?? 0;
+            try {
+              void req.write(tail);
+            } catch {
+              // A synchronous rejection is also proof that the tail was not accepted.
+            }
+            const onClosed = (): void => finish(true, clientBytesWrittenBeforeTail, true);
+            req.once("close", onClosed);
+            req.once("error", onClosed);
+            req.socket?.once("close", onClosed);
+            if (socketClosed()) {
+              finish(true, clientBytesWrittenBeforeTail, true);
+            }
+          });
+        });
+        req.on("error", (err) => {
+          if (sawResponse) return;
+          clearTimeout(timeout);
+          reject(err);
+        });
+        req.write(prelude, () => {
+          req.write(atCap, () => {
+            req.write(overLimit);
+          });
+        });
+      });
+
+      expect(outcome.statusCode).toBe(413);
+      expect(JSON.parse(outcome.body)).toEqual({ error: "upload exceeds size cap" });
+      expect(String(outcome.headers.connection ?? "").toLowerCase()).toBe("close");
+      expect(outcome.tailAttempted).toBe(true);
+      expect(outcome.connectionClosed).toBe(true);
+      expect(uploadSocket).toBeDefined();
+      expect(uploadSocket?.bytesRead).toBeLessThanOrEqual(outcome.clientBytesWrittenBeforeTail);
+      expect(await listScratch(root)).toEqual([]);
+      expect(await store.head(sha256Hex(atCap))).toBeNull();
+      expect(await store.head(sha256Hex(overLimit))).toBeNull();
+      expect(await store.head(sha256Hex(presented))).toBeNull();
+      expect(await store.head(sha256Hex(Buffer.concat([presented, tail])))).toBeNull();
+      expect(await store.head(sha256Hex(tail))).toBeNull();
+    }, { maxUploadBytes: 16 });
+  });
+
   it("does not use forbidden multipart helpers or whole-file buffering", () => {
     const routesSrc = readFileSync(join(HERE, "routes.ts"), "utf8");
     const serviceSrc = readFileSync(join(HERE, "service.ts"), "utf8");
@@ -848,6 +1050,18 @@ describe("POST /api/cases/:id/evidence/stream", () => {
     expect(routesSrc).not.toMatch(/process\.stderr/);
     expect(routesSrc).not.toMatch(/setTimeout\(done,\s*250\)|setTimeout\(resolve,\s*250\)/);
     expect(routesSrc).toMatch(/for await/);
+    const adapter = routesSrc.slice(
+      routesSrc.indexOf("async function* multipartFileBytes"),
+      routesSrc.indexOf("export async function registerCaseRoutes"),
+    );
+    expect(adapter.indexOf("rawMultipartChunkByteLength")).toBeGreaterThanOrEqual(0);
+    expect(adapter.indexOf("chunkLength > remaining")).toBeGreaterThanOrEqual(0);
+    expect(adapter.indexOf("rawMultipartChunkByteLength")).toBeLessThan(
+      adapter.indexOf("copyBoundedChunk"),
+    );
+    expect(adapter.indexOf("chunkLength > remaining")).toBeLessThan(
+      adapter.indexOf("copyBoundedChunk"),
+    );
     const streamed = serviceSrc.slice(
       serviceSrc.indexOf("async addStreamedEvidence"),
       serviceSrc.indexOf("async previewCorpusIntake"),
