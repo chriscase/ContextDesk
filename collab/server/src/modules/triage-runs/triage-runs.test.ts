@@ -9,7 +9,7 @@ import {
   type TriageCandidateRunV1,
   type TriageJobV1,
 } from "@cd-collab/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { migrateUp } from "../../db/migrate.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
 import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
@@ -73,7 +73,7 @@ async function fixture(
     { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
     "test",
   );
-  return { root, cases, service, caseId: created.id, snapshot };
+  return { root, cases, evidence, service, caseId: created.id, snapshot, artifactId: artifact.artifact.id };
 }
 
 function request(snapshotId: string) {
@@ -651,6 +651,162 @@ describe("snapshot-bound triage runs", () => {
       expect(observed?.request.question).toBe("What caused the timeout?");
       expect(observed?.request.concurrency).toBe(2);
       expect(completed.candidates.map((candidate) => candidate.status)).toEqual(["completed", "completed"]);
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not call getArtifactBytes for non-gateway runs", async () => {
+    const fx = await fixture();
+    try {
+      const get = vi.spyOn(fx.evidence, "get");
+      const head = vi.spyOn(fx.evidence, "head");
+      const openRead = vi.spyOn(fx.evidence, "openRead");
+      const getBytes = vi.spyOn(fx.cases, "getArtifactBytes");
+      get.mockClear();
+      head.mockClear();
+      openRead.mockClear();
+      const created = await fx.service.create(
+        fx.caseId,
+        actor,
+        request(fx.snapshot.id),
+        "test",
+        false,
+        true,
+      );
+      const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
+      expect(completed.status).toBe("completed");
+      expect(getBytes).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+      expect(head).not.toHaveBeenCalled();
+      expect(openRead).not.toHaveBeenCalled();
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a 4 MiB-over gateway item before opening bytes", async () => {
+    const gatewayExecutor: TriageBatchRunExecutor = {
+      executeBatch: async () => {
+        throw new Error("gateway should not execute oversize evidence");
+      },
+    };
+    const fx = await fixture(undefined, gatewayExecutor);
+    try {
+      const originalGetArtifact = fx.cases.getArtifact.bind(fx.cases);
+      vi.spyOn(fx.cases, "getArtifact").mockImplementation(async (caseId, artifactId) => {
+        const artifact = await originalGetArtifact(caseId, artifactId);
+        return artifact ? { ...artifact, byteLength: 4 * 1024 * 1024 + 1 } : artifact;
+      });
+      const getBytes = vi.spyOn(fx.cases, "getArtifactBytes");
+      const created = await fx.service.create(
+        fx.caseId,
+        actor,
+        {
+          ...request(fx.snapshot.id),
+          mode: "gateway",
+          candidates: [
+            {
+              candidateId: "gateway-oversize-item",
+              role: "reviewer",
+              provider: "openai-compatible",
+              profileId: "profile:a",
+              model: "qwen-3.6-27b",
+              version: null,
+            },
+          ],
+        },
+        "test",
+        false,
+        true,
+      );
+      const failed = await waitFor(fx.service, fx.caseId, created.id, "failed");
+      expect(failed.status).toBe("failed");
+      expect(getBytes).not.toHaveBeenCalled();
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects gateway evidence over the 8 MiB aggregate before opening the overflowing item", async () => {
+    const gatewayExecutor: TriageBatchRunExecutor = {
+      executeBatch: async () => {
+        throw new Error("gateway should not execute oversize aggregate");
+      },
+    };
+    const fx = await fixture(undefined, gatewayExecutor);
+    try {
+      const second = await fx.cases.addEvidence(
+        fx.caseId,
+        actor,
+        {
+          kind: "log",
+          filename: "second.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("second timeout"),
+          summary: "Second synthetic timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const third = await fx.cases.addEvidence(
+        fx.caseId,
+        actor,
+        {
+          kind: "log",
+          filename: "third.log",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("third timeout"),
+          summary: "Third synthetic timeout.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const snapshot = await fx.cases.createSnapshot(
+        fx.caseId,
+        actor,
+        {
+          evidenceIds: [fx.artifactId, second.artifact.id, third.artifact.id],
+          visibility: "share_safe",
+        },
+        "test",
+      );
+      const originalGetArtifact = fx.cases.getArtifact.bind(fx.cases);
+      vi.spyOn(fx.cases, "getArtifact").mockImplementation(async (caseId, artifactId) => {
+        const artifact = await originalGetArtifact(caseId, artifactId);
+        return artifact ? { ...artifact, byteLength: 3 * 1024 * 1024 } : artifact;
+      });
+      const getBytes = vi.spyOn(fx.cases, "getArtifactBytes");
+      const created = await fx.service.create(
+        fx.caseId,
+        actor,
+        {
+          ...request(snapshot.id),
+          mode: "gateway",
+          candidates: [
+            {
+              candidateId: "gateway-oversize-aggregate",
+              role: "reviewer",
+              provider: "openai-compatible",
+              profileId: "profile:a",
+              model: "qwen-3.6-27b",
+              version: null,
+            },
+          ],
+        },
+        "test",
+        false,
+        true,
+      );
+      const failed = await waitFor(fx.service, fx.caseId, created.id, "failed");
+      expect(failed.status).toBe("failed");
+      expect(getBytes).toHaveBeenCalledTimes(2);
+      expect(getBytes.mock.calls.every((call) => {
+        const maxBytes = call[5];
+        return typeof maxBytes === "number"
+          && maxBytes <= 4 * 1024 * 1024
+          && maxBytes <= 8 * 1024 * 1024;
+      })).toBe(true);
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }

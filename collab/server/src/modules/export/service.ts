@@ -23,6 +23,9 @@ import { PrivacyScanError, assertShareSafeClean } from "./scan.js";
 
 export { PrivacyScanError };
 
+/** Inline artifact bytes in a brief/package. Over-cap content is omitted, not truncated. */
+export const MAX_EXPORT_INLINE_ARTIFACT_BYTES = 1_000_000;
+
 export interface ExportSelection {
   kind: "artifact" | "contribution";
   id: string;
@@ -276,14 +279,18 @@ export class ExportService {
         out.set(artifact.id, null);
         continue;
       }
-      const bytes = await this.deps.cases.getArtifactBytes(
+      const result = await this.deps.cases.getArtifactBytes(
         caseId,
         artifact.id,
         actor,
         isAdmin,
         canReadPrivate,
+        MAX_EXPORT_INLINE_ARTIFACT_BYTES,
       );
-      out.set(artifact.id, bytes ? new TextDecoder().decode(bytes) : null);
+      out.set(
+        artifact.id,
+        result.outcome === "ok" ? new TextDecoder().decode(result.bytes) : null,
+      );
     }
     return out;
   }

@@ -254,6 +254,8 @@ function mockReadHandle(input: {
   metaHash?: string;
   metaByteLength?: number;
   chunks: Uint8Array[];
+  hangNext?: boolean;
+  hangReturn?: boolean;
   onReturn?: () => void;
   onNext?: (index: number, chunk: Uint8Array) => void;
 }) {
@@ -269,6 +271,9 @@ function mockReadHandle(input: {
     bytes: () => ({
       [Symbol.asyncIterator]: () => ({
         next: async () => {
+          if (input.hangNext) {
+            return new Promise<{ done: true; value: undefined }>(() => undefined);
+          }
           if (index >= input.chunks.length) {
             return { done: true as const, value: undefined };
           }
@@ -279,6 +284,9 @@ function mockReadHandle(input: {
         },
         return: async () => {
           input.onReturn?.();
+          if (input.hangReturn) {
+            return new Promise<{ done: true; value: undefined }>(() => undefined);
+          }
           return { done: true as const, value: undefined };
         },
       }),
@@ -652,7 +660,7 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       spies.openRead.mockClear();
       spies.head.mockResolvedValueOnce({
         hash,
-        byteLength: expected.byteLength + 64,
+        byteLength: 1_000_001,
         contentType: null,
       });
       expectStorageUnavailable(await app.inject({
@@ -798,14 +806,281 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
 
   it("does not call EvidenceStore.get from the JSON bytes service path", () => {
     const serviceSrc = readFileSync(join(HERE, "service.ts"), "utf8");
+    const artifactBytes = serviceSrc.slice(
+      serviceSrc.indexOf("async getArtifactBytes"),
+      serviceSrc.indexOf("async getArtifactJsonBytes"),
+    );
     const jsonBytes = serviceSrc.slice(
       serviceSrc.indexOf("async getArtifactJsonBytes"),
       serviceSrc.indexOf("async headEvidence"),
     );
-    expect(jsonBytes).toContain("headEvidence");
-    expect(jsonBytes).toContain("openEvidenceRead");
+    expect(jsonBytes).toContain("getArtifactBytes");
     expect(jsonBytes).not.toMatch(/this\.evidence\.get\s*\(/);
-    expect(jsonBytes).toContain("collectExactJsonEvidenceBytes");
+    expect(artifactBytes).toContain("getReadableHeldArtifact");
+    expect(artifactBytes).not.toContain("requireCase");
+    expect(artifactBytes).toContain("headEvidence");
+    expect(artifactBytes).toContain("openEvidenceRead");
+    expect(artifactBytes).toContain("collectExactBoundedEvidenceBytes");
+    expect(artifactBytes).not.toMatch(/this\.evidence\.get\s*\(/);
+    expect(serviceSrc).toContain("nextWithAbort");
+    expect(serviceSrc).toContain("releaseBoundedIterator");
+    expect(serviceSrc).toMatch(/nextLength > maxBytes \|\| nextLength > expectedLength/);
+    expect(serviceSrc).toMatch(/const copy = Uint8Array\.from\(chunk\)/);
+    expect(serviceSrc.indexOf("nextLength > maxBytes")).toBeLessThan(
+      serviceSrc.indexOf("const copy = Uint8Array.from(chunk)"),
+    );
+  });
+
+  it("authorizes getArtifactBytes before any Head or OpenRead and rejects catalog over cap", async () => {
+    await withApp(async ({ app, store, domain }) => {
+      const spies = spyJsonBytesStore(store);
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Bounded collector auth");
+      const privateArt = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "private.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "owner only",
+        privacyClass: "owner_only",
+      });
+      const sharedArt = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "shared.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "share safe",
+        privacyClass: "share_safe",
+      });
+      const actor = {
+        id: "uid=alice,ou=people,dc=example,dc=test",
+        username: "alice",
+      };
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+
+      const denied = await domain.getArtifactBytes(
+        caseId,
+        privateArt.id,
+        actor,
+        false,
+        false,
+        1_000_000,
+      );
+      expect(denied).toEqual({ outcome: "not_found" });
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(spies.head).not.toHaveBeenCalled();
+      expect(spies.openRead).not.toHaveBeenCalled();
+
+      await expect(domain.getArtifactBytes(
+        caseId,
+        sharedArt.id,
+        actor,
+        false,
+        true,
+        -1,
+      )).rejects.toThrow(/maxBytes must be a safe nonnegative integer/);
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(spies.head).not.toHaveBeenCalled();
+      expect(spies.openRead).not.toHaveBeenCalled();
+
+      const overCap = await domain.getArtifactBytes(
+        caseId,
+        sharedArt.id,
+        actor,
+        false,
+        true,
+        1,
+      );
+      expect(overCap).toEqual({
+        outcome: "too_large",
+        byteLength: LOG.length,
+        maxBytes: 1,
+      });
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(spies.head).not.toHaveBeenCalled();
+      expect(spies.openRead).not.toHaveBeenCalled();
+
+      const ok = await domain.getArtifactBytes(
+        caseId,
+        sharedArt.id,
+        actor,
+        false,
+        true,
+        1_000_000,
+      );
+      expect(ok.outcome).toBe("ok");
+      if (ok.outcome === "ok") {
+        expect(Buffer.from(ok.bytes).toString("utf8")).toBe(LOG);
+        expect(ok.byteLength).toBe(LOG.length);
+        expect(ok.hash).toBe(sharedArt.contentHash);
+      }
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(spies.head).toHaveBeenCalledTimes(1);
+      expect(spies.openRead).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("aborts a stalled collector next() promptly and does not await a hanging return", async () => {
+    await withApp(async ({ app, store, domain }) => {
+      const spies = spyJsonBytesStore(store);
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Stalled collector next");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "app.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "stalled next",
+        privacyClass: "share_safe",
+      });
+      const hash = artifact.contentHash ?? "";
+      const expected = new TextEncoder().encode(LOG);
+      let returned = 0;
+      let enteredNext!: () => void;
+      const nextStarted = new Promise<void>((resolve) => {
+        enteredNext = resolve;
+      });
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce({
+        meta: { hash, byteLength: expected.byteLength, contentType: null },
+        range: null,
+        byteLength: expected.byteLength,
+        bytes: () => ({
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              enteredNext();
+              return new Promise<{ done: true; value: undefined }>(() => undefined);
+            },
+            return: async () => {
+              returned += 1;
+              return new Promise<{ done: true; value: undefined }>(() => undefined);
+            },
+          }),
+        }),
+      });
+      const actor = {
+        id: "uid=alice,ou=people,dc=example,dc=test",
+        username: "alice",
+      };
+      const controller = new AbortController();
+      const started = Date.now();
+      const pending = domain.getArtifactBytes(
+        caseId,
+        artifact.id,
+        actor,
+        false,
+        true,
+        1_000_000,
+        controller.signal,
+      );
+      await nextStarted;
+      controller.abort();
+      await expect(pending).rejects.toThrow();
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(returned).toBeGreaterThan(0);
+      expect(spies.get).not.toHaveBeenCalled();
+    });
+  });
+
+  it("rejects overflow without awaiting a never-settling iterator.return", async () => {
+    await withApp(async ({ app, store, domain }) => {
+      const spies = spyJsonBytesStore(store);
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Hanging collector return");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "app.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "hanging return",
+        privacyClass: "share_safe",
+      });
+      const hash = artifact.contentHash ?? "";
+      const expected = new TextEncoder().encode(LOG);
+      const huge = new Uint8Array(expected.byteLength + 1).fill(0x61);
+      let returned = 0;
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce(mockReadHandle({
+        hash,
+        byteLength: expected.byteLength,
+        chunks: [huge],
+        hangReturn: true,
+        onReturn: () => {
+          returned += 1;
+        },
+      }));
+      const actor = {
+        id: "uid=alice,ou=people,dc=example,dc=test",
+        username: "alice",
+      };
+      const started = Date.now();
+      await expect(domain.getArtifactBytes(
+        caseId,
+        artifact.id,
+        actor,
+        false,
+        true,
+        1_000_000,
+      )).rejects.toThrow(/evidence blob failed verification/);
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(returned).toBeGreaterThan(0);
+      expect(spies.get).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns exact bytes without invoking a never-settling return after iterator completion", async () => {
+    await withApp(async ({ app, store, domain }) => {
+      const spies = spyJsonBytesStore(store);
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Completed collector return");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "app.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "completed iterator",
+        privacyClass: "share_safe",
+      });
+      const hash = artifact.contentHash ?? "";
+      const expected = new TextEncoder().encode(LOG);
+      let returned = 0;
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce(mockReadHandle({
+        hash,
+        byteLength: expected.byteLength,
+        chunks: [expected],
+        hangReturn: true,
+        onReturn: () => {
+          returned += 1;
+        },
+      }));
+      const started = Date.now();
+      const result = await domain.getArtifactBytes(
+        caseId,
+        artifact.id,
+        { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" },
+        false,
+        true,
+        1_000_000,
+      );
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(result.outcome).toBe("ok");
+      if (result.outcome === "ok") {
+        expect(result.bytes).toEqual(expected);
+        expect(result.byteLength).toBe(expected.byteLength);
+        expect(result.hash).toBe(hash);
+      }
+      expect(returned).toBe(0);
+      expect(spies.get).not.toHaveBeenCalled();
+    });
   });
 
   it("aborts a stalled verification preflight without publishing a response and cleans guards", async () => {

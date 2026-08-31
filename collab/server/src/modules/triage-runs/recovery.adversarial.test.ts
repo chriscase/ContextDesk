@@ -300,15 +300,15 @@ async function waitFor(
 }
 
 describe("triage restart recovery reauthorization", () => {
-  it("resumes an active authorized requester with only current private-read capability", async () => {
+  it("resumes an active authorized requester without materializing private bytes for a non-gateway run", async () => {
     const fx = await recoveryFixture({ actor: LEAD, privacyClass: "owner_only" });
     try {
       await fx.service.recoverPending();
       const completed = await waitFor(fx.service, fx.caseId, fx.jobId, LEAD, "completed");
       expect(completed.status).toBe("completed");
       expect(fx.counts.providerCalls).toBe(1);
-      expect(fx.counts.privateByteReads).toBeGreaterThan(0);
-      expect(fx.counts.observedPrivateBase64).toBe(Buffer.from(PRIVATE_LOG).toString("base64"));
+      expect(fx.counts.privateByteReads).toBe(0);
+      expect(fx.counts.observedPrivateBase64).toBeNull();
       expect((await fx.jobs.get(fx.jobId))?.stoppedReason).toBeNull();
     } finally {
       await rm(fx.root, { recursive: true, force: true });
@@ -561,7 +561,8 @@ describe("triage restart recovery reauthorization", () => {
       const completed = await waitFor(fx.service, fx.caseId, "job-recover-auth", ADMIN, "completed", true);
       expect(completed.status).toBe("completed");
       expect(fx.counts.providerCalls).toBe(1);
-      expect(fx.counts.observedPrivateBase64).toBe(Buffer.from(PRIVATE_LOG).toString("base64"));
+      expect(fx.counts.privateByteReads).toBe(0);
+      expect(fx.counts.observedPrivateBase64).toBeNull();
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }

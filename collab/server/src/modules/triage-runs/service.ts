@@ -948,8 +948,24 @@ export class TriageRunService {
       const caseRow = await this.deps.cases.getCase(job.caseId, actor, isAdmin);
       if (!caseRow) throw new Error("case disappeared before execution");
       const evidence = job.request.mode === "gateway"
-        ? await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, canReadPrivate, true)
-        : await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, canReadPrivate, false);
+        ? await this.materializeEvidence(
+          job.caseId,
+          snapshot,
+          actor,
+          isAdmin,
+          canReadPrivate,
+          true,
+          controller.signal,
+        )
+        : await this.materializeEvidence(
+          job.caseId,
+          snapshot,
+          actor,
+          isAdmin,
+          canReadPrivate,
+          false,
+          controller.signal,
+        );
       const persistCandidate = async (result: TriageCandidateRunV1): Promise<void> => {
         if (leaseLost) return;
         const latest = await this.deps.jobs.get(currentJob.id);
@@ -1206,43 +1222,78 @@ export class TriageRunService {
     isAdmin: boolean,
     canReadPrivate: boolean,
     requireContent: boolean,
+    signal?: AbortSignal,
   ): Promise<TriageExecutionEvidence[]> {
     const evidence: TriageExecutionEvidence[] = [];
-    let aggregateBytes = 0;
+    let remainingAggregate = MAX_GATEWAY_EVIDENCE_AGGREGATE_BYTES;
     for (const item of snapshot.evidence) {
       const artifact = await this.deps.cases.getArtifact(caseId, item.evidenceId);
       if (!artifact) throw new Error("snapshot evidence disappeared before execution");
-      const bytes = await this.deps.cases.getArtifactBytes(
+      if (!requireContent) {
+        evidence.push({
+          evidenceId: item.evidenceId,
+          ordinal: item.ordinal,
+          contentHash: item.contentHash,
+          mediaType: artifact.mediaType,
+          privacyClass: item.privacyClass,
+          byteLength: artifact.byteLength,
+          contentBase64: null,
+        });
+        continue;
+      }
+      if (!item.contentHash) {
+        evidence.push({
+          evidenceId: item.evidenceId,
+          ordinal: item.ordinal,
+          contentHash: item.contentHash,
+          mediaType: artifact.mediaType,
+          privacyClass: item.privacyClass,
+          byteLength: artifact.byteLength,
+          contentBase64: null,
+        });
+        continue;
+      }
+      const catalogLength = artifact.byteLength;
+      if (catalogLength === null || catalogLength < 0) {
+        throw new Error("snapshot evidence content is unavailable to the gateway runner");
+      }
+      if (catalogLength > MAX_GATEWAY_EVIDENCE_ITEM_BYTES) {
+        throw new Error("gateway evidence item exceeds the bounded size");
+      }
+      if (catalogLength > remainingAggregate) {
+        throw new Error("gateway evidence exceeds the aggregate bound");
+      }
+      const maxBytes = Math.min(MAX_GATEWAY_EVIDENCE_ITEM_BYTES, remainingAggregate);
+      const result = await this.deps.cases.getArtifactBytes(
         caseId,
         item.evidenceId,
         actor,
         isAdmin,
         canReadPrivate,
+        maxBytes,
+        signal,
       );
-      if (requireContent && item.contentHash && !bytes) {
-        throw new Error("snapshot evidence content is unavailable to the gateway runner");
-      }
-      if (bytes && requireContent) {
-        if (bytes.byteLength > MAX_GATEWAY_EVIDENCE_ITEM_BYTES) {
+      if (result.outcome === "too_large") {
+        if (result.byteLength > MAX_GATEWAY_EVIDENCE_ITEM_BYTES) {
           throw new Error("gateway evidence item exceeds the bounded size");
         }
-        aggregateBytes += bytes.byteLength;
-        if (aggregateBytes > MAX_GATEWAY_EVIDENCE_AGGREGATE_BYTES) {
-          throw new Error("gateway evidence exceeds the aggregate bound");
-        }
-        const actualHash = createHash("sha256").update(bytes).digest("hex");
-        if (item.contentHash && actualHash !== item.contentHash) {
-          throw new Error("snapshot evidence integrity verification failed");
-        }
+        throw new Error("gateway evidence exceeds the aggregate bound");
       }
+      if (result.outcome !== "ok") {
+        throw new Error("snapshot evidence content is unavailable to the gateway runner");
+      }
+      if (item.contentHash && result.hash !== item.contentHash) {
+        throw new Error("snapshot evidence integrity verification failed");
+      }
+      remainingAggregate -= catalogLength;
       evidence.push({
         evidenceId: item.evidenceId,
         ordinal: item.ordinal,
         contentHash: item.contentHash,
         mediaType: artifact.mediaType,
         privacyClass: item.privacyClass,
-        byteLength: bytes?.byteLength ?? artifact.byteLength,
-        contentBase64: bytes ? Buffer.from(bytes).toString("base64") : null,
+        byteLength: result.byteLength,
+        contentBase64: Buffer.from(result.bytes).toString("base64"),
       });
     }
     return evidence;

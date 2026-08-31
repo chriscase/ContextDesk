@@ -301,6 +301,53 @@ function throwIfStreamAborted(signal: AbortSignal | undefined): void {
   }
 }
 
+function abortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  return new Error("evidence stream aborted");
+}
+
+async function nextWithAbort<T>(
+  iterator: AsyncIterator<T>,
+  signal: AbortSignal | undefined,
+): Promise<IteratorResult<T>> {
+  throwIfStreamAborted(signal);
+  if (!signal) return iterator.next();
+  return new Promise<IteratorResult<T>>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      finish(() => reject(abortReason(signal)));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    let next: Promise<IteratorResult<T>>;
+    try {
+      next = Promise.resolve(iterator.next());
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    void next.then(
+      (result) => finish(() => resolve(result)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+function releaseBoundedIterator(iterator: AsyncIterator<Uint8Array>): void {
+  if (typeof iterator.return !== "function") return;
+  try {
+    void Promise.resolve(iterator.return()).catch(() => undefined);
+  } catch {
+    // A hostile return() must not replace the collector failure.
+  }
+}
+
 async function* nonEmptyStreamChunks(
   source: AsyncIterable<Uint8Array>,
   signal?: AbortSignal,
@@ -318,16 +365,27 @@ async function* nonEmptyStreamChunks(
   if (!yielded) throw new Error("evidence file must not be empty");
 }
 
-function jsonBytesStorageUnavailable(): Error {
+function boundedArtifactBytesUnavailable(): Error {
   return new Error("evidence blob failed verification");
 }
 
-async function openJsonBytesIterator(
+function assertSafeMaxBytes(maxBytes: number): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error("maxBytes must be a safe nonnegative integer");
+  }
+}
+
+export type ArtifactBytesOutcome =
+  | { outcome: "not_found" }
+  | { outcome: "too_large"; byteLength: number; maxBytes: number }
+  | { outcome: "ok"; bytes: Uint8Array; hash: ContentHash; byteLength: number };
+
+async function openBoundedEvidenceIterator(
   handle: EvidenceReadHandle,
 ): Promise<AsyncIterator<Uint8Array>> {
   const source: unknown = await Promise.resolve(handle.bytes());
   if (!source || typeof source !== "object") {
-    throw jsonBytesStorageUnavailable();
+    throw boundedArtifactBytesUnavailable();
   }
   const record = source as {
     [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array>;
@@ -353,7 +411,7 @@ async function openJsonBytesIterator(
   if (typeof record.next === "function") {
     return record as AsyncIterator<Uint8Array>;
   }
-  throw jsonBytesStorageUnavailable();
+  throw boundedArtifactBytesUnavailable();
 }
 
 function concatExactChunks(chunks: Uint8Array[], byteLength: number): Uint8Array {
@@ -370,51 +428,60 @@ function concatExactChunks(chunks: Uint8Array[], byteLength: number): Uint8Array
   return out;
 }
 
-async function collectExactJsonEvidenceBytes(
+async function collectExactBoundedEvidenceBytes(
   handle: EvidenceReadHandle,
   expectedHash: string,
   expectedLength: number,
+  maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   if (
     handle.meta.hash !== expectedHash
     || handle.meta.byteLength !== expectedLength
     || handle.range !== null
     || handle.byteLength !== expectedLength
+    || expectedLength > maxBytes
+    || handle.byteLength > maxBytes
+    || handle.meta.byteLength > maxBytes
   ) {
-    throw jsonBytesStorageUnavailable();
+    throw boundedArtifactBytesUnavailable();
   }
   const hasher = createHash("sha256");
   const chunks: Uint8Array[] = [];
   let received = 0;
-  const iterator = await openJsonBytesIterator(handle);
+  const iterator = await openBoundedEvidenceIterator(handle);
   try {
     for (;;) {
-      const next = await iterator.next();
+      const next = await nextWithAbort(iterator, signal);
       if (next.done) break;
       const chunk = next.value;
       if (!(chunk instanceof Uint8Array)) {
-        throw jsonBytesStorageUnavailable();
+        throw boundedArtifactBytesUnavailable();
       }
       if (chunk.byteLength === 0) continue;
       const nextLength = received + chunk.byteLength;
-      if (nextLength > MAX_UPLOAD_BYTES || nextLength > expectedLength) {
-        throw jsonBytesStorageUnavailable();
+      if (nextLength > maxBytes || nextLength > expectedLength) {
+        throw boundedArtifactBytesUnavailable();
       }
       const copy = Uint8Array.from(chunk);
       chunks.push(copy);
       hasher.update(copy);
       received = nextLength;
     }
-  } finally {
-    if (typeof iterator.return === "function") {
-      await Promise.resolve(iterator.return()).catch(() => undefined);
-    }
+  } catch (error) {
+    releaseBoundedIterator(iterator);
+    throw error;
   }
-  if (received !== expectedLength) {
-    throw jsonBytesStorageUnavailable();
+  const digest = hasher.digest("hex");
+  if (received !== expectedLength || digest !== expectedHash) {
+    releaseBoundedIterator(iterator);
+    throw boundedArtifactBytesUnavailable();
   }
-  if (hasher.digest("hex") !== expectedHash) {
-    throw jsonBytesStorageUnavailable();
+  try {
+    throwIfStreamAborted(signal);
+  } catch (error) {
+    releaseBoundedIterator(iterator);
+    throw error;
   }
   return concatExactChunks(chunks, received);
 }
@@ -2282,8 +2349,9 @@ export class CaseService {
     actor: Actor,
     isAdmin: boolean,
     canReadPrivate: boolean,
-  ): Promise<Uint8Array | null> {
-    await this.requireCase(caseId);
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<ArtifactBytesOutcome> {
     const row = await this.getReadableHeldArtifact(
       caseId,
       artifactId,
@@ -2291,8 +2359,32 @@ export class CaseService {
       isAdmin,
       canReadPrivate,
     );
-    if (!row?.contentHash) return null;
-    return this.evidence.get(row.contentHash);
+    if (!row?.contentHash || row.byteLength === null || !isContentHash(row.contentHash)) {
+      return { outcome: "not_found" };
+    }
+    assertSafeMaxBytes(maxBytes);
+    throwIfStreamAborted(signal);
+    if (row.byteLength > maxBytes) {
+      return { outcome: "too_large", byteLength: row.byteLength, maxBytes };
+    }
+    const hash = row.contentHash;
+    const expectedLength = row.byteLength;
+    const meta = await this.headEvidence(hash, signal);
+    if (!meta || meta.hash !== hash || meta.byteLength !== expectedLength) {
+      throw boundedArtifactBytesUnavailable();
+    }
+    if (meta.byteLength > maxBytes) {
+      return { outcome: "too_large", byteLength: meta.byteLength, maxBytes };
+    }
+    const handle = await this.openEvidenceRead(hash, undefined, signal);
+    const bytes = await collectExactBoundedEvidenceBytes(
+      handle,
+      hash,
+      expectedLength,
+      maxBytes,
+      signal,
+    );
+    return { outcome: "ok", bytes, hash, byteLength: bytes.byteLength };
   }
 
   async getArtifactJsonBytes(
@@ -2304,25 +2396,17 @@ export class CaseService {
   ): Promise<
     { outcome: "not_found" } | { outcome: "too_large" } | { outcome: "ok"; bytes: Uint8Array }
   > {
-    await this.requireCase(caseId);
-    const row = await this.getReadableHeldArtifact(
+    const result = await this.getArtifactBytes(
       caseId,
       artifactId,
       actor,
       isAdmin,
       canReadPrivate,
+      MAX_UPLOAD_BYTES,
     );
-    if (!row?.contentHash || row.byteLength === null) return { outcome: "not_found" };
-    if (row.byteLength > MAX_UPLOAD_BYTES) return { outcome: "too_large" };
-    const hash = row.contentHash;
-    const expectedLength = row.byteLength;
-    const meta = await this.headEvidence(hash);
-    if (!meta || meta.hash !== hash || meta.byteLength !== expectedLength) {
-      throw jsonBytesStorageUnavailable();
-    }
-    const handle = await this.openEvidenceRead(hash);
-    const bytes = await collectExactJsonEvidenceBytes(handle, hash, expectedLength);
-    return { outcome: "ok", bytes };
+    if (result.outcome === "ok") return { outcome: "ok", bytes: result.bytes };
+    if (result.outcome === "too_large") return { outcome: "too_large" };
+    return { outcome: "not_found" };
   }
 
   async headEvidence(hash: string, signal?: AbortSignal): Promise<BlobMetaV1 | null> {
