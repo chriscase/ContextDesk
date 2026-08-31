@@ -33,16 +33,18 @@ runs on one workstation or behind shared infrastructure.
 | Shape | Shipped configuration | Important boundary |
 | --- | --- | --- |
 | Private local | Loopback service, SQLite, local authentication, and filesystem evidence storage | Single node; no PostgreSQL role separation or multi-worker high availability |
-| Shared | Operator-deployed service with PostgreSQL, filesystem evidence storage, and encrypted LDAP-capable sign-in | The operator must configure and qualify storage, TLS, directory access, ingress, and backups |
+| Shared | Operator-deployed service with PostgreSQL, filesystem or S3-compatible evidence storage, and encrypted LDAP-capable sign-in | The operator must configure and qualify database, byte storage, TLS, directory access, ingress, and backups |
 | Synthetic demo | Loopback-only fixture with temporary evidence and no PostgreSQL, LDAP, or provider call | Demonstration behavior is not production qualification |
 
 The browser is a client in every shape. Local deployment does not remove the
 browser/service trust boundary, and shared deployment does not make every link
 public; authorization still applies.
 
-Evidence bytes in both local and shared shapes currently use filesystem
-storage. A future S3-compatible byte backend is documented in
-help://war-room-s3-evidence-store; it is not a shipped provider.
+Filesystem remains the default evidence-byte backend. A deployment may select
+the shipped S3-compatible backend with the exact server-only contract in
+help://war-room-s3-evidence-store. `COLLAB_EVIDENCE_ROOT` remains local
+server-owned control state in either mode. Selecting S3 does not migrate bytes
+already stored on the filesystem.
 
 ## Optional model bridge
 
@@ -88,11 +90,16 @@ surfaces.
   signatures are recorded as metadata but are not verified.
 - Automatic desktop embedding and automatic desktop/CLI synchronization are
   not shipped.
-- Filesystem evidence storage is the shipped byte backend. An S3-compatible
-  War Room evidence store is not shipped.
+- Filesystem is the default byte backend; S3-compatible storage is opt-in and
+  must pass configuration preflight, startup/readiness, provider permission,
+  and application write/read checks separately. A PostgreSQL-backed process
+  uses a database advisory lease for evidence writes; SQLite plus S3 is a
+  single-process evaluation shape and doctor warns about it. Doctor preflight
+  does not contact the bucket. There is no filesystem-to-S3 migration,
+  retention, lifecycle, or multi-provider failover automation.
 
 For the operating sequence, open help://war-room-workflow. For provenance,
-lane, and human-decision checks, open help://war-room-evidence-review. For a
-future S3-compatible evidence-byte store, open
+lane, and human-decision checks, open help://war-room-evidence-review. For the
+S3-compatible evidence-byte contract and qualification workflow, open
 help://war-room-s3-evidence-store. Security boundaries for the desktop product
 are described in help://security-boundaries.

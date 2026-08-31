@@ -56,9 +56,9 @@ certification.
 | Dedicated location | Prefer a private bucket used only for War Room. A dedicated prefix is acceptable only when the provider can enforce that prefix boundary for the service identity |
 | Endpoint and region | A stable API endpoint and a region string the client and server both use for signing |
 | Path-style addressing | Local and many self-hosted endpoints need path-style requests (`/bucket/key`). Virtual-hosted `bucket.hostname` names often fail on loopback |
-| TLS and trust | Production traffic uses TLS. If the certificate is issued by an internal CA, the **War Room process** trust store must include that CA |
+| TLS and trust | Production traffic uses TLS. If the certificate is issued by an internal CA, mount the CA bundle for the **War Room process** and set `COLLAB_EVIDENCE_S3_CA_FILE`; certificate verification remains enabled |
 | Stable DNS | The name the War Room service uses must keep resolving to the intended hosts. Do not put credentials in the URL |
-| Least-privilege identity | A dedicated service identity with only the read, write, list, and multipart actions the shipped provider requires, scoped to that bucket or prefix. No console root, browser user, or unused bucket-admin APIs |
+| Least-privilege identity | A dedicated service identity with only bucket readiness/list plus object read, write, and delete below the assigned location. The shipped provider does not use multipart APIs. No console root, browser user, or unused bucket-admin APIs |
 | Non-browser credentials | Access keys stay in a secret manager or owner-only files on the host. They never enter the webview, Help, git, or screenshots |
 | Persistence | Metadata and object bytes survive process and container restarts on durable volumes |
 | Capacity and monitoring | Disk, inode, and object-count headroom with alerts before the store is full |
@@ -83,21 +83,31 @@ root even in S3 mode; do not expose either location to the browser.
 Policy syntax is provider-specific. For services that accept AWS-style IAM
 policies, this is a starting shape rather than a provider-neutral copy/paste
 policy. Replace the bucket and prefix and verify it against the selected S3
-service. ContextDesk requires `s3:DeleteObject` for staging, journal recovery,
-and rollback cleanup; it does not require bucket-administration permissions.
+service. The shipped client calls `HeadBucket`, `HeadObject`, `GetObject`,
+`PutObject`, `CopyObject`, `DeleteObject`, and `ListObjectsV2`. In AWS IAM,
+`HeadBucket` and `ListObjectsV2` map to `s3:ListBucket`, while same-prefix
+`CopyObject` uses `s3:GetObject` on the source and `s3:PutObject` on the
+destination. ContextDesk requires `s3:DeleteObject` for staging, journal
+recovery, and rollback cleanup. It does not call multipart or
+bucket-administration APIs.
+
+The bucket-level statement below is intentionally not prefix-conditioned:
+startup uses `HeadBucket`, which carries no object prefix. That makes a
+dedicated bucket the clearest v1 security boundary. In a shared bucket, the
+object resource still restricts read/write/delete to `assigned-prefix/`, but
+this AWS-style shape does not make object listing outside that prefix a hard
+security boundary. Use a provider-native grant that passes both readiness and
+negative isolation tests, or use a dedicated bucket.
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "ListAssignedPrefix",
+      "Sid": "ReadinessAndList",
       "Effect": "Allow",
       "Action": ["s3:ListBucket"],
-      "Resource": ["arn:aws:s3:::war-room-evidence"],
-      "Condition": {
-        "StringLike": { "s3:prefix": ["assigned-prefix/*"] }
-      }
+      "Resource": ["arn:aws:s3:::war-room-evidence"]
     },
     {
       "Sid": "ReadWriteAssignedObjects",
@@ -105,9 +115,7 @@ and rollback cleanup; it does not require bucket-administration permissions.
       "Action": [
         "s3:GetObject",
         "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:AbortMultipartUpload",
-        "s3:ListMultipartUploadParts"
+        "s3:DeleteObject"
       ],
       "Resource": ["arn:aws:s3:::war-room-evidence/assigned-prefix/*"]
     }
@@ -116,11 +124,12 @@ and rollback cleanup; it does not require bucket-administration permissions.
 ```
 
 Some self-hosted services expose coarser bucket grants instead of IAM JSON.
-Use the smallest native grant that passes the release's readiness and
-application smoke tests. The application identity must be able to delete only
-objects below its assigned prefix; this is internal transaction cleanup, not a
-user-facing permanent-delete feature. Keep bucket administration and unrelated
-prefixes out of the application grant.
+Use the smallest native grant that passes the release's readiness, negative
+isolation, and application smoke tests. The application identity must be able
+to delete objects below its assigned prefix; this is internal transaction
+cleanup, not a user-facing permanent-delete feature. Keep bucket administration
+and unrelated object prefixes out of the application grant wherever the
+selected service can enforce that boundary.
 
 ## Operator settings translation
 
@@ -132,20 +141,38 @@ control-state root in both modes.
 | Operator job | Setting | Notes |
 | --- | --- | --- |
 | Select byte backend | `COLLAB_EVIDENCE_PROVIDER` | `filesystem` (default) or `s3`. |
-| Filesystem/control root | `COLLAB_EVIDENCE_ROOT` | Required in both modes for local control state. |
+| Filesystem/control root | `COLLAB_EVIDENCE_ROOT` | Used in both modes for server-owned local control state; defaults to `.data/evidence` when unset. |
 | S3 API endpoint | `COLLAB_EVIDENCE_S3_ENDPOINT` | Scheme, host, and port only. No userinfo, no key in the query string. |
 | Region | `COLLAB_EVIDENCE_S3_REGION` | Must match the signer. Garage's default region is `garage`. |
 | Bucket | `COLLAB_EVIDENCE_S3_BUCKET` | Private bucket dedicated to War Room when possible. |
-| Key prefix | `COLLAB_EVIDENCE_S3_PREFIX` | Optional isolation inside a shared bucket. Keep smoke-test keys out of the application prefix. |
-| Path-style | `COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE` | Use `1` for Garage and other endpoints that do not provide bucket-name DNS. |
-| HTTP opt-in | `COLLAB_EVIDENCE_S3_ALLOW_HTTP` | Defaults off. Set to `1` only for a trusted local evaluation network. |
-| Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Bounded per-request timeout; the deployment sample uses 30 seconds. |
-| Upload ceiling | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Defaults to 512 MiB and refuses values above the 5 GiB v1 hard limit. |
-| Credential mode | `COLLAB_EVIDENCE_S3_CREDENTIALS_MODE` | `static` requires the explicit values below; `default_chain` uses the server process's AWS-compatible provider chain. |
+| Key prefix | `COLLAB_EVIDENCE_S3_PREFIX` | Optional application key prefix. A configured value is normalized with one trailing `/`; an empty configured value is rejected. Prefer a dedicated bucket because `HeadBucket` needs bucket-level permission. |
+| Path-style | `COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE` | Exact `0` or `1`. When unset, custom endpoints (including Garage) default to path-style and AWS-managed endpoints default to virtual-host style. |
+| HTTP opt-in | `COLLAB_EVIDENCE_S3_ALLOW_HTTP` | Exact `0` or `1`; defaults to `0`. Set to `1` only for a trusted local evaluation network. |
+| Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Connection and request timeout in milliseconds; defaults to `30000`, valid range `1000..120000`. |
+| Parsed backend size bound | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Parsed and stored with a 512 MiB default and `1..5368709120` range. This release does not apply it to `PutObject` or application intake. Held-evidence intake remains capped separately at 1,000,000 bytes, and this setting does not raise that limit. |
+| Credential mode | `COLLAB_EVIDENCE_S3_CREDENTIALS_MODE` | Required in S3 mode; there is no default. `static` requires the explicit pair below; `default_chain` uses the server process's AWS-compatible provider chain and rejects leftover static `COLLAB_EVIDENCE_S3_*` credential names. |
 | Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID`, `_FILE`, or `_REF` | Dedicated service identity, not a human console login. Configure exactly one source. |
-| Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; files must be owner-protected and `_REF` must be an absolute `file:` reference. |
+| Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; files must be owner-protected and `_REF` must be an absolute `file:/...` reference, not `file://...`. |
 | Session token | `COLLAB_EVIDENCE_S3_SESSION_TOKEN`, `_FILE`, or `_REF` | Optional; use only when the selected static credentials require it. |
-| Custom CA | `COLLAB_EVIDENCE_S3_CA_FILE` | Optional PEM file for the private S3 endpoint. TLS verification remains enabled. |
+| Custom CA | `COLLAB_EVIDENCE_S3_CA_FILE` | Optional absolute path to a regular PEM CA bundle (maximum 1 MiB). The S3 request handler uses it with TLS verification enabled; unlike credential files, the CA file need not be owner-only. |
+
+In `static` mode, access key id and secret access key must both resolve. A
+session token is optional but is invalid without that pair. For each value,
+configure exactly one of the direct name, `_FILE`, or `_REF`; relative paths,
+symlinks, empty files, group/world-readable secret files on Unix, and
+`file://` references are refused. Direct environment values exist for
+orchestrator secret injection, but do not put them in a committed env file.
+
+Filesystem mode rejects leftover `COLLAB_EVIDENCE_S3_*` names and
+`COLLAB_EVIDENCE_MAX_UPLOAD_BYTES`, including names that are present with empty
+values. Remove the S3 block rather than blanking it when returning to the
+filesystem provider.
+
+With PostgreSQL, the process uses a database advisory lease to coordinate
+evidence write batches across application replicas. SQLite has no external
+lease: SQLite plus S3 is a single-process evaluation shape, and doctor reports
+that warning. Do not run multiple SQLite-backed War Room processes against one
+S3 location.
 
 ## Local evaluation with Garage
 
@@ -263,9 +290,19 @@ documents different paths, follow that version's documentation instead.
 The S3 API listens on port **3900**. Garage's default region string is
 `garage`. Leave RPC, admin, and website ports unpublished on the host.
 
-Loopback publishing is correct for **object-store** evaluation from the same
-host. A War Room **container** does not reach `127.0.0.1:3900` on the host; see
-Troubleshooting.
+Loopback publishing is correct when the War Room process runs on the same
+**host**. Use endpoint `http://127.0.0.1:3900` with
+`COLLAB_EVIDENCE_S3_ALLOW_HTTP=1` only for that trusted local evaluation.
+
+A War Room **container** does not reach the host or another container through
+`127.0.0.1:3900`; that address is the War Room container itself. If War Room
+and Garage are services in the same Compose project and network, use
+`http://garage:3900` and `COLLAB_EVIDENCE_S3_ALLOW_HTTP=1`. If they are in
+different Compose projects, attach both services to an explicitly named shared
+network and give Garage a stable network alias before using that alias in the
+endpoint. A service name is not automatically visible across separate Compose
+project networks. Keep port 3900 unpublished when only peer containers need it;
+the loopback `ports` entry above exists for host-run smoke tools.
 
 ### Object-store smoke test
 
@@ -382,7 +419,7 @@ Where the object store supports two live keys:
 2. Prove the new key with the object-store smoke test.
 3. Update the War Room secret source from `collab/deploy/.env.example` (file,
    absolute `file:` reference, or secret manager).
-4. Restart or reload the War Room process as the release requires.
+4. Restart the War Room process; this release has no live credential reload.
 5. Confirm an application-level read of a known object.
 6. Revoke the old key.
 7. Verify the old key is rejected and the new key still works.
@@ -397,27 +434,39 @@ Keep these two proofs separate.
 
 | Proof | What it shows | What it does not show |
 | --- | --- | --- |
+| Doctor preflight | S3 names, credential sources, local control root, CA file, and bounds parse successfully | Bucket reachability or permissions; doctor says `bucket not contacted` |
+| Process startup and `/ready` | Startup selected the configured provider, `HeadBucket` succeeded, crash recovery completed before listen, and the current database plus byte backend answer readiness probes | An application write/read, historical migration, or backup restore |
 | Object-store CLI smoke test | The service accepts signed requests, persists bytes, and honors get/head/range/list/delete on a disposable key | That War Room can configure, authorize, or hash evidence |
-| Provider readiness | The War Room process accepted its config and `ping`/ready checks for the byte backend | That historical objects were migrated or that backups restore |
-| Bucket and prefix permissions | The dedicated identity can reach only the assigned location | That another identity is locked out unless you test that separately |
-| Application upload/download | An authorized War Room action stored bytes and read them back with a matching hash | Lifecycle, legal hold, or multi-provider failover |
+| Bucket and prefix permissions | Positive and negative tests show the dedicated identity reaches only the intended object location to the extent the provider can enforce it | A hard listing boundary when the required bucket-level readiness grant is broader |
+| Application upload/download | An authorized War Room action stored bytes, returned metadata, and read them back with a matching hash | Retention, lifecycle, legal hold, or multi-provider failover |
 
 After the CLI proof plus persistence across restart, add:
 
-1. Process configuration accepted from `collab/deploy/.env.example`.
-2. Readiness of the configured byte backend.
-3. Permission check against the assigned bucket or prefix.
-4. A small unique application upload, head, download, and hash compare.
-5. Restart of War Room and the object store, then another download of the same
-   artifact.
-6. Cleanup only of disposable smoke objects. The current evidence interface
+1. Run `npm run doctor` with the intended server environment. Require an
+   accepted S3 configuration, and remember that this step does not contact the
+   bucket.
+2. Start War Room. In S3 mode it must complete `HeadBucket` and pending-write
+   recovery before it listens. Check `/health` for process liveness and
+   `/ready` for the database plus the currently selected evidence backend; do
+   not treat `/health` as evidence readiness.
+3. Run positive and negative permission checks for the dedicated bucket or
+   prefix. For AWS-style permissions, account for the bucket-level
+   `s3:ListBucket` required by `HeadBucket`.
+4. Through the normal authenticated War Room evidence flow, upload a small
+   unique file, read the returned artifact metadata, download its bytes, and
+   compare the returned content hash plus a locally computed SHA-256 with the
+   original. This is the application smoke test; an object-store CLI put is not
+   a substitute.
+5. Restart War Room and the object store, require `/ready` again, then download
+   the same artifact and repeat the hash comparison.
+6. Cleanup only disposable operator-smoke objects. The current evidence interface
    does not offer general deletion; do not invent a production delete path.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
-| TLS handshake failure or unknown CA | Custom CA not in the War Room process trust store; hostname mismatch | Certificate names, `NODE_EXTRA_CA_CERTS` or the release CA setting, and that you are not pointing at HTTP |
+| TLS handshake failure or unknown CA | Custom CA bundle is missing/unreadable, incomplete, or does not match the endpoint; hostname mismatch | Certificate names, the absolute `COLLAB_EVIDENCE_S3_CA_FILE` mounted in the War Room process, and that the endpoint is HTTPS |
 | SignatureDoesNotMatch or similar | Wrong secret, clock skew, or region mismatch | Region string (`garage` for the example), key material, and host NTP |
 | Permanent redirect or NoSuchBucket on a URL that includes the bucket hostname | Client used virtual-hosted addressing | Force path-style; local services rarely serve `bucket.127.0.0.1` |
 | AccessDenied / 403 | Identity lacks the operation, or the prefix/bucket is wrong | Scope of the service identity; smoke prefix versus application prefix |
@@ -425,7 +474,6 @@ After the CLI proof plus persistence across restart, add:
 | Connection refused from War Room, works on the host | Endpoint is loopback in a different network namespace | From the War Room container, `127.0.0.1` is that container. Use a compose network name, host gateway, or publish on an address that namespace can reach |
 | Missing object, database row exists | Prefix, bucket, or key layout mismatch; bytes never persisted | Head the exact key; do not treat object-store 404 as authorization |
 | Writes fail after a period of success | Full disk, inode exhaustion, or quota | Data volume **and** metadata volume; capacity alerts |
-| Incomplete multipart upload remains | A large or interrupted put left parts behind | Abort the upload with the same identity if the API supports it; small smoke objects should not need multipart |
 
 ## Backups and versioning
 
@@ -444,9 +492,9 @@ at the bucket, source migration, or automatic source cleanup in this milestone.
 
 ## What this is not
 
-- There is **no shipped S3 evidence provider** at the commit this page was
-  written against. Filesystem storage is the shipped provider.
-- There is no local-filesystem-to-S3 migration tool.
+- Selecting S3 changes the byte backend for new server operations. It does not
+  copy evidence already stored under `COLLAB_EVIDENCE_ROOT`.
+- There is no local-filesystem-to-S3 or S3-to-filesystem migration tool.
 - There is no retention, legal-hold, or lifecycle automation in the object
   store.
 - There are no browser credentials and no direct or presigned browser uploads

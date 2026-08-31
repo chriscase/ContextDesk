@@ -34,20 +34,37 @@ services:
       COLLAB_EVIDENCE_ROOT: /var/lib/cd-collab/evidence
       COLLAB_STATIC_DIR: /srv/web/dist
       # Optional S3-compatible evidence bytes (server-side only; opt-in).
-      # The local control-state root above remains required. Doctor does not
-      # contact the bucket. Mount owner-only secret files; do not put keys in
-      # this compose file. The object-store role must allow DeleteObject for
-      # staging, journal, and rollback cleanup.
+      # The local control-state root above remains in use. Doctor validates
+      # config but does not contact the bucket; startup and /ready ping it.
+      # This compose has no Garage service. 127.0.0.1 here is the app container,
+      # not the host or another container. For a same-network Garage service use
+      # http://garage:3900 plus ALLOW_HTTP=1; separate Compose projects need an
+      # explicitly named shared network and stable alias.
+      # Mount owner-only secret files; never put keys in this compose file.
+      # --env-file supplies the substitutions below but does not inject them;
+      # uncomment only the mappings selected for this deployment. Present but
+      # empty optional S3 names are invalid. Remove all mappings in filesystem
+      # mode, including COLLAB_EVIDENCE_MAX_UPLOAD_BYTES.
+      # The object-store role needs bucket readiness/list plus GetObject,
+      # PutObject, and DeleteObject. DeleteObject is required for staging,
+      # journal, and rollback cleanup, not a user-facing delete feature.
       # COLLAB_EVIDENCE_PROVIDER: s3
-      # COLLAB_EVIDENCE_S3_ENDPOINT: https://s3.example.test
-      # COLLAB_EVIDENCE_S3_REGION: garage
-      # COLLAB_EVIDENCE_S3_BUCKET: war-room-evidence
-      # COLLAB_EVIDENCE_S3_PREFIX: assigned-prefix
-      # COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE: "1"
-      # COLLAB_EVIDENCE_S3_ALLOW_HTTP: "0"
-      # COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: static
-      # COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: /run/secrets/evidence-s3-access-key-id
-      # COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/evidence-s3-secret-access-key
+      # COLLAB_EVIDENCE_S3_ENDPOINT: ${COLLAB_EVIDENCE_S3_ENDPOINT}
+      # COLLAB_EVIDENCE_S3_REGION: ${COLLAB_EVIDENCE_S3_REGION}
+      # COLLAB_EVIDENCE_S3_BUCKET: ${COLLAB_EVIDENCE_S3_BUCKET}
+      # COLLAB_EVIDENCE_S3_PREFIX: ${COLLAB_EVIDENCE_S3_PREFIX}
+      # COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE: ${COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE}
+      # COLLAB_EVIDENCE_S3_ALLOW_HTTP: ${COLLAB_EVIDENCE_S3_ALLOW_HTTP}
+      # COLLAB_EVIDENCE_S3_CA_FILE: ${COLLAB_EVIDENCE_S3_CA_FILE}
+      # COLLAB_EVIDENCE_S3_TIMEOUT_MS: ${COLLAB_EVIDENCE_S3_TIMEOUT_MS}
+      # Parsed/stored only; it does not raise the 1,000,000-byte app intake cap.
+      # COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: ${COLLAB_EVIDENCE_MAX_UPLOAD_BYTES}
+      # Required: static or default_chain. See .env.example for the complete
+      # direct/_FILE/_REF credential matrix and exact validation rules.
+      # COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: ${COLLAB_EVIDENCE_S3_CREDENTIALS_MODE}
+      # COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: ${COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE}
+      # COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: ${COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE}
+      # COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE: ${COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE}
     volumes:
       - evidence_data:/var/lib/cd-collab/evidence
       # Bind mounts preserve host ownership and mode. Before opting in, the
@@ -55,6 +72,10 @@ services:
       # with mode 0400; root-owned or group/world-readable files are refused.
       # - /run/secrets/evidence-s3-access-key-id:/run/secrets/evidence-s3-access-key-id:ro
       # - /run/secrets/evidence-s3-secret-access-key:/run/secrets/evidence-s3-secret-access-key:ro
+      # - /run/secrets/evidence-s3-session-token:/run/secrets/evidence-s3-session-token:ro
+      # A CA bundle is not secret and need not be owner-only, but it must be a
+      # regular absolute PEM file no larger than 1 MiB.
+      # - /etc/ssl/certs/s3-internal-ca.pem:/etc/ssl/certs/s3-internal-ca.pem:ro
     ports:
       - "8787:8787"
     depends_on:
