@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useId,
   useRef,
   useState,
@@ -320,6 +321,12 @@ export function KeystoneHypothesisComposer({
   const scopeEpoch = activeScope.current.epoch;
   const activeScopeEpoch = useRef(scopeEpoch);
   activeScopeEpoch.current = scopeEpoch;
+
+  useEffect(() => () => {
+    if (activeScopeEpoch.current === scopeEpoch) {
+      activeScopeEpoch.current = scopeEpoch + 1;
+    }
+  }, [scopeEpoch]);
 
   return (
     <KeystoneHypothesisComposerScope

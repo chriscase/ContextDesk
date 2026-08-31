@@ -96,6 +96,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   });
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const workingSetHeadingRef = useRef<HTMLHeadingElement>(null);
+  const returnFocusToWorkingSet = useRef(false);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
   const focusedArrival = useRef<string | null>(null);
   const cases = investigations.availability === "available" ? investigations.value : [];
@@ -189,6 +191,12 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     detailHeadingRef.current?.focus();
   }, [detailArrival]);
 
+  useEffect(() => {
+    if (!returnFocusToWorkingSet.current) return;
+    returnFocusToWorkingSet.current = false;
+    workingSetHeadingRef.current?.focus();
+  }, [workingSet.length]);
+
   function changeWorkingSet(evidenceId: string, selected: boolean) {
     setWorkingSetState((current) => {
       const ids = current.scope === scope ? current.ids : [];
@@ -204,6 +212,16 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   function inspectEvidence(evidenceId: string) {
     setSelectionState({ scope, evidenceId });
     changeInspectorTab("details");
+  }
+
+  function removeFromWorkingSet(evidenceId: string) {
+    returnFocusToWorkingSet.current = true;
+    changeWorkingSet(evidenceId, false);
+  }
+
+  function clearWorkingSet() {
+    returnFocusToWorkingSet.current = true;
+    setWorkingSetState({ scope, ids: [] });
   }
 
   function changeInspectorTab(tab: KeystoneInspectorTab) {
@@ -229,8 +247,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
           titleId="keystone-collection-title"
           headingRef={browseHeadingRef}
           headingTabIndex={-1}
-          description={<p>Scan the recorded collection in server-provided order, then inspect evidence without changing the shared record.</p>}
-          actions={<StrategyBadge tone="accent">Read-only K1</StrategyBadge>}
+          description={<p>Scan the recorded collection in server-provided order, then inspect evidence and record explicit engineer reasoning or situation corrections.</p>}
+          actions={<StrategyBadge tone="accent">Engineer workflow K2</StrategyBadge>}
         />
         <StrategyPanel
           title="Recorded collection"
@@ -346,7 +364,6 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
         actions={inventory.availability === "available"
           ? <StrategyBadge>{inventory.value.length} recorded</StrategyBadge>
           : null}
-        busy={inventory.availability === "idle" || inventory.availability === "loading" || (inventory.availability === "available" && inventory.refresh === "loading")}
       >
         {inventory.availability === "idle" || inventory.availability === "loading"
           ? <StrategyStateNotice busy>Loading evidence inventory…</StrategyStateNotice>
@@ -432,8 +449,11 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
         ) : null}
         <div className="keystone-strategy__working-set" aria-labelledby="keystone-working-set-title">
           <div>
-            <h4 id="keystone-working-set-title">Working set</h4>
-            <p>Temporary for this signed-in identity and investigation. Nothing is saved or sent.</p>
+            <h4 ref={workingSetHeadingRef} id="keystone-working-set-title" tabIndex={-1}>Working set</h4>
+            <p>
+              Temporary for this signed-in identity and investigation. Selection alone sends nothing;
+              cited evidence IDs are submitted only when you explicitly record a hypothesis.
+            </p>
           </div>
           {workingSet.length === 0 ? <span>No evidence selected</span> : (
             <>
@@ -447,13 +467,13 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                       <button
                         type="button"
                         aria-label={`Remove ${evidenceName(row.evidence)} from working set`}
-                        onClick={() => changeWorkingSet(id, false)}
+                        onClick={() => removeFromWorkingSet(id)}
                       >Remove</button>
                     </li>
                   );
                 })}
               </ul>
-              <button type="button" onClick={() => setWorkingSetState({ scope, ids: [] })}>Clear working set</button>
+              <button type="button" onClick={clearWorkingSet}>Clear working set</button>
             </>
           )}
         </div>

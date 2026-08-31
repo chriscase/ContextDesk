@@ -54,6 +54,7 @@ interface EditorState {
   readonly attempted: boolean;
   readonly pending: boolean;
   readonly conflicted: boolean;
+  readonly succeeded: boolean;
   readonly failure: RuntimeFailure | null;
   readonly ignored: CommandIgnoredReason | null;
 }
@@ -118,6 +119,7 @@ function initialState(scope: string, investigation: CaseV1): EditorState {
     attempted: false,
     pending: false,
     conflicted: false,
+    succeeded: false,
     failure: null,
     ignored: null,
   };
@@ -424,6 +426,7 @@ export function KeystoneSituationEditor({
         attempted: false,
         pending: false,
         conflicted: false,
+        succeeded: false,
         failure: null,
         ignored: null,
       };
@@ -444,6 +447,7 @@ export function KeystoneSituationEditor({
         attempted: false,
         pending: false,
         conflicted: false,
+        succeeded: false,
         failure: null,
         ignored: null,
       };
@@ -498,6 +502,7 @@ export function KeystoneSituationEditor({
         attempted: false,
         pending: false,
         conflicted: false,
+        succeeded: false,
         failure: null,
         ignored: null,
       };
@@ -526,6 +531,7 @@ export function KeystoneSituationEditor({
         attempted: true,
         pending: true,
         conflicted: false,
+        succeeded: false,
         failure: null,
         ignored: null,
       };
@@ -550,9 +556,10 @@ export function KeystoneSituationEditor({
         setStoredState((current) => current.scope === scope
           ? {
               ...current,
-              pending: false,
-              conflicted: false,
-              failure: { kind: "unexpected" },
+            pending: false,
+            conflicted: false,
+            succeeded: false,
+            failure: { kind: "unexpected" },
             }
           : current);
         return;
@@ -568,6 +575,7 @@ export function KeystoneSituationEditor({
             attempted: false,
             pending: false,
             conflicted: false,
+            succeeded: true,
             failure: null,
             ignored: null,
           }
@@ -580,9 +588,10 @@ export function KeystoneSituationEditor({
       setStoredState((current) => current.scope === scope
         ? {
             ...current,
-            pending: false,
-            conflicted: outcome.error.kind === "conflict",
-            failure: outcome.error,
+          pending: false,
+          conflicted: outcome.error.kind === "conflict",
+          succeeded: false,
+          failure: outcome.error,
             ignored: null,
           }
         : current);
@@ -592,9 +601,10 @@ export function KeystoneSituationEditor({
     setStoredState((current) => current.scope === scope
       ? {
           ...current,
-          pending: false,
-          conflicted: false,
-          failure: null,
+        pending: false,
+        conflicted: false,
+        succeeded: false,
+        failure: null,
           ignored: outcome.reason,
         }
       : current);
@@ -634,6 +644,7 @@ export function KeystoneSituationEditor({
             <textarea
               ref={firstFieldRef}
               rows={4}
+              disabled={running}
               value={state.draft.problemStatement}
               onChange={(event) => updateDraft("problemStatement", event.target.value)}
             />
@@ -642,6 +653,7 @@ export function KeystoneSituationEditor({
             <span>Affected people or systems</span>
             <textarea
               rows={3}
+              disabled={running}
               value={state.draft.affectedParties}
               onChange={(event) => updateDraft("affectedParties", event.target.value)}
             />
@@ -650,6 +662,7 @@ export function KeystoneSituationEditor({
             <span>Impact</span>
             <textarea
               rows={3}
+              disabled={running}
               value={state.draft.impact}
               onChange={(event) => updateDraft("impact", event.target.value)}
             />
@@ -658,6 +671,7 @@ export function KeystoneSituationEditor({
             <span>Scope</span>
             <textarea
               rows={3}
+              disabled={running}
               value={state.draft.scope}
               onChange={(event) => updateDraft("scope", event.target.value)}
             />
@@ -666,6 +680,7 @@ export function KeystoneSituationEditor({
             <span>Open questions</span>
             <textarea
               rows={4}
+              disabled={running}
               aria-label="Open questions"
               aria-describedby={questionsHintId}
               value={state.draft.openQuestions}
@@ -684,6 +699,7 @@ export function KeystoneSituationEditor({
                   <input
                     type="text"
                     maxLength={200}
+                    disabled={running}
                     value={state.draft.investigationContext[field]}
                     onChange={(event) => updateContext(field, event.target.value)}
                   />
@@ -701,7 +717,7 @@ export function KeystoneSituationEditor({
               <h5 id={latestRecordHeadingId}>Latest recorded situation</h5>
               {canonicalRecordIsNewer ? (
                 <>
-                  <p>Compare every recorded field with your retained draft before rebasing.</p>
+                  <p role="status">Compare every recorded field with your retained draft before rebasing.</p>
                   <SituationRecord investigation={investigation} />
                   <button type="button" onClick={rebaseOntoLatest} disabled={running}>
                     I reviewed this record — rebase my draft
@@ -728,6 +744,7 @@ export function KeystoneSituationEditor({
       ) : (
         <>
           <SituationRecord investigation={authoritativeRecord} />
+          {state.succeeded ? <p role="status">Situation changes recorded.</p> : null}
           {updateSituation === null ? (
             <p role="status">This view can read recorded situation context, but editing is unavailable.</p>
           ) : null}

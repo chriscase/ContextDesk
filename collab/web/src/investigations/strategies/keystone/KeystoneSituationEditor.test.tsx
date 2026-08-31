@@ -142,6 +142,7 @@ describe("Keystone K2 situation correction", () => {
       expect(submitted).not.toHaveProperty(forbidden);
     }
     expect(onSuccess).toHaveBeenCalledWith(accepted);
+    expect(screen.getByRole("status").textContent).toContain("Situation changes recorded");
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit situation" }));
   });
 
@@ -418,6 +419,22 @@ describe("Keystone K2 situation correction", () => {
     mounted.rerender({ mutation: { status: "running" } });
     expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled)
       .toBe(true);
+    for (const label of [
+      "Problem statement",
+      "Affected people or systems",
+      "Impact",
+      "Scope",
+      "Open questions",
+      "Product or software",
+      "Version",
+      "Build",
+      "Component",
+      "Environment",
+      "Customer, team, or organization",
+    ]) {
+      expect((screen.getByLabelText(label) as HTMLInputElement | HTMLTextAreaElement).disabled)
+        .toBe(true);
+    }
     fireEvent.submit(form);
     expect(updateSituation).not.toHaveBeenCalled();
 
@@ -428,6 +445,7 @@ describe("Keystone K2 situation correction", () => {
     expect(updateSituation).toHaveBeenCalledTimes(1);
     expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled)
       .toBe(true);
+    expect((screen.getByLabelText("Problem statement") as HTMLTextAreaElement).disabled).toBe(true);
 
     await act(async () => {
       deferred.resolve({ status: "failed", error: { kind: "network" } });

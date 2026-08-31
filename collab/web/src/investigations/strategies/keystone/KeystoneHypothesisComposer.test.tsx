@@ -327,6 +327,23 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(JSON.stringify(vi.mocked(commandB).mock.calls)).not.toContain("artifact-a");
   });
 
+  it("invalidates a pending success callback when the composer unmounts", async () => {
+    const deferred: Deferred<Awaited<ReturnType<CreateContribution>>> = createDeferred();
+    const command: CreateContribution = vi.fn(() => deferred.promise);
+    const onSuccess = vi.fn();
+    const mounted = mount({ createContribution: command, onSuccess });
+    fireEvent.change(hypothesisField(), { target: { value: "Pending during unmount." } });
+    fireEvent.submit(hypothesisForm());
+
+    mounted.unmount();
+    await act(async () => {
+      deferred.resolve({ status: "succeeded", value: authoritativeContribution() });
+      await deferred.promise;
+    });
+
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
   it("keeps newer typing when an earlier authoritative success arrives", async () => {
     const deferred: Deferred<Awaited<ReturnType<CreateContribution>>> = createDeferred();
     const command: CreateContribution = vi.fn(() => deferred.promise);

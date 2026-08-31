@@ -261,6 +261,24 @@ describe("Keystone engineer strategy", () => {
     expect(mounted.gateway.updateSituation).not.toHaveBeenCalled();
   });
 
+  it("returns keyboard focus to the working-set heading after removing its focused controls", async () => {
+    mountStrategy({ shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("button", { name: "checkout-timeout.log" });
+    const checkbox = screen.getByRole("checkbox", { name: /Add checkout-timeout\.log to working set/u });
+    fireEvent.click(checkbox);
+
+    const remove = screen.getByRole("button", { name: /Remove checkout-timeout\.log from working set/u });
+    act(() => remove.focus());
+    fireEvent.click(remove);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Working set" })));
+
+    fireEvent.click(checkbox);
+    const clear = screen.getByRole("button", { name: "Clear working set" });
+    act(() => clear.focus());
+    fireEvent.click(clear);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Working set" })));
+  });
+
   it("labels focused loading state as a status before the record arrives", async () => {
     const pending = createDeferred<GatewayResult<CaseV1>>();
     const gateway = createInvestigationGatewayDouble({
@@ -285,7 +303,7 @@ describe("Keystone engineer strategy", () => {
       name: "Add checkout-timeout.log to working set",
     });
     fireEvent.click(checkbox);
-    expect(screen.getByText("Temporary for this signed-in identity and investigation. Nothing is saved or sent.")).toBeTruthy();
+    expect(screen.getByText(/Selection alone sends nothing/u)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Clear working set" })).toBeTruthy();
     expect((screen.getByRole("checkbox", { name: "Remove checkout-timeout.log from working set" }) as HTMLInputElement).checked).toBe(true);
 

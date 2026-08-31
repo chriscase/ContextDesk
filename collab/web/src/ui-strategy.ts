@@ -49,6 +49,11 @@ const REFERENCE_STRATEGY_FEATURES: readonly UiStrategyOptionalFeature[] = Object
   "specialist-log-exploration",
 ]);
 
+const WAR_ROOM_FEATURES: readonly UiStrategyOptionalFeature[] = Object.freeze([
+  ...REFERENCE_STRATEGY_FEATURES,
+  "situation-edit",
+]);
+
 export interface UiStrategyCompatibility {
   /** The authoritative investigation record contract consumed by the strategy. */
   schemaId: "cd-collab.case.v1";
@@ -95,7 +100,7 @@ export const UI_STRATEGIES: readonly UiStrategyDescriptor[] = [
       version: "^1.0.0",
       runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
     },
-    optionalFeatures: REFERENCE_STRATEGY_FEATURES,
+    optionalFeatures: WAR_ROOM_FEATURES,
   },
   {
     id: "investigation-first",

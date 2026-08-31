@@ -43,6 +43,9 @@ describe("UI strategy catalogue", () => {
     expect(UI_STRATEGIES.find(({ id }) => id === "war-room")?.optionalFeatures).not.toContain(
       "evidence-linked-hypothesis",
     );
+    expect(UI_STRATEGIES.find(({ id }) => id === "war-room")?.optionalFeatures).toContain(
+      "situation-edit",
+    );
     expect(UI_STRATEGIES.find(({ id }) => id === "investigation-first")?.optionalFeatures).not.toContain(
       "situation-edit",
     );
