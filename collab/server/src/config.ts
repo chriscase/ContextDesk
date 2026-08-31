@@ -4,7 +4,10 @@
  * Evidence S3 credentials stay in the server credential loader, never on Config.
  */
 import { loadEvidenceS3Credentials } from "./evidence/s3-secrets.js";
-import { loadEvidenceStorageSettings } from "./evidence/s3-settings.js";
+import {
+  loadEvidenceStorageSettings,
+  type EvidenceStorageSettings,
+} from "./evidence/s3-settings.js";
 
 export {
   loadEvidenceStorageSettings,
@@ -29,6 +32,11 @@ export interface Config {
   /** Required only for SQLite local/single-node mode. */
   sqlitePath: string | null;
   evidenceRoot: string;
+  /**
+   * Secret-free evidence byte-backend settings. S3 credentials stay in the
+   * server credential loader and are never stored on this object.
+   */
+  evidence: EvidenceStorageSettings;
   /** Built UI assets; null skips static serving (API-only). */
   staticDir: string | null;
   authMode: "ldap" | "local";
@@ -144,6 +152,7 @@ export function loadRuntimeConfig(
     migrateDatabaseUrl,
     sqlitePath,
     evidenceRoot,
+    evidence,
     staticDir: env.COLLAB_STATIC_DIR?.trim() || null,
     authMode: authMode(env),
     trustProxy: parseTrustProxy(env.COLLAB_TRUST_PROXY),
@@ -152,7 +161,7 @@ export function loadRuntimeConfig(
 
 /** Test/helper config that does not require a live database URL. */
 export function testConfig(overrides: Partial<Config> = {}): Config {
-  return {
+  const config: Config = {
     host: "127.0.0.1",
     port: 8787,
     serviceName: "cd-collab",
@@ -163,9 +172,22 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     migrateDatabaseUrl: "postgres://collab_migrator@127.0.0.1:5432/collab",
     sqlitePath: null,
     evidenceRoot: ".data/evidence",
+    evidence: {
+      provider: "filesystem",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+    },
     staticDir: null,
     authMode: "ldap",
     trustProxy: null,
     ...overrides,
   };
+  if (overrides.evidence === undefined) {
+    config.evidence = {
+      provider: "filesystem",
+      controlRoot: config.evidenceRoot,
+      storage: config.storage,
+    };
+  }
+  return config;
 }

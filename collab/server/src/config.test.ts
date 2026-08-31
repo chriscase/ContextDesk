@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { loadEvidenceStorageSettings, loadRuntimeConfig, parseTrustProxy, testConfig } from "./config.js";
+import {
+  DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+  DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+} from "./evidence/s3-settings.js";
 
 describe("runtime configuration", () => {
   const database = {
@@ -20,6 +24,16 @@ describe("runtime configuration", () => {
   it("keeps test defaults explicit", () => {
     expect(testConfig().authMode).toBe("ldap");
     expect(testConfig().storage).toBe("postgres");
+    expect(testConfig().evidence).toEqual({
+      provider: "filesystem",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+    });
+    expect(testConfig({ evidenceRoot: "/tmp/ev", storage: "sqlite" }).evidence).toEqual({
+      provider: "filesystem",
+      controlRoot: "/tmp/ev",
+      storage: "sqlite",
+    });
   });
 
   it("supports an explicit SQLite local/single-node runtime without database URLs", () => {
@@ -74,11 +88,17 @@ describe("runtime configuration", () => {
   it("defaults evidence storage to filesystem and keeps the control-state root", () => {
     const config = loadRuntimeConfig(database);
     expect(config.evidenceRoot).toBe(".data/evidence");
+    expect(config.evidence).toEqual({
+      provider: "filesystem",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+    });
     expect(loadEvidenceStorageSettings(database, {
       controlRoot: config.evidenceRoot,
       storage: config.storage,
-    }).provider).toBe("filesystem");
+    })).toEqual(config.evidence);
     expect(JSON.stringify(config)).not.toMatch(/COLLAB_EVIDENCE_S3/);
+    expect(config).not.toHaveProperty("credentials");
   });
 
   it("fails closed on leftover s3 configuration in filesystem mode", () => {
@@ -96,6 +116,8 @@ describe("runtime configuration", () => {
   it("accepts s3 evidence settings without placing secrets on Config", () => {
     const secret = "canarySecretAccessKeyValue!!";
     const token = "canarySessionTokenValue!!";
+    const accessKey = "GKEXAMPLEKEYID0001";
+    const credentialFile = "/run/secrets/canary-s3-secret";
     const config = loadRuntimeConfig({
       ...database,
       COLLAB_EVIDENCE_PROVIDER: "s3",
@@ -104,15 +126,49 @@ describe("runtime configuration", () => {
       COLLAB_EVIDENCE_S3_BUCKET: "war-room-evidence",
       COLLAB_EVIDENCE_S3_PREFIX: "assigned-prefix",
       COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
-      COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: "GKEXAMPLEKEYID0001",
+      COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: accessKey,
       COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY: secret,
       COLLAB_EVIDENCE_S3_SESSION_TOKEN: token,
     });
     expect(config.evidenceRoot).toBe(".data/evidence");
     expect(config).not.toHaveProperty("s3");
+    expect(config).not.toHaveProperty("credentials");
+    expect(config.evidence).toEqual({
+      provider: "s3",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+      s3: {
+        endpoint: "https://objects.example.test",
+        region: "garage",
+        bucket: "war-room-evidence",
+        prefix: "assigned-prefix/",
+        forcePathStyle: true,
+        allowHttp: false,
+        caConfigured: false,
+        caFilePath: null,
+        timeoutMs: DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+        maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+        credentialsMode: "static",
+      },
+    });
     const json = JSON.stringify(config);
     expect(json).not.toContain(secret);
     expect(json).not.toContain(token);
-    expect(json).not.toContain("GKEXAMPLEKEYID0001");
+    expect(json).not.toContain(accessKey);
+    expect(json).not.toContain(credentialFile);
+    expect(json).not.toMatch(/BEGIN CERTIFICATE/);
+  });
+
+  it("fails closed on s3 credential load without storing credentials on Config", () => {
+    expect(() =>
+      loadRuntimeConfig({
+        ...database,
+        COLLAB_EVIDENCE_PROVIDER: "s3",
+        COLLAB_EVIDENCE_S3_ENDPOINT: "https://objects.example.test",
+        COLLAB_EVIDENCE_S3_REGION: "garage",
+        COLLAB_EVIDENCE_S3_BUCKET: "war-room-evidence",
+        COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+      }),
+    ).toThrow(/static credentials require an access key id and secret access key/);
   });
 });
