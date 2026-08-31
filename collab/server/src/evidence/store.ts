@@ -329,6 +329,131 @@ function assertSameFileSnapshot(
   if (!sameFileSnapshot(left, right)) throw new Error(message);
 }
 
+async function readCanonicalMetaStrictAtRoot(
+  rootDir: string,
+  hash: ContentHash,
+  signal?: AbortSignal,
+): Promise<BlobMetaV1> {
+  throwIfAborted(signal);
+  let raw: string;
+  try {
+    raw = await readFile(metaPath(rootDir, hash), { encoding: "utf8", signal });
+    throwIfAborted(signal);
+  } catch (error) {
+    throwIfAborted(signal);
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error("evidence metadata is unavailable");
+    }
+    throw new Error("evidence metadata is missing");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("evidence metadata is corrupt");
+  }
+  if (
+    typeof parsed !== "object"
+    || parsed === null
+    || typeof (parsed as BlobMetaV1).hash !== "string"
+    || typeof (parsed as BlobMetaV1).byteLength !== "number"
+    || (
+      (parsed as BlobMetaV1).contentType !== null
+      && typeof (parsed as BlobMetaV1).contentType !== "string"
+    )
+  ) {
+    throw new Error("evidence metadata is corrupt");
+  }
+  const meta = parsed as BlobMetaV1;
+  if (meta.hash !== hash || !isContentHash(meta.hash)) {
+    throw new Error("evidence metadata hash mismatch");
+  }
+  assertSafeNonNegativeInteger(meta.byteLength, "meta.byteLength");
+  return {
+    hash: meta.hash,
+    byteLength: meta.byteLength,
+    contentType: meta.contentType,
+  };
+}
+
+async function verifyOpenFileIncremental(
+  handle: FileHandle,
+  expectedHash: ContentHash,
+  expectedLength: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal);
+  const hasher = createHash("sha256");
+  let position = 0;
+  while (position < expectedLength) {
+    throwIfAborted(signal);
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, expectedLength - position));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position);
+    if (bytesRead <= 0) {
+      throw new Error("evidence blob truncated or corrupted");
+    }
+    hasher.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  throwIfAborted(signal);
+  const extra = Buffer.allocUnsafe(1);
+  if ((await handle.read(extra, 0, 1, expectedLength)).bytesRead !== 0) {
+    throw new Error("evidence blob size does not match metadata");
+  }
+  if (hasher.digest("hex") !== expectedHash) {
+    throw new Error("evidence blob failed verification");
+  }
+  throwIfAborted(signal);
+}
+
+async function verifyCanonicalFileAtPath(
+  path: string,
+  expectedHash: ContentHash,
+  expectedLength: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal);
+  let handle: FileHandle;
+  try {
+    handle = await open(path, "r");
+  } catch {
+    throw new Error("evidence blob is missing");
+  }
+  try {
+    const before = await handle.stat();
+    throwIfAborted(signal);
+    if (!before.isFile() || before.size !== expectedLength) {
+      throw new Error("evidence blob size does not match metadata");
+    }
+    await verifyOpenFileIncremental(handle, expectedHash, expectedLength, signal);
+    const after = await handle.stat();
+    throwIfAborted(signal);
+    if (!sameFileSnapshot(before, after)) {
+      throw new Error("evidence blob changed during verification");
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function verifyFilesystemObjectAtRoot(
+  rootDir: string,
+  hash: ContentHash,
+): Promise<boolean> {
+  if (!isContentHash(hash)) return false;
+  try {
+    const meta = await readCanonicalMetaStrictAtRoot(rootDir, hash);
+    await verifyCanonicalFileAtPath(
+      blobPath(rootDir, hash),
+      hash,
+      meta.byteLength,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function writeFileDurable(path: string, contents: string): Promise<void> {
   const temporaryPath = `${path}.tmp-${randomUUID()}`;
   try {
@@ -1112,41 +1237,11 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     };
   }
 
-  private async readCanonicalMetaStrict(hash: ContentHash): Promise<BlobMetaV1> {
-    let raw: string;
-    try {
-      raw = await readFile(metaPath(this.rootDir, hash), "utf8");
-    } catch {
-      throw new Error("evidence metadata is missing");
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      throw new Error("evidence metadata is corrupt");
-    }
-    if (
-      typeof parsed !== "object"
-      || parsed === null
-      || typeof (parsed as BlobMetaV1).hash !== "string"
-      || typeof (parsed as BlobMetaV1).byteLength !== "number"
-      || (
-        (parsed as BlobMetaV1).contentType !== null
-        && typeof (parsed as BlobMetaV1).contentType !== "string"
-      )
-    ) {
-      throw new Error("evidence metadata is corrupt");
-    }
-    const meta = parsed as BlobMetaV1;
-    if (meta.hash !== hash || !isContentHash(meta.hash)) {
-      throw new Error("evidence metadata hash mismatch");
-    }
-    assertSafeNonNegativeInteger(meta.byteLength, "meta.byteLength");
-    return {
-      hash: meta.hash,
-      byteLength: meta.byteLength,
-      contentType: meta.contentType,
-    };
+  private async readCanonicalMetaStrict(
+    hash: ContentHash,
+    signal?: AbortSignal,
+  ): Promise<BlobMetaV1> {
+    return readCanonicalMetaStrictAtRoot(this.rootDir, hash, signal);
   }
 
   private async verifyOpenFileIncremental(
@@ -1155,33 +1250,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     expectedLength: number,
     signal?: AbortSignal,
   ): Promise<void> {
-    throwIfAborted(signal);
-    const hasher = createHash("sha256");
-    let position = 0;
-    while (position < expectedLength) {
-      throwIfAborted(signal);
-      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, expectedLength - position));
-      const { bytesRead } = await handle.read(
-        buffer,
-        0,
-        buffer.byteLength,
-        position,
-      );
-      if (bytesRead <= 0) {
-        throw new Error("evidence blob truncated or corrupted");
-      }
-      hasher.update(buffer.subarray(0, bytesRead));
-      position += bytesRead;
-    }
-    throwIfAborted(signal);
-    const extra = Buffer.allocUnsafe(1);
-    if ((await handle.read(extra, 0, 1, expectedLength)).bytesRead !== 0) {
-      throw new Error("evidence blob size does not match metadata");
-    }
-    if (hasher.digest("hex") !== expectedHash) {
-      throw new Error("evidence blob failed verification");
-    }
-    throwIfAborted(signal);
+    await verifyOpenFileIncremental(handle, expectedHash, expectedLength, signal);
   }
 
   private async verifyCanonicalFile(
@@ -1190,28 +1259,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     expectedLength: number,
     signal?: AbortSignal,
   ): Promise<void> {
-    throwIfAborted(signal);
-    let handle: FileHandle;
-    try {
-      handle = await open(path, "r");
-    } catch {
-      throw new Error("evidence blob is missing");
-    }
-    try {
-      const before = await handle.stat();
-      throwIfAborted(signal);
-      if (!before.isFile() || before.size !== expectedLength) {
-        throw new Error("evidence blob size does not match metadata");
-      }
-      await this.verifyOpenFileIncremental(handle, expectedHash, expectedLength, signal);
-      const after = await handle.stat();
-      throwIfAborted(signal);
-      if (!sameFileSnapshot(before, after)) {
-        throw new Error("evidence blob changed during verification");
-      }
-    } finally {
-      await handle.close();
-    }
+    await verifyCanonicalFileAtPath(path, expectedHash, expectedLength, signal);
   }
 
   private readVerifiedRange(
@@ -1355,27 +1403,53 @@ export class FilesystemEvidenceStore implements EvidenceStore {
 
   async head(hash: ContentHash, signal?: AbortSignal): Promise<BlobMetaV1 | null> {
     throwIfAborted(signal);
+    if (!isContentHash(hash)) {
+      throw new Error("invalid content hash");
+    }
+    let before: Awaited<ReturnType<typeof stat>>;
     try {
-      const raw = await readFile(metaPath(this.rootDir, hash), { encoding: "utf8", signal });
+      before = await stat(blobPath(this.rootDir, hash));
       throwIfAborted(signal);
-      return JSON.parse(raw) as BlobMetaV1;
-    } catch {
+      if (!before.isFile()) {
+        throw new Error("evidence blob is not a regular file");
+      }
+    } catch (error) {
       throwIfAborted(signal);
-      try {
-        const bytes = await readFile(blobPath(this.rootDir, hash), { signal });
-        throwIfAborted(signal);
-        return { hash, byteLength: bytes.byteLength, contentType: null };
-      } catch {
-        throwIfAborted(signal);
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+    let meta: BlobMetaV1;
+    try {
+      meta = await this.readCanonicalMetaStrict(hash, signal);
+    } catch (error) {
+      throwIfAborted(signal);
+      if (error instanceof Error && error.message === "evidence metadata is missing") {
         return null;
       }
+      throw error;
     }
+    try {
+      const after = await stat(blobPath(this.rootDir, hash));
+      throwIfAborted(signal);
+      if (!after.isFile()) {
+        throw new Error("evidence blob is not a regular file");
+      }
+      if (!sameFileSnapshot(before, after)) {
+        throw new Error("evidence blob changed while reading metadata");
+      }
+      if (after.size !== meta.byteLength) {
+        throw new Error("evidence blob size does not match metadata");
+      }
+    } catch (error) {
+      throwIfAborted(signal);
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+    return meta;
   }
 
   async verify(hash: ContentHash): Promise<boolean> {
-    const bytes = await this.get(hash);
-    if (!bytes) return false;
-    return sha256Hex(bytes) === hash;
+    return verifyFilesystemObjectAtRoot(this.rootDir, hash);
   }
 
   async putFileServerReference(input: {
@@ -1528,8 +1602,10 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
   }
 
   async verify(hash: ContentHash): Promise<boolean> {
-    const bytes = await this.get(hash);
-    return bytes !== null && sha256Hex(bytes) === hash;
+    if (this.staged.has(hash) && !this.promoted) {
+      return verifyFilesystemObjectAtRoot(this.stageRoot, hash);
+    }
+    return this.owner.verify(hash);
   }
 
   async putFileServerReference(): Promise<FileServerReferenceV1> {
