@@ -130,14 +130,18 @@ function normalizedQuestions(value: string): readonly string[] {
     .filter((question) => question.length > 0);
 }
 
+function normalizedContextValue(value: string): string {
+  return value.trim().length === 0 ? "" : value;
+}
+
 function normalizedContext(context: InvestigationContext): InvestigationContext | null {
   const normalized: InvestigationContext = {
-    productName: context.productName.trim().length === 0 ? "" : context.productName,
-    version: context.version.trim().length === 0 ? "" : context.version,
-    build: context.build.trim().length === 0 ? "" : context.build,
-    component: context.component.trim().length === 0 ? "" : context.component,
-    environment: context.environment.trim().length === 0 ? "" : context.environment,
-    organization: context.organization.trim().length === 0 ? "" : context.organization,
+    productName: normalizedContextValue(context.productName),
+    version: normalizedContextValue(context.version),
+    build: normalizedContextValue(context.build),
+    component: normalizedContextValue(context.component),
+    environment: normalizedContextValue(context.environment),
+    organization: normalizedContextValue(context.organization),
   };
   return Object.values(normalized).some((value) => value.length > 0) ? normalized : null;
 }
@@ -205,6 +209,28 @@ function hasSituationField(
   return Object.prototype.hasOwnProperty.call(command, field);
 }
 
+function rebaseContext(
+  draft: InvestigationContext,
+  previousBaseline: CaseV1,
+  latest: CaseV1,
+): InvestigationContext {
+  const previous = contextFor(previousBaseline);
+  const latestContext = contextFor(latest);
+  const value = (field: InvestigationContextField): string => (
+    normalizedContextValue(draft[field]) !== normalizedContextValue(previous[field])
+      ? draft[field]
+      : latestContext[field]
+  );
+  return {
+    productName: value("productName"),
+    version: value("version"),
+    build: value("build"),
+    component: value("component"),
+    environment: value("environment"),
+    organization: value("organization"),
+  };
+}
+
 /**
  * Rebase preserves actual local corrections, not the stale values that merely
  * seeded the form. Untouched fields adopt the latest canonical record so they
@@ -229,9 +255,11 @@ function rebaseDraft(
     openQuestions: hasSituationField(localChanges, "openQuestions")
       ? draft.openQuestions
       : latestDraft.openQuestions,
-    investigationContext: hasSituationField(localChanges, "investigationContext")
-      ? draft.investigationContext
-      : latestDraft.investigationContext,
+    investigationContext: rebaseContext(
+      draft.investigationContext,
+      previousBaseline,
+      latest,
+    ),
   };
 }
 
@@ -381,7 +409,7 @@ export function KeystoneSituationEditor({
       returnFocusRef.current = false;
       editButtonRef.current?.focus();
     }
-  }, [state.editing, state.scope]);
+  }, [state.baseline.situationVersion, state.editing, state.scope]);
 
   function beginEditing() {
     if (updateSituation === null || mutation.status === "running") return;
@@ -451,10 +479,14 @@ export function KeystoneSituationEditor({
   }
 
   function rebaseOntoLatest() {
+    if (running) return;
     setStoredState((current) => {
       const scoped = current.scope === scope ? current : initialState(scope, investigation);
       if (
-        investigation.situationVersion <= scoped.baseline.situationVersion
+        scoped.pending
+        || activeSaveRef.current?.scope === scope
+        || currentScopeRef.current !== scope
+        || investigation.situationVersion <= scoped.baseline.situationVersion
       ) {
         return scoped;
       }
@@ -671,7 +703,7 @@ export function KeystoneSituationEditor({
                 <>
                   <p>Compare every recorded field with your retained draft before rebasing.</p>
                   <SituationRecord investigation={investigation} />
-                  <button type="button" onClick={rebaseOntoLatest}>
+                  <button type="button" onClick={rebaseOntoLatest} disabled={running}>
                     I reviewed this record — rebase my draft
                   </button>
                 </>

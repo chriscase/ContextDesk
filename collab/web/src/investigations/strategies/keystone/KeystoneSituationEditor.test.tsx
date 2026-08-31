@@ -189,6 +189,7 @@ describe("Keystone K2 situation correction", () => {
     const investigation = makePopulatedCase();
     const sharedProblem = "A teammate recorded this same corrected problem.";
     const localImpact = "My retained impact correction.";
+    const localBuild = "local-build-2026.02.03.6";
     const latest: CaseV1 = {
       ...investigation,
       problemStatement: sharedProblem,
@@ -197,13 +198,18 @@ describe("Keystone K2 situation correction", () => {
       openQuestions: ["What does the refreshed trace show?"],
       investigationContext: {
         ...investigation.investigationContext!,
-        build: "2026.02.03.5",
+        build: "teammate-build-2026.02.03.5",
+        environment: "canary",
       },
       situationVersion: investigation.situationVersion + 1,
     };
     const accepted: CaseV1 = {
       ...latest,
       impact: localImpact,
+      investigationContext: {
+        ...latest.investigationContext!,
+        build: localBuild,
+      },
       situationVersion: latest.situationVersion + 1,
     };
     let attempt = 0;
@@ -221,6 +227,9 @@ describe("Keystone K2 situation correction", () => {
     fireEvent.change(screen.getByLabelText("Impact"), {
       target: { value: localImpact },
     });
+    fireEvent.change(screen.getByLabelText("Build"), {
+      target: { value: localBuild },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     expect((await screen.findByRole("alert")).textContent).toMatch(/save is blocked/i);
@@ -228,6 +237,10 @@ describe("Keystone K2 situation correction", () => {
     expect(updateSituation).toHaveBeenLastCalledWith({
       problemStatement: sharedProblem,
       impact: localImpact,
+      investigationContext: {
+        ...investigation.investigationContext!,
+        build: localBuild,
+      },
     });
     expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled)
       .toBe(true);
@@ -241,7 +254,8 @@ describe("Keystone K2 situation correction", () => {
     expect(screen.getByText("Newer recorded affected systems.")).toBeTruthy();
     expect(screen.getByText("Newer recorded rollout scope.")).toBeTruthy();
     expect(screen.getByText("What does the refreshed trace show?")).toBeTruthy();
-    expect(screen.getByText("2026.02.03.5")).toBeTruthy();
+    expect(screen.getByText("teammate-build-2026.02.03.5")).toBeTruthy();
+    expect(screen.getByText("canary")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled)
       .toBe(true);
 
@@ -256,14 +270,71 @@ describe("Keystone K2 situation correction", () => {
       .toBe("Newer recorded rollout scope.");
     expect((screen.getByLabelText("Open questions") as HTMLTextAreaElement).value)
       .toBe("What does the refreshed trace show?");
-    expect((screen.getByLabelText("Build") as HTMLInputElement).value).toBe("2026.02.03.5");
+    expect((screen.getByLabelText("Build") as HTMLInputElement).value).toBe(localBuild);
+    expect((screen.getByLabelText("Environment") as HTMLInputElement).value).toBe("canary");
+    expect(document.activeElement).toBe(screen.getByLabelText("Problem statement"));
     expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled)
       .toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await screen.findByText(localImpact)).toBeTruthy();
     expect(updateSituation).toHaveBeenCalledTimes(2);
-    expect(updateSituation).toHaveBeenLastCalledWith({ impact: localImpact });
+    expect(updateSituation).toHaveBeenLastCalledWith({
+      impact: localImpact,
+      investigationContext: {
+        ...latest.investigationContext!,
+        build: localBuild,
+      },
+    });
+  });
+
+  it("guards rebase while a save is pending and unlocks when its original conflict settles", async () => {
+    const investigation = makePopulatedCase();
+    const latest: CaseV1 = {
+      ...investigation,
+      scope: "Newer scope published during the pending save.",
+      situationVersion: investigation.situationVersion + 1,
+    };
+    const deferred = createDeferred<CommandOutcome<CaseV1>>();
+    const updateSituation = vi.fn<UpdateSituation>(() => deferred.promise);
+    const mounted = mountEditor({ investigation, updateSituation });
+    enterEditor();
+    fireEvent.change(screen.getByLabelText("Impact"), {
+      target: { value: "Retained while the original save is pending." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    mounted.rerender({ investigation: latest });
+    const rebase = screen.getByRole("button", { name: /rebase my draft/i });
+    expect((rebase as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(rebase);
+    expect(updateSituation).toHaveBeenCalledTimes(1);
+    expect((screen.getByLabelText("Scope") as HTMLTextAreaElement).value)
+      .toBe(investigation.scope);
+
+    await act(async () => {
+      deferred.resolve({ status: "failed", error: { kind: "conflict", status: 409 } });
+      await deferred.promise;
+    });
+    expect(screen.queryByText(/awaiting the latest recorded situation/i)).toBeNull();
+    expect((screen.getByRole("button", { name: /rebase my draft/i }) as HTMLButtonElement).disabled)
+      .toBe(false);
+
+    mounted.rerender({ mutation: { status: "running" } });
+    const runtimeBlockedRebase = screen.getByRole("button", { name: /rebase my draft/i });
+    expect((runtimeBlockedRebase as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(runtimeBlockedRebase);
+    expect((screen.getByLabelText("Scope") as HTMLTextAreaElement).value)
+      .toBe(investigation.scope);
+    expect(updateSituation).toHaveBeenCalledTimes(1);
+
+    mounted.rerender({ mutation: IDLE });
+    fireEvent.click(screen.getByRole("button", { name: /rebase my draft/i }));
+    expect((screen.getByLabelText("Scope") as HTMLTextAreaElement).value).toBe(latest.scope);
+    expect((screen.getByLabelText("Impact") as HTMLTextAreaElement).value)
+      .toBe("Retained while the original save is pending.");
+    expect(document.activeElement).toBe(screen.getByLabelText("Problem statement"));
+    expect(updateSituation).toHaveBeenCalledTimes(1);
   });
 
   it("records only entered context values and does not invent catalog or domain values", async () => {
