@@ -35,7 +35,7 @@ import {
 } from "./store.js";
 
 export interface S3EvidenceClient {
-  send(command: unknown): Promise<unknown>;
+  send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
 }
 
 export interface S3EvidenceStoreOptions {
@@ -609,16 +609,19 @@ export class S3EvidenceStore implements EvidenceStore {
     return this.getObject(this.blobKey(hash), "get");
   }
 
-  async head(hash: ContentHash): Promise<BlobMetaV1 | null> {
+  async head(hash: ContentHash, signal?: AbortSignal): Promise<BlobMetaV1 | null> {
+    throwIfAborted(signal);
     assertContentHash(hash, "head");
     try {
       const output = await this.sendAllowMissing(
         "head",
         new HeadObjectCommand({ Bucket: this.bucket, Key: this.blobKey(hash) }),
+        signal,
       );
       if (output === null) return null;
       return trustedBlobMeta(asRecord(output, "head"), hash, "head");
     } catch (error) {
+      throwIfAborted(signal);
       if (error instanceof S3EvidenceError) throw error;
       throw new S3EvidenceError("head", "unavailable");
     }
@@ -627,7 +630,9 @@ export class S3EvidenceStore implements EvidenceStore {
   async openRead(
     hash: ContentHash,
     range?: EvidenceReadRange,
+    signal?: AbortSignal,
   ): Promise<EvidenceReadHandle> {
+    throwIfAborted(signal);
     if (!isContentHash(hash)) {
       throw new Error("invalid content hash");
     }
@@ -643,6 +648,7 @@ export class S3EvidenceStore implements EvidenceStore {
       const output = await this.sendAllowMissing(
         "openRead",
         new HeadObjectCommand({ Bucket: this.bucket, Key: this.blobKey(hash) }),
+        signal,
       );
       if (output === null) {
         throw new S3EvidenceError("openRead", "not found");
@@ -653,6 +659,7 @@ export class S3EvidenceStore implements EvidenceStore {
       throw new S3EvidenceError("openRead", "unavailable");
     }
     const meta = Object.freeze(trustedBlobMeta(headRecord, hash, "openRead"));
+    throwIfAborted(signal);
     const fence = parseObjectEtag(headRecord.ETag, "openRead");
     if (
       range !== undefined
@@ -664,7 +671,8 @@ export class S3EvidenceStore implements EvidenceStore {
     ) {
       throw new Error("range is out of bounds");
     }
-    await this.verifyCanonicalIncremental(hash, meta, fence, "openRead");
+    await this.verifyCanonicalIncremental(hash, meta, fence, "openRead", signal);
+    throwIfAborted(signal);
 
     const effectiveRange: EvidenceReadRange | null = range
       ? Object.freeze({ start: range.start, end: range.end })
@@ -677,7 +685,7 @@ export class S3EvidenceStore implements EvidenceStore {
       meta,
       range: effectiveRange,
       byteLength: exactCount,
-      bytes: () => this.readVerifiedObject(hash, meta, effectiveRange, fence),
+      bytes: () => this.readVerifiedObject(hash, meta, effectiveRange, fence, signal),
     });
   }
 
@@ -1294,10 +1302,16 @@ export class S3EvidenceStore implements EvidenceStore {
     }
   }
 
-  private async sendAllowMissing(operation: string, command: unknown): Promise<unknown | null> {
+  private async sendAllowMissing(
+    operation: string,
+    command: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown | null> {
+    throwIfAborted(signal);
     try {
-      return await this.client.send(command);
+      return await this.client.send(command, signal ? { abortSignal: signal } : undefined);
     } catch (error) {
+      throwIfAborted(signal);
       if (isObjectNotFound(error)) return null;
       if (error instanceof S3EvidenceError) throw error;
       throw new S3EvidenceError(operation, "unavailable");
@@ -1313,7 +1327,9 @@ export class S3EvidenceStore implements EvidenceStore {
     meta: BlobMetaV1,
     fence: string,
     operation: string,
+    signal?: AbortSignal,
   ): Promise<void> {
+    throwIfAborted(signal);
     const record = asRecord(
       await this.sendConditional(
         operation,
@@ -1322,6 +1338,7 @@ export class S3EvidenceStore implements EvidenceStore {
           Key: this.blobKey(hash),
           IfMatch: fence,
         }),
+        signal,
       ),
       operation,
     );
@@ -1335,7 +1352,8 @@ export class S3EvidenceStore implements EvidenceStore {
     if (contentLength !== meta.byteLength) {
       throw new S3EvidenceError(operation, "inconsistent object");
     }
-    await hashBodyExact(record.Body, meta.byteLength, hash, operation);
+    await hashBodyExact(record.Body, meta.byteLength, hash, operation, signal);
+    throwIfAborted(signal);
   }
 
   private readVerifiedObject(
@@ -1343,16 +1361,19 @@ export class S3EvidenceStore implements EvidenceStore {
     meta: BlobMetaV1,
     range: EvidenceReadRange | null,
     fence: string,
+    signal?: AbortSignal,
   ): AsyncIterable<Uint8Array> {
     const sendConditional = (
       operation: string,
       command: unknown,
-    ): Promise<unknown> => this.sendConditional(operation, command);
+      readSignal?: AbortSignal,
+    ): Promise<unknown> => this.sendConditional(operation, command, readSignal);
     const request = this.conditionalGetInput(hash, fence, range);
     return {
       async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        throwIfAborted(signal);
         const record = asRecord(
-          await sendConditional("openRead", new GetObjectCommand(request)),
+          await sendConditional("openRead", new GetObjectCommand(request), signal),
           "openRead",
         );
         if (parseObjectEtag(record.ETag, "openRead") !== fence) {
@@ -1378,7 +1399,8 @@ export class S3EvidenceStore implements EvidenceStore {
         }
         const hasher = range === null ? createHash("sha256") : null;
         let received = 0;
-        for await (const chunk of iterateObjectBody(record.Body, "openRead")) {
+        for await (const chunk of iterateObjectBody(record.Body, "openRead", signal)) {
+          throwIfAborted(signal);
           if (chunk.byteLength === 0) continue;
           if (received + chunk.byteLength > want) {
             throw new S3EvidenceError("openRead", "inconsistent object");
@@ -1386,6 +1408,7 @@ export class S3EvidenceStore implements EvidenceStore {
           const stable = Uint8Array.from(chunk);
           hasher?.update(stable);
           received += stable.byteLength;
+          throwIfAborted(signal);
           yield stable;
         }
         if (received !== want) {
@@ -1394,6 +1417,7 @@ export class S3EvidenceStore implements EvidenceStore {
         if (hasher && hasher.digest("hex") !== meta.hash) {
           throw new S3EvidenceError("openRead", "failed verification");
         }
+        throwIfAborted(signal);
       },
     };
   }
@@ -1412,10 +1436,16 @@ export class S3EvidenceStore implements EvidenceStore {
     return input;
   }
 
-  private async sendConditional(operation: string, command: unknown): Promise<unknown> {
+  private async sendConditional(
+    operation: string,
+    command: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    throwIfAborted(signal);
     try {
-      return await this.client.send(command);
+      return await this.client.send(command, signal ? { abortSignal: signal } : undefined);
     } catch (error) {
+      throwIfAborted(signal);
       if (isPreconditionFailed(error)) {
         throw new S3EvidenceError(operation, "object changed");
       }
@@ -1514,8 +1544,9 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
   async openRead(
     hash: ContentHash,
     range?: EvidenceReadRange,
+    signal?: AbortSignal,
   ): Promise<EvidenceReadHandle> {
-    return this.owner.openRead(hash, range);
+    return this.owner.openRead(hash, range, signal);
   }
 
   async get(hash: ContentHash): Promise<Uint8Array | null> {
@@ -1526,10 +1557,11 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
     return this.owner.get(hash);
   }
 
-  async head(hash: ContentHash): Promise<BlobMetaV1 | null> {
+  async head(hash: ContentHash, signal?: AbortSignal): Promise<BlobMetaV1 | null> {
+    throwIfAborted(signal);
     const staged = this.staged.get(hash);
     if (staged && !this.promoted) return staged.meta;
-    return this.owner.head(hash);
+    return this.owner.head(hash, signal);
   }
 
   async verify(hash: ContentHash): Promise<boolean> {
@@ -2144,7 +2176,9 @@ function parseInclusiveContentRange(
 async function* iterateObjectBody(
   body: unknown,
   operation: string,
+  signal?: AbortSignal,
 ): AsyncIterable<Uint8Array> {
+  throwIfAborted(signal);
   if (body == null) return;
   if (body instanceof Uint8Array) {
     yield Uint8Array.from(body);
@@ -2153,16 +2187,33 @@ async function* iterateObjectBody(
   if (!isAsyncIterable(body)) {
     throw new S3EvidenceError(operation, "unavailable");
   }
+  const iterator = body[Symbol.asyncIterator]();
   try {
-    for await (const chunk of body) {
+    for (;;) {
+      const next = await nextWithAbort(iterator, signal);
+      if (next.done) break;
+      const chunk = next.value;
       if (!(chunk instanceof Uint8Array)) {
         throw new S3EvidenceError(operation, "unavailable");
       }
+      throwIfAborted(signal);
       yield Uint8Array.from(chunk);
     }
   } catch (error) {
+    throwIfAborted(signal);
     if (error instanceof S3EvidenceError) throw error;
     throw new S3EvidenceError(operation, "unavailable");
+  } finally {
+    if (signal?.aborted && typeof (body as { destroy?: unknown }).destroy === "function") {
+      (body as unknown as { destroy: (error?: Error) => void }).destroy(
+        signal.reason instanceof Error ? signal.reason : undefined,
+      );
+    }
+    if (typeof iterator.return === "function") {
+      const closing = Promise.resolve(iterator.return()).catch(() => undefined);
+      if (signal?.aborted) void closing;
+      else await closing;
+    }
   }
 }
 
@@ -2171,11 +2222,14 @@ async function hashBodyExact(
   expectedLength: number,
   expectedHash: ContentHash,
   operation: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const hasher = createHash("sha256");
   let received = 0;
   try {
-    for await (const chunk of iterateObjectBody(body, operation)) {
+    for await (const chunk of iterateObjectBody(body, operation, signal)) {
+      throwIfAborted(signal);
       if (chunk.byteLength === 0) continue;
       if (received + chunk.byteLength > expectedLength) {
         throw new S3EvidenceError(operation, "inconsistent object");
@@ -2185,6 +2239,7 @@ async function hashBodyExact(
       received += stable.byteLength;
     }
   } catch (error) {
+    throwIfAborted(signal);
     if (error instanceof S3EvidenceError) throw error;
     throw new S3EvidenceError(operation, "unavailable");
   }
@@ -2194,6 +2249,7 @@ async function hashBodyExact(
   if (hasher.digest("hex") !== expectedHash) {
     throw new S3EvidenceError(operation, "failed verification");
   }
+  throwIfAborted(signal);
 }
 
 function requiredToken(value: string, field: string): string {

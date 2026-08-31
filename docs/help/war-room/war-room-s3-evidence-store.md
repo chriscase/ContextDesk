@@ -174,6 +174,34 @@ lease: SQLite plus S3 is a single-process evaluation shape, and doctor reports
 that warning. Do not run multiple SQLite-backed War Room processes against one
 S3 location.
 
+### Abandoned streamed scratch objects with external coordination
+
+PostgreSQL/external coordination intentionally does not auto-sweep unjournaled
+objects under the configured provider prefix's `.stream-staging/` namespace.
+Another replica may still be writing one of those objects outside the advisory
+lease. A process crash after the scratch `PutObject` and before promotion or
+settlement can therefore leave residue.
+
+Treat cleanup as a conservative maintenance operation:
+
+1. Quiesce or drain **all** War Room writers that use the bucket and provider
+   prefix. Do not clean this namespace while a writer, rollout, or retry is
+   active.
+2. List objects only beneath `<configured-prefix>/.stream-staging/` (or
+   `.stream-staging/` when no prefix is configured). Confirm that no active or
+   restarting replica can own each candidate.
+3. Use age and deployment observability as supporting evidence, not as proof by
+   themselves. Review candidates individually and retain anything whose owner
+   or state is uncertain.
+4. With least-privilege operator tooling, delete only objects individually
+   confirmed to be abandoned. Never delete the whole provider prefix.
+5. Resume writers, then verify service and object-store readiness plus an
+   application-level write/read check.
+
+S3 Evidence Storage v1 does not promise a retention period, migration,
+lifecycle policy, TTL, automatic garbage collection, or a reaper for this
+residue. Configure no unattended deletion policy from this procedure.
+
 ## Local evaluation with Garage
 
 Use a local evaluation to prove the S3 API, persistence, and path-style

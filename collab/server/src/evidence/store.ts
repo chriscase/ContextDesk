@@ -50,7 +50,7 @@ export interface EvidenceStore {
     opts: EvidenceStreamOptions,
   ): Promise<EvidenceStreamStage>;
   get(hash: ContentHash): Promise<Uint8Array | null>;
-  head(hash: ContentHash): Promise<BlobMetaV1 | null>;
+  head(hash: ContentHash, signal?: AbortSignal): Promise<BlobMetaV1 | null>;
   /**
    * Open a verified byte range as an exact-count async iterable. Fail closed on
    * missing/corrupt meta, digest mismatch, truncation, or concurrent size change.
@@ -59,6 +59,7 @@ export interface EvidenceStore {
   openRead(
     hash: ContentHash,
     range?: EvidenceReadRange,
+    signal?: AbortSignal,
   ): Promise<EvidenceReadHandle>;
   /** Re-hash on-disk bytes; returns false (fail closed) on missing or mutated blob. */
   verify(hash: ContentHash): Promise<boolean>;
@@ -1063,7 +1064,9 @@ export class FilesystemEvidenceStore implements EvidenceStore {
   async openRead(
     hash: ContentHash,
     range?: EvidenceReadRange,
+    signal?: AbortSignal,
   ): Promise<EvidenceReadHandle> {
+    throwIfAborted(signal);
     if (!isContentHash(hash)) {
       throw new Error("invalid content hash");
     }
@@ -1076,6 +1079,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     }
     const path = blobPath(this.rootDir, hash);
     const meta = await this.readCanonicalMetaStrict(hash);
+    throwIfAborted(signal);
     if (
       range !== undefined
       && (
@@ -1086,7 +1090,8 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     ) {
       throw new Error("range is out of bounds");
     }
-    await this.verifyCanonicalFile(path, hash, meta.byteLength);
+    await this.verifyCanonicalFile(path, hash, meta.byteLength, signal);
+    throwIfAborted(signal);
 
     const effectiveRange: EvidenceReadRange | null = range
       ? Object.freeze({ ...range })
@@ -1103,7 +1108,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
       }),
       range: effectiveRange,
       byteLength: exactCount,
-      bytes: () => this.readVerifiedRange(path, meta, effectiveRange),
+      bytes: () => this.readVerifiedRange(path, meta, effectiveRange, signal),
     };
   }
 
@@ -1148,10 +1153,13 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     handle: FileHandle,
     expectedHash: ContentHash,
     expectedLength: number,
+    signal?: AbortSignal,
   ): Promise<void> {
+    throwIfAborted(signal);
     const hasher = createHash("sha256");
     let position = 0;
     while (position < expectedLength) {
+      throwIfAborted(signal);
       const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, expectedLength - position));
       const { bytesRead } = await handle.read(
         buffer,
@@ -1165,6 +1173,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
       hasher.update(buffer.subarray(0, bytesRead));
       position += bytesRead;
     }
+    throwIfAborted(signal);
     const extra = Buffer.allocUnsafe(1);
     if ((await handle.read(extra, 0, 1, expectedLength)).bytesRead !== 0) {
       throw new Error("evidence blob size does not match metadata");
@@ -1172,13 +1181,16 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     if (hasher.digest("hex") !== expectedHash) {
       throw new Error("evidence blob failed verification");
     }
+    throwIfAborted(signal);
   }
 
   private async verifyCanonicalFile(
     path: string,
     expectedHash: ContentHash,
     expectedLength: number,
+    signal?: AbortSignal,
   ): Promise<void> {
+    throwIfAborted(signal);
     let handle: FileHandle;
     try {
       handle = await open(path, "r");
@@ -1187,11 +1199,13 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     }
     try {
       const before = await handle.stat();
+      throwIfAborted(signal);
       if (!before.isFile() || before.size !== expectedLength) {
         throw new Error("evidence blob size does not match metadata");
       }
-      await this.verifyOpenFileIncremental(handle, expectedHash, expectedLength);
+      await this.verifyOpenFileIncremental(handle, expectedHash, expectedLength, signal);
       const after = await handle.stat();
+      throwIfAborted(signal);
       if (!sameFileSnapshot(before, after)) {
         throw new Error("evidence blob changed during verification");
       }
@@ -1204,18 +1218,22 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     path: string,
     meta: BlobMetaV1,
     range: EvidenceReadRange | null,
+    signal?: AbortSignal,
   ): AsyncIterable<Uint8Array> {
     const verifyOpenFileIncremental = (
       handle: FileHandle,
       expectedHash: ContentHash,
       expectedLength: number,
+      readSignal?: AbortSignal,
     ): Promise<void> => this.verifyOpenFileIncremental(
       handle,
       expectedHash,
       expectedLength,
+      readSignal,
     );
     return {
       async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        throwIfAborted(signal);
         let handle: FileHandle;
         try {
           handle = await open(path, "r");
@@ -1226,6 +1244,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
         let integrityComplete = false;
         try {
           const before = await handle.stat();
+          throwIfAborted(signal);
           if (!before.isFile() || before.size !== meta.byteLength) {
             throw new Error("evidence blob size does not match metadata");
           }
@@ -1233,8 +1252,10 @@ export class FilesystemEvidenceStore implements EvidenceStore {
             handle,
             meta.hash,
             meta.byteLength,
+            signal,
           );
           const verified = await handle.stat();
+          throwIfAborted(signal);
           if (!sameFileSnapshot(before, verified)) {
             throw new Error("evidence blob changed during verification");
           }
@@ -1246,6 +1267,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
             : meta.byteLength;
           const emittedHasher = range === null ? createHash("sha256") : null;
           while (remaining > 0) {
+            throwIfAborted(signal);
             const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
             const { bytesRead } = await handle.read(
               buffer,
@@ -1258,6 +1280,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
             emittedHasher?.update(chunk);
             position += bytesRead;
             remaining -= bytesRead;
+            throwIfAborted(signal);
             yield Uint8Array.from(chunk);
           }
 
@@ -1270,20 +1293,23 @@ export class FilesystemEvidenceStore implements EvidenceStore {
               handle,
               meta.hash,
               meta.byteLength,
+              signal,
             );
           }
           const after = await handle.stat();
+          throwIfAborted(signal);
           if (!sameFileSnapshot(verified, after)) {
             throw new Error("evidence blob changed during read");
           }
           integrityComplete = true;
         } finally {
           try {
-            if (!integrityComplete && verifiedSnapshot) {
+            if (!signal?.aborted && !integrityComplete && verifiedSnapshot) {
               await verifyOpenFileIncremental(
                 handle,
                 meta.hash,
                 meta.byteLength,
+                signal,
               );
               assertSameFileSnapshot(
                 verifiedSnapshot,
@@ -1327,14 +1353,22 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     return this.getUnlocked(hash);
   }
 
-  async head(hash: ContentHash): Promise<BlobMetaV1 | null> {
+  async head(hash: ContentHash, signal?: AbortSignal): Promise<BlobMetaV1 | null> {
+    throwIfAborted(signal);
     try {
-      const raw = await readFile(metaPath(this.rootDir, hash), "utf8");
+      const raw = await readFile(metaPath(this.rootDir, hash), { encoding: "utf8", signal });
+      throwIfAborted(signal);
       return JSON.parse(raw) as BlobMetaV1;
     } catch {
-      const bytes = await this.get(hash);
-      if (!bytes) return null;
-      return { hash, byteLength: bytes.byteLength, contentType: null };
+      throwIfAborted(signal);
+      try {
+        const bytes = await readFile(blobPath(this.rootDir, hash), { signal });
+        throwIfAborted(signal);
+        return { hash, byteLength: bytes.byteLength, contentType: null };
+      } catch {
+        throwIfAborted(signal);
+        return null;
+      }
     }
   }
 
@@ -1472,8 +1506,9 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
   async openRead(
     hash: ContentHash,
     range?: EvidenceReadRange,
+    signal?: AbortSignal,
   ): Promise<EvidenceReadHandle> {
-    return this.owner.openRead(hash, range);
+    return this.owner.openRead(hash, range, signal);
   }
 
   async get(hash: ContentHash): Promise<Uint8Array | null> {
@@ -1487,8 +1522,9 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
     return this.owner.getUnlocked(hash);
   }
 
-  async head(hash: ContentHash): Promise<BlobMetaV1 | null> {
-    return this.staged.get(hash) ?? this.owner.head(hash);
+  async head(hash: ContentHash, signal?: AbortSignal): Promise<BlobMetaV1 | null> {
+    throwIfAborted(signal);
+    return this.staged.get(hash) ?? this.owner.head(hash, signal);
   }
 
   async verify(hash: ContentHash): Promise<boolean> {

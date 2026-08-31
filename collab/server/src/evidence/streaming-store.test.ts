@@ -910,6 +910,32 @@ describe("FilesystemEvidenceStore stageStream/openRead", () => {
     });
   });
 
+  it("refuses already-aborted reads while preserving verified full and ranged reads", async () => {
+    await withTempRoot(async (root) => {
+      const store = new FilesystemEvidenceStore({ rootDir: root });
+      const bytes = new TextEncoder().encode("filesystem-abort-read");
+      const stage = await store.stageStream(asAsyncChunks([bytes]), {
+        maxBytes: bytes.byteLength,
+      });
+      await stage.promote();
+
+      const aborted = new AbortController();
+      aborted.abort(new Error("synthetic filesystem disconnect"));
+      await expect(store.openRead(stage.meta.hash, undefined, aborted.signal)).rejects.toThrow(
+        /synthetic filesystem disconnect/,
+      );
+
+      const active = new AbortController();
+      const full = await store.openRead(stage.meta.hash, undefined, active.signal);
+      expect(Buffer.from(await collectChunks(full.bytes())).toString()).toBe(
+        "filesystem-abort-read",
+      );
+      const ranged = await store.openRead(stage.meta.hash, { start: 0, end: 9 }, active.signal);
+      expect(Buffer.from(await collectChunks(ranged.bytes())).toString()).toBe("filesystem");
+      await stage.finalize();
+    });
+  });
+
   it("writes a pending journal on promote; finalize and retained recovery behave correctly", async () => {
     await withTempRoot(async (root) => {
       const lease = createLeaseTracker();

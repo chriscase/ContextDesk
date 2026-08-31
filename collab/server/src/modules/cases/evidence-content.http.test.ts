@@ -808,7 +808,7 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
     expect(jsonBytes).toContain("collectExactJsonEvidenceBytes");
   });
 
-  it("terminates and cleans a stalled authenticated content download on timeout", async () => {
+  it("aborts a stalled verification preflight without publishing a response and cleans guards", async () => {
     await withApp(async ({ app, store }) => {
       const alice = await login(app, "alice", ALICE);
       const dave = await login(app, "dave", "fixture-dave-secret");
@@ -821,26 +821,27 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
         summary: "stalled read",
         privacyClass: "share_safe",
       });
-      const originalOpen = store.openRead.bind(store);
-      let iteratorReturned = 0;
-      store.openRead = vi.fn(async (hash, range) => {
-        const handle = await originalOpen(hash, range);
-        return {
-          ...handle,
-          bytes: () => ({
-            [Symbol.asyncIterator]: () => ({
-              next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
-              return: async () => {
-                iteratorReturned += 1;
-                return { done: true as const, value: undefined };
-              },
-            }),
-          }),
-        };
+      let observedSignal: AbortSignal | undefined;
+      store.openRead = vi.fn(async (_hash, _range, signal) => {
+        observedSignal = signal;
+        if (!signal) throw new Error("missing transfer signal");
+        await new Promise<never>((_resolve, reject) => {
+          const onAbort = (): void => reject(signal.reason ?? new Error("aborted"));
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        });
+        throw new Error("unreachable");
       });
       await app.listen({ host: "127.0.0.1", port: 0 });
       const address = app.server.address();
       const port = typeof address === "object" && address ? address.port : 0;
+      let responsePublished = false;
+      let requestRaw: http.IncomingMessage | undefined;
+      let replyRaw: http.ServerResponse | undefined;
+      app.server.once("request", (request, response) => {
+        requestRaw = request;
+        replyRaw = response;
+      });
       const started = Date.now();
       await Promise.race([
         new Promise<void>((resolve) => {
@@ -860,6 +861,7 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
           req.on("error", done);
           req.on("close", done);
           req.on("response", (response) => {
+            responsePublished = true;
             response.on("aborted", done);
             response.on("error", done);
             response.on("close", done);
@@ -872,7 +874,11 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       ]);
       expect(Date.now() - started).toBeLessThan(2_500);
       await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(iteratorReturned).toBeGreaterThan(0);
+      expect(observedSignal?.aborted).toBe(true);
+      expect(store.openRead).toHaveBeenCalledTimes(1);
+      expect(responsePublished).toBe(false);
+      expect(requestRaw?.listenerCount("aborted") ?? 0).toBe(0);
+      expect(replyRaw?.listenerCount("close") ?? 0).toBe(0);
     }, { transferTimeoutMs: 1_000 });
   });
 

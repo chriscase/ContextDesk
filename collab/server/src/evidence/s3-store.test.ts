@@ -64,8 +64,11 @@ interface FakeObject {
   reportedGetEtag?: string | null;
   reportedContentRange?: string | null;
   chunks?: Uint8Array[];
-  chunkProducers?: Array<() => Uint8Array>;
+  chunkProducers?: Array<() => Uint8Array | Promise<Uint8Array>>;
   yieldCount?: { value: number };
+  iteratorReturns?: { value: number };
+  iteratorReturnHangs?: boolean;
+  bodyDestroys?: { value: number };
   transformOnly?: boolean;
   failAfterYields?: number;
   failYieldError?: Error;
@@ -74,7 +77,11 @@ interface FakeObject {
 
 class FakeS3Client {
   readonly objects = new Map<string, FakeObject>();
-  readonly calls: Array<{ name: string; input: Record<string, unknown> }> = [];
+  readonly calls: Array<{
+    name: string;
+    input: Record<string, unknown>;
+    abortSignal?: AbortSignal;
+  }> = [];
   transformToByteArrayCalls = 0;
   bucketExists = true;
   nextError: Error | null = null;
@@ -99,11 +106,14 @@ class FakeS3Client {
     return `"opaque-${this.etagSeq}"`;
   }
 
-  async send(command: unknown): Promise<unknown> {
+  async send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
     this.onSend?.();
+    if (options?.abortSignal?.aborted) {
+      throw options.abortSignal.reason ?? new Error("aborted");
+    }
     const name = commandName(command);
     const input = commandInput(command);
-    this.calls.push({ name, input: { ...input } });
+    this.calls.push({ name, input: { ...input }, abortSignal: options?.abortSignal });
     if (this.nextError) {
       const error = this.nextError;
       this.nextError = null;
@@ -309,8 +319,11 @@ class FakeS3Client {
     reportedLength?: number,
     extra?: {
       chunks?: Uint8Array[];
-      chunkProducers?: Array<() => Uint8Array>;
+      chunkProducers?: Array<() => Uint8Array | Promise<Uint8Array>>;
       yieldCount?: { value: number };
+      iteratorReturns?: { value: number };
+      iteratorReturnHangs?: boolean;
+      bodyDestroys?: { value: number };
       transformOnly?: boolean;
       etag?: string;
       reportedEtag?: string | null;
@@ -333,6 +346,9 @@ class FakeS3Client {
     if (extra?.chunks) stored.chunks = extra.chunks.map((chunk) => new Uint8Array(chunk));
     if (extra?.chunkProducers) stored.chunkProducers = extra.chunkProducers;
     if (extra?.yieldCount) stored.yieldCount = extra.yieldCount;
+    if (extra?.iteratorReturns) stored.iteratorReturns = extra.iteratorReturns;
+    if (extra?.iteratorReturnHangs) stored.iteratorReturnHangs = true;
+    if (extra?.bodyDestroys) stored.bodyDestroys = extra.bodyDestroys;
     if (extra?.transformOnly) stored.transformOnly = true;
     if (extra?.reportedEtag !== undefined) stored.reportedEtag = extra.reportedEtag;
     if (extra?.reportedGetEtag !== undefined) stored.reportedGetEtag = extra.reportedGetEtag;
@@ -436,7 +452,7 @@ function sdkBody(
         }
         const produce = producers[index];
         if (produce === undefined) return { done: true, value: undefined };
-        const chunk = produce();
+        const chunk = await produce();
         if (stored.yieldCount) stored.yieldCount.value += 1;
         index += 1;
         return { done: false, value: chunk };
@@ -444,10 +460,20 @@ function sdkBody(
         if (sequential) sequential.pending = false;
       }
     },
+    async return(): Promise<IteratorResult<Uint8Array>> {
+      if (stored.iteratorReturns) stored.iteratorReturns.value += 1;
+      if (stored.iteratorReturnHangs) {
+        return new Promise<IteratorResult<Uint8Array>>(() => undefined);
+      }
+      return { done: true, value: undefined };
+    },
   };
   return {
     [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
       return iterator;
+    },
+    destroy(): void {
+      if (stored.bodyDestroys) stored.bodyDestroys.value += 1;
     },
     transformToByteArray,
   };
@@ -2895,6 +2921,65 @@ describe("S3EvidenceStore", () => {
     const tail = await store.openRead(stage.meta.hash, { start: 7, end: 9 });
     expect(Buffer.from(await collectChunks(tail.bytes())).toString()).toBe("789");
     await stage.finalize();
+  });
+
+  it("aborts the verification preflight, closes its body, and never starts the response GET", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("abort-during-canonical-preflight");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing canonical object");
+    let enteredResolve: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => {
+      enteredResolve = resolve;
+    });
+    const iteratorReturns = { value: 0 };
+    const bodyDestroys = { value: 0 };
+    stored.chunkProducers = [() => {
+      enteredResolve?.();
+      return new Promise<Uint8Array>(() => undefined);
+    }];
+    stored.iteratorReturns = iteratorReturns;
+    stored.iteratorReturnHangs = true;
+    stored.bodyDestroys = bodyDestroys;
+    fake.calls.length = 0;
+    const controller = new AbortController();
+
+    const opening = store.openRead(meta.hash, undefined, controller.signal);
+    await entered;
+    controller.abort(new Error("synthetic transfer disconnected"));
+
+    await expect(opening).rejects.toThrow(/synthetic transfer disconnected/);
+    const gets = fake.calls.filter((call) => call.name === "GetObjectCommand");
+    expect(gets).toHaveLength(1);
+    expect(gets[0]?.abortSignal).toBe(controller.signal);
+    expect(iteratorReturns.value).toBeGreaterThan(0);
+    expect(bodyDestroys.value).toBeGreaterThan(0);
+  });
+
+  it("refuses an already-aborted read before S3 work and signals both successful GETs", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("abort-signal-forwarding");
+    const meta = await store.put(bytes);
+
+    fake.calls.length = 0;
+    const already = new AbortController();
+    already.abort(new Error("already disconnected"));
+    await expect(store.head(meta.hash, already.signal)).rejects.toThrow(/already disconnected/);
+    await expect(store.openRead(meta.hash, undefined, already.signal)).rejects.toThrow(
+      /already disconnected/,
+    );
+    expect(fake.calls).toEqual([]);
+
+    const active = new AbortController();
+    expect(await store.head(meta.hash, active.signal)).toEqual(meta);
+    const handle = await store.openRead(meta.hash, { start: 0, end: 4 }, active.signal);
+    expect(Buffer.from(await collectChunks(handle.bytes())).toString()).toBe("abort");
+    const gets = fake.calls.filter((call) => call.name === "GetObjectCommand");
+    expect(gets).toHaveLength(2);
+    expect(gets.every((call) => call.abortSignal === active.signal)).toBe(true);
+    const heads = fake.calls.filter((call) => call.name === "HeadObjectCommand");
+    expect(heads.every((call) => call.abortSignal === active.signal)).toBe(true);
   });
 
   it("reads correctly when metadata replacement preserves the source ETag", async () => {

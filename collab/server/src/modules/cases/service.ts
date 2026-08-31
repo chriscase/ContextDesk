@@ -2325,19 +2325,20 @@ export class CaseService {
     return { outcome: "ok", bytes };
   }
 
-  async headEvidence(hash: string): Promise<BlobMetaV1 | null> {
+  async headEvidence(hash: string, signal?: AbortSignal): Promise<BlobMetaV1 | null> {
     if (!isContentHash(hash)) return null;
-    return this.evidence.head(hash);
+    return this.evidence.head(hash, signal);
   }
 
   async openEvidenceRead(
     hash: string,
     range?: EvidenceReadRange,
+    signal?: AbortSignal,
   ): Promise<EvidenceReadHandle> {
     if (!isContentHash(hash)) {
       throw new Error("invalid content hash");
     }
-    return this.evidence.openRead(hash as ContentHash, range);
+    return this.evidence.openRead(hash as ContentHash, range, signal);
   }
 
   async recheckReference(

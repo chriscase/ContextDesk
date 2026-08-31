@@ -1536,10 +1536,16 @@ export async function registerCaseRoutes(
       );
       let meta;
       try {
-        meta = await deps.domain.headEvidence(artifact.contentHash);
+        meta = await deps.domain.headEvidence(artifact.contentHash, transfer.signal);
       } catch {
+        const aborted = transfer.signal.aborted;
         transfer.dispose();
+        if (aborted) return;
         return storageUnavailable(reply);
+      }
+      if (transfer.signal.aborted) {
+        transfer.dispose();
+        return;
       }
       if (!meta || meta.byteLength !== artifact.byteLength || meta.hash !== artifact.contentHash) {
         transfer.dispose();
@@ -1590,9 +1596,13 @@ export async function registerCaseRoutes(
         handle = await deps.domain.openEvidenceRead(
           artifact.contentHash,
           range.kind === "satisfiable" ? { start, end } : undefined,
+          transfer.signal,
         );
+        throwIfTransferAborted(transfer.signal);
       } catch {
+        const aborted = transfer.signal.aborted;
         transfer.dispose();
+        if (aborted) return;
         return storageUnavailable(reply);
       }
       applyContentHeaders(reply, representation);
