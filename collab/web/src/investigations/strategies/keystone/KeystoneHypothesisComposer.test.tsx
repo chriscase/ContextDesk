@@ -91,6 +91,28 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(command).not.toHaveBeenCalled();
   });
 
+  it("fences an in-flight success when write authority disappears", async () => {
+    const deferred: Deferred<Awaited<ReturnType<CreateContribution>>> = createDeferred();
+    const command: CreateContribution = vi.fn(() => deferred.promise);
+    const onSuccess = vi.fn();
+    const mounted = mount({ createContribution: command, onSuccess });
+    fireEvent.change(hypothesisField(), { target: { value: "Pending before authority loss." } });
+    fireEvent.submit(hypothesisForm());
+    expect(command).toHaveBeenCalledTimes(1);
+
+    mounted.rerenderComposer({ createContribution: null });
+    expect(screen.getByText("Hypothesis writing unavailable")).toBeTruthy();
+
+    await act(async () => {
+      deferred.resolve({ status: "succeeded", value: authoritativeContribution() });
+      await deferred.promise;
+    });
+
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(screen.queryByText("Hypothesis recorded")).toBeNull();
+    expect(screen.queryByDisplayValue("Pending before authority loss.")).toBeNull();
+  });
+
   it("writes nothing for a blank body or without required selected evidence", () => {
     const command = succeededCommand();
     const mounted = mount({ createContribution: command });

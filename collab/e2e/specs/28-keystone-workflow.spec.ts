@@ -53,10 +53,12 @@ test.describe("Keystone K2 engineer workflow", () => {
     await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
     await page.setViewportSize(DESKTOP);
     await loginAs(page, FIXTURE_USERS.dave);
+    await selectStrategy(page, "War Room");
+    const title = uniqueTitle("Keystone forced-colors proof");
+    await createCase(page, title);
+    const caseId = await caseIdForTitle(page, title);
+    await page.goto("/investigations");
     await selectStrategy(page, "Keystone");
-    await page.getByRole("navigation", { name: "Primary" })
-      .getByRole("button", { name: "Investigations", exact: true })
-      .click();
     const root = page.locator(".keystone-strategy");
     await expect(root).toBeVisible();
 
@@ -64,6 +66,18 @@ test.describe("Keystone K2 engineer workflow", () => {
     await expectForcedColors(page, [
       page.getByRole("searchbox", { name: "Search investigations" }),
       page.getByRole("combobox", { name: "Status" }),
+    ]);
+
+    await page.locator(".keystone-strategy__collection-list button").filter({ hasText: title }).click();
+    await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
+    await page.getByRole("tab", { name: "Reasoning" }).click();
+    await expectForcedColors(page, [
+      page.getByRole("textbox", { name: "Hypothesis" }),
+    ]);
+    await page.getByRole("tab", { name: "Record" }).click();
+    await page.getByRole("button", { name: "Edit situation" }).click();
+    await expectForcedColors(page, [
+      page.getByRole("textbox", { name: "Problem statement" }),
     ]);
   });
 
