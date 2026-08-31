@@ -1,7 +1,7 @@
 ---
 id: war-room-s3-evidence-store
 title: Use a self-hosted S3-compatible War Room evidence store
-summary: Qualify a compatible object store for future War Room evidence bytes, evaluate it locally, and keep credentials and metadata authority off the browser.
+summary: Configure and qualify an S3-compatible War Room evidence store, evaluate it locally, and keep credentials and metadata authority off the browser.
 section: war-room
 tags:
   - war-room
@@ -21,27 +21,27 @@ related:
 # Use a self-hosted S3-compatible War Room evidence store
 
 War Room keeps investigation metadata, authorization, and audit in the
-collaboration database. Evidence **bytes** are a separate backend. The shipped
-backend is still a content-addressed filesystem under `COLLAB_EVIDENCE_ROOT`.
-A later provider may store those bytes in a self-hosted S3-compatible service.
+collaboration database. Evidence **bytes** are a separate backend. Filesystem
+storage under `COLLAB_EVIDENCE_ROOT` remains the default; deployments may
+instead select an S3-compatible bucket or assigned prefix.
 
-This page is an operator guide for that future byte store. It does not ship an
-S3 evidence provider, and it does not qualify any vendor. When a release adds
-the provider, use that release's generated or sample configuration as
-authority.
+This page is the operator guide for that S3 byte store. It describes the
+ContextDesk configuration contract and a local evaluation, but it does not
+certify any object-store vendor.
 
 ![A compatible object store holds evidence bytes, the War Room service keeps host credentials, and the database remains authoritative for metadata and authorization](../assets/war-room-s3-evidence-store.svg)
 
 > Important:
-> Filesystem storage remains the shipped War Room evidence provider. An
-> object-store CLI success is not War Room integration.
+> Filesystem storage remains the default War Room evidence provider. An
+> object-store CLI success alone is not War Room integration; complete the
+> application-level checks below before enabling S3 for a real instance.
 
 ## Choose the right S3 feature
 
 | Job | Use | Do not treat as the same thing |
 | --- | --- | --- |
-| Shared or local War Room evidence bytes today | Filesystem volume at `COLLAB_EVIDENCE_ROOT` | An S3 bucket, including the evaluation bucket in this guide |
-| Future War Room evidence bytes | A dedicated S3-compatible bucket or prefix that satisfies the contract below | Desktop Settings → Backup, or a public CDN bucket |
+| Default War Room evidence bytes | Filesystem volume at `COLLAB_EVIDENCE_ROOT` | Desktop Settings → Backup or a public CDN bucket |
+| S3-backed War Room evidence bytes | A dedicated S3-compatible bucket or prefix that satisfies the contract below | Desktop Settings → Backup, or an object-store CLI smoke test by itself |
 | Local API qualification | A loopback evaluation service with persistent volumes (Garage is the example here) | A one-node Compose file copied into production |
 | Desktop workspace export | help://s3-backup Phase A backup/export | War Room evidence storage, restore, or an S3 index source |
 
@@ -72,10 +72,11 @@ for investigation identity, permissions, provenance, and whether a case
 believes an artifact exists. Object user-metadata is not a substitute for
 database rows.
 
-The current filesystem provider also keeps staging, pending-write journals, and
-file-server reference JSON on disk. A future S3 provider must document which of
-those stay local. Do not assume journals, references, or hashes move into the
-bucket until the shipped config says so.
+The S3 provider keeps canonical blobs, staging objects, pending-write journals,
+and file-server reference records below the assigned prefix. The collaboration
+database remains authoritative for case membership, permissions, provenance,
+and artifact metadata. `COLLAB_EVIDENCE_ROOT` remains a protected local control
+root even in S3 mode; do not expose either location to the browser.
 
 ### Least-privilege policy shape
 
@@ -379,10 +380,10 @@ Where the object store supports two live keys:
 1. Create a new key for the same identity or an equivalent least-privilege
    identity. Leave the old key active.
 2. Prove the new key with the object-store smoke test.
-3. Update the War Room secret source from the **release** sample (file, ref,
-   or secret manager — not the draft labels above).
+3. Update the War Room secret source from `collab/deploy/.env.example` (file,
+   absolute `file:` reference, or secret manager).
 4. Restart or reload the War Room process as the release requires.
-5. Confirm an application-level read of a known object once that path ships.
+5. Confirm an application-level read of a known object.
 6. Revoke the old key.
 7. Verify the old key is rejected and the new key still works.
 
@@ -397,16 +398,14 @@ Keep these two proofs separate.
 | Proof | What it shows | What it does not show |
 | --- | --- | --- |
 | Object-store CLI smoke test | The service accepts signed requests, persists bytes, and honors get/head/range/list/delete on a disposable key | That War Room can configure, authorize, or hash evidence |
-| Provider readiness (when shipped) | The War Room process accepted its config and `ping`/ready checks for the byte backend | That historical objects were migrated or that backups restore |
+| Provider readiness | The War Room process accepted its config and `ping`/ready checks for the byte backend | That historical objects were migrated or that backups restore |
 | Bucket and prefix permissions | The dedicated identity can reach only the assigned location | That another identity is locked out unless you test that separately |
-| Application upload/download (when shipped) | An authorized War Room action stored bytes and read them back with a matching hash | Lifecycle, legal hold, or multi-provider failover |
+| Application upload/download | An authorized War Room action stored bytes and read them back with a matching hash | Lifecycle, legal hold, or multi-provider failover |
 
-Until the provider ships, stop after the CLI proof plus persistence across
-restart. When it ships, add:
+After the CLI proof plus persistence across restart, add:
 
-1. Process configuration accepted from the **release** sample, not this draft
-   table.
-2. Readiness of the byte backend as documented by that release.
+1. Process configuration accepted from `collab/deploy/.env.example`.
+2. Readiness of the configured byte backend.
 3. Permission check against the assigned bucket or prefix.
 4. A small unique application upload, head, download, and hash compare.
 5. Restart of War Room and the object store, then another download of the same
