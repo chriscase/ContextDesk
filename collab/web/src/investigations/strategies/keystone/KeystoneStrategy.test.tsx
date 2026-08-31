@@ -15,6 +15,8 @@ import {
   gatewayUnavailable,
   InvestigationRuntimeGatewayHarness,
   makeCaseList,
+  makeContributionList,
+  makePopulatedCase,
   RUNTIME_FIXTURE_IDS,
   type GatewayResult,
   type InvestigationGateway,
@@ -92,7 +94,7 @@ function mountStrategy(options: {
 
 afterEach(() => cleanup());
 
-describe("Keystone K1 read-only strategy", () => {
+describe("Keystone engineer strategy", () => {
   it("keeps server collection order through sparse-safe search and status filtering", async () => {
     const onOpenCase = vi.fn();
     const mounted = mountStrategy({ shell: { onOpenCase } });
@@ -120,18 +122,19 @@ describe("Keystone K1 read-only strategy", () => {
     expect(mounted.gateway.applyLifecycleAction).not.toHaveBeenCalled();
   });
 
-  it("shows the evidence grid, linked reasoning, and canonical record without write controls", async () => {
+  it("shows the evidence grid, linked reasoning, and canonical record without write controls in read-only mode", async () => {
     const onNavigateInvestigation = vi.fn();
     const mounted = mountStrategy({
       shell: {
         focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase,
         onNavigateInvestigation,
       },
+      readOnly: true,
     });
     const detailHeading = await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
     await waitFor(() => expect(document.activeElement).toBe(detailHeading));
     expect(await screen.findByRole("button", { name: "checkout-timeout.log" })).toBeTruthy();
-    expect(screen.getByText("Gateway timeout excerpt captured during the affected interval.")).toBeTruthy();
+    expect(screen.getAllByText("Gateway timeout excerpt captured during the affected interval.").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "checkout-timeout.log" }));
     expect(screen.getByText("text/plain")).toBeTruthy();
@@ -161,6 +164,101 @@ describe("Keystone K1 read-only strategy", () => {
     expect(mounted.gateway.createInvestigation).not.toHaveBeenCalled();
     expect(mounted.gateway.uploadEvidence).not.toHaveBeenCalled();
     expect(mounted.gateway.applyLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  it("records a working-set hypothesis and a bounded situation correction through Runtime commands", async () => {
+    const contribution = {
+      ...makeContributionList().contributions[0]!,
+      id: "contribution-keystone-hypothesis",
+      kind: "hypothesis" as const,
+      body: "The timeout aligns with the rollout window.",
+      hypothesisLinks: [{ kind: "artifact" as const, id: RUNTIME_FIXTURE_IDS.evidence }],
+    };
+    const updated = {
+      ...makePopulatedCase(),
+      situationVersion: makePopulatedCase().situationVersion + 1,
+      problemStatement: "Checkout requests exceed the revised latency objective.",
+    };
+    const gateway = createInvestigationGatewayDouble({
+      createContribution: vi.fn(async () => gatewayOk(contribution)),
+      updateSituation: vi.fn(async () => gatewayOk(updated)),
+    });
+    const onNavigateInvestigation = vi.fn();
+    const mounted = mountStrategy({
+      gateway,
+      shell: {
+        focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase,
+        onNavigateInvestigation,
+      },
+    });
+
+    const evidenceButton = await screen.findByRole("button", { name: "checkout-timeout.log" });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Add checkout-timeout\.log to working set/u }));
+    fireEvent.click(screen.getByRole("tab", { name: "Reasoning" }));
+    const hypothesis = screen.getByRole("textbox", { name: "Hypothesis" });
+    fireEvent.change(hypothesis, { target: { value: contribution.body } });
+    fireEvent.click(screen.getByRole("button", { name: "Record hypothesis" }));
+    await waitFor(() => expect(gateway.createContribution).toHaveBeenCalledTimes(1));
+    expect(gateway.createContribution).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        kind: "hypothesis",
+        body: contribution.body,
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+
+    fireEvent.click(evidenceButton);
+    expect(onNavigateInvestigation).toHaveBeenLastCalledWith({
+      investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
+      stage: "capture",
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Record" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit situation" }));
+    const problem = screen.getByRole("textbox", { name: "Problem statement" });
+    fireEvent.change(problem, { target: { value: updated.problemStatement } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(gateway.updateSituation).toHaveBeenCalledTimes(1));
+    expect(gateway.updateSituation).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      expect.objectContaining({
+        expectedVersion: makePopulatedCase().situationVersion,
+        problemStatement: updated.problemStatement,
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(await screen.findByText(updated.problemStatement)).toBeTruthy();
+    expect(mounted.gateway.createInvestigation).not.toHaveBeenCalled();
+    expect(mounted.gateway.uploadEvidence).not.toHaveBeenCalled();
+    expect(mounted.gateway.applyLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  it("keeps same-case drafts mounted across canonical inspector tab changes", async () => {
+    const mounted = mountStrategy({
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByRole("button", { name: "checkout-timeout.log" });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Add checkout-timeout\.log to working set/u }));
+    fireEvent.click(screen.getByRole("tab", { name: "Reasoning" }));
+    const hypothesis = screen.getByRole("textbox", { name: "Hypothesis" });
+    fireEvent.change(hypothesis, { target: { value: "Draft retained across tabs" } });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Record" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit situation" }));
+    const impact = screen.getByRole("textbox", { name: "Impact" });
+    fireEvent.change(impact, { target: { value: "Draft impact retained across tabs" } });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Reasoning" }));
+    expect((screen.getByRole("textbox", { name: "Hypothesis" }) as HTMLTextAreaElement).value).toBe(
+      "Draft retained across tabs",
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Record" }));
+    expect((screen.getByRole("textbox", { name: "Impact" }) as HTMLTextAreaElement).value).toBe(
+      "Draft impact retained across tabs",
+    );
+    expect(mounted.gateway.createContribution).not.toHaveBeenCalled();
+    expect(mounted.gateway.updateSituation).not.toHaveBeenCalled();
   });
 
   it("labels focused loading state as a status before the record arrives", async () => {

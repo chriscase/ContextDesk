@@ -35,8 +35,19 @@ export const UI_STRATEGY_OPTIONAL_FEATURE_IDS = Object.freeze([
   "evidence-upload",
   "lifecycle-actions",
   "specialist-log-exploration",
+  "evidence-linked-hypothesis",
+  "situation-edit",
 ] as const);
 export type UiStrategyOptionalFeature = (typeof UI_STRATEGY_OPTIONAL_FEATURE_IDS)[number];
+
+const REFERENCE_STRATEGY_FEATURES: readonly UiStrategyOptionalFeature[] = Object.freeze([
+  "investigation-create",
+  "evidence-inventory",
+  "evidence-annotations",
+  "evidence-upload",
+  "lifecycle-actions",
+  "specialist-log-exploration",
+]);
 
 export interface UiStrategyCompatibility {
   /** The authoritative investigation record contract consumed by the strategy. */
@@ -84,7 +95,7 @@ export const UI_STRATEGIES: readonly UiStrategyDescriptor[] = [
       version: "^1.0.0",
       runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
     },
-    optionalFeatures: UI_STRATEGY_OPTIONAL_FEATURE_IDS,
+    optionalFeatures: REFERENCE_STRATEGY_FEATURES,
   },
   {
     id: "investigation-first",
@@ -101,24 +112,29 @@ export const UI_STRATEGIES: readonly UiStrategyDescriptor[] = [
       version: "^1.0.0",
       runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
     },
-    optionalFeatures: UI_STRATEGY_OPTIONAL_FEATURE_IDS,
+    optionalFeatures: REFERENCE_STRATEGY_FEATURES,
   },
   {
     id: "keystone",
     name: "Keystone",
     description:
-      "A dense, read-only engineer workbench for reviewing evidence, reasoning, and the investigation record together.",
+      "A dense engineer workbench for reviewing evidence, recording cited hypotheses, and correcting the investigation record together.",
     previewToken: "strategy-keystone",
     previewAsset: null,
     maturity: "pilot",
     status: "preview",
-    version: "0.1.0",
+    version: "0.2.0",
     compatibility: {
       schemaId: "cd-collab.case.v1",
       version: "^1.0.0",
       runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
     },
-    optionalFeatures: ["evidence-inventory", "evidence-annotations"],
+    optionalFeatures: [
+      "evidence-inventory",
+      "evidence-annotations",
+      "evidence-linked-hypothesis",
+      "situation-edit",
+    ],
   },
 ] as const;
 

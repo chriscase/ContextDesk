@@ -407,7 +407,7 @@ const STRATEGY_COVERAGE_MANIFEST: Readonly<
       "collab/e2e/specs/28-keystone-read-only.spec.ts",
     ],
     evidence:
-      "The Keystone K1 component is held to every shared component-surface requirement by its dedicated runComponentConformance suite, and the named browser spec qualifies strategy isolation, read-only evidence inspection, canonical inspector navigation, and narrow-width reflow.",
+      "The Keystone K2 component is held to every shared component-surface requirement by its dedicated runComponentConformance suite, and the named browser spec qualifies strategy isolation, read-only evidence inspection, canonical inspector navigation, and narrow-width reflow. Writable hypothesis and situation journeys are separately asserted by Keystone integration coverage.",
     notSharedBecause:
       "The preview uses dedicated Keystone component and browser journeys rather than mounting Keystone in the strategy-neutral component runner; this manifest records both earned claims without calling them shared-runner coverage.",
   },

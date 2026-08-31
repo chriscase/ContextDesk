@@ -26,7 +26,10 @@
 
 .keystone-strategy__filters input,
 .keystone-strategy__filters select,
-.keystone-strategy__evidence-search input {
+.keystone-strategy__evidence-search input,
+.keystone-strategy__evidence-search textarea,
+.keystone-situation-editor input,
+.keystone-situation-editor textarea {
   width: 100%;
   min-width: 0;
   min-height: 2.5rem;
@@ -35,6 +38,11 @@
   border-radius: 0.55rem;
   background: var(--surface-input);
   color: var(--fg);
+}
+
+.keystone-strategy__evidence-search textarea,
+.keystone-situation-editor textarea {
+  resize: vertical;
 }
 
 .keystone-strategy__collection-list {
@@ -289,6 +297,135 @@
   padding: 0.9rem;
 }
 
+.keystone-strategy__inspector [role="tabpanel"][hidden] {
+  display: none;
+}
+
+.keystone-strategy__reasoning-stack,
+.keystone-strategy__record-stack {
+  display: grid;
+  min-width: 0;
+  gap: 1rem;
+}
+
+.keystone-strategy__reasoning-stack > section,
+.keystone-strategy__supplemental-record,
+.keystone-situation-editor {
+  min-width: 0;
+}
+
+.keystone-strategy__reasoning-stack h3,
+.keystone-strategy__supplemental-record h3,
+.keystone-situation-editor h3,
+.keystone-situation-editor h4 {
+  margin: 0 0 0.65rem;
+}
+
+.keystone-situation-editor__header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.keystone-situation-editor__header p,
+.keystone-situation-editor__form > p {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.keystone-situation-editor__form,
+.keystone-situation-editor__context-fields {
+  display: grid;
+  min-width: 0;
+  gap: 0.8rem;
+}
+
+.keystone-situation-editor__form label,
+.keystone-situation-editor__context-fields label {
+  display: grid;
+  min-width: 0;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.keystone-situation-editor__form fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+}
+
+.keystone-situation-editor__conflict-review {
+  display: grid;
+  min-width: 0;
+  gap: 0.7rem;
+  padding: 0.8rem;
+  border: 2px solid var(--warning, var(--border));
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.keystone-situation-editor__conflict-review h5,
+.keystone-situation-editor__conflict-review p {
+  margin: 0;
+}
+
+.keystone-situation-editor__form legend {
+  padding: 0 0.3rem;
+  font-weight: 720;
+}
+
+.keystone-situation-editor__context-fields,
+.keystone-situation-editor__context-record,
+.keystone-situation-editor__record {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.keystone-situation-editor__record,
+.keystone-situation-editor__context-record {
+  display: grid;
+  min-width: 0;
+  gap: 0.65rem 1rem;
+  margin: 0;
+}
+
+.keystone-situation-editor__record > div,
+.keystone-situation-editor__context-record > div {
+  min-width: 0;
+}
+
+.keystone-situation-editor__record dt,
+.keystone-situation-editor__context-record dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.keystone-situation-editor__record dd,
+.keystone-situation-editor__context-record dd {
+  margin: 0.18rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.keystone-situation-editor__record ul {
+  margin: 0;
+  padding-inline-start: 1.25rem;
+}
+
+.keystone-situation-editor__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
 .keystone-strategy__metadata,
 .keystone-strategy__record,
 .keystone-strategy__inline-metadata {
@@ -374,8 +511,16 @@
 
 @media (max-width: 760px) {
   .keystone-strategy__workbench-grid,
-  .keystone-strategy__working-set {
+  .keystone-strategy__working-set,
+  .keystone-situation-editor__context-fields,
+  .keystone-situation-editor__context-record,
+  .keystone-situation-editor__record {
     grid-template-columns: 1fr;
+  }
+
+  .keystone-situation-editor__header {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .keystone-strategy__evidence-table-wrap {
@@ -472,6 +617,14 @@
   .keystone-strategy__workbench-context,
   .keystone-strategy__inspector,
   .keystone-strategy__ledger > li {
+    border-color: CanvasText;
+  }
+
+  .keystone-situation-editor__form fieldset {
+    border-color: CanvasText;
+  }
+
+  .keystone-situation-editor__conflict-review {
     border-color: CanvasText;
   }
 

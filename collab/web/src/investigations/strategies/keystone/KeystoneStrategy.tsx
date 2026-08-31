@@ -16,7 +16,9 @@ import {
   StrategySurface,
 } from "../shared/index.js";
 import { KeystoneEvidenceGrid } from "./KeystoneEvidenceGrid.js";
+import { KeystoneHypothesisComposer } from "./KeystoneHypothesisComposer.js";
 import { KeystoneInspector } from "./KeystoneInspector.js";
+import { KeystoneSituationEditor } from "./KeystoneSituationEditor.js";
 import {
   filterEvidence,
   filterInvestigations,
@@ -66,8 +68,8 @@ function tabForStage(stage: InvestigationStrategyShellProps["stage"]): KeystoneI
 }
 
 /**
- * Keystone K1 is an evidence-dense, read-only engineer view. It consumes only
- * Runtime V1 reads and shell callbacks. `startSignal` is intentionally inert:
+ * Keystone is an evidence-dense engineer view. It consumes only the public
+ * Runtime reads, commands, and shell callbacks. `startSignal` is intentionally inert:
  * this strategy neither creates a record nor guesses which local inspector a
  * shell-level create request meant to activate.
  */
@@ -101,7 +103,17 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     () => filterInvestigations(cases, query, status),
     [cases, query, status],
   );
-  const scope = `${runtime.identity.id}\u0000${runtime.identity.username}\u0000${props.focusCaseId ?? ""}`;
+  const identityScopeKey = JSON.stringify([
+    "keystone-identity-v1",
+    runtime.identity.id,
+    runtime.identity.username,
+  ]);
+  const scope = JSON.stringify([
+    "keystone-case-v1",
+    runtime.identity.id,
+    runtime.identity.username,
+    props.focusCaseId,
+  ]);
   const evidenceRows = evidenceInventory.inventory.availability === "available"
     ? evidenceInventory.inventory.value
     : [];
@@ -113,6 +125,15 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     [evidenceQuery, evidenceRows],
   );
   const selectedEvidence = evidenceRows.find(({ evidence }) => evidence.id === selectedEvidenceId) ?? null;
+  const hypothesisEvidence = useMemo(
+    () => workingSet.flatMap((evidenceId) => {
+      const row = evidenceRows.find(({ evidence }) => evidence.id === evidenceId);
+      return row === undefined
+        ? []
+        : [{ id: row.evidence.id, name: evidenceName(row.evidence) }];
+    }),
+    [evidenceRows, workingSet],
+  );
   const focusedTitle = props.focusCaseId !== null
     && investigation.availability === "available"
     && investigation.value.id === props.focusCaseId
@@ -182,7 +203,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
 
   function inspectEvidence(evidenceId: string) {
     setSelectionState({ scope, evidenceId });
-    setInspectorTab("details");
+    changeInspectorTab("details");
   }
 
   function changeInspectorTab(tab: KeystoneInspectorTab) {
@@ -453,6 +474,22 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 : "loading"}
             tab={inspectorTab}
             onTabChange={changeInspectorTab}
+            reasoningComposer={(
+              <KeystoneHypothesisComposer
+                scopeKey={scope}
+                selectedEvidence={hypothesisEvidence}
+                createContribution={runtime.commands.createContribution}
+                mutationState={runtime.mutations.createContribution}
+              />
+            )}
+            situationEditor={(
+              <KeystoneSituationEditor
+                identityKey={identityScopeKey}
+                investigation={investigationValue}
+                updateSituation={runtime.commands.updateSituation}
+                mutation={runtime.mutations.updateSituation}
+              />
+            )}
           />
         </div>
       </StrategyPanel>
