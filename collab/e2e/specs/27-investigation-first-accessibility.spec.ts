@@ -340,6 +340,33 @@ test.describe("Investigation First accessibility and browser conformance", () =>
       );
       expect(uploadColumns.split(" ").length).toBe(1);
       await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
+      if (requirement === "reflow-390") {
+        await page.route("**/api/cases", async (route) => {
+          const method = route.request().method();
+          if (method === "GET") {
+            await route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"unavailable"}' });
+            return;
+          }
+          if (method === "POST") {
+            await route.fulfill({ status: 400, contentType: "application/json", body: '{"error":"validation"}' });
+            return;
+          }
+          await route.continue();
+        });
+        await page.goto("/investigations");
+        await page.locator(".investigation-first__advanced > summary").click();
+        const retry = page.getByRole("button", { name: "Retry recorded values" });
+        await expect(retry).toBeVisible();
+        await page.getByLabel("What should the team call this?").fill("Narrow create failure");
+        await page.getByRole("button", { name: "Create investigation" }).click();
+        await expect(page.locator(".investigation-first__create-error")).toBeVisible();
+        observed.push(`truthful error controls: ${await expectReflow(page, requirement, [
+          page.locator(".investigation-first__create-status"),
+          retry,
+          page.locator(".investigation-first__create-error"),
+          page.getByRole("button", { name: "Create investigation" }),
+        ])}`);
+      }
       run.record(requirement, observed.join("; "));
     }
 
@@ -351,6 +378,21 @@ test.describe("Investigation First accessibility and browser conformance", () =>
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.reload();
     await expect(page.locator(".investigation-first")).toBeVisible();
+
+    await page.evaluate(() => {
+      const state = globalThis as typeof globalThis & { __contextdeskScrollBehaviors?: string[] };
+      state.__contextdeskScrollBehaviors = [];
+      Element.prototype.scrollIntoView = function recordScrollBehavior(argument?: boolean | ScrollIntoViewOptions) {
+        state.__contextdeskScrollBehaviors?.push(
+          typeof argument === "object" ? (argument.behavior ?? "auto") : "auto",
+        );
+      };
+    });
+    await page.getByRole("button", { name: "Start investigation" }).click();
+    await expect(page.getByLabel("What should the team call this?")).toBeFocused();
+    expect(await page.evaluate(() => (
+      globalThis as typeof globalThis & { __contextdeskScrollBehaviors?: string[] }
+    ).__contextdeskScrollBehaviors)).toContain("auto");
 
     run.record("reduced-motion", await expectReducedMotion(page, strategyRoot(page)));
     expect(run.finish().evaluated.map((evidence) => evidence.id)).toEqual([...REDUCED_MOTION_SLICE]);

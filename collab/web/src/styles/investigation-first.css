@@ -199,7 +199,7 @@
   }
 
   /* Chromium does not always apply :focus-visible after a pointer-triggered
-     validation failure. In forced-colors mode every focused create control
+     validation failure. In forced-colors mode every focused strategy control
      still needs a system-color indicator, regardless of input modality. */
   .investigation-first button:focus,
   .investigation-first input:focus,
