@@ -180,11 +180,15 @@ function encodeBytes(value: string): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
-function streamBody(bytes: Uint8Array, cancelled?: { value: boolean }): ReadableStream<Uint8Array> {
+function streamBody(
+  bytes: Uint8Array,
+  cancelled?: { value: boolean },
+  leaveOpen = false,
+): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
       if (bytes.byteLength > 0) controller.enqueue(bytes);
-      controller.close();
+      if (!leaveOpen) controller.close();
     },
     cancel() {
       if (cancelled) cancelled.value = true;
@@ -197,6 +201,7 @@ function previewResponse(options: {
   headers?: Record<string, string>;
   body?: Uint8Array | string;
   cancelled?: { value: boolean };
+  leaveOpen?: boolean;
 }) {
   const bytes = typeof options.body === "string" || options.body === undefined
     ? encodeBytes(options.body ?? "")
@@ -205,7 +210,7 @@ function previewResponse(options: {
     ok: options.status >= 200 && options.status < 300,
     status: options.status,
     headers: new Headers(options.headers),
-    body: streamBody(bytes, options.cancelled),
+    body: streamBody(bytes, options.cancelled, options.leaveOpen),
   };
 }
 
@@ -944,6 +949,11 @@ describe("bounded evidence preview and download", () => {
   it("handles 200, 404, 416, and 503 preview outcomes", async () => {
     const encoder = new TextEncoder();
     const textBytes = encoder.encode("ok-body");
+    const cancelled = {
+      missing: { value: false },
+      range: { value: false },
+      unavailable: { value: false },
+    };
     const artifacts = [
       {
         id: "ok",
@@ -1000,12 +1010,27 @@ describe("bounded evidence preview and download", () => {
         });
       }
       if (url.includes("/missing/")) {
-        return previewResponse({ status: 404, body: "" });
+        return previewResponse({
+          status: 404,
+          body: "",
+          cancelled: cancelled.missing,
+          leaveOpen: true,
+        });
       }
       if (url.includes("/range/")) {
-        return previewResponse({ status: 416, body: "" });
+        return previewResponse({
+          status: 416,
+          body: "",
+          cancelled: cancelled.range,
+          leaveOpen: true,
+        });
       }
-      return previewResponse({ status: 503, body: JSON.stringify({ error: "storage_unavailable" }) });
+      return previewResponse({
+        status: 503,
+        body: JSON.stringify({ error: "storage_unavailable" }),
+        cancelled: cancelled.unavailable,
+        leaveOpen: true,
+      });
     });
     render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("ok.log")).toBeTruthy();
@@ -1020,6 +1045,9 @@ describe("bounded evidence preview and download", () => {
     fireEvent.click(screen.getByRole("button", { name: "Hide log" }));
     fireEvent.click(within(screen.getByText("down.log").closest("li")!).getByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText(/storage is temporarily unavailable/)).toBeTruthy();
+    expect(cancelled.missing.value).toBe(true);
+    expect(cancelled.range.value).toBe(true);
+    expect(cancelled.unavailable.value).toBe(true);
   });
 
   it("does not read a body whose Content-Length exceeds 64 KiB", async () => {
