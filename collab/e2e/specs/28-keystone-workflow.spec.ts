@@ -6,6 +6,10 @@ import {
   loginAs,
   uniqueTitle,
 } from "../src/helpers.js";
+import {
+  expectForcedColors,
+  expectReducedMotion,
+} from "../src/investigation-strategy/conformance.js";
 import { FIXTURE_USERS } from "../src/users.js";
 
 const DESKTOP = { width: 1280, height: 900 };
@@ -43,6 +47,24 @@ test.describe("Keystone K2 engineer workflow", () => {
     await expect(page.locator(".topbar__title-app")).toHaveText("Keystone");
     await expect(page.locator(".keystone-strategy")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Investigations" })).toBeVisible();
+  });
+
+  test("keeps controls and focus visible in forced colors and removes motion", async ({ page }) => {
+    await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
+    await page.setViewportSize(DESKTOP);
+    await loginAs(page, FIXTURE_USERS.dave);
+    await selectStrategy(page, "Keystone");
+    await page.getByRole("navigation", { name: "Primary" })
+      .getByRole("button", { name: "Investigations", exact: true })
+      .click();
+    const root = page.locator(".keystone-strategy");
+    await expect(root).toBeVisible();
+
+    await expectReducedMotion(page, root);
+    await expectForcedColors(page, [
+      page.getByRole("searchbox", { name: "Search investigations" }),
+      page.getByRole("combobox", { name: "Status" }),
+    ]);
   });
 
   test("browses evidence without writes and keeps canonical inspector navigation", async ({ page }) => {

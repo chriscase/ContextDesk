@@ -404,10 +404,10 @@ const STRATEGY_COVERAGE_MANIFEST: Readonly<
     kind: "dedicated-coverage",
     dedicatedSpecs: [
       "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.conformance.test.tsx",
-      "collab/e2e/specs/28-keystone-read-only.spec.ts",
+      "collab/e2e/specs/28-keystone-workflow.spec.ts",
     ],
     evidence:
-      "The Keystone K2 component is held to every shared component-surface requirement by its dedicated runComponentConformance suite, and the named browser spec qualifies strategy isolation, read-only evidence inspection, canonical inspector navigation, and narrow-width reflow. Writable hypothesis and situation journeys are separately asserted by Keystone integration coverage.",
+      "The Keystone K2 component is held to every shared component-surface requirement by its dedicated runComponentConformance suite, and the named browser spec qualifies strategy isolation, read-only evidence inspection, canonical inspector navigation, narrow-width reflow, forced colors, reduced motion, one cited hypothesis, and one explicit situation correction.",
     notSharedBecause:
       "The preview uses dedicated Keystone component and browser journeys rather than mounting Keystone in the strategy-neutral component runner; this manifest records both earned claims without calling them shared-runner coverage.",
   },
@@ -492,7 +492,7 @@ describe("shipped strategy conformance coverage", () => {
 
     expect([...enrollment.dedicatedSpecs]).toEqual([
       "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.conformance.test.tsx",
-      "collab/e2e/specs/28-keystone-read-only.spec.ts",
+      "collab/e2e/specs/28-keystone-workflow.spec.ts",
     ]);
     expect(enrollment.notSharedBecause).toContain("dedicated Keystone component and browser journeys");
     expect(repositorySource(enrollment.dedicatedSpecs[0]!)).toContain(

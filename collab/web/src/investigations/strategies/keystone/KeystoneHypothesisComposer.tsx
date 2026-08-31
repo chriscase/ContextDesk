@@ -310,10 +310,15 @@ export function KeystoneHypothesisComposer({
   scopeKey,
   ...scopeProps
 }: KeystoneHypothesisComposerProps) {
-  const activeScope = useRef({ key: scopeKey, epoch: 0 });
-  if (activeScope.current.key !== scopeKey) {
+  const componentScopeKey = JSON.stringify([
+    "keystone-hypothesis-v1",
+    scopeKey,
+    scopeProps.createContribution !== null,
+  ]);
+  const activeScope = useRef({ key: componentScopeKey, epoch: 0 });
+  if (activeScope.current.key !== componentScopeKey) {
     activeScope.current = {
-      key: scopeKey,
+      key: componentScopeKey,
       epoch: activeScope.current.epoch + 1,
     };
   }

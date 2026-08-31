@@ -76,6 +76,21 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(screen.queryByRole("button", { name: "Record hypothesis" })).toBeNull();
   });
 
+  it("drops a private draft when write authority disappears before it returns", () => {
+    const command = succeededCommand();
+    const mounted = mount({ createContribution: command });
+    fireEvent.change(hypothesisField(), { target: { value: "Do not restore this draft." } });
+
+    mounted.rerenderComposer({ createContribution: null });
+    expect(screen.getByText("Hypothesis writing unavailable")).toBeTruthy();
+    expect(screen.queryByDisplayValue("Do not restore this draft.")).toBeNull();
+
+    mounted.rerenderComposer({ createContribution: command });
+    expect(hypothesisField().value).toBe("");
+    expect(screen.queryByText("Hypothesis recorded")).toBeNull();
+    expect(command).not.toHaveBeenCalled();
+  });
+
   it("writes nothing for a blank body or without required selected evidence", () => {
     const command = succeededCommand();
     const mounted = mount({ createContribution: command });
