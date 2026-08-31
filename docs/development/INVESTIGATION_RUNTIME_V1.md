@@ -11,6 +11,11 @@
 accepted tree; Runtime V1 additions now require additive, versioned evolution
 of the public surface rather than imports from implementation modules.
 
+The additive Runtime V1.1 integration candidate layers contribution-create and
+Situation-update seams onto that frozen base. They are optional gateway members
+resolved through a fail-closed write contract, so pre-V1.1 read-shaped gateways
+remain valid and cannot accidentally acquire mutation authority.
+
 Runtime V1 is the shared browser-side boundary that lets ContextDesk ship more
 than one investigation presentation without creating competing authorities for
 case data, evidence, permissions, lifecycle, audit history, or navigation.
@@ -24,7 +29,8 @@ The collaboration server remains authoritative for:
 
 - authentication, authorization, case access, and capabilities;
 - case, evidence, contribution, and lifecycle identity;
-- validation, optimistic concurrency, audit history, and retention rules;
+- validation, optimistic concurrency, audit history, and retention rules,
+  including hypothesis-link kind, identity, and same-investigation existence;
 - archive/restore eligibility and every durable mutation.
 
 The runtime owns browser-side orchestration only:
@@ -32,7 +38,8 @@ The runtime owns browser-side orchestration only:
 - parsing successful wire payloads into typed values;
 - projecting capabilities into presentation-safe affordances;
 - loading collection, detail, evidence, and lifecycle state;
-- invoking create, upload, archive, and restore commands;
+- invoking investigation create, evidence upload, contribution create,
+  Situation update, archive, and restore commands;
 - cancelling or fencing requests whose route, case, or identity is stale;
 - preserving canonical case, stage, focus, and URL state across strategies.
 
@@ -131,14 +138,17 @@ generation. A response may publish only when its identity, requested case, and
 generation are still current. The guard applies before and after body parsing,
 not merely around the initial fetch.
 
-Mutation completion is fenced independently. A late upload, lifecycle action,
-or refresh for case A cannot select, refresh, or reopen A after navigation to
-case B. Create navigation uses only the identifier returned by the successful,
-parsed server response. A retained create callback rechecks the latest identity,
-authority, read-only state, capability, and canonical location before it may
-issue a request, and it runs only at the null-case investigations origin. A
-create already in flight may merge its authoritative result after navigation,
-but it may navigate only while the user remains at that origin.
+Mutation completion is fenced independently. A late upload, contribution,
+Situation edit, lifecycle action, or refresh for case A cannot publish into,
+select, refresh, or reopen A after navigation to case B. Every write controller
+fences identity, authority, case, capability, read-only state, and unmount, and
+aborts the superseded request. Create navigation uses only the identifier
+returned by the successful, parsed server response. A retained create callback
+rechecks the latest identity, authority, read-only state, capability, and
+canonical location before it may issue a request, and it runs only at the
+null-case investigations origin. A create already in flight may merge its
+authoritative result after navigation, but it may navigate only while the user
+remains at that origin.
 
 Successful parsed gateway values, structured lifecycle-conflict state, and the
 provider's assembled Runtime V1 graph are frozen before publication. Arrays and
@@ -161,7 +171,10 @@ collection or evidence request is never represented as an empty collection.
 Capability projections can remove or disable an affordance; they cannot grant
 one. The gateway still relies on the protected server route for final
 authorization. Static read-only builds and capability-limited sessions expose
-no callable mutation commands.
+no callable mutation commands. Contribution-create and Situation-update
+affordances are projected separately even while both rely on
+`investigation:write`; a future capability split therefore changes the central
+projection rather than strategy code.
 
 Lifecycle authority is shared across presentations. A strategy cannot use a
 broader or narrower capability formula than another strategy for the same
@@ -177,6 +190,10 @@ behavior:
 - create an investigation and return its authoritative identifier;
 - list evidence and contribution annotations;
 - upload bounded evidence through the existing protected route;
+- create one typed contribution, optionally citing artifact or contribution
+  identities when its kind is `hypothesis`;
+- update the active investigation's Situation using its parsed
+  `situationVersion` as the required optimistic-concurrency token;
 - inspect and invoke archive/restore through the shared lifecycle authority.
 
 Specialist log exploration remains an explicit handoff to War Room. Permanent
@@ -195,6 +212,11 @@ response. The delivered contracts layer provides:
 - a versioned evidence-upload-success envelope and parser for the returned
   artifact and summary contribution, with the case service emitting it from
   `POST /api/cases/:id/evidence`; and
+- the authoritative `ContributionV1` parser for
+  `POST /api/cases/:id/contributions`, with the runtime requiring the returned
+  contribution to belong to the requested investigation; and
+- the authoritative `CaseV1` parser for `PATCH /api/cases/:id/situation`, with
+  the runtime requiring the returned case identity to match the request; and
 - versioned lifecycle-action request, success, and changed-state conflict
   envelopes and parsers for `POST /api/cases/:id/lifecycle`.
 
@@ -203,6 +225,26 @@ their parsed values.
 
 The gateway must not compensate for any omission with a local cast or a
 second hand-written wire parser.
+
+### Contribution and Situation command integrity
+
+The browser snapshots a contribution command into fresh transport fields and
+allows hypothesis links only for a hypothesis. That structural check is not an
+authority decision. Inside the same server transaction that would persist the
+revision, idempotency intent, timeline event, and audit row, the case service
+parses every link as exactly `{ kind, id }`, accepts only `artifact` or
+`contribution`, and resolves the referenced identity in the target
+investigation. Malformed, nonexistent, and cross-investigation links fail
+before any of those writes. The server applies the same rule to hypothesis
+status links, so another client cannot bypass the runtime gateway.
+
+The Situation command intentionally omits `expectedVersion` from the public
+strategy input. Its controller derives the token from the parsed active
+`CaseV1`; the gateway requires and serializes that value, and the server
+performs the atomic comparison. A `409` is published as conflict, triggers
+fresh detail and collection reads, and is never retried as a write. A later
+user action therefore starts from the server's current Situation instead of
+replaying a stale edit.
 
 ### Lifecycle command integrity
 
@@ -240,6 +282,10 @@ Every strategy consumer must prove, using deterministic synthetic fixtures:
 - create opens the server-confirmed record identifier;
 - a delayed case A response cannot overwrite active case B;
 - late upload and lifecycle completion cannot resurrect case A;
+- late contribution and Situation completion cannot publish into case B;
+- malformed, nonexistent, and cross-investigation hypothesis links write no
+  revision, idempotency intent, timeline event, or audit row;
+- Situation conflicts refresh authoritative state without retrying the write;
 - evidence and collection failures remain visible and retryable;
 - selection is scoped to the active case and exposes no permanent deletion;
 - lifecycle actions use the shared audited authority;

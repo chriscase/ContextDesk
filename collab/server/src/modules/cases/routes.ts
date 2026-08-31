@@ -718,7 +718,7 @@ export async function registerCaseRoutes(
       privacyClass?: PrivacyClass;
       clientTime?: string;
       hypothesisStatus?: HypothesisStatus;
-      hypothesisLinks?: { kind: "artifact" | "contribution"; id: string }[];
+      hypothesisLinks?: unknown;
       sourceId?: string;
       idempotencyKey?: string;
     } = { kind, body: text };
@@ -739,11 +739,8 @@ export async function registerCaseRoutes(
     ) {
       input.hypothesisStatus = hypothesisStatus as HypothesisStatus;
     }
-    if (Array.isArray(body.hypothesisLinks)) {
-      input.hypothesisLinks = body.hypothesisLinks as {
-        kind: "artifact" | "contribution";
-        id: string;
-      }[];
+    if (Object.prototype.hasOwnProperty.call(body, "hypothesisLinks")) {
+      input.hypothesisLinks = body.hypothesisLinks;
     }
     const sourceId = str(body.sourceId);
     if (sourceId) input.sourceId = sourceId;
@@ -886,8 +883,8 @@ export async function registerCaseRoutes(
       void reply.code(400);
       return { error: "clientTime must be a string" };
     }
-    const links = Array.isArray(body.links)
-      ? (body.links as { kind: "artifact" | "contribution"; id: string }[])
+    const links = Object.prototype.hasOwnProperty.call(body, "links")
+      ? body.links
       : [];
     try {
       return await deps.domain.setHypothesisStatus(

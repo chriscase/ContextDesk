@@ -23,6 +23,7 @@ import { createAuthLog, createRateLimiter, MemorySessionStore, defaultSessionPol
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService } from "./service.js";
+import { MemoryCaseStore } from "./store.js";
 
 const ALICE = "fixture-alice-secret";
 const LOG = "2026-08-15T00:00:00Z mailer timeout id=syn-1\n";
@@ -97,6 +98,7 @@ async function withApp(
     domain: CaseService;
     catalog: CatalogService;
     store: FilesystemEvidenceStore;
+    caseStore: MemoryCaseStore;
     roles: MutableGroupRoleMap;
   }) => Promise<void>,
 ) {
@@ -104,7 +106,8 @@ async function withApp(
   const store = new FilesystemEvidenceStore({ rootDir: root });
   const audit = new MemoryAuditStore();
   const catalog = new CatalogService(undefined, audit);
-  const domain = new CaseService(store, audit, undefined, catalog);
+  const caseStore = new MemoryCaseStore();
+  const domain = new CaseService(store, audit, caseStore, catalog);
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(roleMap));
   const app = await buildApp({
     config: testConfig({ evidenceRoot: root }),
@@ -128,7 +131,7 @@ async function withApp(
     },
   });
   try {
-    await fn({ app, audit, domain, catalog, store, roles });
+    await fn({ app, audit, domain, catalog, store, caseStore, roles });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -425,6 +428,183 @@ describe("cases timeline evidence provenance", () => {
         payload: { openQuestions: "not-an-array" },
       });
       expect(malformed.statusCode).toBe(400);
+    });
+  });
+
+  it("validates hypothesis link identities in-case before any durable write", async () => {
+    await withApp(async ({ app, audit, caseStore }) => {
+      const alice = await login(app, "alice", ALICE);
+      const createCase = async (title: string) => parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title },
+      })).body));
+      const createContribution = async (
+        caseId: string,
+        payload: Record<string, unknown>,
+      ) => parseContribution(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/contributions`,
+        headers: { cookie: alice },
+        payload,
+      })).body));
+      const uploadArtifact = async (caseId: string, filename: string, content: string) => {
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/cases/${caseId}/evidence`,
+          headers: { cookie: alice },
+          payload: {
+            kind: "log",
+            filename,
+            mediaType: "text/plain",
+            contentBase64: Buffer.from(content).toString("base64"),
+            summary: `${filename} summary`,
+          },
+        });
+        expect(response.statusCode).toBe(200);
+        return parseEvidenceUploadSuccess(JSON.parse(response.body)).artifact;
+      };
+
+      const primary = await createCase("Primary link authority fixture");
+      const secondary = await createCase("Secondary link authority fixture");
+      const primaryNote = await createContribution(primary.id, {
+        kind: "note",
+        body: "Primary case observation",
+      });
+      const secondaryNote = await createContribution(secondary.id, {
+        kind: "note",
+        body: "Secondary case observation",
+      });
+      const primaryArtifact = await uploadArtifact(primary.id, "primary.log", "primary\n");
+      const secondaryArtifact = await uploadArtifact(secondary.id, "secondary.log", "secondary\n");
+
+      const linked = await createContribution(primary.id, {
+        kind: "hypothesis",
+        body: "Both case-local link kinds are valid",
+        hypothesisLinks: [
+          { kind: "artifact", id: primaryArtifact.id },
+          { kind: "contribution", id: primaryNote.id },
+        ],
+      });
+      expect(linked.hypothesisLinks).toEqual([
+        { kind: "artifact", id: primaryArtifact.id },
+        { kind: "contribution", id: primaryNote.id },
+      ]);
+      const statusTarget = await createContribution(primary.id, {
+        kind: "hypothesis",
+        body: "Status mutation target",
+      });
+
+      const baselineLatest = await caseStore.listLatestRevisions(primary.id);
+      const baselineTimeline = await caseStore.listTimeline(primary.id);
+      const baselineCreateAudits = await audit.list({ action: "contribution_create" });
+      const baselineStatusAudits = await audit.list({ action: "hypothesis_status" });
+
+      const invalidCreateLinks: Array<{
+        label: string;
+        links: unknown;
+        kind?: string;
+        idempotencyKey?: string;
+      }> = [
+        { label: "non-array", links: "not-an-array" },
+        { label: "unknown kind", links: [{ kind: "url", id: primaryArtifact.id }] },
+        { label: "non-string id", links: [{ kind: "artifact", id: 42 }] },
+        { label: "empty id", links: [{ kind: "artifact", id: "" }] },
+        {
+          label: "nonexistent artifact",
+          links: [{ kind: "artifact", id: "artifact-does-not-exist" }],
+          idempotencyKey: "invalid-link-create-1",
+        },
+        {
+          label: "nonexistent contribution",
+          links: [{ kind: "contribution", id: "contribution-does-not-exist" }],
+        },
+        { label: "cross-case artifact", links: [{ kind: "artifact", id: secondaryArtifact.id }] },
+        {
+          label: "cross-case contribution",
+          links: [{ kind: "contribution", id: secondaryNote.id }],
+        },
+        {
+          label: "links on a note",
+          kind: "note",
+          links: [{ kind: "artifact", id: primaryArtifact.id }],
+        },
+      ];
+      const createFailures = new Map<string, { error?: string; detail?: string }>();
+      for (const attempt of invalidCreateLinks) {
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/cases/${primary.id}/contributions`,
+          headers: { cookie: alice },
+          payload: {
+            kind: attempt.kind ?? "hypothesis",
+            body: `Rejected: ${attempt.label}`,
+            hypothesisLinks: attempt.links,
+            ...(attempt.idempotencyKey ? { idempotencyKey: attempt.idempotencyKey } : {}),
+          },
+        });
+        expect(response.statusCode, attempt.label).toBe(400);
+        const failure = JSON.parse(response.body) as { error?: string; detail?: string };
+        expect(failure.error, attempt.label).toBe("invalid");
+        createFailures.set(attempt.label, failure);
+      }
+      expect(createFailures.get("nonexistent artifact")?.detail).toBe(
+        createFailures.get("cross-case artifact")?.detail,
+      );
+      expect(createFailures.get("nonexistent contribution")?.detail).toBe(
+        createFailures.get("cross-case contribution")?.detail,
+      );
+
+      const invalidStatusLinks: Array<{ label: string; links: unknown }> = [
+        { label: "status non-array", links: { kind: "artifact", id: primaryArtifact.id } },
+        { label: "status unknown kind", links: [{ kind: "url", id: primaryArtifact.id }] },
+        { label: "status non-string id", links: [{ kind: "artifact", id: 42 }] },
+        { label: "status empty id", links: [{ kind: "contribution", id: "" }] },
+        {
+          label: "status nonexistent artifact",
+          links: [{ kind: "artifact", id: "missing-artifact" }],
+        },
+        {
+          label: "status nonexistent contribution",
+          links: [{ kind: "contribution", id: "missing-contribution" }],
+        },
+        {
+          label: "status cross-case artifact",
+          links: [{ kind: "artifact", id: secondaryArtifact.id }],
+        },
+        {
+          label: "status cross-case contribution",
+          links: [{ kind: "contribution", id: secondaryNote.id }],
+        },
+      ];
+      for (const attempt of invalidStatusLinks) {
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/cases/${primary.id}/hypotheses/${statusTarget.id}/status`,
+          headers: { cookie: alice },
+          payload: { status: "supported", links: attempt.links },
+        });
+        expect(response.statusCode, attempt.label).toBe(400);
+        expect((JSON.parse(response.body) as { error?: string }).error, attempt.label).toBe(
+          "invalid",
+        );
+      }
+
+      expect(await caseStore.listLatestRevisions(primary.id)).toEqual(baselineLatest);
+      expect(await caseStore.listRevisions(statusTarget.id)).toHaveLength(1);
+      expect(await caseStore.listTimeline(primary.id)).toEqual(baselineTimeline);
+      expect(await audit.list({ action: "contribution_create" })).toEqual(
+        baselineCreateAudits,
+      );
+      expect(await audit.list({ action: "hypothesis_status" })).toEqual(
+        baselineStatusAudits,
+      );
+      expect(await caseStore.getContributionIdempotency(
+        primary.id,
+        "uid=alice,ou=people,dc=example,dc=test",
+        "invalid-link-create-1",
+      )).toBeNull();
     });
   });
 
