@@ -185,6 +185,87 @@ describe("Keystone K2 situation correction", () => {
     expect(screen.getByRole("form", { name: "Edit recorded situation" })).toBeTruthy();
   });
 
+  it("blocks conflict retry until an explicit newer-record rebase and then sends only the rebased diff", async () => {
+    const investigation = makePopulatedCase();
+    const sharedProblem = "A teammate recorded this same corrected problem.";
+    const localImpact = "My retained impact correction.";
+    const latest: CaseV1 = {
+      ...investigation,
+      problemStatement: sharedProblem,
+      affectedParties: "Newer recorded affected systems.",
+      scope: "Newer recorded rollout scope.",
+      openQuestions: ["What does the refreshed trace show?"],
+      investigationContext: {
+        ...investigation.investigationContext!,
+        build: "2026.02.03.5",
+      },
+      situationVersion: investigation.situationVersion + 1,
+    };
+    const accepted: CaseV1 = {
+      ...latest,
+      impact: localImpact,
+      situationVersion: latest.situationVersion + 1,
+    };
+    let attempt = 0;
+    const updateSituation = vi.fn<UpdateSituation>(async () => {
+      attempt += 1;
+      return attempt === 1
+        ? { status: "failed", error: { kind: "conflict", status: 409 } }
+        : { status: "succeeded", value: accepted };
+    });
+    const mounted = mountEditor({ investigation, updateSituation });
+    const form = enterEditor();
+    fireEvent.change(screen.getByLabelText("Problem statement"), {
+      target: { value: sharedProblem },
+    });
+    fireEvent.change(screen.getByLabelText("Impact"), {
+      target: { value: localImpact },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(/save is blocked/i);
+    expect(updateSituation).toHaveBeenCalledTimes(1);
+    expect(updateSituation).toHaveBeenLastCalledWith({
+      problemStatement: sharedProblem,
+      impact: localImpact,
+    });
+    expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled)
+      .toBe(true);
+    fireEvent.submit(form);
+    expect(updateSituation).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/awaiting the latest recorded situation/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /rebase my draft/i })).toBeNull();
+    expect((screen.getByLabelText("Impact") as HTMLTextAreaElement).value).toBe(localImpact);
+
+    mounted.rerender({ investigation: latest });
+    expect(screen.getByText("Newer recorded affected systems.")).toBeTruthy();
+    expect(screen.getByText("Newer recorded rollout scope.")).toBeTruthy();
+    expect(screen.getByText("What does the refreshed trace show?")).toBeTruthy();
+    expect(screen.getByText("2026.02.03.5")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled)
+      .toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: /rebase my draft/i }));
+    expect(updateSituation).toHaveBeenCalledTimes(1);
+    expect((screen.getByLabelText("Problem statement") as HTMLTextAreaElement).value)
+      .toBe(sharedProblem);
+    expect((screen.getByLabelText("Impact") as HTMLTextAreaElement).value).toBe(localImpact);
+    expect((screen.getByLabelText("Affected people or systems") as HTMLTextAreaElement).value)
+      .toBe("Newer recorded affected systems.");
+    expect((screen.getByLabelText("Scope") as HTMLTextAreaElement).value)
+      .toBe("Newer recorded rollout scope.");
+    expect((screen.getByLabelText("Open questions") as HTMLTextAreaElement).value)
+      .toBe("What does the refreshed trace show?");
+    expect((screen.getByLabelText("Build") as HTMLInputElement).value).toBe("2026.02.03.5");
+    expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled)
+      .toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(localImpact)).toBeTruthy();
+    expect(updateSituation).toHaveBeenCalledTimes(2);
+    expect(updateSituation).toHaveBeenLastCalledWith({ impact: localImpact });
+  });
+
   it("records only entered context values and does not invent catalog or domain values", async () => {
     const investigation = makeSparseImportedCase();
     const updateSituation = vi.fn<UpdateSituation>(async () => ({
