@@ -134,6 +134,7 @@ describe("Keystone engineer strategy", () => {
     const detailHeading = await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
     await waitFor(() => expect(document.activeElement).toBe(detailHeading));
     expect(await screen.findByRole("button", { name: "checkout-timeout.log" })).toBeTruthy();
+    expect(screen.getByRole("table", { name: "Evidence grid" })).toBeTruthy();
     expect(screen.getAllByText("Gateway timeout excerpt captured during the affected interval.").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "checkout-timeout.log" }));

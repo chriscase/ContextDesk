@@ -146,6 +146,38 @@ describe("Keystone K2 situation correction", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit situation" }));
   });
 
+  it.each([
+    ["same-version", 0],
+    ["equivalent canonical", 1],
+  ] as const)("reports a %s authoritative success as an unchanged save", async (_label, versionDelta) => {
+    const investigation = makePopulatedCase();
+    const authoritative = {
+      ...investigation,
+      situationVersion: investigation.situationVersion + versionDelta,
+    };
+    const updateSituation = vi.fn<UpdateSituation>(async () => ({
+      status: "succeeded",
+      value: authoritative,
+    }));
+    const onSuccess = vi.fn();
+    mountEditor({ investigation, updateSituation, onSuccess });
+
+    enterEditor();
+    fireEvent.change(screen.getByLabelText("Problem statement"), {
+      target: { value: `  ${investigation.problemStatement}  ` },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByText("No situation changes were recorded.")).toBeTruthy();
+    expect(screen.queryByText("Situation changes recorded.")).toBeNull();
+    expect(screen.queryByRole("form")).toBeNull();
+    expect(updateSituation).toHaveBeenCalledWith({
+      problemStatement: `  ${investigation.problemStatement}  `,
+    });
+    expect(onSuccess).toHaveBeenCalledWith(authoritative);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit situation" }));
+  });
+
   it("normalizes edited questions and preserves explicit empty/null erasures on conflict", async () => {
     const updateSituation = vi.fn<UpdateSituation>(async () => ({
       status: "failed",

@@ -55,6 +55,7 @@ interface EditorState {
   readonly pending: boolean;
   readonly conflicted: boolean;
   readonly succeeded: boolean;
+  readonly unchanged: boolean;
   readonly failure: RuntimeFailure | null;
   readonly ignored: CommandIgnoredReason | null;
 }
@@ -120,6 +121,7 @@ function initialState(scope: string, investigation: CaseV1): EditorState {
     pending: false,
     conflicted: false,
     succeeded: false,
+    unchanged: false,
     failure: null,
     ignored: null,
   };
@@ -159,6 +161,15 @@ function sameContext(
 ): boolean {
   if (left === null || right === null) return left === right;
   return CONTEXT_FIELDS.every(({ field }) => left[field] === right[field]);
+}
+
+function sameSituation(left: CaseV1, right: CaseV1): boolean {
+  return left.problemStatement === right.problemStatement
+    && left.affectedParties === right.affectedParties
+    && left.impact === right.impact
+    && left.scope === right.scope
+    && sameQuestions(left.openQuestions, right.openQuestions)
+    && sameContext(left.investigationContext, right.investigationContext);
 }
 
 /**
@@ -427,6 +438,7 @@ export function KeystoneSituationEditor({
         pending: false,
         conflicted: false,
         succeeded: false,
+        unchanged: false,
         failure: null,
         ignored: null,
       };
@@ -448,6 +460,7 @@ export function KeystoneSituationEditor({
         pending: false,
         conflicted: false,
         succeeded: false,
+        unchanged: false,
         failure: null,
         ignored: null,
       };
@@ -503,6 +516,7 @@ export function KeystoneSituationEditor({
         pending: false,
         conflicted: false,
         succeeded: false,
+        unchanged: false,
         failure: null,
         ignored: null,
       };
@@ -532,6 +546,7 @@ export function KeystoneSituationEditor({
         pending: true,
         conflicted: false,
         succeeded: false,
+        unchanged: false,
         failure: null,
         ignored: null,
       };
@@ -556,14 +571,20 @@ export function KeystoneSituationEditor({
         setStoredState((current) => current.scope === scope
           ? {
               ...current,
-            pending: false,
-            conflicted: false,
-            succeeded: false,
-            failure: { kind: "unexpected" },
+              pending: false,
+              conflicted: false,
+              succeeded: false,
+              unchanged: false,
+              failure: { kind: "unexpected" },
             }
           : current);
         return;
       }
+      // A successful response can be an authoritative no-op after server
+      // normalization. Durable-success copy therefore requires an advanced,
+      // materially different situation rather than transport success alone.
+      const unchanged = outcome.value.situationVersion === state.baseline.situationVersion
+        || sameSituation(outcome.value, state.baseline);
       returnFocusRef.current = true;
       setStoredState((current) => current.scope === scope
         ? {
@@ -575,7 +596,8 @@ export function KeystoneSituationEditor({
             attempted: false,
             pending: false,
             conflicted: false,
-            succeeded: true,
+            succeeded: !unchanged,
+            unchanged,
             failure: null,
             ignored: null,
           }
@@ -588,10 +610,11 @@ export function KeystoneSituationEditor({
       setStoredState((current) => current.scope === scope
         ? {
             ...current,
-          pending: false,
-          conflicted: outcome.error.kind === "conflict",
-          succeeded: false,
-          failure: outcome.error,
+            pending: false,
+            conflicted: outcome.error.kind === "conflict",
+            succeeded: false,
+            unchanged: false,
+            failure: outcome.error,
             ignored: null,
           }
         : current);
@@ -601,10 +624,11 @@ export function KeystoneSituationEditor({
     setStoredState((current) => current.scope === scope
       ? {
           ...current,
-        pending: false,
-        conflicted: false,
-        succeeded: false,
-        failure: null,
+          pending: false,
+          conflicted: false,
+          succeeded: false,
+          unchanged: false,
+          failure: null,
           ignored: outcome.reason,
         }
       : current);
@@ -745,6 +769,7 @@ export function KeystoneSituationEditor({
         <>
           <SituationRecord investigation={authoritativeRecord} />
           {state.succeeded ? <p role="status">Situation changes recorded.</p> : null}
+          {state.unchanged ? <p role="status">No situation changes were recorded.</p> : null}
           {updateSituation === null ? (
             <p role="status">This view can read recorded situation context, but editing is unavailable.</p>
           ) : null}

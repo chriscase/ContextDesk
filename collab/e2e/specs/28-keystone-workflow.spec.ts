@@ -116,10 +116,7 @@ test.describe("Keystone K2 engineer workflow", () => {
     await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
     await expect(page.getByRole("heading", { level: 2, name: title })).toBeFocused();
 
-    // The table is labelled by its enclosing StrategyPanel, not by an
-    // aria-label of its own; keep the selector tied to Keystone's presentation
-    // surface rather than manufacturing an inaccessible table name.
-    const grid = page.locator(".keystone-strategy__evidence-table");
+    const grid = page.getByRole("table", { name: "Evidence grid" });
     await expect(grid).toBeVisible();
     const row = grid.locator("tbody tr").filter({ hasText: filename });
     await expect(row).toBeVisible();
