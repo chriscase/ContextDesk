@@ -3,6 +3,14 @@
   margin: 0 auto;
 }
 
+.keystone-strategy button:focus-visible,
+.keystone-strategy input:focus-visible,
+.keystone-strategy textarea:focus-visible,
+.keystone-strategy select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .keystone-strategy__filters,
 .keystone-strategy__workbench-grid {
   display: grid;
@@ -628,9 +636,23 @@
     border-color: CanvasText;
   }
 
+  .keystone-strategy__evidence-name,
+  .keystone-strategy__tabs button {
+    border: 1px solid ButtonText;
+  }
+
   .keystone-strategy__tabs button[aria-selected="true"] {
+    border-color: Highlight;
     color: Highlight;
     box-shadow: inset 0 -0.18rem Highlight;
+  }
+
+  .keystone-strategy button:focus,
+  .keystone-strategy input:focus,
+  .keystone-strategy textarea:focus,
+  .keystone-strategy select:focus {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
   }
 }
 

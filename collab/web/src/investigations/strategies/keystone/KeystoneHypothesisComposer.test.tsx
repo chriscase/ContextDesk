@@ -230,25 +230,29 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
 
   it("reuses one idempotency key after an ambiguous response loss and rotates after success", async () => {
     const durableByKey = new Map<string, ContributionV1>();
-    let loseFirstResponse = true;
+    const responsesToLose = new Set([1, 4]);
+    let callCount = 0;
     const command: CreateContribution = vi.fn(async (input) => {
+      callCount += 1;
       const key = input.idempotencyKey;
       if (key === undefined) throw new Error("missing duplicate-prevention key");
       const durable = durableByKey.get(key) ?? authoritativeContribution();
       durableByKey.set(key, durable);
-      if (loseFirstResponse) {
-        loseFirstResponse = false;
+      if (responsesToLose.has(callCount)) {
         throw new Error("response lost after commit");
       }
       return { status: "succeeded" as const, value: durable };
     });
-    mount({ createContribution: command });
+    const mounted = mount({ createContribution: command });
     const field = hypothesisField();
     fireEvent.change(field, { target: { value: "One durable hypothesis despite a lost response." } });
 
     fireEvent.submit(hypothesisForm());
     expect(await screen.findByText("Hypothesis outcome unknown")).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toContain("may have been recorded");
+    mounted.rerenderComposer({
+      mutationState: { status: "failed", error: { kind: "network" } },
+    });
+    expect(screen.getByRole("alert").textContent).toContain("may have recorded");
     expect(field.value).toBe("One durable hypothesis despite a lost response.");
     expect(durableByKey.size).toBe(1);
 
@@ -261,14 +265,65 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(retryKey).toBe(firstKey);
     expect(durableByKey.size).toBe(1);
 
-    fireEvent.change(field, { target: { value: "A deliberately new hypothesis intent." } });
+    mounted.rerenderComposer({ mutationState: IDLE });
+    fireEvent.change(field, { target: { value: "One durable hypothesis despite a lost response." } });
     fireEvent.submit(hypothesisForm());
     await waitFor(() => expect(command).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(field.value).toBe(""));
-    const nextKey = vi.mocked(command).mock.calls[2]?.[0].idempotencyKey;
-    expect(nextKey).toMatch(/^keystone-hypothesis-/);
-    expect(nextKey).not.toBe(firstKey);
+    const postSuccessKey = vi.mocked(command).mock.calls[2]?.[0].idempotencyKey;
+    expect(postSuccessKey).toMatch(/^keystone-hypothesis-/);
+    expect(postSuccessKey).not.toBe(firstKey);
     expect(durableByKey.size).toBe(2);
+
+    fireEvent.change(field, { target: { value: "A second hypothesis with another lost response." } });
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(4));
+    mounted.rerenderComposer({
+      mutationState: { status: "failed", error: { kind: "network" } },
+    });
+    expect(await screen.findByText("Hypothesis outcome unknown")).toBeTruthy();
+    const ambiguousKey = vi.mocked(command).mock.calls[3]?.[0].idempotencyKey;
+
+    fireEvent.change(field, { target: { value: "A deliberately new hypothesis intent." } });
+    expect(screen.queryByText("Hypothesis outcome unknown")).toBeNull();
+    expect(screen.queryByText(/retrying this unchanged draft/iu)).toBeNull();
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(field.value).toBe(""));
+    const nextKey = vi.mocked(command).mock.calls[4]?.[0].idempotencyKey;
+    expect(nextKey).toMatch(/^keystone-hypothesis-/);
+    expect(nextKey).not.toBe(ambiguousKey);
+    expect(durableByKey.size).toBe(4);
+  });
+
+  it("rotates an ambiguous retry key after the user explicitly clears and restores the draft", async () => {
+    const command: CreateContribution = vi.fn(async () => ({
+      status: "ignored" as const,
+      reason: "not_ready" as const,
+    }));
+    const mounted = mount({ createContribution: command });
+    const field = hypothesisField();
+    const body = "Restore this text only as a new intent after clearing.";
+    fireEvent.change(field, { target: { value: body } });
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
+
+    mounted.rerenderComposer({
+      mutationState: { status: "failed", error: { kind: "network" } },
+    });
+    expect(await screen.findByText("Hypothesis outcome unknown")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("may have recorded");
+    const firstKey = vi.mocked(command).mock.calls[0]?.[0].idempotencyKey;
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear draft" }));
+    mounted.rerenderComposer({ mutationState: IDLE });
+    fireEvent.change(field, { target: { value: body } });
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+
+    const restoredKey = vi.mocked(command).mock.calls[1]?.[0].idempotencyKey;
+    expect(restoredKey).toMatch(/^keystone-hypothesis-/);
+    expect(restoredKey).not.toBe(firstKey);
   });
 
   it("derives links from the current working set and never retains removed target IDs", async () => {
@@ -459,22 +514,27 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     expect(command).not.toHaveBeenCalled();
   });
 
-  it("maps public mutation failures to bounded alert copy without rendering detail", () => {
+  it("maps a submitted public mutation failure to bounded alert copy without rendering detail", async () => {
     const privateDetail = "private lifecycle refusal detail must not render";
-    mount({
-      mutationState: {
-        status: "failed",
-        error: {
-          kind: "lifecycle_refused",
-          status: 409,
-          action: "archive",
-          reason: "legal_hold",
-          detail: privateDetail,
-        },
+    const command: CreateContribution = vi.fn(async () => ({
+      status: "failed" as const,
+      error: {
+        kind: "lifecycle_refused" as const,
+        status: 409 as const,
+        action: "archive" as const,
+        reason: "legal_hold" as const,
+        detail: privateDetail,
       },
+    }));
+    mount({
+      createContribution: command,
     });
+    fireEvent.change(hypothesisField(), {
+      target: { value: "A bounded failure should keep this draft." },
+    });
+    fireEvent.submit(hypothesisForm());
 
-    const alert = screen.getByRole("alert");
+    const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("does not currently allow this contribution");
     expect(document.body.textContent).not.toContain(privateDetail);
   });

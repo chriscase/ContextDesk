@@ -57,6 +57,19 @@ test.describe("Keystone K2 engineer workflow", () => {
     const title = uniqueTitle("Keystone forced-colors proof");
     await createCase(page, title);
     const caseId = await caseIdForTitle(page, title);
+    const filename = "keystone-forced-colors.log";
+    const uploaded = await page.request.post(`/api/cases/${caseId}/evidence`, {
+      headers: BROWSER_MUTATION_HEADERS,
+      data: {
+        kind: "log",
+        summary: "Synthetic evidence for forced-colors control boundaries.",
+        filename,
+        mediaType: "text/plain",
+        contentBase64: Buffer.from("forced colors proof\n", "utf8").toString("base64"),
+        privacyClass: "owner_only",
+      },
+    });
+    expect(uploaded.ok(), await uploaded.text()).toBeTruthy();
     await page.goto("/investigations");
     await selectStrategy(page, "Keystone");
     const root = page.locator(".keystone-strategy");
@@ -70,6 +83,11 @@ test.describe("Keystone K2 engineer workflow", () => {
 
     await page.locator(".keystone-strategy__collection-list button").filter({ hasText: title }).click();
     await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
+    await expectForcedColors(page, [
+      page.getByRole("button", { name: filename, exact: true }),
+      page.getByRole("tab", { name: "Reasoning" }),
+      page.getByRole("tab", { name: "Record" }),
+    ]);
     await page.getByRole("tab", { name: "Reasoning" }).click();
     await expectForcedColors(page, [
       page.getByRole("textbox", { name: "Hypothesis" }),

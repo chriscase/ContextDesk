@@ -170,6 +170,7 @@ function KeystoneHypothesisComposerScope({
   const [body, setBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<SubmissionFeedback | null>(null);
+  const [lastSubmittedFingerprint, setLastSubmittedFingerprint] = useState<string | null>(null);
   const submittingRef = useRef(false);
   const submissionIntentRef = useRef<SubmissionIntent | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
@@ -220,6 +221,7 @@ function KeystoneHypothesisComposerScope({
           idempotencyKey: newHypothesisIdempotencyKey(),
         };
     submissionIntentRef.current = submissionIntent;
+    setLastSubmittedFingerprint(fingerprint);
 
     submittingRef.current = true;
     setSubmitting(true);
@@ -245,6 +247,7 @@ function KeystoneHypothesisComposerScope({
       if (submissionIntentRef.current?.fingerprint === fingerprint) {
         submissionIntentRef.current = null;
       }
+      setLastSubmittedFingerprint(null);
       setBody((current) => current === submittedBody ? "" : current);
       setFeedback({ status: "succeeded", citationCount: submittedLinks.length });
       bodyRef.current?.focus();
@@ -261,6 +264,7 @@ function KeystoneHypothesisComposerScope({
   function clearDraft() {
     setBody("");
     setFeedback(null);
+    setLastSubmittedFingerprint(null);
     submissionIntentRef.current = null;
     bodyRef.current?.focus();
   }
@@ -272,18 +276,25 @@ function KeystoneHypothesisComposerScope({
     event.currentTarget.form?.requestSubmit();
   }
 
-  const reportedFailure = mutationState.status === "failed"
-    ? mutationState.error
-    : feedback?.status === "failed"
-      ? feedback.error
-      : null;
+  const currentFingerprint = fingerprintSubmissionIntent(body, links);
+  const failureAppliesToCurrentIntent = lastSubmittedFingerprint === currentFingerprint;
+  const reportedFailure = !running && failureAppliesToCurrentIntent
+    ? mutationState.status === "failed"
+      ? mutationState.error
+      : feedback?.status === "failed"
+        ? feedback.error
+        : null
+    : null;
   const mutationFailure = reportedFailure === null
     ? null
     : contributionFailureCopy(reportedFailure);
   const mutationOutcomeUnknown = reportedFailure === null
     ? false
     : failureOutcomeIsUnknown(reportedFailure);
-  const fallbackFailure = reportedFailure === null && feedback?.status === "failed"
+  const fallbackFailure = !running
+    && failureAppliesToCurrentIntent
+    && reportedFailure === null
+    && feedback?.status === "failed"
     ? "This view could not confirm the result. The hypothesis may have been recorded; retrying this unchanged draft is protected from creating a duplicate."
     : null;
 
