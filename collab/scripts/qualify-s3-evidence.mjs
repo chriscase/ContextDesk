@@ -75,7 +75,10 @@ export const GARAGE_TOML_TEMPLATE = join(
   "garage.toml",
 );
 const SERVER_DIR = join(COLLAB_ROOT, "server");
-const LIVE_TEST = "src/evidence/s3-garage.integration.test.ts";
+const LIVE_TESTS = Object.freeze([
+  "src/evidence/s3-garage.integration.test.ts",
+  "src/evidence/s3-http-garage.integration.test.ts",
+]);
 
 export function isLiveOptIn(env = process.env) {
   return env[LIVE_OPT_IN_ENV] === LIVE_OPT_IN_VALUE;
@@ -503,7 +506,7 @@ async function runVitest(env, secrets, live) {
   const bin = vitestBin();
   const result = await runCommand(
     bin,
-    ["run", LIVE_TEST, "--reporter=dot"],
+    ["run", ...LIVE_TESTS, "--reporter=dot", "--fileParallelism=false"],
     {
       cwd: SERVER_DIR,
       env: {
@@ -511,7 +514,7 @@ async function runVitest(env, secrets, live) {
         [LIVE_OPT_IN_ENV]: live ? LIVE_OPT_IN_VALUE : "",
       },
       secrets,
-      timeoutMs: 300_000,
+      timeoutMs: 600_000,
     },
   );
   process.stdout.write(sanitizeText(result.stdout, secrets));
