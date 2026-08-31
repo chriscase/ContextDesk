@@ -141,7 +141,9 @@ function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
   const [confirmation, setConfirmation] = useState<LifecycleAction | null>(null);
   const action: LifecycleAction = investigation.status === "archived" ? "restore" : "archive";
   const descriptionId = "investigation-first-lifecycle-description";
-  useEffect(() => setConfirmation(null), [action, investigation.id]);
+  // Reset before paint so a late passive mount effect cannot erase an
+  // immediate confirmation click after the lifecycle control becomes visible.
+  useLayoutEffect(() => setConfirmation(null), [action, investigation.id]);
   // Answer the authority question before the transport question. Without
   // lifecycle authority no lifecycle read can change the outcome, so loading
   // and retry would offer this viewer work that cannot help them.

@@ -626,7 +626,8 @@ describe("Investigation First Runtime V1 presentation", () => {
     await screen.findByRole("button", { name: "Archive investigation" });
     fireEvent.click(screen.getByRole("button", { name: "Archive investigation" }));
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole("button", { name: "Confirm archive investigation" }));
+    expect(screen.getByRole("button", { name: "Confirm archive investigation" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm archive investigation" }));
     await waitFor(() => expect(gateway.applyLifecycleAction).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("Refreshing lifecycle options…")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
