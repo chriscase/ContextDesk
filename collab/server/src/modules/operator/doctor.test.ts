@@ -577,7 +577,7 @@ describe("operator doctor s3 evidence preflight", () => {
       /bucket not contacted/,
     );
     expect(report.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
-      /DeleteObject.*rollback cleanup/,
+      /DeleteObject.*journal.*rollback cleanup/,
     );
     expect(report.checks.find((check) => check.id === "evidence_root")?.summary).not.toMatch(
       /sqlite/i,
@@ -603,7 +603,7 @@ describe("operator doctor s3 evidence preflight", () => {
     const summary = report.checks.find((check) => check.id === "evidence_root")?.summary ?? "";
     expect(summary).toMatch(/bucket not contacted/);
     expect(summary).toMatch(/single-process evaluation/);
-    expect(summary).toMatch(/DeleteObject.*rollback cleanup/);
+    expect(summary).toMatch(/DeleteObject.*journal.*rollback cleanup/);
     expectNoS3Canaries(report);
   });
 
@@ -625,7 +625,7 @@ describe("operator doctor s3 evidence preflight", () => {
     expect(evidence?.status).toBe("warn");
     expect(evidence?.summary).toMatch(/bucket not contacted/);
     expect(evidence?.summary).toMatch(/s3 evidence configuration accepted/);
-    expect(evidence?.summary).toMatch(/DeleteObject.*rollback cleanup/);
+    expect(evidence?.summary).toMatch(/DeleteObject.*journal.*rollback cleanup/);
     expectNoS3Canaries(report);
   });
 
@@ -705,7 +705,7 @@ describe("operator config:init s3 examples", () => {
       expect(body).not.toMatch(/^COLLAB_EVIDENCE_PROVIDER=/m);
       expect(body).toMatch(/secret-store-sourced/);
       expect(body).toMatch(/\/run\/secrets\/evidence-s3-/);
-      expect(body).toMatch(/DeleteObject.*rollback cleanup/);
+      expect(body).toMatch(/DeleteObject.*journal.*rollback cleanup/);
       expect(body).not.toMatch(/CORS|ACL|presign|AKIA/i);
       expect(parseEnvFile(body).COLLAB_EVIDENCE_PROVIDER).toBeUndefined();
       const again = await initConfig({
@@ -720,14 +720,14 @@ describe("operator config:init s3 examples", () => {
       expect(again.overwritten).toBe(true);
       const deployExample = await readFile(join(collabRoot, "deploy/.env.example"), "utf8");
       expect(deployExample).toMatch(/^# COLLAB_EVIDENCE_PROVIDER=s3$/m);
-      expect(deployExample).toMatch(/DeleteObject.*rollback cleanup/);
+      expect(deployExample).toMatch(/DeleteObject.*journal.*rollback cleanup/);
       expect(parseEnvFile(deployExample).COLLAB_EVIDENCE_PROVIDER).toBeUndefined();
       const compose = await readFile(join(collabRoot, "deploy/docker-compose.example.yml"), "utf8");
       expect(compose).toMatch(/# COLLAB_EVIDENCE_PROVIDER: s3/);
       expect(compose).not.toMatch(/^\s+COLLAB_EVIDENCE_PROVIDER:/m);
       expect(compose).toMatch(/node uid \(1000\)/);
       expect(compose).toMatch(/mode 0400/);
-      expect(compose).toMatch(/DeleteObject[\s\S]*rollback cleanup/);
+      expect(compose).toMatch(/DeleteObject[\s\S]*journal[\s\S]*rollback cleanup/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -37,7 +37,7 @@ services:
       # The local control-state root above remains required. Doctor does not
       # contact the bucket. Mount owner-only secret files; do not put keys in
       # this compose file. The object-store role must allow DeleteObject for
-      # staging and rollback cleanup.
+      # staging, journal, and rollback cleanup.
       # COLLAB_EVIDENCE_PROVIDER: s3
       # COLLAB_EVIDENCE_S3_ENDPOINT: https://s3.example.test
       # COLLAB_EVIDENCE_S3_REGION: garage

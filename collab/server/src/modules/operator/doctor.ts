@@ -227,20 +227,20 @@ function checkEvidence(env: NodeJS.ProcessEnv, cwd: string, intent: Intent, fs: 
     return check(
       "evidence_root",
       root.status,
-      `${root.summary}; s3 evidence configuration accepted; DeleteObject is required for rollback cleanup; bucket not contacted`,
+      `${root.summary}; s3 evidence configuration accepted; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted`,
     );
   }
   if (doctorStorage(env) === "sqlite") {
     return check(
       "evidence_root",
       "warn",
-      "evidence root is a writable directory; sqlite plus s3 is a single-process evaluation shape; DeleteObject is required for rollback cleanup; bucket not contacted",
+      "evidence root is a writable directory; sqlite plus s3 is a single-process evaluation shape; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted",
     );
   }
   return check(
     "evidence_root",
     "ok",
-    "evidence root is a writable directory; s3 evidence configuration accepted; DeleteObject is required for rollback cleanup; bucket not contacted",
+    "evidence root is a writable directory; s3 evidence configuration accepted; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted",
   );
 }
 
