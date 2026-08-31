@@ -53,6 +53,7 @@ interface EditorState {
   readonly authoritativeResult: CaseV1 | null;
   readonly attempted: boolean;
   readonly pending: boolean;
+  readonly conflicted: boolean;
   readonly failure: RuntimeFailure | null;
   readonly ignored: CommandIgnoredReason | null;
 }
@@ -116,6 +117,7 @@ function initialState(scope: string, investigation: CaseV1): EditorState {
     authoritativeResult: null,
     attempted: false,
     pending: false,
+    conflicted: false,
     failure: null,
     ignored: null,
   };
@@ -196,13 +198,50 @@ function changedSituation(
   return command;
 }
 
+function hasSituationField(
+  command: InvestigationSituationCommand,
+  field: keyof SituationDraft,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(command, field);
+}
+
+/**
+ * Rebase preserves actual local corrections, not the stale values that merely
+ * seeded the form. Untouched fields adopt the latest canonical record so they
+ * cannot be written back over somebody else's newer correction.
+ */
+function rebaseDraft(
+  draft: SituationDraft,
+  previousBaseline: CaseV1,
+  latest: CaseV1,
+): SituationDraft {
+  const localChanges = changedSituation(draft, previousBaseline);
+  const latestDraft = draftFor(latest);
+  return {
+    problemStatement: hasSituationField(localChanges, "problemStatement")
+      ? draft.problemStatement
+      : latestDraft.problemStatement,
+    affectedParties: hasSituationField(localChanges, "affectedParties")
+      ? draft.affectedParties
+      : latestDraft.affectedParties,
+    impact: hasSituationField(localChanges, "impact") ? draft.impact : latestDraft.impact,
+    scope: hasSituationField(localChanges, "scope") ? draft.scope : latestDraft.scope,
+    openQuestions: hasSituationField(localChanges, "openQuestions")
+      ? draft.openQuestions
+      : latestDraft.openQuestions,
+    investigationContext: hasSituationField(localChanges, "investigationContext")
+      ? draft.investigationContext
+      : latestDraft.investigationContext,
+  };
+}
+
 function recorded(value: string): string {
   return value.trim().length > 0 ? value : "Not recorded";
 }
 
 function failureCopy(error: RuntimeFailure): string {
   if (error.kind === "conflict") {
-    return "The recorded situation changed before this save completed. Your draft is still here; compare it with the refreshed record before saving again.";
+    return "The recorded situation changed before this save completed. Your draft is still here, but Save is blocked until the latest record arrives and you explicitly rebase.";
   }
   if (error.kind === "validation" || error.kind === "input") {
     return "The recorded values could not be accepted. Review the fields and try again; your draft is still here.";
@@ -294,6 +333,7 @@ export function KeystoneSituationEditor({
   const headingId = useId();
   const editHeadingId = useId();
   const questionsHintId = useId();
+  const latestRecordHeadingId = useId();
   const scope = editorScope(identityKey, investigation.id, updateSituation !== null);
   const [storedState, setStoredState] = useState(() => initialState(scope, investigation));
   const activeSaveRef = useRef<SaveToken | null>(null);
@@ -314,6 +354,8 @@ export function KeystoneSituationEditor({
   const command = changedSituation(state.draft, state.baseline);
   const hasChanges = Object.keys(command).length > 0;
   const running = state.pending || mutation.status === "running";
+  const canonicalRecordIsNewer = investigation.situationVersion > state.baseline.situationVersion;
+  const reviewBlocked = state.conflicted || canonicalRecordIsNewer;
   const visibleFailure = state.attempted
     ? state.failure ?? (mutation.status === "failed" ? mutation.error : null)
     : null;
@@ -353,6 +395,7 @@ export function KeystoneSituationEditor({
         baseline,
         attempted: false,
         pending: false,
+        conflicted: false,
         failure: null,
         ignored: null,
       };
@@ -372,6 +415,7 @@ export function KeystoneSituationEditor({
         baseline,
         attempted: false,
         pending: false,
+        conflicted: false,
         failure: null,
         ignored: null,
       };
@@ -385,7 +429,7 @@ export function KeystoneSituationEditor({
       return {
         ...scoped,
         draft: { ...scoped.draft, [field]: value },
-        failure: null,
+        failure: scoped.conflicted ? scoped.failure : null,
         ignored: null,
       };
     });
@@ -400,6 +444,28 @@ export function KeystoneSituationEditor({
           ...scoped.draft,
           investigationContext: { ...scoped.draft.investigationContext, [field]: value },
         },
+        failure: scoped.conflicted ? scoped.failure : null,
+        ignored: null,
+      };
+    });
+  }
+
+  function rebaseOntoLatest() {
+    setStoredState((current) => {
+      const scoped = current.scope === scope ? current : initialState(scope, investigation);
+      if (
+        investigation.situationVersion <= scoped.baseline.situationVersion
+      ) {
+        return scoped;
+      }
+      return {
+        ...scoped,
+        draft: rebaseDraft(scoped.draft, scoped.baseline, investigation),
+        baseline: investigation,
+        authoritativeResult: null,
+        attempted: false,
+        pending: false,
+        conflicted: false,
         failure: null,
         ignored: null,
       };
@@ -411,6 +477,7 @@ export function KeystoneSituationEditor({
     if (
       updateSituation === null
       || running
+      || reviewBlocked
       || !hasChanges
       || activeSaveRef.current?.scope === scope
     ) {
@@ -426,6 +493,7 @@ export function KeystoneSituationEditor({
         ...scoped,
         attempted: true,
         pending: true,
+        conflicted: false,
         failure: null,
         ignored: null,
       };
@@ -448,7 +516,12 @@ export function KeystoneSituationEditor({
     if (outcome.status === "succeeded") {
       if (outcome.value.id !== investigation.id) {
         setStoredState((current) => current.scope === scope
-          ? { ...current, pending: false, failure: { kind: "unexpected" } }
+          ? {
+              ...current,
+              pending: false,
+              conflicted: false,
+              failure: { kind: "unexpected" },
+            }
           : current);
         return;
       }
@@ -462,6 +535,7 @@ export function KeystoneSituationEditor({
             authoritativeResult: outcome.value,
             attempted: false,
             pending: false,
+            conflicted: false,
             failure: null,
             ignored: null,
           }
@@ -472,13 +546,25 @@ export function KeystoneSituationEditor({
 
     if (outcome.status === "failed") {
       setStoredState((current) => current.scope === scope
-        ? { ...current, pending: false, failure: outcome.error, ignored: null }
+        ? {
+            ...current,
+            pending: false,
+            conflicted: outcome.error.kind === "conflict",
+            failure: outcome.error,
+            ignored: null,
+          }
         : current);
       return;
     }
 
     setStoredState((current) => current.scope === scope
-      ? { ...current, pending: false, failure: null, ignored: outcome.reason }
+      ? {
+          ...current,
+          pending: false,
+          conflicted: false,
+          failure: null,
+          ignored: outcome.reason,
+        }
       : current);
   }
 
@@ -575,12 +661,35 @@ export function KeystoneSituationEditor({
           </fieldset>
 
           {visibleFailure !== null ? <p role="alert">{failureCopy(visibleFailure)}</p> : null}
+          {reviewBlocked ? (
+            <section
+              className="keystone-situation-editor__conflict-review"
+              aria-labelledby={latestRecordHeadingId}
+            >
+              <h5 id={latestRecordHeadingId}>Latest recorded situation</h5>
+              {canonicalRecordIsNewer ? (
+                <>
+                  <p>Compare every recorded field with your retained draft before rebasing.</p>
+                  <SituationRecord investigation={investigation} />
+                  <button type="button" onClick={rebaseOntoLatest}>
+                    I reviewed this record — rebase my draft
+                  </button>
+                </>
+              ) : (
+                <p role="status">
+                  Awaiting the latest recorded situation. Save remains blocked until a newer record is available.
+                </p>
+              )}
+            </section>
+          ) : null}
           {state.ignored !== null ? <p role="status">{ignoredCopy(state.ignored)}</p> : null}
           {running ? <p role="status">Saving the situation…</p> : null}
           {!running && !hasChanges ? <p role="status">No changes to save.</p> : null}
 
           <div className="keystone-situation-editor__actions">
-            <button type="submit" disabled={running || !hasChanges}>Save changes</button>
+            <button type="submit" disabled={running || reviewBlocked || !hasChanges}>
+              Save changes
+            </button>
             <button type="button" onClick={cancelEditing} disabled={running}>Cancel</button>
           </div>
         </form>
