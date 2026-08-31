@@ -23,7 +23,7 @@ import { MapAuthAdapter } from "../auth/index.js";
 import { createAuthLog, createRateLimiter, MemorySessionStore, defaultSessionPolicy } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
-import { CaseService } from "./service.js";
+import { CaseService, CaseStoreCommitOutcomeUnknownError } from "./service.js";
 import { MemoryCaseStore } from "./store.js";
 
 const ALICE = "fixture-alice-secret";
@@ -210,6 +210,41 @@ describe("cases timeline evidence provenance", () => {
       const populated = parseEvidenceList(JSON.parse(populatedResponse.body));
       expect(populated.caseId).toBe(created.id);
       expect(populated.artifacts.map((artifact) => artifact.id)).toEqual([uploaded.artifact.id]);
+    });
+  });
+
+  it("reports an unknown evidence COMMIT outcome without exposing driver details", async () => {
+    await withApp(async ({ app, domain }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Synthetic unknown commit response" },
+      })).body));
+      const original = domain.addEvidence.bind(domain);
+      domain.addEvidence = vi.fn(async () => {
+        throw new CaseStoreCommitOutcomeUnknownError();
+      });
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/cases/${created.id}/evidence`,
+          headers: { cookie: alice },
+          payload: {
+            kind: "log",
+            filename: "unknown-commit.log",
+            mediaType: "text/plain",
+            contentBase64: Buffer.from(LOG).toString("base64"),
+            summary: "Synthetic unknown commit response.",
+          },
+        });
+        expect(response.statusCode).toBe(503);
+        expect(JSON.parse(response.body)).toEqual({ error: "commit_outcome_unknown" });
+        expect(response.body).not.toMatch(/postgres|commit response|connection|password/i);
+      } finally {
+        domain.addEvidence = original;
+      }
     });
   });
 

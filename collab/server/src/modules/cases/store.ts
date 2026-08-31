@@ -32,6 +32,20 @@ export interface Actor {
   username: string;
 }
 
+/**
+ * PostgreSQL COMMIT was attempted and its outcome is unknown.
+ *
+ * The acknowledgement may have been lost after the transaction applied.
+ * Callers must not ROLLBACK, must not report success, and must not retry
+ * the same write as if it definitely failed.
+ */
+export class CaseStoreCommitOutcomeUnknownError extends Error {
+  constructor() {
+    super("case-store transaction commit outcome is unknown");
+    this.name = "CaseStoreCommitOutcomeUnknownError";
+  }
+}
+
 export interface TimelineRow {
   seq: number;
   kind: string;
@@ -1737,11 +1751,25 @@ async function withPgTransaction<T>(
     transaction = pooled;
   }
   await transaction.query("BEGIN");
+  let commitAttempted = false;
   try {
     const result = await operation(transaction);
+    commitAttempted = true;
     await transaction.query("COMMIT");
     return result;
   } catch (error) {
+    if (commitAttempted) {
+      if (pooled) {
+        const client = pooled;
+        pooled = null;
+        try {
+          client.release(new Error("case-store transaction commit outcome is unknown"));
+        } catch {
+          // The connection is already unsafe; keep the unknown COMMIT outcome.
+        }
+      }
+      throw new CaseStoreCommitOutcomeUnknownError();
+    }
     try {
       await transaction.query("ROLLBACK");
     } catch {
@@ -1752,6 +1780,9 @@ async function withPgTransaction<T>(
     pooled?.release();
   }
 }
+
+/** @internal Test-only access to the PostgreSQL case-store transaction wrapper. */
+export const withPgTransactionForTests = withPgTransaction;
 
 function asTimeline(row: Record<string, unknown>): TimelineRow {
   const payload = row.payload;

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,7 +9,7 @@ import {
   parseCorpusIntakePreviewReport,
   parseTimeline,
 } from "@cd-collab/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
@@ -23,7 +23,11 @@ import {
 } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
-import { CaseService, MemoryCaseStore } from "../cases/index.js";
+import {
+  CaseService,
+  CaseStoreCommitOutcomeUnknownError,
+  MemoryCaseStore,
+} from "../cases/index.js";
 import { buildTestZip, buildUnicodePathExtra } from "./zip.js";
 import { corpusIntakeRequestDigest, decodeBase64, digestOf } from "./preview.js";
 
@@ -117,6 +121,18 @@ class BoomStore extends MemoryCaseStore {
   ): Promise<void> {
     if (this.boom) throw new Error("intake store failed");
     return super.insertIntakeBatch(row);
+  }
+}
+
+class UnknownCommitStore extends MemoryCaseStore {
+  unknownCommit = false;
+  override async withAtomic<T>(
+    operation: () => Promise<T>,
+    audit?: Parameters<MemoryCaseStore["withAtomic"]>[1],
+  ): Promise<T> {
+    const result = await super.withAtomic(operation, audit);
+    if (this.unknownCommit) throw new CaseStoreCommitOutcomeUnknownError();
+    return result;
   }
 }
 
@@ -721,6 +737,112 @@ describe("investigation corpus intake API", () => {
       const batch = parseCorpusIntakeBatch(JSON.parse(committed.body));
       expect(batch.items[0]?.relativePath).toBe(name);
       expect(committed.body).not.toMatch(/<script/i);
+    });
+  });
+
+  it("retains committed corpus bytes when the case-store COMMIT outcome is unknown", async () => {
+    const cases = new UnknownCommitStore();
+    await withApp(async ({ domain, store }) => {
+      const actor = { id: ALICE_ID, username: "alice" };
+      const created = await domain.createCase(actor, { title: "Unknown commit corpus fixture" }, "test");
+      cases.unknownCommit = true;
+      await expect(
+        domain.commitCorpusIntake(
+          created.id,
+          actor,
+          withPreviewToken(created.id, {
+            schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+            origin: "files",
+            sourceLabel: "fixture-files",
+            privacyClass: "owner_only",
+            idempotencyKey: "batch-syn-unknown-commit-1",
+            files: [
+              {
+                relativePath: "mailer/unknown-commit.log",
+                mediaType: "text/plain",
+                contentBase64: LOG_B64,
+              },
+            ],
+            archiveBase64: null,
+          }),
+          "test",
+        ),
+      ).rejects.toBeInstanceOf(CaseStoreCommitOutcomeUnknownError);
+      expect(await store.verify(digestOf(Buffer.from(LOG)))).toBe(true);
+      const pending = (await readdir(join(store.rootDir, ".pending")).catch(() => [] as string[]))
+        .filter((name) => name.endsWith(".json"));
+      expect(pending).not.toEqual([]);
+      expect((await cases.listArtifactsByCase(created.id)).map((row) => row.contentHash)).toEqual([
+        digestOf(Buffer.from(LOG)),
+      ]);
+      const next = await store.beginWriteBatch();
+      await next.rollback();
+    }, cases);
+  });
+
+  it("reports an unknown corpus COMMIT outcome without leaking an internal error", async () => {
+    await withApp(async ({ app, domain }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await openCase(app, alice);
+      vi.spyOn(domain, "commitCorpusIntake").mockRejectedValueOnce(
+        new CaseStoreCommitOutcomeUnknownError(),
+      );
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/corpus-intake`,
+        headers: { cookie: alice },
+        payload: withPreviewToken(caseId, {
+          schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+          origin: "files",
+          sourceLabel: "fixture-files",
+          privacyClass: "owner_only",
+          idempotencyKey: "batch-syn-http-unknown-commit-1",
+          files: [
+            {
+              relativePath: "mailer/http-unknown-commit.log",
+              mediaType: "text/plain",
+              contentBase64: LOG_B64,
+            },
+          ],
+          archiveBase64: null,
+        }),
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({ error: "commit_outcome_unknown" });
+      expect(response.body).not.toMatch(/postgres|password|connection|commit response/i);
+    });
+  });
+
+  it("drops the pending evidence journal after a successful corpus commit", async () => {
+    await withApp(async ({ domain, store }) => {
+      const actor = { id: ALICE_ID, username: "alice" };
+      const created = await domain.createCase(actor, { title: "Normal corpus finalize fixture" }, "test");
+      await domain.commitCorpusIntake(
+        created.id,
+        actor,
+        withPreviewToken(created.id, {
+          schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+          origin: "files",
+          sourceLabel: "fixture-files",
+          privacyClass: "owner_only",
+          idempotencyKey: "batch-syn-normal-finalize-1",
+          files: [
+            {
+              relativePath: "mailer/shared-timeout.log",
+              mediaType: "text/plain",
+              contentBase64: LOG_B64,
+            },
+          ],
+          archiveBase64: null,
+        }),
+        "test",
+      );
+      expect(await store.verify(digestOf(Buffer.from(LOG)))).toBe(true);
+      const pending = (await readdir(join(store.rootDir, ".pending")).catch(() => [] as string[]))
+        .filter((name) => name.endsWith(".json"));
+      expect(pending).toEqual([]);
     });
   });
 });

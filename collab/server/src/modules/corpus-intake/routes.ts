@@ -9,7 +9,11 @@ import {
   type AuthorizedSession,
   type SessionAuthorizationDeps,
 } from "../authz/index.js";
-import { CorpusIntakeConflictError, type CaseService } from "../cases/index.js";
+import {
+  CaseStoreCommitOutcomeUnknownError,
+  CorpusIntakeConflictError,
+  type CaseService,
+} from "../cases/index.js";
 import type { AuditStore } from "../audit/index.js";
 import { ZipError } from "./zip.js";
 
@@ -143,6 +147,10 @@ export async function registerCorpusIntakeRoutes(
       try {
         return await deps.domain.commitCorpusIntake(id, ctx.actor, request.body, request.ip);
       } catch (err) {
+        if (err instanceof CaseStoreCommitOutcomeUnknownError) {
+          void reply.code(503);
+          return { error: "commit_outcome_unknown" };
+        }
         void reply.code(err instanceof CorpusIntakeConflictError ? 409 : 400);
         return { error: publicIntakeError(err) };
       }

@@ -15,6 +15,7 @@ import { MemoryAuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { corpusIntakeRequestDigest } from "../corpus-intake/index.js";
 import { ContributionConflictError, CaseService, MemoryCaseStore } from "./index.js";
+import { CaseStoreCommitOutcomeUnknownError } from "./store.js";
 
 const actor = { id: "alice", username: "alice" };
 
@@ -51,6 +52,24 @@ class InjectedFailureAudit extends MemoryAuditStore {
     }
     return super.append(record);
   }
+}
+
+class UnknownCommitStore extends MemoryCaseStore {
+  unknownCommit = false;
+  override async withAtomic<T>(
+    operation: () => Promise<T>,
+    audit?: Parameters<MemoryCaseStore["withAtomic"]>[1],
+  ): Promise<T> {
+    const result = await super.withAtomic(operation, audit);
+    if (this.unknownCommit) throw new CaseStoreCommitOutcomeUnknownError();
+    return result;
+  }
+}
+
+async function pendingJournalNames(root: string): Promise<string[]> {
+  return (await readdir(join(root, ".pending")).catch(() => [] as string[]))
+    .filter((name) => name.endsWith(".json"))
+    .sort();
 }
 
 async function withService(
@@ -863,5 +882,97 @@ describe("case write integrity", () => {
         (await service.listTimeline(created.id)).filter((event) => event.kind === "evidence_registered"),
       ).toHaveLength(1);
     });
+  });
+
+  it("retains promoted evidence and the pending journal when COMMIT outcome is unknown", async () => {
+    const cases = new UnknownCommitStore();
+    await withService(async ({ service, evidence, store }) => {
+      const created = await service.createCase(actor, { title: "Unknown commit evidence fixture" }, "test");
+      cases.unknownCommit = true;
+      const bytes = new TextEncoder().encode("2026-08-25T00:02:00Z synthetic unknown commit\n");
+      const hash = sha256Hex(bytes);
+      await expect(
+        service.addEvidence(
+          created.id,
+          actor,
+          {
+            kind: "log",
+            filename: "unknown-commit.log",
+            mediaType: "text/plain",
+            bytes,
+            summary: "Synthetic unknown commit evidence.",
+            privacyClass: "share_safe",
+          },
+          "test",
+        ),
+      ).rejects.toBeInstanceOf(CaseStoreCommitOutcomeUnknownError);
+      expect(await evidence.verify(hash)).toBe(true);
+      expect(await pendingJournalNames(evidence.rootDir)).not.toEqual([]);
+      expect((await store.listArtifactsByCase(created.id)).map((row) => row.contentHash)).toEqual([hash]);
+      const next = await evidence.beginWriteBatch();
+      await next.rollback();
+    }, cases);
+  });
+
+  it("finalizes evidence and drops the pending journal on a normal commit", async () => {
+    await withService(async ({ service, evidence }) => {
+      const created = await service.createCase(actor, { title: "Normal commit evidence fixture" }, "test");
+      const bytes = new TextEncoder().encode("2026-08-25T00:03:00Z synthetic normal commit\n");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "normal-commit.log",
+          mediaType: "text/plain",
+          bytes,
+          summary: "Synthetic normal commit evidence.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      expect(await evidence.verify(uploaded.artifact.contentHash ?? "")).toBe(true);
+      expect(await pendingJournalNames(evidence.rootDir)).toEqual([]);
+    });
+  });
+
+  it("retains promoted corpus bytes when COMMIT outcome is unknown", async () => {
+    const cases = new UnknownCommitStore();
+    await withService(async ({ service, evidence, store }) => {
+      const created = await service.createCase(actor, { title: "Unknown commit corpus fixture" }, "test");
+      cases.unknownCommit = true;
+      const bytes = new TextEncoder().encode("2026-08-25T00:04:00Z synthetic corpus unknown commit\n");
+      const files = [{ relativePath: "mailer/unknown-commit.log", mediaType: "text/plain", bytes }];
+      const request = {
+        schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+        origin: "files" as const,
+        sourceLabel: "synthetic unknown commit source",
+        privacyClass: "owner_only" as const,
+        idempotencyKey: "batch-syn-unknown-commit-1",
+        files: [{
+          relativePath: files[0]!.relativePath,
+          mediaType: files[0]!.mediaType,
+          contentBase64: Buffer.from(bytes).toString("base64"),
+        }],
+        archiveBase64: null,
+        previewToken: corpusIntakeRequestDigest({
+          caseId: created.id,
+          actorId: actor.id,
+          origin: "files",
+          sourceLabel: "synthetic unknown commit source",
+          privacyClass: "owner_only",
+          idempotencyKey: "batch-syn-unknown-commit-1",
+          files,
+          archive: null,
+        }),
+      };
+      await expect(service.commitCorpusIntake(created.id, actor, request, "test"))
+        .rejects.toBeInstanceOf(CaseStoreCommitOutcomeUnknownError);
+      expect(await evidence.verify(sha256Hex(bytes))).toBe(true);
+      expect(await pendingJournalNames(evidence.rootDir)).not.toEqual([]);
+      expect((await store.listArtifactsByCase(created.id)).map((row) => row.contentHash)).toEqual([
+        sha256Hex(bytes),
+      ]);
+    }, cases);
   });
 });

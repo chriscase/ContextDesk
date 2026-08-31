@@ -35,6 +35,7 @@ import {
   resolutionInputFrom,
 } from "../resolutions/index.js";
 import {
+  CaseStoreCommitOutcomeUnknownError,
   ContributionConflictError,
   LifecycleActionRequiredError,
   LifecycleChangedError,
@@ -178,6 +179,10 @@ function domainError(
     return err.currentRevision === undefined
       ? { error: "contribution_conflict" }
       : { error: "contribution_conflict", currentRevision: err.currentRevision };
+  }
+  if (err instanceof CaseStoreCommitOutcomeUnknownError) {
+    void reply.code(503);
+    return { error: "commit_outcome_unknown" };
   }
   if (err instanceof ContractViolation) {
     void reply.code(400);

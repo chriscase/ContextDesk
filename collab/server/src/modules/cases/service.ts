@@ -78,6 +78,7 @@ import {
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
 import { deriveCaseBoard, type AcceptedDecisionBoardInput } from "./board.js";
 import {
+  CaseStoreCommitOutcomeUnknownError,
   MemoryCaseStore,
   type Actor,
   type ArtifactRow,
@@ -96,6 +97,7 @@ import {
   type ActivityPageQuery,
 } from "./store.js";
 
+export { CaseStoreCommitOutcomeUnknownError };
 export type { Actor, ArtifactRow, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, OverviewVisibilityBoundary, RevisionRow, TimelineRow } from "./store.js";
 
 const ACTIVITY_DETAIL_KEYS = new Set([
@@ -216,6 +218,29 @@ export class ContributionConflictError extends Error {
   constructor(readonly currentRevision?: number) {
     super("contribution conflict");
     this.name = "ContributionConflictError";
+  }
+}
+
+async function settleEvidenceAfterCaseTransactionFailure(
+  error: unknown,
+  evidenceBatch: EvidenceWriteBatch | null,
+  stages: EvidenceStage[],
+  evidenceCommitted: boolean,
+): Promise<void> {
+  if (error instanceof CaseStoreCommitOutcomeUnknownError && evidenceCommitted) {
+    if (evidenceBatch) {
+      try {
+        await evidenceBatch.finalize({ retainPendingJournal: true });
+      } catch {
+        // Staging cleanup is best-effort; the COMMIT outcome remains unknown.
+      }
+    }
+    return;
+  }
+  if (evidenceBatch) {
+    await evidenceBatch.rollback();
+  } else {
+    await Promise.allSettled(stages.map((stage) => stage.rollback()));
   }
 }
 
@@ -404,7 +429,14 @@ export class CaseService {
       try {
         return await this.store.withAtomic(operation, this.audit);
       } catch (error) {
-        await this.catalog.rollbackCaseInserts();
+        if (error instanceof CaseStoreCommitOutcomeUnknownError) {
+          throw error;
+        }
+        try {
+          await this.catalog.rollbackCaseInserts();
+        } catch {
+          // Catalog cleanup must never replace the authoritative mutation error.
+        }
         throw error;
       }
     });
@@ -1561,7 +1593,7 @@ export class CaseService {
           summary: input.summary,
         });
       } catch (error) {
-        if (refId) {
+        if (refId && !(error instanceof CaseStoreCommitOutcomeUnknownError)) {
           await this.evidence.abandonFileServerReference(refId);
         }
         throw error;
@@ -1576,6 +1608,7 @@ export class CaseService {
     }
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
+    let evidenceCommitted = false;
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
       const result = await this.withAtomic(async () => {
@@ -1642,6 +1675,7 @@ export class CaseService {
         } else {
           for (const stage of stages) await stage.commit();
         }
+        evidenceCommitted = true;
         if (!(await this.evidence.verify(meta.hash))) {
           throw new Error("hash verification failed after storage");
         }
@@ -1650,11 +1684,12 @@ export class CaseService {
       await evidenceBatch?.finalize();
       return result;
     } catch (error) {
-      if (evidenceBatch) {
-        await evidenceBatch.rollback();
-      } else {
-        await Promise.allSettled(stages.map((stage) => stage.rollback()));
-      }
+      await settleEvidenceAfterCaseTransactionFailure(
+        error,
+        evidenceBatch,
+        stages,
+        evidenceCommitted,
+      );
       throw error;
     } finally {
       for (const stage of stages) stage.release();
@@ -1741,6 +1776,7 @@ export class CaseService {
     const createdAt = new Date().toISOString();
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
+    let evidenceCommitted = false;
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
       const result = await this.withAtomic(async () => {
@@ -1874,6 +1910,7 @@ export class CaseService {
         } else {
           for (const stage of stages) await stage.commit();
         }
+        evidenceCommitted = true;
         for (const meta of metaByDigest.values()) {
           if (!(await this.evidence.verify(meta.hash))) {
             throw new Error("hash verification failed after storage");
@@ -1898,11 +1935,12 @@ export class CaseService {
       await evidenceBatch?.finalize();
       return result;
     } catch (error) {
-      if (evidenceBatch) {
-        await evidenceBatch.rollback();
-      } else {
-        await Promise.allSettled(stages.map((stage) => stage.rollback()));
-      }
+      await settleEvidenceAfterCaseTransactionFailure(
+        error,
+        evidenceBatch,
+        stages,
+        evidenceCommitted,
+      );
       throw error;
     } finally {
       for (const stage of stages) stage.release();

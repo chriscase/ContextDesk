@@ -20,8 +20,10 @@ import { CatalogService, PgCatalogStore } from "../catalog/index.js";
 import { corpusIntakeRequestDigest } from "../corpus-intake/index.js";
 import { CaseService, ContributionConflictError } from "./service.js";
 import {
+  CaseStoreCommitOutcomeUnknownError,
   MemoryCaseStore,
   PgCaseStore,
+  withPgTransactionForTests,
   type ArtifactRow,
   type CaseRow,
   type SnapshotRow,
@@ -441,6 +443,30 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
         await pool.end();
         await rm(root, { recursive: true, force: true });
       }
+    });
+  });
+
+  it("keeps applied rows when COMMIT succeeds and the acknowledgement is lost", async () => {
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const statements: string[] = [];
+      const commitFault = {
+        query: async (text: string, values?: unknown[]) => {
+          const result = await client.query(text, values);
+          statements.push(text.replace(/\s+/g, " ").trim());
+          if (text === "COMMIT") throw new Error("synthetic interrupted COMMIT response");
+          return result;
+        },
+      };
+      await expect(
+        withPgTransactionForTests(commitFault, async (transaction) => {
+          await new PgCaseStore(transaction).insertCase(caseRow());
+          return "applied";
+        }),
+      ).rejects.toBeInstanceOf(CaseStoreCommitOutcomeUnknownError);
+      expect(statements).toContain("COMMIT");
+      expect(statements).not.toContain("ROLLBACK");
+      expect(await new PgCaseStore(client).getCase(CASE_ID)).not.toBeNull();
     });
   });
 
@@ -1065,6 +1091,42 @@ describe("PostgreSQL Situation SQL boundary", () => {
         outcome: "success",
       },
     }, audit)).rejects.toThrow("synthetic audit failure");
+    expect(statements.at(-1)).toBe("ROLLBACK");
+    expect(statements).not.toContain("COMMIT");
+  });
+
+  it("does not ROLLBACK when COMMIT is attempted and then throws", async () => {
+    const statements: string[] = [];
+    const db = {
+      query: async (sql: string) => {
+        const text = sql.replace(/\s+/g, " ").trim();
+        statements.push(text);
+        if (text === "COMMIT") throw new Error("synthetic interrupted COMMIT response");
+        return { rows: [], rowCount: 1 };
+      },
+    };
+    const store = new PgCaseStore(db as never);
+    await expect(store.withAtomic(async () => "applied")).rejects.toBeInstanceOf(
+      CaseStoreCommitOutcomeUnknownError,
+    );
+    expect(statements).toEqual(["BEGIN", "COMMIT"]);
+    expect(statements).not.toContain("ROLLBACK");
+  });
+
+  it("still ROLLBACKs a pre-COMMIT operation failure", async () => {
+    const statements: string[] = [];
+    const db = {
+      query: async (sql: string) => {
+        statements.push(sql.replace(/\s+/g, " ").trim());
+        return { rows: [], rowCount: 1 };
+      },
+    };
+    const store = new PgCaseStore(db as never);
+    await expect(
+      store.withAtomic(async () => {
+        throw new Error("synthetic pre-commit mutation failure");
+      }),
+    ).rejects.toThrow("synthetic pre-commit mutation failure");
     expect(statements.at(-1)).toBe("ROLLBACK");
     expect(statements).not.toContain("COMMIT");
   });
