@@ -294,14 +294,21 @@ function failureCopy(error: RuntimeFailure): string {
     return "This investigation is no longer available in the current scope. Nothing from this draft is shown as recorded.";
   }
   if (error.kind === "aborted") {
-    return "The save did not complete. Your draft is still here.";
+    return "This view stopped waiting before it received a result. The situation may have been saved. Your draft is still here; review the latest recorded situation before retrying.";
   }
   if (
     error.kind === "network"
     || error.kind === "unavailable"
     || error.kind === "server_failure"
   ) {
-    return "The situation could not be saved right now. Your draft is still here; try again when the service is available.";
+    return "The service may have saved these situation changes even though this view did not receive a result. Your draft is still here; review the latest recorded situation before retrying.";
+  }
+  if (
+    error.kind === "unexpected_response"
+    || error.kind === "protocol"
+    || error.kind === "unexpected"
+  ) {
+    return "This view could not confirm whether the situation was saved. Your draft is still here; review the latest recorded situation before retrying.";
   }
   return "The situation could not be saved safely. Your draft is still here.";
 }

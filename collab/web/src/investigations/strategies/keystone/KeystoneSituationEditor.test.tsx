@@ -483,7 +483,10 @@ describe("Keystone K2 situation correction", () => {
       deferred.resolve({ status: "failed", error: { kind: "network" } });
       await deferred.promise;
     });
-    expect(screen.getByRole("alert").textContent).toMatch(/draft is still here/i);
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toMatch(/may have saved these situation changes/i);
+    expect(alert.textContent).toMatch(/review the latest recorded situation before retrying/i);
+    expect(alert.textContent).not.toMatch(/could not be saved/i);
     expect((screen.getByLabelText("Problem statement") as HTMLTextAreaElement).value)
       .toBe("One bounded correction.");
   });
