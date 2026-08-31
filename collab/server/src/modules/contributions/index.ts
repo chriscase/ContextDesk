@@ -7,5 +7,6 @@ export {
   defaultPrivacy,
   hashContributionContent,
   isContributionKind,
+  parseHypothesisLinks,
 } from "./model.js";
-export type { ContributionKind } from "./model.js";
+export type { ContributionKind, HypothesisLinkInput } from "./model.js";

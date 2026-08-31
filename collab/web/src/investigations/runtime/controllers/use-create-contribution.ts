@@ -31,9 +31,16 @@ interface ContributionScope {
 export interface CreateContributionCommand {
   readonly kind: ContributionKind;
   readonly body: string;
+  /** Recorded evidence or prior contributions cited by a hypothesis. */
+  readonly hypothesisLinks?: readonly {
+    readonly kind: "artifact" | "contribution";
+    readonly id: string;
+  }[];
   readonly privacyClass?: PrivacyClass;
   readonly clientTime?: string;
   readonly sourceId?: string;
+  /** Optional caller-generated duplicate-prevention token, adjudicated by the server. */
+  readonly idempotencyKey?: string;
 }
 
 export interface UseCreateContributionOptions {
@@ -61,6 +68,29 @@ export interface CreateContributionController {
 
 function unexpected(): { status: "failed"; error: { kind: "unexpected" } } {
   return { status: "failed", error: { kind: "unexpected" } };
+}
+
+function snapshotHypothesisLinks(
+  raw: unknown,
+  contributionKind: ContributionKind,
+): Array<{ kind: "artifact" | "contribution"; id: string }> | undefined {
+  if (raw === undefined) return undefined;
+  if (contributionKind !== "hypothesis") {
+    throw new TypeError("hypothesis links require a hypothesis contribution");
+  }
+  if (!Array.isArray(raw)) throw new TypeError("invalid hypothesis links");
+  return Array.from(raw, (candidate) => {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      throw new TypeError("invalid hypothesis link");
+    }
+    const link = candidate as Record<string, unknown>;
+    const kind = link.kind;
+    const id = link.id;
+    if ((kind !== "artifact" && kind !== "contribution") || typeof id !== "string") {
+      throw new TypeError("invalid hypothesis link");
+    }
+    return { kind, id };
+  });
 }
 
 /**
@@ -146,14 +176,19 @@ export function useCreateContribution(
     };
 
     try {
+      const linkSnapshot = snapshotHypothesisLinks(command.hypothesisLinks, command.kind);
       const result = await start.gateway.createContribution(
         scope.investigationId,
         {
           kind: command.kind,
           body: command.body,
+          ...(linkSnapshot === undefined ? {} : { hypothesisLinks: linkSnapshot }),
           ...(command.privacyClass === undefined ? {} : { privacyClass: command.privacyClass }),
           ...(command.clientTime === undefined ? {} : { clientTime: command.clientTime }),
           ...(command.sourceId === undefined ? {} : { sourceId: command.sourceId }),
+          ...(command.idempotencyKey === undefined
+            ? {}
+            : { idempotencyKey: command.idempotencyKey }),
         },
         { signal: token.signal },
       );

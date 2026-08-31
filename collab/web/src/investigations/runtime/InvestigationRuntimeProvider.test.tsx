@@ -725,7 +725,13 @@ describe("InvestigationRuntimeProvider", () => {
   it("publishes a contribution before refreshing only the active contribution lane", async () => {
     const written = makeContributionList().contributions[1];
     if (written === undefined) throw new Error("expected a seeded contribution");
-    const created = { ...written, id: "contribution-newly-written" };
+    const created = {
+      ...written,
+      id: "contribution-newly-written",
+      kind: "hypothesis" as const,
+      body: "Queue time rises after the rollout.",
+      hypothesisLinks: [{ kind: "artifact" as const, id: RUNTIME_FIXTURE_IDS.evidence }],
+    };
     const contributionRefresh = createDeferred<GatewayResult<readonly ContributionV1[]>>();
     let contributionCalls = 0;
     const gateway = makeGateway({
@@ -756,14 +762,21 @@ describe("InvestigationRuntimeProvider", () => {
 
     await act(async () => {
       await currentRuntime().commands.createContribution?.({
-        kind: "note",
+        kind: "hypothesis",
         body: "Queue time rises after the rollout.",
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+        idempotencyKey: "msg-syn-0003",
       });
     });
 
     expect(gateway.createContribution).toHaveBeenCalledWith(
       RUNTIME_FIXTURE_IDS.populatedCase,
-      { kind: "note", body: "Queue time rises after the rollout." },
+      {
+        kind: "hypothesis",
+        body: "Queue time rises after the rollout.",
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+        idempotencyKey: "msg-syn-0003",
+      },
       { signal: expect.any(AbortSignal) },
     );
     expect(currentRuntime().resources.contributions).toEqual({
@@ -777,6 +790,9 @@ describe("InvestigationRuntimeProvider", () => {
     const mutation = currentRuntime().mutations.createContribution;
     if (mutation.status === "succeeded") {
       expect(Object.isFrozen(mutation.value)).toBe(true);
+      expect(mutation.value.hypothesisLinks).toEqual([
+        { kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence },
+      ]);
       expect(() => {
         (mutation.value as { body: string | null }).body = "contaminated";
       }).toThrow();
@@ -1022,7 +1038,11 @@ describe("InvestigationRuntimeProvider", () => {
     act(() => currentRuntime().refresh.investigation());
     await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("loading"));
     await act(async () => {
-      await expect(retained?.({ kind: "note", body: "must not write while loading" }))
+      await expect(retained?.({
+        kind: "hypothesis",
+        body: "must not write while loading",
+        hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+      }))
         .resolves.toEqual({ status: "ignored", reason: "not_ready" });
     });
     expect(gateway.createContribution).not.toHaveBeenCalled();
@@ -1064,6 +1084,30 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().mutations.updateSituation).toEqual({ status: "idle" });
     expect(gateway.createContribution).not.toHaveBeenCalled();
     expect(gateway.updateSituation).not.toHaveBeenCalled();
+  });
+
+  it("withholds an evidence-linked contribution in static read-only mode", async () => {
+    const gateway = makeGateway();
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-read-only"
+        capabilities={FULL_CAPABILITIES}
+        readOnly
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+
+    expect(currentRuntime().commands.createContribution).toBeNull();
+    expect(currentRuntime().mutations.createContribution).toEqual({ status: "idle" });
+    expect(gateway.createContribution).not.toHaveBeenCalled();
   });
 
   it("fails a write closed as unavailable when the transport omits the seam", async () => {

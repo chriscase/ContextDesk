@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
+  ContractViolation,
   CONTRIBUTION_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
@@ -9,6 +10,7 @@ import {
   OVERVIEW_ACTIVITY_CAP,
   OVERVIEW_OPEN_CASE_CAP,
   describeDeleteRequest,
+  isRfc4122Uuid,
   isContributionIdempotencyKey,
   normalizeInvestigationContext,
   snapshotFairness,
@@ -47,6 +49,9 @@ import {
   defaultPrivacy,
   hashContributionContent,
   isContributionKind,
+  parseHypothesisLinks,
+  type ContributionKind,
+  type HypothesisLinkInput,
 } from "../contributions/index.js";
 import { assertFilenameAllowed, assertUploadAllowed } from "../evidence/index.js";
 import {
@@ -220,7 +225,8 @@ interface ContributionWriteInput {
   privacyClass?: PrivacyClass;
   clientTime?: string;
   hypothesisStatus?: HypothesisStatus;
-  hypothesisLinks?: { kind: "artifact" | "contribution"; id: string }[];
+  /** Untrusted until parsed and resolved inside the case transaction. */
+  hypothesisLinks?: unknown;
   sourceId?: string;
   idempotencyKey?: string;
 }
@@ -1203,7 +1209,9 @@ export class CaseService {
       if (input.idempotencyKey && isUniqueViolation(error)) {
         const sourceId = await this.resolveSourceId(actor, input.sourceId);
         const privacy = defaultPrivacy(input.privacyClass);
-        const links = input.hypothesisLinks ?? [];
+        const links = input.hypothesisLinks === undefined
+          ? []
+          : parseHypothesisLinks(input.hypothesisLinks);
         const digest = contributionWriteDigest({
           kind: input.kind,
           body: input.body,
@@ -1233,7 +1241,11 @@ export class CaseService {
     if (!isContributionKind(input.kind)) {
       throw new Error(`unknown contribution kind: ${input.kind}`);
     }
-    const links = input.hypothesisLinks ?? [];
+    const links = await this.validatedContributionLinks(
+      caseId,
+      input.kind,
+      input.hypothesisLinks,
+    );
     if (input.kind === "hypothesis") {
       assertSupportedLinks(input.hypothesisStatus ?? "proposed", links);
     }
@@ -1440,18 +1452,19 @@ export class CaseService {
     contributionId: string,
     actor: Actor,
     status: HypothesisStatus,
-    links: { kind: "artifact" | "contribution"; id: string }[],
+    linksInput: unknown,
     origin: string,
     clientTime?: string,
   ): Promise<ContributionV1> {
     const canonicalTime = canonicalClientTime(clientTime);
-    assertSupportedLinks(status, links);
     try {
       return await this.store.withAtomic(async () => {
         const latest = await this.requireLatest(caseId, contributionId);
         if (latest.kind !== "hypothesis" || latest.tombstone) {
           throw new Error("hypothesis not found");
         }
+        const links = await this.validatedHypothesisLinks(caseId, linksInput, "$.links");
+        assertSupportedLinks(status, links);
         if (
           latest.hypothesisStatus === status
           && sameHypothesisLinks(latest.hypothesisLinks, links)
@@ -2084,6 +2097,57 @@ export class CaseService {
     const latest = chain[chain.length - 1];
     if (!latest) throw new Error("contribution not found");
     return latest;
+  }
+
+  /**
+   * A contribution may carry links only when it is a hypothesis. Structural
+   * validity and case-local existence are decided by the server before any
+   * revision, idempotency intent, timeline row, or audit record is written.
+   */
+  private async validatedContributionLinks(
+    caseId: string,
+    kind: ContributionKind,
+    raw: unknown,
+  ): Promise<HypothesisLinkInput[]> {
+    if (raw === undefined) return [];
+    if (kind !== "hypothesis") {
+      throw new ContractViolation(
+        "$.hypothesisLinks",
+        "links require a hypothesis contribution",
+      );
+    }
+    return this.validatedHypothesisLinks(caseId, raw, "$.hypothesisLinks");
+  }
+
+  /** Resolve every link under the same case transaction that persists it. */
+  private async validatedHypothesisLinks(
+    caseId: string,
+    raw: unknown,
+    path: string,
+  ): Promise<HypothesisLinkInput[]> {
+    const links = parseHypothesisLinks(raw, path);
+    for (const [index, link] of links.entries()) {
+      const invalidReference = () => new ContractViolation(
+        `${path}[${index}].id`,
+        "must reference an existing artifact or contribution in this investigation",
+      );
+      // PostgreSQL stores both namespaces as UUID columns. Reject malformed
+      // values at the domain boundary so they never reach a driver cast and so
+      // memory and PostgreSQL return the same bounded contract failure.
+      if (!isRfc4122Uuid(link.id)) throw invalidReference();
+      let belongsToCase: boolean;
+      if (link.kind === "artifact") {
+        belongsToCase = (await this.store.getArtifact(link.id))?.caseId === caseId;
+      } else {
+        const revisions = await this.store.listRevisions(link.id);
+        belongsToCase = revisions.length > 0
+          && revisions.every((revision) => revision.caseId === caseId);
+      }
+      if (!belongsToCase) {
+        throw invalidReference();
+      }
+    }
+    return links;
   }
 
   private toCase(row: {
