@@ -280,11 +280,11 @@ function previewIsTruncated(input: {
   return false;
 }
 
-async function cancelPreviewBody(response: Response): Promise<void> {
+function cancelPreviewBody(response: Response): void {
   const body = response.body;
   if (!body || typeof body.cancel !== "function") return;
   try {
-    await body.cancel();
+    void body.cancel().catch(() => undefined);
   } catch {
     // Best-effort stop of a Range-ignoring transfer.
   }
@@ -656,28 +656,28 @@ export function CaseBoardPanel(props: {
         { headers, signal: controller.signal },
       );
       if (!stillCurrent()) {
-        await cancelPreviewBody(response);
+        cancelPreviewBody(response);
         return;
       }
       if (response.status === 404) {
-        await cancelPreviewBody(response);
+        cancelPreviewBody(response);
         applyPreviewUnavailable("This evidence is not available.");
         return;
       }
       if (response.status === 416) {
-        await cancelPreviewBody(response);
+        cancelPreviewBody(response);
         applyPreviewUnavailable("A bounded preview is not available for this evidence.");
         return;
       }
       if (response.status === 503) {
-        await cancelPreviewBody(response);
+        cancelPreviewBody(response);
         applyPreviewUnavailable(
           "Evidence storage is temporarily unavailable. Try previewing again later.",
         );
         return;
       }
       if (response.status === 304) {
-        await cancelPreviewBody(response);
+        cancelPreviewBody(response);
         if (cached && cached.artifactId === artifact.id) {
           setInspectText(cached.text);
           setInspectTruncated(cached.truncated);
@@ -690,7 +690,7 @@ export function CaseBoardPanel(props: {
         return;
       }
       if (response.status !== 200 && response.status !== 206) {
-        await cancelPreviewBody(response);
+        cancelPreviewBody(response);
         applyPreviewUnavailable("This evidence could not be previewed.");
         return;
       }

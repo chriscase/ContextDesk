@@ -184,6 +184,7 @@ function streamBody(
   bytes: Uint8Array,
   cancelled?: { value: boolean },
   leaveOpen = false,
+  cancellationNeverSettles = false,
 ): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
@@ -192,6 +193,7 @@ function streamBody(
     },
     cancel() {
       if (cancelled) cancelled.value = true;
+      if (cancellationNeverSettles) return new Promise<void>(() => undefined);
     },
   });
 }
@@ -202,6 +204,7 @@ function previewResponse(options: {
   body?: Uint8Array | string;
   cancelled?: { value: boolean };
   leaveOpen?: boolean;
+  cancellationNeverSettles?: boolean;
 }) {
   const bytes = typeof options.body === "string" || options.body === undefined
     ? encodeBytes(options.body ?? "")
@@ -210,7 +213,12 @@ function previewResponse(options: {
     ok: options.status >= 200 && options.status < 300,
     status: options.status,
     headers: new Headers(options.headers),
-    body: streamBody(bytes, options.cancelled, options.leaveOpen),
+    body: streamBody(
+      bytes,
+      options.cancelled,
+      options.leaveOpen,
+      options.cancellationNeverSettles,
+    ),
   };
 }
 
@@ -1030,6 +1038,7 @@ describe("bounded evidence preview and download", () => {
         body: JSON.stringify({ error: "storage_unavailable" }),
         cancelled: cancelled.unavailable,
         leaveOpen: true,
+        cancellationNeverSettles: true,
       });
     });
     render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
