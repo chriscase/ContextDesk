@@ -773,6 +773,8 @@ const COMPONENT_CHECKS: Record<ComponentSurfaceRequirementId, ComponentCheck> = 
       const commands = mounted.runtime().commands;
       expect(commands.createInvestigation, "read-only exposed a create command").toBeNull();
       expect(commands.uploadEvidence, "read-only exposed an upload command").toBeNull();
+      expect(commands.createContribution, "read-only exposed a contribution command").toBeNull();
+      expect(commands.updateSituation, "read-only exposed a situation command").toBeNull();
       expect(commands.applyLifecycle, "read-only exposed a lifecycle command").toBeNull();
 
       const forms = Array.from(mounted.container.querySelectorAll("form"));

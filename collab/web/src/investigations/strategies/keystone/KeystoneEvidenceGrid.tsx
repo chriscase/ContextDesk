@@ -44,6 +44,7 @@ export function KeystoneEvidenceGrid({
   return (
     <div className="keystone-strategy__evidence-table-wrap">
       <table className="keystone-strategy__evidence-table">
+        <caption className="keystone-strategy__visually-hidden">Evidence grid</caption>
         <thead>
           <tr>
             <th scope="col"><span className="keystone-strategy__visually-hidden">Working set</span></th>

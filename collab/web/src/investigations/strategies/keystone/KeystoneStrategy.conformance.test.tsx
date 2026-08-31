@@ -5,10 +5,10 @@ import {
 } from "../testkit/conformance.js";
 import { KeystoneStrategy } from "./KeystoneStrategy.js";
 
-describe("Keystone K1 shared component conformance", () => {
+describe("Keystone K2 shared component conformance", () => {
   it("meets every strategy-neutral Runtime V1 component requirement", async () => {
     const report = await runComponentConformance({
-      label: "Keystone K1",
+      label: "Keystone K2",
       component: KeystoneStrategy,
       controls: {
         openRecord: (title) => new RegExp(title.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"),

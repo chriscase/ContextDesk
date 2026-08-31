@@ -3,7 +3,7 @@ import type {
   CaseV1,
   ContributionV1,
 } from "../../runtime/public.js";
-import type { KeyboardEvent } from "react";
+import { useId, type KeyboardEvent, type ReactNode } from "react";
 import {
   StrategyBadge,
   StrategyStateNotice,
@@ -24,6 +24,10 @@ interface KeystoneInspectorProps {
   readonly contributionsState: "available" | "loading" | "unavailable";
   readonly tab: KeystoneInspectorTab;
   readonly onTabChange: (tab: KeystoneInspectorTab) => void;
+  readonly reasoningComposer?: ReactNode;
+  readonly situationEditor?: ReactNode;
+  readonly reasoningPanelIsStatic: boolean;
+  readonly recordPanelIsStatic: boolean;
 }
 
 const TABS: readonly { id: KeystoneInspectorTab; label: string }[] = [
@@ -103,7 +107,7 @@ function ContributionLedger({
   );
 }
 
-function CanonicalRecord({ investigation }: { readonly investigation: CaseV1 }) {
+function CanonicalSituationRecord({ investigation }: { readonly investigation: CaseV1 }) {
   const context = investigation.investigationContext;
   return (
     <dl className="keystone-strategy__record">
@@ -111,15 +115,31 @@ function CanonicalRecord({ investigation }: { readonly investigation: CaseV1 }) 
       <div><dt>Affected parties</dt><dd>{recordedText(investigation.affectedParties)}</dd></div>
       <div><dt>Impact</dt><dd>{recordedText(investigation.impact)}</dd></div>
       <div><dt>Scope</dt><dd>{recordedText(investigation.scope)}</dd></div>
-      <div><dt>Occurred at</dt><dd>{recordedText(investigation.occurredAt)}</dd></div>
-      <div><dt>Occurrence precision</dt><dd>{investigation.occurredAtPrecision}</dd></div>
-      <div><dt>Occurrence time zone</dt><dd>{investigation.occurredAtZone}</dd></div>
       <div><dt>Product</dt><dd>{recordedText(context?.productName)}</dd></div>
       <div><dt>Version</dt><dd>{recordedText(context?.version)}</dd></div>
       <div><dt>Build</dt><dd>{recordedText(context?.build)}</dd></div>
       <div><dt>Component</dt><dd>{recordedText(context?.component)}</dd></div>
       <div><dt>Environment</dt><dd>{recordedText(context?.environment)}</dd></div>
       <div><dt>Organization</dt><dd>{recordedText(context?.organization)}</dd></div>
+      <div className="keystone-strategy__record-wide">
+        <dt>Open questions</dt>
+        <dd>{investigation.openQuestions.length > 0
+          ? <ul>{investigation.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul>
+          : "Not recorded"}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function SupplementalCanonicalRecord({ investigation }: { readonly investigation: CaseV1 }) {
+  const headingId = useId();
+  return (
+    <section className="keystone-strategy__supplemental-record" aria-labelledby={headingId}>
+      <h3 id={headingId}>Additional recorded context</h3>
+      <dl className="keystone-strategy__record">
+      <div><dt>Occurred at</dt><dd>{recordedText(investigation.occurredAt)}</dd></div>
+      <div><dt>Occurrence precision</dt><dd>{investigation.occurredAtPrecision}</dd></div>
+      <div><dt>Occurrence time zone</dt><dd>{investigation.occurredAtZone}</dd></div>
       <div><dt>Created at</dt><dd>{recordedText(investigation.createdAt)}</dd></div>
       <div><dt>Created by</dt><dd>{recordedText(investigation.createdBy)}</dd></div>
       <div><dt>Situation version</dt><dd>{investigation.situationVersion}</dd></div>
@@ -131,13 +151,8 @@ function CanonicalRecord({ investigation }: { readonly investigation: CaseV1 }) 
           ? <ul>{investigation.participants.map((participant) => <li key={participant.identityId}>{recordedText(participant.username)}</li>)}</ul>
           : "Not recorded"}</dd>
       </div>
-      <div className="keystone-strategy__record-wide">
-        <dt>Open questions</dt>
-        <dd>{investigation.openQuestions.length > 0
-          ? <ul>{investigation.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul>
-          : "Not recorded"}</dd>
-      </div>
-    </dl>
+      </dl>
+    </section>
   );
 }
 
@@ -148,13 +163,20 @@ export function KeystoneInspector({
   contributionsState,
   tab,
   onTabChange,
+  reasoningComposer,
+  situationEditor,
+  reasoningPanelIsStatic,
+  recordPanelIsStatic,
 }: KeystoneInspectorProps) {
+  const instanceId = useId();
   const selected = selectedEvidence?.evidence ?? null;
   const linkedContributions = contributionsLinkedToEvidence(
     selected,
     selectedEvidence?.annotation ?? null,
     contributions,
   );
+  const tabId = (value: KeystoneInspectorTab) => `${instanceId}-${value}-tab`;
+  const panelId = (value: KeystoneInspectorTab) => `${instanceId}-${value}-panel`;
   function moveTab(event: KeyboardEvent<HTMLButtonElement>, current: KeystoneInspectorTab) {
     const index = TABS.findIndex(({ id }) => id === current);
     let nextIndex: number | null = null;
@@ -167,7 +189,7 @@ export function KeystoneInspector({
     if (!next) return;
     event.preventDefault();
     onTabChange(next.id);
-    document.getElementById(`keystone-tab-${next.id}`)?.focus();
+    document.getElementById(tabId(next.id))?.focus();
   }
   return (
     <div className="keystone-strategy__inspector">
@@ -177,8 +199,8 @@ export function KeystoneInspector({
             key={item.id}
             type="button"
             role="tab"
-            id={`keystone-tab-${item.id}`}
-            aria-controls="keystone-inspector-panel"
+            id={tabId(item.id)}
+            aria-controls={panelId(item.id)}
             aria-selected={tab === item.id}
             tabIndex={tab === item.id ? 0 : -1}
             onClick={() => onTabChange(item.id)}
@@ -189,20 +211,42 @@ export function KeystoneInspector({
         ))}
       </div>
       <div
-        id="keystone-inspector-panel"
+        id={panelId("details")}
         role="tabpanel"
-        aria-labelledby={`keystone-tab-${tab}`}
-        tabIndex={0}
+        aria-labelledby={tabId("details")}
+        tabIndex={tab === "details" ? 0 : -1}
+        hidden={tab !== "details"}
       >
-        {tab === "details"
-          ? selected
-            ? <MetadataList evidence={selected} />
-            : <StrategyStateNotice title="Choose evidence">Inspect an evidence row to see its recorded metadata.</StrategyStateNotice>
-          : null}
-        {tab === "reasoning"
-          ? <ContributionLedger rows={linkedContributions} state={contributionsState} />
-          : null}
-        {tab === "record" ? <CanonicalRecord investigation={investigation} /> : null}
+        {selected
+          ? <MetadataList evidence={selected} />
+          : <StrategyStateNotice title="Choose evidence">Inspect an evidence row to see its recorded metadata.</StrategyStateNotice>}
+      </div>
+      <div
+        id={panelId("reasoning")}
+        role="tabpanel"
+        aria-labelledby={tabId("reasoning")}
+        tabIndex={tab === "reasoning" && reasoningPanelIsStatic ? 0 : -1}
+        hidden={tab !== "reasoning"}
+      >
+        <div className="keystone-strategy__reasoning-stack">
+          {reasoningComposer}
+          <section aria-labelledby={`${instanceId}-linked-reasoning-title`}>
+            <h3 id={`${instanceId}-linked-reasoning-title`}>Reasoning linked to inspected evidence</h3>
+            <ContributionLedger rows={linkedContributions} state={contributionsState} />
+          </section>
+        </div>
+      </div>
+      <div
+        id={panelId("record")}
+        role="tabpanel"
+        aria-labelledby={tabId("record")}
+        tabIndex={tab === "record" && recordPanelIsStatic ? 0 : -1}
+        hidden={tab !== "record"}
+      >
+        <div className="keystone-strategy__record-stack">
+          {situationEditor ?? <CanonicalSituationRecord investigation={investigation} />}
+          <SupplementalCanonicalRecord investigation={investigation} />
+        </div>
       </div>
     </div>
   );

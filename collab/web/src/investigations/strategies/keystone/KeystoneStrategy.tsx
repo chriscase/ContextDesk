@@ -16,7 +16,9 @@ import {
   StrategySurface,
 } from "../shared/index.js";
 import { KeystoneEvidenceGrid } from "./KeystoneEvidenceGrid.js";
+import { KeystoneHypothesisComposer } from "./KeystoneHypothesisComposer.js";
 import { KeystoneInspector } from "./KeystoneInspector.js";
+import { KeystoneSituationEditor } from "./KeystoneSituationEditor.js";
 import {
   filterEvidence,
   filterInvestigations,
@@ -66,8 +68,8 @@ function tabForStage(stage: InvestigationStrategyShellProps["stage"]): KeystoneI
 }
 
 /**
- * Keystone K1 is an evidence-dense, read-only engineer view. It consumes only
- * Runtime V1 reads and shell callbacks. `startSignal` is intentionally inert:
+ * Keystone is an evidence-dense engineer view. It consumes only the public
+ * Runtime reads, commands, and shell callbacks. `startSignal` is intentionally inert:
  * this strategy neither creates a record nor guesses which local inspector a
  * shell-level create request meant to activate.
  */
@@ -94,6 +96,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   });
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const workingSetHeadingRef = useRef<HTMLHeadingElement>(null);
+  const returnFocusToWorkingSet = useRef(false);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
   const focusedArrival = useRef<string | null>(null);
   const cases = investigations.availability === "available" ? investigations.value : [];
@@ -101,7 +105,17 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     () => filterInvestigations(cases, query, status),
     [cases, query, status],
   );
-  const scope = `${runtime.identity.id}\u0000${runtime.identity.username}\u0000${props.focusCaseId ?? ""}`;
+  const identityScopeKey = JSON.stringify([
+    "keystone-identity-v1",
+    runtime.identity.id,
+    runtime.identity.username,
+  ]);
+  const scope = JSON.stringify([
+    "keystone-case-v1",
+    runtime.identity.id,
+    runtime.identity.username,
+    props.focusCaseId,
+  ]);
   const evidenceRows = evidenceInventory.inventory.availability === "available"
     ? evidenceInventory.inventory.value
     : [];
@@ -113,6 +127,15 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     [evidenceQuery, evidenceRows],
   );
   const selectedEvidence = evidenceRows.find(({ evidence }) => evidence.id === selectedEvidenceId) ?? null;
+  const hypothesisEvidence = useMemo(
+    () => workingSet.flatMap((evidenceId) => {
+      const row = evidenceRows.find(({ evidence }) => evidence.id === evidenceId);
+      return row === undefined
+        ? []
+        : [{ id: row.evidence.id, name: evidenceName(row.evidence) }];
+    }),
+    [evidenceRows, workingSet],
+  );
   const focusedTitle = props.focusCaseId !== null
     && investigation.availability === "available"
     && investigation.value.id === props.focusCaseId
@@ -168,6 +191,12 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     detailHeadingRef.current?.focus();
   }, [detailArrival]);
 
+  useEffect(() => {
+    if (!returnFocusToWorkingSet.current) return;
+    returnFocusToWorkingSet.current = false;
+    workingSetHeadingRef.current?.focus();
+  }, [workingSet.length]);
+
   function changeWorkingSet(evidenceId: string, selected: boolean) {
     setWorkingSetState((current) => {
       const ids = current.scope === scope ? current.ids : [];
@@ -182,7 +211,17 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
 
   function inspectEvidence(evidenceId: string) {
     setSelectionState({ scope, evidenceId });
-    setInspectorTab("details");
+    changeInspectorTab("details");
+  }
+
+  function removeFromWorkingSet(evidenceId: string) {
+    returnFocusToWorkingSet.current = true;
+    changeWorkingSet(evidenceId, false);
+  }
+
+  function clearWorkingSet() {
+    returnFocusToWorkingSet.current = true;
+    setWorkingSetState({ scope, ids: [] });
   }
 
   function changeInspectorTab(tab: KeystoneInspectorTab) {
@@ -208,8 +247,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
           titleId="keystone-collection-title"
           headingRef={browseHeadingRef}
           headingTabIndex={-1}
-          description={<p>Scan the recorded collection in server-provided order, then inspect evidence without changing the shared record.</p>}
-          actions={<StrategyBadge tone="accent">Read-only K1</StrategyBadge>}
+          description={<p>Scan the recorded collection in server-provided order, then inspect evidence and record explicit engineer reasoning or situation corrections.</p>}
+          actions={<StrategyBadge tone="accent">Engineer workflow K2</StrategyBadge>}
         />
         <StrategyPanel
           title="Recorded collection"
@@ -325,7 +364,6 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
         actions={inventory.availability === "available"
           ? <StrategyBadge>{inventory.value.length} recorded</StrategyBadge>
           : null}
-        busy={inventory.availability === "idle" || inventory.availability === "loading" || (inventory.availability === "available" && inventory.refresh === "loading")}
       >
         {inventory.availability === "idle" || inventory.availability === "loading"
           ? <StrategyStateNotice busy>Loading evidence inventory…</StrategyStateNotice>
@@ -411,8 +449,11 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
         ) : null}
         <div className="keystone-strategy__working-set" aria-labelledby="keystone-working-set-title">
           <div>
-            <h4 id="keystone-working-set-title">Working set</h4>
-            <p>Temporary for this signed-in identity and investigation. Nothing is saved or sent.</p>
+            <h4 ref={workingSetHeadingRef} id="keystone-working-set-title" tabIndex={-1}>Working set</h4>
+            <p>
+              Temporary for this signed-in identity and investigation. Selection alone sends nothing;
+              cited evidence IDs are submitted only when you explicitly record a hypothesis.
+            </p>
           </div>
           {workingSet.length === 0 ? <span>No evidence selected</span> : (
             <>
@@ -426,13 +467,13 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                       <button
                         type="button"
                         aria-label={`Remove ${evidenceName(row.evidence)} from working set`}
-                        onClick={() => changeWorkingSet(id, false)}
+                        onClick={() => removeFromWorkingSet(id)}
                       >Remove</button>
                     </li>
                   );
                 })}
               </ul>
-              <button type="button" onClick={() => setWorkingSetState({ scope, ids: [] })}>Clear working set</button>
+              <button type="button" onClick={clearWorkingSet}>Clear working set</button>
             </>
           )}
         </div>
@@ -453,6 +494,24 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 : "loading"}
             tab={inspectorTab}
             onTabChange={changeInspectorTab}
+            reasoningComposer={(
+              <KeystoneHypothesisComposer
+                scopeKey={scope}
+                selectedEvidence={hypothesisEvidence}
+                createContribution={runtime.commands.createContribution}
+                mutationState={runtime.mutations.createContribution}
+              />
+            )}
+            situationEditor={(
+              <KeystoneSituationEditor
+                identityKey={identityScopeKey}
+                investigation={investigationValue}
+                updateSituation={runtime.commands.updateSituation}
+                mutation={runtime.mutations.updateSituation}
+              />
+            )}
+            reasoningPanelIsStatic={runtime.commands.createContribution === null}
+            recordPanelIsStatic={runtime.commands.updateSituation === null}
           />
         </div>
       </StrategyPanel>

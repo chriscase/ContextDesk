@@ -10,7 +10,7 @@ import {
 } from "./ui-strategy.js";
 
 describe("UI strategy catalogue", () => {
-  it("ships exactly the reference strategy and the first alternate", () => {
+  it("ships exactly the registered strategy set", () => {
     expect(UI_STRATEGIES.map((strategy) => strategy.id)).toEqual([
       "war-room",
       "investigation-first",
@@ -31,11 +31,24 @@ describe("UI strategy catalogue", () => {
     }
   });
 
-  it("describes the read-only Keystone preview without claiming unsupported tools", () => {
-    expect(UI_STRATEGIES.find(({ id }) => id === "keystone")?.optionalFeatures).toEqual([
+  it("describes Keystone's narrow write tools without assigning them to other strategies", () => {
+    const keystone = UI_STRATEGIES.find(({ id }) => id === "keystone");
+    expect(keystone?.version).toBe("0.2.0");
+    expect(keystone?.optionalFeatures).toEqual([
       "evidence-inventory",
       "evidence-annotations",
+      "evidence-linked-hypothesis",
+      "situation-edit",
     ]);
+    expect(UI_STRATEGIES.find(({ id }) => id === "war-room")?.optionalFeatures).not.toContain(
+      "evidence-linked-hypothesis",
+    );
+    expect(UI_STRATEGIES.find(({ id }) => id === "war-room")?.optionalFeatures).toContain(
+      "situation-edit",
+    );
+    expect(UI_STRATEGIES.find(({ id }) => id === "investigation-first")?.optionalFeatures).not.toContain(
+      "situation-edit",
+    );
   });
 
   it("fails closed for unknown runtime contracts and optional features", () => {
