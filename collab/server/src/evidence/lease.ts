@@ -4,8 +4,10 @@
  * Preserves the existing key and connection-session semantics:
  * `pg_advisory_lock(hashtextextended('contextdesk-evidence-write-v1', 0))`
  * on a dedicated pool client, unlocked on the same session before release.
- * This is not multi-app replica safety and is not wired into the process
- * entrypoint from this lane.
+ * The process entrypoint supplies this factory to createEvidenceStore when a
+ * PostgreSQL pool exists, so filesystem and S3 backends coordinate write
+ * batches across application replicas that share that database. SQLite has
+ * no external lease.
  */
 
 export const EVIDENCE_WRITE_LEASE_LOCK_SQL =

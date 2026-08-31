@@ -74,7 +74,11 @@ services:
       # - /run/secrets/evidence-s3-secret-access-key:/run/secrets/evidence-s3-secret-access-key:ro
       # - /run/secrets/evidence-s3-session-token:/run/secrets/evidence-s3-session-token:ro
       # A CA bundle is not secret and need not be owner-only, but it must be a
-      # regular absolute PEM file no larger than 1 MiB.
+      # regular absolute PEM file no larger than 1 MiB. The S3 request handler's
+      # TLS ca option replaces the default trust store for that connection; if
+      # public roots and an internal CA are both required, combine them in one
+      # PEM. Certificate verification stays enabled. This does not change LDAP
+      # or ingress TLS.
       # - /etc/ssl/certs/s3-internal-ca.pem:/etc/ssl/certs/s3-internal-ca.pem:ro
     ports:
       - "8787:8787"

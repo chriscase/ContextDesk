@@ -95,7 +95,9 @@ surfaces.
   and application write/read checks separately. A PostgreSQL-backed process
   uses a database advisory lease for evidence writes; SQLite plus S3 is a
   single-process evaluation shape and doctor warns about it. Doctor preflight
-  does not contact the bucket. There is no filesystem-to-S3 migration,
+  does not contact the bucket. An S3 custom CA file replaces the default
+  trust store for the S3 connection only; combine public roots and an
+  internal CA in one PEM. There is no filesystem-to-S3 migration,
   retention, lifecycle, or multi-provider failover automation.
 
 For the operating sequence, open help://war-room-workflow. For provenance,

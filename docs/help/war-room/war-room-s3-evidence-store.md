@@ -56,7 +56,7 @@ certification.
 | Dedicated location | Prefer a private bucket used only for War Room. A dedicated prefix is acceptable only when the provider can enforce that prefix boundary for the service identity |
 | Endpoint and region | A stable API endpoint and a region string the client and server both use for signing |
 | Path-style addressing | Local and many self-hosted endpoints need path-style requests (`/bucket/key`). Virtual-hosted `bucket.hostname` names often fail on loopback |
-| TLS and trust | Production traffic uses TLS. If the certificate is issued by an internal CA, mount the CA bundle for the **War Room process** and set `COLLAB_EVIDENCE_S3_CA_FILE`; certificate verification remains enabled |
+| TLS and trust | Production traffic uses TLS. If the certificate is issued by an internal CA, mount a PEM bundle for the **War Room process** and set `COLLAB_EVIDENCE_S3_CA_FILE`. The S3 request handler's Node TLS `ca` option replaces the default trust store for that connection; include required public roots plus the internal CA in one combined PEM when both are needed. Certificate verification remains enabled. This setting does not change LDAP or ingress TLS |
 | Stable DNS | The name the War Room service uses must keep resolving to the intended hosts. Do not put credentials in the URL |
 | Least-privilege identity | A dedicated service identity with only bucket readiness/list plus object read, write, and delete below the assigned location. The shipped provider does not use multipart APIs. No console root, browser user, or unused bucket-admin APIs |
 | Non-browser credentials | Access keys stay in a secret manager or owner-only files on the host. They never enter the webview, Help, git, or screenshots |
@@ -154,7 +154,7 @@ control-state root in both modes.
 | Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID`, `_FILE`, or `_REF` | Dedicated service identity, not a human console login. Configure exactly one source. |
 | Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; files must be owner-protected and `_REF` must be an absolute `file:/...` reference, not `file://...`. |
 | Session token | `COLLAB_EVIDENCE_S3_SESSION_TOKEN`, `_FILE`, or `_REF` | Optional; use only when the selected static credentials require it. |
-| Custom CA | `COLLAB_EVIDENCE_S3_CA_FILE` | Optional absolute path to a regular PEM CA bundle (maximum 1 MiB). The S3 request handler uses it with TLS verification enabled; unlike credential files, the CA file need not be owner-only. |
+| Custom CA | `COLLAB_EVIDENCE_S3_CA_FILE` | Optional absolute path to a regular PEM CA bundle (maximum 1 MiB). The S3 request handler passes it as Node's TLS `ca` option, which replaces the default trust store for that S3 connection. Operators who need public roots and an internal CA must combine them in one PEM, mount it into the server process, and keep verification enabled. Unlike credential files, the CA file need not be owner-only. This setting does not change LDAP or ingress TLS. |
 
 In `static` mode, access key id and secret access key must both resolve. A
 session token is optional but is invalid without that pair. For each value,
@@ -466,7 +466,7 @@ After the CLI proof plus persistence across restart, add:
 
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
-| TLS handshake failure or unknown CA | Custom CA bundle is missing/unreadable, incomplete, or does not match the endpoint; hostname mismatch | Certificate names, the absolute `COLLAB_EVIDENCE_S3_CA_FILE` mounted in the War Room process, and that the endpoint is HTTPS |
+| TLS handshake failure or unknown CA | Custom CA bundle is missing/unreadable, incomplete (for example public roots omitted from a combined PEM), or does not match the endpoint; hostname mismatch | Certificate names, the absolute `COLLAB_EVIDENCE_S3_CA_FILE` mounted in the War Room process, that the bundle contains every required root because `ca` replaces the default trust store for that connection, and that the endpoint is HTTPS |
 | SignatureDoesNotMatch or similar | Wrong secret, clock skew, or region mismatch | Region string (`garage` for the example), key material, and host NTP |
 | Permanent redirect or NoSuchBucket on a URL that includes the bucket hostname | Client used virtual-hosted addressing | Force path-style; local services rarely serve `bucket.127.0.0.1` |
 | AccessDenied / 403 | Identity lacks the operation, or the prefix/bucket is wrong | Scope of the service identity; smoke prefix versus application prefix |

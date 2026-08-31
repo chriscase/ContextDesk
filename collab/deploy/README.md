@@ -83,6 +83,14 @@ before listening. `/health` is process liveness; `/ready` checks the database
 and the selected evidence backend. Neither replaces a normal authenticated War
 Room upload, metadata read, byte download, and SHA-256 comparison.
 
+`COLLAB_EVIDENCE_S3_CA_FILE` is an optional absolute PEM bundle mounted into
+the War Room process. The S3 request handler passes it as Node's TLS `ca`
+option, which **replaces** the default trust store for that S3 connection
+only. Operators who need public roots and an internal CA must provide one
+combined PEM bundle and keep certificate verification enabled. This does not
+change directory TLS (`COLLAB_LDAP_CA` / `NODE_EXTRA_CA_CERTS`) or ingress
+TLS.
+
 The example Compose file does not include Garage. From the `app` container,
 `127.0.0.1` is the app container itself. Put War Room and the object store on
 the same explicitly controlled network and use the object-store service name,

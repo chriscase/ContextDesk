@@ -11,7 +11,11 @@ import { describe, expect, it } from "vitest";
 import { parseEnvFile } from "./env-file.js";
 import { nodeOperatorFs, type OperatorFs } from "./fs.js";
 import { probeWritableDirectory, runDoctor } from "./doctor.js";
-import { initConfig, renderConfigFile } from "./config-init.js";
+import {
+  CONFIG_INIT_PROFILES,
+  initConfig,
+  renderConfigFile,
+} from "./config-init.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const collabRoot = join(here, "../../../..");
@@ -689,7 +693,46 @@ describe("operator doctor s3 evidence preflight", () => {
   });
 });
 
+function expectS3OperatorGuidance(body: string) {
+  expect(body).toMatch(/^# COLLAB_EVIDENCE_PROVIDER=s3$/m);
+  expect(body).not.toMatch(/^COLLAB_EVIDENCE_PROVIDER=/m);
+  expect(body).toMatch(
+    /filesystem is the(?:\n#)? default when COLLAB_EVIDENCE_PROVIDER is absent/,
+  );
+  expect(body).toMatch(/does not contact the bucket/);
+  expect(body).toMatch(/Startup and \/ready ping the selected bucket/);
+  expect(body).toMatch(/local server-owned control state/);
+  expect(body).toMatch(/Exact 0\/1/);
+  expect(body).toMatch(/1000\.\.120000 ms \(default 30000\)/);
+  expect(body).toMatch(/1\.\.5368709120 \(default 536870912\)/);
+  expect(body).toMatch(/does not apply it to PutObject/);
+  expect(body).toMatch(/1,000,000 bytes/);
+  expect(body).toMatch(/HeadBucket/);
+  expect(body).toMatch(/GetObject/);
+  expect(body).toMatch(/CopyObject/);
+  expect(body).toMatch(/DeleteObject is required for staging, journal, and rollback cleanup/);
+  expect(body).toMatch(/not a user-facing delete feature/);
+  expect(body).toMatch(/default_chain/);
+  expect(body).toMatch(/rejects all static COLLAB_EVIDENCE_S3_\* credential names/);
+  expect(body).toMatch(
+    /^# COLLAB_EVIDENCE_S3_SESSION_TOKEN_REF=file:\/run\/secrets\/evidence-s3-session-token$/m,
+  );
+  expect(body).toMatch(/owner-only regular files/);
+  expect(body).toMatch(/replaces the default trust store/);
+  expect(body).toMatch(/combined(?:\n#)? PEM bundle/);
+  expect(body).toMatch(/no retention, lifecycle, migration, or multi-provider failover/);
+  expect(body).toMatch(/secret-store-sourced/);
+  expect(body).not.toMatch(/CORS|ACL|presign|AKIA/i);
+  expect(parseEnvFile(body).COLLAB_EVIDENCE_PROVIDER).toBeUndefined();
+}
+
 describe("operator config:init s3 examples", () => {
+  it("documents filesystem default, bounds, credentials, and custom CA replacement", () => {
+    for (const profile of CONFIG_INIT_PROFILES) {
+      expectS3OperatorGuidance(renderConfigFile(profile));
+    }
+  });
+
   it("keeps s3 examples commented, secret-store-oriented, and idempotent", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cd-collab-init-s3-"));
     try {
@@ -701,13 +744,8 @@ describe("operator config:init s3 examples", () => {
         nonInteractive: true,
       });
       const body = await readFile(first.outputPath, "utf8");
-      expect(body).toMatch(/^# COLLAB_EVIDENCE_PROVIDER=s3$/m);
-      expect(body).not.toMatch(/^COLLAB_EVIDENCE_PROVIDER=/m);
-      expect(body).toMatch(/secret-store-sourced/);
+      expectS3OperatorGuidance(body);
       expect(body).toMatch(/\/run\/secrets\/evidence-s3-/);
-      expect(body).toMatch(/DeleteObject.*journal.*rollback cleanup/);
-      expect(body).not.toMatch(/CORS|ACL|presign|AKIA/i);
-      expect(parseEnvFile(body).COLLAB_EVIDENCE_PROVIDER).toBeUndefined();
       const again = await initConfig({
         collabRoot,
         cwd: dir,
@@ -719,15 +757,19 @@ describe("operator config:init s3 examples", () => {
       expect(await readFile(again.outputPath, "utf8")).toBe(body);
       expect(again.overwritten).toBe(true);
       const deployExample = await readFile(join(collabRoot, "deploy/.env.example"), "utf8");
-      expect(deployExample).toMatch(/^# COLLAB_EVIDENCE_PROVIDER=s3$/m);
-      expect(deployExample).toMatch(/DeleteObject.*journal.*rollback cleanup/);
-      expect(parseEnvFile(deployExample).COLLAB_EVIDENCE_PROVIDER).toBeUndefined();
+      const s3BlockStart = deployExample.indexOf("# Optional S3-compatible evidence bytes.");
+      const s3BlockEnd = deployExample.indexOf("# Admin-owned share_safe redaction map");
+      expect(s3BlockStart).toBeGreaterThanOrEqual(0);
+      expect(s3BlockEnd).toBeGreaterThan(s3BlockStart);
+      expectS3OperatorGuidance(deployExample.slice(s3BlockStart, s3BlockEnd));
       const compose = await readFile(join(collabRoot, "deploy/docker-compose.example.yml"), "utf8");
       expect(compose).toMatch(/# COLLAB_EVIDENCE_PROVIDER: s3/);
       expect(compose).not.toMatch(/^\s+COLLAB_EVIDENCE_PROVIDER:/m);
       expect(compose).toMatch(/node uid \(1000\)/);
       expect(compose).toMatch(/mode 0400/);
       expect(compose).toMatch(/DeleteObject[\s\S]*journal[\s\S]*rollback cleanup/);
+      expect(compose).toMatch(/replaces the default trust store/);
+      expect(compose).toMatch(/combine them in one/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
