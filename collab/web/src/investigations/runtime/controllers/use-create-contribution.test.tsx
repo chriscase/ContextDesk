@@ -19,7 +19,13 @@ function contribution(): ContributionV1 {
     ({ id }) => id === RUNTIME_FIXTURE_IDS.note,
   );
   if (found === undefined) throw new Error("the note contribution fixture is missing");
-  return found;
+  return {
+    ...found,
+    id: "contribution-linked-hypothesis",
+    kind: "hypothesis",
+    body: "Queue time rises after the rollout.",
+    hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+  };
 }
 
 /**

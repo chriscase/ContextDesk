@@ -59,6 +59,16 @@ function createdContribution(): ContributionV1 {
   return found;
 }
 
+function createdHypothesisContribution(): ContributionV1 {
+  return {
+    ...createdContribution(),
+    id: "contribution-linked-hypothesis",
+    kind: "hypothesis",
+    body: "Evidence points to connection-pool saturation.",
+    hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+  };
+}
+
 /** The case a situation update answers with, one version ahead of the fixture. */
 function revisedSituationCase(): CaseV1 {
   const current = makePopulatedCase();
@@ -1098,6 +1108,32 @@ describe("typed lifecycle action conflicts", () => {
 });
 
 describe("Runtime V1.1 write seams", () => {
+  it("keeps an unlinked note request backward-compatible on the wire", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(createdContribution()),
+    );
+
+    await expect(investigationGateway.createContribution(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        kind: "note",
+        body: "An unlinked note remains a bounded note.",
+        privacyClass: "share_safe",
+        clientTime: "2026-02-03T19:59:45.000Z",
+        sourceId: "source-human-note",
+      },
+      options(),
+    )).resolves.toEqual({ ok: true, value: createdContribution() });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      kind: "note",
+      body: "An unlinked note remains a bounded note.",
+      privacyClass: "share_safe",
+      clientTime: "2026-02-03T19:59:45.000Z",
+      sourceId: "source-human-note",
+    });
+  });
+
   it("serializes a bounded evidence-link snapshot without rewriting the body", async () => {
     const deferred = createDeferred<Response>();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => deferred.promise);
@@ -1124,8 +1160,12 @@ describe("Runtime V1.1 write seams", () => {
       hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
       idempotencyKey: "msg-syn-0002",
     });
-    deferred.resolve(jsonResponse(createdContribution()));
-    await expect(pending).resolves.toEqual({ ok: true, value: createdContribution() });
+    const created = createdHypothesisContribution();
+    deferred.resolve(jsonResponse(created));
+    await expect(pending).resolves.toEqual({ ok: true, value: created });
+    expect(created.hypothesisLinks).toEqual([
+      { kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence },
+    ]);
   });
 
   it.each([

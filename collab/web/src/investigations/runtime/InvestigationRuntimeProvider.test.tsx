@@ -725,7 +725,13 @@ describe("InvestigationRuntimeProvider", () => {
   it("publishes a contribution before refreshing only the active contribution lane", async () => {
     const written = makeContributionList().contributions[1];
     if (written === undefined) throw new Error("expected a seeded contribution");
-    const created = { ...written, id: "contribution-newly-written" };
+    const created = {
+      ...written,
+      id: "contribution-newly-written",
+      kind: "hypothesis" as const,
+      body: "Queue time rises after the rollout.",
+      hypothesisLinks: [{ kind: "artifact" as const, id: RUNTIME_FIXTURE_IDS.evidence }],
+    };
     const contributionRefresh = createDeferred<GatewayResult<readonly ContributionV1[]>>();
     let contributionCalls = 0;
     const gateway = makeGateway({
@@ -784,6 +790,9 @@ describe("InvestigationRuntimeProvider", () => {
     const mutation = currentRuntime().mutations.createContribution;
     if (mutation.status === "succeeded") {
       expect(Object.isFrozen(mutation.value)).toBe(true);
+      expect(mutation.value.hypothesisLinks).toEqual([
+        { kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence },
+      ]);
       expect(() => {
         (mutation.value as { body: string | null }).body = "contaminated";
       }).toThrow();
