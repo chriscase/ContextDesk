@@ -1,12 +1,14 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArtifact, parseEvidenceUploadSuccess } from "@cd-collab/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
-import { FilesystemEvidenceStore } from "../../evidence/store.js";
+import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import {
   createAuthLog,
@@ -23,6 +25,7 @@ import { MemoryCaseStore } from "./store.js";
 const ALICE = "fixture-alice-secret";
 const LOG = "0123456789abcdef-content-body\n";
 const MISSING_ARTIFACT_ID = "10000000-0000-4000-8000-000000000001";
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 function users() {
   return new Map([
@@ -229,6 +232,60 @@ function expectNotFound(res: { statusCode: number; body: string }): void {
   expect(res.statusCode).not.toBe(403);
 }
 
+function expectStorageUnavailable(res: { statusCode: number; body: string }): void {
+  expect(res.statusCode).toBe(503);
+  expect(JSON.parse(res.body)).toEqual({ error: "storage_unavailable" });
+  expect(res.body).not.toMatch(/verification|blob|password|contentBase64/i);
+}
+
+function spyJsonBytesStore(store: FilesystemEvidenceStore) {
+  return {
+    get: vi.spyOn(store, "get"),
+    head: vi.spyOn(store, "head"),
+    openRead: vi.spyOn(store, "openRead"),
+  };
+}
+
+function mockReadHandle(input: {
+  hash: string;
+  byteLength: number;
+  range?: { start: number; end: number } | null;
+  handleByteLength?: number;
+  metaHash?: string;
+  metaByteLength?: number;
+  chunks: Uint8Array[];
+  onReturn?: () => void;
+  onNext?: (index: number, chunk: Uint8Array) => void;
+}) {
+  let index = 0;
+  return {
+    meta: {
+      hash: input.metaHash ?? input.hash,
+      byteLength: input.metaByteLength ?? input.byteLength,
+      contentType: null,
+    },
+    range: input.range === undefined ? null : input.range,
+    byteLength: input.handleByteLength ?? input.byteLength,
+    bytes: () => ({
+      [Symbol.asyncIterator]: () => ({
+        next: async () => {
+          if (index >= input.chunks.length) {
+            return { done: true as const, value: undefined };
+          }
+          const chunk = input.chunks[index] ?? new Uint8Array();
+          input.onNext?.(index, chunk);
+          index += 1;
+          return { done: false as const, value: chunk };
+        },
+        return: async () => {
+          input.onReturn?.();
+          return { done: true as const, value: undefined };
+        },
+      }),
+    }),
+  };
+}
+
 describe("GET/HEAD evidence content and JSON bytes", () => {
   it("returns indistinguishable 404 for privacy, missing, file-ref, and unknown artifacts", async () => {
     await withApp(async ({ app, store }) => {
@@ -421,9 +478,86 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
     });
   });
 
+  it("returns authorized JSON bytes without calling EvidenceStore.get", async () => {
+    await withApp(async ({ app, store }) => {
+      const spies = spyJsonBytesStore(store);
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const caseId = await createCase(app, alice, "Json bytes success");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "app.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "json bytes",
+        privacyClass: "share_safe",
+      });
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/evidence/${artifact.id}/bytes`,
+        headers: { cookie: dave },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(
+        Buffer.from(
+          (JSON.parse(response.body) as { contentBase64: string }).contentBase64,
+          "base64",
+        ).toString("utf8"),
+      ).toBe(LOG);
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(spies.head).toHaveBeenCalledTimes(1);
+      expect(spies.openRead).toHaveBeenCalledTimes(1);
+      expect(spies.head.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+        spies.openRead.mock.invocationCallOrder[0] ?? 0,
+      );
+    });
+  });
+
+  it("returns JSON bytes when the opened handle yields a thenable iterable", async () => {
+    await withApp(async ({ app, store }) => {
+      const originalOpen = store.openRead.bind(store);
+      const spies = spyJsonBytesStore(store);
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const caseId = await createCase(app, alice, "Thenable json bytes");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "app.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "thenable bytes",
+        privacyClass: "share_safe",
+      });
+      spies.openRead.mockImplementation(async (hash, range) => {
+        const handle = await originalOpen(hash, range);
+        return {
+          ...handle,
+          bytes: async () => handle.bytes(),
+        };
+      });
+      spies.get.mockClear();
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/evidence/${artifact.id}/bytes`,
+        headers: { cookie: dave },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(
+        Buffer.from(
+          (JSON.parse(response.body) as { contentBase64: string }).contentBase64,
+          "base64",
+        ).toString("utf8"),
+      ).toBe(LOG);
+      expect(spies.get).not.toHaveBeenCalled();
+    });
+  });
+
   it("refuses oversized JSON bytes without calling evidence.get", async () => {
     await withApp(async ({ app, store }) => {
-      const get = vi.spyOn(store, "get");
+      const spies = spyJsonBytesStore(store);
       const alice = await login(app, "alice", ALICE);
       const dave = await login(app, "dave", "fixture-dave-secret");
       const caseId = await createCase(app, alice, "Large json bytes");
@@ -435,7 +569,9 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
         summary: "large json refusal",
         privacyClass: "share_safe",
       });
-      get.mockClear();
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
       const response = await app.inject({
         method: "GET",
         url: `/api/cases/${caseId}/evidence/${artifact.id}/bytes`,
@@ -443,7 +579,9 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       });
       expect(response.statusCode).toBe(400);
       expect(JSON.parse(response.body)).toEqual({ error: "too_large_for_json_bytes" });
-      expect(get).not.toHaveBeenCalled();
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(spies.head).not.toHaveBeenCalled();
+      expect(spies.openRead).not.toHaveBeenCalled();
     });
   });
 
@@ -475,6 +613,199 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       expect(spies.head).not.toHaveBeenCalled();
       expect(spies.openRead).not.toHaveBeenCalled();
     });
+  });
+
+  it("fails closed with 503 for missing, corrupt, truncated, replaced, and mismatched JSON bytes", async () => {
+    await withApp(async ({ app, store }) => {
+      const spies = spyJsonBytesStore(store);
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const caseId = await createCase(app, alice, "Hostile json bytes");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "app.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "hostile store",
+        privacyClass: "share_safe",
+      });
+      const hash = artifact.contentHash ?? "";
+      const url = `/api/cases/${caseId}/evidence/${artifact.id}/bytes`;
+      const originalHead = store.head.bind(store);
+      const originalOpen = store.openRead.bind(store);
+      const expected = new TextEncoder().encode(LOG);
+
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.head.mockResolvedValueOnce(null);
+      expectStorageUnavailable(await app.inject({
+        method: "GET",
+        url,
+        headers: { cookie: dave },
+      }));
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(spies.openRead).not.toHaveBeenCalled();
+
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.head.mockResolvedValueOnce({
+        hash,
+        byteLength: expected.byteLength + 64,
+        contentType: null,
+      });
+      expectStorageUnavailable(await app.inject({
+        method: "GET",
+        url,
+        headers: { cookie: dave },
+      }));
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(spies.openRead).not.toHaveBeenCalled();
+
+      spies.head.mockImplementation(originalHead);
+
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce(mockReadHandle({
+        hash,
+        byteLength: expected.byteLength,
+        chunks: [Uint8Array.from(expected.map((byte) => byte ^ 0xff))],
+      }));
+      const corrupt = await app.inject({
+        method: "GET",
+        url,
+        headers: { cookie: dave },
+      });
+      expectStorageUnavailable(corrupt);
+      expect(JSON.parse(corrupt.body)).not.toHaveProperty("contentBase64");
+      expect(spies.get).not.toHaveBeenCalled();
+
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce(mockReadHandle({
+        hash,
+        byteLength: expected.byteLength,
+        chunks: [expected.subarray(0, 4)],
+      }));
+      expectStorageUnavailable(await app.inject({
+        method: "GET",
+        url,
+        headers: { cookie: dave },
+      }));
+      expect(spies.get).not.toHaveBeenCalled();
+
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce(mockReadHandle({
+        hash,
+        byteLength: expected.byteLength,
+        range: { start: 0, end: expected.byteLength - 1 },
+        chunks: [expected],
+      }));
+      expectStorageUnavailable(await app.inject({
+        method: "GET",
+        url,
+        headers: { cookie: dave },
+      }));
+      expect(spies.get).not.toHaveBeenCalled();
+
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce(mockReadHandle({
+        hash,
+        byteLength: expected.byteLength,
+        handleByteLength: expected.byteLength + 1,
+        chunks: [expected],
+      }));
+      expectStorageUnavailable(await app.inject({
+        method: "GET",
+        url,
+        headers: { cookie: dave },
+      }));
+      expect(spies.get).not.toHaveBeenCalled();
+
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce(mockReadHandle({
+        hash,
+        byteLength: expected.byteLength,
+        metaHash: "0".repeat(64),
+        chunks: [expected],
+      }));
+      expectStorageUnavailable(await app.inject({
+        method: "GET",
+        url,
+        headers: { cookie: dave },
+      }));
+      expect(spies.get).not.toHaveBeenCalled();
+
+      spies.openRead.mockImplementation(originalOpen);
+      expect(sha256Hex(expected)).toBe(hash);
+    });
+  });
+
+  it("rejects an oversize JSON-bytes chunk before retaining it and closes the iterator", async () => {
+    await withApp(async ({ app, store }) => {
+      const spies = spyJsonBytesStore(store);
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const caseId = await createCase(app, alice, "Oversize json chunk");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "app.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "oversize chunk",
+        privacyClass: "share_safe",
+      });
+      const hash = artifact.contentHash ?? "";
+      const expected = new TextEncoder().encode(LOG);
+      const huge = new Uint8Array(1_000_001).fill(0x61);
+      let returned = 0;
+      let nextCalls = 0;
+      spies.get.mockClear();
+      spies.head.mockClear();
+      spies.openRead.mockClear();
+      spies.openRead.mockResolvedValueOnce(mockReadHandle({
+        hash,
+        byteLength: expected.byteLength,
+        chunks: [expected.subarray(0, 4), huge, expected],
+        onNext: () => {
+          nextCalls += 1;
+        },
+        onReturn: () => {
+          returned += 1;
+        },
+      }));
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/evidence/${artifact.id}/bytes`,
+        headers: { cookie: dave },
+      });
+      expectStorageUnavailable(response);
+      expect(spies.get).not.toHaveBeenCalled();
+      expect(nextCalls).toBe(2);
+      expect(returned).toBeGreaterThan(0);
+      expect(response.body).not.toContain(Buffer.from(huge).toString("base64").slice(0, 24));
+    });
+  });
+
+  it("does not call EvidenceStore.get from the JSON bytes service path", () => {
+    const serviceSrc = readFileSync(join(HERE, "service.ts"), "utf8");
+    const jsonBytes = serviceSrc.slice(
+      serviceSrc.indexOf("async getArtifactJsonBytes"),
+      serviceSrc.indexOf("async headEvidence"),
+    );
+    expect(jsonBytes).toContain("headEvidence");
+    expect(jsonBytes).toContain("openEvidenceRead");
+    expect(jsonBytes).not.toMatch(/this\.evidence\.get\s*\(/);
+    expect(jsonBytes).toContain("collectExactJsonEvidenceBytes");
   });
 
   it("terminates and cleans a stalled authenticated content download on timeout", async () => {

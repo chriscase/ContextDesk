@@ -149,7 +149,7 @@ control-state root in both modes.
 | Path-style | `COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE` | Exact `0` or `1`. When unset, custom endpoints (including Garage) default to path-style and AWS-managed endpoints default to virtual-host style. |
 | HTTP opt-in | `COLLAB_EVIDENCE_S3_ALLOW_HTTP` | Exact `0` or `1`; defaults to `0`. Set to `1` only for a trusted local evaluation network. |
 | Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Connection and request timeout in milliseconds; defaults to `30000`, valid range `1000..120000`. |
-| Parsed backend size bound | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Parsed and stored with a 512 MiB default and `1..5368709120` range. This release does not apply it to `PutObject` or application intake. Held-evidence intake remains capped separately at 1,000,000 bytes, and this setting does not raise that limit. |
+| Streamed intake size bound | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Provider-neutral. Governs streamed evidence intake for the default filesystem provider and the opt-in S3 provider. Default 512 MiB (`536870912`), valid range `1..5368709120` (5 GiB). Legacy JSON/base64 evidence upload and the legacy JSON bytes download remain separately capped at exactly 1,000,000 decoded bytes. This setting does not raise those JSON caps. |
 | Credential mode | `COLLAB_EVIDENCE_S3_CREDENTIALS_MODE` | Required in S3 mode; there is no default. `static` requires the explicit pair below; `default_chain` uses the server process's AWS-compatible provider chain and rejects leftover static `COLLAB_EVIDENCE_S3_*` credential names. |
 | Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID`, `_FILE`, or `_REF` | Dedicated service identity, not a human console login. Configure exactly one source. |
 | Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; files must be owner-protected and `_REF` must be an absolute `file:/...` reference, not `file://...`. |
@@ -163,10 +163,10 @@ symlinks, empty files, group/world-readable secret files on Unix, and
 `file://` references are refused. Direct environment values exist for
 orchestrator secret injection, but do not put them in a committed env file.
 
-Filesystem mode rejects leftover `COLLAB_EVIDENCE_S3_*` names and
-`COLLAB_EVIDENCE_MAX_UPLOAD_BYTES`, including names that are present with empty
-values. Remove the S3 block rather than blanking it when returning to the
-filesystem provider.
+Filesystem mode rejects leftover `COLLAB_EVIDENCE_S3_*` names, including names
+that are present with empty values. `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` is
+accepted in filesystem mode. Remove leftover S3 names rather than blanking
+them when returning to the filesystem provider.
 
 With PostgreSQL, the process uses a database advisory lease to coordinate
 evidence write batches across application replicas. SQLite has no external

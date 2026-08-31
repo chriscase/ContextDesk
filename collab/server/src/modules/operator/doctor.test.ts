@@ -544,6 +544,25 @@ describe("operator doctor s3 evidence preflight", () => {
     expect(evidence?.summary).toBe("evidence root is a writable directory");
   });
 
+  it("accepts COLLAB_EVIDENCE_MAX_UPLOAD_BYTES in filesystem mode", () => {
+    const root = fixtureRoot;
+    const report = runDoctor({
+      env: {
+        COLLAB_AUTH_MODE: "local",
+        COLLAB_COOKIE_SECURE: "0",
+        COLLAB_PORT: "8787",
+        COLLAB_EVIDENCE_ROOT: ".data/evidence",
+        COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "1048576",
+      },
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(built(root)),
+    });
+    expect(report.ok).toBe(true);
+    expect(statusOf(report, "evidence_root")).toBe("ok");
+  });
+
   it("errors on leftover s3 configuration in filesystem mode without echoing values", () => {
     const root = fixtureRoot;
     const report = runDoctor({
@@ -705,8 +724,15 @@ function expectS3OperatorGuidance(body: string) {
   expect(body).toMatch(/Exact 0\/1/);
   expect(body).toMatch(/1000\.\.120000 ms \(default 30000\)/);
   expect(body).toMatch(/1\.\.5368709120 \(default 536870912\)/);
-  expect(body).toMatch(/does not apply it to PutObject/);
-  expect(body).toMatch(/1,000,000 bytes/);
+  expect(body).toMatch(/provider-neutral/);
+  expect(body).toMatch(/streamed evidence intake/);
+  expect(body).toMatch(/filesystem provider and the opt-in S3 provider/);
+  expect(body).toMatch(/Filesystem mode rejects every present COLLAB_EVIDENCE_S3_\*/);
+  expect(body).not.toMatch(
+    /COLLAB_EVIDENCE_S3_\* name and(?:\n#)? COLLAB_EVIDENCE_MAX_UPLOAD_BYTES/,
+  );
+  expect(body).not.toMatch(/does not apply it to PutObject/);
+  expect(body).toMatch(/1,000,000/);
   expect(body).toMatch(/HeadBucket/);
   expect(body).toMatch(/GetObject/);
   expect(body).toMatch(/CopyObject/);
@@ -770,6 +796,12 @@ describe("operator config:init s3 examples", () => {
       expect(compose).toMatch(/DeleteObject[\s\S]*journal[\s\S]*rollback cleanup/);
       expect(compose).toMatch(/replaces the default trust store/);
       expect(compose).toMatch(/combine them in one/);
+      expect(compose).toMatch(/Provider-neutral streamed-intake cap/);
+      expect(compose).toMatch(/may stay\n {6}# set in filesystem mode/);
+      expect(compose).not.toMatch(/including COLLAB_EVIDENCE_MAX_UPLOAD_BYTES/);
+      expect(compose).not.toMatch(
+        /Parsed\/stored only; it does not raise the 1,000,000-byte app intake cap/,
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

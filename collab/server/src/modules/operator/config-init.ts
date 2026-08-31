@@ -34,9 +34,14 @@ function s3EvidenceComments(): string {
 # default when COLLAB_EVIDENCE_PROVIDER is absent. Doctor validates this block
 # but does not contact the bucket. Startup and /ready ping the selected bucket.
 # COLLAB_EVIDENCE_ROOT stays local server-owned control state in either mode.
-# Filesystem mode rejects every present COLLAB_EVIDENCE_S3_* name and
-# COLLAB_EVIDENCE_MAX_UPLOAD_BYTES, even if its value is empty: remove the
-# whole block when returning to filesystem mode.
+# Filesystem mode rejects every present COLLAB_EVIDENCE_S3_* name, even if its
+# value is empty: remove the S3 names when returning to filesystem mode.
+# COLLAB_EVIDENCE_MAX_UPLOAD_BYTES is provider-neutral and is accepted in
+# filesystem mode. It governs streamed evidence intake for both the default
+# filesystem provider and the opt-in S3 provider (default 536870912 / 512 MiB;
+# valid range 1..5368709120 / 5 GiB). Legacy JSON/base64 evidence upload and
+# the legacy JSON bytes download remain separately capped at exactly 1,000,000
+# decoded bytes.
 # The object-store role must allow bucket readiness/list plus GetObject and
 # PutObject (also used by same-prefix CopyObject).
 # DeleteObject is required for staging, journal, and rollback cleanup.
@@ -60,9 +65,10 @@ function s3EvidenceComments(): string {
 # COLLAB_EVIDENCE_S3_CA_FILE=/etc/ssl/certs/s3-internal-ca.pem
 # Connection and request timeout, 1000..120000 ms (default 30000).
 # COLLAB_EVIDENCE_S3_TIMEOUT_MS=30000
-# Parsed/stored backend size bound, 1..5368709120 (default 536870912). This
-# release does not apply it to PutObject or raise the current held-evidence
-# application intake cap of 1,000,000 bytes.
+# Provider-neutral streamed-intake cap, 1..5368709120 (default 536870912).
+# Governs multipart streamed evidence for filesystem and S3. Does not raise
+# the separate 1,000,000-byte legacy JSON/base64 upload or JSON bytes
+# download caps.
 # COLLAB_EVIDENCE_MAX_UPLOAD_BYTES=536870912
 # Required in S3 mode; no default. static or default_chain. default_chain
 # rejects all static COLLAB_EVIDENCE_S3_* credential names below.

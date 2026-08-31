@@ -554,6 +554,78 @@ describe("POST /api/cases/:id/evidence/stream", () => {
     });
   });
 
+  it("accepts a browser-style multipart file larger than the global 2 MiB JSON bodyLimit when under the streamed cap", async () => {
+    const fileBytes = 2 * 1024 * 1024 + 1;
+    const underCap = 4 * 1024 * 1024;
+    const overCap = 1024 * 1024;
+    const body = Buffer.alloc(fileBytes, 0x61);
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Over 2MiB under cap");
+      const encoded = encodeMultipart([
+        { kind: "field", name: "kind", value: "log" },
+        { kind: "field", name: "summary", value: "browser-style over 2MiB" },
+        { kind: "field", name: "filename", value: "large.log" },
+        { kind: "field", name: "mediaType", value: "text/plain" },
+        {
+          kind: "file",
+          name: "file",
+          filename: "large.log",
+          mediaType: "text/plain",
+          body,
+        },
+      ]);
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/evidence/stream`,
+        headers: {
+          cookie: alice,
+          "content-type": encoded.contentType,
+          "content-length": String(encoded.payload.byteLength),
+        },
+        payload: encoded.payload,
+      });
+      expect(response.statusCode).toBe(200);
+      const artifact = parseArtifact(
+        parseEvidenceUploadSuccess(JSON.parse(response.body)).artifact,
+      );
+      expect(artifact.byteLength).toBe(fileBytes);
+      expect(artifact.contentHash).toBe(sha256Hex(body));
+    }, { maxUploadBytes: underCap });
+
+    await withApp(async ({ app, store }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Over 2MiB over cap");
+      const encoded = encodeMultipart([
+        { kind: "field", name: "kind", value: "log" },
+        { kind: "field", name: "summary", value: "browser-style over cap" },
+        { kind: "field", name: "filename", value: "large.log" },
+        { kind: "field", name: "mediaType", value: "text/plain" },
+        {
+          kind: "file",
+          name: "file",
+          filename: "large.log",
+          mediaType: "text/plain",
+          body,
+        },
+      ]);
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/evidence/stream`,
+        headers: {
+          cookie: alice,
+          "content-type": encoded.contentType,
+          "content-length": String(encoded.payload.byteLength),
+        },
+        payload: encoded.payload,
+      });
+      expect(response.statusCode).toBe(413);
+      expect(JSON.parse(response.body)).toEqual({ error: "upload exceeds size cap" });
+      expect(await listScratch(store.rootDir)).toEqual([]);
+      expect(await store.head(sha256Hex(body))).toBeNull();
+    }, { maxUploadBytes: overCap });
+  });
+
   it("enforces the stream size cap and leaves no scratch residue", async () => {
     await withApp(async ({ app, store, root }) => {
       const alice = await login(app, "alice", ALICE);

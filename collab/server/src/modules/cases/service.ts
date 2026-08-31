@@ -318,6 +318,107 @@ async function* nonEmptyStreamChunks(
   if (!yielded) throw new Error("evidence file must not be empty");
 }
 
+function jsonBytesStorageUnavailable(): Error {
+  return new Error("evidence blob failed verification");
+}
+
+async function openJsonBytesIterator(
+  handle: EvidenceReadHandle,
+): Promise<AsyncIterator<Uint8Array>> {
+  const source: unknown = await Promise.resolve(handle.bytes());
+  if (!source || typeof source !== "object") {
+    throw jsonBytesStorageUnavailable();
+  }
+  const record = source as {
+    [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array>;
+    [Symbol.iterator]?: () => Iterator<Uint8Array>;
+    next?: AsyncIterator<Uint8Array>["next"];
+    return?: AsyncIterator<Uint8Array>["return"];
+  };
+  const asyncIterator = record[Symbol.asyncIterator];
+  if (typeof asyncIterator === "function") {
+    return asyncIterator.call(record);
+  }
+  const syncIterator = record[Symbol.iterator];
+  if (typeof syncIterator === "function") {
+    const iterator = syncIterator.call(record);
+    return {
+      next: async () => iterator.next(),
+      return: async () => {
+        if (typeof iterator.return === "function") iterator.return();
+        return { done: true, value: undefined };
+      },
+    };
+  }
+  if (typeof record.next === "function") {
+    return record as AsyncIterator<Uint8Array>;
+  }
+  throw jsonBytesStorageUnavailable();
+}
+
+function concatExactChunks(chunks: Uint8Array[], byteLength: number): Uint8Array {
+  if (chunks.length === 1) {
+    const only = chunks[0];
+    if (only && only.byteLength === byteLength) return only;
+  }
+  const out = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+async function collectExactJsonEvidenceBytes(
+  handle: EvidenceReadHandle,
+  expectedHash: string,
+  expectedLength: number,
+): Promise<Uint8Array> {
+  if (
+    handle.meta.hash !== expectedHash
+    || handle.meta.byteLength !== expectedLength
+    || handle.range !== null
+    || handle.byteLength !== expectedLength
+  ) {
+    throw jsonBytesStorageUnavailable();
+  }
+  const hasher = createHash("sha256");
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  const iterator = await openJsonBytesIterator(handle);
+  try {
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      const chunk = next.value;
+      if (!(chunk instanceof Uint8Array)) {
+        throw jsonBytesStorageUnavailable();
+      }
+      if (chunk.byteLength === 0) continue;
+      const nextLength = received + chunk.byteLength;
+      if (nextLength > MAX_UPLOAD_BYTES || nextLength > expectedLength) {
+        throw jsonBytesStorageUnavailable();
+      }
+      const copy = Uint8Array.from(chunk);
+      chunks.push(copy);
+      hasher.update(copy);
+      received = nextLength;
+    }
+  } finally {
+    if (typeof iterator.return === "function") {
+      await Promise.resolve(iterator.return()).catch(() => undefined);
+    }
+  }
+  if (received !== expectedLength) {
+    throw jsonBytesStorageUnavailable();
+  }
+  if (hasher.digest("hex") !== expectedHash) {
+    throw jsonBytesStorageUnavailable();
+  }
+  return concatExactChunks(chunks, received);
+}
+
 interface ContributionWriteInput {
   kind: string;
   body: string;
@@ -2213,8 +2314,14 @@ export class CaseService {
     );
     if (!row?.contentHash || row.byteLength === null) return { outcome: "not_found" };
     if (row.byteLength > MAX_UPLOAD_BYTES) return { outcome: "too_large" };
-    const bytes = await this.evidence.get(row.contentHash);
-    if (!bytes) return { outcome: "not_found" };
+    const hash = row.contentHash;
+    const expectedLength = row.byteLength;
+    const meta = await this.headEvidence(hash);
+    if (!meta || meta.hash !== hash || meta.byteLength !== expectedLength) {
+      throw jsonBytesStorageUnavailable();
+    }
+    const handle = await this.openEvidenceRead(hash);
+    const bytes = await collectExactJsonEvidenceBytes(handle, hash, expectedLength);
     return { outcome: "ok", bytes };
   }
 

@@ -73,7 +73,10 @@ that file into the `app` container. For S3, uncomment the matching
 `COLLAB_EVIDENCE_...` mappings under `app.environment` after setting their
 substitution values. Enable only the names selected for the deployment:
 present-but-empty optional S3 names are invalid, and filesystem mode rejects
-every present S3 name (plus `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES`).
+every present S3 name. `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` is provider-neutral
+and is accepted in filesystem mode; it bounds streamed evidence intake for
+both backends (default 512 MiB, range 1..5 GiB). Legacy JSON/base64 upload
+and JSON bytes download stay capped at 1,000,000 decoded bytes.
 
 Run `npm run doctor` with the intended environment before startup. For S3 it
 validates names, credential sources, the custom CA file, bounds, and the local
