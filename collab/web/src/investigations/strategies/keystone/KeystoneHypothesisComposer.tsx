@@ -33,6 +33,11 @@ export interface KeystoneHypothesisEvidence {
 }
 
 export interface KeystoneHypothesisComposerProps {
+  /**
+   * Opaque identity + investigation scope supplied by the composition root.
+   * It fences presentation state only and never grants write authority.
+   */
+  readonly scopeKey: string;
   /** The current Keystone working set. Only these artifact IDs may be cited. */
   readonly selectedEvidence: readonly KeystoneHypothesisEvidence[];
   /** A resolved public Runtime command. Null means this presentation cannot write. */
@@ -101,12 +106,20 @@ function snapshotArtifactLinks(
  * hypothesis only after an explicit form submission; Runtime owns every write
  * boundary and authoritative result.
  */
-export function KeystoneHypothesisComposer({
+interface KeystoneHypothesisComposerScopeProps
+  extends Omit<KeystoneHypothesisComposerProps, "scopeKey"> {
+  readonly scopeEpoch: number;
+  readonly activeScopeEpoch: { readonly current: number };
+}
+
+function KeystoneHypothesisComposerScope({
   selectedEvidence,
   createContribution,
   mutationState,
   onSuccess,
-}: KeystoneHypothesisComposerProps) {
+  scopeEpoch,
+  activeScopeEpoch,
+}: KeystoneHypothesisComposerScopeProps) {
   const id = useId();
   const titleId = `${id}-title`;
   const bodyId = `${id}-body`;
@@ -139,6 +152,10 @@ export function KeystoneHypothesisComposer({
   }
   const command = createContribution;
 
+  function scopeIsCurrent() {
+    return activeScopeEpoch.current === scopeEpoch;
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submittingRef.current || mutationState.status === "running") return;
@@ -162,13 +179,14 @@ export function KeystoneHypothesisComposer({
         hypothesisLinks: submittedLinks,
       });
     } catch {
-      setFeedback({ status: "failed" });
+      if (scopeIsCurrent()) setFeedback({ status: "failed" });
       return;
     } finally {
       submittingRef.current = false;
-      setSubmitting(false);
+      if (scopeIsCurrent()) setSubmitting(false);
     }
 
+    if (!scopeIsCurrent()) return;
     if (outcome.status === "succeeded") {
       setBody((current) => current === submittedBody ? "" : current);
       setFeedback({ status: "succeeded", citationCount: submittedLinks.length });
@@ -284,5 +302,31 @@ export function KeystoneHypothesisComposer({
         </StrategyStateNotice>
       ) : null}
     </StrategyPanel>
+  );
+}
+
+export function KeystoneHypothesisComposer({
+  scopeKey,
+  ...scopeProps
+}: KeystoneHypothesisComposerProps) {
+  const activeScope = useRef({ key: scopeKey, epoch: 0 });
+  if (activeScope.current.key !== scopeKey) {
+    activeScope.current = {
+      key: scopeKey,
+      epoch: activeScope.current.epoch + 1,
+    };
+  }
+
+  const scopeEpoch = activeScope.current.epoch;
+  const activeScopeEpoch = useRef(scopeEpoch);
+  activeScopeEpoch.current = scopeEpoch;
+
+  return (
+    <KeystoneHypothesisComposerScope
+      key={scopeEpoch}
+      {...scopeProps}
+      scopeEpoch={scopeEpoch}
+      activeScopeEpoch={activeScopeEpoch}
+    />
   );
 }

@@ -38,6 +38,7 @@ function succeededCommand(contribution = authoritativeContribution()): CreateCon
 
 function mount(overrides: Partial<KeystoneHypothesisComposerProps> = {}) {
   let props: KeystoneHypothesisComposerProps = {
+    scopeKey: "analyst-a:case-a",
     selectedEvidence: EVIDENCE,
     createContribution: succeededCommand(),
     mutationState: IDLE,
@@ -212,6 +213,118 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     });
     expect(JSON.stringify(vi.mocked(command).mock.calls)).not.toContain("artifact-old");
     expect(screen.queryByText("old.log")).toBeNull();
+  });
+
+  it("excludes empty and duplicate artifact IDs while preserving first-seen order", async () => {
+    const command = succeededCommand();
+    mount({
+      createContribution: command,
+      selectedEvidence: [
+        { id: "", name: "empty" },
+        { id: "artifact-second", name: "second.log" },
+        { id: "artifact-first", name: "first.log" },
+        { id: "artifact-second", name: "duplicate.log" },
+        { id: "", name: "another empty" },
+      ],
+    });
+    fireEvent.change(hypothesisField(), { target: { value: "Preserve citation order." } });
+    fireEvent.submit(hypothesisForm());
+
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
+    expect(command).toHaveBeenCalledWith({
+      kind: "hypothesis",
+      body: "Preserve citation order.",
+      hypothesisLinks: [
+        { kind: "artifact", id: "artifact-second" },
+        { kind: "artifact", id: "artifact-first" },
+      ],
+    });
+  });
+
+  it("uses Meta+Enter but never submits a composing Enter chord", async () => {
+    const command = succeededCommand();
+    mount({ createContribution: command });
+    const field = hypothesisField();
+    fireEvent.change(field, { target: { value: "Keyboard submission remains explicit." } });
+
+    fireEvent.keyDown(field, {
+      key: "Enter",
+      metaKey: true,
+      isComposing: true,
+    });
+    expect(command).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(field, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
+  });
+
+  it("fences draft and feedback before a new identity-investigation scope is shown", async () => {
+    const commandA = succeededCommand();
+    const commandB = succeededCommand();
+    const mounted = mount({
+      scopeKey: "analyst-a:case-a",
+      createContribution: commandA,
+    });
+    fireEvent.change(hypothesisField(), { target: { value: "Case A private draft" } });
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(screen.getByText("Hypothesis recorded")).toBeTruthy());
+
+    mounted.rerenderComposer({
+      scopeKey: "analyst-b:case-b",
+      createContribution: commandB,
+      selectedEvidence: [{ id: "artifact-b", name: "case-b.log" }],
+    });
+
+    expect(hypothesisField().value).toBe("");
+    expect(screen.queryByText("Case A private draft")).toBeNull();
+    expect(screen.queryByText("Hypothesis recorded")).toBeNull();
+    fireEvent.submit(hypothesisForm());
+    expect(commandB).not.toHaveBeenCalled();
+  });
+
+  it("ignores an old-scope completion and submits the new scope with its command and evidence", async () => {
+    const deferredA: Deferred<Awaited<ReturnType<CreateContribution>>> = createDeferred();
+    const commandA: CreateContribution = vi.fn(() => deferredA.promise);
+    const commandB = succeededCommand();
+    const onSuccessA = vi.fn();
+    const mounted = mount({
+      scopeKey: "analyst-a:case-a",
+      createContribution: commandA,
+      selectedEvidence: [{ id: "artifact-a", name: "case-a.log" }],
+      onSuccess: onSuccessA,
+    });
+    fireEvent.change(hypothesisField(), { target: { value: "Case A in flight" } });
+    fireEvent.submit(hypothesisForm());
+    expect(commandA).toHaveBeenCalledTimes(1);
+
+    mounted.rerenderComposer({
+      scopeKey: "analyst-b:case-b",
+      createContribution: commandB,
+      selectedEvidence: [{ id: "artifact-b", name: "case-b.log" }],
+      onSuccess: vi.fn(),
+    });
+    const fieldB = hypothesisField();
+    fireEvent.change(fieldB, { target: { value: "Case B current draft" } });
+    expect(screen.queryByText("Recording hypothesis…")).toBeNull();
+    expect(screen.getByRole("button", { name: "Record hypothesis" }).getAttribute("disabled")).toBeNull();
+
+    await act(async () => {
+      deferredA.resolve({ status: "succeeded", value: authoritativeContribution() });
+      await deferredA.promise;
+    });
+
+    expect(fieldB.value).toBe("Case B current draft");
+    expect(onSuccessA).not.toHaveBeenCalled();
+    expect(screen.queryByText("Hypothesis recorded")).toBeNull();
+
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(commandB).toHaveBeenCalledTimes(1));
+    expect(commandB).toHaveBeenCalledWith({
+      kind: "hypothesis",
+      body: "Case B current draft",
+      hypothesisLinks: [{ kind: "artifact", id: "artifact-b" }],
+    });
+    expect(JSON.stringify(vi.mocked(commandB).mock.calls)).not.toContain("artifact-a");
   });
 
   it("keeps newer typing when an earlier authoritative success arrives", async () => {
