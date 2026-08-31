@@ -10,7 +10,10 @@ One container/service serves the API and the built React shell. PostgreSQL is
 the default system of record. A private single-node deployment may use the
 explicit SQLite mode documented in `collab/README.md`; it does not provide
 PostgreSQL role separation or multi-worker HA. Evidence bytes live on a
-filesystem volume beside the database.
+filesystem volume beside the database (`COLLAB_EVIDENCE_ROOT`). A future
+S3-compatible evidence-byte backend is not shipped in this example; do not
+add unshipped S3 environment names to `.env.example`. The operator guide is
+`docs/help/war-room/war-room-s3-evidence-store.md`.
 
 ## Roles
 

@@ -15,6 +15,7 @@ related:
   - war-room-workflow
   - war-room-evidence-review
   - war-room-ldap-directory
+  - war-room-s3-evidence-store
   - security-boundaries
 ---
 
@@ -38,6 +39,10 @@ runs on one workstation or behind shared infrastructure.
 The browser is a client in every shape. Local deployment does not remove the
 browser/service trust boundary, and shared deployment does not make every link
 public; authorization still applies.
+
+Evidence bytes in both local and shared shapes currently use filesystem
+storage. A future S3-compatible byte backend is documented in
+help://war-room-s3-evidence-store; it is not a shipped provider.
 
 ## Optional model bridge
 
@@ -83,7 +88,11 @@ surfaces.
   signatures are recorded as metadata but are not verified.
 - Automatic desktop embedding and automatic desktop/CLI synchronization are
   not shipped.
+- Filesystem evidence storage is the shipped byte backend. An S3-compatible
+  War Room evidence store is not shipped.
 
 For the operating sequence, open help://war-room-workflow. For provenance,
-lane, and human-decision checks, open help://war-room-evidence-review. Security
-boundaries for the desktop product are described in help://security-boundaries.
+lane, and human-decision checks, open help://war-room-evidence-review. For a
+future S3-compatible evidence-byte store, open
+help://war-room-s3-evidence-store. Security boundaries for the desktop product
+are described in help://security-boundaries.

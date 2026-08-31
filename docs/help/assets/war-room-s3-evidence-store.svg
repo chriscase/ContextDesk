@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 300" role="img" aria-labelledby="title desc">
+  <title id="title">War Room evidence bytes versus database authority</title>
+  <desc id="desc">A compatible object store holds War Room evidence bytes in a dedicated bucket. The War Room service keeps host-held credentials. The database remains authoritative for investigation metadata and authorization. Browsers never receive object-store credentials or upload directly.</desc>
+  <rect width="980" height="300" fill="#0f172a"/>
+  <defs>
+    <marker id="s3-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="24" y="28" width="280" height="196" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <circle cx="56" cy="58" r="16" fill="#082f49" stroke="#38bdf8"/>
+  <text x="56" y="64" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">1</text>
+  <text x="164" y="64" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Object store</text>
+  <text x="164" y="104" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">S3-compatible API</text>
+  <text x="164" y="126" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Dedicated bucket</text>
+  <text x="164" y="148" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Path-style and TLS</text>
+  <text x="164" y="170" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Persistent volumes</text>
+  <path d="M304 126H344" stroke="#38bdf8" stroke-width="4" marker-end="url(#s3-arrow)"/>
+  <rect x="350" y="28" width="280" height="196" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="3"/>
+  <circle cx="382" cy="58" r="16" fill="#082f49" stroke="#38bdf8"/>
+  <text x="382" y="64" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">2</text>
+  <text x="490" y="64" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">War Room service</text>
+  <text x="490" y="104" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Filesystem today</text>
+  <text x="490" y="126" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">S3 later, not shipped</text>
+  <text x="490" y="148" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Secrets stay on host</text>
+  <text x="490" y="170" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">No browser uploads</text>
+  <path d="M630 126H670" stroke="#38bdf8" stroke-width="4" marker-end="url(#s3-arrow)"/>
+  <rect x="676" y="28" width="280" height="196" rx="16" fill="#111827" stroke="#fbbf24" stroke-width="2"/>
+  <circle cx="708" cy="58" r="16" fill="#422006" stroke="#fbbf24"/>
+  <text x="708" y="64" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15" font-weight="700">3</text>
+  <text x="816" y="64" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">Database</text>
+  <text x="816" y="104" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Metadata and audit</text>
+  <text x="816" y="126" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Authorization</text>
+  <text x="816" y="148" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Authoritative record</text>
+  <text x="816" y="170" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Not object user-meta</text>
+  <rect x="24" y="240" width="932" height="40" rx="12" fill="#111827" stroke="#475569"/>
+  <text x="490" y="265" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">The browser is a client only. Desktop S3 backup/export is a different feature.</text>
+</svg>
