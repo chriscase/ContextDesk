@@ -1,15 +1,30 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { protectedApiFetch } from "./protected-api.js";
+import { parseEvidenceUploadSuccess } from "@cd-collab/contracts/investigation-runtime";
+import { protectedApiFetch, protectedMultipartUpload } from "./protected-api.js";
 import type { WorkFocus } from "./app-location.js";
 import { useRouteFocus } from "./route-focus.js";
 import { TechnicalIdentifiers } from "./technical-identity.js";
 
 const ARTIFACT_KINDS = ["log", "email", "attachment", "file_server_ref"] as const;
+const UPLOAD_KINDS = ARTIFACT_KINDS.filter(
+  (kind): kind is "log" | "email" | "attachment" => kind !== "file_server_ref",
+);
 const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
-const MAX_UPLOAD_BYTES = 1_000_000;
 const MAX_ERROR_LENGTH = 240;
 const INITIAL_FINDINGS = 12;
 const INITIAL_EVIDENCE = 25;
+const PREVIEW_LIMIT_BYTES = 65_536;
+const PREVIEW_RANGE = `bytes=0-${PREVIEW_LIMIT_BYTES - 1}`;
+const UNKNOWN_UPLOAD_REFRESHED =
+  "The upload outcome is unknown. The evidence board has been refreshed; check it before retrying. This is not confirmation that the file was stored or that it was rolled back.";
+const UNKNOWN_UPLOAD_REFRESH_FAILED =
+  "The upload outcome is unknown, and the evidence board could not be refreshed. Reload and check the inventory before retrying. This is not confirmation that the file was stored or that it was rolled back.";
+const UNUSABLE_UPLOAD_RESPONSE =
+  "The server returned an unusable upload response. Check the evidence board before retrying.";
+const UNUSABLE_UPLOAD_REFRESH_FAILED =
+  "The server returned an unusable upload response, and the evidence board could not be refreshed. Reload and check the inventory before retrying.";
+const TEXT_LIKE_EXTENSIONS =
+  /\.(log|txt|text|md|markdown|json|xml|yml|yaml|csv|tsv|eml|html|htm|css|js|mjs|cjs|ts|tsx|jsx|ini|conf|cfg|env|sh|bash|diff|patch|svg)$/i;
 
 interface ArtifactView {
   id: string;
@@ -21,6 +36,8 @@ interface ArtifactView {
   uploaderId: string;
   relativePath?: string | null;
   intakeBatchId?: string | null;
+  mediaType?: string | null;
+  byteLength?: number | null;
 }
 
 interface ParticipantLabel {
@@ -89,7 +106,6 @@ const BUCKET_DETAILS: Record<
   },
 };
 
-
 function participantLabel(identityId: string, participants: readonly ParticipantLabel[]): string {
   const username = participants
     .find((participant) => participant.identityId === identityId)
@@ -119,7 +135,230 @@ function boundedError(message: string, fallback: string): string {
     : trimmed;
 }
 
-function LogEvidenceViewer(props: { filename: string; text: string }) {
+function parseErrorCode(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    return typeof parsed.error === "string" ? parsed.error : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapUploadFailure(status: number, body: string): string {
+  const code = parseErrorCode(body);
+  if (status === 413 || code === "upload exceeds size cap") {
+    return "This file is larger than the server allows.";
+  }
+  if (status === 404 || code === "not_found") {
+    return "This investigation is not available.";
+  }
+  if (status === 503) {
+    return "Evidence storage is temporarily unavailable. The file may not have been stored. Check the evidence board before retrying.";
+  }
+  if (status === 401) {
+    return "Your session is no longer valid.";
+  }
+  if (status === 403) {
+    return "You are not allowed to upload evidence.";
+  }
+  if (status === 400) {
+    const detail = code ? `The server rejected this upload: ${code}.` : "The server rejected this upload.";
+    return boundedError(detail, "The server rejected this upload.");
+  }
+  return boundedError(code ?? "Evidence could not be uploaded.", "Evidence could not be uploaded.");
+}
+
+function isAbortFailure(cause: unknown): boolean {
+  return Boolean(
+    cause
+      && typeof cause === "object"
+      && "name" in cause
+      && (cause as { name?: unknown }).name === "AbortError",
+  );
+}
+
+function formatByteLength(bytes: number | null | undefined): string | null {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) {
+    const kb = bytes / 1024;
+    const rounded = kb >= 10 ? Math.round(kb) : Math.round(kb * 10) / 10;
+    return `${rounded} KB`;
+  }
+  const mb = bytes / (1024 * 1024);
+  const rounded = mb >= 10 ? Math.round(mb) : Math.round(mb * 10) / 10;
+  return `${rounded} MB`;
+}
+
+function isTextLikeMediaType(mediaType: string | null | undefined): boolean {
+  if (!mediaType) return false;
+  const type = mediaType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (type.startsWith("text/")) return true;
+  return (
+    type === "application/json"
+    || type === "application/ld+json"
+    || type === "application/xml"
+    || type === "application/javascript"
+    || type === "application/x-javascript"
+    || type === "application/yaml"
+    || type === "application/x-yaml"
+    || type === "application/x-ndjson"
+    || type.endsWith("+json")
+    || type.endsWith("+xml")
+  );
+}
+
+function isTextLikeFilename(filename: string | null | undefined): boolean {
+  return Boolean(filename && TEXT_LIKE_EXTENSIONS.test(filename));
+}
+
+function isMetadataOnlyArtifact(artifact: ArtifactView): boolean {
+  return artifact.kind === "file_server_ref";
+}
+
+function artifactIsPreviewableText(artifact: ArtifactView): boolean {
+  if (isMetadataOnlyArtifact(artifact)) return false;
+  if (isTextLikeMediaType(artifact.mediaType) || isTextLikeFilename(artifact.filename)) {
+    return true;
+  }
+  return artifact.kind === "log" || artifact.kind === "email";
+}
+
+function evidenceContentUrl(caseId: string, artifactId: string): string {
+  return `/api/cases/${caseId}/evidence/${artifactId}/content`;
+}
+
+function contentLengthOf(response: Response): number | null {
+  const raw = response.headers.get("content-length");
+  if (raw === null || raw === "") return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+function parseContentRange(
+  header: string | null,
+): { start: number; end: number; total: number | null } | null {
+  if (!header) return null;
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(header.trim());
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = match[3] === "*" ? null : Number(match[3]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) return null;
+  if (total !== null && !Number.isSafeInteger(total)) return null;
+  return { start, end, total };
+}
+
+function previewIsTruncated(input: {
+  readerTruncated: boolean;
+  received: number;
+  contentRange: { start: number; end: number; total: number | null } | null;
+  byteLength: number | null | undefined;
+}): boolean {
+  if (input.readerTruncated || input.received > PREVIEW_LIMIT_BYTES) return true;
+  if (typeof input.byteLength === "number" && input.byteLength > PREVIEW_LIMIT_BYTES) return true;
+  if (input.contentRange) {
+    const covered = input.contentRange.end - input.contentRange.start + 1;
+    if (input.contentRange.total !== null && input.contentRange.total > covered) return true;
+    if (input.contentRange.total !== null && input.contentRange.total > PREVIEW_LIMIT_BYTES) {
+      return true;
+    }
+    if (typeof input.byteLength === "number" && covered < input.byteLength) return true;
+  }
+  return false;
+}
+
+async function cancelPreviewBody(response: Response): Promise<void> {
+  const body = response.body;
+  if (!body || typeof body.cancel !== "function") return;
+  try {
+    await body.cancel();
+  } catch {
+    // Best-effort stop of a Range-ignoring transfer.
+  }
+}
+
+async function readBoundedPreviewBytes(
+  response: Response,
+): Promise<{ bytes: Uint8Array; truncated: boolean; received: number }> {
+  const declared = contentLengthOf(response);
+  if (declared !== null && declared > PREVIEW_LIMIT_BYTES) {
+    await cancelPreviewBody(response);
+    throw new Error("Preview stopped because the server sent more than the 64 KiB limit.");
+  }
+  const body = response.body;
+  if (!body || typeof body.getReader !== "function") {
+    throw new Error("Preview bytes were not available as a readable stream.");
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  let readerTruncated = false;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const value = next.value;
+      if (!value || value.byteLength === 0) continue;
+      if (received + value.byteLength > PREVIEW_LIMIT_BYTES) {
+        chunks.push(value.subarray(0, PREVIEW_LIMIT_BYTES - received));
+        received = PREVIEW_LIMIT_BYTES;
+        readerTruncated = true;
+        await reader.cancel();
+        break;
+      }
+      chunks.push(value);
+      received += value.byteLength;
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Already released after cancel.
+    }
+  }
+  return { bytes: concatBytes(chunks), truncated: readerTruncated, received };
+}
+
+function decodePreviewText(bytes: Uint8Array): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (text.includes("\uFFFD")) return null;
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+function previewControlName(artifact: ArtifactView, open: boolean): string {
+  if (artifact.kind === "log") return open ? "Hide log" : "Inspect log";
+  return open ? "Hide preview" : "Preview";
+}
+
+function triggerSameOriginDownload(url: string, filename: string | null): void {
+  const link = document.createElement("a");
+  link.href = url;
+  link.setAttribute("download", filename ?? "");
+  link.rel = "noopener";
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+function LogEvidenceViewer(props: { filename: string; text: string; truncated?: boolean }) {
   const lines = props.text.split(/\r?\n/);
   const interesting = lines
     .map((line, index) => ({ line, index }))
@@ -139,6 +378,9 @@ function LogEvidenceViewer(props: { filename: string; text: string }) {
   return (
     <div className="log-viewer" aria-label={`Log ${props.filename}`}>
       <p className="log-viewer__name">{props.filename}</p>
+      {props.truncated ? (
+        <p className="case-memory__note">Showing the first 64 KiB of this file.</p>
+      ) : null}
       <ol className="log-viewer__lines log-viewer__lines--preview">
         {collapsed.map((index) => (
           <li key={index} value={index + 1}>
@@ -165,22 +407,6 @@ function LogEvidenceViewer(props: { filename: string; text: string }) {
   );
 }
 
-function readFileAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result !== "string") {
-        reject(new Error("Selected file could not be read."));
-        return;
-      }
-      const separator = reader.result.indexOf(",");
-      resolve(separator === -1 ? reader.result : reader.result.slice(separator + 1));
-    };
-    reader.onerror = () => reject(new Error("Selected file could not be read."));
-    reader.readAsDataURL(file);
-  });
-}
-
 export function CaseBoardPanel(props: {
   caseId: string;
   canWrite: boolean;
@@ -200,10 +426,39 @@ export function CaseBoardPanel(props: {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorSource, setErrorSource] = useState<"board" | "upload" | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ loaded: number; total: number | null } | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [summary, setSummary] = useState("");
+  const [kind, setKind] = useState<(typeof UPLOAD_KINDS)[number]>("log");
+  const [privacyClass, setPrivacyClass] = useState<(typeof PRIVACY_CLASSES)[number]>("owner_only");
+  const [freezeAfterUpload, setFreezeAfterUpload] = useState(false);
+  const [fileInputGeneration, setFileInputGeneration] = useState(0);
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [inspectText, setInspectText] = useState<string | null>(null);
-  const [inspectMetaOnly, setInspectMetaOnly] = useState(false);
+  const [inspectUnavailable, setInspectUnavailable] = useState<string | null>(null);
+  const [inspectTruncated, setInspectTruncated] = useState(false);
+  const [downloadPendingId, setDownloadPendingId] = useState<string | null>(null);
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
   const loadGeneration = useRef(0);
+  const previewGeneration = useRef(0);
+  const previewAbort = useRef<AbortController | null>(null);
+  const previewCache = useRef<{
+    artifactId: string;
+    etag: string;
+    text: string;
+    truncated: boolean;
+  } | null>(null);
+  const uploadAbort = useRef<AbortController | null>(null);
+  const downloadAbort = useRef<AbortController | null>(null);
+  const uploadInFlight = useRef(false);
+  const transferSession = useRef(0);
+  const caseIdRef = useRef(props.caseId);
+  const loadedCaseRef = useRef<string | null>(null);
+  const retryButtonRef = useRef<HTMLButtonElement | null>(null);
+  const submitButtonRef = useRef<HTMLButtonElement | null>(null);
+  caseIdRef.current = props.caseId;
   const evidenceRouteKey = props.routeFocus?.section === "triage-evidence-board"
     && props.routeFocus.itemKind === "evidence"
     && props.routeFocus.item
@@ -228,31 +483,96 @@ export function CaseBoardPanel(props: {
   }, [artifacts, evidenceFilter, evidenceLimit, evidenceRouteKey]);
   useRouteFocus(props.routeFocus, !loading && !evidenceRouteNeedsFilterReset);
 
-  const load = useCallback(async (snapshotId?: string | null) => {
-    const generation = ++loadGeneration.current;
-    const isCurrent = () => generation === loadGeneration.current;
+  useEffect(() => {
+    if (!restoreActionFocusAfterUpload.current || uploading) return;
+    restoreActionFocusAfterUpload.current = false;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement) return;
+    (retryButtonRef.current ?? submitButtonRef.current)?.focus();
+  }, [uploading, error, uploadNotice]);
+
+  function abortPanelTransfers(): void {
+    transferSession.current += 1;
+    previewGeneration.current += 1;
+    previewAbort.current?.abort();
+    previewAbort.current = null;
+    uploadAbort.current?.abort();
+    uploadAbort.current = null;
+    downloadAbort.current?.abort();
+    downloadAbort.current = null;
+    uploadInFlight.current = false;
+  }
+
+  const restoreActionFocusAfterUpload = useRef(false);
+
+  function restoreActionFocus(): void {
+    restoreActionFocusAfterUpload.current = true;
+  }
+
+  useEffect(() => {
+    abortPanelTransfers();
+    loadedCaseRef.current = null;
     setLoading(true);
-    setError(null);
+    setUploading(false);
+    setUploadProgress(null);
+    setUploadNotice(null);
+    setSelectedFile(null);
+    setSummary("");
+    setKind("log");
+    setPrivacyClass("owner_only");
+    setFreezeAfterUpload(false);
+    setFileInputGeneration((current) => current + 1);
+    setInspecting(null);
+    setInspectText(null);
+    setInspectUnavailable(null);
+    setInspectTruncated(false);
+    setDownloadPendingId(null);
+    setDownloadNotice(null);
+    previewCache.current = null;
+    return () => abortPanelTransfers();
+  }, [props.caseId]);
+
+  const load = useCallback(async (
+    snapshotId?: string | null,
+    options?: { preserveError?: boolean },
+  ): Promise<boolean> => {
+    const caseId = props.caseId;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => generation === loadGeneration.current && caseIdRef.current === caseId;
+    const blocking = loadedCaseRef.current !== caseId;
+    if (blocking) setLoading(true);
+    if (!options?.preserveError) {
+      setError(null);
+      setErrorSource(null);
+    }
     try {
       const suffix = snapshotId ? `?snapshotId=${encodeURIComponent(snapshotId)}` : "";
       const [evidenceResponse, snapshotsResponse, boardResponse] = await Promise.all([
-        protectedApiFetch(`/api/cases/${props.caseId}/evidence`),
-        protectedApiFetch(`/api/cases/${props.caseId}/snapshots`),
-        protectedApiFetch(`/api/cases/${props.caseId}/board${suffix}`),
+        protectedApiFetch(`/api/cases/${caseId}/evidence`),
+        protectedApiFetch(`/api/cases/${caseId}/snapshots`),
+        protectedApiFetch(`/api/cases/${caseId}/board${suffix}`),
       ]);
       if (!evidenceResponse.ok) throw new Error(await errorText(evidenceResponse, "Evidence could not be loaded."));
       if (!snapshotsResponse.ok) throw new Error(await errorText(snapshotsResponse, "Snapshots could not be loaded."));
       if (!boardResponse.ok) throw new Error(await errorText(boardResponse, "Case board could not be loaded."));
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       const evidenceBody = (await evidenceResponse.json()) as { artifacts?: ArtifactView[] };
       const snapshotsBody = (await snapshotsResponse.json()) as { snapshots?: SnapshotView[] };
       const boardBody = (await boardResponse.json()) as { snapshotId: string | null; findings: BoardFinding[]; notice: string };
-      setArtifacts(evidenceBody.artifacts ?? []);
+      const nextArtifacts = evidenceBody.artifacts ?? [];
+      setArtifacts(nextArtifacts);
+      setSelectedEvidence((current) => current.filter((id) => nextArtifacts.some((artifact) => artifact.id === id)));
       setSnapshots(snapshotsBody.snapshots ?? []);
       setBoard(boardBody);
       setSelectedSnapshotId(boardBody.snapshotId);
+      loadedCaseRef.current = caseId;
+      return true;
     } catch (cause) {
-      if (isCurrent()) setError(cause instanceof Error ? cause.message : "Case memory could not be loaded.");
+      if (isCurrent() && !options?.preserveError) {
+        setError(cause instanceof Error ? cause.message : "Case memory could not be loaded.");
+        setErrorSource("board");
+      }
+      return false;
     } finally {
       if (isCurrent()) setLoading(false);
     }
@@ -272,47 +592,192 @@ export function CaseBoardPanel(props: {
     return () => window.removeEventListener("contextdesk:corpus-intake-committed", onIntake);
   }, [load, props.caseId]);
 
+  function clearPreview(): void {
+    previewGeneration.current += 1;
+    previewAbort.current?.abort();
+    previewAbort.current = null;
+    setInspecting(null);
+    setInspectText(null);
+    setInspectUnavailable(null);
+    setInspectTruncated(false);
+  }
+
+  function applyPreviewUnavailable(message: string): void {
+    setInspectUnavailable(message);
+    setInspectText(null);
+  }
+
   async function inspectArtifact(artifact: ArtifactView) {
     if (inspecting === artifact.id) {
-      setInspecting(null);
-      setInspectText(null);
-      setInspectMetaOnly(false);
+      clearPreview();
       return;
     }
+    const caseId = props.caseId;
+    const session = transferSession.current;
+    const generation = ++previewGeneration.current;
+    previewAbort.current?.abort();
+    const controller = new AbortController();
+    previewAbort.current = controller;
     setInspecting(artifact.id);
     setInspectText(null);
-    setInspectMetaOnly(false);
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/evidence/${artifact.id}/bytes`);
-    if (!response.ok) {
-      setInspectMetaOnly(true);
+    setInspectUnavailable(null);
+    setInspectTruncated(false);
+    const stillCurrent = () =>
+      generation === previewGeneration.current
+      && transferSession.current === session
+      && caseIdRef.current === caseId
+      && !controller.signal.aborted;
+
+    if (isMetadataOnlyArtifact(artifact)) {
+      if (stillCurrent()) {
+        applyPreviewUnavailable(
+          "Bytes are not stored for this artifact. Only recorded metadata is available.",
+        );
+      }
       return;
     }
-    const body = (await response.json()) as { contentBase64?: string };
-    if (!body.contentBase64) {
-      setInspectMetaOnly(true);
+    if (!artifactIsPreviewableText(artifact)) {
+      if (stillCurrent()) {
+        applyPreviewUnavailable(
+          "Preview is unavailable for this file type. Use Download to retrieve the original bytes.",
+        );
+      }
       return;
     }
+
     try {
-      const bytes = Uint8Array.from(atob(body.contentBase64), (char) => char.charCodeAt(0));
-      if (bytes.subarray(0, 1024).includes(0)) {
-        setInspectMetaOnly(true);
+      const cached = previewCache.current;
+      const headers: Record<string, string> = { Range: PREVIEW_RANGE };
+      if (cached && cached.artifactId === artifact.id && cached.etag) {
+        headers["If-None-Match"] = cached.etag;
+      }
+      const response = await protectedApiFetch(
+        evidenceContentUrl(caseId, artifact.id),
+        { headers, signal: controller.signal },
+      );
+      if (!stillCurrent()) return;
+      if (response.status === 404) {
+        applyPreviewUnavailable("This evidence is not available.");
         return;
       }
-      setInspectText(new TextDecoder().decode(bytes));
-    } catch {
-      setInspectMetaOnly(true);
+      if (response.status === 416) {
+        applyPreviewUnavailable("A bounded preview is not available for this evidence.");
+        return;
+      }
+      if (response.status === 503) {
+        applyPreviewUnavailable(
+          "Evidence storage is temporarily unavailable. Try previewing again later.",
+        );
+        return;
+      }
+      if (response.status === 304) {
+        if (cached && cached.artifactId === artifact.id) {
+          setInspectText(cached.text);
+          setInspectTruncated(cached.truncated);
+          setInspectUnavailable(null);
+          return;
+        }
+        applyPreviewUnavailable(
+          "The preview was not modified, but no cached preview is available.",
+        );
+        return;
+      }
+      if (response.status !== 200 && response.status !== 206) {
+        applyPreviewUnavailable("This evidence could not be previewed.");
+        return;
+      }
+      const preview = await readBoundedPreviewBytes(response);
+      if (!stillCurrent()) return;
+      const text = decodePreviewText(preview.bytes);
+      if (text === null) {
+        applyPreviewUnavailable(
+          "This file is not valid text; bytes are not decoded as a preview.",
+        );
+        return;
+      }
+      const truncated = previewIsTruncated({
+        readerTruncated: preview.truncated,
+        received: preview.received,
+        contentRange: parseContentRange(
+          response.headers.get("content-range") ?? response.headers.get("Content-Range"),
+        ),
+        byteLength: artifact.byteLength,
+      });
+      const etag = response.headers.get("etag") ?? response.headers.get("ETag") ?? "";
+      previewCache.current = {
+        artifactId: artifact.id,
+        etag,
+        text,
+        truncated,
+      };
+      setInspectTruncated(truncated);
+      setInspectText(text);
+    } catch (cause) {
+      if (!stillCurrent() || isAbortFailure(cause)) return;
+      applyPreviewUnavailable(
+        cause instanceof Error
+          ? boundedError(cause.message, "This evidence could not be previewed.")
+          : "This evidence could not be previewed.",
+      );
+    }
+  }
+
+  async function downloadArtifact(artifact: ArtifactView) {
+    const caseId = props.caseId;
+    const session = transferSession.current;
+    downloadAbort.current?.abort();
+    const controller = new AbortController();
+    downloadAbort.current = controller;
+    setDownloadPendingId(artifact.id);
+    setDownloadNotice("Preparing download…");
+    const url = evidenceContentUrl(caseId, artifact.id);
+    const stillThisDownload = () =>
+      transferSession.current === session
+      && caseIdRef.current === caseId
+      && !controller.signal.aborted;
+    try {
+      const response = await protectedApiFetch(url, {
+        method: "HEAD",
+        signal: controller.signal,
+      });
+      if (!stillThisDownload()) return;
+      if (response.status === 404) {
+        setDownloadNotice("This evidence is not available.");
+        return;
+      }
+      if (response.status === 503) {
+        setDownloadNotice("Evidence storage is temporarily unavailable.");
+        return;
+      }
+      if (!response.ok) {
+        setDownloadNotice("This evidence could not be downloaded.");
+        return;
+      }
+      setDownloadNotice(null);
+      triggerSameOriginDownload(url, artifact.filename);
+    } catch (cause) {
+      if (!stillThisDownload() || isAbortFailure(cause)) return;
+      setDownloadNotice("This evidence could not be downloaded.");
+    } finally {
+      if (downloadAbort.current === controller) downloadAbort.current = null;
+      if (stillThisDownload()) setDownloadPendingId(null);
     }
   }
 
   async function freezeSnapshot() {
+    const visibleIds = new Set(visibleArtifacts.map((artifact) => artifact.id));
+    const evidenceIds = selectedEvidence.filter((id) => visibleIds.has(id));
+    if (evidenceIds.length === 0) return;
     setError(null);
+    setErrorSource(null);
     const response = await protectedApiFetch(`/api/cases/${props.caseId}/snapshots`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ evidenceIds: selectedEvidence }),
+      body: JSON.stringify({ evidenceIds }),
     });
     if (!response.ok) {
       setError(await errorText(response, "Snapshot could not be frozen."));
+      setErrorSource("board");
       return;
     }
     const snapshot = (await response.json()) as SnapshotView;
@@ -338,96 +803,194 @@ export function CaseBoardPanel(props: {
     );
   }
 
-  async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (props.readOnly || !props.canWrite || uploading) return;
+  function resetUploadForm(): void {
+    setSelectedFile(null);
+    setSummary("");
+    setKind("log");
+    setPrivacyClass("owner_only");
+    setFreezeAfterUpload(false);
+    setFileInputGeneration((current) => current + 1);
+  }
 
-    const form = event.currentTarget;
-    const data = new FormData(form);
-    const fileControl = form.elements.namedItem("file");
-    const selectedFile = fileControl instanceof HTMLInputElement ? fileControl.files?.[0] : undefined;
+  async function runUpload() {
+    if (props.readOnly || !props.canWrite || uploadInFlight.current) return;
     if (!selectedFile) {
       setError("Choose an evidence file to upload.");
+      setErrorSource("upload");
       return;
     }
-    if (selectedFile.size > MAX_UPLOAD_BYTES) {
-      setError("Selected file is too large. Files must be 1 MB or smaller.");
-      return;
-    }
-    const summary = String(data.get("summary") ?? "").trim();
-    if (!summary) {
+    const trimmedSummary = summary.trim();
+    if (!trimmedSummary) {
       setError("Add a short evidence summary.");
+      setErrorSource("upload");
       return;
     }
 
-    const freezeAfterUpload = props.canLead && data.get("freezeAfterUpload") === "on";
+    const caseId = props.caseId;
+    const session = transferSession.current;
+    const file = selectedFile;
+    const artifactKind = kind;
+    const privacy = privacyClass;
+    const shouldFreeze = props.canLead && freezeAfterUpload;
+    const payload = new FormData();
+    payload.append("kind", artifactKind);
+    payload.append("summary", trimmedSummary);
+    payload.append("privacyClass", privacy);
+    payload.append("file", file);
 
+    const controller = new AbortController();
+    uploadAbort.current?.abort();
+    uploadAbort.current = controller;
+    uploadInFlight.current = true;
     setError(null);
+    setErrorSource(null);
+    setUploadNotice(null);
     setUploading(true);
+    setUploadProgress(
+      Number.isFinite(file.size) && file.size > 0
+        ? { loaded: 0, total: file.size }
+        : { loaded: 0, total: null },
+    );
+    const stillThisUpload = () =>
+      transferSession.current === session
+      && caseIdRef.current === caseId
+      && uploadAbort.current === controller;
+
     try {
-      const contentBase64 = await readFileAsBase64(selectedFile);
-      const response = await protectedApiFetch(`/api/cases/${props.caseId}/evidence`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          filename: selectedFile.name,
-          mediaType: selectedFile.type || "application/octet-stream",
-          contentBase64,
-          kind: String(data.get("kind") ?? "log"),
-          summary,
-          privacyClass: String(data.get("privacyClass") ?? "owner_only"),
-        }),
-      });
-      if (!response.ok) {
-        setError(await errorText(response, "Evidence could not be uploaded."));
+      const response = await protectedMultipartUpload(
+        `/api/cases/${caseId}/evidence/stream`,
+        {
+          body: payload,
+          signal: controller.signal,
+          onUploadProgress: (progress) => {
+            if (stillThisUpload() && !controller.signal.aborted) setUploadProgress(progress);
+          },
+        },
+      );
+      if (!stillThisUpload()) return;
+      const bodyText = await response.text();
+      if (!stillThisUpload()) return;
+      if (response.status === 503 && parseErrorCode(bodyText) === "commit_outcome_unknown") {
+        const refreshed = await load(null, { preserveError: true });
+        if (!stillThisUpload()) return;
+        setError(refreshed ? UNKNOWN_UPLOAD_REFRESHED : UNKNOWN_UPLOAD_REFRESH_FAILED);
+        setErrorSource("upload");
+        if (refreshed) announceEvidenceChanged();
+        restoreActionFocus();
         return;
       }
-      form.reset();
-      if (freezeAfterUpload) {
-        const uploaded = (await response.json().catch(() => null)) as
-          | { artifact?: { id?: string } }
-          | null;
-        const artifactId = uploaded?.artifact?.id;
-        if (!artifactId) {
-          setError("Upload succeeded but the snapshot was not frozen: the new evidence id was unavailable. Freeze it from the evidence board.");
-          await load(null);
-          announceEvidenceChanged();
-          return;
-        }
-        const evidenceIds = [...new Set([...selectedEvidence, artifactId])];
-        const snapshotResponse = await protectedApiFetch(`/api/cases/${props.caseId}/snapshots`, {
+      if (!response.ok) {
+        setError(mapUploadFailure(response.status, bodyText));
+        setErrorSource("upload");
+        restoreActionFocus();
+        return;
+      }
+      let parsed: unknown = null;
+      try {
+        parsed = bodyText ? JSON.parse(bodyText) : null;
+      } catch {
+        parsed = null;
+      }
+      let uploaded = null;
+      try {
+        uploaded = parseEvidenceUploadSuccess(parsed);
+      } catch {
+        uploaded = null;
+      }
+      if (
+        !uploaded
+        || uploaded.caseId !== caseId
+        || uploaded.artifact.id.trim().length === 0
+      ) {
+        const refreshed = await load(null, { preserveError: true });
+        if (!stillThisUpload()) return;
+        setError(refreshed ? UNUSABLE_UPLOAD_RESPONSE : UNUSABLE_UPLOAD_REFRESH_FAILED);
+        setErrorSource("upload");
+        if (refreshed) announceEvidenceChanged();
+        restoreActionFocus();
+        return;
+      }
+      if (shouldFreeze) {
+        const visibleIds = new Set(visibleArtifacts.map((artifact) => artifact.id));
+        const evidenceIds = [...new Set([
+          ...selectedEvidence.filter((id) => visibleIds.has(id)),
+          uploaded.artifact.id,
+        ])];
+        const snapshotResponse = await protectedApiFetch(`/api/cases/${caseId}/snapshots`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ evidenceIds }),
         });
+        if (!stillThisUpload()) return;
         if (!snapshotResponse.ok) {
           setError(await errorText(snapshotResponse, "Upload succeeded but the snapshot could not be frozen."));
-          await load(null);
+          setErrorSource("upload");
+          resetUploadForm();
+          await load(null, { preserveError: true });
           announceEvidenceChanged();
+          restoreActionFocus();
           return;
         }
         const snapshot = (await snapshotResponse.json()) as SnapshotView;
+        if (!stillThisUpload()) return;
         setSelectedEvidence([]);
+        resetUploadForm();
+        setUploadNotice("Evidence uploaded and a snapshot was frozen.");
         await load(snapshot.id);
         window.dispatchEvent(
           new CustomEvent("contextdesk:snapshot-frozen", {
-            detail: { caseId: props.caseId, snapshotId: snapshot.id },
+            detail: { caseId, snapshotId: snapshot.id },
           }),
         );
         announceEvidenceChanged();
+        restoreActionFocus();
         return;
       }
+      resetUploadForm();
+      setUploadNotice("Evidence uploaded.");
       await load(null);
       announceEvidenceChanged();
+      restoreActionFocus();
     } catch (cause) {
+      if (!stillThisUpload()) return;
+      if (isAbortFailure(cause)) {
+        setUploadNotice("Upload cancelled.");
+        setError(null);
+        setErrorSource(null);
+        restoreActionFocus();
+        return;
+      }
       setError(
         cause instanceof Error
-          ? boundedError(cause.message, "Evidence could not be uploaded.")
-          : "Evidence could not be uploaded.",
+          ? boundedError(
+            /failed to fetch/i.test(cause.message)
+              ? "The upload did not reach the server. Check the evidence board before retrying."
+              : cause.message,
+            "Evidence could not be uploaded.",
+          )
+          : "The upload did not reach the server. Check the evidence board before retrying.",
       );
+      setErrorSource("upload");
+      restoreActionFocus();
     } finally {
-      setUploading(false);
+      if (uploadAbort.current === controller) {
+        uploadInFlight.current = false;
+        uploadAbort.current = null;
+        if (transferSession.current === session && caseIdRef.current === caseId) {
+          setUploading(false);
+          setUploadProgress(null);
+        }
+      }
     }
+  }
+
+  async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await runUpload();
+  }
+
+  function cancelUpload() {
+    uploadAbort.current?.abort();
   }
 
   const byBucket = (bucket: BoardFinding["bucket"]) =>
@@ -442,6 +1005,19 @@ export function CaseBoardPanel(props: {
     : artifacts;
   const renderedArtifacts = visibleArtifacts.slice(0, evidenceLimit);
   const hiddenArtifactCount = Math.max(0, visibleArtifacts.length - renderedArtifacts.length);
+  const progressPercent =
+    uploadProgress && uploadProgress.total && uploadProgress.total > 0
+      ? Math.min(100, Math.round((uploadProgress.loaded / uploadProgress.total) * 100))
+      : null;
+  const canRetryUpload = Boolean(selectedFile && !uploading && (errorSource === "upload" || uploadNotice === "Upload cancelled."));
+  const visibleSelectedIds = selectedEvidence.filter((id) =>
+    visibleArtifacts.some((artifact) => artifact.id === id),
+  );
+  const statusLiveText = uploading
+    ? progressPercent === null
+      ? `Uploading${selectedFile ? ` ${selectedFile.name}` : ""}…`
+      : `Uploading${selectedFile ? ` ${selectedFile.name}` : ""} — ${progressPercent}%`
+    : [uploadNotice, downloadNotice].filter(Boolean).join(" ");
 
   function selectVisibleEvidence() {
     const visibleIds = visibleArtifacts.map((artifact) => artifact.id);
@@ -458,7 +1034,14 @@ export function CaseBoardPanel(props: {
         </div>
         <span className="case-memory__badge">{artifacts.length} evidence · {snapshots.length} snapshots</span>
       </div>
-      {error ? <p className="case-memory__error" role="alert">{error}</p> : null}
+      {error ? (
+        <p className="case-memory__error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <p className="case-memory__upload-live" role="status" aria-live="polite" aria-atomic="true">
+        {error ? "" : statusLiveText}
+      </p>
       {loading ? <p className="case-memory__empty">Loading case memory…</p> : null}
       {!loading ? (
         <>
@@ -498,7 +1081,7 @@ export function CaseBoardPanel(props: {
                   <p aria-live="polite">
                     {visibleArtifacts.length.toLocaleString()} matching · showing{" "}
                     {Math.min(renderedArtifacts.length, visibleArtifacts.length).toLocaleString()} ·{" "}
-                    {selectedEvidence.length.toLocaleString()} selected
+                    {visibleSelectedIds.length.toLocaleString()} selected
                   </p>
                   {!props.readOnly && props.canLead ? (
                     <div className="case-memory__selection-actions">
@@ -517,23 +1100,29 @@ export function CaseBoardPanel(props: {
                 </div>
               ) : null}
               <ul className="case-memory__list">
-                {renderedArtifacts.map((artifact) => (
+                {renderedArtifacts.map((artifact) => {
+                  const selected = selectedEvidence.includes(artifact.id);
+                  const selectable = !props.readOnly && props.canLead;
+                  const label = artifact.filename ?? artifact.kind;
+                  const sizeLabel = formatByteLength(artifact.byteLength);
+                  const itemClass = [
+                    "case-memory__item",
+                    selectable ? "case-memory__item--selectable" : "",
+                    selected ? "is-selected" : "",
+                  ].filter(Boolean).join(" ");
+                  return (
                   <li
                     key={artifact.id}
-                    className={
-                      props.readOnly || !props.canLead
-                        ? "case-memory__item"
-                        : "case-memory__item case-memory__item--selectable"
-                    }
+                    className={itemClass}
                     data-route-item={artifact.id}
                     data-route-kind="evidence"
                     tabIndex={-1}
                   >
-                    {!props.readOnly && props.canLead ? (
+                    {selectable ? (
                       <input
                         type="checkbox"
-                        aria-label={`Include ${artifact.filename ?? artifact.kind} in snapshot`}
-                        checked={selectedEvidence.includes(artifact.id)}
+                        aria-label={`Include ${label} in snapshot`}
+                        checked={selected}
                         onChange={(event) =>
                           setSelectedEvidence((current) =>
                             event.target.checked
@@ -545,29 +1134,27 @@ export function CaseBoardPanel(props: {
                     ) : null}
                     <div className="case-memory__item-body">
                       <div className="case-memory__item-heading">
-                        <strong>{artifact.filename ?? artifact.kind}</strong>
+                        <strong>{label}</strong>
+                        <span className="case-memory__item-identity">
+                          <span className="case-memory__item-kind">Kind: {artifact.kind}</span>
+                          {sizeLabel ? <span className="case-memory__item-size">{sizeLabel}</span> : null}
+                          {artifact.mediaType ? (
+                            <span className="case-memory__item-type">{artifact.mediaType}</span>
+                          ) : null}
+                          <span className="case-memory__item-status">
+                            {artifact.verificationStatus ?? "verification unknown"}
+                          </span>
+                        </span>
                       </div>
-                      {/* Keep the complete recorded metadata visible at a glance,
-                          but group it into one wrapping line so each artifact is
-                          scannable without making the inventory needlessly tall. */}
                       <div className="case-memory__item-meta">
                         <span className="case-memory__meta">
-                          <span className="case-memory__item-kind">Kind: {artifact.kind}</span>
-                          <span>
-                            {artifact.verificationStatus ?? "verification unknown"} · uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}
-                          </span>
+                          uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}
                         </span>
                         <span className="case-memory__meta">{artifact.privacyClass}</span>
                       </div>
                       <div className="case-memory__item-actions">
-                        {/* The privacy class is a decision a reader acts on; the
-                            content digest is how the record is addressed. Leading
-                            with a truncated digest spent the first line of every
-                            card on a value nobody can act on — it is too short to
-                            match against another system and means nothing on its
-                            own. It stays available in full, one disclosure away. */}
                         <TechnicalIdentifiers
-                          record={artifact.filename ?? artifact.kind}
+                          record={label}
                           items={[
                             {
                               label: "Content hash",
@@ -580,23 +1167,41 @@ export function CaseBoardPanel(props: {
                         <button
                           type="button"
                           className="case-memory__inspect"
+                          aria-expanded={inspecting === artifact.id}
                           onClick={() => void inspectArtifact(artifact)}
                         >
-                          {inspecting === artifact.id ? "Hide log" : "Inspect log"}
+                          {previewControlName(artifact, inspecting === artifact.id)}
                         </button>
+                        {artifact.kind !== "file_server_ref" ? (
+                          <button
+                            type="button"
+                            className="case-memory__download"
+                            disabled={downloadPendingId === artifact.id}
+                            onClick={() => void downloadArtifact(artifact)}
+                          >
+                            {downloadPendingId === artifact.id
+                              ? `Preparing download of ${label}`
+                              : `Download ${label}`}
+                          </button>
+                        ) : null}
                       </div>
                       {inspecting === artifact.id ? (
-                        inspectMetaOnly ? (
-                          <p className="case-memory__note">Metadata only — bytes are not decoded as text.</p>
+                        inspectUnavailable ? (
+                          <p className="case-memory__note">{inspectUnavailable}</p>
                         ) : inspectText !== null ? (
-                          <LogEvidenceViewer filename={artifact.filename ?? artifact.kind} text={inspectText} />
+                          <LogEvidenceViewer
+                            filename={label}
+                            text={inspectText}
+                            truncated={inspectTruncated}
+                          />
                         ) : (
-                          <p className="case-memory__empty">Loading log…</p>
+                          <p className="case-memory__empty">Loading preview…</p>
                         )
                       ) : null}
                     </div>
                   </li>
-                ))}
+                  );
+                })}
               </ul>
               {hiddenArtifactCount > 0 ? (
                 <div className="case-memory__more">
@@ -618,6 +1223,7 @@ export function CaseBoardPanel(props: {
                 <form
                   className="case-memory__upload-form"
                   aria-labelledby="case-evidence-upload-heading"
+                  aria-busy={uploading}
                   onSubmit={(event) => void uploadEvidence(event)}
                 >
                   <h5 id="case-evidence-upload-heading">Upload evidence</h5>
@@ -629,8 +1235,14 @@ export function CaseBoardPanel(props: {
                       name="file"
                       type="file"
                       required
+                      key={fileInputGeneration}
+                      disabled={uploading}
+                      onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
                     />
                   </label>
+                  {selectedFile ? (
+                    <p className="case-memory__note">Selected: {selectedFile.name}</p>
+                  ) : null}
                   <label className="case-memory__upload-field" htmlFor="case-evidence-summary">
                     Summary
                     <textarea
@@ -639,14 +1251,24 @@ export function CaseBoardPanel(props: {
                       name="summary"
                       required
                       rows={3}
+                      value={summary}
+                      disabled={uploading}
+                      onChange={(event) => setSummary(event.target.value)}
                     />
                   </label>
                   <label className="case-memory__upload-field" htmlFor="case-evidence-kind">
                     Artifact kind
-                    <select className="login__input" id="case-evidence-kind" name="kind" defaultValue="log">
-                      {ARTIFACT_KINDS.map((kind) => (
-                        <option key={kind} value={kind}>
-                          {kind}
+                    <select
+                      className="login__input"
+                      id="case-evidence-kind"
+                      name="kind"
+                      value={kind}
+                      disabled={uploading}
+                      onChange={(event) => setKind(event.target.value as (typeof UPLOAD_KINDS)[number])}
+                    >
+                      {UPLOAD_KINDS.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
                         </option>
                       ))}
                     </select>
@@ -657,16 +1279,29 @@ export function CaseBoardPanel(props: {
                       className="login__input"
                       id="case-evidence-privacy"
                       name="privacyClass"
-                      defaultValue={PRIVACY_CLASSES[0]}
+                      value={privacyClass}
+                      disabled={uploading}
+                      onChange={(event) =>
+                        setPrivacyClass(event.target.value as (typeof PRIVACY_CLASSES)[number])
+                      }
                     >
-                      <option value="owner_only">owner_only</option>
-                      <option value="share_safe">share_safe</option>
+                      {PRIVACY_CLASSES.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   {props.canLead ? (
                     <label className="case-memory__upload-field case-memory__freeze-toggle">
                       <span>
-                        <input name="freezeAfterUpload" type="checkbox" /> Freeze a snapshot with
+                        <input
+                          name="freezeAfterUpload"
+                          type="checkbox"
+                          checked={freezeAfterUpload}
+                          disabled={uploading}
+                          onChange={(event) => setFreezeAfterUpload(event.target.checked)}
+                        /> Freeze a snapshot with
                         this upload
                       </span>
                       <small>
@@ -676,9 +1311,44 @@ export function CaseBoardPanel(props: {
                       </small>
                     </label>
                   ) : null}
-                  <button className="login__submit" type="submit" disabled={uploading}>
-                    {uploading ? "Uploading…" : "Upload evidence"}
-                  </button>
+                  <div className="case-memory__upload-status">
+                    {uploading && uploadProgress?.total && uploadProgress.total > 0 ? (
+                      <progress
+                        aria-label="Upload progress"
+                        value={uploadProgress.loaded}
+                        max={uploadProgress.total}
+                      />
+                    ) : null}
+                    <div className="case-memory__upload-actions">
+                      <button
+                        className="login__submit"
+                        type="submit"
+                        disabled={uploading}
+                        ref={submitButtonRef}
+                      >
+                        {uploading ? "Uploading…" : "Upload evidence"}
+                      </button>
+                      {uploading ? (
+                        <button
+                          className="case-memory__secondary-button"
+                          type="button"
+                          onClick={cancelUpload}
+                        >
+                          Cancel
+                        </button>
+                      ) : null}
+                      {canRetryUpload ? (
+                        <button
+                          className="case-memory__secondary-button"
+                          type="button"
+                          ref={retryButtonRef}
+                          onClick={() => void runUpload()}
+                        >
+                          Retry upload
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
                 </form>
               ) : null}
               {!props.readOnly && props.canLead ? (
@@ -686,9 +1356,9 @@ export function CaseBoardPanel(props: {
                   className="login__submit"
                   type="button"
                   onClick={() => void freezeSnapshot()}
-                  disabled={selectedEvidence.length === 0}
+                  disabled={visibleSelectedIds.length === 0}
                 >
-                  Freeze selected evidence ({selectedEvidence.length})
+                  Freeze selected evidence ({visibleSelectedIds.length})
                 </button>
               ) : null}
             </section>
