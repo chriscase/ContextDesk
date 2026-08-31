@@ -26,6 +26,8 @@ interface KeystoneInspectorProps {
   readonly onTabChange: (tab: KeystoneInspectorTab) => void;
   readonly reasoningComposer?: ReactNode;
   readonly situationEditor?: ReactNode;
+  readonly reasoningPanelIsStatic: boolean;
+  readonly recordPanelIsStatic: boolean;
 }
 
 const TABS: readonly { id: KeystoneInspectorTab; label: string }[] = [
@@ -163,6 +165,8 @@ export function KeystoneInspector({
   onTabChange,
   reasoningComposer,
   situationEditor,
+  reasoningPanelIsStatic,
+  recordPanelIsStatic,
 }: KeystoneInspectorProps) {
   const instanceId = useId();
   const selected = selectedEvidence?.evidence ?? null;
@@ -221,7 +225,7 @@ export function KeystoneInspector({
         id={panelId("reasoning")}
         role="tabpanel"
         aria-labelledby={tabId("reasoning")}
-        tabIndex={tab === "reasoning" ? 0 : -1}
+        tabIndex={tab === "reasoning" && reasoningPanelIsStatic ? 0 : -1}
         hidden={tab !== "reasoning"}
       >
         <div className="keystone-strategy__reasoning-stack">
@@ -236,7 +240,7 @@ export function KeystoneInspector({
         id={panelId("record")}
         role="tabpanel"
         aria-labelledby={tabId("record")}
-        tabIndex={tab === "record" ? 0 : -1}
+        tabIndex={tab === "record" && recordPanelIsStatic ? 0 : -1}
         hidden={tab !== "record"}
       >
         <div className="keystone-strategy__record-stack">

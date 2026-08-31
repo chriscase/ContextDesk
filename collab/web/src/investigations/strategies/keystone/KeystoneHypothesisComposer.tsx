@@ -175,6 +175,8 @@ function KeystoneHypothesisComposerScope({
   const submissionIntentRef = useRef<SubmissionIntent | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const links = snapshotArtifactLinks(selectedEvidence);
+  const currentLinksRef = useRef(links);
+  currentLinksRef.current = links;
   const running = submitting || mutationState.status === "running";
   const canSubmit = createContribution !== null
     && body.trim().length > 0
@@ -248,7 +250,11 @@ function KeystoneHypothesisComposerScope({
         submissionIntentRef.current = null;
       }
       setLastSubmittedFingerprint(null);
-      setBody((current) => current === submittedBody ? "" : current);
+      setBody((current) => (
+        fingerprintSubmissionIntent(current, currentLinksRef.current) === fingerprint
+          ? ""
+          : current
+      ));
       setFeedback({ status: "succeeded", citationCount: submittedLinks.length });
       bodyRef.current?.focus();
       onSuccess?.(outcome.value);

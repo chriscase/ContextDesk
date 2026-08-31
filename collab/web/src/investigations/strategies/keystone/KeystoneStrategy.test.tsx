@@ -204,6 +204,7 @@ describe("Keystone engineer strategy", () => {
     const evidenceButton = await screen.findByRole("button", { name: "checkout-timeout.log" });
     fireEvent.click(screen.getByRole("checkbox", { name: /Add checkout-timeout\.log to working set/u }));
     fireEvent.click(screen.getByRole("tab", { name: "Reasoning" }));
+    expect(screen.getByRole("tabpanel", { name: "Reasoning" }).getAttribute("tabindex")).toBe("-1");
     const hypothesis = screen.getByRole("textbox", { name: "Hypothesis" });
     fireEvent.change(hypothesis, { target: { value: contribution.body } });
     fireEvent.click(screen.getByRole("button", { name: "Record hypothesis" }));
@@ -225,6 +226,7 @@ describe("Keystone engineer strategy", () => {
       stage: "capture",
     });
     fireEvent.click(screen.getByRole("tab", { name: "Record" }));
+    expect(screen.getByRole("tabpanel", { name: "Record" }).getAttribute("tabindex")).toBe("-1");
     fireEvent.click(screen.getByRole("button", { name: "Edit situation" }));
     const problem = screen.getByRole("textbox", { name: "Problem statement" });
     fireEvent.change(problem, { target: { value: updated.problemStatement } });

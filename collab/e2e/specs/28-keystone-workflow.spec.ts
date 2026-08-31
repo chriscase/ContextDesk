@@ -83,11 +83,25 @@ test.describe("Keystone K2 engineer workflow", () => {
 
     await page.locator(".keystone-strategy__collection-list button").filter({ hasText: title }).click();
     await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
+    const currentEvidence = page.getByRole("button", { name: filename, exact: true });
+    await currentEvidence.click();
+    await expect(currentEvidence).toHaveAttribute("aria-current", "true");
     await expectForcedColors(page, [
-      page.getByRole("button", { name: filename, exact: true }),
+      currentEvidence,
       page.getByRole("tab", { name: "Reasoning" }),
       page.getByRole("tab", { name: "Record" }),
     ]);
+    const selectedEvidenceColors = await currentEvidence.evaluate((node) => {
+      const probe = document.createElement("span");
+      probe.style.color = "Highlight";
+      document.body.append(probe);
+      const highlight = getComputedStyle(probe).color;
+      probe.remove();
+      const style = getComputedStyle(node);
+      return { borderColor: style.borderColor, color: style.color, highlight };
+    });
+    expect(selectedEvidenceColors.borderColor).toBe(selectedEvidenceColors.highlight);
+    expect(selectedEvidenceColors.color).toBe(selectedEvidenceColors.highlight);
     await page.getByRole("tab", { name: "Reasoning" }).click();
     await expectForcedColors(page, [
       page.getByRole("textbox", { name: "Hypothesis" }),

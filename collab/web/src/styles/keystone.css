@@ -636,9 +636,15 @@
     border-color: CanvasText;
   }
 
-  .keystone-strategy__evidence-name,
+  .keystone-strategy .keystone-strategy__evidence-name,
   .keystone-strategy__tabs button {
     border: 1px solid ButtonText;
+  }
+
+  .keystone-strategy .keystone-strategy__evidence-name[aria-current="true"] {
+    border-color: Highlight;
+    color: Highlight;
+    box-shadow: inset 0 0 0 1px Highlight;
   }
 
   .keystone-strategy__tabs button[aria-selected="true"] {

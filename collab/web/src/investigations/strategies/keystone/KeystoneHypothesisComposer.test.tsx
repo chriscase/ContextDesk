@@ -501,6 +501,39 @@ describe("Keystone K2 evidence-linked hypothesis composer", () => {
     await waitFor(() => expect(field.value).toBe("Newer local draft"));
   });
 
+  it("keeps the body when evidence changes during a pending success and gives that new intent a fresh key", async () => {
+    const deferred: Deferred<Awaited<ReturnType<CreateContribution>>> = createDeferred();
+    const command: CreateContribution = vi.fn(() => deferred.promise);
+    const mounted = mount({
+      createContribution: command,
+      selectedEvidence: [{ id: "artifact-a", name: "a.log" }],
+    });
+    const field = hypothesisField();
+    const body = "The same words cite a different evidence set.";
+    fireEvent.change(field, { target: { value: body } });
+    fireEvent.submit(hypothesisForm());
+    const firstKey = vi.mocked(command).mock.calls[0]?.[0].idempotencyKey;
+
+    mounted.rerenderComposer({
+      selectedEvidence: [{ id: "artifact-b", name: "b.log" }],
+    });
+    await act(async () => {
+      deferred.resolve({ status: "succeeded", value: authoritativeContribution() });
+      await deferred.promise;
+    });
+
+    await waitFor(() => expect(field.value).toBe(body));
+    fireEvent.submit(hypothesisForm());
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+    const secondCall = vi.mocked(command).mock.calls[1]?.[0];
+    expect(secondCall).toEqual(expect.objectContaining({
+      body,
+      hypothesisLinks: [{ kind: "artifact", id: "artifact-b" }],
+      idempotencyKey: expect.stringMatching(/^keystone-hypothesis-/),
+    }));
+    expect(secondCall?.idempotencyKey).not.toBe(firstKey);
+  });
+
   it("clears a draft only on the explicit clear action and restores input focus", () => {
     const command = succeededCommand();
     mount({ createContribution: command });

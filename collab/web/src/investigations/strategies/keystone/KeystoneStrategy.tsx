@@ -510,6 +510,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 mutation={runtime.mutations.updateSituation}
               />
             )}
+            reasoningPanelIsStatic={runtime.commands.createContribution === null}
+            recordPanelIsStatic={runtime.commands.updateSituation === null}
           />
         </div>
       </StrategyPanel>
