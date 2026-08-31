@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   FILE_SERVER_REF_SCHEMA_ID,
@@ -31,8 +41,25 @@ export interface EvidenceStore {
     bytes: Uint8Array,
     opts?: { contentType?: string },
   ): Promise<EvidenceStage>;
+  /**
+   * Stream bytes into an opaque scratch object without holding the global write
+   * lease. Promotion is a separate, lock-acquiring step on the returned stage.
+   */
+  stageStream(
+    source: AsyncIterable<Uint8Array>,
+    opts: EvidenceStreamOptions,
+  ): Promise<EvidenceStreamStage>;
   get(hash: ContentHash): Promise<Uint8Array | null>;
   head(hash: ContentHash): Promise<BlobMetaV1 | null>;
+  /**
+   * Open a verified byte range as an exact-count async iterable. Fail closed on
+   * missing/corrupt meta, digest mismatch, truncation, or concurrent size change.
+   * No URLs or ETags — content hash is the only address.
+   */
+  openRead(
+    hash: ContentHash,
+    range?: EvidenceReadRange,
+  ): Promise<EvidenceReadHandle>;
   /** Re-hash on-disk bytes; returns false (fail closed) on missing or mutated blob. */
   verify(hash: ContentHash): Promise<boolean>;
 
@@ -86,6 +113,48 @@ export interface EvidenceStore {
   recoverUnreferencedWrites?(
     referenced?: ReadonlySet<string>,
   ): Promise<EvidenceWriteRecoveryReport>;
+}
+
+/** Options for provider-neutral streaming evidence intake. */
+export interface EvidenceStreamOptions {
+  contentType?: string;
+  /** Reject the stream once more than this many bytes have been accepted. */
+  maxBytes: number;
+  /** When set, the authoritative byte length must match after the source ends. */
+  expectedLength?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Staged streaming write. `meta` is authoritative for the scratched bytes.
+ * Repeated promotion before settlement and repeated settlement with the same
+ * mode/options are idempotent. Settlement is terminal and only promotion
+ * acquires write coordination locks.
+ */
+export interface EvidenceStreamStage {
+  readonly meta: BlobMetaV1;
+  promote(): Promise<void>;
+  rollback(): Promise<void>;
+  finalize(options?: EvidenceFinalizeOptions): Promise<void>;
+}
+
+/** Inclusive byte range over a content-addressed blob. */
+export interface EvidenceReadRange {
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * Verified read handle. `byteLength` is the exact count `bytes` will emit.
+ * No URLs or ETags — callers address content solely by hash + range.
+ */
+export interface EvidenceReadHandle {
+  readonly meta: BlobMetaV1;
+  /** Null means the complete blob, including a valid zero-byte blob. */
+  readonly range: EvidenceReadRange | null;
+  readonly byteLength: number;
+  /** Treat successful iteration completion as the integrity boundary. */
+  bytes(): AsyncIterable<Uint8Array>;
 }
 
 export interface EvidenceFinalizeOptions {
@@ -157,16 +226,123 @@ function stagingDir(root: string): string {
   return join(root, ".staging");
 }
 
+function streamStagingDir(root: string): string {
+  return join(root, ".stream-staging");
+}
+
+function assertSafeNonNegativeInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a safe nonnegative integer`);
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal) return;
+  if (typeof signal.throwIfAborted === "function") {
+    signal.throwIfAborted();
+    return;
+  }
+  if (signal.aborted) {
+    const reason = signal.reason;
+    if (reason instanceof Error) throw reason;
+    throw new Error("evidence stream aborted");
+  }
+}
+
+async function nextWithAbort<T>(
+  iterator: AsyncIterator<T>,
+  signal: AbortSignal | undefined,
+): Promise<IteratorResult<T>> {
+  throwIfAborted(signal);
+  if (!signal) return iterator.next();
+  return new Promise<IteratorResult<T>>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      finish(() => reject(signal.reason ?? new Error("evidence stream aborted")));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    let next: Promise<IteratorResult<T>>;
+    try {
+      next = Promise.resolve(iterator.next());
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    void next.then(
+      (result) => finish(() => resolve(result)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+async function writeChunkFully(
+  handle: FileHandle,
+  chunk: Uint8Array,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    throwIfAborted(signal);
+    const { bytesWritten } = await handle.write(
+      chunk,
+      offset,
+      chunk.byteLength - offset,
+      null,
+    );
+    if (bytesWritten <= 0) {
+      throw new Error("evidence stream write made no progress");
+    }
+    offset += bytesWritten;
+  }
+  throwIfAborted(signal);
+}
+
+interface FileSnapshot {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+function sameFileSnapshot(left: FileSnapshot, right: FileSnapshot): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+function assertSameFileSnapshot(
+  left: FileSnapshot,
+  right: FileSnapshot,
+  message: string,
+): void {
+  if (!sameFileSnapshot(left, right)) throw new Error(message);
+}
+
 async function writeFileDurable(path: string, contents: string): Promise<void> {
   const temporaryPath = `${path}.tmp-${randomUUID()}`;
-  const handle = await open(temporaryPath, "w");
   try {
-    await handle.writeFile(contents, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await open(temporaryPath, "w");
+    try {
+      await handle.writeFile(contents, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporaryPath, path);
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
   }
-  await rename(temporaryPath, path);
   try {
     const directory = await open(dirname(path), "r");
     try {
@@ -195,6 +371,7 @@ export interface FilesystemEvidenceStoreOptions {
 export class FilesystemEvidenceStore implements EvidenceStore {
   readonly rootDir: string;
   private readonly stageTails = new Map<string, Promise<void>>();
+  private readonly activeStreamStages = new Set<string>();
   readonly writeCoordination: "single_process" | "external";
   private writeTail: Promise<void> = Promise.resolve();
   private readonly acquireWriteLease:
@@ -226,6 +403,7 @@ export class FilesystemEvidenceStore implements EvidenceStore {
         await this.recoverUnreferencedWritesUnlocked(await this.loadBoundReferencedHashes());
       } else {
         await rm(stagingDir(this.rootDir), { recursive: true, force: true });
+        await this.cleanupAbandonedStreamStagesUnlocked();
       }
       return new FilesystemEvidenceWriteBatch(this, release);
     } catch (error) {
@@ -346,7 +524,27 @@ export class FilesystemEvidenceStore implements EvidenceStore {
       await rm(path, { force: true });
     }
     await rm(stagingDir(this.rootDir), { recursive: true, force: true });
+    await this.cleanupAbandonedStreamStagesUnlocked();
     return { reclaimed, journals };
+  }
+
+  private async cleanupAbandonedStreamStagesUnlocked(): Promise<void> {
+    if (this.writeCoordination !== "single_process") return;
+    let names: string[];
+    try {
+      names = await readdir(streamStagingDir(this.rootDir));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const name of names) {
+      const stageId = name.slice(0, 36);
+      if (this.activeStreamStages.has(stageId)) continue;
+      await rm(join(streamStagingDir(this.rootDir), name), {
+        recursive: true,
+        force: true,
+      });
+    }
   }
 
   async put(
@@ -517,6 +715,590 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     };
   }
 
+  async stageStream(
+    source: AsyncIterable<Uint8Array>,
+    opts: EvidenceStreamOptions,
+  ): Promise<EvidenceStreamStage> {
+    if (!opts || typeof opts !== "object") {
+      throw new Error("evidence stream options are required");
+    }
+    assertSafeNonNegativeInteger(opts.maxBytes, "maxBytes");
+    if (opts.expectedLength !== undefined) {
+      assertSafeNonNegativeInteger(opts.expectedLength, "expectedLength");
+      if (opts.expectedLength > opts.maxBytes) {
+        throw new Error("expectedLength must not exceed maxBytes");
+      }
+    }
+    if (opts.contentType !== undefined && typeof opts.contentType !== "string") {
+      throw new Error("contentType must be a string");
+    }
+    if (
+      !source
+      || typeof source[Symbol.asyncIterator] !== "function"
+    ) {
+      throw new Error("evidence stream source must be an AsyncIterable");
+    }
+    throwIfAborted(opts.signal);
+
+    await this.ping();
+    await mkdir(streamStagingDir(this.rootDir), { recursive: true });
+    const stageId = randomUUID();
+    const scratchBlob = join(streamStagingDir(this.rootDir), stageId);
+    const scratchMeta = join(streamStagingDir(this.rootDir), `${stageId}.meta.json`);
+    this.activeStreamStages.add(stageId);
+    const cleanScratch = async (): Promise<void> => {
+      const results = await Promise.allSettled([
+        rm(scratchBlob, { force: true }),
+        rm(scratchMeta, { force: true }),
+      ]);
+      this.activeStreamStages.delete(stageId);
+      const failed = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failed) throw failed.reason;
+    };
+
+    const hasher = createHash("sha256");
+    let byteLength = 0;
+    let handle: FileHandle | null = null;
+    let streamed = false;
+    let sourceFinished = false;
+    let iterator: AsyncIterator<Uint8Array> | null = null;
+    try {
+      iterator = source[Symbol.asyncIterator]();
+      handle = await open(scratchBlob, "w");
+      while (true) {
+        const next = await nextWithAbort(iterator, opts.signal);
+        if (next.done) {
+          sourceFinished = true;
+          break;
+        }
+        const chunk = next.value;
+        throwIfAborted(opts.signal);
+        if (!(chunk instanceof Uint8Array)) {
+          throw new Error("evidence stream chunk must be a Uint8Array");
+        }
+        if (chunk.byteLength === 0) {
+          throw new Error("evidence stream chunk must not be empty");
+        }
+        const nextLength = byteLength + chunk.byteLength;
+        if (nextLength > opts.maxBytes) {
+          throw new Error("evidence stream exceeded maxBytes");
+        }
+        const stableChunk = Uint8Array.from(chunk);
+        await writeChunkFully(handle, stableChunk, opts.signal);
+        hasher.update(stableChunk);
+        byteLength = nextLength;
+      }
+      throwIfAborted(opts.signal);
+      if (opts.expectedLength !== undefined && byteLength !== opts.expectedLength) {
+        throw new Error("evidence stream length did not match expectedLength");
+      }
+      await handle.sync();
+      throwIfAborted(opts.signal);
+      await handle.close();
+      handle = null;
+      streamed = true;
+    } finally {
+      if (iterator && !sourceFinished) {
+        try {
+          if (typeof iterator.return === "function") {
+            void Promise.resolve(iterator.return()).catch(() => undefined);
+          }
+        } catch {
+          // A hostile source cannot suppress descriptor/scratch cleanup.
+        }
+      }
+      if (handle) {
+        await handle.close().catch(() => undefined);
+        handle = null;
+      }
+      if (!streamed) {
+        await cleanScratch();
+      }
+    }
+
+    const hash = hasher.digest("hex") as ContentHash;
+    const meta: BlobMetaV1 = Object.freeze({
+      hash,
+      byteLength,
+      contentType: opts.contentType ?? null,
+    });
+    try {
+      throwIfAborted(opts.signal);
+      await writeFileDurable(scratchMeta, JSON.stringify(meta));
+      throwIfAborted(opts.signal);
+    } catch (error) {
+      await cleanScratch();
+      throw error;
+    }
+
+    const canonicalBlob = blobPath(this.rootDir, hash);
+    const canonicalMeta = metaPath(this.rootDir, hash);
+    let promoted = false;
+    let created = false;
+    let settled = false;
+    let journalId: string | null = null;
+    let releaseLifecycleLock: (() => Promise<void>) | null = null;
+    let promotionPromise: Promise<void> | null = null;
+    let settlementPromise: Promise<void> | null = null;
+    let settlementMode: "rollback" | "finalize" | null = null;
+    let finalizeRetainPendingJournal: boolean | null = null;
+    let terminalPromotionFailure = false;
+
+    const releaseLifecycle = async (): Promise<void> => {
+      const release = releaseLifecycleLock;
+      if (!release) return;
+      await release();
+      if (releaseLifecycleLock === release) releaseLifecycleLock = null;
+    };
+
+    const runPromotion = async (): Promise<void> => {
+      const releaseWrite = await this.acquireWriteLock();
+      let retainWriteLock = false;
+      try {
+        const releaseDigest = await this.acquireStageLock(hash);
+        try {
+          let existing = false;
+          try {
+            await stat(canonicalBlob);
+            existing = true;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+          if (existing) {
+            const existingMeta = await this.readCanonicalMetaStrict(hash);
+            await this.verifyCanonicalFile(
+              canonicalBlob,
+              hash,
+              existingMeta.byteLength,
+            );
+            await cleanScratch();
+            promoted = true;
+            created = false;
+            releaseLifecycleLock = releaseWrite;
+            retainWriteLock = true;
+            return;
+          }
+
+          try {
+            await stat(canonicalMeta);
+            throw new Error("orphaned evidence metadata exists without canonical bytes");
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+
+          await this.verifyCanonicalFile(scratchBlob, hash, byteLength);
+          await writeFileDurable(scratchMeta, JSON.stringify(meta));
+          journalId = randomUUID();
+          await this.writePendingJournal(journalId, [hash]);
+          try {
+            await mkdir(dirname(canonicalBlob), { recursive: true });
+            await rename(scratchBlob, canonicalBlob);
+            created = true;
+            try {
+              await rename(scratchMeta, canonicalMeta);
+              this.activeStreamStages.delete(stageId);
+            } catch (error) {
+              try {
+                await rename(canonicalBlob, scratchBlob);
+                created = false;
+              } catch {
+                terminalPromotionFailure = true;
+              }
+              throw error;
+            }
+          } catch (error) {
+            let failure: unknown = error;
+            try {
+              if (created) {
+                await rm(canonicalMeta, { force: true });
+                await rm(canonicalBlob, { force: true });
+                created = false;
+                if (terminalPromotionFailure) await cleanScratch();
+              }
+              if (journalId) {
+                await this.deletePendingJournal(journalId);
+                journalId = null;
+              }
+            } catch (cleanupError) {
+              failure = new AggregateError(
+                [error, cleanupError],
+                "evidence stream promotion cleanup failed",
+              );
+            }
+            if (created || journalId) {
+              // Fail closed: unresolved canonical/journal state remains owned by
+              // this stage and must not be observed or adopted outside its lease.
+              releaseLifecycleLock = releaseWrite;
+              retainWriteLock = true;
+            } else if (terminalPromotionFailure) {
+              settled = true;
+            }
+            throw failure;
+          }
+          promoted = true;
+          releaseLifecycleLock = releaseWrite;
+          retainWriteLock = true;
+        } finally {
+          releaseDigest();
+        }
+      } finally {
+        if (!retainWriteLock) await releaseWrite();
+      }
+    };
+
+    const promote = async (): Promise<void> => {
+      if (settled) throw new Error("evidence stream stage is already settled");
+      if (settlementMode) {
+        throw new Error(`evidence stream stage is already settling via ${settlementMode}`);
+      }
+      if (promoted) return;
+      if (releaseLifecycleLock) {
+        throw new Error("evidence stream failed promotion must be rolled back");
+      }
+      if (!promotionPromise) {
+        promotionPromise = runPromotion().catch((error: unknown) => {
+          promotionPromise = null;
+          throw error;
+        });
+      }
+      await promotionPromise;
+      if (settlementMode) {
+        throw new Error(
+          `evidence stream stage began ${settlementMode} while promotion was in flight`,
+        );
+      }
+    };
+
+    const settle = async (
+      mode: "rollback" | "finalize",
+      options?: EvidenceFinalizeOptions,
+    ): Promise<void> => {
+      const retainPendingJournal = options?.retainPendingJournal === true;
+      if (mode === "finalize" && !promoted) {
+        if (promotionPromise) {
+          throw new Error("evidence stream promotion must complete before finalize");
+        }
+        if (created || journalId !== null || releaseLifecycleLock) {
+          throw new Error("evidence stream failed promotion must be rolled back");
+        }
+      }
+      if (settlementPromise) {
+        if (settlementMode !== mode) {
+          throw new Error(`evidence stream stage is already settling via ${settlementMode}`);
+        }
+        if (
+          mode === "finalize"
+          && finalizeRetainPendingJournal !== retainPendingJournal
+        ) {
+          throw new Error("evidence stream finalize options conflict with the active settlement");
+        }
+        return settlementPromise;
+      }
+      if (settled) return;
+      if (settlementMode && settlementMode !== mode) {
+        throw new Error(`evidence stream stage is already settling via ${settlementMode}`);
+      }
+      if (mode === "finalize") {
+        if (
+          finalizeRetainPendingJournal !== null
+          && finalizeRetainPendingJournal !== retainPendingJournal
+        ) {
+          throw new Error("evidence stream finalize options conflict with the active settlement");
+        }
+        finalizeRetainPendingJournal = retainPendingJournal;
+      }
+      settlementMode = mode;
+      const attempt = (async () => {
+        if (promotionPromise) {
+          try {
+            await promotionPromise;
+          } catch {
+            // Settlement still owns cleanup after a failed promotion.
+          }
+        }
+        if (
+          !releaseLifecycleLock
+          && (promoted || created || journalId !== null)
+        ) {
+          releaseLifecycleLock = await this.acquireWriteLock();
+        }
+        try {
+          await cleanScratch();
+          if (mode === "rollback" && created) {
+            await rm(canonicalMeta, { force: true });
+            await rm(canonicalBlob, { force: true });
+            created = false;
+            promoted = false;
+          }
+          if (!retainPendingJournal && journalId) {
+            await this.deletePendingJournal(journalId);
+            journalId = null;
+          }
+        } catch (error) {
+          if (!created && journalId === null) await releaseLifecycle();
+          throw error;
+        }
+        await releaseLifecycle();
+        settled = true;
+      })();
+      settlementPromise = attempt;
+      try {
+        await attempt;
+      } catch (error) {
+        if (settlementPromise === attempt) settlementPromise = null;
+        throw error;
+      }
+    };
+
+    return {
+      meta,
+      promote,
+      rollback: () => settle("rollback"),
+      finalize: (options) => settle("finalize", options),
+    };
+  }
+
+  async openRead(
+    hash: ContentHash,
+    range?: EvidenceReadRange,
+  ): Promise<EvidenceReadHandle> {
+    if (!isContentHash(hash)) {
+      throw new Error("invalid content hash");
+    }
+    if (range !== undefined) {
+      assertSafeNonNegativeInteger(range.start, "range.start");
+      assertSafeNonNegativeInteger(range.end, "range.end");
+      if (range.end < range.start) {
+        throw new Error("range.end must be greater than or equal to range.start");
+      }
+    }
+    const path = blobPath(this.rootDir, hash);
+    const meta = await this.readCanonicalMetaStrict(hash);
+    if (
+      range !== undefined
+      && (
+        meta.byteLength === 0
+        || range.start >= meta.byteLength
+        || range.end >= meta.byteLength
+      )
+    ) {
+      throw new Error("range is out of bounds");
+    }
+    await this.verifyCanonicalFile(path, hash, meta.byteLength);
+
+    const effectiveRange: EvidenceReadRange | null = range
+      ? Object.freeze({ ...range })
+      : null;
+    const exactCount = effectiveRange
+      ? effectiveRange.end - effectiveRange.start + 1
+      : meta.byteLength;
+
+    return {
+      meta: Object.freeze({
+        hash: meta.hash,
+        byteLength: meta.byteLength,
+        contentType: meta.contentType ?? null,
+      }),
+      range: effectiveRange,
+      byteLength: exactCount,
+      bytes: () => this.readVerifiedRange(path, meta, effectiveRange),
+    };
+  }
+
+  private async readCanonicalMetaStrict(hash: ContentHash): Promise<BlobMetaV1> {
+    let raw: string;
+    try {
+      raw = await readFile(metaPath(this.rootDir, hash), "utf8");
+    } catch {
+      throw new Error("evidence metadata is missing");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("evidence metadata is corrupt");
+    }
+    if (
+      typeof parsed !== "object"
+      || parsed === null
+      || typeof (parsed as BlobMetaV1).hash !== "string"
+      || typeof (parsed as BlobMetaV1).byteLength !== "number"
+      || (
+        (parsed as BlobMetaV1).contentType !== null
+        && typeof (parsed as BlobMetaV1).contentType !== "string"
+      )
+    ) {
+      throw new Error("evidence metadata is corrupt");
+    }
+    const meta = parsed as BlobMetaV1;
+    if (meta.hash !== hash || !isContentHash(meta.hash)) {
+      throw new Error("evidence metadata hash mismatch");
+    }
+    assertSafeNonNegativeInteger(meta.byteLength, "meta.byteLength");
+    return {
+      hash: meta.hash,
+      byteLength: meta.byteLength,
+      contentType: meta.contentType,
+    };
+  }
+
+  private async verifyOpenFileIncremental(
+    handle: FileHandle,
+    expectedHash: ContentHash,
+    expectedLength: number,
+  ): Promise<void> {
+    const hasher = createHash("sha256");
+    let position = 0;
+    while (position < expectedLength) {
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, expectedLength - position));
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        buffer.byteLength,
+        position,
+      );
+      if (bytesRead <= 0) {
+        throw new Error("evidence blob truncated or corrupted");
+      }
+      hasher.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    const extra = Buffer.allocUnsafe(1);
+    if ((await handle.read(extra, 0, 1, expectedLength)).bytesRead !== 0) {
+      throw new Error("evidence blob size does not match metadata");
+    }
+    if (hasher.digest("hex") !== expectedHash) {
+      throw new Error("evidence blob failed verification");
+    }
+  }
+
+  private async verifyCanonicalFile(
+    path: string,
+    expectedHash: ContentHash,
+    expectedLength: number,
+  ): Promise<void> {
+    let handle: FileHandle;
+    try {
+      handle = await open(path, "r");
+    } catch {
+      throw new Error("evidence blob is missing");
+    }
+    try {
+      const before = await handle.stat();
+      if (!before.isFile() || before.size !== expectedLength) {
+        throw new Error("evidence blob size does not match metadata");
+      }
+      await this.verifyOpenFileIncremental(handle, expectedHash, expectedLength);
+      const after = await handle.stat();
+      if (!sameFileSnapshot(before, after)) {
+        throw new Error("evidence blob changed during verification");
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private readVerifiedRange(
+    path: string,
+    meta: BlobMetaV1,
+    range: EvidenceReadRange | null,
+  ): AsyncIterable<Uint8Array> {
+    const verifyOpenFileIncremental = (
+      handle: FileHandle,
+      expectedHash: ContentHash,
+      expectedLength: number,
+    ): Promise<void> => this.verifyOpenFileIncremental(
+      handle,
+      expectedHash,
+      expectedLength,
+    );
+    return {
+      async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        let handle: FileHandle;
+        try {
+          handle = await open(path, "r");
+        } catch {
+          throw new Error("evidence blob is missing");
+        }
+        let verifiedSnapshot: FileSnapshot | null = null;
+        let integrityComplete = false;
+        try {
+          const before = await handle.stat();
+          if (!before.isFile() || before.size !== meta.byteLength) {
+            throw new Error("evidence blob size does not match metadata");
+          }
+          await verifyOpenFileIncremental(
+            handle,
+            meta.hash,
+            meta.byteLength,
+          );
+          const verified = await handle.stat();
+          if (!sameFileSnapshot(before, verified)) {
+            throw new Error("evidence blob changed during verification");
+          }
+          verifiedSnapshot = verified;
+
+          let position = range?.start ?? 0;
+          let remaining = range
+            ? range.end - range.start + 1
+            : meta.byteLength;
+          const emittedHasher = range === null ? createHash("sha256") : null;
+          while (remaining > 0) {
+            const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+            const { bytesRead } = await handle.read(
+              buffer,
+              0,
+              buffer.byteLength,
+              position,
+            );
+            if (bytesRead <= 0) throw new Error("evidence read truncated");
+            const chunk = buffer.subarray(0, bytesRead);
+            emittedHasher?.update(chunk);
+            position += bytesRead;
+            remaining -= bytesRead;
+            yield Uint8Array.from(chunk);
+          }
+
+          if (emittedHasher) {
+            if (emittedHasher.digest("hex") !== meta.hash) {
+              throw new Error("evidence blob changed during read");
+            }
+          } else {
+            await verifyOpenFileIncremental(
+              handle,
+              meta.hash,
+              meta.byteLength,
+            );
+          }
+          const after = await handle.stat();
+          if (!sameFileSnapshot(verified, after)) {
+            throw new Error("evidence blob changed during read");
+          }
+          integrityComplete = true;
+        } finally {
+          try {
+            if (!integrityComplete && verifiedSnapshot) {
+              await verifyOpenFileIncremental(
+                handle,
+                meta.hash,
+                meta.byteLength,
+              );
+              assertSameFileSnapshot(
+                verifiedSnapshot,
+                await handle.stat(),
+                "evidence blob changed during read",
+              );
+            }
+          } finally {
+            await handle.close();
+          }
+        }
+      },
+    };
+  }
+
   private async acquireStageLock(hash: string): Promise<() => void> {
     const previous = this.stageTails.get(hash) ?? Promise.resolve();
     let unlock = (): void => undefined;
@@ -681,6 +1463,17 @@ class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
 
   async stage(): Promise<EvidenceStage> {
     throw new Error("nested evidence stages are unsupported in an evidence write batch");
+  }
+
+  async stageStream(): Promise<EvidenceStreamStage> {
+    throw new Error("streaming evidence stages are unsupported in an evidence write batch");
+  }
+
+  async openRead(
+    hash: ContentHash,
+    range?: EvidenceReadRange,
+  ): Promise<EvidenceReadHandle> {
+    return this.owner.openRead(hash, range);
   }
 
   async get(hash: ContentHash): Promise<Uint8Array | null> {
