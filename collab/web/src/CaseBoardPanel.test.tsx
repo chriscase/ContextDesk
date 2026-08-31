@@ -108,6 +108,7 @@ describe("CaseBoardPanel", () => {
     );
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
     expect(screen.getByText("checkout.log")).toBeTruthy();
+    expect(screen.getByText("Kind: log")).toBeTruthy();
     expect(screen.getByText(/uploaded by alice/)).toBeTruthy();
     expect(screen.getByText(/frozen by alice/)).toBeTruthy();
     expect(screen.queryByText(/uid=alice/)).toBeNull();
