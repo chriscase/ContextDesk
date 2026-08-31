@@ -62,9 +62,12 @@
 .investigation-first__field textarea { resize: vertical; min-height: 3.1rem; }
 .investigation-first__field small { font-size: 0.74rem; }
 .investigation-first__advanced { margin-top: 1rem; border-top: 1px solid var(--line-soft); }
-.investigation-first__advanced summary { display: flex; gap: 0.5rem; padding: 0.8rem 0; color: var(--fg); font-weight: 600; cursor: pointer; }
-.investigation-first__advanced summary span { color: var(--muted); font-size: 0.8rem; font-weight: 400; }
+.investigation-first__advanced summary { display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; min-width: 0; padding: 0.8rem 0; color: var(--fg); font-weight: 600; cursor: pointer; overflow-wrap: anywhere; }
+.investigation-first__advanced summary span { min-width: 0; color: var(--muted); font-size: 0.8rem; font-weight: 400; overflow-wrap: anywhere; }
 .investigation-first__advanced[open] summary { color: var(--accent); }
+.investigation-first__create-status { margin: 0 0 0.8rem; padding: 0.65rem 0.8rem; border: 1px solid var(--line-soft); border-inline-start: 3px solid var(--warning); border-radius: 0.45rem; }
+.investigation-first__create-status p { margin: 0 0 0.55rem; }
+.investigation-first__create-status button { max-width: 100%; border: 1px solid var(--border); border-radius: 0.4rem; padding: 0.4rem 0.6rem; background: transparent; color: var(--fg); overflow-wrap: anywhere; }
 .investigation-first__form-actions { display: flex; align-items: center; gap: 0.8rem; margin-top: 1rem; }
 .investigation-first__form-actions span { color: var(--muted); font-size: 0.78rem; }
 .investigation-first__form-actions button,
@@ -176,6 +179,11 @@
 @media (forced-colors: active) {
   .investigation-first__list-item,
   .investigation-first__card,
+  .investigation-first__create .investigation-first__advanced,
+  .investigation-first__create-error,
+  .investigation-first__create-status,
+  .investigation-first__create-status button,
+  .investigation-first__create .investigation-first__form-actions button,
   .investigation-first .status-pill,
   .investigation-first .severity-pill {
     border: 1px solid CanvasText;
@@ -186,6 +194,18 @@
   .investigation-first textarea:focus-visible,
   .investigation-first select:focus-visible,
   .investigation-first summary:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
+
+  /* Chromium does not always apply :focus-visible after a pointer-triggered
+     validation failure. In forced-colors mode every focused strategy control
+     still needs a system-color indicator, regardless of input modality. */
+  .investigation-first button:focus,
+  .investigation-first input:focus,
+  .investigation-first textarea:focus,
+  .investigation-first select:focus,
+  .investigation-first summary:focus {
     outline: 3px solid Highlight;
     outline-offset: 2px;
   }

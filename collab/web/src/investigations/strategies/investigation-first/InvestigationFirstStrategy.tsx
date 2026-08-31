@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   selectEvidenceInventory,
   selectResourceView,
@@ -43,7 +43,15 @@ function compactByteLabel(value: number | null | undefined): string | null {
 }
 function listQuestions(value: string): string[] { return value.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean); }
 function contextPayload(value: InvestigationContext): InvestigationContext | null {
-  return Object.values(value).some((item) => text(item)) ? { ...value } : null;
+  const normalized: InvestigationContext = {
+    productName: text(value.productName),
+    version: text(value.version),
+    build: text(value.build),
+    component: text(value.component),
+    environment: text(value.environment),
+    organization: text(value.organization),
+  };
+  return Object.values(normalized).some(Boolean) ? normalized : null;
 }
 function dateLabel(value: string | null | undefined): string {
   if (!value) return "Not recorded";
@@ -57,7 +65,24 @@ function occurrenceLabel(row: CaseV1): string {
   return `${row.occurredAt} (${precision})`;
 }
 
+function createFailureCopy(error: RuntimeFailure): string {
+  if (error.kind === "input") {
+    if (error.field === "title") return "Add a title before creating the investigation.";
+    return "The investigation could not be created because required input is missing. Review the form and try again.";
+  }
+  if (error.kind === "auth_lost") return "Your access changed before the investigation could be created. Sign in again to continue.";
+  if (error.kind === "validation") return "The submitted values were not accepted, so the investigation was not created. Review the entries and try again.";
+  if (error.kind === "conflict") return "The create request conflicted with current server state. Check the investigation list before trying again.";
+  if (error.kind === "not_found") return "The create request could not find the required server resource. Check the investigation list before trying again.";
+  if (error.kind === "network") return "The connection failed before ContextDesk could confirm the result. Check the investigation list before trying again.";
+  if (error.kind === "unavailable" || error.kind === "server_failure") return "The service could not complete the create request right now. Check the investigation list before trying again.";
+  if (error.kind === "aborted") return "The create request was canceled before it finished. Check the investigation list before trying again.";
+  if (error.kind === "unexpected_response" || error.kind === "protocol") return "The server response could not be verified. Check the investigation list before trying again.";
+  return "ContextDesk could not confirm the create result safely. Check the investigation list before trying again.";
+}
+
 function failureCopy(error: RuntimeFailure, subject: "list" | "detail" | "evidence" | "annotations" | "create" | "upload" | "lifecycle"): string {
+  if (subject === "create") return createFailureCopy(error);
   if (error.kind === "input") {
     if (error.field === "title") return "Add a title before creating the investigation.";
     if (error.field === "file" && error.reason === "too_large") return "Files must be 1 MB or smaller.";
@@ -77,18 +102,25 @@ function failureCopy(error: RuntimeFailure, subject: "list" | "detail" | "eviden
 }
 
 /** Whether the recorded-value catalog behind the combo fields can be trusted. */
-type CatalogState = "available" | "loading" | "unavailable";
+type CatalogState = "available" | "empty" | "loading" | "unavailable";
 
 function comboHint(catalog: CatalogState, value: string, options: readonly string[]): string {
   // A comparison against a catalog that was never read is not a fact. Say what
-  // is actually known instead of calling an unchecked value new.
-  if (catalog === "loading") return "Recorded values are still loading, so this cannot be compared with them yet. It will be recorded exactly as entered.";
-  if (catalog === "unavailable") return "Recorded values are unavailable, so this cannot be compared with them. It will be recorded exactly as entered.";
-  const normalized = text(value).toLocaleLowerCase();
-  if (!normalized) return "Choose a recorded value or enter a new one.";
-  return options.some((option) => option.toLocaleLowerCase() === normalized)
-    ? "Using an existing recorded value."
-    : "New value — it will be recorded exactly as entered.";
+  // is actually known instead of calling an unchecked value new. Context
+  // payloads and catalog options share the same outer-whitespace normalization,
+  // so the comparison copy also names that behavior explicitly.
+  if (catalog === "loading") return "Recorded values are still loading, so this cannot be compared yet. Outer whitespace will be removed when it is saved.";
+  if (catalog === "unavailable") return "Recorded values are unavailable, so this cannot be compared. Outer whitespace will be removed when it is saved.";
+  const submittedLiteral = text(value);
+  if (catalog === "empty" || options.length === 0) {
+    return submittedLiteral
+      ? "No recorded values yet. This will be saved as a new value after removing outer whitespace."
+      : "No recorded values yet; enter a new value. Outer whitespace will be removed when saved.";
+  }
+  if (!submittedLiteral) return "Choose a recorded value or enter a new one. Outer whitespace will be removed when saved.";
+  return options.some((option) => option === submittedLiteral)
+    ? "Matches a recorded value after removing outer whitespace; that value will be reused."
+    : "No recorded value matches after removing outer whitespace. This will be saved as a new value without outer whitespace.";
 }
 
 /**
@@ -109,7 +141,9 @@ function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
   const [confirmation, setConfirmation] = useState<LifecycleAction | null>(null);
   const action: LifecycleAction = investigation.status === "archived" ? "restore" : "archive";
   const descriptionId = "investigation-first-lifecycle-description";
-  useEffect(() => setConfirmation(null), [action, investigation.id]);
+  // Reset before paint so a late passive mount effect cannot erase an
+  // immediate confirmation click after the lifecycle control becomes visible.
+  useLayoutEffect(() => setConfirmation(null), [action, investigation.id]);
   // Answer the authority question before the transport question. Without
   // lifecycle authority no lifecycle read can change the outcome, so loading
   // and retry would offer this viewer work that cannot help them.
@@ -159,6 +193,8 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
   const focusedArrival = useRef<string | null>(null);
+  const draftOwnerKey = `${runtime.identity.id}\u0000${runtime.identity.username}`;
+  const priorDraftOwnerKey = useRef(draftOwnerKey);
   const cases = investigations.availability === "available" ? investigations.value : [];
   const focusedTitle = props.focusCaseId !== null
     && investigation.availability === "available"
@@ -183,7 +219,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           ? `available:${props.focusCaseId}`
           : null;
   const catalog: CatalogState = investigations.availability === "available"
-    ? "available"
+    ? cases.length > 0 ? "available" : "empty"
     : investigations.availability === "unavailable"
       ? "unavailable"
       : "loading";
@@ -200,7 +236,26 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     return cases.filter((row) => (statusFilter === "all" || row.status === statusFilter) && (!normalized || [row.id, row.title, row.problemStatement, row.affectedParties, row.impact, row.investigationContext?.productName, row.investigationContext?.build].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalized)));
   }, [cases, query, statusFilter]);
 
-  useEffect(() => { if (props.startSignal) { titleRef.current?.focus(); titleRef.current?.scrollIntoView?.({ block: "center" }); } }, [props.startSignal]);
+  useEffect(() => {
+    if (!props.startSignal) return;
+    const titleInput = titleRef.current;
+    titleInput?.focus();
+    const reduceMotion = typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    titleInput?.scrollIntoView?.({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "center",
+      inline: "nearest",
+    });
+  }, [props.startSignal]);
+  useLayoutEffect(() => {
+    if (priorDraftOwnerKey.current === draftOwnerKey) return;
+    priorDraftOwnerKey.current = draftOwnerKey;
+    setTitle("");
+    setSeverity("medium");
+    setSituation(EMPTY_SITUATION);
+    setAdvancedOpen(false);
+  }, [draftOwnerKey]);
   useEffect(() => setSelectedEvidence([]), [props.focusCaseId]);
   useEffect(() => {
     const available = new Set(evidenceSelectionKey ? evidenceSelectionKey.split("\u0000") : []);
@@ -248,18 +303,18 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     const creating = runtime.mutations.create.status === "running";
     return <section className="investigation-first__create" aria-labelledby="investigation-first-create-title" aria-busy={creating}>
       <div className="investigation-first__section-heading"><div><p className="investigation-first__eyebrow">Fast capture</p><h2 id="investigation-first-create-title">Create an investigation</h2><p>Start with what you know. Add technical context when it helps someone else find or understand this work.</p></div><span className="investigation-first__time">About 60–90 seconds</span></div>
-      {runtime.mutations.create.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(runtime.mutations.create.error, "create")}</p> : null}
+      {runtime.mutations.create.status === "failed" ? <p className="investigation-first__error investigation-first__create-error" role="alert">{failureCopy(runtime.mutations.create.error, "create")}</p> : null}
       <form onSubmit={(event) => void createInvestigation(event)}><div className="investigation-first__form-grid">
         <label className="investigation-first__field investigation-first__field--wide"><span>What should the team call this?</span><input ref={titleRef} className="login__input" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Short investigation title" required /></label>
         <label className="investigation-first__field"><span>Severity</span><select className="login__input" value={severity} onChange={(event) => setSeverity(event.target.value as CaseV1["severity"])}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
         <label className="investigation-first__field investigation-first__field--wide"><span>What was observed?</span><textarea value={situation.problemStatement} onChange={(event) => setSituation((current) => ({ ...current, problemStatement: event.target.value }))} placeholder="Describe the problem without assuming its cause." rows={3} /></label>
         <label className="investigation-first__field"><span>Who or what is affected?</span><textarea value={situation.affectedParties} onChange={(event) => setSituation((current) => ({ ...current, affectedParties: event.target.value }))} placeholder="People, services, or customers" rows={2} /></label>
         <label className="investigation-first__field"><span>What is the impact?</span><textarea value={situation.impact} onChange={(event) => setSituation((current) => ({ ...current, impact: event.target.value }))} placeholder="The recorded operational impact" rows={2} /></label>
-      </div><details className="investigation-first__advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}><summary>Advanced context <span>Product, build, timing, scope, and open questions</span></summary>
-      {catalog === "unavailable" ? <div className="investigation-first__muted" role="status"><p>Recorded values could not be loaded, so nothing entered below can be compared with them. Creating an investigation still works.</p><button type="button" onClick={runtime.refresh.investigations}>Retry recorded values</button></div> : null}
+      </div><details key={draftOwnerKey} className="investigation-first__advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}><summary>Advanced context <span>Product, build, timing, scope, and open questions</span></summary>
+      {catalog === "unavailable" ? <div className="investigation-first__muted investigation-first__create-status" role="status"><p>Recorded values could not be loaded, so nothing entered below can be compared with them. Creating an investigation still works.</p><button type="button" onClick={runtime.refresh.investigations}>Retry recorded values</button></div> : null}
       <div className="investigation-first__form-grid">
         {CONTEXT_FIELDS.map(([field, label]) => <ComboField key={field} field={field} label={label} value={situation.investigationContext[field]} options={contextOptions[field]} catalog={catalog} onChange={(value) => setSituation((current) => ({ ...current, investigationContext: { ...current.investigationContext, [field]: value } }))} />)}
-        <label className="investigation-first__field"><span>When did it happen?</span><input className="login__input" value={situation.occurredAt} onChange={(event) => setSituation((current) => ({ ...current, occurredAt: event.target.value }))} placeholder="2026-08-29 or leave empty" /></label>
+        <label className="investigation-first__field"><span>When did it happen? <small>optional</small></span><input className="login__input" aria-describedby="investigation-first-occurred-at-hint" value={situation.occurredAt} onChange={(event) => setSituation((current) => ({ ...current, occurredAt: event.target.value }))} placeholder="2026-08-29 or 2026-08-29T14:30:00-05:00" /><small id="investigation-first-occurred-at-hint">Use YYYY-MM-DD for a known date, or an ISO 8601 date-time with an offset when the local time is known. The server validates this value when you create the investigation.</small></label>
         <label className="investigation-first__field"><span>Scope</span><input className="login__input" value={situation.scope} onChange={(event) => setSituation((current) => ({ ...current, scope: event.target.value }))} placeholder="What is in or out of scope?" /></label>
         <label className="investigation-first__field investigation-first__field--wide"><span>Open questions <small>one per line</small></span><textarea value={situation.openQuestions} onChange={(event) => setSituation((current) => ({ ...current, openQuestions: event.target.value }))} placeholder="What still needs to be learned?" rows={3} /></label>
       </div></details><div className="investigation-first__form-actions"><button className="login__submit" type="submit" disabled={creating}>{creating ? "Creating…" : "Create investigation"}</button><span>Blank fields remain explicitly not recorded.</span></div></form>

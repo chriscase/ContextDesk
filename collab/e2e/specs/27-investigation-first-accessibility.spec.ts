@@ -301,6 +301,31 @@ test.describe("Investigation First accessibility and browser conformance", () =>
       await page.goto("/investigations");
       await expect(page.locator(".investigation-first")).toBeVisible();
       observed.push(`collection view: ${await expectReflow(page, requirement, collectionControls())}`);
+      const advancedSummary = page.locator(".investigation-first__advanced > summary");
+      const advancedSummaryLayout = await advancedSummary.evaluate((node) => {
+        const style = getComputedStyle(node);
+        return {
+          clientWidth: node.clientWidth,
+          flexWrap: style.flexWrap,
+          scrollWidth: node.scrollWidth,
+        };
+      });
+      expect(advancedSummaryLayout.flexWrap).toBe("wrap");
+      expect(
+        advancedSummaryLayout.scrollWidth,
+        `advanced-context summary overflows at ${requirement}`,
+      ).toBeLessThanOrEqual(advancedSummaryLayout.clientWidth + 1);
+      if (requirement === "reflow-390") {
+        await advancedSummary.click();
+        await expect(page.locator(".investigation-first__advanced")).toHaveAttribute("open", "");
+        observed.push(`open advanced context: ${await expectReflow(page, requirement, [
+          page.getByRole("combobox", { name: "Product or software" }),
+          page.getByRole("combobox", { name: "Build" }),
+          page.getByLabel(/When did it happen/u),
+          page.getByPlaceholder("What is in or out of scope?"),
+          page.getByPlaceholder("What still needs to be learned?"),
+        ])}`);
+      }
 
       const result = page.locator(".investigation-first__list-button").filter({ hasText: title });
       await activate(result, page);
@@ -315,6 +340,33 @@ test.describe("Investigation First accessibility and browser conformance", () =>
       );
       expect(uploadColumns.split(" ").length).toBe(1);
       await expect(page).toHaveURL(`/investigations/${caseId}/situation`);
+      if (requirement === "reflow-390") {
+        await page.route("**/api/cases", async (route) => {
+          const method = route.request().method();
+          if (method === "GET") {
+            await route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"unavailable"}' });
+            return;
+          }
+          if (method === "POST") {
+            await route.fulfill({ status: 400, contentType: "application/json", body: '{"error":"validation"}' });
+            return;
+          }
+          await route.continue();
+        });
+        await page.goto("/investigations");
+        await page.locator(".investigation-first__advanced > summary").click();
+        const retry = page.getByRole("button", { name: "Retry recorded values" });
+        await expect(retry).toBeVisible();
+        await page.getByLabel("What should the team call this?").fill("Narrow create failure");
+        await page.getByRole("button", { name: "Create investigation" }).click();
+        await expect(page.locator(".investigation-first__create-error")).toBeVisible();
+        observed.push(`truthful error controls: ${await expectReflow(page, requirement, [
+          page.locator(".investigation-first__create-status"),
+          retry,
+          page.locator(".investigation-first__create-error"),
+          page.getByRole("button", { name: "Create investigation" }),
+        ])}`);
+      }
       run.record(requirement, observed.join("; "));
     }
 
@@ -327,6 +379,21 @@ test.describe("Investigation First accessibility and browser conformance", () =>
     await page.reload();
     await expect(page.locator(".investigation-first")).toBeVisible();
 
+    await page.evaluate(() => {
+      const state = globalThis as typeof globalThis & { __contextdeskScrollBehaviors?: string[] };
+      state.__contextdeskScrollBehaviors = [];
+      Element.prototype.scrollIntoView = function recordScrollBehavior(argument?: boolean | ScrollIntoViewOptions) {
+        state.__contextdeskScrollBehaviors?.push(
+          typeof argument === "object" ? (argument.behavior ?? "auto") : "auto",
+        );
+      };
+    });
+    await page.getByRole("button", { name: "Start investigation" }).click();
+    await expect(page.getByLabel("What should the team call this?")).toBeFocused();
+    expect(await page.evaluate(() => (
+      globalThis as typeof globalThis & { __contextdeskScrollBehaviors?: string[] }
+    ).__contextdeskScrollBehaviors)).toContain("auto");
+
     run.record("reduced-motion", await expectReducedMotion(page, strategyRoot(page)));
     expect(run.finish().evaluated.map((evidence) => evidence.id)).toEqual([...REDUCED_MOTION_SLICE]);
   });
@@ -334,14 +401,34 @@ test.describe("Investigation First accessibility and browser conformance", () =>
   test("forced colors retains system control boundaries and a visible keyboard focus indicator", async ({ page }) => {
     const run = new BrowserConformanceRun("Investigation First", FORCED_COLORS_SLICE);
     await page.emulateMedia({ forcedColors: "active" });
+    await page.route("**/api/cases", async (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        await route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"unavailable"}' });
+        return;
+      }
+      if (method === "POST") {
+        await route.fulfill({ status: 400, contentType: "application/json", body: '{"error":"validation"}' });
+        return;
+      }
+      await route.continue();
+    });
     await page.reload();
     await expect(page.locator(".investigation-first")).toBeVisible();
+    await page.locator(".investigation-first__advanced > summary").click();
+    await expect(page.locator(".investigation-first__create-status")).toBeVisible();
+    await page.getByLabel("What should the team call this?").fill("Forced-colors create failure");
+    await page.getByRole("button", { name: "Create investigation" }).click();
+    await expect(page.locator(".investigation-first__create-error")).toBeVisible();
 
     run.record(
       "forced-colors",
       await expectForcedColors(page, [
         page.getByLabel("What should the team call this?"),
         page.getByLabel("Severity"),
+        page.locator(".investigation-first__advanced"),
+        page.locator(".investigation-first__create-status"),
+        page.locator(".investigation-first__create-error"),
         page.getByRole("button", { name: "Create investigation" }),
       ]),
     );
