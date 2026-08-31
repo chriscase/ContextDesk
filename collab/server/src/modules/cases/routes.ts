@@ -243,6 +243,7 @@ export interface CaseRouteDeps {
   domain: CaseService;
   experiments?: AcceptedDecisionSource;
   maxUploadBytes: number;
+  transferTimeoutMs?: number;
 }
 
 const STREAM_TEXT_FIELDS = new Set([
@@ -257,7 +258,6 @@ const STREAM_TEXT_FIELDS = new Set([
 ]);
 const STREAM_ARTIFACT_KINDS = new Set(["log", "email", "attachment"]);
 const AUTHENTICATED_TRANSFER_TIMEOUT_MS = 60 * 60 * 1000;
-const STREAM_MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 
 class MultipartEvidenceError extends Error {
   constructor(message: string) {
@@ -266,38 +266,70 @@ class MultipartEvidenceError extends Error {
   }
 }
 
-function armTransferTimeout(request: FastifyRequest, reply: FastifyReply): void {
-  const noop = (): void => undefined;
-  const requestRaw = request.raw as {
-    setTimeout?: (ms: number, cb?: () => void) => void;
-  };
-  const replyRaw = reply.raw as {
-    setTimeout?: (ms: number, cb?: () => void) => void;
-  };
-  requestRaw.setTimeout?.(AUTHENTICATED_TRANSFER_TIMEOUT_MS, noop);
-  replyRaw.setTimeout?.(AUTHENTICATED_TRANSFER_TIMEOUT_MS, noop);
+/** @internal Exported only so parser truncation flags have a non-vacuous unit oracle. */
+export function assertMultipartTextFieldIntact(part: {
+  fieldnameTruncated: boolean;
+  valueTruncated: boolean;
+}): void {
+  if (part.fieldnameTruncated || part.valueTruncated) {
+    throw new MultipartEvidenceError("multipart text field was truncated");
+  }
 }
 
-function abortSignalForRequest(request: FastifyRequest): AbortSignal {
+interface TransferGuard {
+  readonly signal: AbortSignal;
+  dispose(): void;
+}
+
+interface TransferEndpoint {
+  once?: (event: string, listener: () => void) => unknown;
+  off?: (event: string, listener: () => void) => unknown;
+  destroy?: () => void;
+  destroyed?: boolean;
+  readableEnded?: boolean;
+  writableEnded?: boolean;
+}
+
+function armTransferGuard(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  timeoutMs: number,
+): TransferGuard {
   const controller = new AbortController();
-  const raw = request.raw as {
-    setTimeout?: (ms: number) => void;
-    once?: (event: string, listener: () => void) => void;
-    readableEnded?: boolean;
-    destroyed?: boolean;
+  const requestRaw = request.raw as TransferEndpoint;
+  const replyRaw = reply.raw as TransferEndpoint;
+  let disposed = false;
+  const abort = (message: string): void => {
+    if (!controller.signal.aborted) controller.abort(new Error(message));
   };
-  // Fastify inject's mock request is not a Node HTTP IncomingMessage.
-  if (typeof raw.setTimeout !== "function" || typeof raw.once !== "function") {
-    return controller.signal;
-  }
-  const abort = (): void => {
-    if (!controller.signal.aborted) controller.abort();
+  const onRequestAborted = (): void => abort("evidence transfer aborted");
+  const onRequestClose = (): void => {
+    if (requestRaw.destroyed && !requestRaw.readableEnded) onRequestAborted();
   };
-  raw.once("aborted", abort);
-  raw.once("close", () => {
-    if (raw.destroyed && !raw.readableEnded) abort();
-  });
-  return controller.signal;
+  const onReplyClose = (): void => {
+    if (!replyRaw.writableEnded) onRequestAborted();
+  };
+  const terminate = (): void => {
+    abort("evidence transfer timed out");
+    requestRaw.destroy?.();
+    replyRaw.destroy?.();
+  };
+  requestRaw.once?.("aborted", onRequestAborted);
+  requestRaw.once?.("close", onRequestClose);
+  replyRaw.once?.("close", onReplyClose);
+  const timer = setTimeout(terminate, Math.max(1, timeoutMs));
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      clearTimeout(timer);
+      requestRaw.off?.("aborted", onRequestAborted);
+      requestRaw.off?.("close", onRequestClose);
+      replyRaw.off?.("close", onReplyClose);
+    },
+  };
 }
 
 function throwIfTransferAborted(signal: AbortSignal): void {
@@ -378,7 +410,37 @@ function ifNoneMatchHits(
   header: string | string[] | undefined,
   etag: string,
 ): boolean {
-  return typeof header === "string" && header.trim() === etag;
+  if (header === undefined) return false;
+  const weakValue = (value: string): string => value.replace(/^W\/[ \t]*/iu, "");
+  const expected = weakValue(etag);
+  const values = (Array.isArray(header) ? header : [header])
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim());
+  return values.some((value) => value === "*" || weakValue(value) === expected);
+}
+
+function nextTransferChunk(
+  iterator: AsyncIterator<Uint8Array>,
+  signal: AbortSignal,
+): Promise<IteratorResult<Uint8Array>> {
+  throwIfTransferAborted(signal);
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      const reason = signal.reason;
+      reject(reason instanceof Error ? reason : new Error("evidence transfer aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void Promise.resolve(iterator.next()).then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 type ParsedBytesRange =
@@ -1226,7 +1288,6 @@ export async function registerCaseRoutes(
 
   app.post(
     "/api/cases/:id/evidence/stream",
-    { bodyLimit: deps.maxUploadBytes + STREAM_MULTIPART_OVERHEAD_BYTES },
     async (request, reply) => {
       const loaded = await sessionOf(request, reply);
       if ("denied" in loaded) return loaded.denied;
@@ -1237,12 +1298,16 @@ export async function registerCaseRoutes(
       }
       const id = (request.params as { id: string }).id;
       if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
-        return authError("forbidden");
+        return { error: "not_found" };
       }
       let parts: AsyncIterator<Multipart> | undefined;
       let filePart: MultipartFile | null = null;
-      armTransferTimeout(request, reply);
-      const signal = abortSignalForRequest(request);
+      const transfer = armTransferGuard(
+        request,
+        reply,
+        deps.transferTimeoutMs ?? AUTHENTICATED_TRANSFER_TIMEOUT_MS,
+      );
+      const signal = transfer.signal;
       try {
         parts = (
           request as FastifyRequest & { parts: () => AsyncIterator<Multipart> }
@@ -1271,6 +1336,7 @@ export async function registerCaseRoutes(
           if (part.type !== "field") {
             throw new MultipartEvidenceError("malformed multipart part");
           }
+          assertMultipartTextFieldIntact(part);
           if (!STREAM_TEXT_FIELDS.has(part.fieldname)) {
             throw new MultipartEvidenceError("unknown multipart field");
           }
@@ -1309,8 +1375,18 @@ export async function registerCaseRoutes(
           clientTime?: string;
           sourceId?: string;
         } = { kind: kind as ArtifactKind, summary };
-        if (fields.filename) evidence.filename = fields.filename;
-        if (fields.mediaType) evidence.mediaType = fields.mediaType;
+        const nativeFilename = filePart.filename || undefined;
+        const nativeMediaType = filePart.mimetype || undefined;
+        if (fields.filename && nativeFilename && fields.filename !== nativeFilename) {
+          throw new MultipartEvidenceError("multipart filename conflicts with file metadata");
+        }
+        if (fields.mediaType && nativeMediaType && fields.mediaType !== nativeMediaType) {
+          throw new MultipartEvidenceError("multipart mediaType conflicts with file metadata");
+        }
+        const filename = fields.filename || nativeFilename;
+        const mediaType = fields.mediaType || nativeMediaType;
+        if (filename) evidence.filename = filename;
+        if (mediaType) evidence.mediaType = mediaType;
         if (Object.prototype.hasOwnProperty.call(fields, "expectedHash") && fields.expectedHash) {
           evidence.expectedHash = fields.expectedHash;
         }
@@ -1358,6 +1434,8 @@ export async function registerCaseRoutes(
         await drainRemainingParts(parts, filePart, signal);
         if (typeof request.raw.resume === "function") request.raw.resume();
         return streamUploadError(reply, err);
+      } finally {
+        transfer.dispose();
       }
     },
   );
@@ -1451,18 +1529,25 @@ export async function registerCaseRoutes(
         void reply.code(404);
         return { error: "not_found" };
       }
-      armTransferTimeout(request, reply);
+      const transfer = armTransferGuard(
+        request,
+        reply,
+        deps.transferTimeoutMs ?? AUTHENTICATED_TRANSFER_TIMEOUT_MS,
+      );
       let meta;
       try {
         meta = await deps.domain.headEvidence(artifact.contentHash);
       } catch {
+        transfer.dispose();
         return storageUnavailable(reply);
       }
       if (!meta || meta.byteLength !== artifact.byteLength || meta.hash !== artifact.contentHash) {
+        transfer.dispose();
         return storageUnavailable(reply);
       }
       const etag = `"${artifact.contentHash}"`;
       if (ifNoneMatchHits(request.headers["if-none-match"], etag)) {
+        transfer.dispose();
         void reply.code(304);
         void reply.header("ETag", etag);
         void reply.header("Accept-Ranges", "bytes");
@@ -1473,6 +1558,7 @@ export async function registerCaseRoutes(
       const size = artifact.byteLength;
       const range = parseInclusiveBytesRange(request.headers.range, size);
       if (range.kind === "unsatisfiable") {
+        transfer.dispose();
         void reply.code(416);
         void reply.header("Accept-Ranges", "bytes");
         void reply.header("Content-Range", `bytes */${size}`);
@@ -1495,6 +1581,7 @@ export async function registerCaseRoutes(
           : {}),
       };
       if (request.method === "HEAD") {
+        transfer.dispose();
         applyContentHeaders(reply, representation);
         return reply.send();
       }
@@ -1505,16 +1592,17 @@ export async function registerCaseRoutes(
           range.kind === "satisfiable" ? { start, end } : undefined,
         );
       } catch {
+        transfer.dispose();
         return storageUnavailable(reply);
       }
       applyContentHeaders(reply, representation);
-      const cancel = abortSignalForRequest(request);
+      const cancel = transfer.signal;
       async function* evidenceBytes(): AsyncIterable<Uint8Array> {
         const iterator = handle.bytes()[Symbol.asyncIterator]();
         try {
           for (;;) {
             if (cancel.aborted) break;
-            const next = await iterator.next();
+            const next = await nextTransferChunk(iterator, cancel);
             if (next.done) break;
             const chunk = next.value;
             if (chunk && chunk.byteLength > 0) yield copyBoundedChunk(chunk);
@@ -1523,10 +1611,16 @@ export async function registerCaseRoutes(
           if (typeof iterator.return === "function") {
             await Promise.resolve(iterator.return()).catch(() => undefined);
           }
+          transfer.dispose();
         }
       }
       const stream = Readable.from(evidenceBytes(), { objectMode: false });
-      return reply.send(stream);
+      try {
+        return reply.send(stream);
+      } catch (error) {
+        transfer.dispose();
+        throw error;
+      }
   };
   app.get(
     "/api/cases/:id/evidence/:eid/content",

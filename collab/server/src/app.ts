@@ -128,6 +128,8 @@ export interface AppDeps {
   references?: ReferenceService;
   /** Resolution records behind conclusive status transitions. */
   resolutions?: ResolutionService;
+  /** Testable wall-clock guard for authenticated evidence transfers. */
+  evidenceTransferTimeoutMs?: number;
   /** Canonical user profile store. Also wires login-time profile sync onto security.auth. */
   profiles?: UserProfileStore;
   grants?: LocalGrantStore;
@@ -309,6 +311,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         audit: security.audit,
         domain: deps.domain,
         maxUploadBytes,
+        ...(deps.evidenceTransferTimeoutMs === undefined
+          ? {}
+          : { transferTimeoutMs: deps.evidenceTransferTimeoutMs }),
         ...(deps.experiments ? { experiments: deps.experiments } : {}),
       });
       await registerInvestigationActivityRoutes(app, {

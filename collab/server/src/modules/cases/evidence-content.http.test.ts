@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArtifact, parseEvidenceUploadSuccess } from "@cd-collab/contracts";
@@ -114,6 +115,7 @@ async function withApp(
     store: FilesystemEvidenceStore;
     domain: CaseService;
   }) => Promise<void>,
+  options: { transferTimeoutMs?: number } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-content-http-"));
   const store = new FilesystemEvidenceStore({ rootDir: root });
@@ -127,6 +129,9 @@ async function withApp(
     store,
     domain,
     catalog,
+    ...(options.transferTimeoutMs === undefined
+      ? {}
+      : { evidenceTransferTimeoutMs: options.transferTimeoutMs }),
     security: {
       auth: {
         adapter: new MapAuthAdapter(users()),
@@ -319,7 +324,7 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       const caseId = await createCase(app, alice, "Content ranges");
       const artifact = await streamUpload(app, alice, caseId, {
         kind: "attachment",
-        filename: 'quote"name.log',
+        filename: "quote_name.log",
         mediaType: "text/plain",
         body: LOG,
         summary: "ranged",
@@ -386,6 +391,22 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       expect(cached.statusCode).toBe(304);
       expect(cached.body).toBe("");
       expect(cached.headers.etag).toBe(etag);
+      const readsBeforeValidators = openRead.mock.calls.length;
+      for (const validator of [
+        "*",
+        `W/${etag}`,
+        `"${"0".repeat(64)}", W/${etag}`,
+      ]) {
+        const conditional = await app.inject({
+          method: "GET",
+          url,
+          headers: { cookie: dave, "if-none-match": validator },
+        });
+        expect(conditional.statusCode, validator).toBe(304);
+        expect(conditional.body).toBe("");
+        expect(conditional.headers.etag).toBe(etag);
+      }
+      expect(openRead).toHaveBeenCalledTimes(readsBeforeValidators);
 
       for (const range of ["bytes=-4", "bytes=0-1,2-3", "bytes=abc", "bytes=5-1", "bytes=99-120"]) {
         const unsat = await app.inject({
@@ -454,6 +475,74 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       expect(spies.head).not.toHaveBeenCalled();
       expect(spies.openRead).not.toHaveBeenCalled();
     });
+  });
+
+  it("terminates and cleans a stalled authenticated content download on timeout", async () => {
+    await withApp(async ({ app, store }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const caseId = await createCase(app, alice, "Timed out content");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "timeout.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "stalled read",
+        privacyClass: "share_safe",
+      });
+      const originalOpen = store.openRead.bind(store);
+      let iteratorReturned = 0;
+      store.openRead = vi.fn(async (hash, range) => {
+        const handle = await originalOpen(hash, range);
+        return {
+          ...handle,
+          bytes: () => ({
+            [Symbol.asyncIterator]: () => ({
+              next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+              return: async () => {
+                iteratorReturned += 1;
+                return { done: true as const, value: undefined };
+              },
+            }),
+          }),
+        };
+      });
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const address = app.server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const started = Date.now();
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          const req = http.request({
+            method: "GET",
+            host: "127.0.0.1",
+            port,
+            path: `/api/cases/${caseId}/evidence/${artifact.id}/content`,
+            headers: { cookie: dave },
+          });
+          let settled = false;
+          const done = (): void => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+          req.on("error", done);
+          req.on("close", done);
+          req.on("response", (response) => {
+            response.on("aborted", done);
+            response.on("error", done);
+            response.on("close", done);
+          });
+          req.end();
+        }),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("transfer guard did not terminate download")), 3_000);
+        }),
+      ]);
+      expect(Date.now() - started).toBeLessThan(2_500);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(iteratorReturned).toBeGreaterThan(0);
+    }, { transferTimeoutMs: 1_000 });
   });
 
   it("returns sanitized 503 before headers when openRead fails, and tears down midstream errors", async () => {

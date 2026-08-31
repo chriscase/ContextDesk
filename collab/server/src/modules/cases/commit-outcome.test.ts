@@ -632,6 +632,120 @@ describe("case-store commit outcome fencing", () => {
     }
   });
 
+  it("retries post-COMMIT streamed cleanup without rollback or an ambiguous failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-commit-outcome-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const events: string[] = [];
+    const originalStage = evidence.stageStream.bind(evidence);
+    evidence.stageStream = async (source, options) => {
+      const stage = await originalStage(source, options);
+      const promote = stage.promote.bind(stage);
+      const rollback = stage.rollback.bind(stage);
+      const finalize = stage.finalize.bind(stage);
+      let finalizeCalls = 0;
+      stage.promote = async () => {
+        events.push("promote");
+        await promote();
+      };
+      stage.rollback = async () => {
+        events.push("rollback");
+        await rollback();
+      };
+      stage.finalize = async (finalizeOptions?: EvidenceFinalizeOptions) => {
+        events.push("finalize");
+        finalizeCalls += 1;
+        if (finalizeCalls === 1) throw new Error("synthetic transient finalize cleanup failure");
+        await finalize(finalizeOptions);
+      };
+      return stage;
+    };
+    const service = new CaseService(
+      evidence,
+      new MemoryAuditStore(),
+      new MemoryCaseStore(),
+      new CatalogService(),
+    );
+    try {
+      const created = await service.createCase(actor, { title: "Stream cleanup retry" }, "test");
+      const bytes = new TextEncoder().encode("stream-cleanup-retry\n");
+      const uploaded = await service.addStreamedEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "stream-cleanup-retry.log",
+          mediaType: "text/plain",
+          source: bytesSource(bytes),
+          summary: "Synthetic transient cleanup failure.",
+          privacyClass: "share_safe",
+          maxBytes: bytes.byteLength,
+        },
+        "test",
+      );
+      expect(events).toEqual(["promote", "finalize", "finalize"]);
+      expect(events).not.toContain("rollback");
+      expect(await evidence.verify(uploaded.artifact.contentHash ?? "")).toBe(true);
+      expect(await pendingJournalNames(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns committed streamed evidence when provider cleanup remains recoverable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-commit-outcome-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const events: string[] = [];
+    const originalStage = evidence.stageStream.bind(evidence);
+    evidence.stageStream = async (source, options) => {
+      const stage = await originalStage(source, options);
+      const promote = stage.promote.bind(stage);
+      const rollback = stage.rollback.bind(stage);
+      stage.promote = async () => {
+        events.push("promote");
+        await promote();
+      };
+      stage.rollback = async () => {
+        events.push("rollback");
+        await rollback();
+      };
+      stage.finalize = async () => {
+        events.push("finalize");
+        throw new Error("synthetic persistent finalize cleanup failure");
+      };
+      return stage;
+    };
+    const service = new CaseService(
+      evidence,
+      new MemoryAuditStore(),
+      new MemoryCaseStore(),
+      new CatalogService(),
+    );
+    try {
+      const created = await service.createCase(actor, { title: "Recoverable stream cleanup" }, "test");
+      const bytes = new TextEncoder().encode("recoverable-stream-cleanup\n");
+      const uploaded = await service.addStreamedEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "recoverable-stream-cleanup.log",
+          mediaType: "text/plain",
+          source: bytesSource(bytes),
+          summary: "Synthetic persistent cleanup failure.",
+          privacyClass: "share_safe",
+          maxBytes: bytes.byteLength,
+        },
+        "test",
+      );
+      expect(events).toEqual(["promote", "finalize", "finalize"]);
+      expect(events).not.toContain("rollback");
+      expect(await evidence.verify(uploaded.artifact.contentHash ?? "")).toBe(true);
+      expect(await pendingJournalNames(root)).not.toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rolls streamed evidence back for a definite pre-COMMIT failure", async () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-commit-outcome-"));
     const evidence = new FilesystemEvidenceStore({ rootDir: root });

@@ -22,6 +22,7 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService, CaseStoreCommitOutcomeUnknownError } from "./service.js";
 import { MemoryCaseStore } from "./store.js";
+import { assertMultipartTextFieldIntact } from "./routes.js";
 
 const ALICE = "fixture-alice-secret";
 const LOG = "2026-08-15T00:00:00Z mailer timeout id=syn-stream-1\n";
@@ -147,7 +148,11 @@ async function withApp(
     caseStore: MemoryCaseStore;
     root: string;
   }) => Promise<void>,
-  options: { maxUploadBytes?: number; caseStore?: MemoryCaseStore } = {},
+  options: {
+    maxUploadBytes?: number;
+    caseStore?: MemoryCaseStore;
+    transferTimeoutMs?: number;
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-stream-http-"));
   const store = new FilesystemEvidenceStore({ rootDir: root });
@@ -170,6 +175,9 @@ async function withApp(
     store,
     domain,
     catalog,
+    ...(options.transferTimeoutMs === undefined
+      ? {}
+      : { evidenceTransferTimeoutMs: options.transferTimeoutMs }),
     security: {
       auth: {
         adapter: new MapAuthAdapter(users()),
@@ -279,6 +287,7 @@ describe("POST /api/cases/:id/evidence/stream", () => {
         payload: body.payload,
       });
       expect(outsider.statusCode).toBe(404);
+      expect(JSON.parse(outsider.body)).toEqual({ error: "not_found" });
 
       expect(spies.stageStream).not.toHaveBeenCalled();
       expect(spies.put).not.toHaveBeenCalled();
@@ -311,9 +320,9 @@ describe("POST /api/cases/:id/evidence/stream", () => {
         },
         {
           kind: "attachment",
-          filename: "note.txt",
-          mediaType: "text/plain",
-          body: "attachment-bytes",
+          filename: "capture.bin",
+          mediaType: "application/octet-stream",
+          body: Uint8Array.from([0, 255, 1, 254]),
           summary: "streamed attachment",
         },
       ] as const;
@@ -321,14 +330,12 @@ describe("POST /api/cases/:id/evidence/stream", () => {
         const encoded = encodeMultipart([
           { kind: "field", name: "kind", value: sample.kind },
           { kind: "field", name: "summary", value: sample.summary },
-          { kind: "field", name: "filename", value: sample.filename },
-          { kind: "field", name: "mediaType", value: sample.mediaType },
           { kind: "field", name: "privacyClass", value: "share_safe" },
           {
             kind: "file",
             name: "file",
             filename: sample.filename,
-            mediaType: "application/json",
+            mediaType: sample.mediaType,
             body: sample.body,
           },
         ]);
@@ -342,8 +349,12 @@ describe("POST /api/cases/:id/evidence/stream", () => {
         const uploaded = parseEvidenceUploadSuccess(JSON.parse(response.body));
         const artifact = parseArtifact(uploaded.artifact);
         expect(artifact.kind).toBe(sample.kind);
+        expect(artifact.filename).toBe(sample.filename);
         expect(artifact.mediaType).toBe(sample.mediaType);
-        expect(artifact.contentHash).toBe(sha256Hex(new TextEncoder().encode(sample.body)));
+        const expectedBytes = typeof sample.body === "string"
+          ? new TextEncoder().encode(sample.body)
+          : sample.body;
+        expect(artifact.contentHash).toBe(sha256Hex(expectedBytes));
         expect(await store.verify(artifact.contentHash ?? "")).toBe(true);
       }
       expect(spies.beginWriteBatch).not.toHaveBeenCalled();
@@ -351,8 +362,8 @@ describe("POST /api/cases/:id/evidence/stream", () => {
     });
   });
 
-  it("allows an empty file stream", async () => {
-    await withApp(async ({ app, store }) => {
+  it("rejects an empty file without catalog, blob, artifact, or scratch residue", async () => {
+    await withApp(async ({ app, store, root }) => {
       const alice = await login(app, "alice", ALICE);
       const caseId = await createCase(app, alice, "Empty stream");
       const encoded = encodeMultipart([
@@ -368,11 +379,83 @@ describe("POST /api/cases/:id/evidence/stream", () => {
         headers: { cookie: alice, "content-type": encoded.contentType },
         payload: encoded.payload,
       });
-      expect(response.statusCode).toBe(200);
-      const uploaded = parseEvidenceUploadSuccess(JSON.parse(response.body));
-      expect(uploaded.artifact.byteLength).toBe(0);
-      expect(uploaded.artifact.contentHash).toBe(sha256Hex(new Uint8Array()));
-      expect(await store.verify(uploaded.artifact.contentHash ?? "")).toBe(true);
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body)).toEqual({ error: "evidence file must not be empty" });
+      const listed = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/evidence`,
+        headers: { cookie: alice },
+      });
+      expect((JSON.parse(listed.body) as { artifacts: unknown[] }).artifacts).toEqual([]);
+      expect(await store.head(sha256Hex(new Uint8Array()))).toBeNull();
+      expect(await listScratch(root)).toEqual([]);
+    });
+  });
+
+  it("rejects conflicting explicit and native file metadata", async () => {
+    await withApp(async ({ app, root }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Conflicting metadata");
+      for (const fields of [
+        [{ kind: "field" as const, name: "filename", value: "other.log" }],
+        [{ kind: "field" as const, name: "mediaType", value: "text/x-log" }],
+      ]) {
+        const encoded = encodeMultipart([
+          { kind: "field", name: "kind", value: "log" },
+          { kind: "field", name: "summary", value: "conflict" },
+          ...fields,
+          { kind: "file", name: "file", filename: "app.log", mediaType: "text/plain", body: LOG },
+        ]);
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/cases/${caseId}/evidence/stream`,
+          headers: { cookie: alice, "content-type": encoded.contentType },
+          payload: encoded.payload,
+        });
+        expect(response.statusCode).toBe(400);
+        expect(JSON.parse(response.body).error).toMatch(/conflicts with file metadata/u);
+      }
+      expect(await listScratch(root)).toEqual([]);
+    });
+  });
+
+  it("rejects truncated multipart field names and values before persistence", async () => {
+    expect(() => assertMultipartTextFieldIntact({
+      fieldnameTruncated: true,
+      valueTruncated: false,
+    })).toThrow("multipart text field was truncated");
+    expect(() => assertMultipartTextFieldIntact({
+      fieldnameTruncated: false,
+      valueTruncated: true,
+    })).toThrow("multipart text field was truncated");
+    await withApp(async ({ app, root }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Truncated fields");
+      const url = `/api/cases/${caseId}/evidence/stream`;
+      for (const truncatedField of [
+        { name: "summary", value: "x".repeat(8193) },
+      ]) {
+        const encoded = encodeMultipart([
+          { kind: "field", name: "kind", value: "log" },
+          { kind: "field", ...truncatedField },
+          { kind: "file", name: "file", filename: "app.log", mediaType: "text/plain", body: LOG },
+        ]);
+        const response = await app.inject({
+          method: "POST",
+          url,
+          headers: { cookie: alice, "content-type": encoded.contentType },
+          payload: encoded.payload,
+        });
+        expect(response.statusCode).toBe(400);
+        expect(JSON.parse(response.body)).toEqual({ error: "multipart text field was truncated" });
+      }
+      const listed = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/evidence`,
+        headers: { cookie: alice },
+      });
+      expect((JSON.parse(listed.body) as { artifacts: unknown[] }).artifacts).toEqual([]);
+      expect(await listScratch(root)).toEqual([]);
     });
   });
 
@@ -615,6 +698,61 @@ describe("POST /api/cases/:id/evidence/stream", () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(await listScratch(root)).toEqual([]);
     });
+  });
+
+  it("terminates a stalled authenticated upload when its transfer guard expires", async () => {
+    await withApp(async ({ app, root }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await createCase(app, alice, "Timed out stream");
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const address = app.server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const boundary = "----cd-timeout-stream";
+      const prelude = Buffer.concat([
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="kind"\r\n\r\nlog\r\n`,
+        ),
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="summary"\r\n\r\ntimeout\r\n`,
+        ),
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="timeout.log"\r\nContent-Type: text/plain\r\n\r\n`,
+        ),
+      ]);
+      const started = Date.now();
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          const req = http.request({
+            method: "POST",
+            host: "127.0.0.1",
+            port,
+            path: `/api/cases/${caseId}/evidence/stream`,
+            headers: {
+              cookie: alice,
+              "x-cd-collab-csrf": "1",
+              "content-type": `multipart/form-data; boundary=${boundary}`,
+              "transfer-encoding": "chunked",
+            },
+          });
+          let settled = false;
+          const done = (): void => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+          req.on("error", done);
+          req.on("close", done);
+          req.write(prelude);
+          req.write("stalled");
+        }),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("transfer guard did not terminate upload")), 1_000);
+        }),
+      ]);
+      expect(Date.now() - started).toBeLessThan(750);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(await listScratch(root)).toEqual([]);
+    }, { transferTimeoutMs: 25 });
   });
 
   it("does not use forbidden multipart helpers or whole-file buffering", () => {

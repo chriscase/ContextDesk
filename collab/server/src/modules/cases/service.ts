@@ -271,6 +271,23 @@ async function settleStreamedEvidenceAfterCaseTransactionFailure(
   }
 }
 
+async function finalizeCommittedStreamStage(stage: EvidenceStreamStage): Promise<void> {
+  try {
+    await stage.finalize();
+  } catch {
+    try {
+      // Settlement is idempotent for the same mode and options. A transient
+      // cleanup failure may therefore be completed without ever turning a
+      // confirmed database COMMIT into a destructive rollback.
+      await stage.finalize();
+    } catch {
+      // Catalog rows and canonical bytes are already durable. Provider
+      // recovery owns any remaining journal/scratch cleanup; the upload result
+      // must not become ambiguous and rollback must never run after COMMIT.
+    }
+  }
+}
+
 function throwIfStreamAborted(signal: AbortSignal | undefined): void {
   if (!signal) return;
   if (typeof signal.throwIfAborted === "function") {
@@ -288,14 +305,17 @@ async function* nonEmptyStreamChunks(
   source: AsyncIterable<Uint8Array>,
   signal?: AbortSignal,
 ): AsyncIterable<Uint8Array> {
+  let yielded = false;
   for await (const chunk of source) {
     throwIfStreamAborted(signal);
     if (!(chunk instanceof Uint8Array)) {
       throw new Error("evidence stream chunk must be a Uint8Array");
     }
     if (chunk.byteLength === 0) continue;
+    yielded = true;
     yield chunk;
   }
+  if (!yielded) throw new Error("evidence file must not be empty");
 }
 
 interface ContributionWriteInput {
@@ -1786,6 +1806,7 @@ export class CaseService {
     throwIfStreamAborted(input.signal);
     let stage: EvidenceStreamStage | null = null;
     let evidenceCommitted = false;
+    let result: { artifact: ArtifactV1; summary: ContributionV1 };
     try {
       stage = await this.evidence.stageStream(
         nonEmptyStreamChunks(input.source, input.signal),
@@ -1798,7 +1819,7 @@ export class CaseService {
       if (expectedHash !== null && expectedHash !== stage.meta.hash) {
         throw new Error("held evidence hash mismatch");
       }
-      const result = await this.withAtomic(async () => {
+      result = await this.withAtomic(async () => {
         const sourceId = await this.resolveSourceId(actor, input.sourceId);
         const summaryInput: ContributionWriteInput = {
           kind: "upload",
@@ -1853,8 +1874,6 @@ export class CaseService {
         }
         return { artifact: this.toArtifact(row), summary };
       });
-      await stage.finalize();
-      return result;
     } catch (error) {
       await settleStreamedEvidenceAfterCaseTransactionFailure(
         error,
@@ -1863,6 +1882,8 @@ export class CaseService {
       );
       throw error;
     }
+    await finalizeCommittedStreamStage(stage);
+    return result;
   }
 
   async previewCorpusIntake(

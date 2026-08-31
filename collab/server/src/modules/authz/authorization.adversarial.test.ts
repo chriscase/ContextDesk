@@ -266,7 +266,8 @@ describe("authorization and suspension enforcement", () => {
         url: `/api/cases/${caseId}/evidence/${uploaded.artifact.id}/bytes`,
         headers: { cookie: aliceCookie },
       });
-      expect(denied.statusCode).toBe(403);
+      expect(denied.statusCode).toBe(404);
+      expect(JSON.parse(denied.body)).toEqual({ error: "not_found" });
 
       await grants.grant(
         "uid=alice,ou=people,dc=example,dc=test",
@@ -295,7 +296,8 @@ describe("authorization and suspension enforcement", () => {
         url: `/api/cases/${caseId}/evidence/${uploaded.artifact.id}/bytes`,
         headers: { cookie: aliceCookie },
       });
-      expect(afterRevoke.statusCode).toBe(403);
+      expect(afterRevoke.statusCode).toBe(404);
+      expect(JSON.parse(afterRevoke.body)).toEqual({ error: "not_found" });
     });
   });
 
