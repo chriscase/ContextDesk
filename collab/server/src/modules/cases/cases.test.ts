@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  isRfc4122Uuid,
   parseArtifact,
   parseCase,
   parseCaseList,
@@ -13,7 +14,7 @@ import {
   parseSourceList,
   parseTimeline,
 } from "@cd-collab/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
 import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
@@ -26,6 +27,8 @@ import { CaseService } from "./service.js";
 import { MemoryCaseStore } from "./store.js";
 
 const ALICE = "fixture-alice-secret";
+const MISSING_ARTIFACT_ID = "10000000-0000-4000-8000-000000000001";
+const MISSING_CONTRIBUTION_ID = "20000000-0000-4000-8000-000000000002";
 const LOG = "2026-08-15T00:00:00Z mailer timeout id=syn-1\n";
 const EML = [
   "From: sender@example.test",
@@ -478,6 +481,14 @@ describe("cases timeline evidence provenance", () => {
       });
       const primaryArtifact = await uploadArtifact(primary.id, "primary.log", "primary\n");
       const secondaryArtifact = await uploadArtifact(secondary.id, "secondary.log", "secondary\n");
+      for (const id of [
+        primaryNote.id,
+        secondaryNote.id,
+        primaryArtifact.id,
+        secondaryArtifact.id,
+      ]) {
+        expect(isRfc4122Uuid(id)).toBe(true);
+      }
 
       const linked = await createContribution(primary.id, {
         kind: "hypothesis",
@@ -500,6 +511,44 @@ describe("cases timeline evidence provenance", () => {
       const baselineTimeline = await caseStore.listTimeline(primary.id);
       const baselineCreateAudits = await audit.list({ action: "contribution_create" });
       const baselineStatusAudits = await audit.list({ action: "hypothesis_status" });
+      const artifactLookup = vi.spyOn(caseStore, "getArtifact");
+      const contributionLookup = vi.spyOn(caseStore, "listRevisions");
+
+      const invalidUuidCreate = await app.inject({
+        method: "POST",
+        url: `/api/cases/${primary.id}/contributions`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "hypothesis",
+          body: "Rejected before store lookup",
+          hypothesisLinks: [{ kind: "artifact", id: "not-a-uuid" }],
+        },
+      });
+      expect(invalidUuidCreate.statusCode).toBe(400);
+      const invalidUuidCreateFailure = JSON.parse(invalidUuidCreate.body) as {
+        error?: string;
+        detail?: string;
+      };
+      expect(invalidUuidCreateFailure.error).toBe("invalid");
+      expect(artifactLookup).not.toHaveBeenCalled();
+      expect(contributionLookup).not.toHaveBeenCalled();
+
+      const invalidUuidContributionCreate = await app.inject({
+        method: "POST",
+        url: `/api/cases/${primary.id}/contributions`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "hypothesis",
+          body: "Rejected before contribution lookup",
+          hypothesisLinks: [{ kind: "contribution", id: "also-not-a-uuid" }],
+        },
+      });
+      expect(invalidUuidContributionCreate.statusCode).toBe(400);
+      expect((JSON.parse(invalidUuidContributionCreate.body) as { detail?: string }).detail).toBe(
+        invalidUuidCreateFailure.detail,
+      );
+      expect(artifactLookup).not.toHaveBeenCalled();
+      expect(contributionLookup).not.toHaveBeenCalled();
 
       const invalidCreateLinks: Array<{
         label: string;
@@ -511,14 +560,27 @@ describe("cases timeline evidence provenance", () => {
         { label: "unknown kind", links: [{ kind: "url", id: primaryArtifact.id }] },
         { label: "non-string id", links: [{ kind: "artifact", id: 42 }] },
         { label: "empty id", links: [{ kind: "artifact", id: "" }] },
+        { label: "null link", links: [null] },
+        {
+          label: "extra link key",
+          links: [{ kind: "artifact", id: primaryArtifact.id, caseId: primary.id }],
+        },
         {
           label: "nonexistent artifact",
-          links: [{ kind: "artifact", id: "artifact-does-not-exist" }],
+          links: [{ kind: "artifact", id: MISSING_ARTIFACT_ID }],
           idempotencyKey: "invalid-link-create-1",
         },
         {
           label: "nonexistent contribution",
-          links: [{ kind: "contribution", id: "contribution-does-not-exist" }],
+          links: [{ kind: "contribution", id: MISSING_CONTRIBUTION_ID }],
+        },
+        {
+          label: "artifact kind with contribution id",
+          links: [{ kind: "artifact", id: primaryNote.id }],
+        },
+        {
+          label: "contribution kind with artifact id",
+          links: [{ kind: "contribution", id: primaryArtifact.id }],
         },
         { label: "cross-case artifact", links: [{ kind: "artifact", id: secondaryArtifact.id }] },
         {
@@ -552,6 +614,9 @@ describe("cases timeline evidence provenance", () => {
       expect(createFailures.get("nonexistent artifact")?.detail).toBe(
         createFailures.get("cross-case artifact")?.detail,
       );
+      expect(invalidUuidCreateFailure.detail).toBe(
+        createFailures.get("nonexistent artifact")?.detail,
+      );
       expect(createFailures.get("nonexistent contribution")?.detail).toBe(
         createFailures.get("cross-case contribution")?.detail,
       );
@@ -561,13 +626,22 @@ describe("cases timeline evidence provenance", () => {
         { label: "status unknown kind", links: [{ kind: "url", id: primaryArtifact.id }] },
         { label: "status non-string id", links: [{ kind: "artifact", id: 42 }] },
         { label: "status empty id", links: [{ kind: "contribution", id: "" }] },
+        { label: "status null link", links: [null] },
+        {
+          label: "status extra link key",
+          links: [{ kind: "artifact", id: primaryArtifact.id, extra: true }],
+        },
         {
           label: "status nonexistent artifact",
-          links: [{ kind: "artifact", id: "missing-artifact" }],
+          links: [{ kind: "artifact", id: MISSING_ARTIFACT_ID }],
         },
         {
           label: "status nonexistent contribution",
-          links: [{ kind: "contribution", id: "missing-contribution" }],
+          links: [{ kind: "contribution", id: MISSING_CONTRIBUTION_ID }],
+        },
+        {
+          label: "status artifact kind with contribution id",
+          links: [{ kind: "artifact", id: primaryNote.id }],
         },
         {
           label: "status cross-case artifact",
@@ -578,6 +652,7 @@ describe("cases timeline evidence provenance", () => {
           links: [{ kind: "contribution", id: secondaryNote.id }],
         },
       ];
+      const statusFailures = new Map<string, { error?: string; detail?: string }>();
       for (const attempt of invalidStatusLinks) {
         const response = await app.inject({
           method: "POST",
@@ -586,10 +661,39 @@ describe("cases timeline evidence provenance", () => {
           payload: { status: "supported", links: attempt.links },
         });
         expect(response.statusCode, attempt.label).toBe(400);
-        expect((JSON.parse(response.body) as { error?: string }).error, attempt.label).toBe(
-          "invalid",
-        );
+        const failure = JSON.parse(response.body) as { error?: string; detail?: string };
+        expect(failure.error, attempt.label).toBe("invalid");
+        statusFailures.set(attempt.label, failure);
       }
+      expect(statusFailures.get("status nonexistent artifact")?.detail).toBe(
+        statusFailures.get("status cross-case artifact")?.detail,
+      );
+      expect(statusFailures.get("status nonexistent contribution")?.detail).toBe(
+        statusFailures.get("status cross-case contribution")?.detail,
+      );
+
+      const artifactCallsBeforeInvalidStatus = artifactLookup.mock.calls.length;
+      const contributionCallsBeforeInvalidStatus = contributionLookup.mock.calls.length;
+      const invalidUuidStatus = await app.inject({
+        method: "POST",
+        url: `/api/cases/${primary.id}/hypotheses/${statusTarget.id}/status`,
+        headers: { cookie: alice },
+        payload: {
+          status: "supported",
+          links: [{ kind: "artifact", id: "still-not-a-uuid" }],
+        },
+      });
+      expect(invalidUuidStatus.statusCode).toBe(400);
+      const invalidUuidStatusFailure = JSON.parse(invalidUuidStatus.body) as {
+        error?: string;
+        detail?: string;
+      };
+      expect(invalidUuidStatusFailure.detail).toBe(
+        statusFailures.get("status nonexistent artifact")?.detail,
+      );
+      expect(artifactLookup).toHaveBeenCalledTimes(artifactCallsBeforeInvalidStatus);
+      expect(contributionLookup).toHaveBeenCalledTimes(contributionCallsBeforeInvalidStatus + 1);
+      expect(contributionLookup).not.toHaveBeenCalledWith("still-not-a-uuid");
 
       expect(await caseStore.listLatestRevisions(primary.id)).toEqual(baselineLatest);
       expect(await caseStore.listRevisions(statusTarget.id)).toHaveLength(1);

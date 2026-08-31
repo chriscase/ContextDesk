@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  ContractViolation,
   SNAPSHOT_SCHEMA_ID,
   parseCorpusIntakeBatch,
   snapshotFingerprint,
@@ -28,6 +29,7 @@ import {
 
 const CASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const SNAPSHOT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const MISSING_CONTRIBUTION_ID = "20000000-0000-4000-8000-000000000002";
 const CREATED_AT = "2026-08-20T00:00:00.000Z";
 
 function caseRow(id = CASE_ID): CaseRow {
@@ -527,6 +529,65 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
         expect(chain[1]?.body).toBe("revision 2");
         expect(chain[1]?.predecessorRevision).toBe(1);
       } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("rejects invalid-shaped hypothesis link ids before PostgreSQL lookup", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 2 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-hypothesis-links-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(pool), catalog);
+      const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      try {
+        const primary = await cases.createCase(actor, { title: "Primary PG link fixture" }, "test");
+        const secondary = await cases.createCase(actor, { title: "Secondary PG link fixture" }, "test");
+        const crossCaseNote = await cases.addContribution(
+          secondary.id,
+          actor,
+          { kind: "note", body: "Secondary case note" },
+          "test",
+        );
+        const baselineTimeline = await cases.listTimeline(primary.id);
+        const baselineAudits = await audit.list({ action: "contribution_create" });
+
+        const rejectedLink = async (id: string): Promise<ContractViolation> => {
+          try {
+            await cases.addContribution(
+              primary.id,
+              actor,
+              {
+                kind: "hypothesis",
+                body: "Must not persist",
+                hypothesisLinks: [{ kind: "contribution", id }],
+              },
+              "test",
+            );
+          } catch (error) {
+            expect(error).toBeInstanceOf(ContractViolation);
+            return error as ContractViolation;
+          }
+          throw new Error("expected hypothesis link rejection");
+        };
+
+        const malformed = await rejectedLink("not-a-postgresql-uuid");
+        const missing = await rejectedLink(MISSING_CONTRIBUTION_ID);
+        const crossCase = await rejectedLink(crossCaseNote.id);
+        expect(malformed.detail).toBe(missing.detail);
+        expect(missing.detail).toBe(crossCase.detail);
+        expect(await cases.listTimeline(primary.id)).toEqual(baselineTimeline);
+        expect(await audit.list({ action: "contribution_create" })).toEqual(baselineAudits);
+        expect((await pool.query(
+          "SELECT id FROM contributions WHERE case_id = $1",
+          [primary.id],
+        )).rows).toEqual([]);
+      } finally {
+        await pool.end();
         await rm(root, { recursive: true, force: true });
       }
     });

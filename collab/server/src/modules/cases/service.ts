@@ -10,6 +10,7 @@ import {
   OVERVIEW_ACTIVITY_CAP,
   OVERVIEW_OPEN_CASE_CAP,
   describeDeleteRequest,
+  isRfc4122Uuid,
   isContributionIdempotencyKey,
   normalizeInvestigationContext,
   snapshotFairness,
@@ -2126,6 +2127,14 @@ export class CaseService {
   ): Promise<HypothesisLinkInput[]> {
     const links = parseHypothesisLinks(raw, path);
     for (const [index, link] of links.entries()) {
+      const invalidReference = () => new ContractViolation(
+        `${path}[${index}].id`,
+        "must reference an existing artifact or contribution in this investigation",
+      );
+      // PostgreSQL stores both namespaces as UUID columns. Reject malformed
+      // values at the domain boundary so they never reach a driver cast and so
+      // memory and PostgreSQL return the same bounded contract failure.
+      if (!isRfc4122Uuid(link.id)) throw invalidReference();
       let belongsToCase: boolean;
       if (link.kind === "artifact") {
         belongsToCase = (await this.store.getArtifact(link.id))?.caseId === caseId;
@@ -2135,10 +2144,7 @@ export class CaseService {
           && revisions.every((revision) => revision.caseId === caseId);
       }
       if (!belongsToCase) {
-        throw new ContractViolation(
-          `${path}[${index}].id`,
-          "must reference an existing artifact or contribution in this investigation",
-        );
+        throw invalidReference();
       }
     }
     return links;
