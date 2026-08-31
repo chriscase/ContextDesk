@@ -80,9 +80,10 @@ bucket until the shipped config says so.
 ### Least-privilege policy shape
 
 Policy syntax is provider-specific. For services that accept AWS-style IAM
-policies, this is a planning shape, not a copy-ready policy. Replace the bucket
-and prefix, then reconcile the exact action set with the shipped provider. Do
-not add `s3:DeleteObject` or bucket administration merely to make setup easier.
+policies, this is a starting shape rather than a provider-neutral copy/paste
+policy. Replace the bucket and prefix and verify it against the selected S3
+service. ContextDesk requires `s3:DeleteObject` for staging, journal recovery,
+and rollback cleanup; it does not require bucket-administration permissions.
 
 ```json
 {
@@ -103,6 +104,7 @@ not add `s3:DeleteObject` or bucket administration merely to make setup easier.
       "Action": [
         "s3:GetObject",
         "s3:PutObject",
+        "s3:DeleteObject",
         "s3:AbortMultipartUpload",
         "s3:ListMultipartUploadParts"
       ],
@@ -114,34 +116,35 @@ not add `s3:DeleteObject` or bucket administration merely to make setup easier.
 
 Some self-hosted services expose coarser bucket grants instead of IAM JSON.
 Use the smallest native grant that passes the release's readiness and
-application smoke tests. Keep a separate short-lived operator identity for the
-disposable-object delete step; deletion is not part of the current evidence
-interface.
+application smoke tests. The application identity must be able to delete only
+objects below its assigned prefix; this is internal transaction cleanup, not a
+user-facing permanent-delete feature. Keep bucket administration and unrelated
+prefixes out of the application grant.
 
 ## Operator settings translation
 
-Every name in this table except the shipped `COLLAB_EVIDENCE_ROOT` and
-`NODE_EXTRA_CA_CERTS` is **PROVISIONAL**. The provider implementation lane may
-rename, split, or reject these labels. Do not copy them into
-`collab/deploy/.env.example` or a copy-ready manifest. After the feature ships,
-the release sample or generated config is authority.
+These names are the S3 Evidence Storage v1 deployment contract. The commented
+examples in `collab/deploy/.env.example` remain the copy-ready source of truth.
+Filesystem is the default, and `COLLAB_EVIDENCE_ROOT` remains the local
+control-state root in both modes.
 
-| Operator job | Draft label (PROVISIONAL) | Notes |
+| Operator job | Setting | Notes |
 | --- | --- | --- |
-| Select byte backend | `COLLAB_EVIDENCE_STORE` | Draft values only (`filesystem` or `s3_compatible`). There is no shipped reader for this name. The current backend is the filesystem at `COLLAB_EVIDENCE_ROOT`. |
-| Filesystem root | `COLLAB_EVIDENCE_ROOT` | Shipped. Still required for the current provider. |
+| Select byte backend | `COLLAB_EVIDENCE_PROVIDER` | `filesystem` (default) or `s3`. |
+| Filesystem/control root | `COLLAB_EVIDENCE_ROOT` | Required in both modes for local control state. |
 | S3 API endpoint | `COLLAB_EVIDENCE_S3_ENDPOINT` | Scheme, host, and port only. No userinfo, no key in the query string. |
 | Region | `COLLAB_EVIDENCE_S3_REGION` | Must match the signer. Garage's default region is `garage`. |
 | Bucket | `COLLAB_EVIDENCE_S3_BUCKET` | Private bucket dedicated to War Room when possible. |
 | Key prefix | `COLLAB_EVIDENCE_S3_PREFIX` | Optional isolation inside a shared bucket. Keep smoke-test keys out of the application prefix. |
-| Path-style | `COLLAB_EVIDENCE_S3_PATH_STYLE` | Draft boolean/flag. Plan on enabling it for local and many self-hosted endpoints. |
-| Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID` | Dedicated service identity, not a human console login. |
-| Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Draft follows the LDAP secret pattern: exactly one of environment, owner-only file, or absolute `file:` reference. |
-| Custom CA | `COLLAB_EVIDENCE_S3_CA` or `COLLAB_EVIDENCE_S3_CA_FILE`, else `NODE_EXTRA_CA_CERTS` | Draft only. LDAP uses PEM **content** for `COLLAB_LDAP_CA` because a path would be an empty trust store; S3 may differ. Prefer adding an internal CA with `NODE_EXTRA_CA_CERTS` unless the release says otherwise. |
-
-> Note:
-> Treat this table as a planning vocabulary, not a boot contract. A process
-> that exports these names today has no shipped reader for them.
+| Path-style | `COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE` | Use `1` for Garage and other endpoints that do not provide bucket-name DNS. |
+| HTTP opt-in | `COLLAB_EVIDENCE_S3_ALLOW_HTTP` | Defaults off. Set to `1` only for a trusted local evaluation network. |
+| Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Bounded per-request timeout; the deployment sample uses 30 seconds. |
+| Upload ceiling | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Defaults to 512 MiB and refuses values above the 5 GiB v1 hard limit. |
+| Credential mode | `COLLAB_EVIDENCE_S3_CREDENTIALS_MODE` | `static` requires the explicit values below; `default_chain` uses the server process's AWS-compatible provider chain. |
+| Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID`, `_FILE`, or `_REF` | Dedicated service identity, not a human console login. Configure exactly one source. |
+| Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; files must be owner-protected and `_REF` must be an absolute `file:` reference. |
+| Session token | `COLLAB_EVIDENCE_S3_SESSION_TOKEN`, `_FILE`, or `_REF` | Optional; use only when the selected static credentials require it. |
+| Custom CA | `COLLAB_EVIDENCE_S3_CA_FILE` | Optional PEM file for the private S3 endpoint. TLS verification remains enabled. |
 
 ## Local evaluation with Garage
 
@@ -267,8 +270,9 @@ Troubleshooting.
 
 This proves the S3 service, not War Room. Use a disposable prefix such as
 `operator-smoke/` so later application keys cannot collide. Prefer a
-least-privilege smoke identity that may delete disposable keys; the future
-application identity may not need delete.
+least-privilege smoke identity. The application identity also requires delete
+within its assigned prefix for transactional cleanup, but it must not receive
+bucket-administration access.
 
 1. Configure an S3 client for path-style requests, endpoint
    `http://127.0.0.1:3900`, and region `garage`. Disable instance-metadata
