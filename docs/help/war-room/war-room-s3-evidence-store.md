@@ -615,18 +615,35 @@ proof from the **repository root**. `npm --prefix collab` executes the
    pending-write recovery before it listens. Default bind is `127.0.0.1:8787`
    (`COLLAB_HOST` default `127.0.0.1`, `COLLAB_PORT` default `8787`).
 
+   Do not export a relative `COLLAB_STATIC_DIR` for this workspace command:
+   doctor and the server start from different working directories. For this
+   repository-root proof, point it at the absolute web build that doctor just
+   produced. The `test` fails before startup if that artifact is absent.
+
    ```sh
+   export COLLAB_STATIC_DIR="$PWD/collab/web/dist"
+   test -f "$COLLAB_STATIC_DIR/index.html"
    npm --prefix collab start
    ```
 
+   Alternatively, leave `COLLAB_STATIC_DIR` unset and the compiled server uses
+   its built-in `collab/web/dist` fallback. Use a different static directory
+   only as an absolute path.
+
 3. Check process liveness, then database plus the selected evidence backend.
    Do not treat `/health` as evidence readiness. `/ready` is HTTP 200 when
-   both are up and HTTP 503 `not_ready` otherwise. If `COLLAB_PORT` is not
-   `8787`, substitute that port. `curl -f` fails closed on HTTP errors.
+   both are up and HTTP 503 `not_ready` otherwise. Export one operator-reachable
+   base URL and reuse it for every browser and readiness step. It defaults to
+   loopback plus `COLLAB_PORT` (or `8787`); set `WAR_ROOM_URL` explicitly when
+   the browser reaches another host or ingress. The second assignment removes
+   one trailing slash. `curl -f` fails closed on HTTP errors.
 
    ```sh
-   curl -sS -f --max-time 5 http://127.0.0.1:8787/health
-   curl -sS -f --max-time 5 http://127.0.0.1:8787/ready
+   WAR_ROOM_URL="${WAR_ROOM_URL:-http://127.0.0.1:${COLLAB_PORT:-8787}}"
+   WAR_ROOM_URL="${WAR_ROOM_URL%/}"
+   export WAR_ROOM_URL
+   curl -sS -f --max-time 5 "$WAR_ROOM_URL/health"
+   curl -sS -f --max-time 5 "$WAR_ROOM_URL/ready"
    ```
 
 4. Run positive and negative permission checks for the dedicated bucket or
@@ -635,8 +652,8 @@ proof from the **repository root**. `npm --prefix collab` executes the
 5. Through the normal authenticated War Room UI, not an unauthenticated
    API or cookie shortcut:
 
-   - Open `http://127.0.0.1:8787` (or the configured bind) and sign in with
-     an identity that may write evidence on the investigation.
+   - Open the exported `WAR_ROOM_URL` in a browser and sign in with an identity
+     that may write evidence on the investigation.
    - Open that case's evidence board. Under **Upload evidence**, choose a
      small unique **File**, fill **Summary**, set **Artifact kind** and
      **Privacy class**, and submit.
@@ -667,7 +684,8 @@ proof from the **repository root**. `npm --prefix collab` executes the
        sleep 3
      done
      n=0
-     while ! curl -sS -f --max-time 5 http://127.0.0.1:8787/ready >/dev/null; do
+     : "${WAR_ROOM_URL:?export WAR_ROOM_URL as shown in step 3}"
+     while ! curl -sS -f --max-time 5 "$WAR_ROOM_URL/ready" >/dev/null; do
        n=$((n + 1))
        test "$n" -lt 30
        sleep 3
