@@ -298,7 +298,7 @@ export function KeystoneSituationEditor({
   const [storedState, setStoredState] = useState(() => initialState(scope, investigation));
   const activeSaveRef = useRef<SaveToken | null>(null);
   const saveSequenceRef = useRef(0);
-  const currentScopeRef = useRef(scope);
+  const currentScopeRef = useRef<string | null>(scope);
   const editButtonRef = useRef<HTMLButtonElement>(null);
   const firstFieldRef = useRef<HTMLTextAreaElement>(null);
   const returnFocusRef = useRef(false);
@@ -319,11 +319,16 @@ export function KeystoneSituationEditor({
     : null;
 
   useLayoutEffect(() => {
+    currentScopeRef.current = scope;
     if (activeSaveRef.current?.scope !== scope) activeSaveRef.current = null;
     setStoredState((current) => current.scope === scope
       ? current
       : initialState(scope, investigation));
-  }, [investigation, scope]);
+    return () => {
+      if (activeSaveRef.current?.scope === scope) activeSaveRef.current = null;
+      if (currentScopeRef.current === scope) currentScopeRef.current = null;
+    };
+  }, [scope]);
 
   useLayoutEffect(() => {
     if (state.editing) {
@@ -433,7 +438,11 @@ export function KeystoneSituationEditor({
       outcome = { status: "failed", error: { kind: "unexpected" } };
     }
 
-    if (activeSaveRef.current === token) activeSaveRef.current = null;
+    // Equality is the completion grant. Scope exit, unmount, or a newer save
+    // clears/replaces this token, so an older promise may never publish state
+    // or invoke the success callback even if the UI later returns to its scope.
+    if (activeSaveRef.current !== token) return;
+    activeSaveRef.current = null;
     if (currentScopeRef.current !== token.scope) return;
 
     if (outcome.status === "succeeded") {

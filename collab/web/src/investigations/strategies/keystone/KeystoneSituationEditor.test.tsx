@@ -31,6 +31,7 @@ function mountEditor(overrides: Partial<KeystoneSituationEditorProps> = {}) {
   };
   const view = render(<KeystoneSituationEditor {...props} />);
   return {
+    unmount: view.unmount,
     rerender(next: Partial<KeystoneSituationEditorProps>) {
       props = { ...props, ...next };
       view.rerender(<KeystoneSituationEditor {...props} />);
@@ -216,6 +217,42 @@ describe("Keystone K2 situation correction", () => {
     expect(screen.queryByRole("option")).toBeNull();
   });
 
+  it("submits an explicitly cleared question list as an empty array", async () => {
+    const updateSituation = vi.fn<UpdateSituation>(async () => ({
+      status: "failed",
+      error: { kind: "validation", status: 400 },
+    }));
+    mountEditor({ updateSituation });
+    enterEditor();
+
+    fireEvent.change(screen.getByLabelText("Open questions"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(updateSituation).toHaveBeenCalledTimes(1));
+    expect(updateSituation).toHaveBeenCalledWith({ openQuestions: [] });
+    expect((screen.getByLabelText("Open questions") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("keeps the draft when the controller ignores the command", async () => {
+    const updateSituation = vi.fn<UpdateSituation>(async () => ({
+      status: "ignored",
+      reason: "busy",
+    }));
+    const onSuccess = vi.fn();
+    mountEditor({ updateSituation, onSuccess });
+    enterEditor();
+    fireEvent.change(screen.getByLabelText("Impact"), {
+      target: { value: "Retain this ignored draft." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByText("A situation save is already in progress.")).toBeTruthy();
+    expect((screen.getByLabelText("Impact") as HTMLTextAreaElement).value)
+      .toBe("Retain this ignored draft.");
+    expect(screen.getByRole("form", { name: "Edit recorded situation" })).toBeTruthy();
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
   it("suppresses writes while runtime-running and allows only one local in-flight write", async () => {
     const investigation = makePopulatedCase();
     const deferred = createDeferred<CommandOutcome<CaseV1>>();
@@ -290,6 +327,97 @@ describe("Keystone K2 situation correction", () => {
     expect(document.body.textContent).not.toContain("PRIVATE SECOND IDENTITY DRAFT");
     expect(screen.queryByRole("form")).toBeNull();
     expect(screen.getByText("Second authoritative problem.")).toBeTruthy();
+  });
+
+  it("does not let an A to B to A completion replace a newer A save", async () => {
+    const first = makePopulatedCase();
+    const second: CaseV1 = {
+      ...makeSparseImportedCase(),
+      id: "case-second",
+      problemStatement: "Second authoritative problem.",
+    };
+    const oldSave = createDeferred<CommandOutcome<CaseV1>>();
+    const replacementSave = createDeferred<CommandOutcome<CaseV1>>();
+    let callCount = 0;
+    const updateSituation = vi.fn<UpdateSituation>(() => {
+      callCount += 1;
+      return callCount === 1 ? oldSave.promise : replacementSave.promise;
+    });
+    const onSuccess = vi.fn();
+    const mounted = mountEditor({ investigation: first, updateSituation, onSuccess });
+
+    enterEditor();
+    fireEvent.change(screen.getByLabelText("Problem statement"), {
+      target: { value: "Old A draft." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    mounted.rerender({ investigation: second });
+    mounted.rerender({ investigation: first });
+    enterEditor();
+    fireEvent.change(screen.getByLabelText("Problem statement"), {
+      target: { value: "Replacement A draft." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(updateSituation).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      oldSave.resolve({
+        status: "succeeded",
+        value: {
+          ...first,
+          problemStatement: "Obsolete A result.",
+          situationVersion: first.situationVersion + 1,
+        },
+      });
+      await oldSave.promise;
+    });
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect((screen.getByLabelText("Problem statement") as HTMLTextAreaElement).value)
+      .toBe("Replacement A draft.");
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled)
+      .toBe(true);
+
+    const replacementResult: CaseV1 = {
+      ...first,
+      problemStatement: "Authoritative replacement A result.",
+      situationVersion: first.situationVersion + 2,
+    };
+    await act(async () => {
+      replacementSave.resolve({ status: "succeeded", value: replacementResult });
+      await replacementSave.promise;
+    });
+    expect(screen.getByText("Authoritative replacement A result.")).toBeTruthy();
+    expect(screen.queryByText("Obsolete A result.")).toBeNull();
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onSuccess).toHaveBeenCalledWith(replacementResult);
+  });
+
+  it("invalidates a pending save on unmount", async () => {
+    const investigation = makePopulatedCase();
+    const deferred = createDeferred<CommandOutcome<CaseV1>>();
+    const updateSituation = vi.fn<UpdateSituation>(() => deferred.promise);
+    const onSuccess = vi.fn();
+    const mounted = mountEditor({ investigation, updateSituation, onSuccess });
+    enterEditor();
+    fireEvent.change(screen.getByLabelText("Scope"), {
+      target: { value: "Pending during unmount." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    mounted.unmount();
+    await act(async () => {
+      deferred.resolve({
+        status: "succeeded",
+        value: {
+          ...investigation,
+          scope: "Server result after unmount.",
+          situationVersion: investigation.situationVersion + 1,
+        },
+      });
+      await deferred.promise;
+    });
+    expect(onSuccess).not.toHaveBeenCalled();
   });
 
   it("cancels by discarding the draft, invokes the callback, and returns focus", () => {
