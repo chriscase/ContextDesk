@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
@@ -23,8 +24,12 @@ import {
   isContentHash,
   sha256Hex,
   type EvidenceFinalizeOptions,
+  type EvidenceReadHandle,
+  type EvidenceReadRange,
   type EvidenceStage,
   type EvidenceStore,
+  type EvidenceStreamOptions,
+  type EvidenceStreamStage,
   type EvidenceWriteBatch,
   type EvidenceWriteRecoveryReport,
 } from "./store.js";
@@ -70,6 +75,9 @@ const ASCII_PRINTABLE = /^[\u0020-\u007E]*$/;
 const OBJECT_NOT_FOUND = new Set(["NoSuchKey", "NotFound", "NoSuchKeyException"]);
 const MAX_FILE_REF_BYTES = 64 * 1024;
 const MAX_JOURNAL_BYTES = 256 * 1024;
+const MAX_LIST_PAGE_SIZE = 1000;
+const MAX_LIST_PAGES = 256;
+const MAX_LIST_KEYS = 8192;
 
 export function createS3ClientConfig(opts: S3EvidenceStoreOptions): S3ClientConfig {
   const region = requiredToken(opts.region, "region");
@@ -109,6 +117,8 @@ export class S3EvidenceStore implements EvidenceStore {
     | undefined;
   private readonly referencedSources: Array<() => Promise<Iterable<string>>> = [];
   private readonly digestTails = new Map<string, Promise<void>>();
+  private readonly liveStageHashes = new Set<string>();
+  private readonly liveStagingKeys = new Set<string>();
   private writeTail: Promise<void> = Promise.resolve();
 
   constructor(opts: S3EvidenceStoreOptions) {
@@ -154,9 +164,7 @@ export class S3EvidenceStore implements EvidenceStore {
   ): Promise<EvidenceWriteRecoveryReport> {
     const release = await this.acquireWriteLock();
     try {
-      const hashes = referenced ?? (this.referencedSources.length > 0
-        ? await this.loadBoundReferencedHashes()
-        : null);
+      const hashes = await this.unionReferencedHashes(referenced);
       if (!hashes) {
         throw new Error("referenced content hashes are required for evidence recovery");
       }
@@ -194,17 +202,19 @@ export class S3EvidenceStore implements EvidenceStore {
     const hash = sha256Hex(bytes);
     const meta = blobMeta(hash, bytes, opts?.contentType);
     const releaseDigest = await this.acquireDigestLock(hash);
-    let releaseWrite: (() => Promise<void>) | null = null;
     let existing = false;
     try {
-      releaseWrite = await this.acquireWriteLock();
-      const head = await this.head(hash);
-      if (head) {
-        await this.assertExistingCanonical(hash, bytes.byteLength);
-        existing = true;
+      const releaseWrite = await this.acquireWriteLock();
+      try {
+        const head = await this.head(hash);
+        if (head) {
+          await this.assertExistingCanonical(hash, bytes.byteLength, "stage");
+          existing = true;
+        }
+      } finally {
+        await releaseWrite();
       }
     } catch (error) {
-      if (releaseWrite) await releaseWrite();
       releaseDigest();
       throw error;
     }
@@ -214,47 +224,382 @@ export class S3EvidenceStore implements EvidenceStore {
         await this.putObject(stagingObjectKey, bytes, meta, "stage");
       }
     } catch (error) {
-      if (releaseWrite) await releaseWrite();
       releaseDigest();
       throw error;
     }
+    this.liveStageHashes.add(hash);
+    if (stagingObjectKey) this.liveStagingKeys.add(stagingObjectKey);
     let committed = existing;
     let created = false;
     let released = false;
-    const canonicalKey = this.blobKey(hash);
+    let rolledBack = false;
+    let ownershipUnknown = false;
+    let journalId: string | null = null;
+    const withWriteLock = async (fn: () => Promise<void>): Promise<void> => {
+      const releaseWrite = await this.acquireWriteLock();
+      try {
+        await fn();
+      } finally {
+        await releaseWrite();
+      }
+    };
+    const dropLiveMarkers = (): void => {
+      this.liveStageHashes.delete(hash);
+      if (stagingObjectKey) this.liveStagingKeys.delete(stagingObjectKey);
+    };
     return {
       meta,
       commit: async () => {
-        if (committed) return;
-        if (!stagingObjectKey) throw new S3EvidenceError("commit", "unavailable");
-        const already = await this.head(hash);
-        if (already) {
-          await this.assertExistingCanonical(hash, bytes.byteLength);
-          committed = true;
-          await this.deleteObjectBestEffort("commit", stagingObjectKey);
-          return;
-        }
-        await this.copyObject(stagingObjectKey, canonicalKey, "commit");
-        created = true;
-        committed = true;
-        await this.deleteObjectBestEffort("commit", stagingObjectKey);
+        await withWriteLock(async () => {
+          if (committed) return;
+          if (rolledBack || released) throw new S3EvidenceError("commit", "unavailable");
+          if (!stagingObjectKey) throw new S3EvidenceError("commit", "unavailable");
+          const already = await this.head(hash);
+          if (already) {
+            await this.assertExistingCanonical(hash, bytes.byteLength, "commit");
+            committed = true;
+            await this.deleteObjectBestEffort("commit", stagingObjectKey);
+            return;
+          }
+          if (journalId === null) journalId = randomUUID();
+          await this.writePendingJournal(journalId, [hash], "commit");
+          const outcome = await this.copyCanonicalObject(
+            stagingObjectKey,
+            hash,
+            bytes.byteLength,
+            "commit",
+          );
+          if (outcome === "applied") {
+            created = true;
+            committed = true;
+            await this.deleteObjectBestEffort("commit", stagingObjectKey);
+            return;
+          }
+          if (outcome === "unknown") ownershipUnknown = true;
+          throw new S3EvidenceError("commit", "unavailable");
+        });
       },
       rollback: async () => {
-        if (stagingObjectKey) await this.deleteObject("rollback", stagingObjectKey);
-        if (created) {
-          await this.deleteObject("rollback", canonicalKey);
-          committed = false;
-          created = false;
-        }
+        await withWriteLock(async () => {
+          // Stale rollback after release is a no-op. Published canonical bytes
+          // are never deleted here: identical content may already be adopted by
+          // another lifecycle or process, and cross-process recovery versus an
+          // active ad-hoc stage cannot be proven without an async/durable
+          // release/finalize seam.
+          if (released || rolledBack) return;
+          if (stagingObjectKey) await this.deleteObject("rollback", stagingObjectKey);
+          const published = created || committed;
+          if (journalId && !published && !ownershipUnknown) {
+            await this.deletePendingJournal(journalId, "rollback");
+            journalId = null;
+          }
+          rolledBack = true;
+        });
       },
       release: () => {
         if (released) return;
         released = true;
+        dropLiveMarkers();
         releaseDigest();
-        // EvidenceStage.release is synchronous. Queue the possibly-async external
-        // lease release; the in-process write tail remains blocked until it settles.
-        void releaseWrite?.().catch(() => undefined);
       },
+    };
+  }
+
+  async stageStream(
+    source: AsyncIterable<Uint8Array>,
+    opts: EvidenceStreamOptions,
+  ): Promise<EvidenceStreamStage> {
+    if (!opts || typeof opts !== "object") {
+      throw new Error("evidence stream options are required");
+    }
+    assertSafeNonNegativeInteger(opts.maxBytes, "maxBytes");
+    if (opts.expectedLength !== undefined) {
+      assertSafeNonNegativeInteger(opts.expectedLength, "expectedLength");
+      if (opts.expectedLength > opts.maxBytes) {
+        throw new Error("expectedLength must not exceed maxBytes");
+      }
+    }
+    if (opts.contentType !== undefined) {
+      if (typeof opts.contentType !== "string") {
+        throw new Error("contentType must be a string");
+      }
+      assertMetadataValue(opts.contentType, "stageStream");
+    }
+    if (opts.signal !== undefined) {
+      assertAbortSignal(opts.signal);
+    }
+    if (!source || typeof source[Symbol.asyncIterator] !== "function") {
+      throw new Error("evidence stream source must be an AsyncIterable");
+    }
+    throwIfAborted(opts.signal);
+
+    const scratchKey = this.opaqueStagingKey(randomUUID());
+    this.liveStagingKeys.add(scratchKey);
+    const hasher = createHash("sha256");
+    let byteLength = 0;
+    let sourceFinished = false;
+    let iterator: AsyncIterator<Uint8Array> | null = null;
+    let streamed = false;
+    let intakeError: unknown = null;
+    const stopSource = (): void => {
+      if (!iterator || sourceFinished) return;
+      sourceFinished = true;
+      try {
+        if (typeof iterator.return === "function") {
+          void Promise.resolve(iterator.return()).catch(() => undefined);
+        }
+      } catch {
+        // A hostile source cannot suppress scratch cleanup.
+      }
+    };
+
+    try {
+      iterator = source[Symbol.asyncIterator]();
+      const intake = iterateIntakeChunks({
+        iterator,
+        opts,
+        hasher,
+        onBytes: (nextLength) => {
+          byteLength = nextLength;
+        },
+        onFinished: () => {
+          sourceFinished = true;
+        },
+        onError: (error) => {
+          intakeError = error;
+        },
+      });
+      const input: {
+        Bucket: string;
+        Key: string;
+        Body: Readable;
+        ContentLength?: number;
+        ContentType?: string;
+      } = {
+        Bucket: this.bucket,
+        Key: scratchKey,
+        Body: Readable.from(intake, { objectMode: true }),
+      };
+      if (opts.expectedLength !== undefined) input.ContentLength = opts.expectedLength;
+      if (opts.contentType !== undefined) input.ContentType = opts.contentType;
+      try {
+        await this.send("stageStream", new PutObjectCommand(input));
+      } catch (error) {
+        if (intakeError !== null) throw intakeError;
+        throw error;
+      }
+      throwIfAborted(opts.signal);
+      if (opts.expectedLength !== undefined && byteLength !== opts.expectedLength) {
+        throw new Error("evidence stream length did not match expectedLength");
+      }
+      streamed = true;
+    } finally {
+      if (!sourceFinished) stopSource();
+      if (!streamed) {
+        await this.deleteObjectBestEffort("stageStream", scratchKey);
+        this.liveStagingKeys.delete(scratchKey);
+      }
+    }
+
+    const hash = hasher.digest("hex") as ContentHash;
+    const meta: BlobMetaV1 = Object.freeze({
+      hash,
+      byteLength,
+      contentType: opts.contentType ?? null,
+    });
+    this.liveStageHashes.add(hash);
+
+    let promoted = false;
+    let created = false;
+    let settled = false;
+    let ownershipUnknown = false;
+    let journalId: string | null = null;
+    let releaseLifecycleLock: (() => Promise<void>) | null = null;
+    let promotionPromise: Promise<void> | null = null;
+    let settlementPromise: Promise<void> | null = null;
+    let settlementMode: "rollback" | "finalize" | null = null;
+    let finalizeRetainPendingJournal: boolean | null = null;
+
+    const dropLiveMarkers = (): void => {
+      this.liveStageHashes.delete(hash);
+      this.liveStagingKeys.delete(scratchKey);
+    };
+
+    const releaseLifecycle = async (): Promise<void> => {
+      const release = releaseLifecycleLock;
+      if (!release) return;
+      try {
+        await release();
+      } finally {
+        if (releaseLifecycleLock === release) releaseLifecycleLock = null;
+      }
+    };
+
+    const cleanScratch = async (operation: string): Promise<void> => {
+      await this.deleteObject(operation, scratchKey);
+      this.liveStagingKeys.delete(scratchKey);
+    };
+
+    const runPromotion = async (): Promise<void> => {
+      const releaseWrite = await this.acquireWriteLock();
+      let retainWriteLock = false;
+      try {
+        const existing = await this.head(hash);
+        if (existing) {
+          await this.assertExistingCanonical(hash, byteLength, "promote");
+          await cleanScratch("promote");
+          promoted = true;
+          created = false;
+          releaseLifecycleLock = releaseWrite;
+          retainWriteLock = true;
+          return;
+        }
+
+        if (journalId === null) journalId = randomUUID();
+        await this.writePendingJournal(journalId, [hash], "promote");
+        const outcome = await this.copyCanonicalObjectReplace(
+          scratchKey,
+          hash,
+          meta,
+          "promote",
+        );
+        if (outcome === "applied") {
+          created = true;
+          promoted = true;
+          releaseLifecycleLock = releaseWrite;
+          retainWriteLock = true;
+          return;
+        }
+        if (outcome === "unknown") ownershipUnknown = true;
+        releaseLifecycleLock = releaseWrite;
+        retainWriteLock = true;
+        throw new S3EvidenceError("promote", "unavailable");
+      } finally {
+        if (!retainWriteLock) await releaseWrite();
+      }
+    };
+
+    const promote = async (): Promise<void> => {
+      if (settled) throw new Error("evidence stream stage is already settled");
+      if (settlementMode) {
+        throw new Error(`evidence stream stage is already settling via ${settlementMode}`);
+      }
+      if (promoted) return;
+      if (releaseLifecycleLock) {
+        throw new Error("evidence stream failed promotion must be rolled back");
+      }
+      if (!promotionPromise) {
+        promotionPromise = runPromotion().catch((error: unknown) => {
+          promotionPromise = null;
+          throw error;
+        });
+      }
+      await promotionPromise;
+      if (settlementMode) {
+        throw new Error(
+          `evidence stream stage began ${settlementMode} while promotion was in flight`,
+        );
+      }
+    };
+
+    const settle = async (
+      mode: "rollback" | "finalize",
+      options?: EvidenceFinalizeOptions,
+    ): Promise<void> => {
+      const retainPendingJournal = options?.retainPendingJournal === true;
+      if (mode === "finalize" && !promoted) {
+        if (promotionPromise) {
+          throw new Error("evidence stream promotion must complete before finalize");
+        }
+        if (created || journalId !== null || releaseLifecycleLock) {
+          throw new Error("evidence stream failed promotion must be rolled back");
+        }
+      }
+      if (settlementPromise) {
+        if (settlementMode !== mode) {
+          throw new Error(`evidence stream stage is already settling via ${settlementMode}`);
+        }
+        if (
+          mode === "finalize"
+          && finalizeRetainPendingJournal !== retainPendingJournal
+        ) {
+          throw new Error("evidence stream finalize options conflict with the active settlement");
+        }
+        return settlementPromise;
+      }
+      if (settled) return;
+      if (settlementMode && settlementMode !== mode) {
+        throw new Error(`evidence stream stage is already settling via ${settlementMode}`);
+      }
+      if (mode === "finalize") {
+        if (
+          finalizeRetainPendingJournal !== null
+          && finalizeRetainPendingJournal !== retainPendingJournal
+        ) {
+          throw new Error("evidence stream finalize options conflict with the active settlement");
+        }
+        finalizeRetainPendingJournal = retainPendingJournal;
+      }
+      settlementMode = mode;
+      const attempt = (async () => {
+        if (promotionPromise) {
+          try {
+            await promotionPromise;
+          } catch {
+            // Settlement still owns cleanup after a failed promotion.
+          }
+        }
+        if (
+          !releaseLifecycleLock
+          && (promoted || created || journalId !== null || ownershipUnknown)
+        ) {
+          releaseLifecycleLock = await this.acquireWriteLock();
+        }
+        try {
+          await cleanScratch(mode);
+          let keepJournal = ownershipUnknown;
+          if (mode === "rollback" && created) {
+            const inspection = await this.inspectCanonical(hash, byteLength);
+            if (inspection === "unknown" || inspection === "mismatch") {
+              keepJournal = true;
+            } else if (inspection === "match") {
+              await this.deleteObject("rollback", this.blobKey(hash));
+              created = false;
+              promoted = false;
+            } else {
+              created = false;
+              promoted = false;
+            }
+          }
+          if (journalId && (mode === "rollback" ? !keepJournal : !retainPendingJournal)) {
+            await this.deletePendingJournal(journalId, mode);
+            journalId = null;
+          }
+        } catch (error) {
+          if (!created && journalId === null && !ownershipUnknown) {
+            dropLiveMarkers();
+            await releaseLifecycle();
+          }
+          throw error;
+        }
+        dropLiveMarkers();
+        await releaseLifecycle();
+        settled = true;
+      })();
+      settlementPromise = attempt;
+      try {
+        await attempt;
+      } catch (error) {
+        if (settlementPromise === attempt) settlementPromise = null;
+        throw error;
+      }
+    };
+
+    return {
+      meta,
+      promote,
+      rollback: () => settle("rollback"),
+      finalize: (options) => settle("finalize", options),
     };
   }
 
@@ -276,6 +621,63 @@ export class S3EvidenceStore implements EvidenceStore {
       if (error instanceof S3EvidenceError) throw error;
       throw new S3EvidenceError("head", "unavailable");
     }
+  }
+
+  async openRead(
+    hash: ContentHash,
+    range?: EvidenceReadRange,
+  ): Promise<EvidenceReadHandle> {
+    if (!isContentHash(hash)) {
+      throw new Error("invalid content hash");
+    }
+    if (range !== undefined) {
+      assertSafeNonNegativeInteger(range.start, "range.start");
+      assertSafeNonNegativeInteger(range.end, "range.end");
+      if (range.end < range.start) {
+        throw new Error("range.end must be greater than or equal to range.start");
+      }
+    }
+    let headRecord: Record<string, unknown>;
+    try {
+      const output = await this.sendAllowMissing(
+        "openRead",
+        new HeadObjectCommand({ Bucket: this.bucket, Key: this.blobKey(hash) }),
+      );
+      if (output === null) {
+        throw new S3EvidenceError("openRead", "not found");
+      }
+      headRecord = asRecord(output, "openRead");
+    } catch (error) {
+      if (error instanceof S3EvidenceError) throw error;
+      throw new S3EvidenceError("openRead", "unavailable");
+    }
+    const meta = Object.freeze(trustedBlobMeta(headRecord, hash, "openRead"));
+    const fence = parseObjectEtag(headRecord.ETag, "openRead");
+    if (
+      range !== undefined
+      && (
+        meta.byteLength === 0
+        || range.start >= meta.byteLength
+        || range.end >= meta.byteLength
+      )
+    ) {
+      throw new Error("range is out of bounds");
+    }
+    await this.verifyCanonicalIncremental(hash, meta, fence, "openRead");
+
+    const effectiveRange: EvidenceReadRange | null = range
+      ? Object.freeze({ start: range.start, end: range.end })
+      : null;
+    const exactCount = effectiveRange
+      ? effectiveRange.end - effectiveRange.start + 1
+      : meta.byteLength;
+
+    return Object.freeze({
+      meta,
+      range: effectiveRange,
+      byteLength: exactCount,
+      bytes: () => this.readVerifiedObject(hash, meta, effectiveRange, fence),
+    });
   }
 
   async verify(hash: ContentHash): Promise<boolean> {
@@ -401,9 +803,13 @@ export class S3EvidenceStore implements EvidenceStore {
     return this.prefixed("staging/");
   }
 
-  async writePendingJournal(id: string, hashes: readonly ContentHash[]): Promise<void> {
+  async writePendingJournal(
+    id: string,
+    hashes: readonly ContentHash[],
+    operation = "promote",
+  ): Promise<void> {
     if (!PENDING_JOURNAL_ID_RE.test(id)) {
-      throw new S3EvidenceError("promote", "invalid pending write journal id");
+      throw new S3EvidenceError(operation, "invalid pending write journal id");
     }
     const safeHashes = hashes.filter((hash) => isContentHash(hash));
     const payload = Buffer.from(
@@ -415,10 +821,10 @@ export class S3EvidenceStore implements EvidenceStore {
       "utf8",
     );
     if (payload.byteLength > MAX_JOURNAL_BYTES) {
-      throw new S3EvidenceError("promote", "pending write journal exceeds bound");
+      throw new S3EvidenceError(operation, "pending write journal exceeds bound");
     }
     await this.send(
-      "promote",
+      operation,
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: this.pendingJournalKey(id),
@@ -478,6 +884,74 @@ export class S3EvidenceStore implements EvidenceStore {
     }
   }
 
+  async copyCanonicalObject(
+    fromKey: string,
+    hash: ContentHash,
+    byteLength: number,
+    operation: string,
+  ): Promise<"applied" | "absent" | "unknown"> {
+    const toKey = this.blobKey(hash);
+    try {
+      await this.copyObject(fromKey, toKey, operation);
+    } catch {
+      // Destination is still inspected below. A thrown CopyObject may have
+      // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
+    }
+    return this.probeCanonicalCopy(hash, byteLength, operation);
+  }
+
+  async copyCanonicalObjectReplace(
+    fromKey: string,
+    hash: ContentHash,
+    meta: BlobMetaV1,
+    operation: string,
+  ): Promise<"applied" | "absent" | "unknown"> {
+    const toKey = this.blobKey(hash);
+    if (meta.contentType !== null) assertMetadataValue(meta.contentType, operation);
+    const input: {
+      Bucket: string;
+      Key: string;
+      CopySource: string;
+      MetadataDirective: "REPLACE";
+      Metadata: Record<string, string>;
+      ContentType?: string;
+    } = {
+      Bucket: this.bucket,
+      Key: toKey,
+      CopySource: encodeCopySource(this.bucket, fromKey),
+      MetadataDirective: "REPLACE",
+      Metadata: userMetadata(meta),
+    };
+    if (meta.contentType !== null) input.ContentType = meta.contentType;
+    try {
+      await this.send(operation, new CopyObjectCommand(input));
+    } catch {
+      // Destination is still inspected below. A thrown CopyObject may have
+      // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
+    }
+    return this.probeCanonicalCopy(hash, meta.byteLength, operation);
+  }
+
+  private async probeCanonicalCopy(
+    hash: ContentHash,
+    byteLength: number,
+    operation: string,
+  ): Promise<"applied" | "absent" | "unknown"> {
+    let present: boolean;
+    try {
+      present = await this.objectExists(this.blobKey(hash), operation);
+    } catch {
+      return "unknown";
+    }
+    if (!present) return "absent";
+    try {
+      await this.assertExistingCanonical(hash, byteLength, operation);
+      return "applied";
+    } catch {
+      return "unknown";
+    }
+  }
+
   async deleteObject(operation: string, key: string): Promise<void> {
     await this.sendAllowMissing(
       operation,
@@ -495,6 +969,7 @@ export class S3EvidenceStore implements EvidenceStore {
 
   async deletePrefix(operation: string, prefix: string): Promise<void> {
     for (const key of await this.listAllKeys(operation, prefix)) {
+      if (this.liveStagingKeys.has(key)) continue;
       await this.deleteObject(operation, key);
     }
   }
@@ -548,16 +1023,31 @@ export class S3EvidenceStore implements EvidenceStore {
     const keys: string[] = [];
     const seenTokens = new Set<string>();
     let token: string | undefined;
+    let pages = 0;
     do {
-      const input: { Bucket: string; Prefix: string; ContinuationToken?: string } = {
+      pages += 1;
+      if (pages > MAX_LIST_PAGES || keys.length > MAX_LIST_KEYS) {
+        throw new S3EvidenceError(operation, "unavailable");
+      }
+      const input: {
+        Bucket: string;
+        Prefix: string;
+        MaxKeys: number;
+        ContinuationToken?: string;
+      } = {
         Bucket: this.bucket,
         Prefix: prefix,
+        MaxKeys: MAX_LIST_PAGE_SIZE,
       };
       if (token !== undefined) input.ContinuationToken = token;
       const output = asRecord(await this.send(operation, new ListObjectsV2Command(input)), operation);
       const contents = output.Contents;
+      let pageCount = 0;
       if (contents !== undefined) {
         if (!Array.isArray(contents)) {
+          throw new S3EvidenceError(operation, "unavailable");
+        }
+        if (contents.length > MAX_LIST_PAGE_SIZE) {
           throw new S3EvidenceError(operation, "unavailable");
         }
         for (const entry of contents) {
@@ -569,20 +1059,27 @@ export class S3EvidenceStore implements EvidenceStore {
             throw new S3EvidenceError(operation, "unavailable");
           }
           keys.push(key);
+          pageCount += 1;
         }
       }
-      if (output.IsTruncated === true) {
+      if (keys.length > MAX_LIST_KEYS) {
+        throw new S3EvidenceError(operation, "unavailable");
+      }
+      const truncated = output.IsTruncated;
+      if (truncated === true) {
         const next = output.NextContinuationToken;
         if (typeof next !== "string" || next === "") {
           throw new S3EvidenceError(operation, "unavailable");
         }
-        if (seenTokens.has(next)) {
+        if (seenTokens.has(next) || next === token || pageCount === 0) {
           throw new S3EvidenceError(operation, "unavailable");
         }
         seenTokens.add(next);
         token = next;
-      } else {
+      } else if (truncated === false || truncated === undefined) {
         token = undefined;
+      } else {
+        throw new S3EvidenceError(operation, "unavailable");
       }
     } while (token !== undefined);
     return keys;
@@ -638,11 +1135,59 @@ export class S3EvidenceStore implements EvidenceStore {
     }
   }
 
+  async inspectCanonical(
+    hash: ContentHash,
+    byteLength: number,
+  ): Promise<"match" | "absent" | "mismatch" | "unknown"> {
+    try {
+      const exists = await this.objectExists(this.blobKey(hash), "rollback");
+      if (!exists) return "absent";
+    } catch {
+      return "unknown";
+    }
+    try {
+      await this.assertExistingCanonical(hash, byteLength, "rollback");
+      return "match";
+    } catch (error) {
+      if (
+        error instanceof S3EvidenceError
+        && (
+          error.message.endsWith("failed verification")
+          || error.message.endsWith("inconsistent metadata")
+          || error.message.endsWith("inconsistent object")
+        )
+      ) {
+        return "mismatch";
+      }
+      return "unknown";
+    }
+  }
+
   private async loadBoundReferencedHashes(): Promise<Set<string>> {
     const hashes = new Set<string>();
     for (const loader of this.referencedSources) {
       for (const hash of await loader()) {
         if (isContentHash(hash)) hashes.add(hash);
+      }
+    }
+    return hashes;
+  }
+
+  private async unionReferencedHashes(
+    explicit?: ReadonlySet<string>,
+  ): Promise<Set<string> | null> {
+    if (explicit === undefined && this.referencedSources.length === 0) {
+      return null;
+    }
+    const hashes = new Set<string>();
+    if (explicit !== undefined) {
+      for (const hash of explicit) {
+        if (isContentHash(hash)) hashes.add(hash);
+      }
+    }
+    if (this.referencedSources.length > 0) {
+      for (const hash of await this.loadBoundReferencedHashes()) {
+        hashes.add(hash);
       }
     }
     return hashes;
@@ -685,8 +1230,19 @@ export class S3EvidenceStore implements EvidenceStore {
         await this.deleteObject("recoverUnreferencedWrites", key);
         continue;
       }
+      // Skip journals that still belong to an unreleased process-local stage.
+      // Cross-process recovery versus an active ad-hoc stage cannot be proven
+      // without an async/durable release/finalize seam.
+      if (parsed.hashes.some((hash) => this.liveStageHashes.has(hash))) {
+        continue;
+      }
       for (const hash of parsed.hashes) {
-        if (typeof hash !== "string" || !isContentHash(hash) || referenced.has(hash)) {
+        if (
+          typeof hash !== "string"
+          || !isContentHash(hash)
+          || referenced.has(hash)
+          || this.liveStageHashes.has(hash)
+        ) {
           continue;
         }
         const blobKey = this.blobKey(hash);
@@ -720,6 +1276,129 @@ export class S3EvidenceStore implements EvidenceStore {
     }
   }
 
+  async acquireOwnerWriteLock(): Promise<() => Promise<void>> {
+    return this.acquireWriteLock();
+  }
+
+  private async verifyCanonicalIncremental(
+    hash: ContentHash,
+    meta: BlobMetaV1,
+    fence: string,
+    operation: string,
+  ): Promise<void> {
+    const record = asRecord(
+      await this.sendConditional(
+        operation,
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: this.blobKey(hash),
+          IfMatch: fence,
+        }),
+      ),
+      operation,
+    );
+    if (parseObjectEtag(record.ETag, operation) !== fence) {
+      throw new S3EvidenceError(operation, "object changed");
+    }
+    if (hasContentRange(record.ContentRange)) {
+      throw new S3EvidenceError(operation, "inconsistent object");
+    }
+    const contentLength = numericLength(record.ContentLength);
+    if (contentLength !== meta.byteLength) {
+      throw new S3EvidenceError(operation, "inconsistent object");
+    }
+    await hashBodyExact(record.Body, meta.byteLength, hash, operation);
+  }
+
+  private readVerifiedObject(
+    hash: ContentHash,
+    meta: BlobMetaV1,
+    range: EvidenceReadRange | null,
+    fence: string,
+  ): AsyncIterable<Uint8Array> {
+    const sendConditional = (
+      operation: string,
+      command: unknown,
+    ): Promise<unknown> => this.sendConditional(operation, command);
+    const request = this.conditionalGetInput(hash, fence, range);
+    return {
+      async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        const record = asRecord(
+          await sendConditional("openRead", new GetObjectCommand(request)),
+          "openRead",
+        );
+        if (parseObjectEtag(record.ETag, "openRead") !== fence) {
+          throw new S3EvidenceError("openRead", "object changed");
+        }
+        const want = range ? range.end - range.start + 1 : meta.byteLength;
+        const contentLength = numericLength(record.ContentLength);
+        if (contentLength !== want) {
+          throw new S3EvidenceError("openRead", "inconsistent object");
+        }
+        if (range) {
+          const contentRange = parseInclusiveContentRange(record.ContentRange, "openRead");
+          if (
+            contentRange.start !== range.start
+            || contentRange.end !== range.end
+            || contentRange.total !== meta.byteLength
+            || contentRange.end - contentRange.start + 1 !== want
+          ) {
+            throw new S3EvidenceError("openRead", "inconsistent object");
+          }
+        } else if (hasContentRange(record.ContentRange)) {
+          throw new S3EvidenceError("openRead", "inconsistent object");
+        }
+        const hasher = range === null ? createHash("sha256") : null;
+        let received = 0;
+        for await (const chunk of iterateObjectBody(record.Body, "openRead")) {
+          if (chunk.byteLength === 0) continue;
+          if (received + chunk.byteLength > want) {
+            throw new S3EvidenceError("openRead", "inconsistent object");
+          }
+          const stable = Uint8Array.from(chunk);
+          hasher?.update(stable);
+          received += stable.byteLength;
+          yield stable;
+        }
+        if (received !== want) {
+          throw new S3EvidenceError("openRead", "inconsistent object");
+        }
+        if (hasher && hasher.digest("hex") !== meta.hash) {
+          throw new S3EvidenceError("openRead", "failed verification");
+        }
+      },
+    };
+  }
+
+  private conditionalGetInput(
+    hash: ContentHash,
+    fence: string,
+    range: EvidenceReadRange | null,
+  ): { Bucket: string; Key: string; IfMatch: string; Range?: string } {
+    const input: { Bucket: string; Key: string; IfMatch: string; Range?: string } = {
+      Bucket: this.bucket,
+      Key: this.blobKey(hash),
+      IfMatch: fence,
+    };
+    if (range) input.Range = `bytes=${range.start}-${range.end}`;
+    return input;
+  }
+
+  private async sendConditional(operation: string, command: unknown): Promise<unknown> {
+    try {
+      return await this.client.send(command);
+    } catch (error) {
+      if (isPreconditionFailed(error)) {
+        throw new S3EvidenceError(operation, "object changed");
+      }
+      if (isObjectNotFound(error)) {
+        throw new S3EvidenceError(operation, "object changed");
+      }
+      if (error instanceof S3EvidenceError) throw error;
+      throw new S3EvidenceError(operation, "unavailable");
+    }
+  }
+
   private async acquireWriteLock(): Promise<() => Promise<void>> {
     const prior = this.writeTail;
     let release!: () => void;
@@ -730,13 +1409,17 @@ export class S3EvidenceStore implements EvidenceStore {
     let releaseLease: (() => void | Promise<void>) | undefined;
     try {
       releaseLease = await this.acquireWriteLease?.();
-    } catch (error) {
+    } catch {
       release();
-      throw error;
+      throw new S3EvidenceError("lease", "unavailable");
     }
     return async () => {
       try {
-        await releaseLease?.();
+        try {
+          await releaseLease?.();
+        } catch {
+          throw new S3EvidenceError("lease", "unavailable");
+        }
       } finally {
         release();
       }
@@ -764,8 +1447,11 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
   private readonly created: ContentHash[] = [];
   private readonly scopeId = randomUUID();
   private released = false;
+  private cleanupComplete = false;
   private promoted = false;
+  private ownershipUnknown = false;
   private journalId: string | null = null;
+  private plannedHashes: ContentHash[] | null = null;
 
   constructor(
     private readonly owner: S3EvidenceStore,
@@ -791,6 +1477,17 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
 
   async stage(): Promise<EvidenceStage> {
     throw new Error("nested evidence stages are unsupported in an evidence write batch");
+  }
+
+  async stageStream(): Promise<EvidenceStreamStage> {
+    throw new Error("streaming evidence stages are unsupported in an evidence write batch");
+  }
+
+  async openRead(
+    hash: ContentHash,
+    range?: EvidenceReadRange,
+  ): Promise<EvidenceReadHandle> {
+    return this.owner.openRead(hash, range);
   }
 
   async get(hash: ContentHash): Promise<Uint8Array | null> {
@@ -850,54 +1547,92 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
 
   async promote(): Promise<void> {
     if (this.promoted) return;
-    const createdHashes: ContentHash[] = [];
-    for (const [hash] of this.staged) {
-      if (!(await this.owner.objectExists(this.owner.blobKey(hash), "promote"))) {
-        createdHashes.push(hash);
+    if (this.plannedHashes === null) {
+      const planned: ContentHash[] = [];
+      for (const [hash, staged] of this.staged) {
+        if (await this.owner.objectExists(this.owner.blobKey(hash), "promote")) {
+          await this.owner.assertExistingCanonical(hash, staged.meta.byteLength, "promote");
+        } else {
+          planned.push(hash);
+        }
       }
+      this.plannedHashes = planned;
     }
-    if (createdHashes.length > 0) {
-      this.journalId = randomUUID();
-      await this.owner.writePendingJournal(this.journalId, createdHashes);
+    if (this.plannedHashes.length > 0) {
+      if (this.journalId === null) this.journalId = randomUUID();
+      await this.owner.writePendingJournal(this.journalId, this.plannedHashes);
     }
-    for (const hash of createdHashes) {
+    const createdSet = new Set(this.created);
+    for (const hash of this.plannedHashes) {
       const staged = this.staged.get(hash);
       if (!staged) continue;
-      await this.owner.copyObject(staged.key, this.owner.blobKey(hash), "promote");
-      this.created.push(hash);
+      if (await this.owner.objectExists(this.owner.blobKey(hash), "promote")) {
+        await this.owner.assertExistingCanonical(hash, staged.meta.byteLength, "promote");
+        if (!createdSet.has(hash)) {
+          this.created.push(hash);
+          createdSet.add(hash);
+        }
+        continue;
+      }
+      const outcome = await this.owner.copyCanonicalObject(
+        staged.key,
+        hash,
+        staged.meta.byteLength,
+        "promote",
+      );
+      if (outcome === "applied") {
+        if (!createdSet.has(hash)) {
+          this.created.push(hash);
+          createdSet.add(hash);
+        }
+        continue;
+      }
+      if (outcome === "unknown") this.ownershipUnknown = true;
+      throw new S3EvidenceError("promote", "unavailable");
     }
+    this.ownershipUnknown = false;
     this.promoted = true;
   }
 
   async rollback(): Promise<void> {
-    if (this.released) return;
-    try {
-      for (const hash of [...this.created].reverse()) {
-        await this.owner.deleteObject("rollback", this.owner.blobKey(hash));
+    if (this.cleanupComplete) return;
+    await this.runExclusiveCleanup(async () => {
+      const inspections: Array<{ hash: ContentHash; inspection: "match" | "absent" | "mismatch" | "unknown" }> = [];
+      for (const hash of this.created) {
+        const staged = this.staged.get(hash);
+        if (!staged) continue;
+        inspections.push({
+          hash,
+          inspection: await this.owner.inspectCanonical(hash, staged.meta.byteLength),
+        });
+      }
+      const retainJournal =
+        this.ownershipUnknown
+        || inspections.some((entry) => entry.inspection === "unknown" || entry.inspection === "mismatch");
+      if (!retainJournal) {
+        for (const entry of [...inspections].reverse()) {
+          if (entry.inspection === "match") {
+            await this.owner.deleteObject("rollback", this.owner.blobKey(entry.hash));
+          }
+        }
       }
       await this.deleteStagingResidue("rollback");
-      if (this.journalId) {
+      if (this.journalId && !retainJournal) {
         await this.owner.deletePendingJournal(this.journalId, "rollback");
         this.journalId = null;
       }
-    } finally {
-      await this.release();
-    }
+    });
   }
 
   async finalize(options?: EvidenceFinalizeOptions): Promise<void> {
-    if (this.released) return;
-    try {
+    if (this.cleanupComplete) return;
+    await this.runExclusiveCleanup(async () => {
       await this.deleteStagingResidue("finalize");
       if (!options?.retainPendingJournal && this.journalId) {
         await this.owner.deletePendingJournal(this.journalId, "finalize");
         this.journalId = null;
       }
-    } catch {
-      // Committed evidence remains canonical; stale scratch cleanup is best effort.
-    } finally {
-      await this.release();
-    }
+    });
   }
 
   async abandonForCrashTest(): Promise<void> {
@@ -911,6 +1646,32 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
       await this.owner.deleteObjectBestEffort(operation, staged.key);
     }
     await this.owner.deletePrefix(operation, this.owner.batchStagingPrefix(this.scopeId));
+  }
+
+  private async runExclusiveCleanup(fn: () => Promise<void>): Promise<void> {
+    let freshRelease: (() => Promise<void>) | undefined;
+    if (this.released) {
+      freshRelease = await this.owner.acquireOwnerWriteLock();
+    }
+    let cleanupError: unknown;
+    try {
+      await fn();
+      this.cleanupComplete = true;
+    } catch (error) {
+      cleanupError = error;
+    }
+    let releaseError: unknown;
+    try {
+      if (freshRelease) {
+        await freshRelease();
+      } else {
+        await this.release();
+      }
+    } catch (error) {
+      releaseError = error;
+    }
+    if (cleanupError) throw cleanupError;
+    if (releaseError) throw releaseError;
   }
 
   private async release(): Promise<void> {
@@ -1033,23 +1794,68 @@ async function readBoundedObjectBytes(
   maxBytes: number,
   operation: string,
 ): Promise<Uint8Array> {
+  const malformed = boundedReadFailure(operation);
   if (contentLength === undefined || contentLength > maxBytes) {
-    throw new S3EvidenceError(
-      operation,
-      operation === "getFileServerReference" || operation === "putFileServerReference"
-        || operation === "verifyFileServerReference" || operation === "restoreFileServerReference"
-        ? "malformed file-server reference"
-        : "malformed pending write journal",
-    );
+    throw new S3EvidenceError(operation, malformed);
   }
-  const bytes = await readObjectBytes(body, contentLength, operation);
-  if (bytes.byteLength > maxBytes) {
-    throw new S3EvidenceError(
-      operation,
-      operation === "recoverUnreferencedWrites" ? "malformed pending write journal" : "malformed file-server reference",
-    );
+  const limit = Math.min(contentLength, maxBytes);
+  if (body instanceof Uint8Array) {
+    if (body.byteLength > limit) {
+      throw new S3EvidenceError(operation, malformed);
+    }
+    if (body.byteLength !== contentLength) {
+      throw new S3EvidenceError(operation, "inconsistent object");
+    }
+    return new Uint8Array(body);
   }
-  return bytes;
+  if (isAsyncIterable(body)) {
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for await (const chunk of body) {
+      if (!(chunk instanceof Uint8Array)) {
+        throw new S3EvidenceError(operation, "unavailable");
+      }
+      if (received + chunk.byteLength > limit) {
+        throw new S3EvidenceError(
+          operation,
+          received + chunk.byteLength > maxBytes ? malformed : "inconsistent object",
+        );
+      }
+      chunks.push(chunk);
+      received += chunk.byteLength;
+    }
+    if (received !== contentLength) {
+      throw new S3EvidenceError(operation, "inconsistent object");
+    }
+    return concatBytes(chunks, received);
+  }
+  throw new S3EvidenceError(operation, "unavailable");
+}
+
+function boundedReadFailure(operation: string): string {
+  return operation === "getFileServerReference"
+    || operation === "putFileServerReference"
+    || operation === "verifyFileServerReference"
+    || operation === "restoreFileServerReference"
+    ? "malformed file-server reference"
+    : "malformed pending write journal";
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return typeof value === "object"
+    && value !== null
+    && Symbol.asyncIterator in value
+    && typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function";
+}
+
+function concatBytes(chunks: readonly Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }
 
 function parseStoredReference(
@@ -1108,6 +1914,25 @@ function isObjectNotFound(error: unknown): boolean {
     && (OBJECT_NOT_FOUND.has(name) || OBJECT_NOT_FOUND.has(code));
 }
 
+function isPreconditionFailed(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const record = error as {
+    name?: unknown;
+    Code?: unknown;
+    code?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  const name = typeof record.name === "string" ? record.name : "";
+  const code =
+    typeof record.Code === "string"
+      ? record.Code
+      : typeof record.code === "string"
+        ? record.code
+        : "";
+  return record.$metadata?.httpStatusCode === 412
+    && (name === "PreconditionFailed" || code === "PreconditionFailed");
+}
+
 function isIntegrityFailure(error: unknown): boolean {
   return error instanceof S3EvidenceError
     && (
@@ -1125,6 +1950,205 @@ function asRecord(value: unknown, operation: string): Record<string, unknown> {
 
 function numericLength(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+async function* iterateIntakeChunks(args: {
+  iterator: AsyncIterator<Uint8Array>;
+  opts: EvidenceStreamOptions;
+  hasher: ReturnType<typeof createHash>;
+  onBytes: (byteLength: number) => void;
+  onFinished: () => void;
+  onError: (error: unknown) => void;
+}): AsyncGenerator<Uint8Array, void, undefined> {
+  let byteLength = 0;
+  let finished = false;
+  try {
+    while (true) {
+      const next = await nextWithAbort(args.iterator, args.opts.signal);
+      if (next.done) {
+        finished = true;
+        args.onFinished();
+        break;
+      }
+      throwIfAborted(args.opts.signal);
+      const chunk = next.value;
+      if (!(chunk instanceof Uint8Array)) {
+        throw new Error("evidence stream chunk must be a Uint8Array");
+      }
+      if (chunk.byteLength === 0) {
+        throw new Error("evidence stream chunk must not be empty");
+      }
+      const nextLength = byteLength + chunk.byteLength;
+      if (nextLength > args.opts.maxBytes) {
+        throw new Error("evidence stream exceeded maxBytes");
+      }
+      const stableChunk = Uint8Array.from(chunk);
+      args.hasher.update(stableChunk);
+      byteLength = nextLength;
+      args.onBytes(byteLength);
+      yield stableChunk;
+    }
+    throwIfAborted(args.opts.signal);
+    if (
+      args.opts.expectedLength !== undefined
+      && byteLength !== args.opts.expectedLength
+    ) {
+      throw new Error("evidence stream length did not match expectedLength");
+    }
+  } catch (error) {
+    args.onError(error);
+    throw error;
+  } finally {
+    if (!finished) {
+      try {
+        if (typeof args.iterator.return === "function") {
+          void Promise.resolve(args.iterator.return()).catch(() => undefined);
+        }
+      } catch {
+        // A hostile source cannot suppress scratch cleanup.
+      }
+      args.onFinished();
+    }
+  }
+}
+
+function assertSafeNonNegativeInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a safe nonnegative integer`);
+  }
+}
+
+function assertAbortSignal(signal: AbortSignal): void {
+  if (typeof signal !== "object" || signal === null || typeof signal.aborted !== "boolean") {
+    throw new Error("signal must be an AbortSignal");
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal) return;
+  if (typeof signal.throwIfAborted === "function") {
+    signal.throwIfAborted();
+    return;
+  }
+  if (signal.aborted) {
+    const reason = signal.reason;
+    if (reason instanceof Error) throw reason;
+    throw new Error("evidence stream aborted");
+  }
+}
+
+async function nextWithAbort<T>(
+  iterator: AsyncIterator<T>,
+  signal: AbortSignal | undefined,
+): Promise<IteratorResult<T>> {
+  throwIfAborted(signal);
+  if (!signal) return iterator.next();
+  return new Promise<IteratorResult<T>>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      finish(() => reject(signal.reason ?? new Error("evidence stream aborted")));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    let next: Promise<IteratorResult<T>>;
+    try {
+      next = Promise.resolve(iterator.next());
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    void next.then(
+      (result) => finish(() => resolve(result)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+function parseObjectEtag(value: unknown, operation: string): string {
+  if (typeof value !== "string" || value === "") {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  return value;
+}
+
+function hasContentRange(value: unknown): boolean {
+  return typeof value === "string" && value !== "";
+}
+
+function parseInclusiveContentRange(
+  value: unknown,
+  operation: string,
+): { start: number; end: number; total: number } {
+  if (typeof value !== "string") {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(value);
+  if (!match || match[1] === undefined || match[2] === undefined || match[3] === undefined) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = Number(match[3]);
+  if (
+    !Number.isSafeInteger(start)
+    || !Number.isSafeInteger(end)
+    || !Number.isSafeInteger(total)
+    || start < 0
+    || end < start
+    || total < 0
+  ) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  return { start, end, total };
+}
+
+async function* iterateObjectBody(
+  body: unknown,
+  operation: string,
+): AsyncIterable<Uint8Array> {
+  if (body == null) return;
+  if (body instanceof Uint8Array) {
+    yield body;
+    return;
+  }
+  if (!isAsyncIterable(body)) {
+    throw new S3EvidenceError(operation, "unavailable");
+  }
+  for await (const chunk of body) {
+    if (!(chunk instanceof Uint8Array)) {
+      throw new S3EvidenceError(operation, "unavailable");
+    }
+    yield chunk;
+  }
+}
+
+async function hashBodyExact(
+  body: unknown,
+  expectedLength: number,
+  expectedHash: ContentHash,
+  operation: string,
+): Promise<void> {
+  const hasher = createHash("sha256");
+  let received = 0;
+  for await (const chunk of iterateObjectBody(body, operation)) {
+    if (received + chunk.byteLength > expectedLength) {
+      throw new S3EvidenceError(operation, "inconsistent object");
+    }
+    hasher.update(chunk);
+    received += chunk.byteLength;
+  }
+  if (received !== expectedLength) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  if (hasher.digest("hex") !== expectedHash) {
+    throw new S3EvidenceError(operation, "failed verification");
+  }
 }
 
 function requiredToken(value: string, field: string): string {

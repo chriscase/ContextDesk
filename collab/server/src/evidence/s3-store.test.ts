@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
@@ -56,7 +57,13 @@ interface FakeObject {
   body: Uint8Array;
   metadata: Record<string, string>;
   contentType: string | undefined;
+  etag: string;
   reportedLength?: number;
+  reportedEtag?: string | null;
+  reportedContentRange?: string | null;
+  chunks?: Uint8Array[];
+  yieldCount?: { value: number };
+  transformOnly?: boolean;
 }
 
 class FakeS3Client {
@@ -66,8 +73,24 @@ class FakeS3Client {
   nextError: Error | null = null;
   listPageSize = 1000;
   onSend: (() => void) | null = null;
+  throwAfterApplyKeys = new Set<string>();
+  throwBeforeApplyKeys = new Set<string>();
+  throwAfterApplyHits = 0;
+  throwBeforeApplyHits = 0;
+  headErrors = new Map<string, Error>();
+  getErrors = new Map<string, Error>();
+  deleteErrors = new Map<string, Error>();
+  corruptCopy = new Map<string, { body?: Uint8Array; metadata?: Record<string, string> }>();
+  listHandler: ((input: Record<string, unknown>) => unknown) | null = null;
+  preserveEtagOnCopy = false;
+  private etagSeq = 0;
 
   constructor(private readonly bucket: string) {}
+
+  allocateEtag(): string {
+    this.etagSeq += 1;
+    return `"opaque-${this.etagSeq}"`;
+  }
 
   async send(command: unknown): Promise<unknown> {
     this.onSend?.();
@@ -87,38 +110,104 @@ class FakeS3Client {
     }
     if (command instanceof PutObjectCommand) {
       const key = objectKey(input);
-      const body = readInputBody(input.Body);
+      const body = await readInputBody(input.Body);
+      if (
+        typeof input.ContentLength === "number"
+        && input.ContentLength !== body.byteLength
+      ) {
+        throw new FakeS3Error(
+          "IncompleteBody",
+          400,
+          `declared ${input.ContentLength} bytes but received ${body.byteLength}`,
+        );
+      }
+      const etag = this.allocateEtag();
       this.objects.set(key, {
         body,
         metadata: lowercaseRecord(input.Metadata),
         contentType: typeof input.ContentType === "string" ? input.ContentType : undefined,
+        etag,
       });
-      return { ETag: `"not-the-digest"` };
+      return { ETag: etag };
     }
     if (command instanceof GetObjectCommand) {
       const stored = this.requireObject(input, "NoSuchKey");
+      const getError = this.getErrors.get(String(input.Key));
+      if (getError) throw getError;
+      if (typeof input.IfMatch === "string" && input.IfMatch !== stored.etag) {
+        throw new FakeS3Error(
+          "PreconditionFailed",
+          412,
+          `PreconditionFailed at ${SYNTHETIC_ENDPOINT} bucket=${SYNTHETIC_BUCKET} key=${String(input.Key)} accessKey=${SYNTHETIC_ACCESS} secret=${SYNTHETIC_SECRET} URI=${SYNTHETIC_URI}`,
+        );
+      }
+      const etagAtStart = stored.etag;
+      let start = 0;
+      let end = Math.max(stored.body.byteLength - 1, -1);
+      let ranged = false;
+      if (typeof input.Range === "string") {
+        const parsed = parseByteRange(input.Range, stored.body.byteLength);
+        if (parsed === "invalid") {
+          throw new FakeS3Error("InvalidArgument", 400, `invalid range ${String(input.Range)}`);
+        }
+        if (parsed === "unsatisfiable") {
+          throw new FakeS3Error(
+            "InvalidRange",
+            416,
+            `InvalidRange at ${SYNTHETIC_ENDPOINT} key=${String(input.Key)}`,
+          );
+        }
+        start = parsed.start;
+        end = parsed.end;
+        ranged = true;
+      }
+      const responseChunks = stored.chunks
+        ?? (ranged ? [stored.body.slice(start, end + 1)] : [stored.body]);
+      const total = responseChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+      const contentRange = ranged
+        ? stored.reportedContentRange === undefined
+          ? `bytes ${start}-${end}/${stored.body.byteLength}`
+          : stored.reportedContentRange ?? undefined
+        : undefined;
       return {
-        Body: { transformToByteArray: async () => new Uint8Array(stored.body) },
-        ContentLength: stored.reportedLength ?? stored.body.byteLength,
+        Body: sdkBody(stored, responseChunks, etagAtStart),
+        ContentLength: stored.reportedLength ?? total,
         ContentType: stored.contentType,
         Metadata: { ...stored.metadata },
-        ETag: `"not-the-digest"`,
+        ETag: stored.reportedEtag === undefined ? stored.etag : stored.reportedEtag,
+        ...(contentRange !== undefined ? { ContentRange: contentRange } : {}),
       };
     }
     if (command instanceof HeadObjectCommand) {
       const stored = this.requireObject(input, "NotFound");
+      const headError = this.headErrors.get(String(input.Key));
+      if (headError) throw headError;
       return {
         ContentLength: stored.reportedLength ?? stored.body.byteLength,
         ContentType: stored.contentType,
         Metadata: { ...stored.metadata },
-        ETag: `"not-the-digest"`,
+        ETag: stored.reportedEtag === undefined ? stored.etag : stored.reportedEtag,
       };
     }
     if (command instanceof DeleteObjectCommand) {
+      const deleteError = this.deleteErrors.get(String(input.Key));
+      if (deleteError) throw deleteError;
       this.objects.delete(objectKey(input));
       return {};
     }
     if (command instanceof CopyObjectCommand) {
+      const destKey = String(input.Key);
+      if (input.MetadataDirective !== "COPY" && input.MetadataDirective !== "REPLACE") {
+        throw new FakeS3Error("InvalidArgument", 400, "MetadataDirective must be COPY or REPLACE");
+      }
+      if (this.throwBeforeApplyKeys.has(destKey)) {
+        this.throwBeforeApplyHits += 1;
+        throw new FakeS3Error(
+          "InternalError",
+          500,
+          `copy-before-apply at ${SYNTHETIC_ENDPOINT} bucket=${SYNTHETIC_BUCKET} key=${destKey} accessKey=${SYNTHETIC_ACCESS} secret=${SYNTHETIC_SECRET} URI=${SYNTHETIC_URI}`,
+        );
+      }
       const source = parseCopySource(input.CopySource);
       const sourceKey = `${source.bucket}/${source.key}`;
       const stored = this.objects.get(sourceKey);
@@ -129,14 +218,33 @@ class FakeS3Client {
           `NoSuchKey bucket=${source.bucket} key=${source.key}`,
         );
       }
+      const corrupt = this.corruptCopy.get(destKey);
+      const replace = input.MetadataDirective === "REPLACE";
+      const etag = this.preserveEtagOnCopy ? stored.etag : this.allocateEtag();
       this.objects.set(objectKey(input), {
-        body: new Uint8Array(stored.body),
-        metadata: { ...stored.metadata },
-        contentType: stored.contentType,
+        body: new Uint8Array(corrupt?.body ?? stored.body),
+        metadata: {
+          ...(corrupt?.metadata ?? (replace ? lowercaseRecord(input.Metadata) : stored.metadata)),
+        },
+        contentType: replace
+          ? typeof input.ContentType === "string"
+            ? input.ContentType
+            : undefined
+          : stored.contentType,
+        etag,
       });
-      return { CopyObjectResult: { ETag: `"not-the-digest"` } };
+      if (this.throwAfterApplyKeys.has(destKey)) {
+        this.throwAfterApplyHits += 1;
+        throw new FakeS3Error(
+          "InternalError",
+          500,
+          `copy-after-apply at ${SYNTHETIC_ENDPOINT} bucket=${SYNTHETIC_BUCKET} key=${destKey} accessKey=${SYNTHETIC_ACCESS} secret=${SYNTHETIC_SECRET} URI=${SYNTHETIC_URI}`,
+        );
+      }
+      return { CopyObjectResult: { ETag: etag } };
     }
     if (command instanceof ListObjectsV2Command) {
+      if (this.listHandler) return this.listHandler(input);
       if (input.Bucket !== this.bucket) {
         throw new FakeS3Error("NoSuchBucket", 404, `NoSuchBucket bucket=${String(input.Bucket)}`);
       }
@@ -149,7 +257,11 @@ class FakeS3Client {
       const token = typeof input.ContinuationToken === "string" ? input.ContinuationToken : "";
       const from = token === "" ? 0 : all.findIndex((key) => key > token);
       const start = from < 0 ? all.length : from;
-      const page = all.slice(start, start + this.listPageSize);
+      const requested =
+        typeof input.MaxKeys === "number" && Number.isSafeInteger(input.MaxKeys) && input.MaxKeys > 0
+          ? input.MaxKeys
+          : 1000;
+      const page = all.slice(start, start + Math.min(this.listPageSize, requested));
       const truncated = start + page.length < all.length;
       const last = page[page.length - 1];
       return {
@@ -177,13 +289,30 @@ class FakeS3Client {
     body: Uint8Array,
     metadata: Record<string, string> = {},
     reportedLength?: number,
+    extra?: {
+      chunks?: Uint8Array[];
+      yieldCount?: { value: number };
+      transformOnly?: boolean;
+      etag?: string;
+      reportedEtag?: string | null;
+      reportedContentRange?: string | null;
+      contentType?: string;
+    },
   ): void {
     const stored: FakeObject = {
       body: new Uint8Array(body),
       metadata: lowercaseRecord(metadata),
-      contentType: undefined,
+      contentType: extra?.contentType,
+      etag: extra?.etag ?? this.allocateEtag(),
     };
     if (reportedLength !== undefined) stored.reportedLength = reportedLength;
+    if (extra?.chunks) stored.chunks = extra.chunks.map((chunk) => new Uint8Array(chunk));
+    if (extra?.yieldCount) stored.yieldCount = extra.yieldCount;
+    if (extra?.transformOnly) stored.transformOnly = true;
+    if (extra?.reportedEtag !== undefined) stored.reportedEtag = extra.reportedEtag;
+    if (extra?.reportedContentRange !== undefined) {
+      stored.reportedContentRange = extra.reportedContentRange;
+    }
     this.objects.set(`${this.bucket}/${key}`, stored);
   }
 
@@ -239,10 +368,121 @@ function encodeCopySource(bucket: string, key: string): string {
   return `${bucket}/${key.split("/").map((segment) => encodeURIComponent(segment)).join("/")}`;
 }
 
-function readInputBody(body: unknown): Uint8Array {
-  if (body instanceof Uint8Array) return new Uint8Array(body);
-  throw new Error("fake S3 expected Uint8Array body");
+function sdkBody(
+  stored: FakeObject,
+  chunks: Uint8Array[] = stored.chunks ?? [stored.body],
+  etagAtStart: string = stored.etag,
+): unknown {
+  const transformToByteArray = async (): Promise<Uint8Array> => {
+    const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return out;
+  };
+  if (stored.transformOnly) {
+    return { transformToByteArray };
+  }
+  return {
+    async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+      for (const chunk of chunks) {
+        if (stored.etag !== etagAtStart) {
+          throw new FakeS3Error("InternalError", 500, "object mutated during get");
+        }
+        if (stored.yieldCount) stored.yieldCount.value += 1;
+        yield chunk;
+      }
+    },
+    transformToByteArray,
+  };
 }
+
+async function readInputBody(body: unknown): Promise<Uint8Array> {
+  if (body instanceof Uint8Array) return new Uint8Array(body);
+  if (body instanceof Readable) {
+    return collectReadableBody(body);
+  }
+  if (isAsyncIterableBody(body)) {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of body) {
+      if (!(chunk instanceof Uint8Array)) {
+        throw new Error("fake S3 stream chunk must be a Uint8Array");
+      }
+      chunks.push(new Uint8Array(chunk));
+      total += chunk.byteLength;
+    }
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const part of chunks) {
+      out.set(part, offset);
+      offset += part.byteLength;
+    }
+    return out;
+  }
+  throw new Error("fake S3 expected Uint8Array or stream body");
+}
+
+function collectReadableBody(readable: Readable): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      callback();
+    };
+    readable.on("data", (chunk: unknown) => {
+      if (!(chunk instanceof Uint8Array)) {
+        finish(() => reject(new Error("fake S3 stream chunk must be a Uint8Array")));
+        return;
+      }
+      chunks.push(new Uint8Array(chunk));
+      total += chunk.byteLength;
+    });
+    readable.on("end", () => {
+      finish(() => {
+        const out = new Uint8Array(total);
+        let offset = 0;
+        for (const part of chunks) {
+          out.set(part, offset);
+          offset += part.byteLength;
+        }
+        resolve(out);
+      });
+    });
+    readable.on("error", (error: unknown) => {
+      finish(() => reject(error instanceof Error ? error : new Error("fake S3 stream failed")));
+    });
+    readable.resume();
+  });
+}
+
+function isAsyncIterableBody(value: unknown): value is AsyncIterable<unknown> {
+  return typeof value === "object"
+    && value !== null
+    && Symbol.asyncIterator in value
+    && typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function";
+}
+
+function parseByteRange(
+  value: string,
+  size: number,
+): { start: number; end: number } | "invalid" | "unsatisfiable" {
+  const match = /^bytes=(\d+)-(\d+)$/.exec(value);
+  if (!match || match[1] === undefined || match[2] === undefined) return "invalid";
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) return "invalid";
+  if (size <= 0 || start >= size || end >= size) return "unsatisfiable";
+  return { start, end };
+}
+
+
 
 function lowercaseRecord(value: unknown): Record<string, string> {
   if (typeof value !== "object" || value === null) return {};
@@ -303,6 +543,12 @@ function assertNoAclOrChecksums(fake: FakeS3Client): void {
       expect(call.input[field], `${call.name}.${field}`).toBeUndefined();
     }
     expect(call.input.Tagging).toBeUndefined();
+    if (call.name === "CopyObjectCommand") {
+      expect(
+        call.input.MetadataDirective === "COPY" || call.input.MetadataDirective === "REPLACE",
+        `${call.name}.MetadataDirective`,
+      ).toBe(true);
+    }
   }
 }
 
@@ -345,6 +591,147 @@ function leaseTracker(): {
     releases: () => releases,
     maxActive: () => maxActive,
   };
+}
+
+function exclusiveLease(): () => Promise<() => void | Promise<void>> {
+  let tail = Promise.resolve();
+  return async () => {
+    const prior = tail;
+    let unlock = (): void => undefined;
+    tail = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    await prior;
+    return () => {
+      unlock();
+    };
+  };
+}
+
+function assertPostCopyProbe(fake: FakeS3Client, destKey: string): void {
+  const copyIndex = fake.calls.findIndex((call) => call.name === "CopyObjectCommand");
+  expect(copyIndex).toBeGreaterThan(-1);
+  const copy = fake.calls[copyIndex];
+  expect(copy?.input.MetadataDirective).toBe("COPY");
+  expect(copy?.input.Key).toBe(destKey);
+  const after = fake.calls.slice(copyIndex + 1);
+  const headIndex = after.findIndex(
+    (call) => call.name === "HeadObjectCommand" && call.input.Key === destKey,
+  );
+  const getIndex = after.findIndex(
+    (call) => call.name === "GetObjectCommand" && call.input.Key === destKey,
+  );
+  expect(headIndex).toBeGreaterThan(-1);
+  expect(getIndex).toBeGreaterThan(headIndex);
+}
+
+function leakingLeaseError(kind: string): Error {
+  return new Error(
+    `${kind} lease failed at ${SYNTHETIC_ENDPOINT} bucket=${SYNTHETIC_BUCKET} accessKey=${SYNTHETIC_ACCESS} secret=${SYNTHETIC_SECRET} URI=${SYNTHETIC_URI}`,
+  );
+}
+
+function parseJournal(fake: FakeS3Client, key: string): { id: string; hashes: string[] } {
+  const stored = fake.object(key);
+  if (!stored) throw new Error(`missing journal ${key}`);
+  return JSON.parse(new TextDecoder().decode(stored.body)) as { id: string; hashes: string[] };
+}
+
+async function collectChunks(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for await (const chunk of source) {
+    parts.push(chunk);
+    total += chunk.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+async function* asAsyncChunks(chunks: readonly Uint8Array[]): AsyncIterable<Uint8Array> {
+  for (const chunk of chunks) {
+    yield chunk;
+  }
+}
+
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+function scratchPuts(fake: FakeS3Client): Array<{ name: string; input: Record<string, unknown> }> {
+  return fake.calls.filter((call) => {
+    if (call.name !== "PutObjectCommand") return false;
+    const key = String(call.input.Key);
+    return key.includes(".staging/") || key.startsWith("staging/") || key.includes("/staging/");
+  });
+}
+
+function assertStreamedScratchPut(fake: FakeS3Client): Record<string, unknown> {
+  const put = scratchPuts(fake)[0];
+  expect(put).toBeDefined();
+  expect(put?.input.Body instanceof Uint8Array).toBe(false);
+  expect(isAsyncIterableBody(put?.input.Body)).toBe(true);
+  expect(String(put?.input.Key)).not.toMatch(/[0-9a-f]{64}/);
+  return put?.input ?? {};
+}
+
+function assertReplaceCopy(
+  fake: FakeS3Client,
+  destKey: string,
+  meta: { hash: string; byteLength: number; contentType: string | null },
+): void {
+  const copyIndex = fake.calls.findIndex(
+    (call) => call.name === "CopyObjectCommand" && call.input.Key === destKey,
+  );
+  expect(copyIndex).toBeGreaterThan(-1);
+  const copy = fake.calls[copyIndex];
+  expect(copy?.input.MetadataDirective).toBe("REPLACE");
+  const metadata = lowercaseRecord(copy?.input.Metadata);
+  expect(metadata.sha256).toBe(meta.hash);
+  expect(metadata.bytelength).toBe(String(meta.byteLength));
+  expect(metadata.contenttype).toBe(meta.contentType ?? "");
+  if (meta.contentType !== null) expect(copy?.input.ContentType).toBe(meta.contentType);
+  const before = fake.calls.slice(0, copyIndex);
+  expect(
+    before.some(
+      (call) => call.name === "PutObjectCommand" && String(call.input.Key).includes(".pending/"),
+    ),
+  ).toBe(true);
+  const after = fake.calls.slice(copyIndex + 1);
+  const headIndex = after.findIndex(
+    (call) => call.name === "HeadObjectCommand" && call.input.Key === destKey,
+  );
+  const getIndex = after.findIndex(
+    (call) => call.name === "GetObjectCommand" && call.input.Key === destKey,
+  );
+  expect(headIndex).toBeGreaterThan(-1);
+  expect(getIndex).toBeGreaterThan(headIndex);
+}
+
+async function waitForCall(
+  fake: FakeS3Client,
+  name: string,
+  timeoutMs = 1000,
+): Promise<void> {
+  const started = Date.now();
+  while (!fake.calls.some((call) => call.name === name)) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(`timed out waiting for ${name}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 describe("S3EvidenceStore", () => {
@@ -603,12 +990,18 @@ describe("S3EvidenceStore", () => {
       expect(copy?.input.CopySource).toBe(
         encodeCopySource(SYNTHETIC_BUCKET, String(staged?.input.Key)),
       );
+      expect(copy?.input.MetadataDirective).toBe("COPY");
       await stage.rollback();
-      expect(await store.head(stage.meta.hash)).toBeNull();
+      expect(await store.verify(stage.meta.hash)).toBe(true);
+      expect(pendingKeys(fake, "inv")).toHaveLength(1);
+      expect(stagingKeys(fake, "inv")).toEqual([]);
     } finally {
       stage.release();
       stage.release();
     }
+    await store.recoverUnreferencedWrites(new Set([sha256Hex(bytes)]));
+    expect(await store.verify(sha256Hex(bytes))).toBe(true);
+    expect(pendingKeys(fake, "inv")).toEqual([]);
 
     const shared = new TextEncoder().encode("shared-synthetic-line\n");
     const first = await store.put(shared, { contentType: "text/plain" });
@@ -831,16 +1224,17 @@ describe("S3EvidenceStore", () => {
     await batch.promote();
     const names = fake.calls.map((call) => call.name);
     const journalPut = fake.calls.findIndex(
-      (call) => call.name === "PutObjectCommand" && String(call.input.Key).includes("/.pending/"),
+      (call) => call.name === "PutObjectCommand" && String(call.input.Key).includes(".pending/"),
     );
     const copy = fake.calls.findIndex((call) => call.name === "CopyObjectCommand");
-    expect(journalPut).toBeGreaterThanOrEqual(0);
+    expect(journalPut).toBeGreaterThan(-1);
     expect(copy).toBeGreaterThan(journalPut);
     expect(names.slice(0, copy + 1).filter((name) => name === "CopyObjectCommand")).toHaveLength(1);
     const copyCall = fake.calls[copy];
     expect(copyCall?.input.CopySource).toBe(
       encodeCopySource(SYNTHETIC_BUCKET, String(staged?.input.Key)),
     );
+    expect(copyCall?.input.MetadataDirective).toBe("COPY");
     expect(await store.verify(meta.hash)).toBe(true);
     const canonical = fake.object(blobKey(meta.hash, "cases/prod"));
     if (!canonical) throw new Error("missing promoted synthetic object");
@@ -957,6 +1351,7 @@ describe("S3EvidenceStore", () => {
     expect(recovered.reclaimed.sort()).toEqual([...orphans].sort());
     const lists = fake.calls.filter((call) => call.name === "ListObjectsV2Command");
     expect(lists.length).toBeGreaterThan(2);
+    expect(lists.every((call) => call.input.MaxKeys === 1000)).toBe(true);
     expect(lists.some((call) => typeof call.input.ContinuationToken === "string")).toBe(true);
     expect(pendingKeys(fake)).toEqual([]);
     expect(stagingKeys(fake)).toEqual([]);
@@ -1040,27 +1435,34 @@ describe("S3EvidenceStore", () => {
     expect(lease.maxActive()).toBe(1);
   });
 
-  it("holds the external lease for an ad-hoc stage until release", async () => {
+  it("does not retain the write lease across outstanding stages so a third-digest put can finish first", async () => {
     const lease = leaseTracker();
     const fake = new FakeS3Client(SYNTHETIC_BUCKET);
-    const heldDuringSend: number[] = [];
-    fake.onSend = () => heldDuringSend.push(lease.active());
     const store = new S3EvidenceStore(
       garageOptions(fake, { acquireWriteLease: lease.acquireWriteLease }),
     );
-    const stage = await store.stage(new TextEncoder().encode("leased-stage\n"));
-    expect(lease.active()).toBe(1);
-    expect(lease.acquires()).toBe(1);
-    await stage.commit();
-    expect(lease.active()).toBe(1);
-    await stage.rollback();
-    expect(lease.active()).toBe(1);
-    expect(heldDuringSend.every((value) => value === 1)).toBe(true);
-    stage.release();
-    stage.release();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    const bytesA = new TextEncoder().encode("outstanding-stage-a\n");
+    const bytesB = new TextEncoder().encode("outstanding-stage-b\n");
+    const bytesC = new TextEncoder().encode("third-digest-put\n");
+    const [stageA, stageB] = await Promise.all([store.stage(bytesA), store.stage(bytesB)]);
+    expect(stageA.meta.hash).not.toBe(stageB.meta.hash);
     expect(lease.active()).toBe(0);
-    expect(lease.releases()).toBe(1);
+    expect(lease.maxActive()).toBe(1);
+    expect(await store.head(stageA.meta.hash)).toBeNull();
+    expect(await store.head(stageB.meta.hash)).toBeNull();
+    const putMeta = await store.put(bytesC);
+    expect(putMeta.hash).toBe(sha256Hex(bytesC));
+    expect(await store.verify(putMeta.hash)).toBe(true);
+    expect(lease.active()).toBe(0);
+    await stageA.commit();
+    await stageB.commit();
+    expect(await store.verify(stageA.meta.hash)).toBe(true);
+    expect(await store.verify(stageB.meta.hash)).toBe(true);
+    expect(lease.active()).toBe(0);
+    stageA.release();
+    stageA.release();
+    stageB.release();
+    expect(lease.maxActive()).toBe(1);
   });
 
   it("fails closed on nested batch, stage, and file-reference mutations", async () => {
@@ -1068,10 +1470,1456 @@ describe("S3EvidenceStore", () => {
     const batch = await store.beginWriteBatch();
     await expect(batch.beginWriteBatch()).rejects.toThrow(/nested evidence write batches/);
     await expect(batch.stage()).rejects.toThrow(/nested evidence stages/);
+    await expect(
+      batch.stageStream(asAsyncChunks([new Uint8Array([1])]), { maxBytes: 1 }),
+    ).rejects.toThrow(/streaming evidence stages/);
     await expect(batch.putFileServerReference()).rejects.toThrow(/file-server references/);
     await expect(batch.abandonFileServerReference()).rejects.toThrow(/file-server references/);
     await expect(batch.restoreFileServerReference()).rejects.toThrow(/file-server references/);
     await expect(batch.verifyFileServerReference()).rejects.toThrow(/file-server references/);
     await batch.rollback();
+  });
+
+  it("unions explicit recovery hashes with bound referenced sources", async () => {
+    const { fake, store } = openStore();
+    const explicitBytes = new TextEncoder().encode("explicit-protected\n");
+    const sourceBytes = new TextEncoder().encode("source-protected\n");
+    const orphanBytes = new TextEncoder().encode("union-orphan\n");
+    const explicitMeta = await store.put(explicitBytes);
+    const sourceMeta = await store.put(sourceBytes);
+    const orphanMeta = await store.put(orphanBytes);
+    const journalId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    fake.putRaw(
+      `.pending/${journalId}.json`,
+      new TextEncoder().encode(
+        JSON.stringify({
+          schemaId: EVIDENCE_PENDING_WRITE_SCHEMA_ID,
+          id: journalId,
+          hashes: [explicitMeta.hash, sourceMeta.hash, orphanMeta.hash],
+        }),
+      ),
+    );
+    store.addReferencedContentHashSource(async () => [sourceMeta.hash, "not-a-hash", "../secret"]);
+    const recovered = await store.recoverUnreferencedWrites(
+      new Set([explicitMeta.hash, "zz", "../secret"]),
+    );
+    expect(recovered.journals).toBe(1);
+    expect(recovered.reclaimed).toEqual([orphanMeta.hash]);
+    expect(await store.verify(explicitMeta.hash)).toBe(true);
+    expect(await store.verify(sourceMeta.hash)).toBe(true);
+    expect(await store.head(orphanMeta.hash)).toBeNull();
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
+  it("treats CopyObject applied-then-thrown as applied for a stage and retains the journal", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("stage-applied-then-thrown\n");
+    const stage = await store.stage(bytes);
+    const hash = stage.meta.hash;
+    fake.throwAfterApplyKeys.add(blobKey(hash));
+    try {
+      await stage.commit();
+      await stage.commit();
+      expect(fake.throwAfterApplyHits).toBe(1);
+      assertPostCopyProbe(fake, blobKey(hash));
+      expect(await store.verify(hash)).toBe(true);
+      expect(pendingKeys(fake)).toHaveLength(1);
+      const journal = parseJournal(fake, pendingKeys(fake)[0] ?? "");
+      expect(journal.hashes).toEqual([hash]);
+    } finally {
+      stage.release();
+    }
+    const recovered = await store.recoverUnreferencedWrites(new Set([hash]));
+    expect(recovered.reclaimed).toEqual([]);
+    expect(await store.verify(hash)).toBe(true);
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
+  it("reclaims unreferenced bytes after a stage CopyObject applied-then-thrown commit", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("stage-applied-then-reclaim\n");
+    const stage = await store.stage(bytes);
+    fake.throwAfterApplyKeys.add(blobKey(stage.meta.hash));
+    try {
+      await stage.commit();
+      expect(fake.throwAfterApplyHits).toBe(1);
+      assertPostCopyProbe(fake, blobKey(stage.meta.hash));
+      expect(pendingKeys(fake)).toHaveLength(1);
+    } finally {
+      stage.release();
+    }
+    const recovered = await store.recoverUnreferencedWrites(new Set());
+    expect(recovered.reclaimed).toEqual([stage.meta.hash]);
+    expect(await store.head(stage.meta.hash)).toBeNull();
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
+  it("preserves a stage journal when CopyObject applies but the probe is unknown", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("stage-copy-unknown-probe\n");
+    const stage = await store.stage(bytes);
+    const canonical = blobKey(stage.meta.hash);
+    fake.throwAfterApplyKeys.add(canonical);
+    fake.headErrors.set(
+      canonical,
+      new FakeS3Error(
+        "SlowDown",
+        503,
+        `probe failed at ${SYNTHETIC_ENDPOINT} accessKey=${SYNTHETIC_ACCESS} secret=${SYNTHETIC_SECRET}`,
+      ),
+    );
+    try {
+      try {
+        await stage.commit();
+        throw new Error("expected unknown copy outcome");
+      } catch (error) {
+        expect(error).toBeInstanceOf(S3EvidenceError);
+        expect((error as S3EvidenceError).operation).toBe("commit");
+        assertSanitized(error, [stage.meta.hash, canonical]);
+      }
+      expect(fake.throwAfterApplyHits).toBe(1);
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(fake.object(canonical)).toBeDefined();
+      await stage.rollback();
+      await stage.rollback();
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(fake.object(canonical)).toBeDefined();
+    } finally {
+      stage.release();
+    }
+    fake.headErrors.clear();
+    const recovered = await store.recoverUnreferencedWrites(new Set());
+    expect(recovered.reclaimed).toEqual([stage.meta.hash]);
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
+  it("treats CopyObject applied-then-thrown as applied for a batch and recovers by reference union", async () => {
+    const { fake, store } = openStore();
+    const keptBytes = new TextEncoder().encode("batch-applied-kept\n");
+    const reclaimBytes = new TextEncoder().encode("batch-applied-reclaim\n");
+    const batch = await store.beginWriteBatch();
+    const kept = await batch.put(keptBytes);
+    const reclaim = await batch.put(reclaimBytes);
+    fake.throwAfterApplyKeys.add(blobKey(kept.hash));
+    fake.throwAfterApplyKeys.add(blobKey(reclaim.hash));
+    await batch.promote();
+    await batch.promote();
+    expect(fake.throwAfterApplyHits).toBe(2);
+    expect(await store.verify(kept.hash)).toBe(true);
+    expect(await store.verify(reclaim.hash)).toBe(true);
+    expect(pendingKeys(fake)).toHaveLength(1);
+    const journal = parseJournal(fake, pendingKeys(fake)[0] ?? "");
+    expect([...journal.hashes].sort()).toEqual([kept.hash, reclaim.hash].sort());
+    await abandonS3WriteBatchForCrashTest(batch);
+    store.addReferencedContentHashSource(async () => [kept.hash]);
+    const recovered = await store.recoverUnreferencedWrites(new Set());
+    expect(recovered.reclaimed).toEqual([reclaim.hash]);
+    expect(await store.verify(kept.hash)).toBe(true);
+    expect(await store.head(reclaim.hash)).toBeNull();
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
+  it("retries a partial batch promote with one full journal id", async () => {
+    const { fake, store } = openStore();
+    const firstBytes = new TextEncoder().encode("partial-promote-first\n");
+    const secondBytes = new TextEncoder().encode("partial-promote-second\n");
+    const batch = await store.beginWriteBatch();
+    const first = await batch.put(firstBytes);
+    const second = await batch.put(secondBytes);
+    fake.throwBeforeApplyKeys.add(blobKey(second.hash));
+    try {
+      await batch.promote();
+      throw new Error("expected partial promote failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("promote");
+      assertSanitized(error, [first.hash, second.hash]);
+    }
+    expect(pendingKeys(fake)).toHaveLength(1);
+    const journalKey = pendingKeys(fake)[0] ?? "";
+    const before = parseJournal(fake, journalKey);
+    expect([...before.hashes].sort()).toEqual([first.hash, second.hash].sort());
+    expect(await store.verify(first.hash)).toBe(true);
+    expect(await store.head(second.hash)).toBeNull();
+    fake.throwBeforeApplyKeys.clear();
+    await batch.promote();
+    expect(pendingKeys(fake)).toEqual([journalKey]);
+    const after = parseJournal(fake, journalKey);
+    expect(after.id).toBe(before.id);
+    expect([...after.hashes].sort()).toEqual([first.hash, second.hash].sort());
+    expect(await store.verify(first.hash)).toBe(true);
+    expect(await store.verify(second.hash)).toBe(true);
+    await batch.finalize();
+    expect(pendingKeys(fake)).toEqual([]);
+    expect(await store.verify(first.hash)).toBe(true);
+    expect(await store.verify(second.hash)).toBe(true);
+  });
+
+  it("does not let a cross-instance stale rollback delete canonical bytes another store adopted", async () => {
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const acquireWriteLease = exclusiveLease();
+    const storeA = new S3EvidenceStore(garageOptions(fake, { acquireWriteLease }));
+    const storeB = new S3EvidenceStore(garageOptions(fake, { acquireWriteLease }));
+    const bytes = new TextEncoder().encode("cross-instance-adopted\n");
+    const stageA = await storeA.stage(bytes);
+    await stageA.commit();
+    expect(await storeA.verify(stageA.meta.hash)).toBe(true);
+    const adopted = await storeB.put(bytes);
+    expect(adopted.hash).toBe(stageA.meta.hash);
+    await stageA.rollback();
+    stageA.release();
+    await stageA.rollback();
+    expect(await storeB.verify(adopted.hash)).toBe(true);
+    expect(await storeA.verify(adopted.hash)).toBe(true);
+    expect(fake.object(blobKey(adopted.hash))).toBeDefined();
+  });
+
+  it("fails closed on malformed, missing, repeated, non-progressing, and exhausting ListObjectsV2 pagination", async () => {
+    const scenarios: Array<{ name: string; handler: (input: Record<string, unknown>) => unknown }> = [
+      {
+        name: "malformed contents",
+        handler: () => ({ Contents: "nope", IsTruncated: false }),
+      },
+      {
+        name: "malformed truncated flag",
+        handler: () => ({ Contents: [], IsTruncated: "true" }),
+      },
+      {
+        name: "missing continuation token",
+        handler: () => ({
+          Contents: [{ Key: ".pending/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json" }],
+          IsTruncated: true,
+        }),
+      },
+      {
+        name: "repeated continuation token",
+        handler: () => ({
+          Contents: [{ Key: ".pending/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json" }],
+          IsTruncated: true,
+          NextContinuationToken: "same-token",
+        }),
+      },
+      {
+        name: "non-progressing empty truncated page",
+        handler: () => ({
+          Contents: [],
+          IsTruncated: true,
+          NextContinuationToken: "empty-progress",
+        }),
+      },
+      {
+        name: "oversized page",
+        handler: () => ({
+          Contents: Array.from({ length: 1001 }, (_, index) => ({ Key: `.pending/k${index}` })),
+          IsTruncated: false,
+        }),
+      },
+    ];
+    for (const scenario of scenarios) {
+      const { fake, store } = openStore();
+      fake.listHandler = scenario.handler;
+      try {
+        await store.recoverUnreferencedWrites(new Set());
+        throw new Error(`expected ${scenario.name} to fail closed`);
+      } catch (error) {
+        expect(error, scenario.name).toBeInstanceOf(S3EvidenceError);
+        expect((error as S3EvidenceError).operation).toBe("recoverUnreferencedWrites");
+        assertSanitized(error);
+      }
+    }
+
+    const pages = openStore();
+    let page = 0;
+    pages.fake.listHandler = () => {
+      page += 1;
+      return {
+        Contents: [{ Key: `.pending/page-${page}` }],
+        IsTruncated: true,
+        NextContinuationToken: `tok-${page}`,
+      };
+    };
+    try {
+      await pages.store.recoverUnreferencedWrites(new Set());
+      throw new Error("expected page-limit exhaustion to fail closed");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("recoverUnreferencedWrites");
+      assertSanitized(error);
+    }
+    expect(page).toBe(256);
+    expect(
+      pages.fake.calls.filter((call) => call.name === "ListObjectsV2Command").every(
+        (call) => call.input.MaxKeys === 1000,
+      ),
+    ).toBe(true);
+
+    const objects = openStore();
+    let objectPage = 0;
+    objects.fake.listHandler = () => {
+      objectPage += 1;
+      return {
+        Contents: Array.from({ length: 1000 }, (_, index) => ({
+          Key: `.pending/p${objectPage}-k${index}`,
+        })),
+        IsTruncated: true,
+        NextContinuationToken: `objects-${objectPage}`,
+      };
+    };
+    try {
+      await objects.store.recoverUnreferencedWrites(new Set());
+      throw new Error("expected object-limit exhaustion to fail closed");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("recoverUnreferencedWrites");
+      assertSanitized(error);
+    }
+    expect(objectPage).toBe(9);
+    expect(
+      objects.fake.calls.filter((call) => call.name === "ListObjectsV2Command").every(
+        (call) => call.input.MaxKeys === 1000,
+      ),
+    ).toBe(true);
+  });
+
+  it("sanitizes delayed and rejected lease acquire/release without deadlocking the in-process tail", async () => {
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    let failNextAcquire = true;
+    let failNextRelease = true;
+    const store = new S3EvidenceStore(
+      garageOptions(fake, {
+        acquireWriteLease: async () => {
+          acquireCalls += 1;
+          if (failNextAcquire) {
+            failNextAcquire = false;
+            throw leakingLeaseError("acquire");
+          }
+          return async () => {
+            releaseCalls += 1;
+            if (failNextRelease) {
+              failNextRelease = false;
+              throw leakingLeaseError("release");
+            }
+          };
+        },
+      }),
+    );
+
+    try {
+      await store.put(new TextEncoder().encode("lease-acquire-fail\n"));
+      throw new Error("expected acquire failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("lease");
+      assertSanitized(error, ["acquire lease failed"]);
+    }
+
+    try {
+      await store.put(new TextEncoder().encode("lease-release-fail\n"));
+      throw new Error("expected release failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("lease");
+      assertSanitized(error, ["release lease failed"]);
+    }
+
+    const first = new TextEncoder().encode("lease-ok-one\n");
+    const second = new TextEncoder().encode("lease-ok-two\n");
+    const [metaOne, metaTwo] = await Promise.all([store.put(first), store.put(second)]);
+    expect(await store.verify(metaOne.hash)).toBe(true);
+    expect(await store.verify(metaTwo.hash)).toBe(true);
+    expect(acquireCalls).toBeGreaterThanOrEqual(4);
+    expect(releaseCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("does not sticky-adopt a recycled digest after a prior put on the same instance", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("recycle-no-sticky-adopt\n");
+    const first = await store.put(bytes);
+    fake.objects.delete(`${SYNTHETIC_BUCKET}/${blobKey(first.hash)}`);
+    expect(await store.head(first.hash)).toBeNull();
+    const batch = await store.beginWriteBatch();
+    const again = await batch.put(bytes);
+    expect(again.hash).toBe(first.hash);
+    await batch.promote();
+    expect(await store.verify(first.hash)).toBe(true);
+    await batch.rollback();
+    expect(await store.head(first.hash)).toBeNull();
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
+  it("protects uncommitted live staging from same-process recover and beginWriteBatch", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("live-uncommitted-stage\n");
+    const stage = await store.stage(bytes);
+    try {
+      expect(stagingKeys(fake)).toHaveLength(1);
+      const recovered = await store.recoverUnreferencedWrites(new Set());
+      expect(recovered).toEqual({ reclaimed: [], journals: 0 });
+      expect(stagingKeys(fake)).toHaveLength(1);
+      const batch = await store.beginWriteBatch();
+      expect(stagingKeys(fake)).toHaveLength(1);
+      await batch.rollback();
+      expect(stagingKeys(fake)).toHaveLength(1);
+    } finally {
+      stage.release();
+    }
+    const after = await store.recoverUnreferencedWrites(new Set());
+    expect(after).toEqual({ reclaimed: [], journals: 0 });
+    expect(stagingKeys(fake)).toEqual([]);
+  });
+
+  it("protects a committed live stage journal from same-process recover and batch startup", async () => {
+    const { fake, store } = openStore();
+    store.addReferencedContentHashSource(async () => []);
+    const bytes = new TextEncoder().encode("live-committed-stage\n");
+    const stage = await store.stage(bytes);
+    try {
+      await stage.commit();
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(await store.verify(stage.meta.hash)).toBe(true);
+      const recovered = await store.recoverUnreferencedWrites(new Set());
+      expect(recovered.reclaimed).toEqual([]);
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(await store.verify(stage.meta.hash)).toBe(true);
+      const batch = await store.beginWriteBatch();
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(await store.verify(stage.meta.hash)).toBe(true);
+      await batch.rollback();
+    } finally {
+      stage.release();
+    }
+    const after = await store.recoverUnreferencedWrites(new Set());
+    expect(after.reclaimed).toEqual([sha256Hex(bytes)]);
+    expect(pendingKeys(fake)).toEqual([]);
+    expect(await store.head(sha256Hex(bytes))).toBeNull();
+  });
+
+  it("fails commit/promote when a 200 CopyObject stores corrupt bytes and keeps the journal", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("corrupt-copy-success\n");
+    const stage = await store.stage(bytes);
+    const dest = blobKey(stage.meta.hash);
+    fake.corruptCopy.set(dest, { body: new Uint8Array(bytes.byteLength).fill(0x41) });
+    try {
+      await expect(stage.commit()).rejects.toBeInstanceOf(S3EvidenceError);
+      assertPostCopyProbe(fake, dest);
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(await store.verify(stage.meta.hash)).toBe(false);
+    } finally {
+      stage.release();
+    }
+
+    const batchCase = openStore();
+    const batch = await batchCase.store.beginWriteBatch();
+    const first = await batch.put(new TextEncoder().encode("corrupt-batch-first\n"));
+    const second = await batch.put(new TextEncoder().encode("corrupt-batch-second\n"));
+    batchCase.fake.corruptCopy.set(blobKey(second.hash), {
+      body: new Uint8Array(second.byteLength).fill(0x42),
+    });
+    await expect(batch.promote()).rejects.toBeInstanceOf(S3EvidenceError);
+    expect(pendingKeys(batchCase.fake)).toHaveLength(1);
+    expect(parseJournal(batchCase.fake, pendingKeys(batchCase.fake)[0] ?? "").hashes.sort()).toEqual(
+      [first.hash, second.hash].sort(),
+    );
+    expect(await batchCase.store.verify(first.hash)).toBe(true);
+    expect(await batchCase.store.verify(second.hash)).toBe(false);
+    await batch.rollback();
+    expect(pendingKeys(batchCase.fake)).toHaveLength(1);
+    expect(parseJournal(batchCase.fake, pendingKeys(batchCase.fake)[0] ?? "").hashes.sort()).toEqual(
+      [first.hash, second.hash].sort(),
+    );
+  });
+
+  it("retains the full batch journal when rollback inspect is mismatch or unknown", async () => {
+    const mismatch = openStore();
+    const mismatchBytes = new TextEncoder().encode("rollback-mismatch\n");
+    const mismatchBatch = await mismatch.store.beginWriteBatch();
+    const mismatchMeta = await mismatchBatch.put(mismatchBytes);
+    await mismatchBatch.promote();
+    const stored = mismatch.fake.object(blobKey(mismatchMeta.hash));
+    if (!stored) throw new Error("missing promoted object");
+    stored.body = new Uint8Array(mismatchBytes.byteLength).fill(0x43);
+    await mismatchBatch.rollback();
+    expect(pendingKeys(mismatch.fake)).toHaveLength(1);
+    expect(mismatch.fake.object(blobKey(mismatchMeta.hash))).toBeDefined();
+
+    const unknownHead = openStore();
+    const unknownBytes = new TextEncoder().encode("rollback-unknown-head\n");
+    const unknownBatch = await unknownHead.store.beginWriteBatch();
+    const unknownMeta = await unknownBatch.put(unknownBytes);
+    await unknownBatch.promote();
+    unknownHead.fake.headErrors.set(
+      blobKey(unknownMeta.hash),
+      new FakeS3Error("SlowDown", 503, `head failed at ${SYNTHETIC_ENDPOINT}`),
+    );
+    await unknownBatch.rollback();
+    expect(pendingKeys(unknownHead.fake)).toHaveLength(1);
+    expect(unknownHead.fake.object(blobKey(unknownMeta.hash))).toBeDefined();
+
+    const unknownGet = openStore();
+    const getBytes = new TextEncoder().encode("rollback-unknown-get\n");
+    const getBatch = await unknownGet.store.beginWriteBatch();
+    const getMeta = await getBatch.put(getBytes);
+    await getBatch.promote();
+    unknownGet.fake.getErrors.set(
+      blobKey(getMeta.hash),
+      new FakeS3Error("SlowDown", 503, `get failed at ${SYNTHETIC_ENDPOINT}`),
+    );
+    await getBatch.rollback();
+    expect(pendingKeys(unknownGet.fake)).toHaveLength(1);
+    expect(unknownGet.fake.object(blobKey(getMeta.hash))).toBeDefined();
+  });
+
+  it("retries batch rollback after a canonical DeleteObject failure with a fresh lock", async () => {
+    const lease = leaseTracker();
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const store = new S3EvidenceStore(garageOptions(fake, { acquireWriteLease: lease.acquireWriteLease }));
+    const bytes = new TextEncoder().encode("retry-canonical-delete\n");
+    const batch = await store.beginWriteBatch();
+    const meta = await batch.put(bytes);
+    await batch.promote();
+    fake.deleteErrors.set(
+      blobKey(meta.hash),
+      new FakeS3Error("InternalError", 500, `delete canonical at ${SYNTHETIC_ENDPOINT}`),
+    );
+    await expect(batch.rollback()).rejects.toBeInstanceOf(S3EvidenceError);
+    expect(lease.active()).toBe(0);
+    expect(pendingKeys(fake)).toHaveLength(1);
+    expect(fake.object(blobKey(meta.hash))).toBeDefined();
+    fake.deleteErrors.clear();
+    await batch.rollback();
+    expect(lease.acquires()).toBe(2);
+    expect(lease.releases()).toBe(2);
+    expect(await store.head(meta.hash)).toBeNull();
+    expect(pendingKeys(fake)).toEqual([]);
+    const later = await store.put(new TextEncoder().encode("after-canonical-delete-retry\n"));
+    expect(await store.verify(later.hash)).toBe(true);
+  });
+
+  it("retries finalize after a journal DeleteObject failure and does not swallow it", async () => {
+    const lease = leaseTracker();
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const store = new S3EvidenceStore(garageOptions(fake, { acquireWriteLease: lease.acquireWriteLease }));
+    const batch = await store.beginWriteBatch();
+    const meta = await batch.put(new TextEncoder().encode("retry-journal-delete\n"));
+    await batch.promote();
+    const journalKey = pendingKeys(fake)[0] ?? "";
+    fake.deleteErrors.set(
+      journalKey,
+      new FakeS3Error("InternalError", 500, `delete journal at ${SYNTHETIC_ENDPOINT}`),
+    );
+    await expect(batch.finalize()).rejects.toBeInstanceOf(S3EvidenceError);
+    expect(lease.active()).toBe(0);
+    expect(pendingKeys(fake)).toEqual([journalKey]);
+    expect(await store.verify(meta.hash)).toBe(true);
+    fake.deleteErrors.clear();
+    await batch.finalize();
+    expect(lease.acquires()).toBe(2);
+    expect(pendingKeys(fake)).toEqual([]);
+    expect(await store.verify(meta.hash)).toBe(true);
+    await batch.finalize();
+    expect(lease.acquires()).toBe(2);
+  });
+
+  it("surfaces a rejected batch lease release, unblocks the tail, and does not double-release", async () => {
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    let acquires = 0;
+    let releases = 0;
+    let failNextRelease = true;
+    const store = new S3EvidenceStore(
+      garageOptions(fake, {
+        acquireWriteLease: async () => {
+          acquires += 1;
+          return async () => {
+            releases += 1;
+            if (failNextRelease) {
+              failNextRelease = false;
+              throw leakingLeaseError("release");
+            }
+          };
+        },
+      }),
+    );
+    const batch = await store.beginWriteBatch();
+    const meta = await batch.put(new TextEncoder().encode("lease-release-reject-batch\n"));
+    await batch.promote();
+    try {
+      await batch.finalize();
+      throw new Error("expected lease release failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("lease");
+      assertSanitized(error, ["release lease failed"]);
+    }
+    expect(releases).toBe(1);
+    expect(acquires).toBe(1);
+    const later = await store.put(new TextEncoder().encode("after-batch-lease-reject\n"));
+    expect(await store.verify(later.hash)).toBe(true);
+    expect(await store.verify(meta.hash)).toBe(true);
+    expect(acquires).toBe(2);
+    expect(releases).toBe(2);
+    await batch.finalize();
+    expect(acquires).toBe(2);
+  });
+
+  it("clears sticky ownershipUnknown after a complete promote retry of the same journal", async () => {
+    const { fake, store } = openStore();
+    const firstBytes = new TextEncoder().encode("retry-unknown-first\n");
+    const secondBytes = new TextEncoder().encode("retry-unknown-second\n");
+    const batch = await store.beginWriteBatch();
+    const first = await batch.put(firstBytes);
+    const second = await batch.put(secondBytes);
+    fake.throwAfterApplyKeys.add(blobKey(second.hash));
+    fake.headErrors.set(
+      blobKey(second.hash),
+      new FakeS3Error("SlowDown", 503, `unknown probe at ${SYNTHETIC_ENDPOINT}`),
+    );
+    try {
+      await batch.promote();
+      throw new Error("expected unknown promote");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("promote");
+      assertSanitized(error, [second.hash]);
+    }
+    expect(fake.throwAfterApplyHits).toBe(1);
+    expect(pendingKeys(fake)).toHaveLength(1);
+    const journalKey = pendingKeys(fake)[0] ?? "";
+    const before = parseJournal(fake, journalKey);
+    expect([...before.hashes].sort()).toEqual([first.hash, second.hash].sort());
+    fake.throwAfterApplyKeys.clear();
+    fake.headErrors.clear();
+    await batch.promote();
+    expect(pendingKeys(fake)).toEqual([journalKey]);
+    const after = parseJournal(fake, journalKey);
+    expect(after.id).toBe(before.id);
+    expect([...after.hashes].sort()).toEqual([first.hash, second.hash].sort());
+    expect(await store.verify(first.hash)).toBe(true);
+    expect(await store.verify(second.hash)).toBe(true);
+    await batch.rollback();
+    expect(await store.head(first.hash)).toBeNull();
+    expect(await store.head(second.hash)).toBeNull();
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
+  it("bounds journal and file-reference reads by streaming chunks and stopping early", async () => {
+    const { fake, store } = openStore();
+    const journalId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const first = new Uint8Array(16).fill(0x11);
+    const extra = new Uint8Array(64).fill(0x22);
+    const yieldCount = { value: 0 };
+    fake.putRaw(
+      `.pending/${journalId}.json`,
+      new Uint8Array([...first, ...extra, ...extra]),
+      {},
+      16,
+      { chunks: [first, extra, extra], yieldCount },
+    );
+    const recovered = await store.recoverUnreferencedWrites(new Set());
+    expect(recovered.reclaimed).toEqual([]);
+    expect(yieldCount.value).toBe(2);
+    expect(pendingKeys(fake)).toEqual([]);
+
+    const refId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const refYield = { value: 0 };
+    fake.putRaw(
+      `refs/${refId}.json`,
+      new Uint8Array([...first, ...extra, ...extra]),
+      {},
+      16,
+      { chunks: [first, extra, extra], yieldCount: refYield },
+    );
+    await expect(store.getFileServerReference(refId)).rejects.toThrow(/malformed file-server reference|inconsistent object/);
+    expect(refYield.value).toBe(2);
+
+    const transformId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    fake.putRaw(
+      `.pending/${transformId}.json`,
+      new TextEncoder().encode(
+        JSON.stringify({
+          schemaId: EVIDENCE_PENDING_WRITE_SCHEMA_ID,
+          id: transformId,
+          hashes: [],
+        }),
+      ),
+      {},
+      undefined,
+      { transformOnly: true },
+    );
+    await expect(store.recoverUnreferencedWrites(new Set())).rejects.toBeInstanceOf(S3EvidenceError);
+  });
+
+  it("serializes same-digest ad-hoc stages until release", async () => {
+    const { store } = openStore();
+    const bytes = new TextEncoder().encode("same-digest-stage\n");
+    const first = await store.stage(bytes);
+    let secondReady = false;
+    const secondPromise = store.stage(bytes).then((stage) => {
+      secondReady = true;
+      return stage;
+    });
+    await store.head(sha256Hex(bytes));
+    expect(secondReady).toBe(false);
+    first.release();
+    const second = await secondPromise;
+    expect(secondReady).toBe(true);
+    second.release();
+  });
+
+  it("keeps a throw-before-apply stage from publishing canonical bytes", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("stage-throw-before-apply\n");
+    const stage = await store.stage(bytes);
+    fake.throwBeforeApplyKeys.add(blobKey(stage.meta.hash));
+    try {
+      await expect(stage.commit()).rejects.toBeInstanceOf(S3EvidenceError);
+      expect(fake.throwBeforeApplyHits).toBe(1);
+      expect(fake.object(blobKey(stage.meta.hash))).toBeUndefined();
+      expect(pendingKeys(fake)).toHaveLength(1);
+      await stage.rollback();
+      expect(pendingKeys(fake)).toEqual([]);
+      expect(stagingKeys(fake)).toEqual([]);
+      expect(fake.object(blobKey(stage.meta.hash))).toBeUndefined();
+    } finally {
+      stage.release();
+    }
+  });
+
+  it("stages a multi-chunk stream with authoritative meta, then reads after promote", async () => {
+    const { fake, store } = openStore("cases/prod");
+    const chunks = [
+      new TextEncoder().encode("alpha|"),
+      new TextEncoder().encode("bravo|"),
+      new TextEncoder().encode("charlie"),
+    ];
+    const bytes = concatBytes(chunks);
+    const stage = await store.stageStream(asAsyncChunks(chunks), {
+      maxBytes: bytes.byteLength,
+      expectedLength: bytes.byteLength,
+      contentType: "text/plain",
+    });
+    expect(stage.meta.hash).toBe(sha256Hex(bytes));
+    expect(stage.meta.byteLength).toBe(bytes.byteLength);
+    expect(stage.meta.contentType).toBe("text/plain");
+    expect(Object.isFrozen(stage.meta)).toBe(true);
+    expect(await store.head(stage.meta.hash)).toBeNull();
+    const scratch = assertStreamedScratchPut(fake);
+    expect(scratch.ContentLength).toBe(bytes.byteLength);
+    expect(String(scratch.Key)).toMatch(/^cases\/prod\/\.staging\//);
+    expect(stagingKeys(fake, "cases/prod")).toHaveLength(1);
+
+    await stage.promote();
+    expect(await store.head(stage.meta.hash)).toEqual(stage.meta);
+    assertReplaceCopy(fake, blobKey(stage.meta.hash, "cases/prod"), stage.meta);
+    const handle = await store.openRead(stage.meta.hash);
+    expect(handle.range).toBeNull();
+    expect(handle.byteLength).toBe(bytes.byteLength);
+    expect(handle.meta).toEqual(stage.meta);
+    expect(Object.isFrozen(handle)).toBe(true);
+    expect(Object.isFrozen(handle.meta)).toBe(true);
+    expect(handle).not.toHaveProperty("etag");
+    expect(handle).not.toHaveProperty("ETag");
+    expect(JSON.stringify(handle)).not.toMatch(/etag/i);
+    expect(Buffer.from(await collectChunks(handle.bytes())).equals(Buffer.from(bytes))).toBe(true);
+
+    await stage.finalize();
+    expect(stagingKeys(fake, "cases/prod")).toEqual([]);
+    expect(pendingKeys(fake, "cases/prod")).toEqual([]);
+    expect(await store.verify(stage.meta.hash)).toBe(true);
+    assertNoAclOrChecksums(fake);
+  });
+
+  it("accepts a zero-byte stream and rejects a range on it", async () => {
+    const { fake, store } = openStore();
+    async function* empty(): AsyncIterable<Uint8Array> {
+      // no chunks
+    }
+    const stage = await store.stageStream(empty(), { maxBytes: 0 });
+    expect(stage.meta.hash).toBe(sha256Hex(new Uint8Array()));
+    expect(stage.meta.byteLength).toBe(0);
+    expect(stage.meta.contentType).toBeNull();
+    await stage.promote();
+    const handle = await store.openRead(stage.meta.hash);
+    expect(handle.range).toBeNull();
+    expect(handle.byteLength).toBe(0);
+    expect(await collectChunks(handle.bytes())).toEqual(new Uint8Array());
+    await expect(store.openRead(stage.meta.hash, { start: 0, end: 0 })).rejects.toThrow(
+      /out of bounds/,
+    );
+    await stage.finalize();
+    expect(stagingKeys(fake)).toEqual([]);
+  });
+
+  it("rejects abort before and while awaiting the next source chunk and cleans scratch", async () => {
+    const { fake, store } = openStore();
+    const before = new AbortController();
+    before.abort(new Error("already-aborted"));
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array([1])]), {
+        maxBytes: 8,
+        signal: before.signal,
+      }),
+    ).rejects.toThrow(/already-aborted/);
+    expect(stagingKeys(fake)).toEqual([]);
+
+    const pending = new AbortController();
+    let enterWait!: () => void;
+    const enteredWait = new Promise<void>((resolve) => {
+      enterWait = resolve;
+    });
+    async function* hanging(): AsyncIterable<Uint8Array> {
+      yield new Uint8Array([9, 9, 9]);
+      enterWait();
+      await new Promise<never>(() => {
+        // pending until abort
+      });
+    }
+    const staging = store.stageStream(hanging(), { maxBytes: 64, signal: pending.signal });
+    await enteredWait;
+    pending.abort(new Error("pending-abort"));
+    await expect(
+      Promise.race([
+        staging,
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error("abort did not reject promptly")), 100);
+        }),
+      ]),
+    ).rejects.toThrow(/pending-abort/);
+    expect(stagingKeys(fake)).toEqual([]);
+  });
+
+  it("rejects oversize, expectedLength mismatch, non-Uint8Array chunks, and invalid options", async () => {
+    const { fake, store } = openStore();
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array(8)]), { maxBytes: 4 }),
+    ).rejects.toThrow(/maxBytes/);
+    expect(stagingKeys(fake)).toEqual([]);
+
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array(3)]), { maxBytes: 16, expectedLength: 5 }),
+    ).rejects.toThrow(/expectedLength/);
+    expect(stagingKeys(fake)).toEqual([]);
+
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array(3)]), { maxBytes: 2, expectedLength: 3 }),
+    ).rejects.toThrow(/expectedLength.*maxBytes/);
+    expect(stagingKeys(fake)).toEqual([]);
+
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array(0)]), { maxBytes: 0 }),
+    ).rejects.toThrow(/must not be empty/);
+    expect(stagingKeys(fake)).toEqual([]);
+
+    async function* badChunk(): AsyncIterable<Uint8Array> {
+      yield "not-bytes" as unknown as Uint8Array;
+    }
+    await expect(store.stageStream(badChunk(), { maxBytes: 16 })).rejects.toThrow(/Uint8Array/);
+    expect(stagingKeys(fake)).toEqual([]);
+
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array([1])]), { maxBytes: -1 }),
+    ).rejects.toThrow(/maxBytes/);
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array([1])]), { maxBytes: 1.5 }),
+    ).rejects.toThrow(/maxBytes/);
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array([1])]), {
+        maxBytes: 8,
+        contentType: 123 as unknown as string,
+      }),
+    ).rejects.toThrow(/contentType/);
+    await expect(
+      store.stageStream(asAsyncChunks([new Uint8Array([1])]), {
+        maxBytes: 8,
+        contentType: "text/plain\u0000",
+      }),
+    ).rejects.toThrow(/invalid metadata/);
+    expect(stagingKeys(fake)).toEqual([]);
+  });
+
+  it("does not hold the write lease during intake and retains it through settlement", async () => {
+    const lease = leaseTracker();
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const store = new S3EvidenceStore(
+      garageOptions(fake, { acquireWriteLease: lease.acquireWriteLease }),
+    );
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    let sawMidStream!: () => void;
+    const midStream = new Promise<void>((resolve) => {
+      sawMidStream = resolve;
+    });
+    async function* delayedSource(): AsyncIterable<Uint8Array> {
+      yield new TextEncoder().encode("lease-one|");
+      sawMidStream();
+      await gate;
+      yield new TextEncoder().encode("lease-two");
+    }
+    const staging = store.stageStream(delayedSource(), {
+      maxBytes: 64,
+      contentType: "application/octet-stream",
+    });
+    await midStream;
+    expect(lease.acquires()).toBe(0);
+    expect(lease.active()).toBe(0);
+    releaseGate();
+    const stage = await staging;
+    expect(lease.acquires()).toBe(0);
+    expect(lease.active()).toBe(0);
+
+    await stage.promote();
+    expect(lease.acquires()).toBe(1);
+    expect(lease.active()).toBe(1);
+    await stage.promote();
+    expect(lease.acquires()).toBe(1);
+    await stage.finalize();
+    expect(lease.active()).toBe(0);
+    expect(lease.releases()).toBe(1);
+    await stage.finalize();
+    expect(lease.acquires()).toBe(1);
+    await expect(stage.promote()).rejects.toThrow(/already settled/);
+  });
+
+  it("lets two outstanding stream stages complete while a third digest put finishes first", async () => {
+    const lease = leaseTracker();
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const store = new S3EvidenceStore(
+      garageOptions(fake, { acquireWriteLease: lease.acquireWriteLease }),
+    );
+    const bytesA = new TextEncoder().encode("outstanding-stream-a\n");
+    const bytesB = new TextEncoder().encode("outstanding-stream-b\n");
+    const bytesC = new TextEncoder().encode("third-digest-put\n");
+    const [stageA, stageB] = await Promise.all([
+      store.stageStream(asAsyncChunks([bytesA]), { maxBytes: bytesA.byteLength }),
+      store.stageStream(asAsyncChunks([bytesB]), { maxBytes: bytesB.byteLength }),
+    ]);
+    expect(stageA.meta.hash).not.toBe(stageB.meta.hash);
+    expect(lease.active()).toBe(0);
+    expect(await store.head(stageA.meta.hash)).toBeNull();
+    expect(await store.head(stageB.meta.hash)).toBeNull();
+    const putMeta = await store.put(bytesC);
+    expect(putMeta.hash).toBe(sha256Hex(bytesC));
+    expect(await store.verify(putMeta.hash)).toBe(true);
+    expect(lease.active()).toBe(0);
+    await stageA.promote();
+    expect(lease.active()).toBe(1);
+    expect(await store.verify(stageA.meta.hash)).toBe(true);
+    await stageA.finalize();
+    expect(lease.active()).toBe(0);
+    await stageB.promote();
+    expect(lease.active()).toBe(1);
+    expect(await store.verify(stageB.meta.hash)).toBe(true);
+    await stageB.finalize();
+    expect(lease.active()).toBe(0);
+    expect(stagingKeys(fake)).toEqual([]);
+  });
+
+  it("retries idempotent settlement and rejects conflicting modes and finalize options", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("settlement-mode");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), { maxBytes: bytes.byteLength });
+    const rollback = stage.rollback();
+    await expect(stage.finalize()).rejects.toThrow(/settling via rollback/);
+    await rollback;
+    await stage.rollback();
+    expect(stagingKeys(fake)).toEqual([]);
+    await expect(stage.promote()).rejects.toThrow(/already settled/);
+
+    const other = await store.stageStream(asAsyncChunks([new TextEncoder().encode("opts\n")]), {
+      maxBytes: 16,
+    });
+    await other.promote();
+    const retaining = other.finalize({ retainPendingJournal: true });
+    await expect(other.finalize()).rejects.toThrow(/options conflict/);
+    await retaining;
+    await other.finalize({ retainPendingJournal: true });
+    await expect(other.finalize()).rejects.toThrow(/options conflict/);
+    expect(pendingKeys(fake)).toHaveLength(1);
+  });
+
+  it("serializes rollback behind an in-flight promotion and makes promotion reject", async () => {
+    let releaseAcquire!: () => void;
+    const acquireGate = new Promise<void>((resolve) => {
+      releaseAcquire = resolve;
+    });
+    let acquisitionStarted!: () => void;
+    const acquisitionStart = new Promise<void>((resolve) => {
+      acquisitionStarted = resolve;
+    });
+    let releases = 0;
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const store = new S3EvidenceStore(
+      garageOptions(fake, {
+        acquireWriteLease: async () => {
+          acquisitionStarted();
+          await acquireGate;
+          return () => {
+            releases += 1;
+          };
+        },
+      }),
+    );
+    const bytes = new TextEncoder().encode("promote-rollback-overlap\n");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), { maxBytes: bytes.byteLength });
+    const promoting = stage.promote();
+    await acquisitionStart;
+    const rollingBack = stage.rollback();
+    releaseAcquire();
+    await expect(promoting).rejects.toThrow(/rollback.*in flight/);
+    await rollingBack;
+    expect(await store.head(stage.meta.hash)).toBeNull();
+    expect(stagingKeys(fake)).toEqual([]);
+    expect(pendingKeys(fake)).toEqual([]);
+    expect(releases).toBe(1);
+    await stage.rollback();
+    await expect(stage.promote()).rejects.toThrow(/already settled/);
+  });
+
+  it("lets a preexisting duplicate survive streamed promote+rollback and fails a corrupt duplicate", async () => {
+    const lease = leaseTracker();
+    const { fake, store } = openStore(undefined, { acquireWriteLease: lease.acquireWriteLease });
+    const bytes = new TextEncoder().encode("shared-stream-duplicate\n");
+    const first = await store.put(bytes, { contentType: "text/plain" });
+    expect(lease.active()).toBe(0);
+    const stage = await store.stageStream(asAsyncChunks([bytes]), {
+      maxBytes: bytes.byteLength,
+      contentType: "text/x-log",
+    });
+    expect(stage.meta.hash).toBe(first.hash);
+    await stage.promote();
+    expect(await store.verify(first.hash)).toBe(true);
+    expect(pendingKeys(fake)).toEqual([]);
+    expect(lease.active()).toBe(1);
+    await stage.rollback();
+    expect(await store.verify(first.hash)).toBe(true);
+    expect(stagingKeys(fake)).toEqual([]);
+    expect(lease.active()).toBe(0);
+
+    const mutated = new TextEncoder().encode("shared-stream-MUTATED!!\n");
+    expect(mutated.byteLength).toBe(bytes.byteLength);
+    const stored = fake.object(blobKey(first.hash));
+    if (!stored) throw new Error("missing duplicate");
+    stored.body = mutated;
+    const corruptStage = await store.stageStream(asAsyncChunks([bytes]), {
+      maxBytes: bytes.byteLength,
+    });
+    await expect(corruptStage.promote()).rejects.toThrow(/verification|corrupt|changed|mismatch/i);
+    expect(Buffer.from(fake.object(blobKey(first.hash))?.body ?? []).equals(Buffer.from(mutated))).toBe(
+      true,
+    );
+    await corruptStage.rollback();
+    expect(Buffer.from(fake.object(blobKey(first.hash))?.body ?? []).equals(Buffer.from(mutated))).toBe(
+      true,
+    );
+  });
+
+  it("excludes a live stream stage from same-process recovery", async () => {
+    const { fake, store } = openStore();
+    fake.putRaw(".staging/stale-scratch", new Uint8Array([1]));
+    let continueSource!: () => void;
+    let sourceWaiting!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      sourceWaiting = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      continueSource = resolve;
+    });
+    async function* liveSource(): AsyncIterable<Uint8Array> {
+      yield new Uint8Array([2]);
+      sourceWaiting();
+      await gate;
+      yield new Uint8Array([3]);
+    }
+    const staging = store.stageStream(liveSource(), { maxBytes: 2 });
+    await waiting;
+    await waitForCall(fake, "PutObjectCommand");
+    continueSource();
+    const stage = await staging;
+    const liveKeys = stagingKeys(fake).filter((key) => key !== ".staging/stale-scratch");
+    expect(liveKeys).toHaveLength(1);
+    const recovered = await store.recoverUnreferencedWrites(new Set());
+    expect(recovered).toEqual({ reclaimed: [], journals: 0 });
+    expect(fake.object(".staging/stale-scratch")).toBeUndefined();
+    expect(stagingKeys(fake)).toEqual(liveKeys);
+    expect(fake.object(liveKeys[0] ?? "")).toBeDefined();
+    await stage.rollback();
+    expect(stagingKeys(fake)).toEqual([]);
+  });
+
+  it("cleans scratch for hostile iterator construction, next, and return failures", async () => {
+    const { fake, store } = openStore();
+    const constructionFailure: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        throw new Error("iterator-construction-failed");
+      },
+    };
+    await expect(
+      store.stageStream(constructionFailure, { maxBytes: 8 }),
+    ).rejects.toThrow(/iterator-construction-failed/);
+    expect(stagingKeys(fake)).toEqual([]);
+
+    const nextFailure: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        return {
+          next: () => {
+            throw new Error("iterator-next-failed");
+          },
+        };
+      },
+    };
+    await expect(store.stageStream(nextFailure, { maxBytes: 8 })).rejects.toThrow(
+      /iterator-next-failed/,
+    );
+    expect(stagingKeys(fake)).toEqual([]);
+
+    let enteredWait!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      enteredWait = resolve;
+    });
+    const hostileReturn: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        let yielded = false;
+        return {
+          next: async () => {
+            if (!yielded) {
+              yielded = true;
+              return { done: false, value: new Uint8Array([1]) };
+            }
+            enteredWait();
+            return new Promise<IteratorResult<Uint8Array>>(() => undefined);
+          },
+          return: () => {
+            throw new Error("hostile-return");
+          },
+        };
+      },
+    };
+    const controller = new AbortController();
+    const staging = store.stageStream(hostileReturn, {
+      maxBytes: 8,
+      signal: controller.signal,
+    });
+    await waiting;
+    controller.abort(new Error("abort-hostile-source"));
+    await expect(staging).rejects.toThrow(/abort-hostile-source/);
+    expect(stagingKeys(fake)).toEqual([]);
+  });
+
+  it("treats applied-then-thrown stream CopyObject as applied and retains an unknown journal", async () => {
+    const applied = openStore();
+    const appliedBytes = new TextEncoder().encode("stream-applied-then-thrown\n");
+    const appliedStage = await applied.store.stageStream(asAsyncChunks([appliedBytes]), {
+      maxBytes: appliedBytes.byteLength,
+    });
+    applied.fake.throwAfterApplyKeys.add(blobKey(appliedStage.meta.hash));
+    await appliedStage.promote();
+    await appliedStage.promote();
+    expect(applied.fake.throwAfterApplyHits).toBe(1);
+    assertReplaceCopy(applied.fake, blobKey(appliedStage.meta.hash), appliedStage.meta);
+    expect(await applied.store.verify(appliedStage.meta.hash)).toBe(true);
+    expect(pendingKeys(applied.fake)).toHaveLength(1);
+    await appliedStage.finalize();
+    expect(pendingKeys(applied.fake)).toEqual([]);
+    expect(await applied.store.verify(appliedStage.meta.hash)).toBe(true);
+
+    const unknown = openStore();
+    const unknownBytes = new TextEncoder().encode("stream-copy-unknown-probe\n");
+    const unknownStage = await unknown.store.stageStream(asAsyncChunks([unknownBytes]), {
+      maxBytes: unknownBytes.byteLength,
+    });
+    const canonical = blobKey(unknownStage.meta.hash);
+    unknown.fake.throwAfterApplyKeys.add(canonical);
+    unknown.fake.headErrors.set(
+      canonical,
+      new FakeS3Error(
+        "SlowDown",
+        503,
+        `probe failed at ${SYNTHETIC_ENDPOINT} accessKey=${SYNTHETIC_ACCESS} secret=${SYNTHETIC_SECRET}`,
+      ),
+    );
+    try {
+      await unknownStage.promote();
+      throw new Error("expected unknown copy outcome");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("promote");
+      assertSanitized(error, [unknownStage.meta.hash, canonical]);
+    }
+    expect(unknown.fake.throwAfterApplyHits).toBe(1);
+    expect(pendingKeys(unknown.fake)).toHaveLength(1);
+    expect(unknown.fake.object(canonical)).toBeDefined();
+    await unknownStage.rollback();
+    await unknownStage.rollback();
+    expect(pendingKeys(unknown.fake)).toHaveLength(1);
+    expect(unknown.fake.object(canonical)).toBeDefined();
+  });
+
+  it("retries partial stream cleanup and does not let stale rollback delete adopted bytes", async () => {
+    const lease = leaseTracker();
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const store = new S3EvidenceStore(
+      garageOptions(fake, { acquireWriteLease: lease.acquireWriteLease }),
+    );
+    const bytes = new TextEncoder().encode("retry-stream-cleanup\n");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), { maxBytes: bytes.byteLength });
+    await stage.promote();
+    const journalKey = pendingKeys(fake)[0] ?? "";
+    fake.deleteErrors.set(
+      journalKey,
+      new FakeS3Error("InternalError", 500, `delete journal at ${SYNTHETIC_ENDPOINT}`),
+    );
+    await expect(stage.rollback()).rejects.toBeInstanceOf(S3EvidenceError);
+    expect(lease.active()).toBe(1);
+    expect(pendingKeys(fake)).toEqual([journalKey]);
+    fake.deleteErrors.clear();
+    await stage.rollback();
+    expect(lease.active()).toBe(0);
+    expect(await store.head(stage.meta.hash)).toBeNull();
+    expect(pendingKeys(fake)).toEqual([]);
+
+    const kept = await store.put(new TextEncoder().encode("adopted-survivor\n"));
+    const duplicate = await store.stageStream(asAsyncChunks([new TextEncoder().encode("adopted-survivor\n")]), {
+      maxBytes: 32,
+    });
+    await duplicate.promote();
+    await duplicate.rollback();
+    expect(await store.verify(kept.hash)).toBe(true);
+  });
+
+  it("rejects finalize during promotion without poisoning later finalize", async () => {
+    let releaseAcquire!: () => void;
+    const acquireGate = new Promise<void>((resolve) => {
+      releaseAcquire = resolve;
+    });
+    let acquisitionStarted!: () => void;
+    const acquisitionStart = new Promise<void>((resolve) => {
+      acquisitionStarted = resolve;
+    });
+    let releases = 0;
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const store = new S3EvidenceStore(
+      garageOptions(fake, {
+        acquireWriteLease: async () => {
+          acquisitionStarted();
+          await acquireGate;
+          return () => {
+            releases += 1;
+          };
+        },
+      }),
+    );
+    const bytes = new TextEncoder().encode("stream-promote-finalize-overlap\n");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), {
+      maxBytes: bytes.byteLength,
+    });
+    const promoting = stage.promote();
+    await acquisitionStart;
+    await expect(stage.finalize()).rejects.toThrow(/must complete before finalize/);
+    releaseAcquire();
+    await promoting;
+    await stage.finalize();
+    expect(await store.verify(stage.meta.hash)).toBe(true);
+    expect(stagingKeys(fake)).toEqual([]);
+    expect(pendingKeys(fake)).toEqual([]);
+    expect(releases).toBe(1);
+  });
+
+  it("recovers a retained stream journal by the explicit and registered reference union", async () => {
+    const { fake, store } = openStore();
+    const reclaimBytes = new TextEncoder().encode("stream-retained-reclaim\n");
+    const reclaim = await store.stageStream(asAsyncChunks([reclaimBytes]), {
+      maxBytes: reclaimBytes.byteLength,
+    });
+    await reclaim.promote();
+    await reclaim.finalize({ retainPendingJournal: true });
+    expect(pendingKeys(fake)).toHaveLength(1);
+    const reclaimed = await store.recoverUnreferencedWrites(new Set());
+    expect(reclaimed).toEqual({ reclaimed: [reclaim.meta.hash], journals: 1 });
+    expect(await store.head(reclaim.meta.hash)).toBeNull();
+
+    const keepBytes = new TextEncoder().encode("stream-retained-reference\n");
+    const keep = await store.stageStream(asAsyncChunks([keepBytes]), {
+      maxBytes: keepBytes.byteLength,
+    });
+    await keep.promote();
+    await keep.finalize({ retainPendingJournal: true });
+    store.addReferencedContentHashSource(async () => new Set([keep.meta.hash]));
+    const kept = await store.recoverUnreferencedWrites(new Set());
+    expect(kept).toEqual({ reclaimed: [], journals: 1 });
+    expect(await store.verify(keep.meta.hash)).toBe(true);
+    expect(pendingKeys(fake)).toEqual([]);
+  });
+
+  it("openRead returns exact full and inclusive first/middle/tail ranges via native Range+IfMatch", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("0123456789");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), {
+      maxBytes: bytes.byteLength,
+      contentType: "text/plain",
+    });
+    await stage.promote();
+    const full = await store.openRead(stage.meta.hash);
+    expect(full.byteLength).toBe(10);
+    expect(Buffer.from(await collectChunks(full.bytes())).equals(Buffer.from(bytes))).toBe(true);
+
+    fake.calls.length = 0;
+    const first = await store.openRead(stage.meta.hash, { start: 0, end: 2 });
+    expect(first.range).toEqual({ start: 0, end: 2 });
+    expect(Object.isFrozen(first.range)).toBe(true);
+    expect(first.byteLength).toBe(3);
+    expect(Buffer.from(await collectChunks(first.bytes())).toString()).toBe("012");
+    const rangedGets = fake.calls.filter(
+      (call) => call.name === "GetObjectCommand" && typeof call.input.Range === "string",
+    );
+    expect(rangedGets.length).toBeGreaterThan(0);
+    expect(rangedGets.every((call) => typeof call.input.IfMatch === "string")).toBe(true);
+    expect(rangedGets.every((call) => call.input.Range === "bytes=0-2")).toBe(true);
+    expect(rangedGets.every((call) => call.input.IfMatch !== stage.meta.hash)).toBe(true);
+
+    const middle = await store.openRead(stage.meta.hash, { start: 3, end: 6 });
+    expect(Buffer.from(await collectChunks(middle.bytes())).toString()).toBe("3456");
+    const tail = await store.openRead(stage.meta.hash, { start: 7, end: 9 });
+    expect(Buffer.from(await collectChunks(tail.bytes())).toString()).toBe("789");
+    await stage.finalize();
+  });
+
+  it("reads correctly when metadata replacement preserves the source ETag", async () => {
+    const { fake, store } = openStore();
+    fake.preserveEtagOnCopy = true;
+    const bytes = new TextEncoder().encode("stable-etag-metadata-replace\n");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), {
+      maxBytes: bytes.byteLength,
+      contentType: "text/plain",
+    });
+    const scratchKey = stagingKeys(fake)[0] ?? "";
+    const scratchEtag = fake.object(scratchKey)?.etag;
+    await stage.promote();
+    const canonical = fake.object(blobKey(stage.meta.hash));
+    expect(canonical?.etag).toBe(scratchEtag);
+    expect(canonical?.contentType).toBe("text/plain");
+    expect(canonical?.metadata).toMatchObject({
+      sha256: stage.meta.hash,
+      bytelength: String(stage.meta.byteLength),
+      contenttype: "text/plain",
+    });
+    const handle = await store.openRead(stage.meta.hash, { start: 0, end: 5 });
+    expect(Buffer.from(await collectChunks(handle.bytes())).toString()).toBe("stable");
+    await stage.finalize();
+  });
+
+  it("rejects invalid hashes and unsatisfiable ranges", async () => {
+    const { store } = openStore();
+    const bytes = new TextEncoder().encode("range-rejection-fixture");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), { maxBytes: bytes.byteLength });
+    await stage.promote();
+    await expect(store.openRead("not-a-content-hash" as never)).rejects.toThrow(/invalid content hash/);
+    await expect(store.openRead(stage.meta.hash, { start: -1, end: 1 })).rejects.toThrow(/range\.start/);
+    await expect(store.openRead(stage.meta.hash, { start: 1.5, end: 2 })).rejects.toThrow(/range\.start/);
+    await expect(
+      store.openRead(stage.meta.hash, { start: 0, end: Number.MAX_SAFE_INTEGER + 1 }),
+    ).rejects.toThrow(/range\.end/);
+    await expect(store.openRead(stage.meta.hash, { start: 2, end: 1 })).rejects.toThrow(
+      /range\.end must be greater than or equal to range\.start/,
+    );
+    await expect(
+      store.openRead(stage.meta.hash, { start: 0, end: bytes.byteLength }),
+    ).rejects.toThrow(/out of bounds/);
+    await expect(
+      store.openRead(stage.meta.hash, { start: bytes.byteLength, end: bytes.byteLength }),
+    ).rejects.toThrow(/out of bounds/);
+    await stage.finalize();
+  });
+
+  it("fails closed on corrupt digest, truncated/oversized/malformed responses, and post-handle mutation", async () => {
+    const { fake, store } = openStore();
+    const small = new TextEncoder().encode("pre-open-corruption-bytes");
+    const smallStage = await store.stageStream(asAsyncChunks([small]), { maxBytes: small.byteLength });
+    await smallStage.promote();
+    const smallStored = fake.object(blobKey(smallStage.meta.hash));
+    if (!smallStored) throw new Error("missing small");
+    smallStored.body = Uint8Array.from(small, (value) => value ^ 0xff);
+    await expect(store.openRead(smallStage.meta.hash)).rejects.toThrow(
+      /verification|corrupt|changed|mismatch|inconsistent/i,
+    );
+    await smallStage.finalize();
+
+    const afterCreate = new TextEncoder().encode("after-handle-mutation!!!!");
+    const afterStage = await store.stageStream(asAsyncChunks([afterCreate]), {
+      maxBytes: afterCreate.byteLength,
+    });
+    await afterStage.promote();
+    const afterHandle = await store.openRead(afterStage.meta.hash);
+    const afterStored = fake.object(blobKey(afterStage.meta.hash));
+    if (!afterStored) throw new Error("missing after");
+    afterStored.body = new TextEncoder().encode("after-handle-MUTATED!!!!!");
+    afterStored.etag = fake.allocateEtag();
+    await expect(collectChunks(afterHandle.bytes())).rejects.toThrow(/changed|verification|mismatch/i);
+    await afterStage.finalize();
+
+    const rangedBytes = new TextEncoder().encode("0123456789abcdef");
+    const rangedStage = await store.stageStream(asAsyncChunks([rangedBytes]), {
+      maxBytes: rangedBytes.byteLength,
+    });
+    await rangedStage.promote();
+    const key = blobKey(rangedStage.meta.hash);
+    const rangedStored = fake.object(key);
+    if (!rangedStored) throw new Error("missing ranged");
+    const resetRanged = (): void => {
+      rangedStored.reportedLength = undefined;
+      rangedStored.reportedContentRange = undefined;
+      rangedStored.chunks = undefined;
+    };
+    const rangedHandle = await store.openRead(rangedStage.meta.hash, { start: 2, end: 5 });
+    rangedStored.reportedLength = 1;
+    await expect(collectChunks(rangedHandle.bytes())).rejects.toThrow(/inconsistent|changed|truncated/i);
+
+    resetRanged();
+    const malformedHandle = await store.openRead(rangedStage.meta.hash, { start: 2, end: 5 });
+    rangedStored.reportedContentRange = "not-a-content-range";
+    await expect(collectChunks(malformedHandle.bytes())).rejects.toThrow(/inconsistent/i);
+
+    resetRanged();
+    const truncatedHandle = await store.openRead(rangedStage.meta.hash, { start: 2, end: 5 });
+    rangedStored.chunks = [rangedBytes.slice(2, 4)];
+    await expect(collectChunks(truncatedHandle.bytes())).rejects.toThrow(/inconsistent/i);
+
+    resetRanged();
+    const oversizedHandle = await store.openRead(rangedStage.meta.hash, { start: 2, end: 5 });
+    rangedStored.chunks = [rangedBytes.slice(2, 8)];
+    await expect(collectChunks(oversizedHandle.bytes())).rejects.toThrow(/inconsistent/i);
+    await rangedStage.finalize();
+
+    const transform = await store.put(new TextEncoder().encode("transform-only-open\n"));
+    const transformStored = fake.object(blobKey(transform.hash));
+    if (!transformStored) throw new Error("missing transform");
+    transformStored.transformOnly = true;
+    await expect(store.openRead(transform.hash)).rejects.toThrow(/unavailable|inconsistent/i);
+  });
+
+  it("delegates batch openRead to the owner after promote", async () => {
+    const { store } = openStore();
+    const bytes = new TextEncoder().encode("batch-open-read\n");
+    const batch = await store.beginWriteBatch();
+    const meta = await batch.put(bytes, { contentType: "text/plain" });
+    await batch.promote();
+    const handle = await batch.openRead(meta.hash);
+    expect(handle.meta.hash).toBe(meta.hash);
+    expect(Buffer.from(await collectChunks(handle.bytes())).equals(Buffer.from(bytes))).toBe(true);
+    const ranged = await batch.openRead(meta.hash, { start: 0, end: 4 });
+    expect(Buffer.from(await collectChunks(ranged.bytes())).toString()).toBe("batch");
+    await batch.finalize();
+  });
+
+  it("omits ContentLength on streamed put unless expectedLength is authoritative", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("no-content-length\n");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), { maxBytes: 64 });
+    const scratch = assertStreamedScratchPut(fake);
+    expect(scratch.ContentLength).toBeUndefined();
+    await stage.rollback();
   });
 });
