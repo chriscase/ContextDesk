@@ -151,6 +151,7 @@ export class S3EvidenceStore implements EvidenceStore {
       } else {
         await this.deletePrefix("beginWriteBatch", this.prefixed(".staging/"));
         await this.deletePrefix("beginWriteBatch", this.prefixed("staging/"));
+        await this.cleanupAbandonedStreamStagesUnlocked("beginWriteBatch");
       }
       return new S3EvidenceWriteBatch(this, release);
     } catch (error) {
@@ -333,7 +334,7 @@ export class S3EvidenceStore implements EvidenceStore {
     }
     throwIfAborted(opts.signal);
 
-    const scratchKey = this.opaqueStagingKey(randomUUID());
+    const scratchKey = this.opaqueStreamStagingKey();
     this.liveStagingKeys.add(scratchKey);
     const hasher = createHash("sha256");
     let byteLength = 0;
@@ -683,10 +684,15 @@ export class S3EvidenceStore implements EvidenceStore {
   async verify(hash: ContentHash): Promise<boolean> {
     assertContentHash(hash, "verify");
     try {
-      const bytes = await this.get(hash);
-      if (!bytes || sha256Hex(bytes) !== hash) return false;
-      const meta = await this.head(hash);
-      if (!meta || meta.hash !== hash || meta.byteLength !== bytes.byteLength) return false;
+      const output = await this.sendAllowMissing(
+        "verify",
+        new HeadObjectCommand({ Bucket: this.bucket, Key: this.blobKey(hash) }),
+      );
+      if (output === null) return false;
+      const record = asRecord(output, "verify");
+      const meta = trustedBlobMeta(record, hash, "verify");
+      const fence = parseObjectEtag(record.ETag, "verify");
+      await this.verifyCanonicalIncremental(hash, meta, fence, "verify");
       return true;
     } catch (error) {
       if (isIntegrityFailure(error)) return false;
@@ -787,6 +793,10 @@ export class S3EvidenceStore implements EvidenceStore {
     return this.prefixed(`.staging/${scopeId}/${randomUUID()}`);
   }
 
+  opaqueStreamStagingKey(): string {
+    return this.prefixed(`.stream-staging/${randomUUID()}/${randomUUID()}`);
+  }
+
   batchStagingPrefix(scopeId: string): string {
     return this.prefixed(`.staging/${scopeId}/`);
   }
@@ -797,6 +807,10 @@ export class S3EvidenceStore implements EvidenceStore {
 
   stagingResiduePrefix(): string {
     return this.prefixed(".staging/");
+  }
+
+  streamStagingResiduePrefix(): string {
+    return this.prefixed(".stream-staging/");
   }
 
   directStagingResiduePrefix(): string {
@@ -1122,17 +1136,23 @@ export class S3EvidenceStore implements EvidenceStore {
     byteLength: number,
     operation = "put",
   ): Promise<void> {
-    const bytes = await this.get(hash);
-    if (!bytes || sha256Hex(bytes) !== hash) {
+    const output = await this.sendAllowMissing(
+      operation,
+      new HeadObjectCommand({ Bucket: this.bucket, Key: this.blobKey(hash) }),
+    );
+    if (output === null) {
       throw new S3EvidenceError(
         operation,
         "existing content-addressed evidence failed verification",
       );
     }
-    const meta = await this.head(hash);
-    if (!meta || meta.byteLength !== byteLength || meta.hash !== hash) {
+    const record = asRecord(output, operation);
+    const meta = trustedBlobMeta(record, hash, operation);
+    if (meta.byteLength !== byteLength || meta.hash !== hash) {
       throw new S3EvidenceError(operation, "inconsistent metadata");
     }
+    const fence = parseObjectEtag(record.ETag, operation);
+    await this.verifyCanonicalIncremental(hash, meta, fence, operation);
   }
 
   async inspectCanonical(
@@ -1254,7 +1274,15 @@ export class S3EvidenceStore implements EvidenceStore {
     }
     await this.deletePrefix("recoverUnreferencedWrites", this.stagingResiduePrefix());
     await this.deletePrefix("recoverUnreferencedWrites", this.directStagingResiduePrefix());
+    await this.cleanupAbandonedStreamStagesUnlocked("recoverUnreferencedWrites");
     return { reclaimed, journals };
+  }
+
+  private async cleanupAbandonedStreamStagesUnlocked(operation: string): Promise<void> {
+    if (this.writeCoordination === "external") {
+      return;
+    }
+    await this.deletePrefix(operation, this.streamStagingResiduePrefix());
   }
 
   private async send(operation: string, command: unknown): Promise<unknown> {
@@ -1505,16 +1533,19 @@ class S3EvidenceWriteBatch implements EvidenceWriteBatch {
   }
 
   async verify(hash: ContentHash): Promise<boolean> {
-    try {
-      const bytes = await this.get(hash);
-      if (bytes === null || sha256Hex(bytes) !== hash) return false;
-      const meta = await this.head(hash);
-      if (!meta || meta.hash !== hash || meta.byteLength !== bytes.byteLength) return false;
-      return true;
-    } catch (error) {
-      if (isIntegrityFailure(error)) return false;
-      throw error;
+    const staged = this.staged.get(hash);
+    if (staged && !this.promoted) {
+      try {
+        const bytes = await this.owner.getObject(staged.key, "get");
+        if (bytes === null || sha256Hex(bytes) !== hash) return false;
+        if (staged.meta.hash !== hash || staged.meta.byteLength !== bytes.byteLength) return false;
+        return true;
+      } catch (error) {
+        if (isIntegrityFailure(error)) return false;
+        throw error;
+      }
     }
+    return this.owner.verify(hash);
   }
 
   async putFileServerReference(): Promise<FileServerReferenceV1> {
@@ -1938,6 +1969,8 @@ function isIntegrityFailure(error: unknown): boolean {
     && (
       error.message.endsWith("inconsistent metadata")
       || error.message.endsWith("inconsistent object")
+      || error.message.endsWith("failed verification")
+      || error.message.endsWith("object changed")
     );
 }
 
@@ -2114,17 +2147,22 @@ async function* iterateObjectBody(
 ): AsyncIterable<Uint8Array> {
   if (body == null) return;
   if (body instanceof Uint8Array) {
-    yield body;
+    yield Uint8Array.from(body);
     return;
   }
   if (!isAsyncIterable(body)) {
     throw new S3EvidenceError(operation, "unavailable");
   }
-  for await (const chunk of body) {
-    if (!(chunk instanceof Uint8Array)) {
-      throw new S3EvidenceError(operation, "unavailable");
+  try {
+    for await (const chunk of body) {
+      if (!(chunk instanceof Uint8Array)) {
+        throw new S3EvidenceError(operation, "unavailable");
+      }
+      yield Uint8Array.from(chunk);
     }
-    yield chunk;
+  } catch (error) {
+    if (error instanceof S3EvidenceError) throw error;
+    throw new S3EvidenceError(operation, "unavailable");
   }
 }
 
@@ -2136,12 +2174,19 @@ async function hashBodyExact(
 ): Promise<void> {
   const hasher = createHash("sha256");
   let received = 0;
-  for await (const chunk of iterateObjectBody(body, operation)) {
-    if (received + chunk.byteLength > expectedLength) {
-      throw new S3EvidenceError(operation, "inconsistent object");
+  try {
+    for await (const chunk of iterateObjectBody(body, operation)) {
+      if (chunk.byteLength === 0) continue;
+      if (received + chunk.byteLength > expectedLength) {
+        throw new S3EvidenceError(operation, "inconsistent object");
+      }
+      const stable = Uint8Array.from(chunk);
+      hasher.update(stable);
+      received += stable.byteLength;
     }
-    hasher.update(chunk);
-    received += chunk.byteLength;
+  } catch (error) {
+    if (error instanceof S3EvidenceError) throw error;
+    throw new S3EvidenceError(operation, "unavailable");
   }
   if (received !== expectedLength) {
     throw new S3EvidenceError(operation, "inconsistent object");

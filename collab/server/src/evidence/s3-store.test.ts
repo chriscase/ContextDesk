@@ -59,16 +59,23 @@ interface FakeObject {
   contentType: string | undefined;
   etag: string;
   reportedLength?: number;
+  reportedGetLength?: number;
   reportedEtag?: string | null;
+  reportedGetEtag?: string | null;
   reportedContentRange?: string | null;
   chunks?: Uint8Array[];
+  chunkProducers?: Array<() => Uint8Array>;
   yieldCount?: { value: number };
   transformOnly?: boolean;
+  failAfterYields?: number;
+  failYieldError?: Error;
+  sequentialNext?: { pending: boolean; concurrent: number };
 }
 
 class FakeS3Client {
   readonly objects = new Map<string, FakeObject>();
   readonly calls: Array<{ name: string; input: Record<string, unknown> }> = [];
+  transformToByteArrayCalls = 0;
   bucketExists = true;
   nextError: Error | null = null;
   listPageSize = 1000;
@@ -163,18 +170,29 @@ class FakeS3Client {
       }
       const responseChunks = stored.chunks
         ?? (ranged ? [stored.body.slice(start, end + 1)] : [stored.body]);
-      const total = responseChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+      const total = stored.chunkProducers
+        ? stored.body.byteLength
+        : responseChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
       const contentRange = ranged
         ? stored.reportedContentRange === undefined
           ? `bytes ${start}-${end}/${stored.body.byteLength}`
           : stored.reportedContentRange ?? undefined
-        : undefined;
+        : stored.reportedContentRange === undefined
+          ? undefined
+          : stored.reportedContentRange ?? undefined;
+      const responseEtag = stored.reportedGetEtag !== undefined
+        ? stored.reportedGetEtag
+        : stored.reportedEtag === undefined
+          ? stored.etag
+          : stored.reportedEtag;
       return {
-        Body: sdkBody(stored, responseChunks, etagAtStart),
-        ContentLength: stored.reportedLength ?? total,
+        Body: sdkBody(stored, responseChunks, etagAtStart, () => {
+          this.transformToByteArrayCalls += 1;
+        }),
+        ContentLength: stored.reportedGetLength ?? stored.reportedLength ?? total,
         ContentType: stored.contentType,
         Metadata: { ...stored.metadata },
-        ETag: stored.reportedEtag === undefined ? stored.etag : stored.reportedEtag,
+        ETag: responseEtag,
         ...(contentRange !== undefined ? { ContentRange: contentRange } : {}),
       };
     }
@@ -291,12 +309,18 @@ class FakeS3Client {
     reportedLength?: number,
     extra?: {
       chunks?: Uint8Array[];
+      chunkProducers?: Array<() => Uint8Array>;
       yieldCount?: { value: number };
       transformOnly?: boolean;
       etag?: string;
       reportedEtag?: string | null;
+      reportedGetEtag?: string | null;
+      reportedGetLength?: number;
       reportedContentRange?: string | null;
       contentType?: string;
+      failAfterYields?: number;
+      failYieldError?: Error;
+      sequentialNext?: { pending: boolean; concurrent: number };
     },
   ): void {
     const stored: FakeObject = {
@@ -307,12 +331,18 @@ class FakeS3Client {
     };
     if (reportedLength !== undefined) stored.reportedLength = reportedLength;
     if (extra?.chunks) stored.chunks = extra.chunks.map((chunk) => new Uint8Array(chunk));
+    if (extra?.chunkProducers) stored.chunkProducers = extra.chunkProducers;
     if (extra?.yieldCount) stored.yieldCount = extra.yieldCount;
     if (extra?.transformOnly) stored.transformOnly = true;
     if (extra?.reportedEtag !== undefined) stored.reportedEtag = extra.reportedEtag;
+    if (extra?.reportedGetEtag !== undefined) stored.reportedGetEtag = extra.reportedGetEtag;
+    if (extra?.reportedGetLength !== undefined) stored.reportedGetLength = extra.reportedGetLength;
     if (extra?.reportedContentRange !== undefined) {
       stored.reportedContentRange = extra.reportedContentRange;
     }
+    if (extra?.failAfterYields !== undefined) stored.failAfterYields = extra.failAfterYields;
+    if (extra?.failYieldError) stored.failYieldError = extra.failYieldError;
+    if (extra?.sequentialNext) stored.sequentialNext = extra.sequentialNext;
     this.objects.set(`${this.bucket}/${key}`, stored);
   }
 
@@ -372,8 +402,10 @@ function sdkBody(
   stored: FakeObject,
   chunks: Uint8Array[] = stored.chunks ?? [stored.body],
   etagAtStart: string = stored.etag,
+  onTransform?: () => void,
 ): unknown {
   const transformToByteArray = async (): Promise<Uint8Array> => {
+    onTransform?.();
     const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
     const out = new Uint8Array(total);
     let offset = 0;
@@ -386,15 +418,36 @@ function sdkBody(
   if (stored.transformOnly) {
     return { transformToByteArray };
   }
-  return {
-    async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
-      for (const chunk of chunks) {
+  const producers = stored.chunkProducers ?? chunks.map((chunk) => () => chunk);
+  let index = 0;
+  const iterator: AsyncIterator<Uint8Array> = {
+    async next(): Promise<IteratorResult<Uint8Array>> {
+      const sequential = stored.sequentialNext;
+      if (sequential) {
+        if (sequential.pending) sequential.concurrent += 1;
+        sequential.pending = true;
+      }
+      try {
         if (stored.etag !== etagAtStart) {
           throw new FakeS3Error("InternalError", 500, "object mutated during get");
         }
+        if (stored.failAfterYields !== undefined && index >= stored.failAfterYields) {
+          throw stored.failYieldError ?? new Error("iterator-failed-mid-body");
+        }
+        const produce = producers[index];
+        if (produce === undefined) return { done: true, value: undefined };
+        const chunk = produce();
         if (stored.yieldCount) stored.yieldCount.value += 1;
-        yield chunk;
+        index += 1;
+        return { done: false, value: chunk };
+      } finally {
+        if (sequential) sequential.pending = false;
       }
+    },
+  };
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+      return iterator;
     },
     transformToByteArray,
   };
@@ -530,6 +583,20 @@ function pendingKeys(fake: FakeS3Client, prefix?: string): string[] {
 
 function stagingKeys(fake: FakeS3Client, prefix?: string): string[] {
   const batchRoot = prefix ? `${prefix}/.staging/` : ".staging/";
+  const streamRoot = prefix ? `${prefix}/.stream-staging/` : ".stream-staging/";
+  const directRoot = prefix ? `${prefix}/staging/` : "staging/";
+  return fake.keys().filter(
+    (key) => key.startsWith(batchRoot) || key.startsWith(streamRoot) || key.startsWith(directRoot),
+  );
+}
+
+function streamStagingKeys(fake: FakeS3Client, prefix?: string): string[] {
+  const root = prefix ? `${prefix}/.stream-staging/` : ".stream-staging/";
+  return fake.keys().filter((key) => key.startsWith(root));
+}
+
+function batchStagingKeys(fake: FakeS3Client, prefix?: string): string[] {
+  const batchRoot = prefix ? `${prefix}/.staging/` : ".staging/";
   const directRoot = prefix ? `${prefix}/staging/` : "staging/";
   return fake.keys().filter((key) => key.startsWith(batchRoot) || key.startsWith(directRoot));
 }
@@ -615,14 +682,7 @@ function assertPostCopyProbe(fake: FakeS3Client, destKey: string): void {
   expect(copy?.input.MetadataDirective).toBe("COPY");
   expect(copy?.input.Key).toBe(destKey);
   const after = fake.calls.slice(copyIndex + 1);
-  const headIndex = after.findIndex(
-    (call) => call.name === "HeadObjectCommand" && call.input.Key === destKey,
-  );
-  const getIndex = after.findIndex(
-    (call) => call.name === "GetObjectCommand" && call.input.Key === destKey,
-  );
-  expect(headIndex).toBeGreaterThan(-1);
-  expect(getIndex).toBeGreaterThan(headIndex);
+  assertCanonicalHeadThenConditionalGet(after, destKey, fake.object(destKey)?.etag);
 }
 
 function leakingLeaseError(kind: string): Error {
@@ -674,7 +734,10 @@ function scratchPuts(fake: FakeS3Client): Array<{ name: string; input: Record<st
   return fake.calls.filter((call) => {
     if (call.name !== "PutObjectCommand") return false;
     const key = String(call.input.Key);
-    return key.includes(".staging/") || key.startsWith("staging/") || key.includes("/staging/");
+    return key.includes(".stream-staging/")
+      || key.includes(".staging/")
+      || key.startsWith("staging/")
+      || key.includes("/staging/");
   });
 }
 
@@ -710,14 +773,55 @@ function assertReplaceCopy(
     ),
   ).toBe(true);
   const after = fake.calls.slice(copyIndex + 1);
-  const headIndex = after.findIndex(
-    (call) => call.name === "HeadObjectCommand" && call.input.Key === destKey,
+  assertCanonicalHeadThenConditionalGet(after, destKey, fake.object(destKey)?.etag);
+}
+
+function assertCanonicalHeadThenConditionalGet(
+  calls: Array<{ name: string; input: Record<string, unknown> }>,
+  key: string,
+  expectedEtag?: string,
+): void {
+  const headIndex = calls.findIndex(
+    (call) => call.name === "HeadObjectCommand" && call.input.Key === key,
   );
-  const getIndex = after.findIndex(
-    (call) => call.name === "GetObjectCommand" && call.input.Key === destKey,
+  const getIndex = calls.findIndex(
+    (call) =>
+      call.name === "GetObjectCommand"
+      && call.input.Key === key
+      && call.input.Range === undefined,
   );
   expect(headIndex).toBeGreaterThan(-1);
   expect(getIndex).toBeGreaterThan(headIndex);
+  const get = calls[getIndex];
+  expect(get?.input.Range).toBeUndefined();
+  expect(typeof get?.input.IfMatch).toBe("string");
+  if (expectedEtag !== undefined) {
+    expect(get?.input.IfMatch).toBe(expectedEtag);
+  }
+}
+
+function canonicalUserMetadata(hash: string, byteLength: number, contentType = ""): Record<string, string> {
+  return {
+    sha256: hash,
+    bytelength: String(byteLength),
+    contenttype: contentType,
+  };
+}
+
+function streamListOrDelete(
+  fake: FakeS3Client,
+  prefix?: string,
+): Array<{ name: string; input: Record<string, unknown> }> {
+  const root = prefix ? `${prefix}/.stream-staging/` : ".stream-staging/";
+  return fake.calls.filter((call) => {
+    if (call.name === "ListObjectsV2Command") {
+      return String(call.input.Prefix ?? "") === root;
+    }
+    if (call.name === "DeleteObjectCommand") {
+      return String(call.input.Key ?? "").startsWith(root);
+    }
+    return false;
+  });
 }
 
 async function waitForCall(
@@ -2207,7 +2311,10 @@ describe("S3EvidenceStore", () => {
     expect(await store.head(stage.meta.hash)).toBeNull();
     const scratch = assertStreamedScratchPut(fake);
     expect(scratch.ContentLength).toBe(bytes.byteLength);
-    expect(String(scratch.Key)).toMatch(/^cases\/prod\/\.staging\//);
+    expect(String(scratch.Key)).toMatch(/^cases\/prod\/\.stream-staging\/[0-9a-f-]+\/[0-9a-f-]+$/i);
+    expect(String(scratch.Key)).not.toContain("/.staging/");
+    expect(streamStagingKeys(fake, "cases/prod")).toHaveLength(1);
+    expect(batchStagingKeys(fake, "cases/prod")).toEqual([]);
     expect(stagingKeys(fake, "cases/prod")).toHaveLength(1);
 
     await stage.promote();
@@ -2520,6 +2627,7 @@ describe("S3EvidenceStore", () => {
   it("excludes a live stream stage from same-process recovery", async () => {
     const { fake, store } = openStore();
     fake.putRaw(".staging/stale-scratch", new Uint8Array([1]));
+    fake.putRaw(".stream-staging/abandoned/stale", new Uint8Array([9]));
     let continueSource!: () => void;
     let sourceWaiting!: () => void;
     const waiting = new Promise<void>((resolve) => {
@@ -2539,12 +2647,14 @@ describe("S3EvidenceStore", () => {
     await waitForCall(fake, "PutObjectCommand");
     continueSource();
     const stage = await staging;
-    const liveKeys = stagingKeys(fake).filter((key) => key !== ".staging/stale-scratch");
+    const liveKeys = streamStagingKeys(fake).filter((key) => key !== ".stream-staging/abandoned/stale");
     expect(liveKeys).toHaveLength(1);
+    expect(String(liveKeys[0])).toMatch(/^\.stream-staging\/[0-9a-f-]+\/[0-9a-f-]+$/i);
     const recovered = await store.recoverUnreferencedWrites(new Set());
     expect(recovered).toEqual({ reclaimed: [], journals: 0 });
     expect(fake.object(".staging/stale-scratch")).toBeUndefined();
-    expect(stagingKeys(fake)).toEqual(liveKeys);
+    expect(fake.object(".stream-staging/abandoned/stale")).toBeUndefined();
+    expect(streamStagingKeys(fake)).toEqual(liveKeys);
     expect(fake.object(liveKeys[0] ?? "")).toBeDefined();
     await stage.rollback();
     expect(stagingKeys(fake)).toEqual([]);
@@ -2920,6 +3030,360 @@ describe("S3EvidenceStore", () => {
     const stage = await store.stageStream(asAsyncChunks([bytes]), { maxBytes: 64 });
     const scratch = assertStreamedScratchPut(fake);
     expect(scratch.ContentLength).toBeUndefined();
+    await stage.rollback();
+  });
+
+  it("verifies existing canonical bytes with Head then IfMatch Get, incrementally, and without transformToByteArray", async () => {
+    const bytes = new TextEncoder().encode("canonical-chunked-body!!\n");
+    const hash = sha256Hex(bytes);
+    const first = bytes.slice(0, 8);
+    const second = bytes.slice(8);
+    const paths: Array<{ name: string; run: (store: S3EvidenceStore) => Promise<void> }> = [
+      { name: "put", run: async (store) => { await store.put(bytes); } },
+      {
+        name: "stage",
+        run: async (store) => {
+          const stage = await store.stage(bytes);
+          stage.release();
+        },
+      },
+      {
+        name: "stageStream",
+        run: async (store) => {
+          const stage = await store.stageStream(asAsyncChunks([bytes]), { maxBytes: bytes.byteLength });
+          await stage.promote();
+          await stage.finalize();
+        },
+      },
+      {
+        name: "batch",
+        run: async (store) => {
+          const batch = await store.beginWriteBatch();
+          await batch.put(bytes);
+          await batch.promote();
+          await batch.finalize();
+        },
+      },
+    ];
+    for (const path of paths) {
+      const { fake, store } = openStore();
+      const yieldCount = { value: 0 };
+      fake.putRaw(
+        blobKey(hash),
+        bytes,
+        canonicalUserMetadata(hash, bytes.byteLength),
+        undefined,
+        { chunks: [first, second], yieldCount },
+      );
+      fake.transformToByteArrayCalls = 0;
+      fake.calls.length = 0;
+      await path.run(store);
+      expect(yieldCount.value, path.name).toBe(2);
+      expect(fake.transformToByteArrayCalls, path.name).toBe(0);
+      assertCanonicalHeadThenConditionalGet(fake.calls, blobKey(hash), fake.object(blobKey(hash))?.etag);
+      const ranged = fake.calls.some(
+        (call) => call.name === "GetObjectCommand" && call.input.Key === blobKey(hash) && typeof call.input.Range === "string",
+      );
+      expect(ranged, path.name).toBe(false);
+    }
+  });
+
+  it("rejects transform-only canonical bodies while legacy get still consumes them", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("transform-only-canonical\n");
+    const hash = sha256Hex(bytes);
+    fake.putRaw(
+      blobKey(hash),
+      bytes,
+      canonicalUserMetadata(hash, bytes.byteLength),
+      undefined,
+      { transformOnly: true },
+    );
+    fake.transformToByteArrayCalls = 0;
+    try {
+      await store.put(bytes);
+      throw new Error("expected transform-only put failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("put");
+      expect((error as S3EvidenceError).message).toMatch(/unavailable/);
+      assertSanitized(error);
+    }
+    expect(fake.transformToByteArrayCalls).toBe(0);
+    const got = await store.get(hash);
+    expect(got).not.toBeNull();
+    expect(Buffer.from(got ?? []).equals(Buffer.from(bytes))).toBe(true);
+    expect(fake.transformToByteArrayCalls).toBeGreaterThan(0);
+  });
+
+  it("fails closed on hostile truncated oversized dishonest ContentRange and mutation without draining later chunks", async () => {
+    const bytes = new TextEncoder().encode("canonical-hostile-source\n");
+    const hash = sha256Hex(bytes);
+    const key = blobKey(hash);
+    const metadata = canonicalUserMetadata(hash, bytes.byteLength);
+
+    const truncated = openStore();
+    const truncatedYield = { value: 0 };
+    truncated.fake.putRaw(key, bytes, metadata, undefined, {
+      chunks: [bytes.slice(0, 6)],
+      reportedGetLength: bytes.byteLength,
+      yieldCount: truncatedYield,
+    });
+    try {
+      await truncated.store.put(bytes);
+      throw new Error("expected truncated put failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("put");
+      expect((error as S3EvidenceError).message).toMatch(/inconsistent object/);
+      assertSanitized(error);
+    }
+    expect(truncatedYield.value).toBe(1);
+
+    const oversized = openStore();
+    const produced: number[] = [];
+    const sequentialNext = { pending: false, concurrent: 0 };
+    const oversizedYield = { value: 0 };
+    oversized.fake.putRaw(key, bytes, metadata, bytes.byteLength, {
+      reportedGetLength: bytes.byteLength,
+      sequentialNext,
+      yieldCount: oversizedYield,
+      chunkProducers: [
+        () => {
+          produced.push(0);
+          return bytes.slice(0, 4);
+        },
+        () => {
+          produced.push(1);
+          return new Uint8Array(bytes.byteLength);
+        },
+        () => {
+          produced.push(2);
+          return new Uint8Array(256).fill(9);
+        },
+      ],
+    });
+    await expect(oversized.store.put(bytes)).rejects.toThrow(/inconsistent object/);
+    expect(produced).toEqual([0, 1]);
+    expect(oversizedYield.value).toBe(2);
+    expect(sequentialNext.concurrent).toBe(0);
+    expect(oversized.fake.transformToByteArrayCalls).toBe(0);
+
+    const dishonest = openStore();
+    const dishonestYield = { value: 0 };
+    dishonest.fake.putRaw(key, bytes, metadata, undefined, {
+      chunks: [bytes],
+      reportedGetLength: bytes.byteLength + 1,
+      yieldCount: dishonestYield,
+    });
+    await expect(dishonest.store.put(bytes)).rejects.toThrow(/inconsistent object/);
+    expect(dishonestYield.value).toBe(0);
+
+    const ranged = openStore();
+    const rangeYield = { value: 0 };
+    ranged.fake.putRaw(key, bytes, metadata, undefined, {
+      chunks: [bytes],
+      reportedContentRange: `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}`,
+      yieldCount: rangeYield,
+    });
+    await expect(ranged.store.put(bytes)).rejects.toThrow(/inconsistent object/);
+    expect(rangeYield.value).toBe(0);
+
+    const mutated = openStore();
+    mutated.fake.putRaw(key, bytes, metadata);
+    mutated.fake.getErrors.set(
+      key,
+      new FakeS3Error(
+        "PreconditionFailed",
+        412,
+        `PreconditionFailed at ${SYNTHETIC_ENDPOINT} bucket=${SYNTHETIC_BUCKET} key=${key} accessKey=${SYNTHETIC_ACCESS} secret=${SYNTHETIC_SECRET} URI=${SYNTHETIC_URI}`,
+      ),
+    );
+    try {
+      await mutated.store.put(bytes);
+      throw new Error("expected object-changed put failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("put");
+      expect((error as S3EvidenceError).message).toMatch(/object changed/);
+      assertSanitized(error);
+    }
+    expect(await mutated.store.inspectCanonical(hash, bytes.byteLength)).toBe("unknown");
+
+    const etagSwap = openStore();
+    etagSwap.fake.putRaw(key, bytes, metadata, undefined, { reportedGetEtag: `"mutated-etag"` });
+    try {
+      await etagSwap.store.put(bytes);
+      throw new Error("expected etag mismatch");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("put");
+      expect((error as S3EvidenceError).message).toMatch(/object changed/);
+      assertSanitized(error);
+    }
+
+    const mid = openStore();
+    const midYield = { value: 0 };
+    mid.fake.putRaw(key, bytes, metadata, undefined, {
+      chunks: [bytes.slice(0, 8), bytes.slice(8)],
+      failAfterYields: 1,
+      failYieldError: new Error("iterator-failed-mid-body"),
+      yieldCount: midYield,
+    });
+    try {
+      await mid.store.put(bytes);
+      throw new Error("expected mid-iteration failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("put");
+      expect((error as S3EvidenceError).message).toMatch(/unavailable/);
+      assertSanitized(error, ["iterator-failed-mid-body"]);
+    }
+    expect(midYield.value).toBe(1);
+  });
+
+  it("keeps a 200 corrupt copy unknown, retains the journal, and distinguishes operational verify failures", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("corrupt-copy-unknown-verify\n");
+    const stage = await store.stage(bytes);
+    const dest = blobKey(stage.meta.hash);
+    fake.corruptCopy.set(dest, { body: new Uint8Array(bytes.byteLength).fill(0x41) });
+    try {
+      await expect(stage.commit()).rejects.toBeInstanceOf(S3EvidenceError);
+      assertPostCopyProbe(fake, dest);
+      expect(pendingKeys(fake)).toHaveLength(1);
+      expect(await store.verify(stage.meta.hash)).toBe(false);
+      expect(fake.object(dest)).toBeDefined();
+    } finally {
+      stage.release();
+    }
+
+    const operational = openStore();
+    const live = await operational.store.put(new TextEncoder().encode("verify-slowdown\n"));
+    operational.fake.getErrors.set(
+      blobKey(live.hash),
+      new FakeS3Error("SlowDown", 503, `SlowDown at ${SYNTHETIC_ENDPOINT} bucket=${SYNTHETIC_BUCKET}`),
+    );
+    try {
+      await operational.store.verify(live.hash);
+      throw new Error("expected operational verify failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(S3EvidenceError);
+      expect((error as S3EvidenceError).operation).toBe("verify");
+      expect((error as S3EvidenceError).message).toMatch(/unavailable/);
+      assertSanitized(error);
+    }
+
+    const batchCase = openStore();
+    const batch = await batchCase.store.beginWriteBatch();
+    const unpromoted = await batch.put(new TextEncoder().encode("unpromoted-batch-verify\n"));
+    expect(await batch.verify(unpromoted.hash)).toBe(true);
+    const promotedBytes = new TextEncoder().encode("promoted-batch-verify\n");
+    const promoted = await batch.put(promotedBytes);
+    await batch.promote();
+    const yieldCount = { value: 0 };
+    const promotedStored = batchCase.fake.object(blobKey(promoted.hash));
+    if (!promotedStored) throw new Error("missing promoted");
+    promotedStored.chunks = [promotedBytes.slice(0, 6), promotedBytes.slice(6)];
+    promotedStored.yieldCount = yieldCount;
+    batchCase.fake.transformToByteArrayCalls = 0;
+    expect(await batch.verify(promoted.hash)).toBe(true);
+    expect(yieldCount.value).toBe(2);
+    expect(batchCase.fake.transformToByteArrayCalls).toBe(0);
+    await batch.finalize();
+  });
+
+  it("keeps stream scratch under .stream-staging and batch scratch under .staging", async () => {
+    const { fake, store } = openStore();
+    const streamBytes = new TextEncoder().encode("stream-prefix-key\n");
+    const stage = await store.stageStream(asAsyncChunks([streamBytes]), { maxBytes: streamBytes.byteLength });
+    const streamKey = String(assertStreamedScratchPut(fake).Key);
+    expect(streamKey).toMatch(/^\.stream-staging\/[0-9a-f-]+\/[0-9a-f-]+$/i);
+    expect(streamKey.includes(".staging/")).toBe(false);
+    expect(streamStagingKeys(fake)).toEqual([streamKey]);
+    expect(batchStagingKeys(fake)).toEqual([]);
+
+    const batch = await store.beginWriteBatch();
+    await batch.put(new TextEncoder().encode("batch-prefix-key\n"));
+    const batchKey = fake.calls
+      .filter((call) => call.name === "PutObjectCommand")
+      .map((call) => String(call.input.Key))
+      .find((key) => key.startsWith(".staging/"));
+    expect(batchKey).toMatch(/^\.staging\/[0-9a-f-]+\/[0-9a-f-]+$/i);
+    expect(String(batchKey).includes(".stream-staging/")).toBe(false);
+    expect(batchStagingKeys(fake).some((key) => key.startsWith(".staging/"))).toBe(true);
+    await batch.rollback();
+    await stage.rollback();
+  });
+
+  it("single_process recovery and beginWriteBatch delete abandoned stream residue but keep a live same-process key", async () => {
+    const { fake, store } = openStore();
+    expect(store.writeCoordination).toBe("single_process");
+    fake.putRaw(".stream-staging/abandoned/obj", new Uint8Array([1]));
+    const bytes = new TextEncoder().encode("live-stream-same-process\n");
+    const stage = await store.stageStream(asAsyncChunks([bytes]), { maxBytes: bytes.byteLength });
+    const live = streamStagingKeys(fake).filter((key) => key !== ".stream-staging/abandoned/obj");
+    expect(live).toHaveLength(1);
+    const recovered = await store.recoverUnreferencedWrites(new Set());
+    expect(recovered).toEqual({ reclaimed: [], journals: 0 });
+    expect(fake.object(".stream-staging/abandoned/obj")).toBeUndefined();
+    expect(streamStagingKeys(fake)).toEqual(live);
+
+    fake.putRaw(".stream-staging/abandoned-later/obj", new Uint8Array([2]));
+    const batch = await store.beginWriteBatch();
+    expect(fake.object(".stream-staging/abandoned-later/obj")).toBeUndefined();
+    expect(streamStagingKeys(fake)).toEqual(live);
+    await batch.rollback();
+    await stage.rollback();
+    expect(streamStagingKeys(fake)).toEqual([]);
+  });
+
+  it("external coordination leaves foreign and live stream residue untouched and issues no stream list or delete", async () => {
+    const fake = new FakeS3Client(SYNTHETIC_BUCKET);
+    const storeA = new S3EvidenceStore(garageOptions(fake, { acquireWriteLease: exclusiveLease() }));
+    const storeB = new S3EvidenceStore(garageOptions(fake, { acquireWriteLease: exclusiveLease() }));
+    expect(storeA.writeCoordination).toBe("external");
+    expect(storeB.writeCoordination).toBe("external");
+    fake.putRaw(".stream-staging/foreign-live/residue", new Uint8Array([7, 7]));
+
+    let continueSource!: () => void;
+    let sourceWaiting!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      sourceWaiting = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      continueSource = resolve;
+    });
+    async function* liveSource(): AsyncIterable<Uint8Array> {
+      yield new Uint8Array([2]);
+      sourceWaiting();
+      await gate;
+      yield new Uint8Array([3]);
+    }
+    const staging = storeA.stageStream(liveSource(), { maxBytes: 2 });
+    await waiting;
+    await waitForCall(fake, "PutObjectCommand");
+    const inFlightKey = String(
+      fake.calls.find((call) => call.name === "PutObjectCommand")?.input.Key ?? "",
+    );
+    expect(inFlightKey).toMatch(/^\.stream-staging\/[0-9a-f-]+\/[0-9a-f-]+$/i);
+
+    fake.calls.length = 0;
+    const recovered = await storeB.recoverUnreferencedWrites(new Set());
+    expect(recovered).toEqual({ reclaimed: [], journals: 0 });
+    expect(fake.object(".stream-staging/foreign-live/residue")).toBeDefined();
+    expect(streamListOrDelete(fake)).toEqual([]);
+
+    continueSource();
+    const stage = await staging;
+    expect(fake.object(inFlightKey)).toBeDefined();
+    fake.calls.length = 0;
+    const batch = await storeB.beginWriteBatch();
+    expect(fake.object(inFlightKey)).toBeDefined();
+    expect(fake.object(".stream-staging/foreign-live/residue")).toBeDefined();
+    expect(streamListOrDelete(fake)).toEqual([]);
+    expect(streamStagingKeys(fake).sort()).toEqual([inFlightKey, ".stream-staging/foreign-live/residue"].sort());
+    await batch.rollback();
     await stage.rollback();
   });
 });
