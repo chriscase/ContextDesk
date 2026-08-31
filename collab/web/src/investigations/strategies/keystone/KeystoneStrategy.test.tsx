@@ -153,12 +153,20 @@ describe("Keystone engineer strategy", () => {
       investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
       stage: "analyze",
     });
+    const reasoningPanel = screen.getByRole("tabpanel", { name: "Reasoning" });
+    expect(reasoningPanel.getAttribute("tabindex")).toBe("0");
+    act(() => reasoningPanel.focus());
+    expect(document.activeElement).toBe(reasoningPanel);
     expect(screen.getAllByText("Gateway timeout excerpt captured during the affected interval.").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("tab", { name: "Record" }));
     expect(onNavigateInvestigation).toHaveBeenLastCalledWith({
       investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
       stage: "situation",
     });
+    const recordPanel = screen.getByRole("tabpanel", { name: "Record" });
+    expect(recordPanel.getAttribute("tabindex")).toBe("0");
+    act(() => recordPanel.focus());
+    expect(document.activeElement).toBe(recordPanel);
     expect(screen.getByText("Checkout requests exceed the recorded latency objective.")).toBeTruthy();
     expect(screen.getByText("2026.02.03.4")).toBeTruthy();
     expect(document.querySelectorAll("form")).toHaveLength(0);
