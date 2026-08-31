@@ -1548,7 +1548,6 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted);
-  font-size: 0.62rem;
   letter-spacing: 0.03em;
   overflow-wrap: anywhere;
 }
@@ -1559,7 +1558,6 @@
   min-width: 0;
   gap: 0.15rem 0.65rem;
   color: var(--muted);
-  font-size: 0.68rem;
   line-height: 1.3;
 }
 

@@ -552,7 +552,7 @@ export function CaseBoardPanel(props: {
                           scannable without making the inventory needlessly tall. */}
                       <div className="case-memory__item-meta">
                         <span className="case-memory__meta">
-                          <span className="case-memory__item-kind">{artifact.kind}</span>
+                          <span className="case-memory__item-kind">Kind: {artifact.kind}</span>
                           <span>
                             {artifact.verificationStatus ?? "verification unknown"} · uploaded by {participantLabel(artifact.uploaderId, props.participants ?? [])}
                           </span>
