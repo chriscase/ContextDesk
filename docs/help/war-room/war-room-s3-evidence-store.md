@@ -227,6 +227,9 @@ Read the upstream pages before copying anything:
 - [Garage Quick Start](https://garagehq.deuxfleurs.fr/documentation/quick-start/)
 - [Garage real-world cookbook](https://garagehq.deuxfleurs.fr/documentation/cookbook/real-world/)
 
+The worked commands require macOS or Linux, OpenSSL, AWS CLI v2, and Docker
+Compose v2 with `docker compose up --wait` support.
+
 > Caution:
 > Single-node Garage is for qualification on one machine. It has no
 > redundancy. Do not reuse this Compose file as a shared War Room store.
@@ -274,13 +277,22 @@ services:
       - ./garage.toml:/etc/garage.toml:ro
       - ./garage-meta:/var/lib/garage/meta
       - ./garage-data:/var/lib/garage/data
+    healthcheck:
+      # Process/layout health only. The live suite's HeadBucket assertion is
+      # the authoritative S3 readiness proof.
+      test: ["CMD", "/garage", "status"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
 ```
 
-Create the directories, then generate the RPC secret:
+Create the directories, then generate the RPC secret. `chmod 700` / `chmod 600` even when you reuse an existing evaluation directory:
 
 ```sh
 umask 077
 mkdir -p garage-meta garage-data
+chmod 700 garage-meta garage-data
 chmod 600 garage.toml
 openssl rand -hex 32
 ```
@@ -291,16 +303,30 @@ until it is gone. Then write evaluation-only bootstrap keys (Garage
 access-key ids must start with `GK`) and start:
 
 ```sh
-umask 077
-if grep -q 'replace-with-64-hex-characters' garage.toml; then
-  printf 'replace rpc_secret before starting\n' >&2
-  exit 1
-fi
-printf 'GARAGE_DEFAULT_ACCESS_KEY=GK%s\n' "$(openssl rand -hex 16)" > .garage-eval.env
-printf 'GARAGE_DEFAULT_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" >> .garage-eval.env
-printf 'GARAGE_DEFAULT_BUCKET=war-room-evidence\n' >> .garage-eval.env
-docker compose up -d
-docker compose exec garage /garage status
+(
+  umask 077
+  set -eu
+  if grep -q 'replace-with-64-hex-characters' garage.toml; then
+    printf 'replace rpc_secret before starting\n' >&2
+    exit 1
+  fi
+  printf 'GARAGE_DEFAULT_ACCESS_KEY=GK%s\n' "$(openssl rand -hex 16)" > .garage-eval.env
+  printf 'GARAGE_DEFAULT_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" >> .garage-eval.env
+  printf 'GARAGE_DEFAULT_BUCKET=war-room-evidence\n' >> .garage-eval.env
+  chmod 700 garage-meta garage-data
+  chmod 600 garage.toml .garage-eval.env
+  case "$(uname -s)" in
+    Darwin) _mode() { stat -f '%Lp' "$1"; } ;;
+    Linux) _mode() { stat -c '%a' "$1"; } ;;
+    *) printf 'this evaluation documents macOS/Linux only\n' >&2; exit 1 ;;
+  esac
+  test "$(_mode garage-meta)" = 700
+  test "$(_mode garage-data)" = 700
+  test "$(_mode garage.toml)" = 600
+  test "$(_mode .garage-eval.env)" = 600
+  docker compose up -d --wait --wait-timeout 90
+  docker compose exec -T garage /garage status
+)
 ```
 
 The env file is acceptable only for this owner-operated evaluation; Docker can
@@ -346,59 +372,158 @@ bucket-administration access.
 2. Put a small unique object under `operator-smoke/`.
 3. Head the object and confirm size.
 4. Get the full object and a range of the same object.
-5. List the prefix and confirm the key is present.
+5. List the prefix and confirm the returned object key equals the
+   generated key.
 6. Hash the downloaded bytes and compare them with the original.
-7. Restart the Garage container, then get the same object again.
+7. Restart the Garage container, wait until `/garage status` succeeds
+   within a bounded loop, then get the same object again.
 8. Delete the smoke object and confirm a later head fails.
 9. Confirm the data landed on the mounted data directory.
 
 A typical AWS CLI shape for this evaluation (any SigV4 S3 client is
-acceptable). Load the keys generated above; do not print them. The scoped
-config file forces path-style addressing so the client does not call
-`bucket.127.0.0.1`.
+acceptable). Run it as a fail-closed subshell. Load the keys generated above
+into the environment only; do not print them, do not pass them on argv, and
+do not enable `set -x` or `aws --debug`. The scoped config file forces
+path-style addressing so the client does not call `bucket.127.0.0.1`. This
+HTTP loopback check does not exercise TLS or `COLLAB_EVIDENCE_S3_CA_FILE`.
+
+The `mktemp -d` template with `XXXXXX` is the portable macOS/Linux form.
+`sleep` in the restart loop is only a poll interval; the proof is the bounded
+`/garage status` success plus the later get/hash assertions.
 
 ```sh
-umask 077
-AWS_ACCESS_KEY_ID="$(sed -n 's/^GARAGE_DEFAULT_ACCESS_KEY=//p' .garage-eval.env)"
-AWS_SECRET_ACCESS_KEY="$(sed -n 's/^GARAGE_DEFAULT_SECRET_KEY=//p' .garage-eval.env)"
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-unset AWS_SESSION_TOKEN
-export AWS_DEFAULT_REGION=garage
-export AWS_EC2_METADATA_DISABLED=true
-export AWS_CONFIG_FILE="$PWD/.garage-eval-aws.config"
-cat > "$AWS_CONFIG_FILE" <<'EOF'
+(
+  set -eu
+  TASK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/war-room-s3-eval.XXXXXX")"
+  KEY=""
+  cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    set +e
+    case "${KEY:-}" in
+      operator-smoke/*)
+        aws --endpoint-url "${ENDPOINT:-}" --region garage s3api delete-object \
+          --bucket "${BUCKET:-}" --key "$KEY" >/dev/null 2>&1
+        ;;
+    esac
+    if [ -n "${TASK_DIR:-}" ] && [ -d "$TASK_DIR" ]; then
+      case "$TASK_DIR" in
+        *war-room-s3-eval.*) rm -rf -- "$TASK_DIR" ;;
+      esac
+    fi
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION \
+      AWS_EC2_METADATA_DISABLED AWS_CONFIG_FILE AWS_PROFILE AWS_DEFAULT_PROFILE \
+      AWS_SESSION_TOKEN
+    exit "$status"
+  }
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  umask 077
+  AWS_ACCESS_KEY_ID="$(sed -n 's/^GARAGE_DEFAULT_ACCESS_KEY=//p' .garage-eval.env)"
+  AWS_SECRET_ACCESS_KEY="$(sed -n 's/^GARAGE_DEFAULT_SECRET_KEY=//p' .garage-eval.env)"
+  test -n "$AWS_ACCESS_KEY_ID"
+  test -n "$AWS_SECRET_ACCESS_KEY"
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  unset AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE
+  export AWS_DEFAULT_REGION=garage
+  export AWS_EC2_METADATA_DISABLED=true
+  export AWS_CONFIG_FILE="$TASK_DIR/aws.config"
+  cat > "$AWS_CONFIG_FILE" <<'EOF'
 [default]
 region = garage
 s3 =
     addressing_style = path
 EOF
-ENDPOINT=http://127.0.0.1:3900
-BUCKET=war-room-evidence
-KEY="operator-smoke/eval-$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 4).txt"
-printf 'war-room-s3-eval\n' > /tmp/war-room-s3-eval.txt
+  chmod 600 "$AWS_CONFIG_FILE"
 
-aws --endpoint-url "$ENDPOINT" --region garage s3api put-object --bucket "$BUCKET" --key "$KEY" --body /tmp/war-room-s3-eval.txt
-aws --endpoint-url "$ENDPOINT" --region garage s3api head-object --bucket "$BUCKET" --key "$KEY"
-aws --endpoint-url "$ENDPOINT" --region garage s3api get-object --bucket "$BUCKET" --key "$KEY" /tmp/war-room-s3-eval-out.txt
-aws --endpoint-url "$ENDPOINT" --region garage s3api get-object --bucket "$BUCKET" --key "$KEY" --range bytes=0-6 /tmp/war-room-s3-eval-range.txt
-aws --endpoint-url "$ENDPOINT" --region garage s3api list-objects-v2 --bucket "$BUCKET" --prefix operator-smoke/
-SOURCE_SHA256="$(openssl dgst -sha256 -r /tmp/war-room-s3-eval.txt | awk '{print $1}')"
-DOWNLOADED_SHA256="$(openssl dgst -sha256 -r /tmp/war-room-s3-eval-out.txt | awk '{print $1}')"
-test "$SOURCE_SHA256" = "$DOWNLOADED_SHA256"
-docker compose restart garage
-docker compose exec garage /garage status
-aws --endpoint-url "$ENDPOINT" --region garage s3api get-object --bucket "$BUCKET" --key "$KEY" /tmp/war-room-s3-eval-restart.txt
-RESTART_SHA256="$(openssl dgst -sha256 -r /tmp/war-room-s3-eval-restart.txt | awk '{print $1}')"
-test "$SOURCE_SHA256" = "$RESTART_SHA256"
-aws --endpoint-url "$ENDPOINT" --region garage s3api delete-object --bucket "$BUCKET" --key "$KEY"
-if aws --endpoint-url "$ENDPOINT" --region garage s3api head-object --bucket "$BUCKET" --key "$KEY"; then exit 1; fi
-unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_EC2_METADATA_DISABLED AWS_CONFIG_FILE
-rm -f .garage-eval-aws.config /tmp/war-room-s3-eval.txt /tmp/war-room-s3-eval-out.txt /tmp/war-room-s3-eval-range.txt /tmp/war-room-s3-eval-restart.txt
+  ENDPOINT=http://127.0.0.1:3900
+  BUCKET=war-room-evidence
+  KEY="operator-smoke/eval-$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 4).txt"
+  SOURCE="$TASK_DIR/source.txt"
+  DOWNLOADED="$TASK_DIR/downloaded.txt"
+  RANGE_FILE="$TASK_DIR/range.txt"
+  RESTART_FILE="$TASK_DIR/restart.txt"
+  printf 'war-room-s3-eval\n' > "$SOURCE"
+  SOURCE_BYTES="$(wc -c < "$SOURCE" | tr -d ' ')"
+  test "$SOURCE_BYTES" = "17"
+
+  aws --endpoint-url "$ENDPOINT" --region garage s3api put-object \
+    --bucket "$BUCKET" --key "$KEY" --body "$SOURCE"
+  HEAD_LEN="$(aws --endpoint-url "$ENDPOINT" --region garage s3api head-object \
+    --bucket "$BUCKET" --key "$KEY" --query ContentLength --output text)"
+  test "$HEAD_LEN" = "$SOURCE_BYTES"
+  aws --endpoint-url "$ENDPOINT" --region garage s3api get-object \
+    --bucket "$BUCKET" --key "$KEY" "$DOWNLOADED"
+  aws --endpoint-url "$ENDPOINT" --region garage s3api get-object \
+    --bucket "$BUCKET" --key "$KEY" --range bytes=0-6 "$RANGE_FILE"
+  test "$(wc -c < "$RANGE_FILE" | tr -d ' ')" = "7"
+  test "$(cat "$RANGE_FILE")" = "war-roo"
+  LISTED_KEY="$(aws --endpoint-url "$ENDPOINT" --region garage s3api list-objects-v2 \
+    --bucket "$BUCKET" --prefix operator-smoke/ \
+    --query "Contents[?Key=='${KEY}'].Key" --output text)"
+  test "$LISTED_KEY" = "$KEY"
+  SOURCE_DGST="$(openssl dgst -sha256 -r "$SOURCE")"
+  DOWNLOADED_DGST="$(openssl dgst -sha256 -r "$DOWNLOADED")"
+  SOURCE_SHA256="${SOURCE_DGST%% *}"
+  DOWNLOADED_SHA256="${DOWNLOADED_DGST%% *}"
+  test "${#SOURCE_SHA256}" -eq 64
+  test "${#DOWNLOADED_SHA256}" -eq 64
+  test "$SOURCE_SHA256" = "$DOWNLOADED_SHA256"
+
+  docker compose restart garage
+  n=0
+  while ! docker compose exec -T garage /garage status >/dev/null 2>&1; do
+    n=$((n + 1))
+    test "$n" -lt 30
+    sleep 3
+  done
+  docker compose exec -T garage /garage status
+  aws --endpoint-url "$ENDPOINT" --region garage s3api get-object \
+    --bucket "$BUCKET" --key "$KEY" "$RESTART_FILE"
+  RESTART_DGST="$(openssl dgst -sha256 -r "$RESTART_FILE")"
+  RESTART_SHA256="${RESTART_DGST%% *}"
+  test "${#RESTART_SHA256}" -eq 64
+  test "$SOURCE_SHA256" = "$RESTART_SHA256"
+
+  aws --endpoint-url "$ENDPOINT" --region garage s3api delete-object \
+    --bucket "$BUCKET" --key "$KEY"
+  if aws --endpoint-url "$ENDPOINT" --region garage s3api head-object \
+    --bucket "$BUCKET" --key "$KEY"; then
+    printf 'expected head-object to fail after delete\n' >&2
+    exit 1
+  fi
+)
 ```
 
 Do not print secret values, and do not capture CLI debug logs that replay
 authorization headers. A later production-shaped check should read keys from
 the platform secret manager or owner-only files, not from `.garage-eval.env`.
+Cleanup is scoped to this `mktemp` directory and the `operator-smoke/`
+object. `HUP`/`INT`/`TERM` traps exit 129/130/143 so an interrupt is not
+converted into success. The `EXIT` handler then disables those traps
+before cleanup (reentrancy-safe), uses `set +e`, and `exit "$status"` so
+a failed assertion or interrupt is not replaced by a later successful
+`rm`. The list step compares the JMESPath-selected key to `$KEY` exactly;
+it is not a substring match.
+
+### Disposable evaluation teardown
+
+> Warning:
+> Destructive teardown for this disposable evaluation directory only. Confirm
+> you are in that working directory before continuing. Exact local paths this
+> evaluation writes: `garage.toml`, `.garage-eval.env`, `garage-meta/`,
+> `garage-data/`, and `compose.yaml`. The next command stops this Compose
+> project. It does **not** delete those files, the Garage image, repository
+> sources, or War Room evidence. Do not run it against a shared or production
+> store. Remove the evaluation files only by an explicit operator decision
+> after you have confirmed the paths.
+
+```sh
+docker compose down
+```
 
 ## Production planning
 
@@ -468,27 +593,100 @@ Keep these two proofs separate.
 | Bucket and prefix permissions | Positive and negative tests show the dedicated identity reaches only the intended object location to the extent the provider can enforce it | A hard listing boundary when the required bucket-level readiness grant is broader |
 | Application upload/download | An authorized War Room action stored bytes, returned metadata, and read them back with a matching hash | Retention, lifecycle, legal hold, or multi-provider failover |
 
-After the CLI proof plus persistence across restart, add:
+After the CLI proof plus persistence across restart, run the application-level
+proof from the **repository root**. `npm --prefix collab` executes the
+`collab/package.json` scripts with cwd `collab/`.
 
-1. Run `npm run doctor` with the intended server environment. Require an
-   accepted S3 configuration, and remember that this step does not contact the
-   bucket.
-2. Start War Room. In S3 mode it must complete `HeadBucket` and pending-write
-   recovery before it listens. Check `/health` for process liveness and
-   `/ready` for the database plus the currently selected evidence backend; do
-   not treat `/health` as evidence readiness.
-3. Run positive and negative permission checks for the dedicated bucket or
+1. Preflight the intended server environment. The `doctor` script is
+   `npm run build && node server/dist/doctor-cli.js`. Require an accepted S3
+   configuration. Doctor does not contact the bucket.
+
+   ```sh
+   npm --prefix collab run doctor -- --env-file deploy/.env
+   ```
+
+   `--env-file deploy/.env` is `collab/deploy/.env` relative to that cwd.
+
+2. Start War Room with the same intended `COLLAB_*` names already exported in
+   the process environment. The `start` script is
+   `npm run start -w @cd-collab/server`, which runs `node dist/index.js` in
+   `@cd-collab/server`. It does not accept `--env-file` and does not rebuild;
+   doctor already built. In S3 mode the process must complete `HeadBucket` and
+   pending-write recovery before it listens. Default bind is `127.0.0.1:8787`
+   (`COLLAB_HOST` default `127.0.0.1`, `COLLAB_PORT` default `8787`).
+
+   ```sh
+   npm --prefix collab start
+   ```
+
+3. Check process liveness, then database plus the selected evidence backend.
+   Do not treat `/health` as evidence readiness. `/ready` is HTTP 200 when
+   both are up and HTTP 503 `not_ready` otherwise. If `COLLAB_PORT` is not
+   `8787`, substitute that port. `curl -f` fails closed on HTTP errors.
+
+   ```sh
+   curl -sS -f --max-time 5 http://127.0.0.1:8787/health
+   curl -sS -f --max-time 5 http://127.0.0.1:8787/ready
+   ```
+
+4. Run positive and negative permission checks for the dedicated bucket or
    prefix. For AWS-style permissions, account for the bucket-level
    `s3:ListBucket` required by `HeadBucket`.
-4. Through the normal authenticated War Room evidence flow, upload a small
-   unique file, read the returned artifact metadata, download its bytes, and
-   compare the returned content hash plus a locally computed SHA-256 with the
-   original. This is the application smoke test; an object-store CLI put is not
-   a substitute.
-5. Restart War Room and the object store, require `/ready` again, then download
-   the same artifact and repeat the hash comparison.
-6. Cleanup only disposable operator-smoke objects. The current evidence interface
-   does not offer general deletion; do not invent a production delete path.
+5. Through the normal authenticated War Room UI, not an unauthenticated
+   API or cookie shortcut:
+
+   - Open `http://127.0.0.1:8787` (or the configured bind) and sign in with
+     an identity that may write evidence on the investigation.
+   - Open that case's evidence board. Under **Upload evidence**, choose a
+     small unique **File**, fill **Summary**, set **Artifact kind** and
+     **Privacy class**, and submit.
+   - Confirm the artifact appears with a **Content hash** (64 lowercase hex
+     digits; War Room evidence hashes are not `sha256:`-prefixed).
+   - Use **Preview** / **Inspect log** only as a bounded text inspect (first
+     64 KiB). It is not a full-object hash proof.
+   - Use **Download** and the artifact filename to retrieve the stored
+     bytes. Compute SHA-256 of the original file and of the download
+     (`openssl dgst -sha256 -r`) and compare both with the displayed
+     Content hash.
+6. In the Garage evaluation directory, restart Garage
+   (`docker compose restart garage`). Wait with a bounded `/garage status`
+   loop (same 30×3s bound as the CLI proof; `sleep` is only the poll
+   interval). Then, from any host that can reach the War Room bind, wait
+   until application `/ready` succeeds. If you also restart War Room, start
+   it again with `npm --prefix collab start` from the repository root and
+   wait for `/health` and `/ready` before downloading.
+
+   ```sh
+   # Run from the Garage evaluation directory (compose.yaml).
+   (
+     set -eu
+     n=0
+     while ! docker compose exec -T garage /garage status >/dev/null 2>&1; do
+       n=$((n + 1))
+       test "$n" -lt 30
+       sleep 3
+     done
+     n=0
+     while ! curl -sS -f --max-time 5 http://127.0.0.1:8787/ready >/dev/null; do
+       n=$((n + 1))
+       test "$n" -lt 30
+       sleep 3
+     done
+   )
+   ```
+
+   Download the same artifact again and repeat the SHA-256 comparison.
+7. Cleanup only disposable operator-smoke objects. The current evidence
+   interface does not offer general deletion; do not invent a production
+   delete path.
+
+This authenticated workflow proves an authorized War Room upload stored
+bytes, returned metadata including Content hash, and that Download bytes
+matched that hash before and after a Garage restart with Garage process
+health plus application `/ready`. It does not prove retention, lifecycle,
+legal hold, backup restore, migration, multi-provider failover,
+multi-replica locking, source deletion, or presigned browser access. An
+object-store CLI put is not a substitute.
 
 ## Troubleshooting
 
