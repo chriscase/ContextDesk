@@ -19,10 +19,11 @@ import { AdminPeoplePanel } from "./AdminPeoplePanel.js";
 import { AdminLdapPanel } from "./AdminLdapPanel.js";
 import { AdminModelPolicyPanel } from "./AdminModelPolicyPanel.js";
 import { AdminUiStrategyPanel } from "./AdminUiStrategyPanel.js";
+import { AdminEvidenceStoragePanel } from "./AdminEvidenceStoragePanel.js";
 import { ComponentHealthPanel } from "./ComponentHealthPanel.js";
 import { protectedApiFetch } from "./protected-api.js";
 
-export type AdminTab = "roles" | "people" | "ldap" | "model-policy" | "ui-strategies";
+export type AdminTab = "roles" | "people" | "ldap" | "model-policy" | "ui-strategies" | "storage";
 
 const ADMIN_TAB_PATHS: Record<AdminTab, string> = {
   roles: "/administration",
@@ -30,6 +31,7 @@ const ADMIN_TAB_PATHS: Record<AdminTab, string> = {
   ldap: "/admin/ldap",
   "model-policy": "/admin/model-policy",
   "ui-strategies": "/admin/ui-strategies",
+  storage: "/admin/storage",
 };
 
 function adminTabFromPathname(pathname: string): AdminTab {
@@ -37,6 +39,7 @@ function adminTabFromPathname(pathname: string): AdminTab {
   if (pathname === "/admin/ldap") return "ldap";
   if (pathname === "/admin/model-policy") return "model-policy";
   if (pathname === "/admin/ui-strategies") return "ui-strategies";
+  if (pathname === "/admin/storage") return "storage";
   return "roles";
 }
 
@@ -177,6 +180,8 @@ export function Administration(props: {
             ? "Model use · Administration · ContextDesk War Room"
             : activeTab === "ui-strategies"
               ? "Investigation experiences · Administration · ContextDesk War Room"
+              : activeTab === "storage"
+                ? "Evidence storage · Administration · ContextDesk War Room"
           : "Administration · ContextDesk War Room";
   }, [activeTab]);
 
@@ -426,6 +431,16 @@ export function Administration(props: {
         >
           Investigation experiences
         </button> : null}
+        {canManageSystem ? <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "storage"}
+          aria-controls="administration-storage-panel"
+          id="administration-tab-storage"
+          onClick={() => selectTab("storage")}
+        >
+          Evidence storage
+        </button> : null}
       </div>
 
       {canManageUsers ? <div
@@ -613,6 +628,15 @@ export function Administration(props: {
         hidden={activeTab !== "model-policy"}
       >
         {activeTab === "model-policy" ? <AdminModelPolicyPanel /> : null}
+      </div> : null}
+
+      {canManageSystem ? <div
+        id="administration-storage-panel"
+        role="tabpanel"
+        aria-labelledby="administration-tab-storage"
+        hidden={activeTab !== "storage"}
+      >
+        {activeTab === "storage" ? <AdminEvidenceStoragePanel /> : null}
       </div> : null}
 
       {canManageSystem ? <div

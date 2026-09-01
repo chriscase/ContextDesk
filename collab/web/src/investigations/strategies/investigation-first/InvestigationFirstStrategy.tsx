@@ -91,7 +91,7 @@ function failureCopy(error: RuntimeFailure, subject: "list" | "detail" | "eviden
   if (subject === "create") return createFailureCopy(error);
   if (error.kind === "input") {
     if (error.field === "title") return "Add a title before creating the investigation.";
-    if (error.field === "file" && error.reason === "too_large") return "Files must be 1 MB or smaller.";
+    if (error.field === "file" && error.reason === "too_large") return "The selected file exceeds the server-configured evidence limit.";
     if (error.field === "file" && error.reason === "unreadable") return "The selected file could not be read.";
     if (error.field === "file") return "Choose a file to add to the evidence inventory.";
     return "Add a short annotation so the evidence can be understood later.";

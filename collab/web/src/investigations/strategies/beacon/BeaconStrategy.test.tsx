@@ -157,7 +157,7 @@ describe("Beacon rapid-intake strategy", () => {
     mount({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     await screen.findByRole("heading", { name: "Supporting material" });
     const file = new File(["gateway timeout"], "gateway.log", { type: "text/plain" });
-    const fileInput = screen.getByLabelText(/File \(up to/u) as HTMLInputElement;
+    const fileInput = screen.getByLabelText(/File \(server-configured limit\)/u) as HTMLInputElement;
     Object.defineProperty(fileInput, "files", { configurable: true, value: [file] });
     fireEvent.change(fileInput);
     fireEvent.change(screen.getByRole("textbox", { name: "Why does this matter?" }), { target: { value: "Captured during the affected interval." } });
@@ -180,7 +180,7 @@ describe("Beacon rapid-intake strategy", () => {
     });
     const privacy = await screen.findByRole("combobox", { name: "Privacy" }) as HTMLSelectElement;
     expect(privacy.value).toBe("owner_only");
-    const fileInput = screen.getByLabelText(/File \(up to/u) as HTMLInputElement;
+    const fileInput = screen.getByLabelText(/File \(server-configured limit\)/u) as HTMLInputElement;
     const privateFile = new File(["private draft"], "authority-change.log", { type: "text/plain" });
     Object.defineProperty(fileInput, "files", { configurable: true, value: [privateFile] });
     Object.defineProperty(fileInput, "value", { configurable: true, writable: true, value: "C:\\fakepath\\authority-change.log" });

@@ -112,6 +112,32 @@ function lifecycleRefused() {
 }
 
 describe("the complete Runtime V1 transport surface", () => {
+  it("uses the protected streaming multipart endpoint without base64 buffering", async () => {
+    const success = makeEvidenceUploadSuccess();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      expect(String(input)).toBe(`/api/cases/${encodeURIComponent(RUNTIME_FIXTURE_IDS.populatedCase)}/evidence/stream`);
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBeInstanceOf(FormData);
+      const form = init?.body as FormData;
+      expect(form.get("kind")).toBe("log");
+      expect(form.get("summary")).toBe("A streamed log");
+      const file = form.get("file");
+      expect(file).toBeInstanceOf(Blob);
+      expect((file as Blob).size).toBeGreaterThan(1_000_000);
+      return jsonResponse(success);
+    });
+
+    const file = new File([new Uint8Array(1_000_001)], "large.log", { type: "text/plain" });
+    const result = await investigationGateway.uploadEvidenceStream!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "log", summary: "A streamed log", file },
+      options(),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("uses the ten protected routes and publishes only parsed values", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input, init) => {

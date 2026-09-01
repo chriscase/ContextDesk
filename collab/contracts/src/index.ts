@@ -67,6 +67,18 @@ export type {
 } from "./model-purpose-policy.js";
 
 export {
+  EVIDENCE_STORAGE_PROVIDERS,
+  EVIDENCE_STORAGE_STATES,
+  EVIDENCE_STORAGE_STATUS_SCHEMA_ID,
+  parseEvidenceStorageStatus,
+} from "./evidence-storage-status.js";
+export type {
+  EvidenceStorageProvider,
+  EvidenceStorageState,
+  EvidenceStorageStatusV1,
+} from "./evidence-storage-status.js";
+
+export {
   HEALTH_SCHEMA_ID,
   READY_SCHEMA_ID,
   parseHealthResponse,

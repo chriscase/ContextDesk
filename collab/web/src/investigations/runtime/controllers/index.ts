@@ -1,6 +1,8 @@
 export {
   prepareEvidenceUpload,
+  prepareEvidenceStreamUpload,
   type PrepareEvidenceUploadOptions,
+  type PrepareEvidenceStreamUploadOptions,
 } from "./file-base64.js";
 export {
   RequestSlot,

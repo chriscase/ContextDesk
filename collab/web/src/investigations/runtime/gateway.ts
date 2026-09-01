@@ -72,6 +72,24 @@ export interface UploadEvidenceInput {
   readonly sourceId?: string;
 }
 
+/**
+ * Browser file upload input for the server's streaming multipart endpoint.
+ * The Blob is passed to FormData unchanged; this seam intentionally has no
+ * base64 or byte-array member, so large evidence never needs to be buffered
+ * into a second in-memory representation.
+ */
+export interface UploadEvidenceStreamInput {
+  readonly kind: ArtifactKind;
+  readonly summary: string;
+  readonly file: Blob;
+  readonly filename?: string;
+  readonly mediaType?: string;
+  readonly expectedHash?: string | null;
+  readonly privacyClass?: PrivacyClass;
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+}
+
 /** Transport-ready contribution create input. Body composition is a controller concern. */
 export interface CreateContributionInput {
   readonly kind: ContributionKind;
@@ -160,6 +178,12 @@ export interface InvestigationGateway extends Partial<InvestigationWriteGateway>
   uploadEvidence(
     investigationId: string,
     input: UploadEvidenceInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<EvidenceUploadSuccessV1>>;
+  /** Optional streaming transport; legacy JSON gateways remain valid. */
+  uploadEvidenceStream?(
+    investigationId: string,
+    input: UploadEvidenceStreamInput,
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<EvidenceUploadSuccessV1>>;
   getLifecycle(
@@ -251,6 +275,23 @@ function uploadEvidenceBody(input: UploadEvidenceInput): Record<string, unknown>
   if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
   if (input.clientTime !== undefined) body.clientTime = input.clientTime;
   if (input.sourceId !== undefined) body.sourceId = input.sourceId;
+  return body;
+}
+
+function uploadEvidenceStreamBody(input: UploadEvidenceStreamInput): FormData {
+  const body = new FormData();
+  body.append("kind", input.kind);
+  body.append("summary", input.summary);
+  if (input.filename !== undefined) body.append("filename", input.filename);
+  if (input.mediaType !== undefined) body.append("mediaType", input.mediaType);
+  if (input.expectedHash !== undefined && input.expectedHash !== null) {
+    body.append("expectedHash", input.expectedHash);
+  }
+  if (input.privacyClass !== undefined) body.append("privacyClass", input.privacyClass);
+  if (input.clientTime !== undefined) body.append("clientTime", input.clientTime);
+  if (input.sourceId !== undefined) body.append("sourceId", input.sourceId);
+  if (input.filename === undefined) body.append("file", input.file);
+  else body.append("file", input.file, input.filename);
   return body;
 }
 
@@ -781,6 +822,33 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
     if (!fetched.response.ok) {
       return parseUploadFailure(fetched.response, signal);
     }
+    return parseSuccessfulResponse(
+      fetched.response,
+      signal,
+      parseEvidenceUploadSuccess,
+      (value) => value.caseId === investigationId
+        && value.artifact.caseId === investigationId
+        && value.summary.caseId === investigationId
+        && value.artifact.id.length > 0
+        && value.summary.id.length > 0,
+    );
+  },
+
+  async uploadEvidenceStream(investigationId, input, { signal }) {
+    let body: FormData;
+    try {
+      if (signal.aborted) return aborted();
+      body = uploadEvidenceStreamBody(input);
+    } catch {
+      return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+    }
+    const fetched = await fetchProtected(
+      caseRoute(investigationId, "/evidence/stream"),
+      { method: "POST", body },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    if (!fetched.response.ok) return parseUploadFailure(fetched.response, signal);
     return parseSuccessfulResponse(
       fetched.response,
       signal,

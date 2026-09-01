@@ -1,11 +1,18 @@
 import type { ArtifactKind, PrivacyClass } from "@cd-collab/contracts/investigation-runtime";
-import type { UploadEvidenceInput } from "../gateway.js";
+import type { UploadEvidenceInput, UploadEvidenceStreamInput } from "../gateway.js";
 import {
   MAX_EVIDENCE_UPLOAD_BYTES,
   type CommandOutcome,
 } from "../types.js";
 
 export interface PrepareEvidenceUploadOptions {
+  readonly kind?: ArtifactKind;
+  readonly privacyClass?: PrivacyClass;
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+}
+
+export interface PrepareEvidenceStreamUploadOptions {
   readonly kind?: ArtifactKind;
   readonly privacyClass?: PrivacyClass;
   readonly clientTime?: string;
@@ -24,6 +31,37 @@ function filenameOf(blob: Blob): string | undefined {
   if (typeof candidate !== "string") return undefined;
   const filename = candidate.trim();
   return filename.length > 0 ? filename : undefined;
+}
+
+function streamFailed(
+  field: "file" | "summary",
+): CommandOutcome<UploadEvidenceStreamInput> {
+  return { status: "failed", error: { kind: "input", field, reason: "required" } };
+}
+
+/** Validate stream metadata without reading or copying the selected Blob. */
+export function prepareEvidenceStreamUpload(
+  file: Blob | null | undefined,
+  summary: string,
+  options: PrepareEvidenceStreamUploadOptions = {},
+): CommandOutcome<UploadEvidenceStreamInput> {
+  if (file === null || file === undefined) return streamFailed("file");
+  const trimmedSummary = summary.trim();
+  if (trimmedSummary.length === 0) return streamFailed("summary");
+  const filename = filenameOf(file);
+  return {
+    status: "succeeded",
+    value: {
+      kind: options.kind ?? "attachment",
+      summary: trimmedSummary,
+      file,
+      mediaType: file.type.trim() || "application/octet-stream",
+      ...(filename === undefined ? {} : { filename }),
+      ...(options.privacyClass === undefined ? {} : { privacyClass: options.privacyClass }),
+      ...(options.clientTime === undefined ? {} : { clientTime: options.clientTime }),
+      ...(options.sourceId === undefined ? {} : { sourceId: options.sourceId }),
+    },
+  };
 }
 
 function encodeBase64(buffer: ArrayBuffer): string {

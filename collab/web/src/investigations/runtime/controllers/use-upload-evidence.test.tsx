@@ -19,6 +19,12 @@ function gatewayWithUpload(
   return { uploadEvidence } as InvestigationGateway;
 }
 
+function gatewayWithStream(
+  uploadEvidenceStream: NonNullable<InvestigationGateway["uploadEvidenceStream"]>,
+): InvestigationGateway {
+  return { uploadEvidenceStream } as InvestigationGateway;
+}
+
 function options(
   overrides: Partial<UseUploadEvidenceOptions> = {},
 ): UseUploadEvidenceOptions {
@@ -38,6 +44,27 @@ function options(
 }
 
 describe("useUploadEvidence", () => {
+  it("prefers the streaming seam and never reads a large Blob into memory", async () => {
+    const success = makeEvidenceUploadSuccess();
+    const file = new Blob([new Uint8Array(1_000_001)], { type: "text/plain" });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: () => { throw new Error("streaming upload must not call arrayBuffer"); },
+    });
+    const uploadEvidenceStream = vi.fn(async (_id, input) => {
+      expect(input.file).toBe(file);
+      expect(input.summary).toBe("Large log");
+      return { ok: true as const, value: success };
+    });
+    const opts = options({ gateway: gatewayWithStream(uploadEvidenceStream) });
+    const { result } = renderHook(() => useUploadEvidence(opts));
+
+    await act(async () => {
+      await expect(result.current.upload({ file, summary: "  Large log  ", kind: "log" }))
+        .resolves.toEqual({ status: "succeeded", value: success });
+    });
+    expect(uploadEvidenceStream).toHaveBeenCalledOnce();
+  });
+
   it("prepares a browser file and publishes authoritative artifact and summary", async () => {
     const success = makeEvidenceUploadSuccess();
     const uploadEvidence = vi.fn(async () => ({ ok: true as const, value: success }));
