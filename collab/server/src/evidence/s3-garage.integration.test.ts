@@ -749,6 +749,39 @@ describe.skipIf(!live)("S3EvidenceStore live Garage qualification", () => {
     },
   );
 
+  it.skipIf(!streamingProviderAvailable)(
+    "opens full and ranged promoted streams when logical contentType is null",
+    async () => {
+      const streaming = streamingLiveStore();
+      const chunks = [
+        new TextEncoder().encode("garage-null-media-type|"),
+        new TextEncoder().encode(`${randomUUID()}\n`),
+      ];
+      const bytes = concatBytes(chunks);
+      const stage = await streaming.stageStream(asAsyncChunks(chunks), {
+        maxBytes: bytes.byteLength,
+        expectedLength: bytes.byteLength,
+      });
+      expect(stage.meta.contentType).toBeNull();
+      await stage.promote();
+
+      const full = await streaming.openRead(stage.meta.hash);
+      expect(full.meta.contentType).toBeNull();
+      expect(Buffer.from(await collectChunks(full.bytes())).equals(Buffer.from(bytes))).toBe(true);
+
+      const start = 1;
+      const end = bytes.byteLength - 2;
+      const ranged = await streaming.openRead(stage.meta.hash, { start, end });
+      expect(ranged.meta.contentType).toBeNull();
+      expect(
+        Buffer.from(await collectChunks(ranged.bytes())).equals(
+          Buffer.from(bytes.slice(start, end + 1)),
+        ),
+      ).toBe(true);
+      await stage.finalize();
+    },
+  );
+
   it.skipIf(!present(process.env, "CONTEXTDESK_S3_LIVE_COMPOSE_FILE"))(
     "persists canonical bytes across a compose restart",
     async () => {

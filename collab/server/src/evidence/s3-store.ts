@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { channel } from "node:diagnostics_channel";
 import { Readable } from "node:stream";
 import {
   CopyObjectCommand,
@@ -83,6 +84,81 @@ const MAX_JOURNAL_BYTES = 256 * 1024;
 const MAX_LIST_PAGE_SIZE = 1000;
 const MAX_LIST_PAGES = 256;
 const MAX_LIST_KEYS = 8192;
+const VERIFIED_GENERATION_CACHE_MAX_ENTRIES = 256;
+const VERIFIED_GENERATION_CACHE_TTL_MS = 300000;
+const VERIFIED_GENERATION_MAX_FLIGHTS = 16;
+const VERIFIED_GENERATION_MAX_WAITERS = 64;
+const S3_GENERATION_TOKEN_MAX_BYTES = 1024;
+const VERIFIED_GENERATION_DIAGNOSTICS = channel("cd.s3.verified_generation");
+
+interface S3ObjectGeneration {
+  readonly bucket: string;
+  readonly key: string;
+  readonly etag: string;
+  readonly versionId: string | undefined;
+  readonly contentLength: number;
+  readonly responseContentType: string | undefined;
+  readonly metadata: Readonly<{
+    readonly sha256: ContentHash;
+    readonly byteLength: number;
+    readonly contentType: string | null;
+  }>;
+}
+
+interface VerifiedGenerationEntry {
+  readonly generation: S3ObjectGeneration;
+  readonly insertedAt: number;
+}
+
+interface VerificationWaiter {
+  fail(error: unknown): void;
+}
+
+interface VerificationFlight {
+  readonly generation: S3ObjectGeneration;
+  readonly controller: AbortController;
+  readonly waiters: Set<VerificationWaiter>;
+  promise: Promise<void>;
+  acceptingWaiters: boolean;
+  completed: boolean;
+}
+
+type DiagnosticEvent =
+  | "hit"
+  | "miss"
+  | "expired"
+  | "generation_mismatch"
+  | "warm"
+  | "lru_evict"
+  | "invalidate"
+  | "flight_start"
+  | "flight_join"
+  | "flight_reject"
+  | "waiter_reject"
+  | "verify_success"
+  | "verify_failure";
+
+type DiagnosticOperation =
+  | "openRead"
+  | "verify"
+  | "put"
+  | "copy"
+  | "delete"
+  | "recover"
+  | "stage"
+  | "commit"
+  | "promote"
+  | "rollback";
+
+type DiagnosticReason =
+  | "overflow"
+  | "successor"
+  | "abort"
+  | "mutation"
+  | "mismatch"
+  | "expired"
+  | "success"
+  | "failure";
 
 export function createS3ClientConfig(opts: S3EvidenceStoreOptions): S3ClientConfig {
   const region = requiredToken(opts.region, "region");
@@ -125,6 +201,10 @@ export class S3EvidenceStore implements EvidenceStore {
   private readonly digestTails = new Map<string, Promise<void>>();
   private readonly liveStageHashes = new Set<string>();
   private readonly liveStagingKeys = new Set<string>();
+  private readonly verifiedGenerations = new Map<string, VerifiedGenerationEntry>();
+  private readonly verificationFlights = new Set<VerificationFlight>();
+  private readonly flightsByIdentity = new Map<string, VerificationFlight>();
+  private mutationEpoch = 0;
   private writeTail: Promise<void> = Promise.resolve();
 
   constructor(opts: S3EvidenceStoreOptions) {
@@ -667,20 +747,39 @@ export class S3EvidenceStore implements EvidenceStore {
       if (error instanceof S3EvidenceError) throw error;
       throw new S3EvidenceError("openRead", "unavailable");
     }
-    const meta = Object.freeze(trustedBlobMeta(headRecord, hash, "openRead"));
+    const key = this.blobKey(hash);
+    let generation: S3ObjectGeneration;
+    try {
+      generation = parseHeadGeneration(
+        headRecord,
+        { bucket: this.bucket, key, expectedHash: hash },
+        "openRead",
+      );
+    } catch (error) {
+      if (isIntegrityFailure(error)) {
+        this.invalidateVerifiedGeneration(key, "openRead", "mismatch");
+      }
+      throw error;
+    }
+    const meta = Object.freeze({
+      hash: generation.metadata.sha256,
+      byteLength: generation.metadata.byteLength,
+      contentType: generation.metadata.contentType,
+    });
     throwIfAborted(signal);
-    const fence = parseObjectEtag(headRecord.ETag, "openRead");
     if (
       range !== undefined
       && (
-        meta.byteLength === 0
-        || range.start >= meta.byteLength
-        || range.end >= meta.byteLength
+        generation.metadata.byteLength === 0
+        || range.start >= generation.metadata.byteLength
+        || range.end >= generation.metadata.byteLength
       )
     ) {
       throw new Error("range is out of bounds");
     }
-    await this.verifyCanonicalIncremental(hash, meta, fence, "openRead", signal);
+    if (!this.lookupVerifiedGeneration(generation, "openRead")) {
+      await this.awaitVerifiedGeneration(generation, "openRead", signal);
+    }
     throwIfAborted(signal);
 
     const effectiveRange: EvidenceReadRange | null = range
@@ -688,13 +787,13 @@ export class S3EvidenceStore implements EvidenceStore {
       : null;
     const exactCount = effectiveRange
       ? effectiveRange.end - effectiveRange.start + 1
-      : meta.byteLength;
+      : generation.metadata.byteLength;
 
     return Object.freeze({
       meta,
       range: effectiveRange,
       byteLength: exactCount,
-      bytes: () => this.readVerifiedObject(hash, meta, effectiveRange, fence, signal),
+      bytes: () => this.readVerifiedObject(generation, effectiveRange, signal),
     });
   }
 
@@ -707,9 +806,21 @@ export class S3EvidenceStore implements EvidenceStore {
       );
       if (output === null) return false;
       const record = asRecord(output, "verify");
-      const meta = trustedBlobMeta(record, hash, "verify");
-      const fence = parseObjectEtag(record.ETag, "verify");
-      await this.verifyCanonicalIncremental(hash, meta, fence, "verify");
+      const key = this.blobKey(hash);
+      let generation: S3ObjectGeneration;
+      try {
+        generation = parseHeadGeneration(
+          record,
+          { bucket: this.bucket, key, expectedHash: hash },
+          "verify",
+        );
+      } catch (error) {
+        if (isIntegrityFailure(error)) {
+          this.invalidateVerifiedGeneration(key, "verify", "mismatch");
+        }
+        throw error;
+      }
+      await this.verifyCanonicalIncremental(generation, "verify");
       return true;
     } catch (error) {
       if (isIntegrityFailure(error)) return false;
@@ -896,7 +1007,15 @@ export class S3EvidenceStore implements EvidenceStore {
       Metadata: userMetadata(meta),
     };
     if (meta.contentType !== null) input.ContentType = meta.contentType;
-    await this.send(operation, new PutObjectCommand(input));
+    const canonical = this.isCanonicalBlobKey(key);
+    if (canonical) this.invalidateVerifiedGeneration(key, diagnosticMutationOperation(operation, "put"), "mutation");
+    try {
+      await this.send(operation, new PutObjectCommand(input));
+    } finally {
+      if (canonical) {
+        this.invalidateVerifiedGeneration(key, diagnosticMutationOperation(operation, "put"), "mutation");
+      }
+    }
   }
 
   async copyObject(fromKey: string, toKey: string, operation: string): Promise<void> {
@@ -923,12 +1042,14 @@ export class S3EvidenceStore implements EvidenceStore {
     operation: string,
   ): Promise<"applied" | "absent" | "unknown"> {
     const toKey = this.blobKey(hash);
+    this.invalidateVerifiedGeneration(toKey, "copy", "mutation");
     try {
       await this.copyObject(fromKey, toKey, operation);
     } catch {
       // Destination is still inspected below. A thrown CopyObject may have
       // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
     }
+    this.invalidateVerifiedGeneration(toKey, "copy", "mutation");
     return this.probeCanonicalCopy(hash, byteLength, operation);
   }
 
@@ -955,12 +1076,14 @@ export class S3EvidenceStore implements EvidenceStore {
       Metadata: userMetadata(meta),
     };
     if (meta.contentType !== null) input.ContentType = meta.contentType;
+    this.invalidateVerifiedGeneration(toKey, "copy", "mutation");
     try {
       await this.send(operation, new CopyObjectCommand(input));
     } catch {
       // Destination is still inspected below. A thrown CopyObject may have
       // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
     }
+    this.invalidateVerifiedGeneration(toKey, "copy", "mutation");
     return this.probeCanonicalCopy(hash, meta.byteLength, operation);
   }
 
@@ -985,10 +1108,17 @@ export class S3EvidenceStore implements EvidenceStore {
   }
 
   async deleteObject(operation: string, key: string): Promise<void> {
-    await this.sendAllowMissing(
-      operation,
-      new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
-    );
+    const canonical = this.isCanonicalBlobKey(key);
+    const diagnostic = diagnosticMutationOperation(operation, "delete");
+    if (canonical) this.invalidateVerifiedGeneration(key, diagnostic, "mutation");
+    try {
+      await this.sendAllowMissing(
+        operation,
+        new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+    } finally {
+      if (canonical) this.invalidateVerifiedGeneration(key, diagnostic, "mutation");
+    }
   }
 
   async deleteObjectBestEffort(operation: string, key: string): Promise<void> {
@@ -1176,12 +1306,33 @@ export class S3EvidenceStore implements EvidenceStore {
       );
     }
     const record = asRecord(output, operation);
-    const meta = trustedBlobMeta(record, hash, operation);
-    if (meta.byteLength !== byteLength || meta.hash !== hash) {
+    const key = this.blobKey(hash);
+    let generation: S3ObjectGeneration;
+    try {
+      generation = parseHeadGeneration(
+        record,
+        { bucket: this.bucket, key, expectedHash: hash },
+        operation,
+      );
+    } catch (error) {
+      if (isIntegrityFailure(error)) {
+        this.invalidateVerifiedGeneration(
+          key,
+          diagnosticReadOperation(operation),
+          "mismatch",
+        );
+      }
+      throw error;
+    }
+    if (generation.metadata.byteLength !== byteLength || generation.metadata.sha256 !== hash) {
+      this.invalidateVerifiedGeneration(
+        key,
+        diagnosticReadOperation(operation),
+        "mismatch",
+      );
       throw new S3EvidenceError(operation, "inconsistent metadata");
     }
-    const fence = parseObjectEtag(record.ETag, operation);
-    await this.verifyCanonicalIncremental(hash, meta, fence, operation);
+    await this.verifyCanonicalIncremental(generation, operation);
   }
 
   async inspectCanonical(
@@ -1344,51 +1495,47 @@ export class S3EvidenceStore implements EvidenceStore {
   }
 
   private async verifyCanonicalIncremental(
-    hash: ContentHash,
-    meta: BlobMetaV1,
-    fence: string,
+    generation: S3ObjectGeneration,
     operation: string,
     signal?: AbortSignal,
   ): Promise<void> {
-    throwIfAborted(signal);
-    const record = asRecord(
-      await this.sendConditional(
+    const epoch = this.mutationEpoch;
+    try {
+      throwIfAborted(signal);
+      const record = asRecord(
+        await this.sendConditional(
+          operation,
+          new GetObjectCommand(this.conditionalGetInput(generation, null)),
+          signal,
+        ),
         operation,
-        new GetObjectCommand({
-          Bucket: this.bucket,
-          Key: this.blobKey(hash),
-          IfMatch: fence,
-        }),
+      );
+      assertGetMatchesGeneration(record, generation, operation, null);
+      await hashBodyExact(
+        record.Body,
+        generation.contentLength,
+        generation.metadata.sha256,
+        operation,
         signal,
-      ),
-      operation,
-    );
-    if (parseObjectEtag(record.ETag, operation) !== fence) {
-      throw new S3EvidenceError(operation, "object changed");
+        this.responseBodyIdleTimeoutMs,
+      );
+      throwIfAborted(signal);
+      this.warmVerifiedGeneration(generation, epoch, diagnosticReadOperation(operation));
+    } catch (error) {
+      if (isIntegrityFailure(error) && !signal?.aborted) {
+        this.invalidateVerifiedGeneration(
+          generation.key,
+          diagnosticReadOperation(operation),
+          "mismatch",
+        );
+      }
+      throw error;
     }
-    if (hasContentRange(record.ContentRange)) {
-      throw new S3EvidenceError(operation, "inconsistent object");
-    }
-    const contentLength = numericLength(record.ContentLength);
-    if (contentLength !== meta.byteLength) {
-      throw new S3EvidenceError(operation, "inconsistent object");
-    }
-    await hashBodyExact(
-      record.Body,
-      meta.byteLength,
-      hash,
-      operation,
-      signal,
-      this.responseBodyIdleTimeoutMs,
-    );
-    throwIfAborted(signal);
   }
 
   private readVerifiedObject(
-    hash: ContentHash,
-    meta: BlobMetaV1,
+    generation: S3ObjectGeneration,
     range: EvidenceReadRange | null,
-    fence: string,
     signal?: AbortSignal,
   ): AsyncIterable<Uint8Array> {
     const sendConditional = (
@@ -1396,75 +1543,75 @@ export class S3EvidenceStore implements EvidenceStore {
       command: unknown,
       readSignal?: AbortSignal,
     ): Promise<unknown> => this.sendConditional(operation, command, readSignal);
-    const request = this.conditionalGetInput(hash, fence, range);
+    const request = this.conditionalGetInput(generation, range);
     const idleTimeoutMs = this.responseBodyIdleTimeoutMs;
+    const assertGet = (
+      record: Record<string, unknown>,
+      expectedRange: EvidenceReadRange | null,
+    ): void => assertGetMatchesGeneration(record, generation, "openRead", expectedRange);
+    const warm = (epoch: number): void => {
+      this.warmVerifiedGeneration(generation, epoch, "openRead");
+    };
+    const currentEpoch = (): number => this.mutationEpoch;
+    const invalidate = (): void => {
+      this.invalidateVerifiedGeneration(generation.key, "openRead", "mismatch");
+    };
     return {
       async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
-        throwIfAborted(signal);
-        const record = asRecord(
-          await sendConditional("openRead", new GetObjectCommand(request), signal),
-          "openRead",
-        );
-        if (parseObjectEtag(record.ETag, "openRead") !== fence) {
-          throw new S3EvidenceError("openRead", "object changed");
-        }
-        const want = range ? range.end - range.start + 1 : meta.byteLength;
-        const contentLength = numericLength(record.ContentLength);
-        if (contentLength !== want) {
-          throw new S3EvidenceError("openRead", "inconsistent object");
-        }
-        if (range) {
-          const contentRange = parseInclusiveContentRange(record.ContentRange, "openRead");
-          if (
-            contentRange.start !== range.start
-            || contentRange.end !== range.end
-            || contentRange.total !== meta.byteLength
-            || contentRange.end - contentRange.start + 1 !== want
-          ) {
+        try {
+          throwIfAborted(signal);
+          const epoch = currentEpoch();
+          const record = asRecord(
+            await sendConditional("openRead", new GetObjectCommand(request), signal),
+            "openRead",
+          );
+          assertGet(record, range);
+          const want = range
+            ? range.end - range.start + 1
+            : generation.metadata.byteLength;
+          const hasher = range === null ? createHash("sha256") : null;
+          let received = 0;
+          for await (const chunk of iterateObjectBody(
+            record.Body,
+            "openRead",
+            signal,
+            idleTimeoutMs,
+          )) {
+            throwIfAborted(signal);
+            if (chunk.byteLength === 0) continue;
+            if (received + chunk.byteLength > want) {
+              throw new S3EvidenceError("openRead", "inconsistent object");
+            }
+            const stable = Uint8Array.from(chunk);
+            hasher?.update(stable);
+            received += stable.byteLength;
+            throwIfAborted(signal);
+            yield stable;
+          }
+          if (received !== want) {
             throw new S3EvidenceError("openRead", "inconsistent object");
           }
-        } else if (hasContentRange(record.ContentRange)) {
-          throw new S3EvidenceError("openRead", "inconsistent object");
-        }
-        const hasher = range === null ? createHash("sha256") : null;
-        let received = 0;
-        for await (const chunk of iterateObjectBody(
-          record.Body,
-          "openRead",
-          signal,
-          idleTimeoutMs,
-        )) {
-          throwIfAborted(signal);
-          if (chunk.byteLength === 0) continue;
-          if (received + chunk.byteLength > want) {
-            throw new S3EvidenceError("openRead", "inconsistent object");
+          if (hasher && hasher.digest("hex") !== generation.metadata.sha256) {
+            throw new S3EvidenceError("openRead", "failed verification");
           }
-          const stable = Uint8Array.from(chunk);
-          hasher?.update(stable);
-          received += stable.byteLength;
           throwIfAborted(signal);
-          yield stable;
+          if (hasher) warm(epoch);
+        } catch (error) {
+          if (isIntegrityFailure(error) && !signal?.aborted) invalidate();
+          throw error;
         }
-        if (received !== want) {
-          throw new S3EvidenceError("openRead", "inconsistent object");
-        }
-        if (hasher && hasher.digest("hex") !== meta.hash) {
-          throw new S3EvidenceError("openRead", "failed verification");
-        }
-        throwIfAborted(signal);
       },
     };
   }
 
   private conditionalGetInput(
-    hash: ContentHash,
-    fence: string,
+    generation: S3ObjectGeneration,
     range: EvidenceReadRange | null,
   ): { Bucket: string; Key: string; IfMatch: string; Range?: string } {
     const input: { Bucket: string; Key: string; IfMatch: string; Range?: string } = {
-      Bucket: this.bucket,
-      Key: this.blobKey(hash),
-      IfMatch: fence,
+      Bucket: generation.bucket,
+      Key: generation.key,
+      IfMatch: generation.etag,
     };
     if (range) input.Range = `bytes=${range.start}-${range.end}`;
     return input;
@@ -1488,6 +1635,250 @@ export class S3EvidenceStore implements EvidenceStore {
       }
       if (error instanceof S3EvidenceError) throw error;
       throw new S3EvidenceError(operation, "unavailable");
+    }
+  }
+
+  private isCanonicalBlobKey(key: string): boolean {
+    const relative = this.prefix === ""
+      ? key
+      : key.startsWith(`${this.prefix}/`)
+        ? key.slice(this.prefix.length + 1)
+        : null;
+    if (relative === null) return false;
+    const match = /^blobs\/([0-9a-f]{2})\/([0-9a-f]{64})$/.exec(relative);
+    return match !== null && match[1] === match[2]?.slice(0, 2);
+  }
+
+  private lookupVerifiedGeneration(
+    generation: S3ObjectGeneration,
+    operation: DiagnosticOperation,
+  ): VerifiedGenerationEntry | null {
+    const id = generationIdentityKey(generation);
+    const entry = this.verifiedGenerations.get(id);
+    if (!entry) {
+      emitVerifiedGeneration("miss", operation);
+      return null;
+    }
+    const age = performance.now() - entry.insertedAt;
+    if (age < 0 || age >= VERIFIED_GENERATION_CACHE_TTL_MS) {
+      this.verifiedGenerations.delete(id);
+      emitVerifiedGeneration("expired", operation, "expired");
+      return null;
+    }
+    if (!generationEquals(entry.generation, generation)) {
+      this.verifiedGenerations.delete(id);
+      emitVerifiedGeneration("generation_mismatch", operation, "mismatch");
+      return null;
+    }
+    this.verifiedGenerations.delete(id);
+    this.verifiedGenerations.set(id, entry);
+    emitVerifiedGeneration("hit", operation);
+    return entry;
+  }
+
+  private warmVerifiedGeneration(
+    generation: S3ObjectGeneration,
+    epoch: number,
+    operation: DiagnosticOperation,
+  ): void {
+    if (epoch !== this.mutationEpoch) return;
+    const now = performance.now();
+    for (const [entryId, entry] of this.verifiedGenerations) {
+      const age = now - entry.insertedAt;
+      if (age < 0 || age >= VERIFIED_GENERATION_CACHE_TTL_MS) {
+        this.verifiedGenerations.delete(entryId);
+        emitVerifiedGeneration("expired", operation, "expired");
+      }
+    }
+    const id = generationIdentityKey(generation);
+    const existing = this.verifiedGenerations.get(id);
+    if (existing) {
+      this.verifiedGenerations.delete(id);
+    } else if (this.verifiedGenerations.size >= VERIFIED_GENERATION_CACHE_MAX_ENTRIES) {
+      const lru = this.verifiedGenerations.keys().next().value;
+      if (lru !== undefined) {
+        this.verifiedGenerations.delete(lru);
+        emitVerifiedGeneration("lru_evict", operation);
+      }
+    }
+    this.verifiedGenerations.set(id, {
+      generation: cloneGeneration(generation),
+      insertedAt: now,
+    });
+    emitVerifiedGeneration("warm", operation, "success");
+  }
+
+  private invalidateVerifiedGeneration(
+    key: string,
+    operation: DiagnosticOperation,
+    reason: DiagnosticReason,
+  ): void {
+    this.mutationEpoch += 1;
+    for (const [id, entry] of this.verifiedGenerations) {
+      if (entry.generation.bucket === this.bucket && entry.generation.key === key) {
+        this.verifiedGenerations.delete(id);
+      }
+    }
+    const identityFlights: VerificationFlight[] = [];
+    for (const flight of this.flightsByIdentity.values()) {
+      if (flight.generation.bucket === this.bucket && flight.generation.key === key) {
+        identityFlights.push(flight);
+      }
+    }
+    const changed = new S3EvidenceError("openRead", "object changed");
+    for (const flight of identityFlights) {
+      this.retireVerificationFlight(flight, changed, "mutation");
+    }
+    emitVerifiedGeneration("invalidate", operation, reason);
+  }
+
+  private async awaitVerifiedGeneration(
+    generation: S3ObjectGeneration,
+    operation: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
+    const diagnostic = diagnosticReadOperation(operation);
+    const idKey = generationIdentityKey(generation);
+    const prior = this.flightsByIdentity.get(idKey);
+    if (prior && prior.acceptingWaiters && !prior.completed) {
+      if (generationEquals(prior.generation, generation)) {
+        await this.joinVerificationFlight(prior, diagnostic, signal);
+        return;
+      }
+      this.retireVerificationFlight(
+        prior,
+        new S3EvidenceError(operation, "object changed"),
+        "successor",
+      );
+    }
+    if (this.verificationFlights.size >= VERIFIED_GENERATION_MAX_FLIGHTS) {
+      emitVerifiedGeneration("flight_reject", diagnostic, "overflow");
+      throw new S3EvidenceError(operation, "unavailable");
+    }
+    const flight = this.startVerificationFlight(generation, operation);
+    await this.joinVerificationFlight(flight, diagnostic, signal);
+  }
+
+  private startVerificationFlight(
+    generation: S3ObjectGeneration,
+    operation: string,
+  ): VerificationFlight {
+    const idKey = generationIdentityKey(generation);
+    const diagnostic = diagnosticReadOperation(operation);
+    const flight: VerificationFlight = {
+      generation,
+      controller: new AbortController(),
+      waiters: new Set(),
+      promise: Promise.resolve(),
+      acceptingWaiters: true,
+      completed: false,
+    };
+    this.verificationFlights.add(flight);
+    this.flightsByIdentity.set(idKey, flight);
+    emitVerifiedGeneration("flight_start", diagnostic);
+    flight.promise = this.verifyCanonicalIncremental(
+      generation,
+      operation,
+      flight.controller.signal,
+    ).then(
+      () => {
+        emitVerifiedGeneration("verify_success", diagnostic, "success");
+      },
+      (error: unknown) => {
+        emitVerifiedGeneration("verify_failure", diagnostic, "failure");
+        throw error;
+      },
+    ).finally(() => {
+      flight.acceptingWaiters = false;
+      flight.completed = true;
+      this.verificationFlights.delete(flight);
+      if (this.flightsByIdentity.get(idKey) === flight) {
+        this.flightsByIdentity.delete(idKey);
+      }
+    });
+    return flight;
+  }
+
+  private joinVerificationFlight(
+    flight: VerificationFlight,
+    operation: DiagnosticOperation,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
+    if (!flight.acceptingWaiters || flight.completed) {
+      throw new S3EvidenceError("openRead", "object changed");
+    }
+    if (flight.waiters.size >= VERIFIED_GENERATION_MAX_WAITERS) {
+      emitVerifiedGeneration("waiter_reject", operation, "overflow");
+      throw new S3EvidenceError("openRead", "unavailable");
+    }
+    if (flight.waiters.size > 0) {
+      emitVerifiedGeneration("flight_join", operation);
+    }
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        flight.waiters.delete(waiter);
+        signal?.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const waiter: VerificationWaiter = {
+        fail: (error) => {
+          finish(() => reject(error));
+        },
+      };
+      const onAbort = (): void => {
+        const reason = abortReason(signal);
+        emitVerifiedGeneration("waiter_reject", operation, "abort");
+        finish(() => reject(reason));
+        if (
+          !flight.completed
+          && flight.waiters.size === 0
+          && !flight.controller.signal.aborted
+        ) {
+          flight.acceptingWaiters = false;
+          const idKey = generationIdentityKey(flight.generation);
+          if (this.flightsByIdentity.get(idKey) === flight) {
+            this.flightsByIdentity.delete(idKey);
+          }
+          flight.controller.abort(reason);
+        }
+      };
+      flight.waiters.add(waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      void flight.promise.then(
+        () => {
+          finish(() => resolve());
+        },
+        (error: unknown) => {
+          finish(() => reject(error));
+        },
+      );
+      if (signal?.aborted) onAbort();
+    });
+  }
+
+  private retireVerificationFlight(
+    flight: VerificationFlight,
+    error: S3EvidenceError,
+    reason: DiagnosticReason,
+  ): void {
+    const idKey = generationIdentityKey(flight.generation);
+    if (this.flightsByIdentity.get(idKey) === flight) {
+      this.flightsByIdentity.delete(idKey);
+    }
+    flight.acceptingWaiters = false;
+    emitVerifiedGeneration("flight_reject", diagnosticReadOperation(error.operation), reason);
+    const waiters = [...flight.waiters];
+    for (const waiter of waiters) {
+      emitVerifiedGeneration("waiter_reject", diagnosticReadOperation(error.operation), reason);
+      waiter.fail(error);
+    }
+    if (!flight.controller.signal.aborted) {
+      flight.controller.abort(error);
     }
   }
 
@@ -2203,11 +2594,246 @@ async function nextWithAbort<T>(
   });
 }
 
-function parseObjectEtag(value: unknown, operation: string): string {
+function parseHeadGeneration(
+  record: Record<string, unknown>,
+  args: { bucket: string; key: string; expectedHash: ContentHash },
+  operation: string,
+): S3ObjectGeneration {
+  if (record.DeleteMarker === true) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  if (record.DeleteMarker !== undefined && record.DeleteMarker !== false) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  const meta = trustedBlobMeta(record, args.expectedHash, operation);
+  if (
+    meta.contentType !== null
+    && (meta.contentType.length > 1024 || !ASCII_PRINTABLE.test(meta.contentType))
+  ) {
+    throw new S3EvidenceError(operation, "inconsistent metadata");
+  }
+  return Object.freeze({
+    bucket: args.bucket,
+    key: args.key,
+    etag: parseGenerationToken(record.ETag, operation),
+    versionId: parseOptionalVersionId(record.VersionId, operation),
+    contentLength: meta.byteLength,
+    responseContentType: parseOptionalResponseContentType(record.ContentType, operation),
+    metadata: Object.freeze({
+      sha256: meta.hash,
+      byteLength: meta.byteLength,
+      contentType: meta.contentType,
+    }),
+  });
+}
+
+function parseOptionalVersionId(value: unknown, operation: string): string | undefined {
+  if (value === undefined) return undefined;
+  return parseGenerationToken(value, operation);
+}
+
+function parseOptionalResponseContentType(
+  value: unknown,
+  operation: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string"
+    || value.length > 1024
+    || !ASCII_PRINTABLE.test(value)
+  ) {
+    throw new S3EvidenceError(operation, "inconsistent metadata");
+  }
+  return value;
+}
+
+function parseGenerationToken(value: unknown, operation: string): string {
   if (typeof value !== "string" || value === "") {
     throw new S3EvidenceError(operation, "inconsistent object");
   }
+  if (
+    Buffer.byteLength(value, "utf8") > S3_GENERATION_TOKEN_MAX_BYTES
+    || containsControlCharacter(value)
+  ) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
   return value;
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== undefined && (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function generationEquals(a: S3ObjectGeneration, b: S3ObjectGeneration): boolean {
+  return a.bucket === b.bucket
+    && a.key === b.key
+    && a.etag === b.etag
+    && a.versionId === b.versionId
+    && a.contentLength === b.contentLength
+    && a.responseContentType === b.responseContentType
+    && a.metadata.sha256 === b.metadata.sha256
+    && a.metadata.byteLength === b.metadata.byteLength
+    && a.metadata.contentType === b.metadata.contentType;
+}
+
+function cloneGeneration(generation: S3ObjectGeneration): S3ObjectGeneration {
+  return Object.freeze({
+    bucket: generation.bucket,
+    key: generation.key,
+    etag: generation.etag,
+    versionId: generation.versionId,
+    contentLength: generation.contentLength,
+    responseContentType: generation.responseContentType,
+    metadata: Object.freeze({ ...generation.metadata }),
+  });
+}
+
+function generationIdentityKey(generation: S3ObjectGeneration): string {
+  return JSON.stringify([
+    generation.bucket,
+    generation.key,
+    generation.metadata.sha256,
+  ]);
+}
+
+function assertOptionalGetMetadata(
+  record: Record<string, unknown>,
+  generation: S3ObjectGeneration,
+  operation: string,
+): void {
+  if (
+    parseOptionalResponseContentType(record.ContentType, operation)
+    !== generation.responseContentType
+  ) {
+    throw new S3EvidenceError(operation, "inconsistent metadata");
+  }
+  if (record.Metadata === undefined) return;
+  const metadata = lowercaseMetadata(record.Metadata);
+  if (metadata === null) {
+    throw new S3EvidenceError(operation, "inconsistent metadata");
+  }
+  const sha = metadata[METADATA_SHA256];
+  const lengthRaw = metadata[METADATA_BYTE_LENGTH];
+  const contentTypeRaw = metadata[METADATA_CONTENT_TYPE];
+  if (sha === undefined && lengthRaw === undefined && contentTypeRaw === undefined) return;
+  if (
+    sha === undefined
+    || lengthRaw === undefined
+    || contentTypeRaw === undefined
+    || sha !== generation.metadata.sha256
+    || lengthRaw !== String(generation.metadata.byteLength)
+    || contentTypeRaw !== (generation.metadata.contentType ?? "")
+  ) {
+    throw new S3EvidenceError(operation, "inconsistent metadata");
+  }
+}
+
+function assertGetMatchesGeneration(
+  record: Record<string, unknown>,
+  generation: S3ObjectGeneration,
+  operation: string,
+  range: EvidenceReadRange | null,
+): void {
+  if (
+    record.DeleteMarker === true
+    || (record.DeleteMarker !== undefined && record.DeleteMarker !== false)
+  ) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  if (parseGenerationToken(record.ETag, operation) !== generation.etag) {
+    throw new S3EvidenceError(operation, "object changed");
+  }
+  const responseVersion = parseOptionalVersionId(record.VersionId, operation);
+  if (responseVersion !== generation.versionId) {
+    throw new S3EvidenceError(operation, "object changed");
+  }
+  const want = range ? range.end - range.start + 1 : generation.contentLength;
+  if (numericLength(record.ContentLength) !== want) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  if (range) {
+    const contentRange = parseInclusiveContentRange(record.ContentRange, operation);
+    if (
+      contentRange.start !== range.start
+      || contentRange.end !== range.end
+      || contentRange.total !== generation.metadata.byteLength
+      || contentRange.end - contentRange.start + 1 !== want
+    ) {
+      throw new S3EvidenceError(operation, "inconsistent object");
+    }
+  } else if (hasContentRange(record.ContentRange)) {
+    throw new S3EvidenceError(operation, "inconsistent object");
+  }
+  assertOptionalGetMetadata(record, generation, operation);
+}
+
+function emitVerifiedGeneration(
+  event: DiagnosticEvent,
+  operation: DiagnosticOperation,
+  reason?: DiagnosticReason,
+): void {
+  try {
+    if (!VERIFIED_GENERATION_DIAGNOSTICS.hasSubscribers) return;
+    const payload: { event: DiagnosticEvent; operation: DiagnosticOperation; reason?: DiagnosticReason } = {
+      event,
+      operation,
+    };
+    if (reason !== undefined) payload.reason = reason;
+    VERIFIED_GENERATION_DIAGNOSTICS.publish(Object.freeze(payload));
+  } catch {
+    // Subscriber failure cannot affect I/O.
+  }
+}
+
+function diagnosticReadOperation(operation: string): DiagnosticOperation {
+  if (
+    operation === "openRead"
+    || operation === "verify"
+    || operation === "put"
+    || operation === "copy"
+    || operation === "delete"
+    || operation === "stage"
+    || operation === "commit"
+    || operation === "promote"
+    || operation === "rollback"
+  ) {
+    return operation;
+  }
+  if (operation === "recoverUnreferencedWrites") return "recover";
+  return "openRead";
+}
+
+function diagnosticMutationOperation(
+  operation: string,
+  fallback: "put" | "copy" | "delete" | "recover",
+): DiagnosticOperation {
+  if (operation === "recoverUnreferencedWrites") return "recover";
+  if (
+    operation === "put"
+    || operation === "copy"
+    || operation === "delete"
+    || operation === "stage"
+    || operation === "commit"
+    || operation === "promote"
+    || operation === "rollback"
+    || operation === "openRead"
+    || operation === "verify"
+  ) {
+    return operation;
+  }
+  return fallback;
+}
+
+function abortReason(signal: AbortSignal | undefined): unknown {
+  if (!signal) return new Error("evidence stream aborted");
+  if (signal.reason instanceof Error || signal.reason !== undefined) return signal.reason;
+  return new Error("evidence stream aborted");
 }
 
 function hasContentRange(value: unknown): boolean {

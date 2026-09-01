@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { channel as diagnosticsChannel } from "node:diagnostics_channel";
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
@@ -63,6 +64,14 @@ interface FakeObject {
   reportedEtag?: string | null;
   reportedGetEtag?: string | null;
   reportedContentRange?: string | null;
+  versionId?: string;
+  reportedVersionId?: string | null;
+  reportedGetVersionId?: string | null;
+  omitHeadVersionId?: boolean;
+  omitGetVersionId?: boolean;
+  reportedDeleteMarker?: boolean | null;
+  reportedGetDeleteMarker?: boolean | null;
+  reportedGetMetadata?: Record<string, string> | null;
   chunks?: Uint8Array[];
   chunkProducers?: Array<() => Uint8Array | Promise<Uint8Array>>;
   yieldCount?: { value: number };
@@ -102,6 +111,7 @@ class FakeS3Client {
   corruptCopy = new Map<string, { body?: Uint8Array; metadata?: Record<string, string> }>();
   listHandler: ((input: Record<string, unknown>) => unknown) | null = null;
   preserveEtagOnCopy = false;
+  afterHead: ((stored: FakeObject) => void) | null = null;
   private etagSeq = 0;
 
   constructor(private readonly bucket: string) {}
@@ -200,6 +210,16 @@ class FakeS3Client {
         : stored.reportedEtag === undefined
           ? stored.etag
           : stored.reportedEtag;
+      const responseVersionId = stored.omitGetVersionId
+        ? undefined
+        : stored.reportedGetVersionId !== undefined
+          ? stored.reportedGetVersionId
+          : stored.reportedVersionId !== undefined
+            ? stored.reportedVersionId
+            : stored.versionId;
+      const responseDeleteMarker = stored.reportedGetDeleteMarker !== undefined
+        ? stored.reportedGetDeleteMarker
+        : stored.reportedDeleteMarker;
       if (stored.headerDelayMs !== undefined && stored.headerDelayMs > 0) {
         await new Promise<void>((resolve) => {
           setTimeout(resolve, stored.headerDelayMs);
@@ -214,8 +234,18 @@ class FakeS3Client {
         }),
         ContentLength: stored.reportedGetLength ?? stored.reportedLength ?? total,
         ContentType: stored.contentType,
-        Metadata: { ...stored.metadata },
+        Metadata: stored.reportedGetMetadata === undefined
+          ? { ...stored.metadata }
+          : stored.reportedGetMetadata === null
+            ? undefined
+            : { ...stored.reportedGetMetadata },
         ETag: responseEtag,
+        ...(responseVersionId !== undefined
+          ? { VersionId: responseVersionId }
+          : {}),
+        ...(responseDeleteMarker !== undefined
+          ? { DeleteMarker: responseDeleteMarker }
+          : {}),
         ...(contentRange !== undefined ? { ContentRange: contentRange } : {}),
       };
     }
@@ -223,12 +253,28 @@ class FakeS3Client {
       const stored = this.requireObject(input, "NotFound");
       const headError = this.headErrors.get(String(input.Key));
       if (headError) throw headError;
-      return {
+      const responseVersionId = stored.omitHeadVersionId
+        ? undefined
+        : stored.reportedVersionId === undefined
+          ? stored.versionId
+          : stored.reportedVersionId;
+      const responseDeleteMarker = stored.reportedDeleteMarker;
+      const response = {
         ContentLength: stored.reportedLength ?? stored.body.byteLength,
         ContentType: stored.contentType,
         Metadata: { ...stored.metadata },
         ETag: stored.reportedEtag === undefined ? stored.etag : stored.reportedEtag,
+        ...(responseVersionId !== undefined
+          ? { VersionId: responseVersionId }
+          : {}),
+        ...(responseDeleteMarker !== undefined
+          ? { DeleteMarker: responseDeleteMarker }
+          : {}),
       };
+      const afterHead = this.afterHead;
+      this.afterHead = null;
+      afterHead?.(stored);
+      return response;
     }
     if (command instanceof DeleteObjectCommand) {
       const deleteError = this.deleteErrors.get(String(input.Key));
@@ -346,6 +392,14 @@ class FakeS3Client {
       reportedGetEtag?: string | null;
       reportedGetLength?: number;
       reportedContentRange?: string | null;
+      versionId?: string;
+      reportedVersionId?: string | null;
+      reportedGetVersionId?: string | null;
+      omitHeadVersionId?: boolean;
+      omitGetVersionId?: boolean;
+      reportedDeleteMarker?: boolean | null;
+      reportedGetDeleteMarker?: boolean | null;
+      reportedGetMetadata?: Record<string, string> | null;
       contentType?: string;
       failAfterYields?: number;
       failYieldError?: Error;
@@ -376,6 +430,22 @@ class FakeS3Client {
     if (extra?.reportedGetLength !== undefined) stored.reportedGetLength = extra.reportedGetLength;
     if (extra?.reportedContentRange !== undefined) {
       stored.reportedContentRange = extra.reportedContentRange;
+    }
+    if (extra?.versionId !== undefined) stored.versionId = extra.versionId;
+    if (extra?.reportedVersionId !== undefined) stored.reportedVersionId = extra.reportedVersionId;
+    if (extra?.reportedGetVersionId !== undefined) {
+      stored.reportedGetVersionId = extra.reportedGetVersionId;
+    }
+    if (extra?.omitHeadVersionId) stored.omitHeadVersionId = true;
+    if (extra?.omitGetVersionId) stored.omitGetVersionId = true;
+    if (extra?.reportedDeleteMarker !== undefined) {
+      stored.reportedDeleteMarker = extra.reportedDeleteMarker;
+    }
+    if (extra?.reportedGetDeleteMarker !== undefined) {
+      stored.reportedGetDeleteMarker = extra.reportedGetDeleteMarker;
+    }
+    if (extra?.reportedGetMetadata !== undefined) {
+      stored.reportedGetMetadata = extra.reportedGetMetadata;
     }
     if (extra?.failAfterYields !== undefined) stored.failAfterYields = extra.failAfterYields;
     if (extra?.failYieldError) stored.failYieldError = extra.failYieldError;
@@ -658,9 +728,42 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+async function waitForCallCount(
+  fake: FakeS3Client,
+  name: string,
+  count: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (fake.calls.filter((call) => call.name === name).length >= count) return;
+    await delay(1);
+  }
+  throw new Error(`timed out waiting for ${count} ${name} calls`);
+}
+
 function blobKey(hash: string, prefix?: string): string {
   const relative = `blobs/${hash.slice(0, 2)}/${hash}`;
   return prefix ? `${prefix}/${relative}` : relative;
+}
+
+function putCanonicalRaw(
+  fake: FakeS3Client,
+  bytes: Uint8Array,
+  extra?: Parameters<FakeS3Client["putRaw"]>[4],
+): { hash: ReturnType<typeof sha256Hex>; key: string } {
+  const hash = sha256Hex(bytes);
+  const key = blobKey(hash);
+  fake.putRaw(
+    key,
+    bytes,
+    {
+      sha256: hash,
+      bytelength: String(bytes.byteLength),
+      contenttype: extra?.contentType ?? "",
+    },
+    undefined,
+    extra,
+  );
+  return { hash, key };
 }
 
 function pendingKeys(fake: FakeS3Client, prefix?: string): string[] {
@@ -3013,7 +3116,9 @@ describe("S3EvidenceStore", () => {
     await expect(opening).rejects.toThrow(/synthetic transfer disconnected/);
     const gets = fake.calls.filter((call) => call.name === "GetObjectCommand");
     expect(gets).toHaveLength(1);
-    expect(gets[0]?.abortSignal).toBe(controller.signal);
+    expect(gets[0]?.abortSignal).not.toBe(controller.signal);
+    expect(gets[0]?.abortSignal?.aborted).toBe(true);
+    expect(gets[0]?.abortSignal?.reason).toEqual(new Error("synthetic transfer disconnected"));
     expect(iteratorReturns.value).toBeGreaterThan(0);
     expect(bodyDestroys.value).toBeGreaterThan(0);
   });
@@ -3038,7 +3143,8 @@ describe("S3EvidenceStore", () => {
     expect(Buffer.from(await collectChunks(handle.bytes())).toString()).toBe("abort");
     const gets = fake.calls.filter((call) => call.name === "GetObjectCommand");
     expect(gets).toHaveLength(2);
-    expect(gets.every((call) => call.abortSignal === active.signal)).toBe(true);
+    expect(gets[0]?.abortSignal).not.toBe(active.signal);
+    expect(gets[1]?.abortSignal).toBe(active.signal);
     const heads = fake.calls.filter((call) => call.name === "HeadObjectCommand");
     expect(heads.every((call) => call.abortSignal === active.signal)).toBe(true);
   });
@@ -3098,7 +3204,8 @@ describe("S3EvidenceStore", () => {
     const smallStored = fake.object(blobKey(smallStage.meta.hash));
     if (!smallStored) throw new Error("missing small");
     smallStored.body = Uint8Array.from(small, (value) => value ^ 0xff);
-    await expect(store.openRead(smallStage.meta.hash)).rejects.toThrow(
+    const coldStore = new S3EvidenceStore(garageOptions(fake));
+    await expect(coldStore.openRead(smallStage.meta.hash)).rejects.toThrow(
       /verification|corrupt|changed|mismatch|inconsistent/i,
     );
     await smallStage.finalize();
@@ -3532,6 +3639,512 @@ describe("S3EvidenceStore", () => {
     expect(streamStagingKeys(fake).sort()).toEqual([inFlightKey, ".stream-staging/foreign-live/residue"].sort());
     await batch.rollback();
     await stage.rollback();
+  });
+});
+
+describe("S3EvidenceStore verified-generation range cache", () => {
+  it("Heads every openRead, hashes an unchanged generation once, and never sends VersionId", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("verified-generation-cache");
+    const { hash } = putCanonicalRaw(fake, bytes, {
+      etag: '"opaque-not-a-content-digest"',
+      versionId: "garage-version-1",
+    });
+
+    const first = await store.openRead(hash, { start: 0, end: 3 });
+    expect(Buffer.from(await collectChunks(first.bytes())).toString()).toBe("veri");
+    const second = await store.openRead(hash, { start: 4, end: 7 });
+    expect(Buffer.from(await collectChunks(second.bytes())).toString()).toBe("fied");
+    const third = await store.openRead(hash, { start: 8, end: 11 });
+    expect(Buffer.from(await collectChunks(third.bytes())).toString()).toBe("-gen");
+
+    const heads = fake.calls.filter((call) => call.name === "HeadObjectCommand");
+    const gets = fake.calls.filter((call) => call.name === "GetObjectCommand");
+    expect(heads).toHaveLength(3);
+    expect(gets.filter((call) => call.input.Range === undefined)).toHaveLength(1);
+    expect(gets.filter((call) => typeof call.input.Range === "string")).toHaveLength(3);
+    expect(gets.every((call) => !("VersionId" in call.input))).toBe(true);
+    expect(gets.every((call) => call.input.IfMatch === '"opaque-not-a-content-digest"')).toBe(true);
+
+    fake.calls.length = 0;
+    expect(await store.verify(hash)).toBe(true);
+    expect(fake.calls.filter((call) => call.name === "GetObjectCommand")).toHaveLength(1);
+  });
+
+  it("is process-local, expires non-sliding at 300 seconds, and never warms from a range", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("ttl-non-sliding-cache");
+    const { hash } = putCanonicalRaw(fake, bytes);
+    let now = 1000;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      await store.openRead(hash, { start: 0, end: 0 });
+      now += 299999;
+      const hit = await store.openRead(hash, { start: 1, end: 1 });
+      await collectChunks(hit.bytes());
+      fake.calls.length = 0;
+      now += 1;
+      await store.openRead(hash, { start: 2, end: 2 });
+      expect(
+        fake.calls.filter(
+          (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+        ),
+      ).toHaveLength(1);
+
+      fake.calls.length = 0;
+      const coldStore = new S3EvidenceStore(garageOptions(fake));
+      await coldStore.openRead(hash, { start: 0, end: 0 });
+      expect(
+        fake.calls.filter(
+          (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("warms only after an exact full read and not after an abandoned full body", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("full-read-warming-proof");
+    const { hash, key } = putCanonicalRaw(fake, bytes, {
+      chunks: [bytes.slice(0, 4), bytes.slice(4)],
+    });
+    let now = 5000;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      await store.openRead(hash, { start: 0, end: 0 });
+      now += 299999;
+      const abandoned = await store.openRead(hash);
+      const iterator = abandoned.bytes()[Symbol.asyncIterator]();
+      expect((await iterator.next()).done).toBe(false);
+      await iterator.return?.();
+      now += 1;
+      fake.calls.length = 0;
+      await store.openRead(hash, { start: 0, end: 0 });
+      expect(
+        fake.calls.filter(
+          (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+        ),
+      ).toHaveLength(1);
+
+      now += 299999;
+      const full = await store.openRead(hash);
+      expect(Buffer.from(await collectChunks(full.bytes())).equals(Buffer.from(bytes))).toBe(true);
+      now += 299999;
+      fake.calls.length = 0;
+      await store.openRead(hash, { start: 0, end: 0 });
+      expect(fake.calls.filter((call) => call.name === "GetObjectCommand")).toHaveLength(0);
+      expect(fake.object(key)).toBeDefined();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("enforces a 256-entry true LRU and removes the least-recently-used generation", async () => {
+    const { fake, store } = openStore();
+    const entries = Array.from({ length: 257 }, (_, index) => {
+      const bytes = new TextEncoder().encode(`lru-${index.toString().padStart(3, "0")}`);
+      return putCanonicalRaw(fake, bytes);
+    });
+    for (const entry of entries.slice(0, 256)) {
+      expect(await store.verify(entry.hash)).toBe(true);
+    }
+
+    const touch = await store.openRead(entries[0]!.hash, { start: 0, end: 0 });
+    await collectChunks(touch.bytes());
+    expect(await store.verify(entries[256]!.hash)).toBe(true);
+
+    fake.calls.length = 0;
+    await store.openRead(entries[0]!.hash, { start: 0, end: 0 });
+    expect(fake.calls.filter((call) => call.name === "GetObjectCommand")).toHaveLength(0);
+    fake.calls.length = 0;
+    await store.openRead(entries[1]!.hash, { start: 0, end: 0 });
+    expect(
+      fake.calls.filter(
+        (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("singleflights an exact generation while keeping caller cancellation independent", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("singleflight-generation");
+    const { hash, key } = putCanonicalRaw(fake, bytes);
+    const stored = fake.object(key);
+    if (!stored) throw new Error("missing singleflight object");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    stored.chunkProducers = [async () => {
+      await gate;
+      return bytes;
+    }];
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const first = store.openRead(hash, { start: 0, end: 0 }, firstAbort.signal);
+    const second = store.openRead(hash, { start: 0, end: 0 }, secondAbort.signal);
+    await waitForCallCount(fake, "GetObjectCommand", 1);
+    firstAbort.abort(new Error("first waiter left"));
+    await expect(first).rejects.toThrow(/first waiter left/);
+    const sharedSignal = fake.calls.find((call) => call.name === "GetObjectCommand")?.abortSignal;
+    expect(sharedSignal).not.toBe(firstAbort.signal);
+    expect(sharedSignal?.aborted).toBe(false);
+    release();
+    await expect(second).resolves.toMatchObject({ byteLength: 1 });
+    expect(fake.calls.filter((call) => call.name === "GetObjectCommand")).toHaveLength(1);
+  });
+
+  it("aborts a hostile shared body promptly when its last waiter leaves", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("last-waiter-abort");
+    const iteratorReturns = { value: 0 };
+    const bodyDestroys = { value: 0 };
+    const { hash } = putCanonicalRaw(fake, bytes, {
+      chunkProducers: [() => new Promise<Uint8Array>(() => undefined)],
+      iteratorReturns,
+      iteratorReturnHangs: true,
+      bodyDestroys,
+    });
+    const controller = new AbortController();
+    const opening = store.openRead(hash, { start: 0, end: 0 }, controller.signal);
+    await waitForCallCount(fake, "GetObjectCommand", 1);
+    const sharedSignal = fake.calls.find((call) => call.name === "GetObjectCommand")?.abortSignal;
+    controller.abort(new Error("last waiter left"));
+    await expect(opening).rejects.toThrow(/last waiter left/);
+    expect(sharedSignal?.aborted).toBe(true);
+    expect(iteratorReturns.value).toBeGreaterThan(0);
+    expect(bodyDestroys.value).toBeGreaterThan(0);
+  });
+
+  it("rejects a 65th waiter and a 17th active verification flight deterministically", async () => {
+    const waiterCase = openStore();
+    const waiterBytes = new TextEncoder().encode("waiter-bound");
+    const waiterEntry = putCanonicalRaw(waiterCase.fake, waiterBytes, {
+      chunkProducers: [() => new Promise<Uint8Array>(() => undefined)],
+    });
+    const waiterControllers = Array.from({ length: 64 }, () => new AbortController());
+    const waiters = waiterControllers.map((controller) =>
+      waiterCase.store.openRead(
+        waiterEntry.hash,
+        { start: 0, end: 0 },
+        controller.signal,
+      ),
+    );
+    await waitForCallCount(waiterCase.fake, "GetObjectCommand", 1);
+    await expect(
+      waiterCase.store.openRead(waiterEntry.hash, { start: 0, end: 0 }),
+    ).rejects.toThrow(/unavailable/i);
+    expect(
+      waiterCase.fake.calls.filter((call) => call.name === "GetObjectCommand"),
+    ).toHaveLength(1);
+    for (const controller of waiterControllers) controller.abort(new Error("test cleanup"));
+    await Promise.allSettled(waiters);
+
+    const flightCase = openStore();
+    const flightControllers: AbortController[] = [];
+    const flights: Array<Promise<unknown>> = [];
+    for (let index = 0; index < 17; index += 1) {
+      const bytes = new TextEncoder().encode(`flight-bound-${index}`);
+      const entry = putCanonicalRaw(flightCase.fake, bytes, {
+        chunkProducers: [() => new Promise<Uint8Array>(() => undefined)],
+      });
+      const controller = new AbortController();
+      flightControllers.push(controller);
+      const opening = flightCase.store.openRead(entry.hash, { start: 0, end: 0 }, controller.signal);
+      if (index < 16) {
+        flights.push(opening);
+      } else {
+        await expect(opening).rejects.toThrow(/unavailable/i);
+      }
+    }
+    expect(
+      flightCase.fake.calls.filter((call) => call.name === "GetObjectCommand"),
+    ).toHaveLength(16);
+    for (const controller of flightControllers) controller.abort(new Error("test cleanup"));
+    await Promise.allSettled(flights);
+  });
+
+  it("retires old-generation waiters before starting a successor generation", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("successor-generation");
+    const { hash, key } = putCanonicalRaw(fake, bytes, { versionId: "v1" });
+    const stored = fake.object(key);
+    if (!stored) throw new Error("missing successor object");
+    stored.chunkProducers = [() => new Promise<Uint8Array>(() => undefined)];
+    const old = store.openRead(hash, { start: 0, end: 0 });
+    await waitForCallCount(fake, "GetObjectCommand", 1);
+
+    stored.versionId = "v2";
+    stored.chunkProducers = [() => bytes];
+    const successor = store.openRead(hash, { start: 0, end: 0 });
+    await expect(old).rejects.toThrow(/changed/i);
+    await expect(successor).resolves.toMatchObject({ byteLength: 1 });
+    expect(fake.calls.filter((call) => call.name === "GetObjectCommand")).toHaveLength(2);
+  });
+
+  it("binds the exact optional VersionId and rejects malformed generation tokens and delete markers", async () => {
+    const valid = openStore();
+    const validBytes = new TextEncoder().encode("literal-null-version");
+    const validEntry = putCanonicalRaw(valid.fake, validBytes, { versionId: "null" });
+    await expect(valid.store.openRead(validEntry.hash, { start: 0, end: 0 })).resolves.toBeDefined();
+    expect(
+      valid.fake.calls
+        .filter((call) => call.name === "GetObjectCommand")
+        .every((call) => !("VersionId" in call.input)),
+    ).toBe(true);
+
+    const cases: Array<Parameters<typeof putCanonicalRaw>[2]> = [
+      { reportedVersionId: null },
+      { versionId: "" },
+      { versionId: "bad\nversion" },
+      { versionId: "v".repeat(1025) },
+      { etag: "" },
+      { etag: "bad\u0000etag" },
+      { etag: "e".repeat(1025) },
+      { reportedDeleteMarker: true },
+    ];
+    for (const [index, extra] of cases.entries()) {
+      const testCase = openStore();
+      const entry = putCanonicalRaw(
+        testCase.fake,
+        new TextEncoder().encode(`invalid-generation-${index}`),
+        extra,
+      );
+      await expect(testCase.store.openRead(entry.hash, { start: 0, end: 0 })).rejects.toThrow(
+        /inconsistent/i,
+      );
+    }
+
+    const contentTypeCase = openStore();
+    const contentTypeBytes = new TextEncoder().encode("large-content-type");
+    const contentTypeEntry = putCanonicalRaw(contentTypeCase.fake, contentTypeBytes, {
+      contentType: "x".repeat(1025),
+    });
+    await expect(
+      contentTypeCase.store.openRead(contentTypeEntry.hash, { start: 0, end: 0 }),
+    ).rejects.toThrow(/metadata/i);
+  });
+
+  it("fails closed on Head/Get tuple changes while allowing absent or empty GET metadata", async () => {
+    const absentMetadata = openStore();
+    const absentBytes = new TextEncoder().encode("absent-get-metadata");
+    const absentEntry = putCanonicalRaw(absentMetadata.fake, absentBytes, {
+      reportedGetMetadata: null,
+    });
+    await expect(
+      absentMetadata.store.openRead(absentEntry.hash, { start: 0, end: 0 }),
+    ).resolves.toBeDefined();
+
+    const emptyMetadata = openStore();
+    const emptyBytes = new TextEncoder().encode("empty-get-metadata");
+    const emptyEntry = putCanonicalRaw(emptyMetadata.fake, emptyBytes, {
+      reportedGetMetadata: {},
+    });
+    await expect(
+      emptyMetadata.store.openRead(emptyEntry.hash, { start: 0, end: 0 }),
+    ).resolves.toBeDefined();
+
+    const exactContentType = openStore();
+    const exactContentTypeBytes = new TextEncoder().encode("exact-get-content-type");
+    const exactContentTypeEntry = putCanonicalRaw(exactContentType.fake, exactContentTypeBytes, {
+      contentType: "text/plain",
+      reportedGetMetadata: null,
+    });
+    await expect(
+      exactContentType.store.openRead(exactContentTypeEntry.hash, { start: 0, end: 0 }),
+    ).resolves.toBeDefined();
+
+    const providerDefault = openStore();
+    const providerDefaultBytes = new TextEncoder().encode("provider-default-content-type");
+    const providerDefaultEntry = putCanonicalRaw(providerDefault.fake, providerDefaultBytes, {
+      contentType: "application/octet-stream",
+    });
+    const providerDefaultStored = providerDefault.fake.object(providerDefaultEntry.key);
+    if (!providerDefaultStored) throw new Error("missing provider-default object");
+    providerDefaultStored.metadata.contenttype = "";
+    const providerDefaultHandle = await providerDefault.store.openRead(
+      providerDefaultEntry.hash,
+      { start: 0, end: 0 },
+    );
+    expect(providerDefaultHandle.meta.contentType).toBeNull();
+    expect(await collectChunks(providerDefaultHandle.bytes())).toEqual(providerDefaultBytes.slice(0, 1));
+    const providerDefaultMismatch = await providerDefault.store.openRead(
+      providerDefaultEntry.hash,
+      { start: 1, end: 1 },
+    );
+    providerDefaultStored.contentType = "text/plain";
+    await expect(collectChunks(providerDefaultMismatch.bytes())).rejects.toThrow(/metadata/i);
+
+    const mutations: Array<Parameters<typeof putCanonicalRaw>[2]> = [
+      { versionId: "v1", omitGetVersionId: true },
+      { reportedGetVersionId: "unexpected-version" },
+      { reportedGetDeleteMarker: true },
+      { reportedGetMetadata: { sha256: "0".repeat(64) } },
+      { contentType: "text/plain", reportedGetMetadata: null },
+    ];
+    for (const [index, extra] of mutations.entries()) {
+      const testCase = openStore();
+      const entry = putCanonicalRaw(
+        testCase.fake,
+        new TextEncoder().encode(`get-mismatch-${index}`),
+        extra,
+      );
+      if (index === mutations.length - 1) {
+        testCase.fake.afterHead = (stored) => {
+          stored.contentType = "application/octet-stream";
+        };
+      }
+      await expect(testCase.store.openRead(entry.hash, { start: 0, end: 0 })).rejects.toThrow(
+        /changed|inconsistent/i,
+      );
+    }
+
+    const afterHead = openStore();
+    const afterBytes = new TextEncoder().encode("mutation-after-head");
+    const afterEntry = putCanonicalRaw(afterHead.fake, afterBytes);
+    afterHead.fake.afterHead = (stored) => {
+      stored.etag = afterHead.fake.allocateEtag();
+    };
+    await expect(afterHead.store.openRead(afterEntry.hash, { start: 0, end: 0 })).rejects.toThrow(
+      /changed/i,
+    );
+    expect(
+      afterHead.fake.calls.filter(
+        (call) => call.name === "GetObjectCommand" && typeof call.input.Range === "string",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("invalidates local mutations and prevents a stale aborted flight from rewarming", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("mutation-epoch-stale-flight");
+    const { hash, key } = putCanonicalRaw(fake, bytes, { etag: '"stable-provider-token"' });
+    const stored = fake.object(key);
+    if (!stored) throw new Error("missing mutation epoch object");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    stored.chunkProducers = [async () => {
+      await gate;
+      return bytes;
+    }];
+    const stale = store.openRead(hash, { start: 0, end: 0 });
+    await waitForCallCount(fake, "GetObjectCommand", 1);
+    await store.deleteObject("delete", key);
+    await expect(stale).rejects.toThrow(/changed/i);
+    putCanonicalRaw(fake, bytes, { etag: '"stable-provider-token"' });
+    release();
+    await delay(0);
+    fake.calls.length = 0;
+    await store.openRead(hash, { start: 0, end: 0 });
+    expect(
+      fake.calls.filter(
+        (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("deletes a stale cache row on Head mismatch and after a failed full verification", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("stale-row-failed-verification");
+    const { hash, key } = putCanonicalRaw(fake, bytes, { etag: '"generation-one"' });
+    await store.openRead(hash, { start: 0, end: 0 });
+    const stored = fake.object(key);
+    if (!stored) throw new Error("missing stale-row object");
+
+    stored.etag = '"generation-two"';
+    stored.reportedGetEtag = '"different-get-generation"';
+    await expect(store.openRead(hash, { start: 0, end: 0 })).rejects.toThrow(/changed/i);
+    stored.etag = '"generation-one"';
+    stored.reportedGetEtag = undefined;
+    fake.calls.length = 0;
+    await store.openRead(hash, { start: 0, end: 0 });
+    expect(
+      fake.calls.filter(
+        (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+      ),
+    ).toHaveLength(1);
+
+    stored.body = Uint8Array.from(bytes, (value) => value ^ 0xff);
+    expect(await store.verify(hash)).toBe(false);
+    stored.body = new Uint8Array(bytes);
+    fake.calls.length = 0;
+    await store.openRead(hash, { start: 0, end: 0 });
+    expect(
+      fake.calls.filter(
+        (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("invalidates a local canonical put while a verified post-copy probe warms the destination", async () => {
+    const direct = openStore();
+    const directBytes = new TextEncoder().encode("local-put-invalidation");
+    const directEntry = putCanonicalRaw(direct.fake, directBytes);
+    await direct.store.openRead(directEntry.hash, { start: 0, end: 0 });
+    await direct.store.putObject(
+      directEntry.key,
+      directBytes,
+      {
+        hash: directEntry.hash,
+        byteLength: directBytes.byteLength,
+        contentType: null,
+      },
+      "put",
+    );
+    direct.fake.calls.length = 0;
+    await direct.store.openRead(directEntry.hash, { start: 0, end: 0 });
+    expect(
+      direct.fake.calls.filter(
+        (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+      ),
+    ).toHaveLength(1);
+
+    const copied = openStore();
+    const copiedBytes = new TextEncoder().encode("verified-post-copy-warm");
+    const stage = await copied.store.stageStream(asAsyncChunks([copiedBytes]), {
+      maxBytes: copiedBytes.byteLength,
+    });
+    await stage.promote();
+    copied.fake.calls.length = 0;
+    await copied.store.openRead(stage.meta.hash, { start: 0, end: 0 });
+    expect(
+      copied.fake.calls.filter(
+        (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+      ),
+    ).toHaveLength(0);
+    await stage.finalize();
+  });
+
+  it("emits frozen closed-enum diagnostics without identifiers and isolates subscribers", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("diagnostic-payload");
+    const { hash } = putCanonicalRaw(fake, bytes);
+    const diagnostic = diagnosticsChannel("cd.s3.verified_generation");
+    const messages: unknown[] = [];
+    const capture = (message: unknown): void => {
+      messages.push(message);
+    };
+    diagnostic.subscribe(capture);
+    try {
+      await store.openRead(hash, { start: 0, end: 0 });
+    } finally {
+      diagnostic.unsubscribe(capture);
+    }
+    expect(messages.length).toBeGreaterThan(0);
+    for (const message of messages) {
+      expect(Object.isFrozen(message)).toBe(true);
+      expect(Object.keys(message as object).every((key) => ["event", "operation", "reason"].includes(key))).toBe(true);
+      const serialized = JSON.stringify(message);
+      expect(serialized).not.toContain(hash);
+      expect(serialized).not.toContain(SYNTHETIC_BUCKET);
+      expect(serialized).not.toContain(SYNTHETIC_ENDPOINT);
+    }
+
+    await expect(store.verify(hash)).resolves.toBe(true);
   });
 });
 
