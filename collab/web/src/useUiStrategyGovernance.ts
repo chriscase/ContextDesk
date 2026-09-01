@@ -134,8 +134,10 @@ export function useUiStrategyGovernance(input: {
       const latest = latestRef.current;
       if (latest.identityId !== start.identityId || latest.authorityGeneration !== start.authorityGeneration) return false;
       if (response.status === 409) {
+        setEffective(SAFE_EFFECTIVE);
         setStatus("conflict");
-        setMessage("The workspace policy or your preference changed. Refresh before choosing again.");
+        setMessage("The workspace policy or your preference changed. War Room is active while current authority is reloaded.");
+        setGeneration((value) => value + 1);
         return false;
       }
       if (!response.ok) throw new Error(`preference request failed:${response.status}`);
@@ -146,8 +148,10 @@ export function useUiStrategyGovernance(input: {
       return true;
     } catch {
       if (requestRef.current !== requestId) return false;
+      setEffective(SAFE_EFFECTIVE);
       setStatus("unavailable");
-      setMessage("Your preference was not confirmed. War Room remains available; refresh before trying again.");
+      setMessage("Your preference was not confirmed. War Room is active while current authority is reloaded.");
+      setGeneration((value) => value + 1);
       return false;
     } finally {
       if (activeRequestRef.current === controller) activeRequestRef.current = null;

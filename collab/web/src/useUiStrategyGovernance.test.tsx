@@ -71,4 +71,46 @@ describe("useUiStrategyGovernance", () => {
       effectiveId: "war-room", selectableIds: [], canSelect: false,
     });
   });
+
+  it("drops stale presentation authority and reloads after a preference conflict", async () => {
+    let reads = 0;
+    const fetchStub = vi.fn(async (_input: RequestInfo, init?: RequestInit) => {
+      if (init?.method === "PUT") return new Response(JSON.stringify({ error: "stale_policy" }), { status: 409 });
+      reads += 1;
+      return reads === 1 ? effective("investigation-first", 1) : effective("war-room");
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    const { result } = renderHook(() => useUiStrategyGovernance({
+      identityId: "local:alice", authorityGeneration: 1, enabled: true,
+    }));
+    await waitFor(() => expect(result.current.effective.effectiveId).toBe("investigation-first"));
+    await act(async () => {
+      expect(await result.current.savePreference("war-room")).toBe(false);
+    });
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(result.current.effective).toMatchObject({
+      effectiveId: "war-room", preferredId: null, preferenceRevision: 0,
+    });
+    expect(fetchStub).toHaveBeenCalledTimes(3);
+  });
+
+  it("reloads authority after an unconfirmed preference outcome", async () => {
+    let reads = 0;
+    const fetchStub = vi.fn(async (_input: RequestInfo, init?: RequestInit) => {
+      if (init?.method === "PUT") throw new Error("response lost");
+      reads += 1;
+      return reads === 1 ? effective("investigation-first", 1) : effective("war-room");
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    const { result } = renderHook(() => useUiStrategyGovernance({
+      identityId: "local:alice", authorityGeneration: 1, enabled: true,
+    }));
+    await waitFor(() => expect(result.current.effective.effectiveId).toBe("investigation-first"));
+    await act(async () => {
+      expect(await result.current.savePreference("war-room")).toBe(false);
+    });
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(result.current.effective.effectiveId).toBe("war-room");
+    expect(fetchStub).toHaveBeenCalledTimes(3);
+  });
 });

@@ -68,6 +68,48 @@ describe("SQLite local runtime", () => {
     }
   });
 
+  it("fails closed when the persisted strategy policy fingerprint is corrupted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-strategy-corrupt-"));
+    const path = join(root, "collab.sqlite");
+    try {
+      const first = createSqliteRuntime(path);
+      const governance = new StrategyGovernanceService({
+        store: first.strategyGovernance,
+        audit: first.audit,
+      });
+      await governance.updatePolicy({
+        schemaId: UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
+        expectedRevision: 0,
+        instance: {
+          enabledIds: ["war-room", "beacon"],
+          visibleIds: ["war-room", "beacon"],
+          defaultId: "war-room",
+          selectionMode: "free",
+          approvedIds: ["war-room", "beacon"],
+        },
+        roleRules: [],
+      }, "local:admin", "test");
+      const persisted = structuredClone(first.state.read("ui_strategy_governance")) as {
+        policy: { fingerprint: string };
+      };
+      persisted.policy.fingerprint = "sha256:corrupted";
+      first.state.write("ui_strategy_governance", persisted);
+      first.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      const reopenedGovernance = new StrategyGovernanceService({
+        store: reopened.strategyGovernance,
+        audit: reopened.audit,
+      });
+      await expect(reopenedGovernance.loadPolicy()).rejects.toThrow(/fingerprint/u);
+      await expect(reopenedGovernance.effective("local:alice", ["contributor"]))
+        .rejects.toThrow(/fingerprint/u);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rolls strategy policy back across SQLite reopen when audit confirmation fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-strategy-rollback-"));
     const path = join(root, "collab.sqlite");

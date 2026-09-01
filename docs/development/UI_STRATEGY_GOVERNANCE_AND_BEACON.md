@@ -120,8 +120,9 @@ The candidate must not be called shipped until all of these are true:
 ## Deliberate follow-ups
 
 - LDAP-group-specific strategy rules; role rules cover the first milestone.
-- User-facing policy history; audit records and append-only policy history are
-  stored now.
+- User-facing policy history. Every provider stores durable success audit
+  records; PostgreSQL also stores append-only policy snapshots in revision
+  order. Cross-provider snapshot history is a deliberate follow-up.
 - Recoverable trash and retention automation.
 - Larger corpus/log intake beyond the bounded evidence upload command.
 - Shared autocomplete catalogs and administrator value deduplication.

@@ -4,6 +4,7 @@ import {
   createUiStrategyPolicy,
   defaultUiStrategyPolicyInput,
   parseUiStrategyPolicyInput,
+  parseUiStrategyPreferenceUpdate,
   type AppRole,
   type UiStrategyEffectiveV1,
   type UiStrategyGovernancePolicyInputV1,
@@ -120,17 +121,18 @@ export class StrategyGovernanceService {
     roles: readonly AppRole[],
     origin: string,
   ): Promise<UiStrategyEffectiveV1> {
+    const parsed = parseUiStrategyPreferenceUpdate(input);
     return this.deps.store.withAtomic(async () => {
       await this.deps.store.lockPolicy();
       const policy = await this.loadPolicy();
-      if (policy.revision !== input.expectedPolicyRevision) throw new StrategyPolicyStaleError();
+      if (policy.revision !== parsed.expectedPolicyRevision) throw new StrategyPolicyStaleError();
       const current = await this.deps.store.loadPreference(userId);
-      if ((current?.revision ?? 0) !== input.expectedPreferenceRevision) throw new StrategyPreferenceStaleError();
+      if ((current?.revision ?? 0) !== parsed.expectedPreferenceRevision) throw new StrategyPreferenceStaleError();
       const before = this.resolve(policy, current, roles);
-      if (!before.selectableIds.includes(input.strategyId)) throw new StrategyPolicyDisallowedError();
+      if (!before.selectableIds.includes(parsed.strategyId)) throw new StrategyPolicyDisallowedError();
       const next: UiStrategyPreferenceRecord = {
         userId,
-        strategyId: input.strategyId,
+        strategyId: parsed.strategyId,
         revision: (current?.revision ?? 0) + 1,
         updatedAt: new Date().toISOString(),
       };
@@ -139,7 +141,7 @@ export class StrategyGovernanceService {
       }
       await this.deps.audit.append({
         identity: userId, action: "ui_strategy_preference_update",
-        target: `strategy:${input.strategyId}`, origin, outcome: "success",
+        target: `strategy:${parsed.strategyId}`, origin, outcome: "success",
       });
       return this.resolve(policy, next, roles);
     }, this.deps.audit);

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CASE_LIST_SCHEMA_ID,
@@ -122,6 +122,41 @@ afterEach(() => {
 });
 
 describe("strategy selection in the shell", () => {
+  it("reconciles an open selector draft when a policy refresh removes that choice", async () => {
+    let restricted = false;
+    const fetchStub = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
+      if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["contributor"], capabilities: ["investigation:read"] }) };
+      if (url === "/api/ui-strategies/effective") {
+        return restricted ? jsonResponse({
+          schemaId: "cd-collab.ui_strategy_effective.v1",
+          policyRevision: 2,
+          preferenceRevision: 0,
+          preferredId: null,
+          effectiveId: "war-room",
+          defaultId: "war-room",
+          enabledIds: ["war-room"],
+          selectableIds: ["war-room"],
+          canSelect: true,
+          source: "instance_default",
+        }) : strategyEffective();
+      }
+      return runtimeReadResponse(url, []) ?? { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Signed in as Alice" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Investigation First/u }));
+    restricted = true;
+    act(() => window.dispatchEvent(new Event("contextdesk:ui-strategy-policy-changed")));
+
+    await waitFor(() => expect(screen.queryByRole("radio", { name: /Investigation First/u })).toBeNull());
+    expect((screen.getByRole("radio", { name: /War Room/u }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("button", { name: "Use selected experience" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("keeps Overview canonical while applying the selected strategy only to Investigations", async () => {
     if (typeof window.localStorage?.removeItem === "function") {
       window.localStorage.removeItem("cd-ui-strategy:alice");

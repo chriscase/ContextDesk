@@ -216,6 +216,11 @@ function EvidenceCard() {
   const [feedback, setFeedback] = useState<{ tone: "danger" | "success"; text: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const busy = runtime.mutations.uploadEvidence.status === "running";
+  useEffect(() => {
+    if (!runtime.capabilities.canReadPrivate && privacyClass === "owner_only") {
+      setPrivacyClass("share_safe");
+    }
+  }, [privacyClass, runtime.capabilities.canReadPrivate]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const command = runtime.commands.uploadEvidence;

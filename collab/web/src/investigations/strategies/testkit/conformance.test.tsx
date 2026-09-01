@@ -415,11 +415,12 @@ const STRATEGY_COVERAGE_MANIFEST: Readonly<
     kind: "dedicated-coverage",
     dedicatedSpecs: [
       "collab/web/src/investigations/strategies/beacon/BeaconStrategy.test.tsx",
+      "collab/e2e/specs/29-beacon-rapid-intake.spec.ts",
     ],
     evidence:
-      "The Beacon pilot has dedicated component coverage for denied/no-read, sparse collection and detail states, append-only entry, explicit Situation and cited-hypothesis promotion, evidence attachment, focus return, and canonical shell navigation. Browser qualification is required before the pilot may be marked available.",
+      "The Beacon pilot has dedicated component and browser coverage for administrator rollout, Overview isolation, denied/no-read zero-call behavior, viewer zero-write behavior, sparse collection and detail states, append-only entry, explicit Situation and cited-hypothesis promotion, evidence attachment, focus return, canonical shell navigation, narrow reflow, forced colors, and reduced motion.",
     notSharedBecause:
-      "Beacon is enrolled at registration time with a dedicated component suite while its strategy-neutral browser-profile journey is still a release gate; this entry makes that incomplete browser claim explicit rather than treating the pilot as already qualified.",
+      "Beacon is held to the shared component profile from its dedicated suite and qualified through a dedicated browser journey; this manifest records the earned coverage without claiming it is mounted by the strategy-neutral runner in this file.",
   },
   "war-room": {
     kind: "dedicated-coverage",
@@ -497,13 +498,15 @@ describe("shipped strategy conformance coverage", () => {
     expect(enrolledIds("dedicated-coverage")).toEqual(["beacon", "keystone", "war-room"]);
   });
 
-  it("records Beacon's shared component profile while keeping browser qualification pending", () => {
+  it("records Beacon's shared component and dedicated browser qualification", () => {
     const enrollment = dedicatedEnrollment("beacon");
     expect([...enrollment.dedicatedSpecs]).toEqual([
       "collab/web/src/investigations/strategies/beacon/BeaconStrategy.test.tsx",
+      "collab/e2e/specs/29-beacon-rapid-intake.spec.ts",
     ]);
     expect(repositorySource(enrollment.dedicatedSpecs[0]!)).toContain("runComponentConformance");
-    expect(enrollment.notSharedBecause).toContain("browser-profile journey is still a release gate");
+    expect(repositorySource(enrollment.dedicatedSpecs[1]!)).toContain("emits no durable writes");
+    expect(enrollment.notSharedBecause).toContain("dedicated browser journey");
   });
 
   it("records Keystone's shared component-profile suite without claiming browser coverage", () => {

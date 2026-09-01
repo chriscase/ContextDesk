@@ -109,7 +109,10 @@ export class MemoryStrategyGovernanceStore implements StrategyGovernanceStore {
   }
 
   async loadPolicy(): Promise<UiStrategyGovernancePolicyV1 | null> {
-    return this.policy ? structuredClone(this.policy) : null;
+    // SQLite rehydrates the in-memory mirror through its generic state
+    // adapter. Re-parse on every publication so a corrupted or drifted JSON
+    // document can never bypass the policy fingerprint and rule invariants.
+    return this.policy ? parseUiStrategyGovernancePolicy(structuredClone(this.policy)) : null;
   }
 
   async loadPreference(userId: string): Promise<UiStrategyPreferenceRecord | null> {

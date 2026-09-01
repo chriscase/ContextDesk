@@ -43,13 +43,13 @@ function mount(options: {
 } = {}) {
   const gateway = options.gateway ?? createInvestigationGatewayDouble();
   const shell = { ...SHELL, ...options.shell };
-  render(
+  const tree = (capabilities: readonly string[]) => (
     <InvestigationRuntimeGatewayHarness gateway={gateway}>
       <InvestigationRuntimeProvider
         identityKey={ALICE.id}
         identity={ALICE}
         authorityKey="alice-authority"
-        capabilities={options.capabilities ?? ["investigation:read", "investigation:write", "run:strategies"]}
+        capabilities={capabilities}
         readOnly={false}
         active
         focusCaseId={shell.focusCaseId}
@@ -58,9 +58,14 @@ function mount(options: {
       >
         <BeaconStrategy {...shell} />
       </InvestigationRuntimeProvider>
-    </InvestigationRuntimeGatewayHarness>,
+    </InvestigationRuntimeGatewayHarness>
   );
-  return { gateway, shell };
+  const view = render(tree(options.capabilities ?? ["investigation:read", "investigation:write", "run:strategies"]));
+  return {
+    gateway,
+    shell,
+    rerenderCapabilities: (capabilities: readonly string[]) => view.rerender(tree(capabilities)),
+  };
 }
 
 describe("Beacon rapid-intake strategy", () => {
@@ -158,6 +163,18 @@ describe("Beacon rapid-intake strategy", () => {
       expect.objectContaining({ filename: "gateway.log", mediaType: "text/plain", kind: "attachment", summary: "Captured during the affected interval." }),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it("drops an owner-only upload draft when private-read authority is removed", async () => {
+    const { rerenderCapabilities } = mount({
+      capabilities: ["investigation:read", "investigation:write", "evidence:private:read"],
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    const privacy = await screen.findByRole("combobox", { name: "Privacy" }) as HTMLSelectElement;
+    expect(privacy.value).toBe("owner_only");
+    rerenderCapabilities(["investigation:read", "investigation:write"]);
+    await waitFor(() => expect(privacy.value).toBe("share_safe"));
+    expect(screen.queryByRole("option", { name: "Owner only" })).toBeNull();
   });
 
   it("focuses a truthful, non-busy denied detail without issuing a read", async () => {

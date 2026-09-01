@@ -32,6 +32,20 @@ function enabledBeacon(expectedRevision: number): UiStrategyGovernancePolicyInpu
 }
 
 describe("StrategyGovernanceService", () => {
+  it("rejects malformed direct preference callers before a store mutation", async () => {
+    const store = new MemoryStrategyGovernanceStore();
+    const audit = new MemoryAuditStore();
+    const service = new StrategyGovernanceService({ store, audit });
+    await expect(service.updatePreference({
+      schemaId: "cd-collab.ui_strategy_preference_update.v1",
+      expectedPolicyRevision: 0,
+      expectedPreferenceRevision: 0,
+      strategyId: "unknown-strategy",
+    } as never, "local:alice", ["contributor"], "test")).rejects.toThrow();
+    expect(await store.loadPreference("local:alice")).toBeNull();
+    expect(await audit.list({ action: "ui_strategy_preference_update" })).toEqual([]);
+  });
+
   it("starts fail-closed with Beacon hidden and no durable preference", async () => {
     const service = new StrategyGovernanceService({
       store: new MemoryStrategyGovernanceStore(),

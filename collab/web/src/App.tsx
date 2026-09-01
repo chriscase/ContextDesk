@@ -272,8 +272,9 @@ function AccountMenu(props: {
   }, [open]);
 
   useEffect(() => {
-    if (!open) setDraftStrategyId(props.strategy.id);
-  }, [open, props.strategy.id]);
+    const draftIsSelectable = props.strategyOptions.some(({ id }) => id === draftStrategyId);
+    if (!open || !draftIsSelectable) setDraftStrategyId(props.strategy.id);
+  }, [draftStrategyId, open, props.strategy.id, props.strategyOptions]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (event.key === "Escape" && open) {
