@@ -57,6 +57,11 @@ import {
   PgModelPurposePolicyStore,
   type ModelPurposePolicyStore,
 } from "./modules/model-policy/index.js";
+import {
+  PgStrategyGovernanceStore,
+  StrategyGovernanceService,
+  type StrategyGovernanceStore,
+} from "./modules/strategy-governance/index.js";
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 import {
   PgLocalGrantStore,
@@ -97,6 +102,7 @@ interface StorageRuntime {
   experiments: ExperimentStore;
   jobs: TriageJobStore;
   modelPolicy: ModelPurposePolicyStore;
+  strategyGovernance: StrategyGovernanceStore;
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
@@ -124,6 +130,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       experiments: runtime.experiments,
       jobs: runtime.jobs,
       modelPolicy: runtime.modelPolicy,
+      strategyGovernance: runtime.strategyGovernance,
       applyState: runtime.applyState,
       profiles: runtime.profiles,
       grants: runtime.grants,
@@ -150,6 +157,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     experiments: new PgExperimentStore(pool),
     jobs: new PgTriageJobStore(pool),
     modelPolicy: new PgModelPurposePolicyStore(pool),
+    strategyGovernance: new PgStrategyGovernanceStore(pool),
     applyState: new PgPortableApplyStateStore(pool),
     profiles: new PgUserProfileStore(pool),
     grants: new PgLocalGrantStore(pool),
@@ -322,6 +330,10 @@ async function main(): Promise<void> {
     store: storage.modelPolicy,
     profiles: triageProfiles,
   });
+  const strategyGovernance = new StrategyGovernanceService({
+    store: storage.strategyGovernance,
+    audit,
+  });
   const triageRuns = new TriageRunService({
     cases: domain,
     audit,
@@ -418,6 +430,7 @@ async function main(): Promise<void> {
     imports,
     triageRuns,
     modelPolicy,
+    strategyGovernance,
     presence: storage.presence,
     experiments,
     exporter,

@@ -3,12 +3,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import {
+  UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
+  UI_STRATEGY_PREFERENCE_UPDATE_SCHEMA_ID,
+} from "@cd-collab/contracts";
 import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../evidence/store.js";
 import { CatalogService } from "../modules/catalog/index.js";
 import { CaseService } from "../modules/cases/index.js";
 import { ExperimentService } from "../modules/experiments/index.js";
 import { ImportService } from "../modules/import/index.js";
 import { TriageRunService } from "../modules/triage-runs/index.js";
+import { StrategyGovernanceService } from "../modules/strategy-governance/index.js";
 import { createSqliteRuntime } from "./sqlite.js";
 
 const EXPERIMENT_SUMMARY = JSON.parse(
@@ -16,6 +21,156 @@ const EXPERIMENT_SUMMARY = JSON.parse(
 ) as unknown;
 
 describe("SQLite local runtime", () => {
+  it("persists strategy policy, preference, and audit atomically across reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-strategy-"));
+    const path = join(root, "collab.sqlite");
+    try {
+      const first = createSqliteRuntime(path);
+      const governance = new StrategyGovernanceService({
+        store: first.strategyGovernance,
+        audit: first.audit,
+      });
+      const policy = await governance.updatePolicy({
+        schemaId: UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
+        expectedRevision: 0,
+        instance: {
+          enabledIds: ["war-room", "investigation-first", "keystone", "beacon"],
+          visibleIds: ["war-room", "beacon"],
+          defaultId: "war-room",
+          selectionMode: "approved_subset",
+          approvedIds: ["war-room", "beacon"],
+        },
+        roleRules: [],
+      }, "local:admin", "test");
+      await governance.updatePreference({
+        schemaId: UI_STRATEGY_PREFERENCE_UPDATE_SCHEMA_ID,
+        expectedPolicyRevision: policy.revision,
+        expectedPreferenceRevision: 0,
+        strategyId: "beacon",
+      }, "local:alice", ["contributor"], "test");
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      const reopened = new StrategyGovernanceService({
+        store: second.strategyGovernance,
+        audit: second.audit,
+      });
+      expect(await reopened.effective("local:alice", ["contributor"])).toMatchObject({
+        policyRevision: 1,
+        preferenceRevision: 1,
+        effectiveId: "beacon",
+      });
+      expect(await second.audit.list({ action: "ui_strategy_policy_update" })).toHaveLength(1);
+      expect(await second.audit.list({ action: "ui_strategy_preference_update" })).toHaveLength(1);
+      second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls strategy policy back across SQLite reopen when audit confirmation fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-strategy-rollback-"));
+    const path = join(root, "collab.sqlite");
+    try {
+      const first = createSqliteRuntime(path);
+      first.audit.append = async () => {
+        throw new Error("injected strategy audit failure");
+      };
+      const governance = new StrategyGovernanceService({
+        store: first.strategyGovernance,
+        audit: first.audit,
+      });
+      await expect(governance.updatePolicy({
+        schemaId: UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
+        expectedRevision: 0,
+        instance: {
+          enabledIds: ["war-room", "beacon"],
+          visibleIds: ["war-room", "beacon"],
+          defaultId: "war-room",
+          selectionMode: "free",
+          approvedIds: ["war-room", "beacon"],
+        },
+        roleRules: [],
+      }, "local:admin", "test")).rejects.toThrow(/injected strategy audit failure/u);
+      expect((await governance.loadPolicy()).revision).toBe(0);
+      first.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      const reopenedGovernance = new StrategyGovernanceService({
+        store: reopened.strategyGovernance,
+        audit: reopened.audit,
+      });
+      expect((await reopenedGovernance.loadPolicy()).revision).toBe(0);
+      expect(await reopened.audit.list({ action: "ui_strategy_policy_update" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes unrelated SQLite audit writes outside a failing strategy transaction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-strategy-interleave-"));
+    const path = join(root, "collab.sqlite");
+    try {
+      const runtime = createSqliteRuntime(path);
+      let releaseFailure!: () => void;
+      let markAuditReached!: () => void;
+      const auditReached = new Promise<void>((resolve) => { markAuditReached = resolve; });
+      const failureReleased = new Promise<void>((resolve) => { releaseFailure = resolve; });
+      const failingAudit = {
+        append: async () => {
+          markAuditReached();
+          await failureReleased;
+          throw new Error("injected delayed strategy audit failure");
+        },
+        list: (filter?: { action?: string; identity?: string }) => runtime.audit.list(filter),
+      };
+      const governance = new StrategyGovernanceService({
+        store: runtime.strategyGovernance,
+        audit: failingAudit,
+      });
+      const policyWrite = governance.updatePolicy({
+        schemaId: UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
+        expectedRevision: 0,
+        instance: {
+          enabledIds: ["war-room", "beacon"],
+          visibleIds: ["war-room", "beacon"],
+          defaultId: "war-room",
+          selectionMode: "free",
+          approvedIds: ["war-room", "beacon"],
+        },
+        roleRules: [],
+      }, "local:admin", "test");
+      await auditReached;
+      let unrelatedConfirmed = false;
+      const unrelatedWrite = runtime.audit.append({
+        identity: "local:operator",
+        action: "unrelated_operation",
+        target: "fixture",
+        origin: "test",
+        outcome: "success",
+      }).then(() => { unrelatedConfirmed = true; });
+      await Promise.resolve();
+      expect(unrelatedConfirmed).toBe(false);
+      releaseFailure();
+      await expect(policyWrite).rejects.toThrow(/injected delayed strategy audit failure/u);
+      await unrelatedWrite;
+      expect((await governance.loadPolicy()).revision).toBe(0);
+      expect(await runtime.audit.list({ action: "unrelated_operation" })).toHaveLength(1);
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.audit.list({ action: "unrelated_operation" })).toHaveLength(1);
+      expect((await new StrategyGovernanceService({
+        store: reopened.strategyGovernance,
+        audit: reopened.audit,
+      }).loadPolicy()).revision).toBe(0);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("persists the collaboration stores across a process reopen", async () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-"));
     const path = join(root, "collab.sqlite");

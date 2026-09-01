@@ -47,6 +47,10 @@ import {
   MemoryUserProfileStore,
 } from "../../server/src/modules/people/index.js";
 import {
+  MemoryStrategyGovernanceStore,
+  StrategyGovernanceService,
+} from "../../server/src/modules/strategy-governance/index.js";
+import {
   loadPortableInstallationId,
   memoryApplyBoundary,
   MemoryPortableApplyStateStore,
@@ -113,6 +117,10 @@ async function main(): Promise<void> {
   const applyState = new MemoryPortableApplyStateStore();
   const profiles = new MemoryUserProfileStore();
   const grants = new MemoryLocalGrantStore();
+  const strategyGovernance = new StrategyGovernanceService({
+    store: new MemoryStrategyGovernanceStore(),
+    audit,
+  });
   const catalog = new CatalogService(catalogStore, audit);
   // Same construction order as production: the resolution guard exists before
   // the case service, so a resolved status can never be reached without a
@@ -339,6 +347,7 @@ async function main(): Promise<void> {
     publicIdentities,
     profiles,
     grants,
+    strategyGovernance,
     security: {
       auth: {
         adapter: new MapAuthAdapter(adapterUsers()),

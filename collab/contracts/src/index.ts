@@ -25,6 +25,39 @@ export {
   parseModelPurposePolicy,
   parseModelPurposePolicyInput,
 } from "./model-purpose-policy.js";
+
+export {
+  UI_STRATEGY_EFFECTIVE_SCHEMA_ID,
+  UI_STRATEGY_EFFECTIVE_SOURCES,
+  UI_STRATEGY_ERROR_CODES,
+  UI_STRATEGY_ERROR_SCHEMA_ID,
+  UI_STRATEGY_IDS,
+  UI_STRATEGY_POLICY_SCHEMA_ID,
+  UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
+  UI_STRATEGY_PREFERENCE_UPDATE_SCHEMA_ID,
+  UI_STRATEGY_SELECTION_MODES,
+  createUiStrategyPolicy,
+  defaultUiStrategyPolicyInput,
+  parseUiStrategyEffective,
+  parseUiStrategyError,
+  parseUiStrategyGovernancePolicy,
+  parseUiStrategyPolicyInput,
+  parseUiStrategyPreferenceUpdate,
+  uiStrategyPolicyFingerprint,
+} from "./ui-strategy-governance.js";
+export type {
+  UiStrategyEffectiveSource,
+  UiStrategyEffectiveV1,
+  UiStrategyErrorCode,
+  UiStrategyErrorV1,
+  UiStrategyGovernancePolicyInputV1,
+  UiStrategyGovernancePolicyV1,
+  UiStrategyId,
+  UiStrategyInstanceRuleV1,
+  UiStrategyPreferenceUpdateV1,
+  UiStrategyRoleRuleV1,
+  UiStrategySelectionMode,
+} from "./ui-strategy-governance.js";
 export type {
   ModelPrivateEvidenceRule,
   ModelPurpose,

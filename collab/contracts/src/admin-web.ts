@@ -16,6 +16,36 @@ export type {
 } from "./model-purpose-policy-shared.js";
 
 export {
+  UI_STRATEGY_EFFECTIVE_SCHEMA_ID,
+  UI_STRATEGY_EFFECTIVE_SOURCES,
+  UI_STRATEGY_ERROR_CODES,
+  UI_STRATEGY_ERROR_SCHEMA_ID,
+  UI_STRATEGY_IDS,
+  UI_STRATEGY_POLICY_SCHEMA_ID,
+  UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
+  UI_STRATEGY_PREFERENCE_UPDATE_SCHEMA_ID,
+  UI_STRATEGY_SELECTION_MODES,
+  parseUiStrategyEffective,
+  parseUiStrategyError,
+  parseUiStrategyPolicy,
+  parseUiStrategyPolicyInput,
+  parseUiStrategyPreferenceUpdate,
+} from "./ui-strategy-governance-shared.js";
+export type {
+  UiStrategyEffectiveSource,
+  UiStrategyEffectiveV1,
+  UiStrategyErrorCode,
+  UiStrategyErrorV1,
+  UiStrategyGovernancePolicyInputV1,
+  UiStrategyGovernancePolicyV1,
+  UiStrategyId,
+  UiStrategyInstanceRuleV1,
+  UiStrategyPreferenceUpdateV1,
+  UiStrategyRoleRuleV1,
+  UiStrategySelectionMode,
+} from "./ui-strategy-governance-shared.js";
+
+export {
   COMPONENT_HEALTH_COMPONENT_IDS,
   COMPONENT_HEALTH_NOTICES,
   COMPONENT_HEALTH_SCHEMA_ID,

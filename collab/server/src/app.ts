@@ -74,6 +74,10 @@ import {
 import { registerReferenceRoutes, type ReferenceService } from "./modules/references/index.js";
 import { registerResolutionRoutes, type ResolutionService } from "./modules/resolutions/index.js";
 import { registerModelPurposePolicyRoutes, type ModelPurposePolicyService } from "./modules/model-policy/index.js";
+import {
+  registerStrategyGovernanceRoutes,
+  type StrategyGovernanceService,
+} from "./modules/strategy-governance/index.js";
 
 function requestPath(url: string): string {
   return url.split("?", 1)[0] ?? url;
@@ -113,6 +117,7 @@ export interface AppDeps {
   imports?: ImportService;
   triageRuns?: TriageRunService;
   modelPolicy?: ModelPurposePolicyService;
+  strategyGovernance?: StrategyGovernanceService;
   presence?: PresenceService;
   logTime?: LogTimeService;
   workbench?: WorkbenchService;
@@ -303,6 +308,12 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         sessionAuth,
         audit: security.audit,
         policy: deps.modelPolicy,
+      });
+    }
+    if (deps.strategyGovernance) {
+      await registerStrategyGovernanceRoutes(app, {
+        sessionAuth,
+        governance: deps.strategyGovernance,
       });
     }
     if (deps.domain) {
