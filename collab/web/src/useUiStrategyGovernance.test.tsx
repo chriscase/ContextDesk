@@ -115,4 +115,28 @@ describe("useUiStrategyGovernance", () => {
     expect(result.current.message).toMatch(/preference was not confirmed.*Current policy is loaded/u);
     expect(fetchStub).toHaveBeenCalledTimes(3);
   });
+
+  it("does not carry a preference-failure acknowledgement to another identity", async () => {
+    let reads = 0;
+    const fetchStub = vi.fn(async (_input: RequestInfo, init?: RequestInit) => {
+      if (init?.method === "PUT") throw new Error("response lost");
+      reads += 1;
+      if (reads === 2) return new Promise<Response>(() => undefined);
+      return reads === 1 ? effective("investigation-first", 1) : effective("war-room");
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    const { result, rerender } = renderHook(
+      (props: { identityId: string; authorityGeneration: number }) =>
+        useUiStrategyGovernance({ ...props, enabled: true }),
+      { initialProps: { identityId: "local:alice", authorityGeneration: 1 } },
+    );
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    await act(async () => {
+      expect(await result.current.savePreference("war-room")).toBe(false);
+    });
+    expect(result.current.message).toMatch(/preference was not confirmed/u);
+    rerender({ identityId: "local:bob", authorityGeneration: 2 });
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(result.current.message).toBe("");
+  });
 });

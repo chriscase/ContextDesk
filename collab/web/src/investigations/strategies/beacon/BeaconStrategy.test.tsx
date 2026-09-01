@@ -181,13 +181,16 @@ describe("Beacon rapid-intake strategy", () => {
     const privacy = await screen.findByRole("combobox", { name: "Privacy" }) as HTMLSelectElement;
     expect(privacy.value).toBe("owner_only");
     rerenderCapabilities(["investigation:read", "investigation:write"]);
-    await waitFor(() => expect(privacy.value).toBe("share_safe"));
+    await waitFor(() => expect(privacy.value).toBe(""));
     expect(screen.queryByRole("option", { name: "Owner only" })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toMatch(/Choose a privacy level again/u);
     const file = new File(["private draft"], "authority-change.log", { type: "text/plain" });
     const fileInput = screen.getByLabelText(/File \(up to/u) as HTMLInputElement;
     Object.defineProperty(fileInput, "files", { configurable: true, value: [file] });
     fireEvent.change(fileInput);
     fireEvent.change(screen.getByRole("textbox", { name: "Why does this matter?" }), { target: { value: "Captured before authority changed." } });
+    expect((screen.getByRole("button", { name: "Attach evidence" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(privacy, { target: { value: "share_safe" } });
     fireEvent.submit(screen.getByRole("button", { name: "Attach evidence" }).closest("form")!);
     await waitFor(() => expect(gateway.uploadEvidence).toHaveBeenCalledTimes(1));
     expect(gateway.uploadEvidence).toHaveBeenCalledWith(
@@ -204,6 +207,15 @@ describe("Beacon rapid-intake strategy", () => {
     expect(title.value).toBe("Alice's unfinished signal");
     rerenderIdentity({ id: "bob", username: "bob", displayName: "Bob Singh" });
     await waitFor(() => expect((screen.getByRole("textbox", { name: "Investigation title" }) as HTMLInputElement).value).toBe(""));
+  });
+
+  it("preserves a draft when only the same identity's descriptive profile changes", async () => {
+    const { rerenderIdentity } = mount();
+    const title = await screen.findByRole("textbox", { name: "Investigation title" }) as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "Same user's unfinished signal" } });
+    rerenderIdentity({ ...ALICE, displayName: "Alice N." });
+    expect((screen.getByRole("textbox", { name: "Investigation title" }) as HTMLInputElement).value)
+      .toBe("Same user's unfinished signal");
   });
 
   it("focuses a truthful, non-busy denied detail without issuing a read", async () => {
