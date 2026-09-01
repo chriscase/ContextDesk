@@ -411,6 +411,16 @@ const STRATEGY_COVERAGE_MANIFEST: Readonly<
     notSharedBecause:
       "The preview uses dedicated Keystone component and browser journeys rather than mounting Keystone in the strategy-neutral component runner; this manifest records both earned claims without calling them shared-runner coverage.",
   },
+  "beacon": {
+    kind: "dedicated-coverage",
+    dedicatedSpecs: [
+      "collab/web/src/investigations/strategies/beacon/BeaconStrategy.test.tsx",
+    ],
+    evidence:
+      "The Beacon pilot has dedicated component coverage for denied/no-read, sparse collection and detail states, append-only entry, explicit Situation and cited-hypothesis promotion, evidence attachment, focus return, and canonical shell navigation. Browser qualification is required before the pilot may be marked available.",
+    notSharedBecause:
+      "Beacon is enrolled at registration time with a dedicated component suite while its strategy-neutral browser-profile journey is still a release gate; this entry makes that incomplete browser claim explicit rather than treating the pilot as already qualified.",
+  },
   "war-room": {
     kind: "dedicated-coverage",
     dedicatedSpecs: [
@@ -484,7 +494,16 @@ describe("shipped strategy conformance coverage", () => {
 
   it("separates a shared-profile claim from dedicated coverage", () => {
     expect(enrolledIds("shared-conformance")).toEqual(["investigation-first"]);
-    expect(enrolledIds("dedicated-coverage")).toEqual(["keystone", "war-room"]);
+    expect(enrolledIds("dedicated-coverage")).toEqual(["beacon", "keystone", "war-room"]);
+  });
+
+  it("records Beacon's shared component profile while keeping browser qualification pending", () => {
+    const enrollment = dedicatedEnrollment("beacon");
+    expect([...enrollment.dedicatedSpecs]).toEqual([
+      "collab/web/src/investigations/strategies/beacon/BeaconStrategy.test.tsx",
+    ]);
+    expect(repositorySource(enrollment.dedicatedSpecs[0]!)).toContain("runComponentConformance");
+    expect(enrollment.notSharedBecause).toContain("browser-profile journey is still a release gate");
   });
 
   it("records Keystone's shared component-profile suite without claiming browser coverage", () => {
