@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { UI_STRATEGY_IDS as GOVERNED_UI_STRATEGY_IDS } from "@cd-collab/contracts/admin";
 import {
   DEFAULT_UI_STRATEGY_ID,
   INVESTIGATION_RUNTIME_COMPATIBILITY,
@@ -15,7 +16,9 @@ describe("UI strategy catalogue", () => {
       "war-room",
       "investigation-first",
       "keystone",
+      "beacon",
     ] satisfies readonly UiStrategyId[]);
+    expect(UI_STRATEGIES.map((strategy) => strategy.id)).toEqual(GOVERNED_UI_STRATEGY_IDS);
 
     for (const strategy of UI_STRATEGIES) {
       expect(strategy.name).toBeTruthy();
@@ -29,6 +32,18 @@ describe("UI strategy catalogue", () => {
       )).toBe(true);
       expect(isUiStrategyRuntimeCompatible(strategy)).toBe(true);
     }
+  });
+
+  it("keeps Beacon a preview presentation with only public Runtime features", () => {
+    const beacon = UI_STRATEGIES.find(({ id }) => id === "beacon");
+    expect(beacon).toMatchObject({ maturity: "pilot", status: "preview", version: "0.1.0" });
+    expect(beacon?.optionalFeatures).toEqual([
+      "investigation-create",
+      "evidence-inventory",
+      "evidence-upload",
+      "evidence-linked-hypothesis",
+      "situation-edit",
+    ]);
   });
 
   it("describes Keystone's narrow write tools without assigning them to other strategies", () => {

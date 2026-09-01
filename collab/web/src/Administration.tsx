@@ -18,22 +18,25 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { AdminPeoplePanel } from "./AdminPeoplePanel.js";
 import { AdminLdapPanel } from "./AdminLdapPanel.js";
 import { AdminModelPolicyPanel } from "./AdminModelPolicyPanel.js";
+import { AdminUiStrategyPanel } from "./AdminUiStrategyPanel.js";
 import { ComponentHealthPanel } from "./ComponentHealthPanel.js";
 import { protectedApiFetch } from "./protected-api.js";
 
-export type AdminTab = "roles" | "people" | "ldap" | "model-policy";
+export type AdminTab = "roles" | "people" | "ldap" | "model-policy" | "ui-strategies";
 
 const ADMIN_TAB_PATHS: Record<AdminTab, string> = {
   roles: "/administration",
   people: "/admin/people",
   ldap: "/admin/ldap",
   "model-policy": "/admin/model-policy",
+  "ui-strategies": "/admin/ui-strategies",
 };
 
 function adminTabFromPathname(pathname: string): AdminTab {
   if (pathname === "/admin/people") return "people";
   if (pathname === "/admin/ldap") return "ldap";
   if (pathname === "/admin/model-policy") return "model-policy";
+  if (pathname === "/admin/ui-strategies") return "ui-strategies";
   return "roles";
 }
 
@@ -134,6 +137,8 @@ function Confirmation(props: {
 export function Administration(props: {
   tab?: AdminTab;
   onSelectTab?: (tab: AdminTab) => void;
+  canManageUsers?: boolean;
+  canManageSystem?: boolean;
 } = {}) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -157,6 +162,8 @@ export function Administration(props: {
     adminTabFromPathname(window.location.pathname),
   );
   const activeTab = props.tab ?? uncontrolledTab;
+  const canManageUsers = props.canManageUsers ?? true;
+  const canManageSystem = props.canManageSystem ?? true;
 
   useEffect(() => headingRef.current?.focus(), []);
 
@@ -168,6 +175,8 @@ export function Administration(props: {
           ? "Directory · Administration · ContextDesk War Room"
           : activeTab === "model-policy"
             ? "Model use · Administration · ContextDesk War Room"
+            : activeTab === "ui-strategies"
+              ? "Investigation experiences · Administration · ContextDesk War Room"
           : "Administration · ContextDesk War Room";
   }, [activeTab]);
 
@@ -220,8 +229,8 @@ export function Administration(props: {
   }, []);
 
   useEffect(() => {
-    void refreshMappings();
-  }, [refreshMappings]);
+    if (canManageUsers && activeTab === "roles") void refreshMappings();
+  }, [activeTab, canManageUsers, refreshMappings]);
 
   async function searchDirectory(event: FormEvent) {
     event.preventDefault();
@@ -361,13 +370,13 @@ export function Administration(props: {
         <p className="administration__eyebrow">Workspace administration</p>
         <h2 id="administration-title" ref={headingRef} tabIndex={-1}>Administration</h2>
         <p>
-          Discover directory references and explicitly map groups to ContextDesk roles. Searching
-          does not create users or groups, change the directory, or grant access by itself.
+          Manage the workspace controls authorized for this account. Identity, permission, model,
+          and presentation policies remain separate and are enforced by the server.
         </p>
       </header>
 
       <div className="admin-people-tabs" role="tablist" aria-label="Administration sections">
-        <button
+        {canManageUsers ? <button
           type="button"
           role="tab"
           aria-selected={activeTab === "roles"}
@@ -376,8 +385,8 @@ export function Administration(props: {
           onClick={() => selectTab("roles")}
         >
           Group role mappings
-        </button>
-        <button
+        </button> : null}
+        {canManageUsers ? <button
           type="button"
           role="tab"
           aria-selected={activeTab === "people"}
@@ -386,8 +395,8 @@ export function Administration(props: {
           onClick={() => selectTab("people")}
         >
           People
-        </button>
-        <button
+        </button> : null}
+        {canManageUsers ? <button
           type="button"
           role="tab"
           aria-selected={activeTab === "ldap"}
@@ -396,8 +405,8 @@ export function Administration(props: {
           onClick={() => selectTab("ldap")}
         >
           Directory
-        </button>
-        <button
+        </button> : null}
+        {canManageSystem ? <button
           type="button"
           role="tab"
           aria-selected={activeTab === "model-policy"}
@@ -406,34 +415,44 @@ export function Administration(props: {
           onClick={() => selectTab("model-policy")}
         >
           Model use
-        </button>
+        </button> : null}
+        {canManageSystem ? <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "ui-strategies"}
+          aria-controls="administration-ui-strategies-panel"
+          id="administration-tab-ui-strategies"
+          onClick={() => selectTab("ui-strategies")}
+        >
+          Investigation experiences
+        </button> : null}
       </div>
 
-      <div
+      {canManageUsers ? <div
         id="administration-people-panel"
         role="tabpanel"
         aria-labelledby="administration-tab-people"
         hidden={activeTab !== "people"}
       >
         {activeTab === "people" ? <AdminPeoplePanel /> : null}
-      </div>
+      </div> : null}
 
-      <div
+      {canManageUsers ? <div
         id="administration-ldap-panel"
         role="tabpanel"
         aria-labelledby="administration-tab-ldap"
         hidden={activeTab !== "ldap"}
       >
         {activeTab === "ldap" ? <AdminLdapPanel /> : null}
-      </div>
+      </div> : null}
 
-      <div
+      {canManageUsers ? <div
         id="administration-roles-panel"
         role="tabpanel"
         aria-labelledby="administration-tab-roles"
         hidden={activeTab !== "roles"}
       >
-      {error ? <p ref={errorRef} tabIndex={-1} className="administration__message administration__message--error" role="alert">{error}</p> : null}
+      {activeTab === "roles" ? <>{error ? <p ref={errorRef} tabIndex={-1} className="administration__message administration__message--error" role="alert">{error}</p> : null}
       {status ? <p ref={statusRef} tabIndex={-1} className="administration__message" role="status">{status}</p> : null}
 
       <ComponentHealthPanel />
@@ -584,16 +603,26 @@ export function Administration(props: {
           Permissions come only from the persistent mappings shown above.
         </p>
       </aside>
-      </div>
+      </> : null}
+      </div> : null}
 
-      <div
+      {canManageSystem ? <div
         id="administration-model-policy-panel"
         role="tabpanel"
         aria-labelledby="administration-tab-model-policy"
         hidden={activeTab !== "model-policy"}
       >
         {activeTab === "model-policy" ? <AdminModelPolicyPanel /> : null}
-      </div>
+      </div> : null}
+
+      {canManageSystem ? <div
+        id="administration-ui-strategies-panel"
+        role="tabpanel"
+        aria-labelledby="administration-tab-ui-strategies"
+        hidden={activeTab !== "ui-strategies"}
+      >
+        {activeTab === "ui-strategies" ? <AdminUiStrategyPanel /> : null}
+      </div> : null}
 
       {pending ? <Confirmation change={pending} onCancel={closeConfirmation} onConfirm={() => void applyChange(pending)} /> : null}
     </section>

@@ -63,6 +63,75 @@
   gap: 1rem;
 }
 
+.admin-strategies__revision,
+.admin-strategies__meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.admin-strategies__cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 0.8rem;
+  margin-block: 1rem;
+}
+
+.admin-strategies__card {
+  display: grid;
+  align-content: start;
+  gap: 0.6rem;
+  padding: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.admin-strategies__card h4,
+.admin-strategies__card p {
+  margin: 0;
+}
+
+.admin-strategies__card label,
+.admin-strategies__selection label,
+.admin-strategies__rules label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.admin-strategies__selection,
+.admin-strategies__rules fieldset {
+  display: grid;
+  gap: 0.65rem;
+  margin-block: 1rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+
+.admin-strategies__rules {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 0.7rem;
+}
+
+.admin-strategies__rules fieldset {
+  margin: 0;
+}
+
+.admin-strategies__rules select {
+  min-width: 0;
+  width: 100%;
+}
+
+.admin-strategies__actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-block-start: 1rem;
+}
+
 .administration__policy-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));

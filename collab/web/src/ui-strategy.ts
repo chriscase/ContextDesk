@@ -10,7 +10,7 @@
 
 export const DEFAULT_UI_STRATEGY_ID = "war-room" as const;
 
-export const UI_STRATEGY_IDS = ["war-room", "investigation-first", "keystone"] as const;
+export const UI_STRATEGY_IDS = ["war-room", "investigation-first", "keystone", "beacon"] as const;
 export type UiStrategyId = (typeof UI_STRATEGY_IDS)[number];
 
 export type UiStrategyMaturity = "reference" | "pilot";
@@ -137,6 +137,29 @@ export const UI_STRATEGIES: readonly UiStrategyDescriptor[] = [
     optionalFeatures: [
       "evidence-inventory",
       "evidence-annotations",
+      "evidence-linked-hypothesis",
+      "situation-edit",
+    ],
+  },
+  {
+    id: "beacon",
+    name: "Beacon",
+    description:
+      "An append-first rapid-intake workspace for recording dated updates, attaching evidence, and explicitly promoting what the team learns.",
+    previewToken: "strategy-beacon",
+    previewAsset: null,
+    maturity: "pilot",
+    status: "preview",
+    version: "0.1.0",
+    compatibility: {
+      schemaId: "cd-collab.case.v1",
+      version: "^1.0.0",
+      runtime: INVESTIGATION_RUNTIME_COMPATIBILITY,
+    },
+    optionalFeatures: [
+      "investigation-create",
+      "evidence-inventory",
+      "evidence-upload",
       "evidence-linked-hypothesis",
       "situation-edit",
     ],
