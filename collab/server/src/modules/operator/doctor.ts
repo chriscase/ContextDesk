@@ -15,12 +15,28 @@ import {
   type LiveProfileAlias,
 } from "@cd-collab/contracts";
 import { loadEvidenceS3Credentials, redactEvidenceS3Error } from "../../evidence/s3-secrets.js";
-import { loadEvidenceStorageSettings } from "../../evidence/s3-settings.js";
+import {
+  DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
+  DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+  EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND,
+  MAX_EVIDENCE_S3_UPLOAD_BYTES,
+  MAX_EVIDENCE_S3_TIMEOUT_MS,
+  MAX_EVIDENCE_UPLOAD_BYTES,
+  loadEvidenceStorageSettings,
+} from "../../evidence/s3-settings.js";
 import { loadLdapConfig } from "../auth/index.js";
 import { nodeOperatorFs, type OperatorFs } from "./fs.js";
 
 const MIN_NODE_MAJOR = 22;
 const LIVE_ALIAS_SET = new Set<string>(LIVE_PROFILE_ALIASES);
+const S3_UPLOAD_ENVELOPE_SUMMARY =
+  `S3 requestTimeout is absolute through PutObject/CopyObject response headers; `
+  + `max upload must be <= floor(timeoutMs/1000)*${EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND} `
+  + `(default ${DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES} at ${DEFAULT_EVIDENCE_S3_TIMEOUT_MS} ms; `
+  + `maximum ${MAX_EVIDENCE_S3_UPLOAD_BYTES} at ${MAX_EVIDENCE_S3_TIMEOUT_MS} ms); `
+  + `${MAX_EVIDENCE_UPLOAD_BYTES} is a protocol/future-MPU ceiling, not supported S3 v1; `
+  + "1 MiB/s is a conservative validation envelope, not a success guarantee, and networks/providers may require less; "
+  + "HTTP transfer remains guarded separately for one hour; unknown-length uploads remain count-enforced";
 
 export interface DoctorInput {
   env: NodeJS.ProcessEnv;
@@ -227,20 +243,20 @@ function checkEvidence(env: NodeJS.ProcessEnv, cwd: string, intent: Intent, fs: 
     return check(
       "evidence_root",
       root.status,
-      `${root.summary}; s3 evidence configuration accepted; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted`,
+      `${root.summary}; s3 evidence configuration accepted; ${S3_UPLOAD_ENVELOPE_SUMMARY}; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted`,
     );
   }
   if (doctorStorage(env) === "sqlite") {
     return check(
       "evidence_root",
       "warn",
-      "evidence root is a writable directory; sqlite plus s3 is a single-process evaluation shape; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted",
+      `evidence root is a writable directory; sqlite plus s3 is a single-process evaluation shape; ${S3_UPLOAD_ENVELOPE_SUMMARY}; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted`,
     );
   }
   return check(
     "evidence_root",
     "ok",
-    "evidence root is a writable directory; s3 evidence configuration accepted; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted",
+    `evidence root is a writable directory; s3 evidence configuration accepted; ${S3_UPLOAD_ENVELOPE_SUMMARY}; DeleteObject is required for staging, journal, and rollback cleanup; bucket not contacted`,
   );
 }
 

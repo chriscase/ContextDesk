@@ -73,10 +73,18 @@ that file into the `app` container. For S3, uncomment the matching
 `COLLAB_EVIDENCE_...` mappings under `app.environment` after setting their
 substitution values. Enable only the names selected for the deployment:
 present-but-empty optional S3 names are invalid, and filesystem mode rejects
-every present S3 name. `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` is provider-neutral
-and is accepted in filesystem mode; it bounds streamed evidence intake for
-both backends (default 512 MiB, range 1..5 GiB). Legacy JSON/base64 upload
-and JSON bytes download stay capped at 1,000,000 decoded bytes.
+every present S3 name. `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` is accepted in both
+modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.
+S3 v1 defaults to 30 MiB at the 30,000 ms timeout and validates at most
+`floor(COLLAB_EVIDENCE_S3_TIMEOUT_MS / 1000) * 1 MiB` (up to 120 MiB at the
+120,000 ms timeout). Smithy's `requestTimeout` is absolute through PutObject
+and CopyObject response headers. The 1 MiB/s relationship is a conservative
+validation envelope, not a success guarantee; actual networks and providers
+may need a lower max. The separate HTTP transfer guard remains one hour and
+unknown-length streams remain count-enforced. The 5 GiB value is a protocol
+and future-multipart ceiling, not a supported S3 v1 operating size. Legacy
+JSON/base64 upload and JSON bytes download stay capped at 1,000,000 decoded
+bytes. This does not add retention or filesystem-to-S3 migration.
 
 Run `npm run doctor` with the intended environment before startup. For S3 it
 validates names, credential sources, the custom CA file, bounds, and the local

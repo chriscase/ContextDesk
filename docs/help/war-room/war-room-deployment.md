@@ -99,10 +99,14 @@ surfaces.
   trust store for the S3 connection only; combine public roots and an
   internal CA in one PEM. There is no filesystem-to-S3 migration,
   retention, lifecycle, or multi-provider failover automation.
-- Streamed evidence intake is bounded by provider-neutral
-  `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` (default 512 MiB, range 1..5 GiB) for both
-  filesystem and S3. Legacy JSON/base64 upload and JSON bytes download remain
-  capped at 1,000,000 decoded bytes.
+- Streamed evidence intake uses `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` in both
+  modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.
+  S3 v1 defaults to 30 MiB at 30,000 ms and couples its supported maximum to
+  the absolute PutObject/CopyObject request timeout, up to 120 MiB at 120,000
+  ms. The 5 GiB value is not a supported S3 v1 operating size. See
+  help://war-room-s3-evidence-store for the exact relationship and nonclaims.
+  Legacy JSON/base64 upload and JSON bytes download remain capped at 1,000,000
+  decoded bytes.
 
 For the operating sequence, open help://war-room-workflow. For provenance,
 lane, and human-decision checks, open help://war-room-evidence-review. For the

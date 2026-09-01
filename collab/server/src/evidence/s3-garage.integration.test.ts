@@ -10,7 +10,10 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createEvidenceStore } from "./provider.js";
 import { loadEvidenceS3Credentials } from "./s3-secrets.js";
-import { loadEvidenceStorageSettings } from "./s3-settings.js";
+import {
+  evidenceS3SupportedMaxUploadBytes,
+  loadEvidenceStorageSettings,
+} from "./s3-settings.js";
 import {
   abandonS3WriteBatchForCrashTest,
   createS3ClientConfig,
@@ -472,6 +475,12 @@ describe.skipIf(!live)("S3EvidenceStore live Garage qualification", () => {
     if (settings.provider !== "s3" || credentials.mode !== "static") {
       throw new Error("factory-compatible live config must be static s3");
     }
+    expect(settings.maxUploadBytes).toBe(
+      Number.parseInt(env.COLLAB_EVIDENCE_MAX_UPLOAD_BYTES ?? "", 10),
+    );
+    expect(settings.maxUploadBytes).toBeLessThanOrEqual(
+      evidenceS3SupportedMaxUploadBytes(settings.s3.timeoutMs),
+    );
     const created = createEvidenceStore({ settings, credentials });
     if (!(created instanceof S3EvidenceStore)) {
       throw new Error("expected S3EvidenceStore from factory");
@@ -789,7 +798,17 @@ function qualificationEnv(
   ] as const) {
     if (present(process.env, name)) env[name] = process.env[name];
   }
-  return { ...env, ...overrides };
+  const qualified = { ...env, ...overrides };
+  if (!present(qualified, "COLLAB_EVIDENCE_MAX_UPLOAD_BYTES")) {
+    const timeoutMs = Number.parseInt(
+      qualified.COLLAB_EVIDENCE_S3_TIMEOUT_MS ?? "",
+      10,
+    );
+    qualified.COLLAB_EVIDENCE_MAX_UPLOAD_BYTES = String(
+      evidenceS3SupportedMaxUploadBytes(timeoutMs),
+    );
+  }
+  return qualified;
 }
 
 function requiredLive(name: string): string {

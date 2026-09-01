@@ -44,8 +44,7 @@ services:
       # --env-file supplies the substitutions below but does not inject them;
       # uncomment only the mappings selected for this deployment. Present but
       # empty optional S3 names are invalid. Remove S3 mappings in filesystem
-      # mode. COLLAB_EVIDENCE_MAX_UPLOAD_BYTES is provider-neutral and may stay
-      # set in filesystem mode.
+      # mode. COLLAB_EVIDENCE_MAX_UPLOAD_BYTES may stay set in filesystem mode.
       # The object-store role needs bucket readiness/list plus GetObject,
       # PutObject, and DeleteObject. DeleteObject is required for staging,
       # journal, and rollback cleanup, not a user-facing delete feature.
@@ -58,9 +57,10 @@ services:
       # COLLAB_EVIDENCE_S3_ALLOW_HTTP: ${COLLAB_EVIDENCE_S3_ALLOW_HTTP}
       # COLLAB_EVIDENCE_S3_CA_FILE: ${COLLAB_EVIDENCE_S3_CA_FILE}
       # COLLAB_EVIDENCE_S3_TIMEOUT_MS: ${COLLAB_EVIDENCE_S3_TIMEOUT_MS}
-      # Provider-neutral streamed-intake cap for filesystem and S3
-      # (1..5368709120, default 536870912). Does not raise the separate
-      # 1,000,000-byte legacy JSON/base64 upload or JSON bytes download caps.
+      # Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.
+      # S3 v1 defaults to 30 MiB at 30000 ms and must remain at or below
+      # floor(timeoutMs/1000)*1 MiB; 5 GiB is not a supported S3 v1 size.
+      # See .env.example for timeout semantics and the complete envelope.
       # COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: ${COLLAB_EVIDENCE_MAX_UPLOAD_BYTES}
       # Required: static or default_chain. See .env.example for the complete
       # direct/_FILE/_REF credential matrix and exact validation rules.

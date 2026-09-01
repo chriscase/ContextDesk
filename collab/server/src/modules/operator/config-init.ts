@@ -1,6 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
+  DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+  EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND,
+  MAX_EVIDENCE_S3_UPLOAD_BYTES,
+  MAX_EVIDENCE_S3_TIMEOUT_MS,
+  MAX_EVIDENCE_UPLOAD_BYTES,
+} from "../../evidence/s3-settings.js";
 
 export const CONFIG_INIT_PROFILES = ["demo", "postgres", "ldap"] as const;
 export type ConfigInitProfile = (typeof CONFIG_INIT_PROFILES)[number];
@@ -36,12 +44,20 @@ function s3EvidenceComments(): string {
 # COLLAB_EVIDENCE_ROOT stays local server-owned control state in either mode.
 # Filesystem mode rejects every present COLLAB_EVIDENCE_S3_* name, even if its
 # value is empty: remove the S3 names when returning to filesystem mode.
-# COLLAB_EVIDENCE_MAX_UPLOAD_BYTES is provider-neutral and is accepted in
-# filesystem mode. It governs streamed evidence intake for both the default
-# filesystem provider and the opt-in S3 provider (default 536870912 / 512 MiB;
-# valid range 1..5368709120 / 5 GiB). Legacy JSON/base64 evidence upload and
-# the legacy JSON bytes download remain separately capped at exactly 1,000,000
-# decoded bytes.
+# COLLAB_EVIDENCE_MAX_UPLOAD_BYTES is accepted in both modes. Filesystem
+# defaults to 536870912 bytes / 512 MiB and retains the protocol ceiling of
+# ${MAX_EVIDENCE_UPLOAD_BYTES} bytes / 5 GiB. S3 v1 instead validates a
+# conservative single-Put/Copy operating envelope: no more than
+# floor(COLLAB_EVIDENCE_S3_TIMEOUT_MS / 1000) *
+# ${EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND} bytes. With both values
+# unset, S3 defaults to ${DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES} bytes / 30 MiB
+# at ${DEFAULT_EVIDENCE_S3_TIMEOUT_MS} ms. Its largest accepted pair is
+# ${MAX_EVIDENCE_S3_UPLOAD_BYTES} bytes / 120 MiB at
+# ${MAX_EVIDENCE_S3_TIMEOUT_MS} ms. The 5 GiB value is only a protocol and
+# future multipart-upload ceiling, not a supported S3 v1 operating size.
+# The 1 MiB/s validation envelope does not guarantee success; actual networks
+# or object stores may require a lower max. Legacy JSON/base64 evidence upload
+# and JSON bytes download remain capped at exactly 1,000,000 decoded bytes.
 # The object-store role must allow bucket readiness/list plus GetObject and
 # PutObject (also used by same-prefix CopyObject).
 # DeleteObject is required for staging, journal, and rollback cleanup.
@@ -63,13 +79,12 @@ function s3EvidenceComments(): string {
 # connection. To trust both public roots and an internal CA, mount one combined
 # PEM bundle into the server process. Certificate verification stays enabled.
 # COLLAB_EVIDENCE_S3_CA_FILE=/etc/ssl/certs/s3-internal-ca.pem
-# Connection and request timeout, 1000..120000 ms (default 30000).
-# COLLAB_EVIDENCE_S3_TIMEOUT_MS=30000
-# Provider-neutral streamed-intake cap, 1..5368709120 (default 536870912).
-# Governs multipart streamed evidence for filesystem and S3. Does not raise
-# the separate 1,000,000-byte legacy JSON/base64 upload or JSON bytes
-# download caps.
-# COLLAB_EVIDENCE_MAX_UPLOAD_BYTES=536870912
+# Smithy connection timeout and absolute requestTimeout, 1000..120000 ms.
+# requestTimeout covers PutObject and CopyObject through response headers.
+# COLLAB_EVIDENCE_S3_TIMEOUT_MS=${DEFAULT_EVIDENCE_S3_TIMEOUT_MS}
+# S3 single-Put/Copy cap for the timeout above. HTTP transfer remains guarded
+# separately for one hour, and unknown-length streams remain count-enforced.
+# COLLAB_EVIDENCE_MAX_UPLOAD_BYTES=${DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES}
 # Required in S3 mode; no default. static or default_chain. default_chain
 # rejects all static COLLAB_EVIDENCE_S3_* credential names below.
 # COLLAB_EVIDENCE_S3_CREDENTIALS_MODE=static

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { loadEvidenceStorageSettings, loadRuntimeConfig, parseTrustProxy, testConfig } from "./config.js";
 import {
   DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+  DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
   DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+  EVIDENCE_STORAGE_ERRORS,
 } from "./evidence/s3-settings.js";
 
 describe("runtime configuration", () => {
@@ -140,7 +142,7 @@ describe("runtime configuration", () => {
       provider: "s3",
       controlRoot: ".data/evidence",
       storage: "postgres",
-      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+      maxUploadBytes: DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
       s3: {
         endpoint: "https://objects.example.test",
         region: "garage",
@@ -151,7 +153,7 @@ describe("runtime configuration", () => {
         caConfigured: false,
         caFilePath: null,
         timeoutMs: DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
-        maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+        maxUploadBytes: DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
         credentialsMode: "static",
       },
     });
@@ -161,6 +163,33 @@ describe("runtime configuration", () => {
     expect(json).not.toContain(accessKey);
     expect(json).not.toContain(credentialFile);
     expect(json).not.toMatch(/BEGIN CERTIFICATE/);
+  });
+
+  it("fails closed on an impossible S3 size and absolute-timeout pair", () => {
+    const secret = "canarySecretAccessKeyValue!!";
+    const endpoint = "https://s3-canary-host.invalid:8443";
+    const env = {
+      ...database,
+      COLLAB_EVIDENCE_PROVIDER: "s3",
+      COLLAB_EVIDENCE_S3_ENDPOINT: endpoint,
+      COLLAB_EVIDENCE_S3_REGION: "garage",
+      COLLAB_EVIDENCE_S3_BUCKET: "war-room-evidence",
+      COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+      COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: "GKEXAMPLEKEYID0001",
+      COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY: secret,
+      COLLAB_EVIDENCE_S3_TIMEOUT_MS: "30000",
+      COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "31457281",
+    };
+    expect(() => loadRuntimeConfig(env)).toThrow(
+      EVIDENCE_STORAGE_ERRORS.s3UploadTimeout,
+    );
+    try {
+      loadRuntimeConfig(env);
+    } catch (error) {
+      const text = String(error);
+      expect(text).not.toContain(secret);
+      expect(text).not.toContain(endpoint);
+    }
   });
 
   it("always populates a provider-neutral maxUploadBytes on Config", () => {

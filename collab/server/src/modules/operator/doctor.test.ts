@@ -602,6 +602,15 @@ describe("operator doctor s3 evidence preflight", () => {
     expect(report.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
       /DeleteObject.*journal.*rollback cleanup/,
     );
+    expect(report.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
+      /requestTimeout is absolute through PutObject\/CopyObject response headers/,
+    );
+    expect(report.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
+      /default 31457280 at 30000 ms.*maximum 125829120 at 120000 ms/,
+    );
+    expect(report.checks.find((check) => check.id === "evidence_root")?.summary).toMatch(
+      /not a success guarantee.*one hour.*count-enforced/,
+    );
     expect(report.checks.find((check) => check.id === "evidence_root")?.summary).not.toMatch(
       /sqlite/i,
     );
@@ -663,6 +672,11 @@ describe("operator doctor s3 evidence preflight", () => {
         ...s3Canaries(),
         COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: "",
       },
+      {
+        ...s3Canaries(),
+        COLLAB_EVIDENCE_S3_TIMEOUT_MS: "30000",
+        COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "31457281",
+      },
     ];
     for (const invalid of invalidEnvironments) {
       const report = runDoctor({
@@ -722,11 +736,17 @@ function expectS3OperatorGuidance(body: string) {
   expect(body).toMatch(/Startup and \/ready ping the selected bucket/);
   expect(body).toMatch(/local server-owned control state/);
   expect(body).toMatch(/Exact 0\/1/);
-  expect(body).toMatch(/1000\.\.120000 ms \(default 30000\)/);
-  expect(body).toMatch(/1\.\.5368709120 \(default 536870912\)/);
-  expect(body).toMatch(/provider-neutral/);
-  expect(body).toMatch(/streamed evidence intake/);
-  expect(body).toMatch(/filesystem provider and the opt-in S3 provider/);
+  expect(body).toMatch(/absolute requestTimeout, 1000\.\.120000 ms/);
+  expect(body).toMatch(/PutObject and CopyObject through response headers/);
+  expect(body).toMatch(/floor\(COLLAB_EVIDENCE_S3_TIMEOUT_MS \/ 1000\)/);
+  expect(body).toMatch(/1048576/);
+  expect(body).toMatch(/31457280/);
+  expect(body).toMatch(/125829120/);
+  expect(body).toMatch(/5368709120 bytes \/ 5 GiB/);
+  expect(body).toMatch(/not a supported S3 v1/);
+  expect(body).toMatch(/does not guarantee success/);
+  expect(body).toMatch(/one hour/);
+  expect(body).toMatch(/unknown-length streams remain count-enforced/);
   expect(body).toMatch(/Filesystem mode rejects every present COLLAB_EVIDENCE_S3_\*/);
   expect(body).not.toMatch(
     /COLLAB_EVIDENCE_S3_\* name and(?:\n#)? COLLAB_EVIDENCE_MAX_UPLOAD_BYTES/,
@@ -796,8 +816,10 @@ describe("operator config:init s3 examples", () => {
       expect(compose).toMatch(/DeleteObject[\s\S]*journal[\s\S]*rollback cleanup/);
       expect(compose).toMatch(/replaces the default trust store/);
       expect(compose).toMatch(/combine them in one/);
-      expect(compose).toMatch(/Provider-neutral streamed-intake cap/);
-      expect(compose).toMatch(/may stay\n {6}# set in filesystem mode/);
+      expect(compose).toMatch(/Filesystem defaults to 512 MiB/);
+      expect(compose).toMatch(/S3 v1 defaults to 30 MiB at 30000 ms/);
+      expect(compose).toMatch(/floor\(timeoutMs\/1000\)\*1 MiB/);
+      expect(compose).toMatch(/may stay set in filesystem mode/);
       expect(compose).not.toMatch(/including COLLAB_EVIDENCE_MAX_UPLOAD_BYTES/);
       expect(compose).not.toMatch(
         /Parsed\/stored only; it does not raise the 1,000,000-byte app intake cap/,

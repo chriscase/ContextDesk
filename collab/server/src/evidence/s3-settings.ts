@@ -21,11 +21,17 @@ export type EvidenceProviderKind =
 export const DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES = 536_870_912;
 export const MIN_EVIDENCE_UPLOAD_BYTES = 1;
 export const MAX_EVIDENCE_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
-export const MAX_EVIDENCE_S3_UPLOAD_BYTES = MAX_EVIDENCE_UPLOAD_BYTES;
 export const MIN_EVIDENCE_S3_UPLOAD_BYTES = MIN_EVIDENCE_UPLOAD_BYTES;
 export const DEFAULT_EVIDENCE_S3_TIMEOUT_MS = 30_000;
 export const MIN_EVIDENCE_S3_TIMEOUT_MS = 1_000;
 export const MAX_EVIDENCE_S3_TIMEOUT_MS = 120_000;
+export const EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND = 1024 * 1024;
+export const DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES =
+  (DEFAULT_EVIDENCE_S3_TIMEOUT_MS / 1000)
+  * EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND;
+export const MAX_EVIDENCE_S3_UPLOAD_BYTES =
+  (MAX_EVIDENCE_S3_TIMEOUT_MS / 1000)
+  * EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND;
 export const MAX_EVIDENCE_S3_CA_FILE_BYTES = 1024 * 1024;
 
 const PEM_CERTIFICATE =
@@ -77,6 +83,8 @@ export const EVIDENCE_STORAGE_ERRORS = {
   timeout: "COLLAB_EVIDENCE_S3_TIMEOUT_MS must be an integer from 1000 to 120000",
   maxUpload:
     "COLLAB_EVIDENCE_MAX_UPLOAD_BYTES must be an integer from 1 to 5368709120",
+  s3UploadTimeout:
+    "s3 evidence COLLAB_EVIDENCE_MAX_UPLOAD_BYTES exceeds the supported request-timeout envelope; set it to no more than floor(COLLAB_EVIDENCE_S3_TIMEOUT_MS / 1000) * 1048576",
   caFile: "evidence s3 CA file is invalid",
   credentialsMode:
     "COLLAB_EVIDENCE_S3_CREDENTIALS_MODE must be default_chain or static",
@@ -118,9 +126,10 @@ type EvidenceStorageBase = {
 
 /**
  * Secret-free evidence byte-backend settings. `loadEvidenceStorageSettings`
- * always populates `maxUploadBytes` (default 512 MiB, hard max 5 GiB).
- * Hand-built test fixtures may omit it; {@link evidenceMaxUploadBytes}
- * restores the loader default in that case.
+ * always populates `maxUploadBytes`. Filesystem defaults to 512 MiB and keeps
+ * the 5 GiB protocol ceiling. S3 defaults to the lower of 30 MiB and its
+ * timeout-derived support envelope. Hand-built test fixtures may omit it;
+ * {@link evidenceMaxUploadBytes} restores their provider-specific value.
  */
 export type EvidenceStorageSettings =
   | (EvidenceStorageBase & {
@@ -193,6 +202,53 @@ function parseMaxUploadBytes(env: NodeJS.ProcessEnv): number {
     DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
     EVIDENCE_STORAGE_ERRORS.maxUpload,
   );
+}
+
+export function evidenceS3SupportedMaxUploadBytes(timeoutMs: number): number {
+  if (
+    !Number.isSafeInteger(timeoutMs)
+    || timeoutMs < MIN_EVIDENCE_S3_TIMEOUT_MS
+    || timeoutMs > MAX_EVIDENCE_S3_TIMEOUT_MS
+  ) {
+    fail(EVIDENCE_STORAGE_ERRORS.timeout);
+  }
+  return Math.floor(timeoutMs / 1000)
+    * EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND;
+}
+
+export function assertEvidenceS3MaxUploadFitsRequestTimeout(
+  maxUploadBytes: number,
+  timeoutMs: number,
+): void {
+  const supportedMaxUploadBytes = evidenceS3SupportedMaxUploadBytes(timeoutMs);
+  if (
+    !Number.isSafeInteger(maxUploadBytes)
+    || maxUploadBytes < MIN_EVIDENCE_S3_UPLOAD_BYTES
+    || maxUploadBytes > supportedMaxUploadBytes
+  ) {
+    fail(EVIDENCE_STORAGE_ERRORS.s3UploadTimeout);
+  }
+}
+
+function parseS3MaxUploadBytes(
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): number {
+  const supportedMaxUploadBytes = evidenceS3SupportedMaxUploadBytes(timeoutMs);
+  const defaultMaxUploadBytes = Math.min(
+    DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
+    supportedMaxUploadBytes,
+  );
+  const maxUploadBytes = parseOptionalBoundedInt(
+    env,
+    "COLLAB_EVIDENCE_MAX_UPLOAD_BYTES",
+    MIN_EVIDENCE_S3_UPLOAD_BYTES,
+    MAX_EVIDENCE_UPLOAD_BYTES,
+    defaultMaxUploadBytes,
+    EVIDENCE_STORAGE_ERRORS.maxUpload,
+  );
+  assertEvidenceS3MaxUploadFitsRequestTimeout(maxUploadBytes, timeoutMs);
+  return maxUploadBytes;
 }
 
 function assertNoUnknownS3Names(env: NodeJS.ProcessEnv): void {
@@ -614,7 +670,7 @@ export function loadEvidenceStorageSettings(
     DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
     EVIDENCE_STORAGE_ERRORS.timeout,
   );
-  const maxUploadBytes = parseMaxUploadBytes(env);
+  const maxUploadBytes = parseS3MaxUploadBytes(env, timeoutMs);
   const credentialsMode = parseCredentialsMode(env);
   if (credentialsMode === "default_chain") {
     assertDefaultChainHasNoStaticLeftovers(env);

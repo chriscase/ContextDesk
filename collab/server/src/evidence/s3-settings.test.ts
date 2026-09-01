@@ -4,8 +4,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+  DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
+  DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+  EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND,
   EVIDENCE_STORAGE_ERRORS,
   MAX_EVIDENCE_S3_UPLOAD_BYTES,
+  MAX_EVIDENCE_S3_TIMEOUT_MS,
+  evidenceS3SupportedMaxUploadBytes,
   evidenceMaxUploadBytes,
   loadEvidenceStorageSettings,
   normalizeEvidenceS3Prefix,
@@ -130,8 +135,8 @@ describe("evidence s3 endpoint and TLS flags", () => {
     expect(garage.s3.forcePathStyle).toBe(true);
     expect(garage.s3.allowHttp).toBe(false);
     expect(garage.s3.timeoutMs).toBe(30_000);
-    expect(garage.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
-    expect(garage.s3.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+    expect(garage.maxUploadBytes).toBe(DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES);
+    expect(garage.s3.maxUploadBytes).toBe(DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES);
     expect(garage.s3.caConfigured).toBe(false);
     expect(garage.s3.caFilePath).toBeNull();
 
@@ -291,7 +296,7 @@ describe("evidence s3 prefix, bucket, timeout, and size", () => {
     const filesystem = load({});
     expect(filesystem.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
     const s3 = load(s3Base());
-    expect(s3.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+    expect(s3.maxUploadBytes).toBe(DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES);
     expect(evidenceMaxUploadBytes({
       provider: "filesystem",
       controlRoot: CONTROL,
@@ -307,6 +312,10 @@ describe("evidence s3 prefix, bucket, timeout, and size", () => {
       storage: "postgres",
       maxUploadBytes: 1_048_576,
     });
+    expect(load({
+      COLLAB_EVIDENCE_PROVIDER: "filesystem",
+      COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "5368709120",
+    }).maxUploadBytes).toBe(5_368_709_120);
     expectThrow(
       { COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "0" },
       EVIDENCE_STORAGE_ERRORS.maxUpload,
@@ -321,20 +330,85 @@ describe("evidence s3 prefix, bucket, timeout, and size", () => {
     );
   });
 
-  it("bounds timeout and upload size, defaulting upload to 512 MiB", () => {
+  it("derives the conservative S3 upload envelope from whole timeout seconds", () => {
+    expect(EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND).toBe(1_048_576);
+    expect([
+      1_000,
+      1_500,
+      1_999,
+      2_000,
+      DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+      MAX_EVIDENCE_S3_TIMEOUT_MS,
+    ].map(evidenceS3SupportedMaxUploadBytes)).toEqual([
+      1_048_576,
+      1_048_576,
+      1_048_576,
+      2_097_152,
+      DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
+      MAX_EVIDENCE_S3_UPLOAD_BYTES,
+    ]);
+    expect(DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES).toBe(31_457_280);
+    expect(MAX_EVIDENCE_S3_UPLOAD_BYTES).toBe(125_829_120);
+  });
+
+  it("defaults S3 to 30 MiB and lowers an unset max for a shorter timeout", () => {
     const settings = load(s3Base());
     if (settings.provider !== "s3") throw new Error("expected s3");
-    expect(settings.maxUploadBytes).toBe(536_870_912);
-    expect(settings.s3.maxUploadBytes).toBe(536_870_912);
-    const min = load(s3Base({ COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "1" }));
+    expect(settings.maxUploadBytes).toBe(DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES);
+    expect(settings.s3.maxUploadBytes).toBe(DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES);
+
+    const shorter = load(s3Base({ COLLAB_EVIDENCE_S3_TIMEOUT_MS: "1500" }));
+    if (shorter.provider !== "s3") throw new Error("expected s3");
+    expect(shorter.s3.timeoutMs).toBe(1_500);
+    expect(shorter.maxUploadBytes).toBe(1_048_576);
+
+    const longer = load(s3Base({ COLLAB_EVIDENCE_S3_TIMEOUT_MS: "120000" }));
+    if (longer.provider !== "s3") throw new Error("expected s3");
+    expect(longer.maxUploadBytes).toBe(DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES);
+  });
+
+  it("accepts S3 envelope boundaries and rejects impossible explicit pairs", () => {
+    const min = load(s3Base({
+      COLLAB_EVIDENCE_S3_TIMEOUT_MS: "1000",
+      COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "1048576",
+    }));
     const max = load(
-      s3Base({ COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: String(MAX_EVIDENCE_S3_UPLOAD_BYTES) }),
+      s3Base({
+        COLLAB_EVIDENCE_S3_TIMEOUT_MS: "120000",
+        COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: String(MAX_EVIDENCE_S3_UPLOAD_BYTES),
+      }),
     );
     if (min.provider !== "s3" || max.provider !== "s3") throw new Error("expected s3");
-    expect(min.maxUploadBytes).toBe(1);
-    expect(min.s3.maxUploadBytes).toBe(1);
+    expect(min.maxUploadBytes).toBe(1_048_576);
+    expect(min.s3.maxUploadBytes).toBe(1_048_576);
     expect(max.maxUploadBytes).toBe(MAX_EVIDENCE_S3_UPLOAD_BYTES);
     expect(max.s3.maxUploadBytes).toBe(MAX_EVIDENCE_S3_UPLOAD_BYTES);
+
+    for (const env of [
+      {
+        COLLAB_EVIDENCE_S3_TIMEOUT_MS: "1000",
+        COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "1048577",
+      },
+      {
+        COLLAB_EVIDENCE_S3_TIMEOUT_MS: "30000",
+        COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "31457281",
+      },
+      {
+        COLLAB_EVIDENCE_S3_TIMEOUT_MS: "120000",
+        COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "125829121",
+      },
+      {
+        COLLAB_EVIDENCE_S3_TIMEOUT_MS: "30000",
+        COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "536870912",
+      },
+      {
+        COLLAB_EVIDENCE_S3_TIMEOUT_MS: "120000",
+        COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "5368709120",
+      },
+    ]) {
+      expectThrow(s3Base(env), EVIDENCE_STORAGE_ERRORS.s3UploadTimeout);
+    }
+
     expectThrow(
       s3Base({ COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "0" }),
       EVIDENCE_STORAGE_ERRORS.maxUpload,
@@ -351,17 +425,21 @@ describe("evidence s3 prefix, bucket, timeout, and size", () => {
       s3Base({ COLLAB_EVIDENCE_S3_TIMEOUT_MS: "120001" }),
       EVIDENCE_STORAGE_ERRORS.timeout,
     );
-    const timeoutMin = load(s3Base({ COLLAB_EVIDENCE_S3_TIMEOUT_MS: "1000" }));
-    const timeoutMax = load(s3Base({ COLLAB_EVIDENCE_S3_TIMEOUT_MS: "120000" }));
-    if (timeoutMin.provider !== "s3" || timeoutMax.provider !== "s3") {
-      throw new Error("expected s3");
-    }
-    expect(timeoutMin.s3.timeoutMs).toBe(1_000);
-    expect(timeoutMax.s3.timeoutMs).toBe(120_000);
     expectThrow(
       s3Base({ COLLAB_EVIDENCE_S3_TIMEOUT_MS: "30000ms" }),
       EVIDENCE_STORAGE_ERRORS.timeout,
     );
+  });
+
+  it("produces the same sanitized pair error regardless of env insertion order", () => {
+    const first: NodeJS.ProcessEnv = s3Base();
+    first.COLLAB_EVIDENCE_MAX_UPLOAD_BYTES = "31457281";
+    first.COLLAB_EVIDENCE_S3_TIMEOUT_MS = "30000";
+    const second: NodeJS.ProcessEnv = s3Base();
+    second.COLLAB_EVIDENCE_S3_TIMEOUT_MS = "30000";
+    second.COLLAB_EVIDENCE_MAX_UPLOAD_BYTES = "31457281";
+    expectThrow(first, EVIDENCE_STORAGE_ERRORS.s3UploadTimeout);
+    expectThrow(second, EVIDENCE_STORAGE_ERRORS.s3UploadTimeout);
   });
 
   it("rejects unknown s3 environment names", () => {

@@ -148,8 +148,8 @@ control-state root in both modes.
 | Key prefix | `COLLAB_EVIDENCE_S3_PREFIX` | Optional application key prefix. A configured value is normalized with one trailing `/`; an empty configured value is rejected. Prefer a dedicated bucket because `HeadBucket` needs bucket-level permission. |
 | Path-style | `COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE` | Exact `0` or `1`. When unset, custom endpoints (including Garage) default to path-style and AWS-managed endpoints default to virtual-host style. |
 | HTTP opt-in | `COLLAB_EVIDENCE_S3_ALLOW_HTTP` | Exact `0` or `1`; defaults to `0`. Set to `1` only for a trusted local evaluation network. |
-| Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Connection and request timeout in milliseconds; defaults to `30000`, valid range `1000..120000`. |
-| Streamed intake size bound | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Provider-neutral. Governs streamed evidence intake for the default filesystem provider and the opt-in S3 provider. Default 512 MiB (`536870912`), valid range `1..5368709120` (5 GiB). Legacy JSON/base64 evidence upload and the legacy JSON bytes download remain separately capped at exactly 1,000,000 decoded bytes. This setting does not raise those JSON caps. |
+| Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Smithy connection timeout and absolute `requestTimeout` in milliseconds; defaults to `30000`, valid range `1000..120000`. The absolute request timer covers PutObject and CopyObject through response headers. |
+| Streamed intake size bound | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Accepted in both modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling. S3 v1 defaults to 30 MiB at 30,000 ms and accepts at most `floor(timeoutMs / 1000) * 1 MiB`, up to 120 MiB at 120,000 ms. With an unset S3 max, the effective default is the lower of 30 MiB and that timeout envelope. The 1 MiB/s relationship is conservative validation, not a throughput guarantee; use a lower max when the network or provider requires it. The separate HTTP transfer guard remains one hour, and unknown-length streams remain count-enforced. The 5 GiB value is only the protocol/future-multipart ceiling, not a supported S3 v1 size. Legacy JSON/base64 upload and JSON bytes download remain capped at exactly 1,000,000 decoded bytes. |
 | Credential mode | `COLLAB_EVIDENCE_S3_CREDENTIALS_MODE` | Required in S3 mode; there is no default. `static` requires the explicit pair below; `default_chain` uses the server process's AWS-compatible provider chain and rejects leftover static `COLLAB_EVIDENCE_S3_*` credential names. |
 | Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID`, `_FILE`, or `_REF` | Dedicated service identity, not a human console login. Configure exactly one source. Windows refuses `_FILE` and `file:` `_REF`. |
 | Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; on Unix, files must be owner-protected and `_REF` must be an absolute `file:/...` reference, not `file://...`. Windows refuses `_FILE` and `file:` `_REF`. |
@@ -169,8 +169,9 @@ committed env file.
 
 Filesystem mode rejects leftover `COLLAB_EVIDENCE_S3_*` names, including names
 that are present with empty values. `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` is
-accepted in filesystem mode. Remove leftover S3 names rather than blanking
-them when returning to the filesystem provider.
+accepted in filesystem mode and keeps its 512 MiB default there. Remove
+leftover S3 names rather than blanking them when returning to the filesystem
+provider.
 
 With PostgreSQL, the process uses a database advisory lease to coordinate
 evidence write batches across application replicas. SQLite has no external
