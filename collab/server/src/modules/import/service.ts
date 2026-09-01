@@ -10,7 +10,7 @@ import {
 import type { EvidenceStage, EvidenceStore, EvidenceWriteBatch } from "../../evidence/store.js";
 import type { AuditStore } from "../audit/index.js";
 import type { CatalogService } from "../catalog/index.js";
-import type { Actor, CaseService } from "../cases/index.js";
+import { CaseStoreCommitOutcomeUnknownError, type Actor, type CaseService } from "../cases/index.js";
 import { defaultPrivacy } from "../contributions/index.js";
 import { assertUploadAllowed } from "../evidence/index.js";
 import {
@@ -42,6 +42,43 @@ export interface ImportInput {
   cost?: string | null;
   redacted?: boolean;
   privacyClass?: PrivacyClass;
+}
+
+async function finalizeCommittedEvidenceBatch(batch: EvidenceWriteBatch | null): Promise<void> {
+  if (!batch) return;
+  try {
+    await batch.finalize();
+  } catch {
+    try {
+      await batch.finalize();
+    } catch {
+      // The catalog COMMIT and canonical bytes are durable. Provider recovery
+      // owns remaining journal/staging cleanup; rollback would be destructive.
+    }
+  }
+}
+
+async function settleImportEvidenceFailure(
+  error: unknown,
+  batch: EvidenceWriteBatch | null,
+  stages: EvidenceStage[],
+  evidencePromoted: boolean,
+): Promise<void> {
+  if (error instanceof CaseStoreCommitOutcomeUnknownError && evidencePromoted) {
+    if (batch) {
+      try {
+        await batch.finalize({ retainPendingJournal: true });
+      } catch {
+        // Recovery must retain the journal while the catalog outcome is unknown.
+      }
+    }
+    return;
+  }
+  if (batch) {
+    await batch.rollback();
+  } else {
+    await Promise.allSettled(stages.map((stage) => stage.rollback()));
+  }
 }
 
 export class ImportService {
@@ -109,6 +146,7 @@ export class ImportService {
 
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
+    let evidencePromoted = false;
     const memoryRuns = this.runs instanceof MemoryRunStore ? this.runs : null;
     try {
       evidenceBatch = await this.deps.evidence.beginWriteBatch?.() ?? null;
@@ -206,6 +244,7 @@ export class ImportService {
           } else {
             for (const stage of stages) await stage.commit();
           }
+          evidencePromoted = true;
           if (!(await this.deps.evidence.verify(outputHash))) {
             throw new Error("hash verification failed after storage");
           }
@@ -220,14 +259,10 @@ export class ImportService {
           throw error;
         }
       });
-      await evidenceBatch?.finalize();
+      await finalizeCommittedEvidenceBatch(evidenceBatch);
       return result;
     } catch (error) {
-      if (evidenceBatch) {
-        await evidenceBatch.rollback();
-      } else {
-        await Promise.allSettled(stages.map((stage) => stage.rollback()));
-      }
+      await settleImportEvidenceFailure(error, evidenceBatch, stages, evidencePromoted);
       throw error;
     } finally {
       for (const stage of stages) stage.release();

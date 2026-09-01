@@ -288,6 +288,22 @@ async function finalizeCommittedStreamStage(stage: EvidenceStreamStage): Promise
   }
 }
 
+async function finalizeCommittedEvidenceBatch(batch: EvidenceWriteBatch | null): Promise<void> {
+  if (!batch) return;
+  try {
+    await batch.finalize();
+  } catch {
+    try {
+      // Provider cleanup after a confirmed catalog COMMIT is retryable, but it
+      // must never turn a durable reference into a destructive rollback.
+      await batch.finalize();
+    } catch {
+      // Canonical bytes and catalog rows are durable. Recovery owns any
+      // remaining journal/staging cleanup.
+    }
+  }
+}
+
 function throwIfStreamAborted(signal: AbortSignal | undefined): void {
   if (!signal) return;
   if (typeof signal.throwIfAborted === "function") {
@@ -1923,7 +1939,7 @@ export class CaseService {
         }
         return { artifact: this.toArtifact(row), summary };
       });
-      await evidenceBatch?.finalize();
+      await finalizeCommittedEvidenceBatch(evidenceBatch);
       return result;
     } catch (error) {
       await settleEvidenceAfterCaseTransactionFailure(
@@ -2290,7 +2306,7 @@ export class CaseService {
         });
         return batch;
       });
-      await evidenceBatch?.finalize();
+      await finalizeCommittedEvidenceBatch(evidenceBatch);
       return result;
     } catch (error) {
       await settleEvidenceAfterCaseTransactionFailure(

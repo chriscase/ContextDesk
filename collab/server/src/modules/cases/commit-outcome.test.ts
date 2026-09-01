@@ -107,6 +107,39 @@ function instrumentBatch(store: FilesystemEvidenceStore): {
   return { events, batch: () => captured };
 }
 
+function failBatchFinalizeAfterCleanup(
+  store: FilesystemEvidenceStore,
+  failureMode: "once" | "always",
+): string[] {
+  const events: string[] = [];
+  const original = store.beginWriteBatch.bind(store);
+  store.beginWriteBatch = async () => {
+    const batch = await original();
+    const promote = batch.promote.bind(batch);
+    const rollback = batch.rollback.bind(batch);
+    const finalize = batch.finalize.bind(batch);
+    let finalizeCalls = 0;
+    batch.promote = async () => {
+      events.push("promote");
+      await promote();
+    };
+    batch.rollback = async () => {
+      events.push("rollback");
+      await rollback();
+    };
+    batch.finalize = async (options?: EvidenceFinalizeOptions) => {
+      events.push(options?.retainPendingJournal ? "finalize:retain" : "finalize");
+      finalizeCalls += 1;
+      await finalize(options);
+      if (failureMode === "always" || finalizeCalls === 1) {
+        throw new Error("synthetic post-COMMIT finalize cleanup failure");
+      }
+    };
+    return batch;
+  };
+  return events;
+}
+
 function instrumentStream(store: FilesystemEvidenceStore): {
   events: string[];
   stage: () => EvidenceStreamStage | null;
@@ -486,6 +519,84 @@ describe("case-store commit outcome fencing", () => {
       expect(instrument.events).toEqual(["promote", "finalize"]);
       expect(await evidence.verify(uploaded.artifact.contentHash ?? "")).toBe(true);
       expect(await pendingJournalNames(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retries transient post-COMMIT batch cleanup without rolling committed evidence back", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-commit-outcome-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const events = failBatchFinalizeAfterCleanup(evidence, "once");
+    const cases = new MemoryCaseStore();
+    const service = new CaseService(evidence, new MemoryAuditStore(), cases, new CatalogService());
+    try {
+      const created = await service.createCase(actor, { title: "Batch cleanup retry" }, "test");
+      const bytes = new TextEncoder().encode("batch-cleanup-retry\n");
+      const uploaded = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "log",
+          filename: "batch-cleanup-retry.log",
+          mediaType: "text/plain",
+          bytes,
+          summary: "Synthetic transient batch cleanup failure.",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      expect(events).toEqual(["promote", "finalize", "finalize"]);
+      expect(events).not.toContain("rollback");
+      expect(await cases.getArtifact(uploaded.artifact.id)).not.toBeNull();
+      expect(await evidence.verify(uploaded.artifact.contentHash ?? "")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a committed corpus batch when post-COMMIT cleanup keeps failing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-commit-outcome-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const events = failBatchFinalizeAfterCleanup(evidence, "always");
+    const cases = new MemoryCaseStore();
+    const service = new CaseService(evidence, new MemoryAuditStore(), cases, new CatalogService());
+    try {
+      const created = await service.createCase(actor, { title: "Corpus cleanup recovery" }, "test");
+      const bytes = new TextEncoder().encode("persistent-corpus-cleanup\n");
+      const files = [{ relativePath: "mailer/persistent.log", mediaType: "text/plain", bytes }];
+      const result = await service.commitCorpusIntake(
+        created.id,
+        actor,
+        {
+          schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+          origin: "files",
+          sourceLabel: "persistent cleanup corpus",
+          privacyClass: "owner_only",
+          idempotencyKey: "batch-syn-persistent-cleanup-1",
+          files: [{
+            relativePath: files[0]!.relativePath,
+            mediaType: files[0]!.mediaType,
+            contentBase64: Buffer.from(bytes).toString("base64"),
+          }],
+          archiveBase64: null,
+          previewToken: corpusIntakeRequestDigest({
+            caseId: created.id,
+            actorId: actor.id,
+            origin: "files",
+            sourceLabel: "persistent cleanup corpus",
+            privacyClass: "owner_only",
+            idempotencyKey: "batch-syn-persistent-cleanup-1",
+            files,
+            archive: null,
+          }),
+        },
+        "test",
+      );
+      expect(events).toEqual(["promote", "finalize", "finalize"]);
+      expect(events).not.toContain("rollback");
+      expect(await service.getCorpusIntakeBatch(created.id, result.id)).toMatchObject({ id: result.id });
+      expect(await evidence.verify(sha256Hex(bytes))).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
