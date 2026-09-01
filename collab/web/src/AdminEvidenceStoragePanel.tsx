@@ -1,7 +1,7 @@
 import {
   parseEvidenceStorageStatus,
   type EvidenceStorageStatusV1,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/evidence-storage";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { protectedApiFetch } from "./protected-api.js";
 

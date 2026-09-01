@@ -6,7 +6,7 @@ import {
   type InvestigationLifecycleActionSuccessV1,
   type InvestigationLifecycleV1,
 } from "@cd-collab/contracts";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationFirst } from "./InvestigationFirst.js";
 import {
@@ -438,6 +438,53 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(row?.textContent).toContain("Expected hash");
     expect(row?.textContent).toContain("sha256:24b005aa8796e5655d4c9cc728fdbcd24542d1ee4eab264b8308efcd350a23d1");
     expect(row?.textContent).toContain("sha256:expected-checksum");
+  });
+
+  it("previews text evidence through the runtime and keeps the row metadata visible", async () => {
+    const artifactId = RUNTIME_FIXTURE_IDS.evidence;
+    const gateway = createInvestigationGatewayDouble({
+      previewEvidence: vi.fn(async () => gatewayOk({
+        artifactId,
+        text: "2026-09-01T12:00:00Z timeout observed",
+        truncated: true,
+        etag: '"fixture-preview"',
+      })),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    const row = (await screen.findByText("checkout-timeout.log")).closest("li");
+    expect(row).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    const preview = await screen.findByRole("region", { name: "Preview of checkout-timeout.log" });
+    expect(preview.textContent).toContain("timeout observed");
+    expect(screen.getByText("Showing the first 64 KiB. Use War Room technical tools for the complete file.")).toBeTruthy();
+    expect(gateway.previewEvidence).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      artifactId,
+      {},
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hide preview" }));
+    expect(screen.queryByRole("region", { name: "Preview of checkout-timeout.log" })).toBeNull();
+  });
+
+  it("does not offer a bytes preview for private evidence without private-read authority", async () => {
+    const previewEvidence = vi.fn(async () => gatewayOk({
+      artifactId: RUNTIME_FIXTURE_IDS.evidence,
+      text: "must not be requested",
+      truncated: false,
+      etag: null,
+    }));
+    const gateway = createInvestigationGatewayDouble({ previewEvidence });
+    renderStrategy({
+      gateway,
+      capabilities: CONTRIBUTOR_CAPABILITIES,
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    const row = (await screen.findByText("checkout-timeout.log")).closest("li");
+    expect(row).toBeTruthy();
+    expect(within(row!).queryByRole("button", { name: "Preview" })).toBeNull();
+    expect(within(row!).queryByText("Metadata only")).toBeNull();
+    expect(previewEvidence).not.toHaveBeenCalled();
   });
 
   it("describes annotations as loading until their independent lane settles", async () => {

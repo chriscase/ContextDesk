@@ -1,6 +1,6 @@
 import {
   EVIDENCE_STORAGE_STATUS_SCHEMA_ID,
-} from "@cd-collab/contracts";
+} from "@cd-collab/contracts/evidence-storage";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AdminEvidenceStoragePanel } from "./AdminEvidenceStoragePanel.js";

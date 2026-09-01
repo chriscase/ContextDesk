@@ -25,11 +25,13 @@ import {
   useActiveInvestigation,
   useCreateContribution,
   useCreateInvestigation,
+  useEvidencePreview,
   useInvestigationList,
   useLifecycleAction,
   useUpdateSituation,
   useUploadEvidence,
   type CreateContributionCommand,
+  type PreviewEvidenceCommand,
   type UpdateSituationCommand,
   type UploadEvidenceCommand,
 } from "./controllers/index.js";
@@ -38,6 +40,7 @@ import {
   investigationWriteGateway,
   type CreateInvestigationInput,
   type InvestigationGateway,
+  type EvidencePreviewValue,
 } from "./gateway.js";
 import { deepFreezeDto } from "./deep-freeze.js";
 import type {
@@ -48,6 +51,7 @@ import type {
 
 export type InvestigationCreateInput = CreateInvestigationInput;
 export type InvestigationEvidenceUploadCommand = UploadEvidenceCommand;
+export type InvestigationEvidencePreviewCommand = PreviewEvidenceCommand;
 export type InvestigationContributionCommand = CreateContributionCommand;
 export type InvestigationSituationCommand = UpdateSituationCommand;
 
@@ -94,6 +98,15 @@ export interface InvestigationRuntimeCommands {
   ) => Promise<CommandOutcome<InvestigationLifecycleActionSuccessV1>>) | null;
 }
 
+/** Read-only evidence inspection keeps its bounded command separate from writes. */
+export interface InvestigationRuntimeEvidencePreview {
+  readonly state: MutationState<EvidencePreviewValue>;
+  readonly preview: (
+    command: InvestigationEvidencePreviewCommand,
+  ) => Promise<CommandOutcome<EvidencePreviewValue>>;
+  readonly clear: () => void;
+}
+
 /**
  * The signed-in person, as a strategy is allowed to see them.
  *
@@ -126,6 +139,7 @@ export interface InvestigationRuntime {
   readonly capabilities: InvestigationRuntimeCapabilities;
   readonly resources: InvestigationRuntimeResources;
   readonly mutations: InvestigationRuntimeMutations;
+  readonly evidencePreview: InvestigationRuntimeEvidencePreview;
   readonly refresh: InvestigationRuntimeRefresh;
   readonly commands: InvestigationRuntimeCommands;
 }
@@ -367,6 +381,13 @@ export function InvestigationRuntimeProvider({
     onRefreshInvestigations: investigationList.refresh,
     onScopeDenied: activeInvestigation.denyScope,
   });
+  const previewController = useEvidencePreview({
+    gateway,
+    identityKey,
+    authorityKey,
+    investigationId: activeScopeUnavailable ? null : activeCaseId,
+    canRead: capabilities.canRead && !activeScopeUnavailable,
+  });
   const contributionController = useCreateContribution({
     gateway: writeGateway,
     identityKey,
@@ -442,6 +463,11 @@ export function InvestigationRuntimeProvider({
       updateSituation: situationController.state,
       lifecycle: lifecycleController.state,
     },
+    evidencePreview: {
+      state: previewController.state,
+      preview: previewController.preview,
+      clear: previewController.clear,
+    },
     refresh: {
       investigations: investigationList.refresh,
       investigation: activeInvestigation.refreshInvestigation,
@@ -515,6 +541,10 @@ export function InvestigationRuntimeProvider({
     situationController.update,
     uploadController.state,
     uploadController.upload,
+    gateway.previewEvidence,
+    previewController.clear,
+    previewController.preview,
+    previewController.state,
   ]);
 
   return (

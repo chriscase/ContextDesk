@@ -9,6 +9,8 @@ export {
   type InvestigationContributionCommand,
   type InvestigationCreateInput,
   type InvestigationEvidenceUploadCommand,
+  type InvestigationEvidencePreviewCommand,
+  type InvestigationRuntimeEvidencePreview,
   type InvestigationRuntime,
   type InvestigationRuntimeCommands,
   type InvestigationRuntimeIdentity,
@@ -18,6 +20,10 @@ export {
   type InvestigationRuntimeResources,
   type InvestigationSituationCommand,
 } from "./InvestigationRuntimeProvider.js";
+export {
+  type EvidencePreviewValue,
+  type PreviewEvidenceInput,
+} from "./gateway.js";
 export {
   selectEvidenceInventory,
   selectResourceView,

@@ -90,6 +90,19 @@ export interface UploadEvidenceStreamInput {
   readonly sourceId?: string;
 }
 
+/** A bounded, text-only projection of one evidence artifact's bytes. */
+export interface EvidencePreviewValue {
+  readonly artifactId: string;
+  readonly text: string;
+  readonly truncated: boolean;
+  readonly etag: string | null;
+}
+
+/** Optional validator for a cached preview representation. */
+export interface PreviewEvidenceInput {
+  readonly ifNoneMatch?: string;
+}
+
 /** Transport-ready contribution create input. Body composition is a controller concern. */
 export interface CreateContributionInput {
   readonly kind: ContributionKind;
@@ -171,6 +184,13 @@ export interface InvestigationGateway extends Partial<InvestigationWriteGateway>
     investigationId: string,
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<readonly ArtifactV1[]>>;
+  /** Read at most the bounded text preview; never exposes a raw Response. */
+  previewEvidence?(
+    investigationId: string,
+    artifactId: string,
+    input: PreviewEvidenceInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<EvidencePreviewValue & { readonly notModified?: boolean }>>;
   listContributions(
     investigationId: string,
     options: GatewayRequestOptions,
@@ -596,6 +616,106 @@ function evidenceCollectionIdentity(
   return true;
 }
 
+const EVIDENCE_PREVIEW_LIMIT_BYTES = 65_536;
+const EVIDENCE_PREVIEW_RANGE = `bytes=0-${EVIDENCE_PREVIEW_LIMIT_BYTES - 1}`;
+
+function previewContentRange(
+  header: string | null,
+): { start: number; end: number; total: number | null } | null {
+  if (!header) return null;
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(header.trim());
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = match[3] === "*" ? null : Number(match[3]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) return null;
+  if (total !== null && (!Number.isSafeInteger(total) || total < end + 1)) return null;
+  return { start, end, total };
+}
+
+function previewContentLength(response: Response): number | null {
+  const raw = response.headers.get("content-length");
+  if (raw === null || raw.trim() === "") return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+async function readBoundedPreview(
+  response: Response,
+  signal: AbortSignal,
+): Promise<GatewayResult<{ bytes: Uint8Array; truncated: boolean; received: number }>> {
+  if (signal.aborted) return aborted();
+  const declared = previewContentLength(response);
+  if (declared !== null && declared > EVIDENCE_PREVIEW_LIMIT_BYTES) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // Best-effort cancellation of a server that ignored the range request.
+    }
+    return failed(protocolFailure("content_type"));
+  }
+  const body = response.body;
+  if (body === null || typeof body.getReader !== "function") {
+    return failed(protocolFailure("content_type"));
+  }
+  const reader = body.getReader();
+  const bounded = new Uint8Array(EVIDENCE_PREVIEW_LIMIT_BYTES);
+  let received = 0;
+  let truncated = false;
+  const onAbort = () => {
+    try {
+      void reader.cancel().catch(() => undefined);
+    } catch {
+      // Best-effort cancellation; fetch has already observed the same signal.
+    }
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (signal.aborted) return aborted();
+      if (next.done) break;
+      const chunk = next.value;
+      if (!chunk || chunk.byteLength === 0) continue;
+      const remaining = EVIDENCE_PREVIEW_LIMIT_BYTES - received;
+      const retained = Math.min(remaining, chunk.byteLength);
+      if (retained > 0) {
+        bounded.set(chunk.subarray(0, retained), received);
+        received += retained;
+      }
+      if (chunk.byteLength > remaining) {
+        truncated = true;
+        try {
+          await reader.cancel();
+        } catch {
+          // The bytes already retained are still a valid bounded preview.
+        }
+        break;
+      }
+    }
+  } catch {
+    return signal.aborted ? aborted() : failed(protocolFailure("content_type"));
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A canceled stream may already have released its reader.
+    }
+  }
+  return { ok: true, value: { bytes: bounded.subarray(0, received), truncated, received } };
+}
+
+function decodeBoundedPreview(bytes: Uint8Array): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return text.includes("\uFFFD") ? null : text;
+  } catch {
+    return null;
+  }
+}
+
 function contributionCollectionIdentity(
   investigationId: string,
   contributions: readonly ContributionV1[],
@@ -790,6 +910,64 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
     return result.ok
       ? { ok: true, value: deepFreezeDto([...result.value.artifacts]) }
       : result;
+  },
+
+  async previewEvidence(investigationId, artifactId, input, { signal }) {
+    const headers: Record<string, string> = { Range: EVIDENCE_PREVIEW_RANGE };
+    if (input.ifNoneMatch !== undefined) headers["If-None-Match"] = input.ifNoneMatch;
+    const fetched = await fetchProtected(
+      caseRoute(investigationId, `/evidence/${encodeURIComponent(artifactId)}/content`),
+      { headers },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    const response = fetched.response;
+    if (response.status === 304) {
+      const etag = response.headers.get("etag");
+      return {
+        ok: true,
+        value: deepFreezeDto({
+          artifactId,
+          text: "",
+          truncated: false,
+          etag,
+          notModified: true as const,
+        }),
+      };
+    }
+    if (!response.ok) return failed(classifyHttpFailure(response.status));
+    if (response.status !== 200 && response.status !== 206) {
+      return failed({ kind: "unexpected_response", status: response.status });
+    }
+    const contentRange = previewContentRange(response.headers.get("content-range"));
+    if (response.status === 206 && (!contentRange || contentRange.start !== 0)) {
+      try {
+        await response.body?.cancel();
+      } catch {
+        // Best-effort stop after an invalid range representation.
+      }
+      return failed(protocolFailure("content_type"));
+    }
+    const bytes = await readBoundedPreview(response, signal);
+    if (!bytes.ok) return bytes;
+    const text = decodeBoundedPreview(bytes.value.bytes);
+    if (text === null) return failed(protocolFailure("content_type"));
+    const total = contentRange?.total ?? null;
+    const covered = contentRange === null
+      ? bytes.value.received
+      : contentRange.end - contentRange.start + 1;
+    const truncated = bytes.value.truncated
+      || (total !== null && total > covered)
+      || (total !== null && total > EVIDENCE_PREVIEW_LIMIT_BYTES);
+    return {
+      ok: true,
+      value: deepFreezeDto({
+        artifactId,
+        text,
+        truncated,
+        etag: response.headers.get("etag"),
+      }),
+    };
   },
 
   async listContributions(investigationId, { signal }) {

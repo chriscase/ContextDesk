@@ -46,6 +46,24 @@ function compactByteLabel(value: number | null | undefined): string | null {
   if (value < 1_048_576) return `${(value / 1_024).toFixed(value < 10_240 ? 1 : 0)} KB`;
   return `${(value / 1_048_576).toFixed(value < 10_485_760 ? 1 : 0)} MB`;
 }
+function previewableTextArtifact(artifact: { kind: string; filename: string | null; mediaType: string | null }): boolean {
+  if (artifact.kind === "file_server_ref") return false;
+  const mediaType = text(artifact.mediaType).split(";", 1)[0]?.toLocaleLowerCase() ?? "";
+  if (
+    mediaType.startsWith("text/")
+    || mediaType === "application/json"
+    || mediaType === "application/ld+json"
+    || mediaType === "application/xml"
+    || mediaType === "application/javascript"
+    || mediaType === "application/x-javascript"
+    || mediaType === "application/yaml"
+    || mediaType === "application/x-yaml"
+    || mediaType === "application/x-ndjson"
+    || mediaType.endsWith("+json")
+    || mediaType.endsWith("+xml")
+  ) return true;
+  return artifact.kind === "log" || artifact.kind === "email" || /\.(log|txt|text|md|json|xml|ya?ml|csv|tsv|eml|html?|css|js|mjs|cjs|ts|tsx|jsx|ini|conf|cfg|env|sh|bash|diff|patch|svg)$/iu.test(artifact.filename ?? "");
+}
 function listQuestions(value: string): string[] { return value.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean); }
 function contextPayload(value: InvestigationContext): InvestigationContext | null {
   const normalized: InvestigationContext = {
@@ -195,6 +213,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedEvidence, setSelectedEvidence] = useState<readonly string[]>([]);
+  const [previewArtifactId, setPreviewArtifactId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [severity, setSeverity] = useState<CaseV1["severity"]>("medium");
   const [situation, setSituation] = useState<SituationDraft>(EMPTY_SITUATION);
@@ -274,6 +293,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
   }, [runtime.capabilities.canReadPrivate]);
   useEffect(() => setSelectedEvidence([]), [props.focusCaseId]);
+  useEffect(() => setPreviewArtifactId(null), [props.focusCaseId]);
   useEffect(() => {
     const available = new Set(evidenceSelectionKey ? evidenceSelectionKey.split("\u0000") : []);
     setSelectedEvidence((current) => {
@@ -324,6 +344,16 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       form.reset();
       setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
     }
+  }
+
+  function togglePreview(artifactId: string) {
+    if (previewArtifactId === artifactId) {
+      setPreviewArtifactId(null);
+      runtime.evidencePreview.clear();
+      return;
+    }
+    setPreviewArtifactId(artifactId);
+    void runtime.evidencePreview.preview({ artifactId });
   }
 
   function renderCreateForm() {
@@ -377,6 +407,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     const annotations = evidenceInventory.annotations;
     const upload = runtime.mutations.uploadEvidence;
     const uploadCommand = runtime.commands.uploadEvidence;
+    const previewState = runtime.evidencePreview.state;
     const busy = inventory.availability === "loading"
       || (inventory.availability === "available" && inventory.refresh === "loading")
       || annotations.availability === "loading"
@@ -404,6 +435,8 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
             const annotationFallback = annotationsPending ? "Annotation loading…" : "Annotation not available";
             const size = compactByteLabel(evidence.byteLength);
             const evidenceName = evidence.filename || evidence.uri || "Unnamed evidence";
+            const canReadArtifact = evidence.privacyClass !== "owner_only" || runtime.capabilities.canReadPrivate;
+            const canPreview = canReadArtifact && previewableTextArtifact(evidence);
             return (
               <li key={evidence.id}>
                 <label className="investigation-first__evidence-select">
@@ -431,6 +464,13 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
                   <summary>More details<span className="sr-only"> about {evidenceName}</span></summary>
                   <dl className="investigation-first__evidence-meta"><div className="investigation-first__evidence-annotation"><dt>Annotation</dt><dd>{annotation?.body || annotationFallback}</dd></div><div><dt>Kind</dt><dd>{display(evidence.kind)}</dd></div><div><dt>Media type</dt><dd>{display(evidence.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(evidence.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(evidence.privacyClass)}</dd></div><div><dt>Content hash</dt><dd>{display(evidence.contentHash)}</dd></div><div><dt>Expected hash</dt><dd>{display(evidence.expectedHash)}</dd></div><div><dt>Size</dt><dd>{evidence.byteLength == null ? "Not recorded" : `${evidence.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(evidence.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(evidence.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(evidence.relativePath)}</dd></div><div><dt>Intake batch</dt><dd>{display(evidence.intakeBatchId)}</dd></div><div><dt>Annotation author</dt><dd>{annotation ? display(annotation.authorUsername) : annotationFallback}</dd></div><div><dt>Annotated</dt><dd>{annotation ? dateLabel(annotation.createdAt) : annotationFallback}</dd></div></dl>
                 </details>
+                <div className="investigation-first__evidence-preview-tools">
+                  {canPreview ? <button type="button" aria-expanded={previewArtifactId === evidence.id} onClick={() => togglePreview(evidence.id)}>{previewArtifactId === evidence.id ? "Hide preview" : "Preview"}</button> : null}
+                  {previewArtifactId === evidence.id && previewState.status === "running" ? <span role="status">Loading preview…</span> : null}
+                  {!canPreview && canReadArtifact && evidence.kind === "file_server_ref" ? <span className="investigation-first__muted">Metadata only; bytes are not stored here.</span> : null}
+                </div>
+                {previewArtifactId === evidence.id && canPreview && previewState.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(previewState.error, "evidence")}</p> : null}
+                {previewArtifactId === evidence.id && canPreview && previewState.status === "succeeded" && previewState.value.artifactId === evidence.id ? <div className="investigation-first__evidence-preview" role="region" aria-label={`Preview of ${evidenceName}`}><pre>{previewState.value.text}</pre>{previewState.value.truncated ? <small role="status">Showing the first 64 KiB. Use War Room technical tools for the complete file.</small> : null}</div> : null}
               </li>
             );
           })}

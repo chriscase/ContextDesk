@@ -49,6 +49,12 @@ export {
   type UseUpdateSituationOptions,
 } from "./use-update-situation.js";
 export {
+  useEvidencePreview,
+  type EvidencePreviewController,
+  type PreviewEvidenceCommand,
+  type UseEvidencePreviewOptions,
+} from "./use-evidence-preview.js";
+export {
   useUploadEvidence,
   type UploadEvidenceCommand,
   type UploadEvidenceController,

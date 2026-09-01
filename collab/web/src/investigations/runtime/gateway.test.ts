@@ -112,6 +112,55 @@ function lifecycleRefused() {
 }
 
 describe("the complete Runtime V1 transport surface", () => {
+  it("reads a bounded text evidence preview through the protected gateway", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      "first line\nsecond line",
+      {
+        status: 206,
+        headers: {
+          "content-type": "text/plain",
+          "content-range": "bytes 0-21/22",
+          "content-length": "22",
+          etag: '"preview-etag"',
+        },
+      },
+    ));
+    const result = await investigationGateway.previewEvidence?.(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      {},
+      options(),
+    );
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        artifactId: RUNTIME_FIXTURE_IDS.evidence,
+        text: "first line\nsecond line",
+        truncated: false,
+        etag: '"preview-etag"',
+      },
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `/api/cases/${encodeURIComponent(RUNTIME_FIXTURE_IDS.populatedCase)}/evidence/${encodeURIComponent(RUNTIME_FIXTURE_IDS.evidence)}/content`,
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({
+      Range: "bytes=0-65535",
+    });
+  });
+
+  it("rejects binary-looking preview bytes without publishing decoded content", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      new Uint8Array([0, 1, 2]),
+      { status: 206, headers: { "content-range": "bytes 0-2/3" } },
+    ));
+    await expect(investigationGateway.previewEvidence?.(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      {},
+      options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "content_type" } });
+  });
+
   it("uses the protected streaming multipart endpoint without base64 buffering", async () => {
     const success = makeEvidenceUploadSuccess();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
