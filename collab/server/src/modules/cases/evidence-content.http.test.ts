@@ -410,7 +410,9 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       expect(head.headers["accept-ranges"]).toBe("bytes");
       expect(head.headers["content-length"]).toBe(String(LOG.length));
       expect(head.headers["content-type"]).toBe("text/plain");
-      expect(head.headers["content-disposition"]).toBe('attachment; filename="quote_name.log"');
+      expect(head.headers["content-disposition"]).toBe(
+        'attachment; filename="quote_name.log"; filename*=UTF-8\'\'quote_name.log',
+      );
       expect(head.headers["cache-control"]).toBe("no-store");
       expect(head.headers["x-content-type-options"]).toBe("nosniff");
       expect(openRead).not.toHaveBeenCalled();
@@ -483,6 +485,42 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
         expect(unsat.headers["content-range"]).toBe(`bytes */${LOG.length}`);
         expect(unsat.body === "" || !unsat.body.includes("schemaId")).toBe(true);
       }
+    });
+  });
+
+  it("serves Unicode and control-bearing filenames with an ASCII fallback and RFC 5987 value", async () => {
+    await withApp(async ({ app, domain }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const caseId = await createCase(app, alice, "Unicode disposition");
+      const filename = 'report\r\n"\\报告.log';
+      const uploaded = await domain.addEvidence(
+        caseId,
+        { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" },
+        {
+          kind: "attachment",
+          filename,
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode(LOG),
+          summary: "unicode filename",
+          privacyClass: "share_safe",
+        },
+        "test",
+      );
+      const url = `/api/cases/${caseId}/evidence/${uploaded.artifact.id}/content`;
+
+      const head = await app.inject({ method: "HEAD", url, headers: { cookie: dave } });
+      expect(head.statusCode).toBe(200);
+      const disposition = String(head.headers["content-disposition"]);
+      expect(disposition).toBe(
+        'attachment; filename="report______.log"; filename*=UTF-8\'\'report%0D%0A%22%5C%E6%8A%A5%E5%91%8A.log',
+      );
+      expect(disposition).not.toMatch(/[\r\n]/u);
+
+      const full = await app.inject({ method: "GET", url, headers: { cookie: dave } });
+      expect(full.statusCode).toBe(200);
+      expect(full.body).toBe(LOG);
+      expect(full.headers["content-disposition"]).toBe(disposition);
     });
   });
 
@@ -1155,6 +1193,65 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
       expect(requestRaw?.listenerCount("aborted") ?? 0).toBe(0);
       expect(replyRaw?.listenerCount("close") ?? 0).toBe(0);
     }, { transferTimeoutMs: 1_000 });
+  });
+
+  it("does not let a non-settling iterator return delay content transfer disposal", async () => {
+    await withApp(async ({ app, store }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const caseId = await createCase(app, alice, "Hostile content iterator cleanup");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "hostile.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "hostile iterator return",
+        privacyClass: "share_safe",
+      });
+      const originalOpen = store.openRead.bind(store);
+      let returned = 0;
+      store.openRead = vi.fn(async (hash, range, signal) => {
+        const handle = await originalOpen(hash, range, signal);
+        return {
+          ...handle,
+          bytes: () => ({
+            [Symbol.asyncIterator]: () => ({
+              next: async () => {
+                throw new Error("evidence blob failed verification");
+              },
+              return: () => {
+                returned += 1;
+                return new Promise<IteratorResult<Uint8Array>>(() => undefined);
+              },
+            }),
+          }),
+        };
+      });
+      const url = `/api/cases/${caseId}/evidence/${artifact.id}/content`;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        app.inject({ method: "GET", url, headers: { cookie: dave } }).then(
+          (response) => ({ settled: true, response }),
+          (error: unknown) => ({ settled: true, error }),
+        ),
+        new Promise<{ settled: false }>((resolve) => {
+          timeout = setTimeout(() => resolve({ settled: false }), 750);
+        }),
+      ]).finally(() => {
+        if (timeout) clearTimeout(timeout);
+      });
+      expect(outcome.settled).toBe(true);
+      expect(returned).toBeGreaterThan(0);
+
+      const routesSrc = readFileSync(join(HERE, "routes.ts"), "utf8");
+      const cleanup = routesSrc.slice(
+        routesSrc.indexOf("async function* evidenceBytes"),
+        routesSrc.indexOf("const stream = Readable.from", routesSrc.indexOf("async function* evidenceBytes")),
+      );
+      expect(cleanup.indexOf("transfer.dispose()")).toBeLessThan(
+        cleanup.indexOf("releaseTransferIterator(iterator)"),
+      );
+    });
   });
 
   it("returns sanitized 503 before headers when openRead fails, and tears down midstream errors", async () => {

@@ -403,16 +403,27 @@ async function drainRemainingParts(
 
 function contentDispositionAttachment(filename: string | null): string {
   if (!filename) return "attachment";
-  let sanitized = "";
+  let fallback = "";
+  let unicode = "";
   for (const char of filename) {
-    const code = char.charCodeAt(0);
-    if (code < 32 || code === 127 || char === '"' || char === "\\") {
-      sanitized += "_";
+    const codePoint = char.codePointAt(0) ?? 0xfffd;
+    unicode += codePoint >= 0xd800 && codePoint <= 0xdfff ? "\ufffd" : char;
+    if (
+      codePoint < 32
+      || codePoint > 126
+      || char === '"'
+      || char === "\\"
+    ) {
+      fallback += "_";
     } else {
-      sanitized += char;
+      fallback += char;
     }
   }
-  return sanitized ? `attachment; filename="${sanitized}"` : "attachment";
+  const encoded = encodeURIComponent(unicode).replace(
+    /[!'()*]/gu,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${fallback || "download"}"; filename*=UTF-8''${encoded}`;
 }
 
 function ifNoneMatchHits(
@@ -450,6 +461,15 @@ function nextTransferChunk(
       },
     );
   });
+}
+
+function releaseTransferIterator(iterator: AsyncIterator<Uint8Array>): void {
+  if (typeof iterator.return !== "function") return;
+  try {
+    void Promise.resolve(iterator.return()).catch(() => undefined);
+  } catch {
+    // A hostile iterator cannot postpone HTTP transfer cleanup.
+  }
 }
 
 type ParsedBytesRange =
@@ -1730,19 +1750,21 @@ export async function registerCaseRoutes(
       const cancel = transfer.signal;
       async function* evidenceBytes(): AsyncIterable<Uint8Array> {
         const iterator = handle.bytes()[Symbol.asyncIterator]();
+        let iteratorDone = false;
         try {
           for (;;) {
             if (cancel.aborted) break;
             const next = await nextTransferChunk(iterator, cancel);
-            if (next.done) break;
+            if (next.done) {
+              iteratorDone = true;
+              break;
+            }
             const chunk = next.value;
             if (chunk && chunk.byteLength > 0) yield copyBoundedChunk(chunk);
           }
         } finally {
-          if (typeof iterator.return === "function") {
-            await Promise.resolve(iterator.return()).catch(() => undefined);
-          }
           transfer.dispose();
+          if (!iteratorDone) releaseTransferIterator(iterator);
         }
       }
       const stream = Readable.from(evidenceBytes(), { objectMode: false });

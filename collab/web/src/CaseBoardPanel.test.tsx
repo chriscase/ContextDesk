@@ -312,7 +312,7 @@ describe("CaseBoardPanel", () => {
     );
 
     render(
-      <CaseBoardPanel
+      <CaseBoardPanel canReadPrivate
         caseId="case-1"
         canWrite={false}
         canLead={false}
@@ -365,7 +365,7 @@ describe("CaseBoardPanel", () => {
         };
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("No evidence has been registered yet.")).toBeTruthy();
     expect(screen.getByText(/No snapshot frozen yet/)).toBeTruthy();
     expect(screen.queryByText(/Freeze selected evidence/)).toBeNull();
@@ -411,7 +411,7 @@ describe("CaseBoardPanel", () => {
     );
 
     const { rerender } = render(
-      <CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />,
+      <CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />,
     );
     expect(await screen.findByText("80 matching · showing 25 · 0 selected")).toBeTruthy();
     expect(screen.queryByText("note-49.txt")).toBeNull();
@@ -422,7 +422,7 @@ describe("CaseBoardPanel", () => {
     expect(screen.getByText("5 matching · showing 5 · 0 selected")).toBeTruthy();
     expect(screen.queryByText("note-12.txt")).toBeNull();
     rerender(
-      <CaseBoardPanel
+      <CaseBoardPanel canReadPrivate
         caseId="case-1"
         canWrite
         canLead
@@ -481,7 +481,7 @@ describe("CaseBoardPanel", () => {
     );
 
     render(
-      <CaseBoardPanel
+      <CaseBoardPanel canReadPrivate
         caseId="case-1"
         canWrite
         canLead
@@ -525,7 +525,7 @@ describe("CaseBoardPanel", () => {
       }),
     );
 
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("Recorded evidence item 12")).toBeTruthy();
     const more = screen.getByText("Show 8 more known items").closest("details") as HTMLDetailsElement;
     expect(more.open).toBe(false);
@@ -570,9 +570,21 @@ describe("CaseBoardPanel", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />);
+    render(
+      <CaseBoardPanel
+        caseId="case-1"
+        canWrite
+        canLead={false}
+        canReadPrivate={false}
+        readOnly={false}
+      />,
+    );
     expect(await screen.findByRole("heading", { name: "Upload evidence" })).toBeTruthy();
     expect(screen.queryByText(/Freeze selected evidence/)).toBeNull();
+    const privacySelect = screen.getByLabelText("Privacy class") as HTMLSelectElement;
+    expect(privacySelect.value).toBe("share_safe");
+    expect([...privacySelect.options].map((option) => option.value)).toEqual(["share_safe"]);
+    expect(screen.getByText(/Share-safe is required/)).toBeTruthy();
 
     const fileInput = screen.getByLabelText("File");
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
@@ -592,7 +604,7 @@ describe("CaseBoardPanel", () => {
     expect(formOrder(data)).toEqual(["kind", "summary", "privacyClass", "file"]);
     expect(data.get("kind")).toBe("log");
     expect(data.get("summary")).toBe("Checkout request log");
-    expect(data.get("privacyClass")).toBe("owner_only");
+    expect(data.get("privacyClass")).toBe("share_safe");
     expect(data.get("filename")).toBeNull();
     expect(data.get("mediaType")).toBeNull();
     const uploaded = data.get("file");
@@ -602,8 +614,81 @@ describe("CaseBoardPanel", () => {
     xhr.complete(200, uploadSuccessBody("artifact-2"));
 
     expect(await screen.findByText("checkout.log")).toBeTruthy();
+    expect(screen.getByText(/Private evidence bytes require additional permission/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download checkout.log" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Inspect log" })).toBeNull();
     expect(evidenceLoads).toBe(2);
     expect(fetchMock.mock.calls.some((call) => call[1]?.method === "POST")).toBe(false);
+  });
+
+  it("resets privacy choices and private-byte controls when capability changes", async () => {
+    const artifact = {
+      id: "private-artifact",
+      kind: "log",
+      filename: "private.log",
+      contentHash: "a".repeat(64),
+      verificationStatus: "verified",
+      privacyClass: "owner_only",
+      uploaderId: "alice",
+      mediaType: "text/plain",
+      byteLength: 12,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) return jsonOk({ artifacts: [artifact] });
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+    const { rerender } = render(
+      <CaseBoardPanel
+        caseId="case-1"
+        canWrite
+        canLead={false}
+        canReadPrivate={false}
+        readOnly={false}
+      />,
+    );
+    expect(await screen.findByText("private.log")).toBeTruthy();
+    let privacySelect = screen.getByLabelText("Privacy class") as HTMLSelectElement;
+    expect(privacySelect.value).toBe("share_safe");
+    expect([...privacySelect.options].map((option) => option.value)).toEqual(["share_safe"]);
+    expect(screen.queryByRole("button", { name: "Download private.log" })).toBeNull();
+
+    rerender(
+      <CaseBoardPanel
+        caseId="case-1"
+        canWrite
+        canLead={false}
+        canReadPrivate
+        readOnly={false}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: "Download private.log" })).toBeTruthy();
+    privacySelect = screen.getByLabelText("Privacy class") as HTMLSelectElement;
+    expect(privacySelect.value).toBe("owner_only");
+    expect([...privacySelect.options].map((option) => option.value)).toEqual([
+      "owner_only",
+      "share_safe",
+    ]);
+
+    rerender(
+      <CaseBoardPanel
+        caseId="case-1"
+        canWrite
+        canLead={false}
+        canReadPrivate={false}
+        readOnly={false}
+      />,
+    );
+    await waitFor(() => {
+      privacySelect = screen.getByLabelText("Privacy class") as HTMLSelectElement;
+      expect(privacySelect.value).toBe("share_safe");
+      expect([...privacySelect.options].map((option) => option.value)).toEqual(["share_safe"]);
+    });
+    expect(screen.queryByRole("button", { name: "Download private.log" })).toBeNull();
   });
 
   it("uploads a sanitized log and freezes a snapshot in one step", async () => {
@@ -634,7 +719,7 @@ describe("CaseBoardPanel", () => {
     const frozen = vi.fn();
     window.addEventListener("contextdesk:snapshot-frozen", frozen);
     try {
-      render(<CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />);
+      render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
       const uploadHeading = await screen.findByRole("heading", { name: "Upload evidence" });
       const fileInput = screen.getByLabelText("File");
       const file = new File(["sanitized"], "sanitized.log", { type: "text/plain" });
@@ -684,7 +769,7 @@ describe("CaseBoardPanel", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />);
     const uploadHeading = await screen.findByRole("heading", { name: "Upload evidence" });
     const fileInput = screen.getByLabelText("File");
     const file = new File([new Uint8Array(1_000_001)], "large.log", { type: "text/plain" });
@@ -751,7 +836,7 @@ describe("evidence card identifiers", () => {
 
   it("does not lead the card with a truncated digest", async () => {
     stub();
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("checkout.log")).toBeTruthy();
     expect(screen.getByText("share_safe")).toBeTruthy();
     expect(screen.queryByText(/hash [0-9a-f]{12}…/)).toBeNull();
@@ -761,7 +846,7 @@ describe("evidence card identifiers", () => {
 
   it("keeps the exact digest available, in full, one disclosure away", async () => {
     stub();
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("checkout.log")).toBeTruthy();
     expect(screen.getByText(HASH)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Copy content hash for checkout.log" })).toBeTruthy();
@@ -808,7 +893,7 @@ describe("streamed evidence workflow", () => {
     );
 
     try {
-      render(<CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />);
+      render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />);
       const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
       const file = new File(["hello"], "checkout.log", { type: "text/plain" });
       const fileInput = screen.getByLabelText("File");
@@ -865,7 +950,7 @@ describe("streamed evidence workflow", () => {
         return jsonOk({ snapshotId: null, notice: "", findings: [] });
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />);
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["x"], "notes.log", { type: "text/plain" });
     const fileInput = screen.getByLabelText("File");
@@ -944,7 +1029,7 @@ describe("bounded evidence preview and download", () => {
         });
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("checkout.log")).toBeTruthy();
     expect(screen.getByText("text/plain")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Inspect log" }));
@@ -1041,7 +1126,7 @@ describe("bounded evidence preview and download", () => {
         cancellationNeverSettles: true,
       });
     });
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("ok.log")).toBeTruthy();
     fireEvent.click(within(screen.getByText("ok.log").closest("li")!).getByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText("ok-body")).toBeTruthy();
@@ -1057,6 +1142,37 @@ describe("bounded evidence preview and download", () => {
     expect(cancelled.missing.value).toBe(true);
     expect(cancelled.range.value).toBe(true);
     expect(cancelled.unavailable.value).toBe(true);
+  });
+
+  it("rejects a 206 preview whose Content-Range does not start at zero", async () => {
+    const cancelled = { value: false };
+    boardWith(
+      [{
+        id: "shifted",
+        kind: "log",
+        filename: "shifted.log",
+        contentHash: "a".repeat(64),
+        verificationStatus: "verified",
+        privacyClass: "share_safe",
+        uploaderId: "alice",
+        mediaType: "text/plain",
+        byteLength: 10,
+      }],
+      (url, init) => {
+        if (!url.endsWith("/content") || requestMethod(init) === "HEAD") return null;
+        return previewResponse({
+          status: 206,
+          headers: { "content-range": "bytes 1-4/10" },
+          body: "EVIL",
+          cancelled,
+        });
+      },
+    );
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
+    expect(await screen.findByText("A bounded preview is not available for this evidence.")).toBeTruthy();
+    expect(cancelled.value).toBe(true);
+    expect(screen.queryByText("EVIL")).toBeNull();
   });
 
   it("does not read a body whose Content-Length exceeds 64 KiB", async () => {
@@ -1092,7 +1208,7 @@ describe("bounded evidence preview and download", () => {
         };
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText(/more than the 64 KiB limit/)).toBeTruthy();
     expect(readerOpened).toBe(false);
@@ -1141,7 +1257,7 @@ describe("bounded evidence preview and download", () => {
         };
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText("Showing the first 64 KiB of this file.")).toBeTruthy();
     expect(screen.getByText(new RegExp(`${(65_536).toLocaleString()} characters`))).toBeTruthy();
@@ -1150,6 +1266,38 @@ describe("bounded evidence preview and download", () => {
     const retained = "A".repeat(32_768) + "B".repeat(32_768);
     expect(screen.getByLabelText("Log overflow.log").textContent).toContain(retained);
     expect(screen.getByLabelText("Log overflow.log").textContent).not.toContain("B".repeat(32_769));
+  });
+
+  it("retains at most 64 KiB from one giant first stream chunk", async () => {
+    const cancelled = { value: false };
+    const giant = new Uint8Array(2 * 1024 * 1024).fill(0x42);
+    giant.fill(0x41, 0, 65_536);
+    boardWith(
+      [{
+        id: "giant",
+        kind: "log",
+        filename: "giant.log",
+        contentHash: "a".repeat(64),
+        verificationStatus: "verified",
+        privacyClass: "share_safe",
+        uploaderId: "alice",
+        mediaType: "text/plain",
+        byteLength: giant.byteLength,
+      }],
+      (url, init) => {
+        if (!url.endsWith("/content") || requestMethod(init) === "HEAD") return null;
+        return previewResponse({ status: 200, body: giant, cancelled, leaveOpen: true });
+      },
+    );
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
+    expect(await screen.findByText("Showing the first 64 KiB of this file.")).toBeTruthy();
+    const preview = screen.getByLabelText("Log giant.log");
+    expect(preview.textContent).toContain("A".repeat(128));
+    expect(preview.textContent).not.toContain("B".repeat(128));
+    expect(cancelled.value).toBe(true);
+    expect(PANEL_SOURCE).toContain("new Uint8Array(PREVIEW_LIMIT_BYTES)");
+    expect(PANEL_SOURCE).not.toContain("chunks.push(value.subarray");
   });
 
   it("explains binary and metadata-only artifacts instead of decoding them", async () => {
@@ -1186,7 +1334,7 @@ describe("bounded evidence preview and download", () => {
       return jsonOk({ snapshotId: null, notice: "", findings: [] });
     });
     vi.stubGlobal("fetch", fetchMock);
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("core.bin")).toBeTruthy();
     fireEvent.click(within(screen.getByText("core.bin").closest("li")!).getByRole("button", { name: "Preview" }));
     expect(await screen.findByText(/Preview is unavailable for this file type/)).toBeTruthy();
@@ -1250,7 +1398,7 @@ describe("bounded evidence preview and download", () => {
         });
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("one.log")).toBeTruthy();
     fireEvent.click(within(screen.getByText("one.log").closest("li")!).getByRole("button", { name: "Inspect log" }));
     fireEvent.click(within(screen.getByText("two.log").closest("li")!).getByRole("button", { name: "Inspect log" }));
@@ -1269,7 +1417,7 @@ describe("bounded evidence preview and download", () => {
       privacyClass: "owner_only",
       uploaderId: "alice",
     }]);
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     expect(await screen.findByText("attachment")).toBeTruthy();
     expect(screen.getByText("Kind: attachment")).toBeTruthy();
     expect(screen.queryByRole("checkbox")).toBeNull();
@@ -1322,7 +1470,7 @@ describe("bounded evidence preview and download", () => {
         });
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText("cached-ok")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Hide log" }));
@@ -1354,7 +1502,7 @@ describe("bounded evidence preview and download", () => {
         return previewResponse({ status: 304, headers: { etag: '"missing"' }, body: "" });
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText("The preview was not modified, but no cached preview is available.")).toBeTruthy();
   });
@@ -1381,18 +1529,23 @@ describe("bounded evidence preview and download", () => {
         });
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText(/not valid text/)).toBeTruthy();
   });
 
-  it("preflights download with HEAD before same-origin attachment navigation", async () => {
-    const heads: RequestInit[] = [];
+  it("uses a native same-origin GET without forcing a filename onto error responses", async () => {
     const downloads: string[] = [];
     const originalClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function click(this: HTMLAnchorElement) {
-      downloads.push(`${this.getAttribute("href")}|${this.getAttribute("download")}`);
+      downloads.push([
+        this.getAttribute("href"),
+        this.getAttribute("download"),
+        this.getAttribute("target"),
+        this.getAttribute("rel"),
+      ].join("|"));
     };
+    let contentFetches = 0;
     boardWith(
       [{
         id: "dl",
@@ -1405,95 +1558,20 @@ describe("bounded evidence preview and download", () => {
         mediaType: "text/plain",
         byteLength: 12,
       }],
-      (url, init) => {
+      (url) => {
         if (!url.endsWith("/content")) return null;
-        if (requestMethod(init) === "HEAD") {
-          heads.push(init ?? {});
-          return { ok: true, status: 200, headers: new Headers({ "content-type": "text/plain" }) };
-        }
-        throw new Error("download must not GET and buffer /content");
+        contentFetches += 1;
+        throw new Error("native downloads must not preflight or buffer /content");
       },
     );
     try {
-      render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+      render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
       fireEvent.click(await screen.findByRole("button", { name: "Download checkout.log" }));
-      await waitFor(() => expect(downloads).toEqual([
-        "/api/cases/case-1/evidence/dl/content|checkout.log",
-      ]));
-      expect(heads).toHaveLength(1);
-    } finally {
-      HTMLAnchorElement.prototype.click = originalClick;
-    }
-  });
-
-  it("keeps download privacy-safe on 404 and does not navigate on 503", async () => {
-    const downloads: string[] = [];
-    const originalClick = HTMLAnchorElement.prototype.click;
-    HTMLAnchorElement.prototype.click = function click() {
-      downloads.push("navigated");
-    };
-    boardWith(
-      [{
-        id: "private",
-        kind: "log",
-        filename: "secret.log",
-        contentHash: "a".repeat(64),
-        verificationStatus: "verified",
-        privacyClass: "owner_only",
-        uploaderId: "alice",
-        byteLength: 12,
-      }],
-      (url, init) => {
-        if (!url.endsWith("/content")) return null;
-        if (requestMethod(init) === "HEAD") {
-          return { ok: false, status: 404, headers: new Headers() };
-        }
-        throw new Error("must not GET content after a privacy-safe HEAD 404");
-      },
-    );
-    try {
-      render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
-      fireEvent.click(await screen.findByRole("button", { name: "Download secret.log" }));
-      expect(await screen.findByText("This evidence is not available.")).toBeTruthy();
-      expect(downloads).toEqual([]);
-    } finally {
-      HTMLAnchorElement.prototype.click = originalClick;
-    }
-  });
-
-  it("does not navigate after a HEAD 503 and reports storage unavailable", async () => {
-    const downloads: string[] = [];
-    const heads: string[] = [];
-    const originalClick = HTMLAnchorElement.prototype.click;
-    HTMLAnchorElement.prototype.click = function click() {
-      downloads.push("navigated");
-    };
-    boardWith(
-      [{
-        id: "down",
-        kind: "log",
-        filename: "down.log",
-        contentHash: "a".repeat(64),
-        verificationStatus: "verified",
-        privacyClass: "owner_only",
-        uploaderId: "alice",
-        byteLength: 12,
-      }],
-      (url, init) => {
-        if (!url.endsWith("/content")) return null;
-        if (requestMethod(init) === "HEAD") {
-          heads.push(url);
-          return { ok: false, status: 503, headers: new Headers(), json: async () => ({ error: "storage_unavailable" }) };
-        }
-        throw new Error("must not GET content after HEAD 503");
-      },
-    );
-    try {
-      render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
-      fireEvent.click(await screen.findByRole("button", { name: "Download down.log" }));
-      expect(await screen.findByText("Evidence storage is temporarily unavailable.")).toBeTruthy();
-      expect(heads).toEqual(["/api/cases/case-1/evidence/down/content"]);
-      expect(downloads).toEqual([]);
+      expect(downloads).toEqual([
+        "/api/cases/case-1/evidence/dl/content||_blank|noopener",
+      ]);
+      expect(contentFetches).toBe(0);
+      expect(PANEL_SOURCE).not.toContain('setAttribute("download"');
     } finally {
       HTMLAnchorElement.prototype.click = originalClick;
     }
@@ -1526,7 +1604,7 @@ describe("bounded evidence preview and download", () => {
         });
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText("hello world")).toBeTruthy();
     expect(screen.queryByText("Showing the first 64 KiB of this file.")).toBeNull();
@@ -1558,7 +1636,7 @@ describe("bounded evidence preview and download", () => {
         });
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText("partial-log")).toBeTruthy();
     expect(screen.getByText("Showing the first 64 KiB of this file.")).toBeTruthy();
@@ -1586,7 +1664,7 @@ describe("bounded evidence preview and download", () => {
         });
       },
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
     expect(await screen.findByText(/not valid text/)).toBeTruthy();
   });
@@ -1598,7 +1676,7 @@ describe("bounded evidence preview and download", () => {
     });
     function Host(props: { open: boolean }) {
       return props.open
-        ? <CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />
+        ? <CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />
         : <p>unmounted</p>;
     }
     boardWith(
@@ -1637,11 +1715,7 @@ describe("bounded evidence preview and download", () => {
     expect(screen.queryByText("STALE")).toBeNull();
   });
 
-  it("does not apply download state after unmount", async () => {
-    let release: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+  it("does not retain download state after native navigation and unmount", async () => {
     const downloads: string[] = [];
     const originalClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function click() {
@@ -1649,7 +1723,7 @@ describe("bounded evidence preview and download", () => {
     };
     function Host(props: { open: boolean }) {
       return props.open
-        ? <CaseBoardPanel caseId="case-1" canWrite={false} canLead={false} readOnly />
+        ? <CaseBoardPanel canReadPrivate caseId="case-1" canWrite={false} canLead={false} readOnly />
         : <p>unmounted</p>;
     }
     boardWith(
@@ -1663,25 +1737,17 @@ describe("bounded evidence preview and download", () => {
         uploaderId: "alice",
         byteLength: 12,
       }],
-      (url, init) => {
+      (url) => {
         if (!url.endsWith("/content")) return null;
-        if (requestMethod(init) === "HEAD") {
-          return gate.then(() => ({
-            ok: true,
-            status: 200,
-            headers: new Headers(),
-          }));
-        }
-        throw new Error("must not GET content during download HEAD");
+        throw new Error("native download must not use protectedApiFetch");
       },
     );
     try {
       const { rerender } = render(<Host open />);
       fireEvent.click(await screen.findByRole("button", { name: "Download checkout.log" }));
       rerender(<Host open={false} />);
-      release?.();
       await waitFor(() => expect(screen.getByText("unmounted")).toBeTruthy());
-      expect(downloads).toEqual([]);
+      expect(downloads).toEqual(["navigated"]);
       expect(screen.queryByText("Preparing download…")).toBeNull();
     } finally {
       HTMLAnchorElement.prototype.click = originalClick;
@@ -1705,7 +1771,7 @@ describe("upload protocol and selection fencing", () => {
         return jsonOk({ snapshotId: null, notice: "", findings: [] });
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />);
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
     Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
@@ -1768,7 +1834,7 @@ describe("upload protocol and selection fencing", () => {
         summary: uploadSummaryRecord("artifact-2"),
       }),
     ];
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
     Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
@@ -1808,7 +1874,7 @@ describe("upload protocol and selection fencing", () => {
         return jsonOk({ snapshotId: null, notice: "", findings: [] });
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
     Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
@@ -1847,7 +1913,7 @@ describe("upload protocol and selection fencing", () => {
         return jsonOk({ snapshotId: null, notice: "", findings: [] });
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
     Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
@@ -1886,7 +1952,7 @@ describe("upload protocol and selection fencing", () => {
         return jsonOk({ snapshotId: null, notice: "", findings: [] });
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />);
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
     Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
@@ -1919,7 +1985,7 @@ describe("upload protocol and selection fencing", () => {
         return jsonOk({ snapshotId: null, notice: "", findings: [] });
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
     Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
@@ -1947,7 +2013,7 @@ describe("upload protocol and selection fencing", () => {
     );
     function Host(props: { open: boolean }) {
       return props.open
-        ? <CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />
+        ? <CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />
         : <p>unmounted</p>;
     }
     const { rerender } = render(<Host open />);
@@ -1980,7 +2046,7 @@ describe("upload protocol and selection fencing", () => {
         return jsonOk({ snapshotId: null, notice: "", findings: [] });
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />);
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
     Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
@@ -2010,7 +2076,7 @@ describe("upload protocol and selection fencing", () => {
       }),
     );
     const { rerender } = render(
-      <CaseBoardPanel caseId="case-1" canWrite canLead={false} readOnly={false} />,
+      <CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />,
     );
     const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
     const file = new File(["hello"], "checkout.log", { type: "text/plain" });
@@ -2019,11 +2085,98 @@ describe("upload protocol and selection fencing", () => {
     fireEvent.change(screen.getByLabelText("Summary"), { target: { value: "Checkout request log" } });
     fireEvent.submit(form);
     await waitFor(() => expect(UploadXHR.pending.length).toBe(1));
-    rerender(<CaseBoardPanel caseId="case-2" canWrite canLead={false} readOnly={false} />);
+    rerender(<CaseBoardPanel canReadPrivate caseId="case-2" canWrite canLead={false} readOnly={false} />);
     expect(await screen.findByRole("heading", { name: "Upload evidence" })).toBeTruthy();
     UploadXHR.pending[0]?.complete(200, uploadSuccessBody("artifact-stale", "case-1"));
     expect(screen.queryByText("Evidence uploaded.")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("aborts and ignores late inventory JSON when switching investigations", async () => {
+    let caseAEvidenceReads = 0;
+    let releaseLateA!: (body: unknown) => void;
+    let releaseCaseB!: (body: unknown) => void;
+    const lateA = new Promise<unknown>((resolve) => {
+      releaseLateA = resolve;
+    });
+    const caseB = new Promise<unknown>((resolve) => {
+      releaseCaseB = resolve;
+    });
+    const signals: AbortSignal[] = [];
+    const artifact = (id: string, filename: string) => ({
+      id,
+      kind: "log",
+      filename,
+      contentHash: "a".repeat(64),
+      verificationStatus: "verified",
+      privacyClass: "share_safe",
+      uploaderId: "alice",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.signal) signals.push(init.signal);
+        if (url.endsWith("/evidence")) {
+          if (url.includes("/case-1/")) {
+            caseAEvidenceReads += 1;
+            return {
+              ok: true,
+              status: 200,
+              json: async () => caseAEvidenceReads === 1
+                ? { artifacts: [artifact("artifact-a", "case-a.log")] }
+                : lateA,
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => caseB,
+          };
+        }
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+    const { rerender } = render(
+      <CaseBoardPanel canReadPrivate
+        caseId="case-1"
+        canWrite={false}
+        canLead={false}
+        readOnly
+        routeFocus={{
+          section: "triage-evidence-board",
+          item: "artifact-a",
+          itemKind: "evidence",
+          lane: null,
+          experiment: null,
+        }}
+      />,
+    );
+    const caseAItem = (await screen.findByText("case-a.log")).closest("li") as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(caseAItem));
+    window.dispatchEvent(new CustomEvent("contextdesk:corpus-intake-committed", {
+      detail: { caseId: "case-1" },
+    }));
+    await waitFor(() => expect(caseAEvidenceReads).toBe(2));
+    const refreshSignal = [...new Set(signals)].at(-1);
+
+    rerender(
+      <CaseBoardPanel canReadPrivate caseId="case-2" canWrite={false} canLead={false} readOnly />,
+    );
+    expect(screen.queryByText("case-a.log")).toBeNull();
+    expect(screen.getByText("Loading case memory…")).toBeTruthy();
+    expect(refreshSignal?.aborted).toBe(true);
+
+    releaseLateA({ artifacts: [artifact("artifact-late-a", "late-case-a.log")] });
+    await Promise.resolve();
+    expect(screen.queryByText("late-case-a.log")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    releaseCaseB({ artifacts: [artifact("artifact-b", "case-b.log")] });
+    expect(await screen.findByText("case-b.log")).toBeTruthy();
+    expect(screen.queryByText("case-a.log")).toBeNull();
+    expect(screen.queryByText("late-case-a.log")).toBeNull();
   });
 
   it("does not freeze hidden selected evidence", async () => {
@@ -2071,7 +2224,7 @@ describe("upload protocol and selection fencing", () => {
         return jsonOk({ snapshotId: null, notice: "", findings: [] });
       }),
     );
-    render(<CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />);
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
     expect(await screen.findByText("2 matching · showing 2 · 0 selected")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Select all evidence" }));
     fireEvent.change(screen.getByLabelText("Filter evidence"), { target: { value: "note-1" } });
@@ -2079,5 +2232,78 @@ describe("upload protocol and selection fencing", () => {
     expect(screen.getByRole("button", { name: "Freeze selected evidence (1)" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Freeze selected evidence (1)" }));
     await waitFor(() => expect(snapshotBody).toEqual({ evidenceIds: ["artifact-1"] }));
+  });
+
+  it("prevents duplicate freeze and ignores a late completion after case switch", async () => {
+    const artifact = {
+      id: "artifact-freeze",
+      kind: "log",
+      filename: "freeze.log",
+      contentHash: "a".repeat(64),
+      verificationStatus: "verified",
+      privacyClass: "share_safe",
+      uploaderId: "lead",
+    };
+    let releaseFreeze!: (response: ReturnType<typeof jsonOk>) => void;
+    const freezeResponse = new Promise<ReturnType<typeof jsonOk>>((resolve) => {
+      releaseFreeze = resolve;
+    });
+    let freezePosts = 0;
+    let freezeSignal: AbortSignal | null = null;
+    let caseOneBoardLoads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots") && init?.method === "POST") {
+          freezePosts += 1;
+          freezeSignal = init.signal ?? null;
+          return freezeResponse;
+        }
+        if (url.includes("/case-1/") && url.endsWith("/evidence")) {
+          return jsonOk({ artifacts: [artifact] });
+        }
+        if (url.endsWith("/evidence")) return jsonOk({ artifacts: [] });
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        if (url.includes("/case-1/") && url.endsWith("/board")) caseOneBoardLoads += 1;
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+    const frozen = vi.fn();
+    window.addEventListener("contextdesk:snapshot-frozen", frozen);
+    try {
+      const { rerender } = render(
+        <CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />,
+      );
+      await screen.findByText("freeze.log");
+      fireEvent.click(screen.getByRole("button", { name: "Select all evidence" }));
+      const freezeButton = screen.getByRole("button", { name: "Freeze selected evidence (1)" });
+      fireEvent.click(freezeButton);
+      fireEvent.click(freezeButton);
+      expect(freezePosts).toBe(1);
+      const pending = screen.getByRole("button", { name: "Freezing selected evidence…" });
+      expect(pending).toHaveProperty("disabled", true);
+      expect(pending.getAttribute("aria-busy")).toBe("true");
+
+      rerender(
+        <CaseBoardPanel canReadPrivate caseId="case-2" canWrite canLead readOnly={false} />,
+      );
+      expect(screen.queryByText("freeze.log")).toBeNull();
+      expect((freezeSignal as AbortSignal | null)?.aborted).toBe(true);
+      releaseFreeze(jsonOk({
+        id: "stale-snapshot",
+        fingerprint: "b".repeat(64),
+        parentSnapshotId: null,
+        evidence: [{ evidenceId: artifact.id, ordinal: 0 }],
+        visibility: "share_safe",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        createdBy: "lead",
+      }));
+      expect(await screen.findByText("No evidence has been registered yet.")).toBeTruthy();
+      expect(frozen).not.toHaveBeenCalled();
+      expect(caseOneBoardLoads).toBe(1);
+    } finally {
+      window.removeEventListener("contextdesk:snapshot-frozen", frozen);
+    }
   });
 });

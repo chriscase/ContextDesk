@@ -10,6 +10,7 @@ const UPLOAD_KINDS = ARTIFACT_KINDS.filter(
   (kind): kind is "log" | "email" | "attachment" => kind !== "file_server_ref",
 );
 const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
+const SHARE_SAFE_PRIVACY_CLASSES = ["share_safe"] as const;
 const MAX_ERROR_LENGTH = 240;
 const INITIAL_FINDINGS = 12;
 const INITIAL_EVIDENCE = 25;
@@ -66,6 +67,9 @@ interface BoardFinding {
   basis?: string;
 }
 
+const EMPTY_ARTIFACTS: ArtifactView[] = [];
+const EMPTY_SNAPSHOTS: SnapshotView[] = [];
+
 const BUCKETS: BoardFinding["bucket"][] = [
   "known",
   "unknown",
@@ -117,13 +121,7 @@ function participantLabel(identityId: string, participants: readonly Participant
 function errorText(response: Response, fallback: string): Promise<string> {
   return response
     .json()
-    .then((body: unknown) => {
-      if (typeof body === "object" && body !== null && "error" in body) {
-        const error = (body as { error?: unknown }).error;
-        if (typeof error === "string") return boundedError(error, fallback);
-      }
-      return fallback;
-    })
+    .then(() => fallback)
     .catch(() => fallback);
 }
 
@@ -236,17 +234,6 @@ function contentLengthOf(response: Response): number | null {
   return value;
 }
 
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
-}
-
 function parseContentRange(
   header: string | null,
 ): { start: number; end: number; total: number | null } | null {
@@ -303,7 +290,7 @@ async function readBoundedPreviewBytes(
     throw new Error("Preview bytes were not available as a readable stream.");
   }
   const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
+  const bounded = new Uint8Array(PREVIEW_LIMIT_BYTES);
   let received = 0;
   let readerTruncated = false;
   try {
@@ -312,15 +299,17 @@ async function readBoundedPreviewBytes(
       if (next.done) break;
       const value = next.value;
       if (!value || value.byteLength === 0) continue;
-      if (received + value.byteLength > PREVIEW_LIMIT_BYTES) {
-        chunks.push(value.subarray(0, PREVIEW_LIMIT_BYTES - received));
-        received = PREVIEW_LIMIT_BYTES;
+      const remaining = PREVIEW_LIMIT_BYTES - received;
+      const retained = Math.min(value.byteLength, remaining);
+      if (retained > 0) {
+        bounded.set(value.subarray(0, retained), received);
+        received += retained;
+      }
+      if (value.byteLength > remaining) {
         readerTruncated = true;
         await reader.cancel();
         break;
       }
-      chunks.push(value);
-      received += value.byteLength;
     }
   } finally {
     try {
@@ -329,7 +318,11 @@ async function readBoundedPreviewBytes(
       // Already released after cancel.
     }
   }
-  return { bytes: concatBytes(chunks), truncated: readerTruncated, received };
+  return {
+    bytes: bounded.subarray(0, received),
+    truncated: readerTruncated,
+    received,
+  };
 }
 
 function decodePreviewText(bytes: Uint8Array): string | null {
@@ -348,10 +341,10 @@ function previewControlName(artifact: ArtifactView, open: boolean): string {
   return open ? "Hide preview" : "Preview";
 }
 
-function triggerSameOriginDownload(url: string, filename: string | null): void {
+function openSameOriginDownload(url: string): void {
   const link = document.createElement("a");
   link.href = url;
-  link.setAttribute("download", filename ?? "");
+  link.target = "_blank";
   link.rel = "noopener";
   document.body.append(link);
   link.click();
@@ -411,11 +404,15 @@ export function CaseBoardPanel(props: {
   caseId: string;
   canWrite: boolean;
   canLead: boolean;
+  canReadPrivate: boolean;
   readOnly: boolean;
   participants?: ParticipantLabel[];
   routeFocus?: WorkFocus;
   onOpenCapture?: () => void;
 }) {
+  const canReadPrivate = props.canReadPrivate;
+  const defaultPrivacyClass = canReadPrivate ? "owner_only" : "share_safe";
+  const privacyClasses = canReadPrivate ? PRIVACY_CLASSES : SHARE_SAFE_PRIVACY_CLASSES;
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
   const [board, setBoard] = useState<{ snapshotId: string | null; findings: BoardFinding[]; notice: string } | null>(null);
@@ -432,15 +429,16 @@ export function CaseBoardPanel(props: {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [summary, setSummary] = useState("");
   const [kind, setKind] = useState<(typeof UPLOAD_KINDS)[number]>("log");
-  const [privacyClass, setPrivacyClass] = useState<(typeof PRIVACY_CLASSES)[number]>("owner_only");
+  const [privacyClass, setPrivacyClass] = useState<(typeof PRIVACY_CLASSES)[number]>(
+    defaultPrivacyClass,
+  );
   const [freezeAfterUpload, setFreezeAfterUpload] = useState(false);
+  const [freezing, setFreezing] = useState(false);
   const [fileInputGeneration, setFileInputGeneration] = useState(0);
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [inspectText, setInspectText] = useState<string | null>(null);
   const [inspectUnavailable, setInspectUnavailable] = useState<string | null>(null);
   const [inspectTruncated, setInspectTruncated] = useState(false);
-  const [downloadPendingId, setDownloadPendingId] = useState<string | null>(null);
-  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
   const loadGeneration = useRef(0);
   const previewGeneration = useRef(0);
   const previewAbort = useRef<AbortController | null>(null);
@@ -451,14 +449,23 @@ export function CaseBoardPanel(props: {
     truncated: boolean;
   } | null>(null);
   const uploadAbort = useRef<AbortController | null>(null);
-  const downloadAbort = useRef<AbortController | null>(null);
+  const loadAbort = useRef<AbortController | null>(null);
+  const freezeAbort = useRef<AbortController | null>(null);
   const uploadInFlight = useRef(false);
+  const freezeInFlight = useRef(false);
+  const freezeGeneration = useRef(0);
   const transferSession = useRef(0);
   const caseIdRef = useRef(props.caseId);
   const loadedCaseRef = useRef<string | null>(null);
   const retryButtonRef = useRef<HTMLButtonElement | null>(null);
   const submitButtonRef = useRef<HTMLButtonElement | null>(null);
   caseIdRef.current = props.caseId;
+  const dataMatchesCase = loadedCaseRef.current === props.caseId;
+  const currentArtifacts = dataMatchesCase ? artifacts : EMPTY_ARTIFACTS;
+  const currentSnapshots = dataMatchesCase ? snapshots : EMPTY_SNAPSHOTS;
+  const currentBoard = dataMatchesCase ? board : null;
+  const caseLoading = loading || !dataMatchesCase;
+  const visibleError = dataMatchesCase ? error : null;
   const evidenceRouteKey = props.routeFocus?.section === "triage-evidence-board"
     && props.routeFocus.itemKind === "evidence"
     && props.routeFocus.item
@@ -478,10 +485,10 @@ export function CaseBoardPanel(props: {
     if (handledEvidenceRoute.current === evidenceRouteKey) return;
     handledEvidenceRoute.current = evidenceRouteKey;
     if (evidenceFilter) setEvidenceFilter("");
-    const routeIndex = artifacts.findIndex((artifact) => artifact.id === evidenceRouteKey);
+    const routeIndex = currentArtifacts.findIndex((artifact) => artifact.id === evidenceRouteKey);
     if (routeIndex >= evidenceLimit) setEvidenceLimit(routeIndex + 1);
-  }, [artifacts, evidenceFilter, evidenceLimit, evidenceRouteKey]);
-  useRouteFocus(props.routeFocus, !loading && !evidenceRouteNeedsFilterReset);
+  }, [currentArtifacts, evidenceFilter, evidenceLimit, evidenceRouteKey]);
+  useRouteFocus(props.routeFocus, !caseLoading && !evidenceRouteNeedsFilterReset);
 
   useEffect(() => {
     if (!restoreActionFocusAfterUpload.current || uploading) return;
@@ -493,14 +500,19 @@ export function CaseBoardPanel(props: {
 
   function abortPanelTransfers(): void {
     transferSession.current += 1;
+    loadGeneration.current += 1;
     previewGeneration.current += 1;
+    freezeGeneration.current += 1;
+    loadAbort.current?.abort();
+    loadAbort.current = null;
     previewAbort.current?.abort();
     previewAbort.current = null;
     uploadAbort.current?.abort();
     uploadAbort.current = null;
-    downloadAbort.current?.abort();
-    downloadAbort.current = null;
+    freezeAbort.current?.abort();
+    freezeAbort.current = null;
     uploadInFlight.current = false;
+    freezeInFlight.current = false;
   }
 
   const restoreActionFocusAfterUpload = useRef(false);
@@ -512,33 +524,51 @@ export function CaseBoardPanel(props: {
   useEffect(() => {
     abortPanelTransfers();
     loadedCaseRef.current = null;
+    handledEvidenceRoute.current = null;
+    setArtifacts([]);
+    setSnapshots([]);
+    setBoard(null);
+    setSelectedSnapshotId(null);
+    setSelectedEvidence([]);
+    setEvidenceFilter("");
+    setEvidenceLimit(INITIAL_EVIDENCE);
     setLoading(true);
+    setError(null);
+    setErrorSource(null);
     setUploading(false);
+    setFreezing(false);
     setUploadProgress(null);
     setUploadNotice(null);
     setSelectedFile(null);
     setSummary("");
     setKind("log");
-    setPrivacyClass("owner_only");
+    setPrivacyClass(defaultPrivacyClass);
     setFreezeAfterUpload(false);
     setFileInputGeneration((current) => current + 1);
     setInspecting(null);
     setInspectText(null);
     setInspectUnavailable(null);
     setInspectTruncated(false);
-    setDownloadPendingId(null);
-    setDownloadNotice(null);
     previewCache.current = null;
     return () => abortPanelTransfers();
-  }, [props.caseId]);
+  }, [defaultPrivacyClass, props.caseId]);
 
   const load = useCallback(async (
     snapshotId?: string | null,
     options?: { preserveError?: boolean },
   ): Promise<boolean> => {
     const caseId = props.caseId;
+    const session = transferSession.current;
     const generation = ++loadGeneration.current;
-    const isCurrent = () => generation === loadGeneration.current && caseIdRef.current === caseId;
+    loadAbort.current?.abort();
+    const controller = new AbortController();
+    loadAbort.current = controller;
+    const isCurrent = () =>
+      generation === loadGeneration.current
+      && transferSession.current === session
+      && caseIdRef.current === caseId
+      && loadAbort.current === controller
+      && !controller.signal.aborted;
     const blocking = loadedCaseRef.current !== caseId;
     if (blocking) setLoading(true);
     if (!options?.preserveError) {
@@ -548,17 +578,32 @@ export function CaseBoardPanel(props: {
     try {
       const suffix = snapshotId ? `?snapshotId=${encodeURIComponent(snapshotId)}` : "";
       const [evidenceResponse, snapshotsResponse, boardResponse] = await Promise.all([
-        protectedApiFetch(`/api/cases/${caseId}/evidence`),
-        protectedApiFetch(`/api/cases/${caseId}/snapshots`),
-        protectedApiFetch(`/api/cases/${caseId}/board${suffix}`),
+        protectedApiFetch(`/api/cases/${caseId}/evidence`, { signal: controller.signal }),
+        protectedApiFetch(`/api/cases/${caseId}/snapshots`, { signal: controller.signal }),
+        protectedApiFetch(`/api/cases/${caseId}/board${suffix}`, { signal: controller.signal }),
       ]);
-      if (!evidenceResponse.ok) throw new Error(await errorText(evidenceResponse, "Evidence could not be loaded."));
-      if (!snapshotsResponse.ok) throw new Error(await errorText(snapshotsResponse, "Snapshots could not be loaded."));
-      if (!boardResponse.ok) throw new Error(await errorText(boardResponse, "Case board could not be loaded."));
       if (!isCurrent()) return false;
+      if (!evidenceResponse.ok) {
+        const message = await errorText(evidenceResponse, "Evidence could not be loaded.");
+        if (!isCurrent()) return false;
+        throw new Error(message);
+      }
+      if (!snapshotsResponse.ok) {
+        const message = await errorText(snapshotsResponse, "Snapshots could not be loaded.");
+        if (!isCurrent()) return false;
+        throw new Error(message);
+      }
+      if (!boardResponse.ok) {
+        const message = await errorText(boardResponse, "Case board could not be loaded.");
+        if (!isCurrent()) return false;
+        throw new Error(message);
+      }
       const evidenceBody = (await evidenceResponse.json()) as { artifacts?: ArtifactView[] };
+      if (!isCurrent()) return false;
       const snapshotsBody = (await snapshotsResponse.json()) as { snapshots?: SnapshotView[] };
+      if (!isCurrent()) return false;
       const boardBody = (await boardResponse.json()) as { snapshotId: string | null; findings: BoardFinding[]; notice: string };
+      if (!isCurrent()) return false;
       const nextArtifacts = evidenceBody.artifacts ?? [];
       setArtifacts(nextArtifacts);
       setSelectedEvidence((current) => current.filter((id) => nextArtifacts.some((artifact) => artifact.id === id)));
@@ -568,15 +613,19 @@ export function CaseBoardPanel(props: {
       loadedCaseRef.current = caseId;
       return true;
     } catch (cause) {
-      if (isCurrent() && !options?.preserveError) {
+      if (isCurrent() && !isAbortFailure(cause) && !options?.preserveError) {
+        loadedCaseRef.current = caseId;
         setError(cause instanceof Error ? cause.message : "Case memory could not be loaded.");
         setErrorSource("board");
       }
       return false;
     } finally {
-      if (isCurrent()) setLoading(false);
+      if (isCurrent()) {
+        loadAbort.current = null;
+        setLoading(false);
+      }
     }
-  }, [props.caseId]);
+  }, [defaultPrivacyClass, props.caseId]);
 
   useEffect(() => {
     setSelectedEvidence([]);
@@ -694,6 +743,14 @@ export function CaseBoardPanel(props: {
         applyPreviewUnavailable("This evidence could not be previewed.");
         return;
       }
+      const contentRange = parseContentRange(
+        response.headers.get("content-range") ?? response.headers.get("Content-Range"),
+      );
+      if (response.status === 206 && (!contentRange || contentRange.start !== 0)) {
+        cancelPreviewBody(response);
+        applyPreviewUnavailable("A bounded preview is not available for this evidence.");
+        return;
+      }
       const preview = await readBoundedPreviewBytes(response);
       if (!stillCurrent()) return;
       const text = decodePreviewText(preview.bytes);
@@ -706,9 +763,7 @@ export function CaseBoardPanel(props: {
       const truncated = previewIsTruncated({
         readerTruncated: preview.truncated,
         received: preview.received,
-        contentRange: parseContentRange(
-          response.headers.get("content-range") ?? response.headers.get("Content-Range"),
-        ),
+        contentRange,
         byteLength: artifact.byteLength,
       });
       const etag = response.headers.get("etag") ?? response.headers.get("ETag") ?? "";
@@ -730,72 +785,72 @@ export function CaseBoardPanel(props: {
     }
   }
 
-  async function downloadArtifact(artifact: ArtifactView) {
+  function downloadArtifact(artifact: ArtifactView): void {
     const caseId = props.caseId;
     const session = transferSession.current;
-    downloadAbort.current?.abort();
-    const controller = new AbortController();
-    downloadAbort.current = controller;
-    setDownloadPendingId(artifact.id);
-    setDownloadNotice("Preparing download…");
-    const url = evidenceContentUrl(caseId, artifact.id);
-    const stillThisDownload = () =>
-      transferSession.current === session
-      && caseIdRef.current === caseId
-      && !controller.signal.aborted;
-    try {
-      const response = await protectedApiFetch(url, {
-        method: "HEAD",
-        signal: controller.signal,
-      });
-      if (!stillThisDownload()) return;
-      if (response.status === 404) {
-        setDownloadNotice("This evidence is not available.");
-        return;
-      }
-      if (response.status === 503) {
-        setDownloadNotice("Evidence storage is temporarily unavailable.");
-        return;
-      }
-      if (!response.ok) {
-        setDownloadNotice("This evidence could not be downloaded.");
-        return;
-      }
-      setDownloadNotice(null);
-      triggerSameOriginDownload(url, artifact.filename);
-    } catch (cause) {
-      if (!stillThisDownload() || isAbortFailure(cause)) return;
-      setDownloadNotice("This evidence could not be downloaded.");
-    } finally {
-      if (downloadAbort.current === controller) downloadAbort.current = null;
-      if (stillThisDownload()) setDownloadPendingId(null);
-    }
+    if (transferSession.current !== session || caseIdRef.current !== caseId) return;
+    openSameOriginDownload(evidenceContentUrl(caseId, artifact.id));
   }
 
   async function freezeSnapshot() {
+    if (freezeInFlight.current) return;
     const visibleIds = new Set(visibleArtifacts.map((artifact) => artifact.id));
     const evidenceIds = selectedEvidence.filter((id) => visibleIds.has(id));
     if (evidenceIds.length === 0) return;
+    const caseId = props.caseId;
+    const session = transferSession.current;
+    const generation = ++freezeGeneration.current;
+    freezeAbort.current?.abort();
+    const controller = new AbortController();
+    freezeAbort.current = controller;
+    freezeInFlight.current = true;
+    setFreezing(true);
+    const isCurrent = () =>
+      generation === freezeGeneration.current
+      && transferSession.current === session
+      && caseIdRef.current === caseId
+      && freezeAbort.current === controller
+      && !controller.signal.aborted;
     setError(null);
     setErrorSource(null);
-    const response = await protectedApiFetch(`/api/cases/${props.caseId}/snapshots`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ evidenceIds }),
-    });
-    if (!response.ok) {
-      setError(await errorText(response, "Snapshot could not be frozen."));
+    try {
+      const response = await protectedApiFetch(`/api/cases/${caseId}/snapshots`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ evidenceIds }),
+        signal: controller.signal,
+      });
+      if (!isCurrent()) return;
+      if (!response.ok) {
+        const message = await errorText(response, "Snapshot could not be frozen.");
+        if (!isCurrent()) return;
+        setError(message);
+        setErrorSource("board");
+        return;
+      }
+      const snapshot = (await response.json()) as SnapshotView;
+      if (!isCurrent()) return;
+      setSelectedEvidence([]);
+      const refreshed = await load(snapshot.id);
+      if (!isCurrent() || !refreshed) return;
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:snapshot-frozen", {
+          detail: { caseId, snapshotId: snapshot.id },
+        }),
+      );
+    } catch (cause) {
+      if (!isCurrent() || isAbortFailure(cause)) return;
+      setError("Snapshot could not be frozen.");
       setErrorSource("board");
-      return;
+    } finally {
+      if (freezeAbort.current === controller) {
+        freezeAbort.current = null;
+        freezeInFlight.current = false;
+        if (transferSession.current === session && caseIdRef.current === caseId) {
+          setFreezing(false);
+        }
+      }
     }
-    const snapshot = (await response.json()) as SnapshotView;
-    setSelectedEvidence([]);
-    await load(snapshot.id);
-    window.dispatchEvent(
-      new CustomEvent("contextdesk:snapshot-frozen", {
-        detail: { caseId: props.caseId, snapshotId: snapshot.id },
-      }),
-    );
   }
 
   /**
@@ -815,7 +870,7 @@ export function CaseBoardPanel(props: {
     setSelectedFile(null);
     setSummary("");
     setKind("log");
-    setPrivacyClass("owner_only");
+    setPrivacyClass(defaultPrivacyClass);
     setFreezeAfterUpload(false);
     setFileInputGeneration((current) => current + 1);
   }
@@ -830,6 +885,11 @@ export function CaseBoardPanel(props: {
     const trimmedSummary = summary.trim();
     if (!trimmedSummary) {
       setError("Add a short evidence summary.");
+      setErrorSource("upload");
+      return;
+    }
+    if (!canReadPrivate && privacyClass !== "share_safe") {
+      setError("Choose an allowed privacy class before uploading.");
       setErrorSource("upload");
       return;
     }
@@ -928,13 +988,20 @@ export function CaseBoardPanel(props: {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ evidenceIds }),
+          signal: controller.signal,
         });
         if (!stillThisUpload()) return;
         if (!snapshotResponse.ok) {
-          setError(await errorText(snapshotResponse, "Upload succeeded but the snapshot could not be frozen."));
+          const message = await errorText(
+            snapshotResponse,
+            "Upload succeeded but the snapshot could not be frozen.",
+          );
+          if (!stillThisUpload()) return;
+          setError(message);
           setErrorSource("upload");
           resetUploadForm();
           await load(null, { preserveError: true });
+          if (!stillThisUpload()) return;
           announceEvidenceChanged();
           restoreActionFocus();
           return;
@@ -945,6 +1012,7 @@ export function CaseBoardPanel(props: {
         resetUploadForm();
         setUploadNotice("Evidence uploaded and a snapshot was frozen.");
         await load(snapshot.id);
+        if (!stillThisUpload()) return;
         window.dispatchEvent(
           new CustomEvent("contextdesk:snapshot-frozen", {
             detail: { caseId, snapshotId: snapshot.id },
@@ -957,6 +1025,7 @@ export function CaseBoardPanel(props: {
       resetUploadForm();
       setUploadNotice("Evidence uploaded.");
       await load(null);
+      if (!stillThisUpload()) return;
       announceEvidenceChanged();
       restoreActionFocus();
     } catch (cause) {
@@ -1002,15 +1071,15 @@ export function CaseBoardPanel(props: {
   }
 
   const byBucket = (bucket: BoardFinding["bucket"]) =>
-    (board?.findings ?? []).filter((finding) => finding.bucket === bucket);
+    (currentBoard?.findings ?? []).filter((finding) => finding.bucket === bucket);
   const normalizedEvidenceFilter = evidenceFilter.trim().toLocaleLowerCase();
   const visibleArtifacts = normalizedEvidenceFilter
-    ? artifacts.filter((artifact) =>
+    ? currentArtifacts.filter((artifact) =>
         [artifact.filename, artifact.relativePath, artifact.kind]
           .filter((value): value is string => Boolean(value))
           .some((value) => value.toLocaleLowerCase().includes(normalizedEvidenceFilter)),
       )
-    : artifacts;
+    : currentArtifacts;
   const renderedArtifacts = visibleArtifacts.slice(0, evidenceLimit);
   const hiddenArtifactCount = Math.max(0, visibleArtifacts.length - renderedArtifacts.length);
   const progressPercent =
@@ -1021,11 +1090,15 @@ export function CaseBoardPanel(props: {
   const visibleSelectedIds = selectedEvidence.filter((id) =>
     visibleArtifacts.some((artifact) => artifact.id === id),
   );
-  const statusLiveText = uploading
+  const statusLiveText = !dataMatchesCase
+    ? ""
+    : uploading
     ? progressPercent === null
       ? `Uploading${selectedFile ? ` ${selectedFile.name}` : ""}…`
       : `Uploading${selectedFile ? ` ${selectedFile.name}` : ""} — ${progressPercent}%`
-    : [uploadNotice, downloadNotice].filter(Boolean).join(" ");
+    : freezing
+      ? "Freezing selected evidence…"
+    : uploadNotice ?? "";
 
   function selectVisibleEvidence() {
     const visibleIds = visibleArtifacts.map((artifact) => artifact.id);
@@ -1040,18 +1113,18 @@ export function CaseBoardPanel(props: {
           <h3 id="case-memory-heading">Evidence and snapshots</h3>
           <p className="case-memory__copy">Freeze exactly what a later triage is allowed to see. New evidence creates a new lineage point.</p>
         </div>
-        <span className="case-memory__badge">{artifacts.length} evidence · {snapshots.length} snapshots</span>
+        <span className="case-memory__badge">{currentArtifacts.length} evidence · {currentSnapshots.length} snapshots</span>
       </div>
-      {error ? (
+      {visibleError ? (
         <p className="case-memory__error" role="alert">
-          {error}
+          {visibleError}
         </p>
       ) : null}
       <p className="case-memory__upload-live" role="status" aria-live="polite" aria-atomic="true">
-        {error ? "" : statusLiveText}
+        {visibleError ? "" : statusLiveText}
       </p>
-      {loading ? <p className="case-memory__empty">Loading case memory…</p> : null}
-      {!loading ? (
+      {caseLoading ? <p className="case-memory__empty">Loading case memory…</p> : null}
+      {!caseLoading ? (
         <>
           <div className="case-memory__grid">
             <section className="case-memory__card" aria-labelledby="case-evidence-heading">
@@ -1069,8 +1142,8 @@ export function CaseBoardPanel(props: {
                   Review timestamps in Capture
                 </button>
               ) : null}
-              {artifacts.length === 0 ? <p className="case-memory__empty">No evidence has been registered yet.</p> : null}
-              {artifacts.length > 0 ? (
+              {currentArtifacts.length === 0 ? <p className="case-memory__empty">No evidence has been registered yet.</p> : null}
+              {currentArtifacts.length > 0 ? (
                 <div className="case-memory__evidence-tools">
                   <label htmlFor="case-evidence-filter">
                     Filter evidence
@@ -1111,6 +1184,7 @@ export function CaseBoardPanel(props: {
                 {renderedArtifacts.map((artifact) => {
                   const selected = selectedEvidence.includes(artifact.id);
                   const selectable = !props.readOnly && props.canLead;
+                  const canReadArtifact = artifact.privacyClass !== "owner_only" || canReadPrivate;
                   const label = artifact.filename ?? artifact.kind;
                   const sizeLabel = formatByteLength(artifact.byteLength);
                   const itemClass = [
@@ -1172,26 +1246,31 @@ export function CaseBoardPanel(props: {
                             { label: "Evidence id", value: artifact.id },
                           ]}
                         />
-                        <button
-                          type="button"
-                          className="case-memory__inspect"
-                          aria-expanded={inspecting === artifact.id}
-                          onClick={() => void inspectArtifact(artifact)}
-                        >
-                          {previewControlName(artifact, inspecting === artifact.id)}
-                        </button>
-                        {artifact.kind !== "file_server_ref" ? (
-                          <button
-                            type="button"
-                            className="case-memory__download"
-                            disabled={downloadPendingId === artifact.id}
-                            onClick={() => void downloadArtifact(artifact)}
-                          >
-                            {downloadPendingId === artifact.id
-                              ? `Preparing download of ${label}`
-                              : `Download ${label}`}
-                          </button>
-                        ) : null}
+                        {canReadArtifact ? (
+                          <>
+                            <button
+                              type="button"
+                              className="case-memory__inspect"
+                              aria-expanded={inspecting === artifact.id}
+                              onClick={() => void inspectArtifact(artifact)}
+                            >
+                              {previewControlName(artifact, inspecting === artifact.id)}
+                            </button>
+                            {artifact.kind !== "file_server_ref" ? (
+                              <button
+                                type="button"
+                                className="case-memory__download"
+                                onClick={() => downloadArtifact(artifact)}
+                              >
+                                Download {label}
+                              </button>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="case-memory__note">
+                            Private evidence bytes require additional permission.
+                          </span>
+                        )}
                       </div>
                       {inspecting === artifact.id ? (
                         inspectUnavailable ? (
@@ -1224,7 +1303,7 @@ export function CaseBoardPanel(props: {
                   </button>
                 </div>
               ) : null}
-              {artifacts.length > 0 && visibleArtifacts.length === 0 ? (
+              {currentArtifacts.length > 0 && visibleArtifacts.length === 0 ? (
                 <p className="case-memory__empty">No evidence matches this filter.</p>
               ) : null}
               {!props.readOnly && props.canWrite ? (
@@ -1293,13 +1372,18 @@ export function CaseBoardPanel(props: {
                         setPrivacyClass(event.target.value as (typeof PRIVACY_CLASSES)[number])
                       }
                     >
-                      {PRIVACY_CLASSES.map((option) => (
+                      {privacyClasses.map((option) => (
                         <option key={option} value={option}>
                           {option}
                         </option>
                       ))}
                     </select>
                   </label>
+                  {!canReadPrivate ? (
+                    <p className="case-memory__note">
+                      Share-safe is required so you can read the evidence after upload.
+                    </p>
+                  ) : null}
                   {props.canLead ? (
                     <label className="case-memory__upload-field case-memory__freeze-toggle">
                       <span>
@@ -1364,17 +1448,20 @@ export function CaseBoardPanel(props: {
                   className="login__submit"
                   type="button"
                   onClick={() => void freezeSnapshot()}
-                  disabled={visibleSelectedIds.length === 0}
+                  disabled={visibleSelectedIds.length === 0 || freezing}
+                  aria-busy={freezing}
                 >
-                  Freeze selected evidence ({visibleSelectedIds.length})
+                  {freezing
+                    ? "Freezing selected evidence…"
+                    : `Freeze selected evidence (${visibleSelectedIds.length})`}
                 </button>
               ) : null}
             </section>
             <section className="case-memory__card" aria-labelledby="case-snapshots-heading">
               <h4 id="case-snapshots-heading">Snapshot lineage</h4>
-              {snapshots.length === 0 ? <p className="case-memory__empty">No snapshot frozen yet. The current board is provisional.</p> : null}
+              {currentSnapshots.length === 0 ? <p className="case-memory__empty">No snapshot frozen yet. The current board is provisional.</p> : null}
               <div className="case-memory__snapshots">
-                {snapshots.map((snapshot, index) => (
+                {currentSnapshots.map((snapshot, index) => (
                   <button
                     className={snapshot.id === selectedSnapshotId ? "case-memory__snapshot is-selected" : "case-memory__snapshot"}
                     type="button"
@@ -1406,7 +1493,7 @@ export function CaseBoardPanel(props: {
                 <h4 id="case-board-heading">What the case currently supports</h4>
                 <p className="case-memory__note">Agreement is not proof of correctness. Gold remains a separate human benchmark.</p>
               </div>
-              {board?.snapshotId ? <span className="case-memory__badge">bound to selected snapshot</span> : null}
+              {currentBoard?.snapshotId ? <span className="case-memory__badge">bound to selected snapshot</span> : null}
             </div>
             <div className="case-memory__board-grid">
               {BUCKETS.map((bucket) => {

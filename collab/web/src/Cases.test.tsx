@@ -2894,6 +2894,12 @@ describe("workstreams in the Analyze stage", () => {
             json: async () => ({ artifacts: [], snapshots: [] }),
           });
         }
+        if (url.endsWith("/board")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ snapshotId: null, findings: [], notice: "" }),
+          });
+        }
         if (url.endsWith("/triage-runs") || url === "/api/triage-profiles" || url === "/api/triage-capabilities") {
           return Promise.resolve({
             ok: true,
@@ -2914,6 +2920,48 @@ describe("workstreams in the Analyze stage", () => {
     ).toBeTruthy();
     // The evidence board and the launcher are part of the same stage.
     expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+  });
+
+  it("passes explicit private-read capability into the evidence board", async () => {
+    stubWithWorkstreams();
+    const common = {
+      focusCaseId: "c1",
+      stage: "analyze" as const,
+      onOpenCase: () => {},
+      onStageChange: () => {},
+    };
+    const view = render(
+      <Cases
+        roles={["contributor"]}
+        capabilities={["investigation:read", "investigation:write", "run:strategies"]}
+        {...common}
+      />,
+    );
+    expect(await screen.findByRole("heading", { name: "Upload evidence" })).toBeTruthy();
+    let privacy = screen.getByLabelText("Privacy class") as HTMLSelectElement;
+    expect(privacy.value).toBe("share_safe");
+    expect([...privacy.options].map((option) => option.value)).toEqual(["share_safe"]);
+
+    view.rerender(
+      <Cases
+        roles={["contributor"]}
+        capabilities={[
+          "investigation:read",
+          "investigation:write",
+          "run:strategies",
+          "evidence:private:read",
+        ]}
+        {...common}
+      />,
+    );
+    await waitFor(() => {
+      privacy = screen.getByLabelText("Privacy class") as HTMLSelectElement;
+      expect(privacy.value).toBe("owner_only");
+      expect([...privacy.options].map((option) => option.value)).toEqual([
+        "owner_only",
+        "share_safe",
+      ]);
+    });
   });
 
   it("makes an opened workstream the stage, not a highlight beside everything else", async () => {
