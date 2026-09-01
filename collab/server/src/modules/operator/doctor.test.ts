@@ -730,7 +730,7 @@ function expectS3OperatorGuidance(body: string) {
   expect(body).toMatch(/^# COLLAB_EVIDENCE_PROVIDER=s3$/m);
   expect(body).not.toMatch(/^COLLAB_EVIDENCE_PROVIDER=/m);
   expect(body).toMatch(
-    /filesystem is the(?:\n#)? default when COLLAB_EVIDENCE_PROVIDER is absent/,
+    /filesystem is the(?:\r?\n#)? default when COLLAB_EVIDENCE_PROVIDER is absent/,
   );
   expect(body).toMatch(/does not contact the bucket/);
   expect(body).toMatch(/Startup and \/ready ping the selected bucket/);
