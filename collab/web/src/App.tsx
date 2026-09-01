@@ -261,14 +261,33 @@ function AccountMenu(props: {
   const [draftStrategyId, setDraftStrategyId] = useState<UiStrategyId>(props.strategy.id);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const strategySaveAttemptRef = useRef(0);
+  const strategySaveOwnsFocusRef = useRef(false);
+
+  function closeMenu() {
+    strategySaveOwnsFocusRef.current = false;
+    setOpen(false);
+  }
 
   useEffect(() => {
     if (!open) return undefined;
     const onPointerDown = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) closeMenu();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (
+        strategySaveOwnsFocusRef.current
+        && event.target !== document.body
+      ) {
+        strategySaveOwnsFocusRef.current = false;
+      }
     };
     document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("focusin", onFocusIn);
+    };
   }, [open]);
 
   useEffect(() => {
@@ -279,7 +298,7 @@ function AccountMenu(props: {
   function onKeyDown(event: React.KeyboardEvent) {
     if (event.key === "Escape" && open) {
       event.stopPropagation();
-      setOpen(false);
+      closeMenu();
       triggerRef.current?.focus();
     }
   }
@@ -292,7 +311,10 @@ function AccountMenu(props: {
         className="account__trigger"
         aria-expanded={open}
         aria-controls="account-panel"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => setOpen((current) => {
+          if (current) strategySaveOwnsFocusRef.current = false;
+          return !current;
+        })}
       >
         <span className="sr-only">Signed in as </span>
         {/* The initial is CSS-generated so the button's text reads exactly
@@ -322,7 +344,7 @@ function AccountMenu(props: {
                 return;
               }
               event.preventDefault();
-              setOpen(false);
+              closeMenu();
               props.onOpenProfile();
             }}
           >
@@ -383,12 +405,18 @@ function AccountMenu(props: {
                 type="button"
                 disabled={draftStrategyId === props.strategy.id || props.strategyStatus !== "ready"}
                 onClick={() => {
-                  void props.onStrategyChange(draftStrategyId).then((saved) => {
+                  const attempt = ++strategySaveAttemptRef.current;
+                  strategySaveOwnsFocusRef.current = true;
+                  void props.onStrategyChange(draftStrategyId).then(() => {
                     // Saving disables this button while it owns focus. Move
                     // focus deliberately instead of allowing the browser to
-                    // drop it to <body>; successful saves also close the
-                    // chooser because the selected workspace is now active.
-                    if (saved) setOpen(false);
+                    // drop it to <body>. If the user dismissed the chooser or
+                    // moved elsewhere while the request was pending, preserve
+                    // that newer focus intent instead.
+                    if (
+                      strategySaveAttemptRef.current !== attempt
+                      || !strategySaveOwnsFocusRef.current
+                    ) return;
                     triggerRef.current?.focus();
                   });
                 }}
@@ -413,7 +441,7 @@ function AccountMenu(props: {
               className="account__signout"
               type="button"
               onClick={() => {
-                setOpen(false);
+                closeMenu();
                 props.onSignOut?.();
               }}
             >

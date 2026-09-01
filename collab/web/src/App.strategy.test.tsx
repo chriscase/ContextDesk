@@ -188,11 +188,12 @@ describe("strategy selection in the shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use selected experience" }));
     await waitFor(() => {
       expect(document.activeElement).toBe(account);
-      expect(account.getAttribute("aria-expanded")).toBe("false");
+      expect(account.getAttribute("aria-expanded")).toBe("true");
     });
-    fireEvent.click(account);
     expect(await screen.findByText(/is now your saved investigation experience/u)).toBeTruthy();
     expect(screen.getByText(/This choice applies inside Investigations; Overview remains the War Room activity dashboard\./u)).toBeTruthy();
+    fireEvent.keyDown(account, { key: "Escape" });
+    expect(account.getAttribute("aria-expanded")).toBe("false");
     expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room");
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
@@ -205,6 +206,62 @@ describe("strategy selection in the shell", () => {
     expect(window.location.pathname).toBe("/investigations");
     expect(fetchStub.mock.calls.filter(([input]) => String(input) === "/api/cases")).toHaveLength(2);
     expect(fetchStub.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+
+  it("does not steal focus when the chooser is dismissed while a preference save is pending", async () => {
+    let finishSave: ((response: Response) => void) | null = null;
+    const fetchStub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
+      if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["contributor"], capabilities: ["investigation:read", "investigation:write"] }) };
+      if (url === "/api/ui-strategies/effective") return strategyEffective();
+      if (url === "/api/ui-strategies/preference" && init?.method === "PUT") {
+        return await new Promise<Response>((resolve) => { finishSave = resolve; });
+      }
+      return runtimeReadResponse(url, []) ?? { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+
+    render(<App />);
+    const account = await screen.findByRole("button", { name: "Signed in as Alice" });
+    fireEvent.click(account);
+    fireEvent.click(screen.getByRole("radio", { name: /Investigation First/u }));
+    fireEvent.click(screen.getByRole("button", { name: "Use selected experience" }));
+    await waitFor(() => expect(finishSave).not.toBeNull());
+
+    const outside = screen.getByRole("button", { name: "Help" });
+    fireEvent.mouseDown(outside);
+    outside.focus();
+    expect(account.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(outside);
+
+    await act(async () => finishSave?.(strategyEffective("investigation-first", 1)));
+    await waitFor(() => expect(document.activeElement).toBe(outside));
+    expect(account.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps a failed preference visible and restores focus while the chooser still owns the interaction", async () => {
+    const fetchStub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
+      if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["contributor"], capabilities: ["investigation:read", "investigation:write"] }) };
+      if (url === "/api/ui-strategies/effective") return strategyEffective();
+      if (url === "/api/ui-strategies/preference" && init?.method === "PUT") {
+        return jsonResponse({ error: "unavailable" }, 503);
+      }
+      return runtimeReadResponse(url, []) ?? { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+
+    render(<App />);
+    const account = await screen.findByRole("button", { name: "Signed in as Alice" });
+    fireEvent.click(account);
+    fireEvent.click(screen.getByRole("radio", { name: /Investigation First/u }));
+    fireEvent.click(screen.getByRole("button", { name: "Use selected experience" }));
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(/preference was not confirmed/u);
+    expect(account.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(account);
   });
 
   it("keeps a shared browser's server preferences isolated by immutable authenticated identity", async () => {

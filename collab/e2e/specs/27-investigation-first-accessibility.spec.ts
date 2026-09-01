@@ -41,10 +41,6 @@ function strategyRoot(page: Page): Locator {
 
 async function useInvestigationFirst(page: Page): Promise<void> {
   const before = new URL(page.url());
-  const account = page.getByRole("button", { name: `Signed in as ${FIXTURE_USERS.dave.username}` });
-  await account.focus();
-  await page.keyboard.press("Enter");
-
   const effectiveResponse = await page.request.get("/api/ui-strategies/effective");
   expect(effectiveResponse.ok(), await effectiveResponse.text()).toBeTruthy();
   const effective = await effectiveResponse.json() as { effectiveId?: string };
@@ -55,6 +51,15 @@ async function useInvestigationFirst(page: Page): Promise<void> {
     beacon: "Beacon",
   }[effective.effectiveId ?? ""];
   expect(currentName, "effective strategy response did not name a shipped strategy").toBeTruthy();
+
+  // The shell resolves the server-backed preference asynchronously after
+  // authentication. Wait for that effective presentation before opening the
+  // chooser; otherwise its intentionally stable draft can capture the
+  // fail-closed War Room default while the shell has already moved on.
+  await expect(page.locator(".topbar__title-app")).toHaveText(currentName!);
+  const account = page.getByRole("button", { name: `Signed in as ${FIXTURE_USERS.dave.username}` });
+  await account.focus();
+  await page.keyboard.press("Enter");
   await expect(page.getByRole("radio", { name: new RegExp(`^${currentName}\\b`, "u") }))
     .toBeChecked();
 
@@ -86,6 +91,9 @@ async function useInvestigationFirst(page: Page): Promise<void> {
   }
   await expect(page.locator(".topbar__title-app")).toHaveText("Investigation First");
   await expect(account).toBeFocused();
+  if (await account.getAttribute("aria-expanded") === "true") {
+    await page.keyboard.press("Escape");
+  }
   await expect(account).toHaveAttribute("aria-expanded", "false");
   const after = new URL(page.url());
   expect(after.pathname).toBe(before.pathname);
