@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { channel } from "node:diagnostics_channel";
 import { Readable } from "node:stream";
 import {
   CopyObjectCommand,
@@ -89,7 +88,6 @@ const VERIFIED_GENERATION_CACHE_TTL_MS = 300000;
 const VERIFIED_GENERATION_MAX_FLIGHTS = 16;
 const VERIFIED_GENERATION_MAX_WAITERS = 64;
 const S3_GENERATION_TOKEN_MAX_BYTES = 1024;
-const VERIFIED_GENERATION_DIAGNOSTICS = channel("cd.s3.verified_generation");
 
 interface S3ObjectGeneration {
   readonly bucket: string;
@@ -123,42 +121,6 @@ interface VerificationFlight {
   completed: boolean;
 }
 
-type DiagnosticEvent =
-  | "hit"
-  | "miss"
-  | "expired"
-  | "generation_mismatch"
-  | "warm"
-  | "lru_evict"
-  | "invalidate"
-  | "flight_start"
-  | "flight_join"
-  | "flight_reject"
-  | "waiter_reject"
-  | "verify_success"
-  | "verify_failure";
-
-type DiagnosticOperation =
-  | "openRead"
-  | "verify"
-  | "put"
-  | "copy"
-  | "delete"
-  | "recover"
-  | "stage"
-  | "commit"
-  | "promote"
-  | "rollback";
-
-type DiagnosticReason =
-  | "overflow"
-  | "successor"
-  | "abort"
-  | "mutation"
-  | "mismatch"
-  | "expired"
-  | "success"
-  | "failure";
 
 export function createS3ClientConfig(opts: S3EvidenceStoreOptions): S3ClientConfig {
   const region = requiredToken(opts.region, "region");
@@ -473,7 +435,7 @@ export class S3EvidenceStore implements EvidenceStore {
       if (opts.expectedLength !== undefined) input.ContentLength = opts.expectedLength;
       if (opts.contentType !== undefined) input.ContentType = opts.contentType;
       try {
-        await this.send("stageStream", new PutObjectCommand(input));
+        await this.send("stageStream", new PutObjectCommand(input), opts.signal);
       } catch (error) {
         if (intakeError !== null) throw intakeError;
         throw error;
@@ -757,7 +719,7 @@ export class S3EvidenceStore implements EvidenceStore {
       );
     } catch (error) {
       if (isIntegrityFailure(error)) {
-        this.invalidateVerifiedGeneration(key, "openRead", "mismatch");
+        this.invalidateVerifiedGeneration(key);
       }
       throw error;
     }
@@ -777,7 +739,7 @@ export class S3EvidenceStore implements EvidenceStore {
     ) {
       throw new Error("range is out of bounds");
     }
-    if (!this.lookupVerifiedGeneration(generation, "openRead")) {
+    if (!this.lookupVerifiedGeneration(generation)) {
       await this.awaitVerifiedGeneration(generation, "openRead", signal);
     }
     throwIfAborted(signal);
@@ -816,7 +778,7 @@ export class S3EvidenceStore implements EvidenceStore {
         );
       } catch (error) {
         if (isIntegrityFailure(error)) {
-          this.invalidateVerifiedGeneration(key, "verify", "mismatch");
+          this.invalidateVerifiedGeneration(key);
         }
         throw error;
       }
@@ -1008,12 +970,12 @@ export class S3EvidenceStore implements EvidenceStore {
     };
     if (meta.contentType !== null) input.ContentType = meta.contentType;
     const canonical = this.isCanonicalBlobKey(key);
-    if (canonical) this.invalidateVerifiedGeneration(key, diagnosticMutationOperation(operation, "put"), "mutation");
+    if (canonical) this.invalidateVerifiedGeneration(key);
     try {
       await this.send(operation, new PutObjectCommand(input));
     } finally {
       if (canonical) {
-        this.invalidateVerifiedGeneration(key, diagnosticMutationOperation(operation, "put"), "mutation");
+        this.invalidateVerifiedGeneration(key);
       }
     }
   }
@@ -1042,14 +1004,14 @@ export class S3EvidenceStore implements EvidenceStore {
     operation: string,
   ): Promise<"applied" | "absent" | "unknown"> {
     const toKey = this.blobKey(hash);
-    this.invalidateVerifiedGeneration(toKey, "copy", "mutation");
+    this.invalidateVerifiedGeneration(toKey);
     try {
       await this.copyObject(fromKey, toKey, operation);
     } catch {
       // Destination is still inspected below. A thrown CopyObject may have
       // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
     }
-    this.invalidateVerifiedGeneration(toKey, "copy", "mutation");
+    this.invalidateVerifiedGeneration(toKey);
     return this.probeCanonicalCopy(hash, byteLength, operation);
   }
 
@@ -1076,14 +1038,14 @@ export class S3EvidenceStore implements EvidenceStore {
       Metadata: userMetadata(meta),
     };
     if (meta.contentType !== null) input.ContentType = meta.contentType;
-    this.invalidateVerifiedGeneration(toKey, "copy", "mutation");
+    this.invalidateVerifiedGeneration(toKey);
     try {
       await this.send(operation, new CopyObjectCommand(input));
     } catch {
       // Destination is still inspected below. A thrown CopyObject may have
       // applied bytes; absent vs unknown is decided from Head/Get, not the throw.
     }
-    this.invalidateVerifiedGeneration(toKey, "copy", "mutation");
+    this.invalidateVerifiedGeneration(toKey);
     return this.probeCanonicalCopy(hash, meta.byteLength, operation);
   }
 
@@ -1109,15 +1071,14 @@ export class S3EvidenceStore implements EvidenceStore {
 
   async deleteObject(operation: string, key: string): Promise<void> {
     const canonical = this.isCanonicalBlobKey(key);
-    const diagnostic = diagnosticMutationOperation(operation, "delete");
-    if (canonical) this.invalidateVerifiedGeneration(key, diagnostic, "mutation");
+    if (canonical) this.invalidateVerifiedGeneration(key);
     try {
       await this.sendAllowMissing(
         operation,
         new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
       );
     } finally {
-      if (canonical) this.invalidateVerifiedGeneration(key, diagnostic, "mutation");
+      if (canonical) this.invalidateVerifiedGeneration(key);
     }
   }
 
@@ -1316,20 +1277,12 @@ export class S3EvidenceStore implements EvidenceStore {
       );
     } catch (error) {
       if (isIntegrityFailure(error)) {
-        this.invalidateVerifiedGeneration(
-          key,
-          diagnosticReadOperation(operation),
-          "mismatch",
-        );
+        this.invalidateVerifiedGeneration(key);
       }
       throw error;
     }
     if (generation.metadata.byteLength !== byteLength || generation.metadata.sha256 !== hash) {
-      this.invalidateVerifiedGeneration(
-        key,
-        diagnosticReadOperation(operation),
-        "mismatch",
-      );
+      this.invalidateVerifiedGeneration(key);
       throw new S3EvidenceError(operation, "inconsistent metadata");
     }
     await this.verifyCanonicalIncremental(generation, operation);
@@ -1465,10 +1418,16 @@ export class S3EvidenceStore implements EvidenceStore {
     await this.deletePrefix(operation, this.streamStagingResiduePrefix());
   }
 
-  private async send(operation: string, command: unknown): Promise<unknown> {
+  private async send(
+    operation: string,
+    command: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    throwIfAborted(signal);
     try {
-      return await this.client.send(command);
+      return await this.client.send(command, signal ? { abortSignal: signal } : undefined);
     } catch (error) {
+      throwIfAborted(signal);
       if (error instanceof S3EvidenceError) throw error;
       throw new S3EvidenceError(operation, "unavailable");
     }
@@ -1520,14 +1479,10 @@ export class S3EvidenceStore implements EvidenceStore {
         this.responseBodyIdleTimeoutMs,
       );
       throwIfAborted(signal);
-      this.warmVerifiedGeneration(generation, epoch, diagnosticReadOperation(operation));
+      this.warmVerifiedGeneration(generation, epoch);
     } catch (error) {
       if (isIntegrityFailure(error) && !signal?.aborted) {
-        this.invalidateVerifiedGeneration(
-          generation.key,
-          diagnosticReadOperation(operation),
-          "mismatch",
-        );
+        this.invalidateVerifiedGeneration(generation.key);
       }
       throw error;
     }
@@ -1550,11 +1505,11 @@ export class S3EvidenceStore implements EvidenceStore {
       expectedRange: EvidenceReadRange | null,
     ): void => assertGetMatchesGeneration(record, generation, "openRead", expectedRange);
     const warm = (epoch: number): void => {
-      this.warmVerifiedGeneration(generation, epoch, "openRead");
+      this.warmVerifiedGeneration(generation, epoch);
     };
     const currentEpoch = (): number => this.mutationEpoch;
     const invalidate = (): void => {
-      this.invalidateVerifiedGeneration(generation.key, "openRead", "mismatch");
+      this.invalidateVerifiedGeneration(generation.key);
     };
     return {
       async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
@@ -1651,35 +1606,27 @@ export class S3EvidenceStore implements EvidenceStore {
 
   private lookupVerifiedGeneration(
     generation: S3ObjectGeneration,
-    operation: DiagnosticOperation,
   ): VerifiedGenerationEntry | null {
     const id = generationIdentityKey(generation);
     const entry = this.verifiedGenerations.get(id);
-    if (!entry) {
-      emitVerifiedGeneration("miss", operation);
-      return null;
-    }
+    if (!entry) return null;
     const age = performance.now() - entry.insertedAt;
     if (age < 0 || age >= VERIFIED_GENERATION_CACHE_TTL_MS) {
       this.verifiedGenerations.delete(id);
-      emitVerifiedGeneration("expired", operation, "expired");
       return null;
     }
     if (!generationEquals(entry.generation, generation)) {
       this.verifiedGenerations.delete(id);
-      emitVerifiedGeneration("generation_mismatch", operation, "mismatch");
       return null;
     }
     this.verifiedGenerations.delete(id);
     this.verifiedGenerations.set(id, entry);
-    emitVerifiedGeneration("hit", operation);
     return entry;
   }
 
   private warmVerifiedGeneration(
     generation: S3ObjectGeneration,
     epoch: number,
-    operation: DiagnosticOperation,
   ): void {
     if (epoch !== this.mutationEpoch) return;
     const now = performance.now();
@@ -1687,7 +1634,6 @@ export class S3EvidenceStore implements EvidenceStore {
       const age = now - entry.insertedAt;
       if (age < 0 || age >= VERIFIED_GENERATION_CACHE_TTL_MS) {
         this.verifiedGenerations.delete(entryId);
-        emitVerifiedGeneration("expired", operation, "expired");
       }
     }
     const id = generationIdentityKey(generation);
@@ -1698,21 +1644,15 @@ export class S3EvidenceStore implements EvidenceStore {
       const lru = this.verifiedGenerations.keys().next().value;
       if (lru !== undefined) {
         this.verifiedGenerations.delete(lru);
-        emitVerifiedGeneration("lru_evict", operation);
       }
     }
     this.verifiedGenerations.set(id, {
       generation: cloneGeneration(generation),
       insertedAt: now,
     });
-    emitVerifiedGeneration("warm", operation, "success");
   }
 
-  private invalidateVerifiedGeneration(
-    key: string,
-    operation: DiagnosticOperation,
-    reason: DiagnosticReason,
-  ): void {
+  private invalidateVerifiedGeneration(key: string): void {
     this.mutationEpoch += 1;
     for (const [id, entry] of this.verifiedGenerations) {
       if (entry.generation.bucket === this.bucket && entry.generation.key === key) {
@@ -1727,9 +1667,8 @@ export class S3EvidenceStore implements EvidenceStore {
     }
     const changed = new S3EvidenceError("openRead", "object changed");
     for (const flight of identityFlights) {
-      this.retireVerificationFlight(flight, changed, "mutation");
+      this.retireVerificationFlight(flight, changed);
     }
-    emitVerifiedGeneration("invalidate", operation, reason);
   }
 
   private async awaitVerifiedGeneration(
@@ -1738,26 +1677,23 @@ export class S3EvidenceStore implements EvidenceStore {
     signal?: AbortSignal,
   ): Promise<void> {
     throwIfAborted(signal);
-    const diagnostic = diagnosticReadOperation(operation);
     const idKey = generationIdentityKey(generation);
     const prior = this.flightsByIdentity.get(idKey);
     if (prior && prior.acceptingWaiters && !prior.completed) {
       if (generationEquals(prior.generation, generation)) {
-        await this.joinVerificationFlight(prior, diagnostic, signal);
+        await this.joinVerificationFlight(prior, signal);
         return;
       }
       this.retireVerificationFlight(
         prior,
         new S3EvidenceError(operation, "object changed"),
-        "successor",
       );
     }
     if (this.verificationFlights.size >= VERIFIED_GENERATION_MAX_FLIGHTS) {
-      emitVerifiedGeneration("flight_reject", diagnostic, "overflow");
       throw new S3EvidenceError(operation, "unavailable");
     }
     const flight = this.startVerificationFlight(generation, operation);
-    await this.joinVerificationFlight(flight, diagnostic, signal);
+    await this.joinVerificationFlight(flight, signal);
   }
 
   private startVerificationFlight(
@@ -1765,7 +1701,6 @@ export class S3EvidenceStore implements EvidenceStore {
     operation: string,
   ): VerificationFlight {
     const idKey = generationIdentityKey(generation);
-    const diagnostic = diagnosticReadOperation(operation);
     const flight: VerificationFlight = {
       generation,
       controller: new AbortController(),
@@ -1776,17 +1711,13 @@ export class S3EvidenceStore implements EvidenceStore {
     };
     this.verificationFlights.add(flight);
     this.flightsByIdentity.set(idKey, flight);
-    emitVerifiedGeneration("flight_start", diagnostic);
     flight.promise = this.verifyCanonicalIncremental(
       generation,
       operation,
       flight.controller.signal,
     ).then(
-      () => {
-        emitVerifiedGeneration("verify_success", diagnostic, "success");
-      },
+      () => undefined,
       (error: unknown) => {
-        emitVerifiedGeneration("verify_failure", diagnostic, "failure");
         throw error;
       },
     ).finally(() => {
@@ -1802,7 +1733,6 @@ export class S3EvidenceStore implements EvidenceStore {
 
   private joinVerificationFlight(
     flight: VerificationFlight,
-    operation: DiagnosticOperation,
     signal?: AbortSignal,
   ): Promise<void> {
     throwIfAborted(signal);
@@ -1810,11 +1740,7 @@ export class S3EvidenceStore implements EvidenceStore {
       throw new S3EvidenceError("openRead", "object changed");
     }
     if (flight.waiters.size >= VERIFIED_GENERATION_MAX_WAITERS) {
-      emitVerifiedGeneration("waiter_reject", operation, "overflow");
       throw new S3EvidenceError("openRead", "unavailable");
-    }
-    if (flight.waiters.size > 0) {
-      emitVerifiedGeneration("flight_join", operation);
     }
     return new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -1832,7 +1758,6 @@ export class S3EvidenceStore implements EvidenceStore {
       };
       const onAbort = (): void => {
         const reason = abortReason(signal);
-        emitVerifiedGeneration("waiter_reject", operation, "abort");
         finish(() => reject(reason));
         if (
           !flight.completed
@@ -1864,17 +1789,14 @@ export class S3EvidenceStore implements EvidenceStore {
   private retireVerificationFlight(
     flight: VerificationFlight,
     error: S3EvidenceError,
-    reason: DiagnosticReason,
   ): void {
     const idKey = generationIdentityKey(flight.generation);
     if (this.flightsByIdentity.get(idKey) === flight) {
       this.flightsByIdentity.delete(idKey);
     }
     flight.acceptingWaiters = false;
-    emitVerifiedGeneration("flight_reject", diagnosticReadOperation(error.operation), reason);
     const waiters = [...flight.waiters];
     for (const waiter of waiters) {
-      emitVerifiedGeneration("waiter_reject", diagnosticReadOperation(error.operation), reason);
       waiter.fail(error);
     }
     if (!flight.controller.signal.aborted) {
@@ -2771,63 +2693,6 @@ function assertGetMatchesGeneration(
     throw new S3EvidenceError(operation, "inconsistent object");
   }
   assertOptionalGetMetadata(record, generation, operation);
-}
-
-function emitVerifiedGeneration(
-  event: DiagnosticEvent,
-  operation: DiagnosticOperation,
-  reason?: DiagnosticReason,
-): void {
-  try {
-    if (!VERIFIED_GENERATION_DIAGNOSTICS.hasSubscribers) return;
-    const payload: { event: DiagnosticEvent; operation: DiagnosticOperation; reason?: DiagnosticReason } = {
-      event,
-      operation,
-    };
-    if (reason !== undefined) payload.reason = reason;
-    VERIFIED_GENERATION_DIAGNOSTICS.publish(Object.freeze(payload));
-  } catch {
-    // Subscriber failure cannot affect I/O.
-  }
-}
-
-function diagnosticReadOperation(operation: string): DiagnosticOperation {
-  if (
-    operation === "openRead"
-    || operation === "verify"
-    || operation === "put"
-    || operation === "copy"
-    || operation === "delete"
-    || operation === "stage"
-    || operation === "commit"
-    || operation === "promote"
-    || operation === "rollback"
-  ) {
-    return operation;
-  }
-  if (operation === "recoverUnreferencedWrites") return "recover";
-  return "openRead";
-}
-
-function diagnosticMutationOperation(
-  operation: string,
-  fallback: "put" | "copy" | "delete" | "recover",
-): DiagnosticOperation {
-  if (operation === "recoverUnreferencedWrites") return "recover";
-  if (
-    operation === "put"
-    || operation === "copy"
-    || operation === "delete"
-    || operation === "stage"
-    || operation === "commit"
-    || operation === "promote"
-    || operation === "rollback"
-    || operation === "openRead"
-    || operation === "verify"
-  ) {
-    return operation;
-  }
-  return fallback;
 }
 
 function abortReason(signal: AbortSignal | undefined): unknown {

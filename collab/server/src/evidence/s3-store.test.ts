@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
 import { channel as diagnosticsChannel } from "node:diagnostics_channel";
+import { readFile } from "node:fs/promises";
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
@@ -8,7 +9,9 @@ import {
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
+  S3Client,
 } from "@aws-sdk/client-s3";
+import { ConfiguredRetryStrategy } from "@smithy/core/retry";
 import { FILE_SERVER_REF_SCHEMA_ID, parseFileServerReference } from "@cd-collab/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -112,6 +115,7 @@ class FakeS3Client {
   listHandler: ((input: Record<string, unknown>) => unknown) | null = null;
   preserveEtagOnCopy = false;
   afterHead: ((stored: FakeObject) => void) | null = null;
+  afterPutBody: ((signal?: AbortSignal) => Promise<void>) | null = null;
   private etagSeq = 0;
 
   constructor(private readonly bucket: string) {}
@@ -142,7 +146,7 @@ class FakeS3Client {
     }
     if (command instanceof PutObjectCommand) {
       const key = objectKey(input);
-      const body = await readInputBody(input.Body);
+      const body = await readInputBody(input.Body, options?.abortSignal);
       if (
         typeof input.ContentLength === "number"
         && input.ContentLength !== body.byteLength
@@ -160,6 +164,7 @@ class FakeS3Client {
         contentType: typeof input.ContentType === "string" ? input.ContentType : undefined,
         etag,
       });
+      await this.afterPutBody?.(options?.abortSignal);
       return { ETag: etag };
     }
     if (command instanceof GetObjectCommand) {
@@ -594,10 +599,10 @@ function sdkBody(
   };
 }
 
-async function readInputBody(body: unknown): Promise<Uint8Array> {
+async function readInputBody(body: unknown, signal?: AbortSignal): Promise<Uint8Array> {
   if (body instanceof Uint8Array) return new Uint8Array(body);
   if (body instanceof Readable) {
-    return collectReadableBody(body);
+    return collectReadableBody(body, signal);
   }
   if (isAsyncIterableBody(body)) {
     const chunks: Uint8Array[] = [];
@@ -620,16 +625,30 @@ async function readInputBody(body: unknown): Promise<Uint8Array> {
   throw new Error("fake S3 expected Uint8Array or stream body");
 }
 
-function collectReadableBody(readable: Readable): Promise<Uint8Array> {
+function collectReadableBody(readable: Readable, signal?: AbortSignal): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const chunks: Uint8Array[] = [];
     let total = 0;
     let settled = false;
+    const cleanup = (): void => {
+      signal?.removeEventListener("abort", onAbort);
+    };
     const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
+      cleanup();
       callback();
     };
+    const onAbort = (): void => {
+      const reason = signal?.reason ?? new Error("aborted");
+      readable.destroy(reason instanceof Error ? reason : new Error("aborted"));
+      finish(() => reject(reason));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
     readable.on("data", (chunk: unknown) => {
       if (!(chunk instanceof Uint8Array)) {
         finish(() => reject(new Error("fake S3 stream chunk must be a Uint8Array")));
@@ -2584,7 +2603,156 @@ describe("S3EvidenceStore", () => {
         }),
       ]),
     ).rejects.toThrow(/pending-abort/);
+    expect(
+      fake.calls.find((call) => call.name === "PutObjectCommand")?.abortSignal,
+    ).toBe(pending.signal);
     expect(stagingKeys(fake)).toEqual([]);
+  });
+
+  it("preserves a post-intake abort reason, cleans scratch, and leaves no live recovery marker", async () => {
+    const { fake, store } = openStore();
+    const controller = new AbortController();
+    let bodyConsumed!: () => void;
+    const consumed = new Promise<void>((resolve) => {
+      bodyConsumed = resolve;
+    });
+    fake.afterPutBody = async (signal) => {
+      bodyConsumed();
+      await new Promise<void>((resolve, reject) => {
+        const rejectAbort = (): void => {
+          reject(signal?.reason ?? new Error("aborted"));
+        };
+        if (signal?.aborted) {
+          rejectAbort();
+          return;
+        }
+        signal?.addEventListener("abort", rejectAbort, { once: true });
+      });
+    };
+    const reason = new Error("post-intake-abort");
+    const staging = store.stageStream(
+      asAsyncChunks([new TextEncoder().encode("fully-consumed-before-abort")]),
+      { maxBytes: 64, signal: controller.signal },
+    );
+    await consumed;
+    const put = fake.calls.find((call) => call.name === "PutObjectCommand");
+    expect(put?.abortSignal).toBe(controller.signal);
+    const scratchKey = String(put?.input.Key);
+    expect(fake.object(scratchKey)).toBeDefined();
+    controller.abort(reason);
+    await expect(staging).rejects.toBe(reason);
+    expect(fake.object(scratchKey)).toBeUndefined();
+    expect(streamStagingKeys(fake)).toEqual([]);
+
+    const failedCleanup = openStore();
+    const cleanupController = new AbortController();
+    let cleanupBodyConsumed!: () => void;
+    const cleanupConsumed = new Promise<void>((resolve) => {
+      cleanupBodyConsumed = resolve;
+    });
+    failedCleanup.fake.afterPutBody = async (signal) => {
+      cleanupBodyConsumed();
+      await new Promise<void>((resolve, reject) => {
+        const rejectAbort = (): void => {
+          reject(signal?.reason ?? new Error("aborted"));
+        };
+        if (signal?.aborted) {
+          rejectAbort();
+          return;
+        }
+        signal?.addEventListener("abort", rejectAbort, { once: true });
+      });
+    };
+    const cleanupReason = new Error("abort-wins-over-cleanup-failure");
+    const cleanupStage = failedCleanup.store.stageStream(
+      asAsyncChunks([new TextEncoder().encode("cleanup-failure-after-intake")]),
+      { maxBytes: 64, signal: cleanupController.signal },
+    );
+    await cleanupConsumed;
+    const cleanupPut = failedCleanup.fake.calls.find(
+      (call) => call.name === "PutObjectCommand",
+    );
+    const cleanupKey = String(cleanupPut?.input.Key);
+    failedCleanup.fake.deleteErrors.set(
+      cleanupKey,
+      new FakeS3Error("ServiceUnavailable", 503, "synthetic cleanup failure"),
+    );
+    cleanupController.abort(cleanupReason);
+    await expect(cleanupStage).rejects.toBe(cleanupReason);
+    expect(failedCleanup.fake.object(cleanupKey)).toBeDefined();
+    failedCleanup.fake.deleteErrors.delete(cleanupKey);
+    await expect(
+      failedCleanup.store.recoverUnreferencedWrites(new Set()),
+    ).resolves.toEqual({ reclaimed: [], journals: 0 });
+    expect(failedCleanup.fake.object(cleanupKey)).toBeUndefined();
+  });
+
+  it("does not replay a streamed PutObject while ordinary SDK requests retain retry behavior", async () => {
+    const attempts = new Map<string, number>();
+    const requestHandler = {
+      handle: vi.fn(async (request: unknown, options?: unknown) => {
+        const method = typeof request === "object" && request !== null && "method" in request
+          ? String(request.method)
+          : "UNKNOWN";
+        attempts.set(method, (attempts.get(method) ?? 0) + 1);
+        if (method === "DELETE") {
+          return { response: { statusCode: 204, headers: {}, body: Readable.from([]) } };
+        }
+        const body = typeof request === "object" && request !== null && "body" in request
+          ? request.body
+          : undefined;
+        const signal = typeof options === "object" && options !== null && "abortSignal" in options
+          ? options.abortSignal instanceof AbortSignal
+            ? options.abortSignal
+            : undefined
+          : undefined;
+        if (body !== undefined) await readInputBody(body, signal);
+        const error = new Error("synthetic retryable transport failure");
+        error.name = "TimeoutError";
+        Object.assign(error, { $metadata: { httpStatusCode: 503 } });
+        throw error;
+      }),
+    };
+    const client = new S3Client({
+      region: "us-east-1",
+      endpoint: SYNTHETIC_ENDPOINT,
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: SYNTHETIC_ACCESS,
+        secretAccessKey: SYNTHETIC_SECRET,
+      },
+      retryStrategy: new ConfiguredRetryStrategy(3, () => 0),
+      requestHandler,
+      logger: {
+        trace: () => undefined,
+        debug: () => undefined,
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+    });
+    const store = new S3EvidenceStore({
+      bucket: SYNTHETIC_BUCKET,
+      region: "us-east-1",
+      endpoint: SYNTHETIC_ENDPOINT,
+      forcePathStyle: true,
+      client,
+    });
+    let sourcePulls = 0;
+    async function* source(): AsyncIterable<Uint8Array> {
+      sourcePulls += 1;
+      yield new TextEncoder().encode("non-replayable-stream");
+    }
+    await expect(store.stageStream(source(), { maxBytes: 64 })).rejects.toMatchObject({
+      operation: "stageStream",
+    });
+    expect(attempts.get("PUT")).toBe(1);
+    expect(sourcePulls).toBe(1);
+    expect(attempts.get("DELETE")).toBe(1);
+
+    await expect(store.ping()).rejects.toMatchObject({ operation: "ping" });
+    expect(attempts.get("HEAD")).toBe(3);
+    client.destroy();
   });
 
   it("rejects oversize, expectedLength mismatch, non-Uint8Array chunks, and invalid options", async () => {
@@ -3895,6 +4063,16 @@ describe("S3EvidenceStore verified-generation range cache", () => {
         .every((call) => !("VersionId" in call.input)),
     ).toBe(true);
 
+    const maximumTokens = openStore();
+    const maximumTokenBytes = new TextEncoder().encode("maximum-generation-tokens");
+    const maximumTokenEntry = putCanonicalRaw(maximumTokens.fake, maximumTokenBytes, {
+      etag: "e".repeat(1024),
+      versionId: "v".repeat(1024),
+    });
+    await expect(
+      maximumTokens.store.openRead(maximumTokenEntry.hash, { start: 0, end: 0 }),
+    ).resolves.toBeDefined();
+
     const cases: Array<Parameters<typeof putCanonicalRaw>[2]> = [
       { reportedVersionId: null },
       { versionId: "" },
@@ -4047,6 +4225,39 @@ describe("S3EvidenceStore verified-generation range cache", () => {
     ).toHaveLength(1);
   });
 
+  it("invalidates a verified generation when recovery deletes its canonical object", async () => {
+    const { fake, store } = openStore();
+    const bytes = new TextEncoder().encode("recover-path-cache-invalidation");
+    const stableEtag = '"recover-generation"';
+    const { hash, key } = putCanonicalRaw(fake, bytes, { etag: stableEtag });
+    await store.openRead(hash, { start: 0, end: 0 });
+    const journalId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    fake.putRaw(
+      `.pending/${journalId}.json`,
+      new TextEncoder().encode(
+        JSON.stringify({
+          schemaId: EVIDENCE_PENDING_WRITE_SCHEMA_ID,
+          id: journalId,
+          hashes: [hash],
+        }),
+      ),
+    );
+    await expect(store.recoverUnreferencedWrites(new Set())).resolves.toEqual({
+      reclaimed: [hash],
+      journals: 1,
+    });
+    expect(fake.object(key)).toBeUndefined();
+
+    putCanonicalRaw(fake, bytes, { etag: stableEtag });
+    fake.calls.length = 0;
+    await store.openRead(hash, { start: 0, end: 0 });
+    expect(
+      fake.calls.filter(
+        (call) => call.name === "GetObjectCommand" && call.input.Range === undefined,
+      ),
+    ).toHaveLength(1);
+  });
+
   it("deletes a stale cache row on Head mismatch and after a failed full verification", async () => {
     const { fake, store } = openStore();
     const bytes = new TextEncoder().encode("stale-row-failed-verification");
@@ -4119,32 +4330,29 @@ describe("S3EvidenceStore verified-generation range cache", () => {
     await stage.finalize();
   });
 
-  it("emits frozen closed-enum diagnostics without identifiers and isolates subscribers", async () => {
+  it("does not expose verified-generation cache activity through diagnostics channels", async () => {
     const { fake, store } = openStore();
     const bytes = new TextEncoder().encode("diagnostic-payload");
     const { hash } = putCanonicalRaw(fake, bytes);
     const diagnostic = diagnosticsChannel("cd.s3.verified_generation");
-    const messages: unknown[] = [];
-    const capture = (message: unknown): void => {
-      messages.push(message);
+    let subscriberCalls = 0;
+    const hostile = (): void => {
+      subscriberCalls += 1;
+      throw new Error("hostile diagnostics subscriber");
     };
-    diagnostic.subscribe(capture);
+    diagnostic.subscribe(hostile);
     try {
       await store.openRead(hash, { start: 0, end: 0 });
+      await expect(store.verify(hash)).resolves.toBe(true);
     } finally {
-      diagnostic.unsubscribe(capture);
+      diagnostic.unsubscribe(hostile);
     }
-    expect(messages.length).toBeGreaterThan(0);
-    for (const message of messages) {
-      expect(Object.isFrozen(message)).toBe(true);
-      expect(Object.keys(message as object).every((key) => ["event", "operation", "reason"].includes(key))).toBe(true);
-      const serialized = JSON.stringify(message);
-      expect(serialized).not.toContain(hash);
-      expect(serialized).not.toContain(SYNTHETIC_BUCKET);
-      expect(serialized).not.toContain(SYNTHETIC_ENDPOINT);
-    }
+    expect(subscriberCalls).toBe(0);
 
-    await expect(store.verify(hash)).resolves.toBe(true);
+    const source = await readFile(new URL("./s3-store.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("node:diagnostics_channel");
+    expect(source).not.toContain("cd.s3.verified_generation");
+    expect(source).not.toMatch(/\.publish\s*\(/);
   });
 });
 
