@@ -182,10 +182,16 @@ describe("strategy selection in the shell", () => {
     await waitFor(() => {
       expect(fetchStub.mock.calls.filter(([input]) => String(input) === "/api/cases")).toHaveLength(2);
     });
-    fireEvent.click(screen.getByRole("button", { name: /Alice/ }));
+    const account = screen.getByRole("button", { name: /Alice/ });
+    fireEvent.click(account);
     fireEvent.click(screen.getByRole("radio", { name: /Investigation First/ }));
     fireEvent.click(screen.getByRole("button", { name: "Use selected experience" }));
-    await waitFor(() => expect(screen.getByText(/is now your saved investigation experience/u)).toBeTruthy());
+    await waitFor(() => {
+      expect(document.activeElement).toBe(account);
+      expect(account.getAttribute("aria-expanded")).toBe("false");
+    });
+    fireEvent.click(account);
+    expect(await screen.findByText(/is now your saved investigation experience/u)).toBeTruthy();
     expect(screen.getByText(/This choice applies inside Investigations; Overview remains the War Room activity dashboard\./u)).toBeTruthy();
     expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room");
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();

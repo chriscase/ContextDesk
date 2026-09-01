@@ -79,12 +79,14 @@ async function useInvestigationFirst(page: Page): Promise<void> {
       page.keyboard.press("Enter"),
     ]);
     expect(saved.ok(), await saved.text()).toBeTruthy();
+  } else {
+    // An already-saved preference leaves the chooser open; Escape remains the
+    // keyboard close path and returns focus to its trigger.
+    await page.keyboard.press("Escape");
   }
   await expect(page.locator(".topbar__title-app")).toHaveText("Investigation First");
-
-  await account.focus();
-  await page.keyboard.press("Escape");
   await expect(account).toBeFocused();
+  await expect(account).toHaveAttribute("aria-expanded", "false");
   const after = new URL(page.url());
   expect(after.pathname).toBe(before.pathname);
   expect(after.search).toBe(before.search);

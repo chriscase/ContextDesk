@@ -382,7 +382,16 @@ function AccountMenu(props: {
               <button
                 type="button"
                 disabled={draftStrategyId === props.strategy.id || props.strategyStatus !== "ready"}
-                onClick={() => void props.onStrategyChange(draftStrategyId)}
+                onClick={() => {
+                  void props.onStrategyChange(draftStrategyId).then((saved) => {
+                    // Saving disables this button while it owns focus. Move
+                    // focus deliberately instead of allowing the browser to
+                    // drop it to <body>; successful saves also close the
+                    // chooser because the selected workspace is now active.
+                    if (saved) setOpen(false);
+                    triggerRef.current?.focus();
+                  });
+                }}
               >
                 {props.strategyStatus === "saving" ? "Saving…" : "Use selected experience"}
               </button>
