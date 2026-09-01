@@ -1,5 +1,6 @@
 export interface InvestigationRuntimeCapabilities {
   canRead: boolean;
+  canReadPrivate: boolean;
   canCreate: boolean;
   canUpload: boolean;
   canContribute: boolean;
@@ -16,6 +17,10 @@ export interface InvestigationRuntimeCapabilities {
  * `canCreate` and `canUpload` even though the server currently gates all four
  * on `investigation:write`. A strategy asks for the affordance it needs, so a
  * later split of the write capability changes this projection alone.
+ *
+ * `canReadPrivate` is exact `evidence:private:read`. It is read authority, so
+ * static read-only mode does not clear it, and no write, run, or role implies
+ * it.
  */
 export function projectInvestigationCapabilities(
   capabilities: readonly string[],
@@ -25,6 +30,7 @@ export function projectInvestigationCapabilities(
   const canMutate = !readOnly;
   return {
     canRead: effective.has("investigation:read"),
+    canReadPrivate: effective.has("evidence:private:read"),
     canCreate: canMutate && effective.has("investigation:write"),
     canUpload: canMutate && effective.has("investigation:write"),
     canContribute: canMutate && effective.has("investigation:write"),

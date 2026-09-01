@@ -2677,7 +2677,7 @@ export function Cases(props: {
                   key={current.id}
                   caseId={current.id}
                   canWrite={canWrite}
-                  canLead={canLead}
+                  canLead={canRunStrategies}
                   canReadPrivate={canReadPrivate}
                   readOnly={readOnly}
                   {...(current.participants ? { participants: current.participants } : {})}

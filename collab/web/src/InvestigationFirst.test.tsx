@@ -33,7 +33,16 @@ import {
 } from "./investigations/runtime/testkit/index.js";
 import type { InvestigationStrategyShellProps } from "./investigations/strategies/contract.js";
 
-const FULL_CAPABILITIES = ["investigation:read", "investigation:write", "run:strategies"] as const;
+const FULL_CAPABILITIES = [
+  "investigation:read",
+  "investigation:write",
+  "run:strategies",
+  "evidence:private:read",
+] as const;
+const CONTRIBUTOR_CAPABILITIES = [
+  "investigation:read",
+  "investigation:write",
+] as const;
 
 function makeLifecycle(investigation: CaseV1): InvestigationLifecycleV1 {
   const template = investigation.status === "archived" ? makeRestoreAllowedLifecycle() : makeArchiveAllowedLifecycle();
@@ -466,6 +475,142 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
     await waitFor(() => expect(gateway.uploadEvidence).toHaveBeenCalledTimes(1));
     expect(gateway.uploadEvidence).toHaveBeenCalledWith(RUNTIME_FIXTURE_IDS.populatedCase, expect.objectContaining({ filename: "notes.txt", mediaType: "text/plain", summary: "Operator notes", kind: "attachment", privacyClass: "owner_only", contentBase64: "aGVsbG8=" }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it("omits file_server_ref from the bytes-only form and still submits a valid kind", async () => {
+    const upload = makeEvidenceUploadSuccess();
+    const gateway = createInvestigationGatewayDouble({ uploadEvidence: vi.fn(async () => gatewayOk(upload)) });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const kindSelect = screen.getByLabelText("Kind") as HTMLSelectElement;
+    expect([...kindSelect.options].map((option) => option.value)).toEqual([
+      "attachment",
+      "log",
+      "email",
+    ]);
+    expect(kindSelect.querySelector('option[value="file_server_ref"]')).toBeNull();
+    fireEvent.change(kindSelect, { target: { value: "log" } });
+    fireEvent.change(screen.getByLabelText("File"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), {
+      target: { value: "Operator notes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    await waitFor(() => expect(gateway.uploadEvidence).toHaveBeenCalledTimes(1));
+    expect(gateway.uploadEvidence).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      expect.objectContaining({ kind: "log", privacyClass: "owner_only" }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("defaults a privileged session to owner_only and keeps contributors on share_safe", async () => {
+    const upload = makeEvidenceUploadSuccess();
+    const gateway = createInvestigationGatewayDouble({
+      uploadEvidence: vi.fn(async () => gatewayOk(upload)),
+    });
+    renderStrategy({
+      gateway,
+      capabilities: CONTRIBUTOR_CAPABILITIES,
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const privacy = screen.getByLabelText("Privacy") as HTMLSelectElement;
+    expect(privacy.value).toBe("share_safe");
+    expect([...privacy.options].map((option) => option.value)).toEqual(["share_safe"]);
+    fireEvent.change(screen.getByLabelText("File"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), {
+      target: { value: "Operator notes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    await waitFor(() => expect(gateway.uploadEvidence).toHaveBeenCalledTimes(1));
+    expect(gateway.uploadEvidence).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      expect.objectContaining({ privacyClass: "share_safe" }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    cleanup();
+
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const privileged = screen.getByLabelText("Privacy") as HTMLSelectElement;
+    expect(privileged.value).toBe("owner_only");
+    expect([...privileged.options].map((option) => option.value)).toEqual([
+      "owner_only",
+      "share_safe",
+    ]);
+  });
+
+  it("clamps owner_only to share_safe before submit when private-read is revoked", async () => {
+    const upload = makeEvidenceUploadSuccess();
+    const gateway = createInvestigationGatewayDouble({
+      uploadEvidence: vi.fn(async () => gatewayOk(upload)),
+    });
+    const view = renderStrategy({
+      gateway,
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const privacy = screen.getByLabelText("Privacy") as HTMLSelectElement;
+    expect(privacy.value).toBe("owner_only");
+    fireEvent.change(screen.getByLabelText("File"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), {
+      target: { value: "Operator notes" },
+    });
+
+    view.rerender({}, {
+      capabilities: CONTRIBUTOR_CAPABILITIES,
+      authorityKey: "alice-authority-no-private",
+    });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const clamped = screen.getByLabelText("Privacy") as HTMLSelectElement;
+    expect(clamped.value).toBe("share_safe");
+    expect([...clamped.options].map((option) => option.value)).toEqual(["share_safe"]);
+    fireEvent.change(clamped, { target: { value: "owner_only" } });
+    expect(clamped.value).toBe("share_safe");
+    fireEvent.change(screen.getByLabelText("File"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), {
+      target: { value: "Operator notes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    await waitFor(() => expect(gateway.uploadEvidence).toHaveBeenCalledTimes(1));
+    expect(gateway.uploadEvidence).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      expect.objectContaining({ privacyClass: "share_safe" }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("states that an unknown upload outcome was not confirmed and does not invite a blind retry", async () => {
+    const gateway = createInvestigationGatewayDouble({
+      uploadEvidence: vi.fn(async () => ({
+        ok: false as const,
+        error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+      })),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    fireEvent.change(screen.getByLabelText("File"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    fireEvent.change(screen.getByPlaceholderText("What is this file and why does it matter?"), {
+      target: { value: "Operator notes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/not confirmed/i);
+    expect(alert.textContent).toMatch(/being refreshed/i);
+    expect(alert.textContent).toMatch(/check it before uploading again/i);
+    expect(alert.textContent).not.toMatch(/try again/i);
+    await waitFor(() => expect(gateway.listEvidence).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(vi.mocked(gateway.listInvestigations).mock.calls.length).toBeGreaterThan(1));
   });
 
   it("suppresses every mutation affordance for viewers and static read-only builds", async () => {

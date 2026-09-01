@@ -971,7 +971,9 @@ describe("streamed evidence workflow", () => {
       expect(screen.getByText(/Uploading checkout\.log/)).toBeTruthy();
 
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(await screen.findByText("Upload cancelled.")).toBeTruthy();
+      expect((await screen.findByRole("alert")).textContent).toBe(
+        "The upload was cancelled. The evidence board has been refreshed; check it before retrying. This is not confirmation that the file was stored or that it was rolled back.",
+      );
       expect(screen.getByRole("button", { name: "Retry upload" })).toBeTruthy();
       expect((screen.getByLabelText("Summary") as HTMLTextAreaElement).value).toBe("Checkout request log");
       expect(screen.getByText("Selected: checkout.log")).toBeTruthy();
@@ -995,6 +997,54 @@ describe("streamed evidence workflow", () => {
     } finally {
       window.removeEventListener(AUTH_LOST_EVENT, listener);
     }
+  });
+
+  it("blocks a cancelled upload after reconciliation fails until a later load succeeds", async () => {
+    stubUploadXhr();
+    let evidenceLoads = 0;
+    let failReconciliation = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) {
+          evidenceLoads += 1;
+          if (evidenceLoads > 1 && failReconciliation) {
+            return { ok: false, status: 500, json: async () => ({ error: "unavailable" }) };
+          }
+          return jsonOk({ artifacts: [] });
+        }
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead={false} readOnly={false} />);
+    const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
+    const file = new File(["hello"], "checkout.log", { type: "text/plain" });
+    Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
+    fireEvent.change(screen.getByLabelText("File"));
+    fireEvent.change(screen.getByLabelText("Summary"), { target: { value: "Checkout request log" } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(UploadXHR.pending).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "The upload was cancelled, and the evidence board could not be refreshed. Reload and check the inventory before retrying. This is not confirmation that the file was stored or that it was rolled back.",
+    );
+    expect(screen.queryByRole("button", { name: "Retry upload" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Upload evidence" })).toHaveProperty("disabled", true);
+    fireEvent.submit(form);
+    expect(UploadXHR.pending).toHaveLength(1);
+
+    failReconciliation = false;
+    window.dispatchEvent(new CustomEvent("contextdesk:corpus-intake-committed", {
+      detail: { caseId: "case-1" },
+    }));
+    await waitFor(() => expect(evidenceLoads).toBe(3));
+    expect(screen.getByRole("button", { name: "Upload evidence" })).toHaveProperty("disabled", false);
+    fireEvent.submit(form);
+    await waitFor(() => expect(UploadXHR.pending).toHaveLength(2));
   });
 
   it("maps empty validation, privacy-safe 404, unknown commit, and network failure truthfully", async () => {
@@ -2023,7 +2073,8 @@ describe("upload protocol and selection fencing", () => {
       "The upload outcome is unknown, and the evidence board could not be refreshed. Reload and check the inventory before retrying. This is not confirmation that the file was stored or that it was rolled back.",
     );
     expect(screen.getByText("Selected: checkout.log")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Retry upload" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry upload" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Upload evidence" })).toHaveProperty("disabled", true);
     expect(UploadXHR.pending).toHaveLength(1);
   });
 
@@ -2056,6 +2107,53 @@ describe("upload protocol and selection fencing", () => {
     expect((await screen.findByRole("alert")).textContent).toMatch(/upload outcome is unknown/);
     expect(snapshotPosts).toBe(0);
     expect(screen.getByText("Selected: checkout.log")).toBeTruthy();
+  });
+
+  it("reconciles an unknown upload-with-freeze outcome without claiming a snapshot", async () => {
+    stubUploadXhr();
+    const artifact = uploadArtifact("artifact-uploaded");
+    let snapshotPosts = 0;
+    const frozen = vi.fn();
+    window.addEventListener("contextdesk:snapshot-frozen", frozen);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots") && init?.method === "POST") {
+          snapshotPosts += 1;
+          return new Response(JSON.stringify({ error: "commit_outcome_unknown" }), {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/evidence")) return jsonOk({ artifacts: snapshotPosts ? [artifact] : [] });
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+    try {
+      render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
+      const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
+      const file = new File(["hello"], "checkout.log", { type: "text/plain" });
+      Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
+      fireEvent.change(screen.getByLabelText("File"));
+      fireEvent.change(screen.getByLabelText("Summary"), { target: { value: "Checkout request log" } });
+      fireEvent.click(screen.getByRole("checkbox", { name: /Freeze a snapshot with this upload/ }));
+      fireEvent.submit(form);
+      await waitFor(() => expect(UploadXHR.pending).toHaveLength(1));
+      UploadXHR.pending[0]?.complete(200, uploadSuccessBody("artifact-uploaded"));
+
+      expect((await screen.findByRole("alert")).textContent).toBe(
+        "The file was uploaded, but the freeze outcome is unknown. The evidence board has been refreshed; check snapshots before freezing again. This is not confirmation that a snapshot was created or that it was rolled back.",
+      );
+      expect(snapshotPosts).toBe(1);
+      expect(frozen).not.toHaveBeenCalled();
+      const freezeWithUpload = screen.getByRole("checkbox", { name: /Freeze a snapshot with this upload/ });
+      expect(freezeWithUpload).toHaveProperty("checked", false);
+      expect(freezeWithUpload).toHaveProperty("disabled", false);
+    } finally {
+      window.removeEventListener("contextdesk:snapshot-frozen", frozen);
+    }
   });
 
   it("does not mark upload cancelled after unmount", async () => {
@@ -2148,6 +2246,55 @@ describe("upload protocol and selection fencing", () => {
     UploadXHR.pending[0]?.complete(200, uploadSuccessBody("artifact-stale", "case-1"));
     expect(screen.queryByText("Evidence uploaded.")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("ignores a cancelled upload's late reconciliation and focus after a case switch", async () => {
+    stubUploadXhr();
+    let caseAEvidenceReads = 0;
+    let releaseLateA!: (body: unknown) => void;
+    const lateA = new Promise<unknown>((resolve) => {
+      releaseLateA = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.includes("/case-1/") && url.endsWith("/evidence")) {
+          caseAEvidenceReads += 1;
+          if (caseAEvidenceReads > 1) {
+            return { ok: true, status: 200, json: () => lateA };
+          }
+          return jsonOk({ artifacts: [] });
+        }
+        if (url.endsWith("/evidence")) return jsonOk({ artifacts: [] });
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+
+    const panel = (caseId: string) => (
+      <CaseBoardPanel canReadPrivate caseId={caseId} canWrite canLead={false} readOnly={false} />
+    );
+    const view = render(panel("case-1"));
+    const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
+    const file = new File(["hello"], "case-a.log", { type: "text/plain" });
+    Object.defineProperty(screen.getByLabelText("File"), "files", { configurable: true, value: [file] });
+    fireEvent.change(screen.getByLabelText("File"));
+    fireEvent.change(screen.getByLabelText("Summary"), { target: { value: "Case A log" } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(UploadXHR.pending).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(caseAEvidenceReads).toBe(2));
+
+    view.rerender(panel("case-2"));
+    expect(await screen.findByRole("heading", { name: "Upload evidence" })).toBeTruthy();
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+    releaseLateA({ artifacts: [{ id: "late-a", filename: "late-case-a.log" }] });
+    await Promise.resolve();
+    expect(screen.queryByText("late-case-a.log")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("clears stale upload focus restoration when an unkeyed host switches investigations", async () => {
@@ -2353,6 +2500,128 @@ describe("upload protocol and selection fencing", () => {
     expect(screen.getByRole("button", { name: "Freeze selected evidence (1)" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Freeze selected evidence (1)" }));
     await waitFor(() => expect(snapshotBody).toEqual({ evidenceIds: ["artifact-1"] }));
+  });
+
+  it("reconciles an unknown direct-freeze outcome before permitting a deliberate second freeze", async () => {
+    const artifact = {
+      id: "artifact-freeze-unknown",
+      kind: "log",
+      filename: "freeze-unknown.log",
+      contentHash: "a".repeat(64),
+      verificationStatus: "verified",
+      privacyClass: "share_safe",
+      uploaderId: "lead",
+    };
+    let freezePosts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots") && init?.method === "POST") {
+          freezePosts += 1;
+          if (freezePosts === 1) {
+            return new Response(JSON.stringify({ error: "commit_outcome_unknown" }), {
+              status: 503,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return jsonOk({
+            id: "snapshot-confirmed",
+            fingerprint: "b".repeat(64),
+            parentSnapshotId: null,
+            evidence: [{ evidenceId: artifact.id, ordinal: 0 }],
+            visibility: "share_safe",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            createdBy: "lead",
+          });
+        }
+        if (url.endsWith("/evidence")) return jsonOk({ artifacts: [artifact] });
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
+    await screen.findByText("freeze-unknown.log");
+    fireEvent.click(screen.getByRole("button", { name: "Select all evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Freeze selected evidence (1)" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "The freeze outcome is unknown. The evidence board has been refreshed; check snapshots before freezing again. This is not confirmation that a snapshot was created or that it was rolled back.",
+    );
+    const retry = screen.getByRole("button", { name: "Freeze selected evidence (1)" });
+    expect(retry).toHaveProperty("disabled", false);
+    fireEvent.click(retry);
+    await waitFor(() => expect(freezePosts).toBe(2));
+  });
+
+  it("blocks freeze after failed reconciliation until a later successful board load", async () => {
+    const artifact = {
+      id: "artifact-freeze-blocked",
+      kind: "log",
+      filename: "freeze-blocked.log",
+      contentHash: "a".repeat(64),
+      verificationStatus: "verified",
+      privacyClass: "share_safe",
+      uploaderId: "lead",
+    };
+    let freezePosts = 0;
+    let evidenceLoads = 0;
+    let failReconciliation = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots") && init?.method === "POST") {
+          freezePosts += 1;
+          if (freezePosts === 1) {
+            return new Response(JSON.stringify({ error: "commit_outcome_unknown" }), {
+              status: 503,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return jsonOk({
+            id: "snapshot-after-reconcile",
+            fingerprint: "b".repeat(64),
+            parentSnapshotId: null,
+            evidence: [{ evidenceId: artifact.id, ordinal: 0 }],
+            visibility: "share_safe",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            createdBy: "lead",
+          });
+        }
+        if (url.endsWith("/evidence")) {
+          evidenceLoads += 1;
+          if (evidenceLoads > 1 && failReconciliation) {
+            return { ok: false, status: 500, json: async () => ({ error: "unavailable" }) };
+          }
+          return jsonOk({ artifacts: [artifact] });
+        }
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+
+    render(<CaseBoardPanel canReadPrivate caseId="case-1" canWrite canLead readOnly={false} />);
+    await screen.findByText("freeze-blocked.log");
+    fireEvent.click(screen.getByRole("button", { name: "Select all evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Freeze selected evidence (1)" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "The freeze outcome is unknown, and the evidence board could not be refreshed. Reload and check snapshots before freezing again. This is not confirmation that a snapshot was created or that it was rolled back.",
+    );
+    const blocked = screen.getByRole("button", { name: "Freeze selected evidence (1)" });
+    expect(blocked).toHaveProperty("disabled", true);
+    fireEvent.click(blocked);
+    expect(freezePosts).toBe(1);
+
+    failReconciliation = false;
+    window.dispatchEvent(new CustomEvent("contextdesk:corpus-intake-committed", {
+      detail: { caseId: "case-1" },
+    }));
+    await waitFor(() => expect(evidenceLoads).toBe(3));
+    const reconciled = screen.getByRole("button", { name: "Freeze selected evidence (1)" });
+    expect(reconciled).toHaveProperty("disabled", false);
+    fireEvent.click(reconciled);
+    await waitFor(() => expect(freezePosts).toBe(2));
   });
 
   it("prevents duplicate freeze and ignores a late completion after case switch", async () => {

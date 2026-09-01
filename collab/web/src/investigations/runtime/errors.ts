@@ -43,7 +43,11 @@ export type RuntimeFailure =
       current: InvestigationLifecycleV1;
     }
   | { kind: "conflict"; status: 409 }
-  | { kind: "unavailable"; status: 503 }
+  | {
+      kind: "unavailable";
+      status: 503;
+      reason?: "commit_outcome_unknown";
+    }
   | { kind: "server_failure"; status: number }
   | { kind: "unexpected_response"; status: number }
   | { kind: "aborted" }
@@ -59,7 +63,12 @@ export interface KnownLifecycleRefusal {
   detail: string;
 }
 
-export type KnownHttpFailure = KnownLifecycleRefusal;
+/** Bounded 503 claim: the mutation may already have committed. */
+export interface KnownCommitOutcomeUnknown {
+  kind: "commit_outcome_unknown";
+}
+
+export type KnownHttpFailure = KnownLifecycleRefusal | KnownCommitOutcomeUnknown;
 
 /**
  * Classify by status before consulting parsed body fields. In particular,
@@ -87,7 +96,12 @@ export function classifyHttpFailure(
     }
     return { kind: "conflict", status };
   }
-  if (status === 503) return { kind: "unavailable", status };
+  if (status === 503) {
+    if (known?.kind === "commit_outcome_unknown") {
+      return { kind: "unavailable", status, reason: "commit_outcome_unknown" };
+    }
+    return { kind: "unavailable", status };
+  }
   if (Number.isInteger(status) && status >= 500 && status <= 599) {
     return { kind: "server_failure", status };
   }

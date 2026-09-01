@@ -73,6 +73,27 @@ describe("runtime failure classification", () => {
     })).toEqual({ kind: "unavailable", status: 503 });
   });
 
+  it("classifies a bounded commit-outcome-unknown 503 without retaining a body", () => {
+    expect(classifyHttpFailure(503, { kind: "commit_outcome_unknown" })).toEqual({
+      kind: "unavailable",
+      status: 503,
+      reason: "commit_outcome_unknown",
+    });
+    expect(classifyHttpFailure(503)).toEqual({ kind: "unavailable", status: 503 });
+    expect(Object.keys(classifyHttpFailure(503, { kind: "commit_outcome_unknown" })).sort())
+      .toEqual(["kind", "reason", "status"]);
+  });
+
+  it.each([401, 403] as const)(
+    "classifies %i as authentication loss before a commit-outcome-unknown body claim",
+    (status) => {
+      expect(classifyHttpFailure(status, { kind: "commit_outcome_unknown" })).toEqual({
+        kind: "auth_lost",
+        status,
+      });
+    },
+  );
+
   it.each([
     "content_type",
     "json",

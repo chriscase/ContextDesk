@@ -2964,6 +2964,35 @@ describe("workstreams in the Analyze stage", () => {
     });
   });
 
+  it("uses exact run-strategies authority for evidence selection and freeze", async () => {
+    stubWithWorkstreams();
+    const common = {
+      roles: ["case-lead"],
+      focusCaseId: "c1",
+      stage: "analyze" as const,
+      onOpenCase: () => {},
+      onStageChange: () => {},
+    };
+    const view = render(
+      <Cases
+        capabilities={["investigation:read", "investigation:write", "decision:accept"]}
+        {...common}
+      />,
+    );
+    expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: /Freeze a snapshot with this upload/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Freeze selected evidence/ })).toBeNull();
+
+    view.rerender(
+      <Cases
+        capabilities={["investigation:read", "investigation:write", "run:strategies"]}
+        {...common}
+      />,
+    );
+    expect(await screen.findByRole("checkbox", { name: /Freeze a snapshot with this upload/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Freeze selected evidence (0)" })).toBeTruthy();
+  });
+
   it("makes an opened workstream the stage, not a highlight beside everything else", async () => {
     stubWithWorkstreams();
     render(

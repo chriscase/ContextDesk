@@ -12,6 +12,7 @@ const UPLOAD_KINDS = ARTIFACT_KINDS.filter(
 const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
 const SHARE_SAFE_PRIVACY_CLASSES = ["share_safe"] as const;
 const MAX_ERROR_LENGTH = 240;
+const MAX_KNOWN_ERROR_BODY_BYTES = 1_024;
 const INITIAL_FINDINGS = 12;
 const INITIAL_EVIDENCE = 25;
 const PREVIEW_LIMIT_BYTES = 65_536;
@@ -20,6 +21,18 @@ const UNKNOWN_UPLOAD_REFRESHED =
   "The upload outcome is unknown. The evidence board has been refreshed; check it before retrying. This is not confirmation that the file was stored or that it was rolled back.";
 const UNKNOWN_UPLOAD_REFRESH_FAILED =
   "The upload outcome is unknown, and the evidence board could not be refreshed. Reload and check the inventory before retrying. This is not confirmation that the file was stored or that it was rolled back.";
+const CANCELLED_UPLOAD_REFRESHED =
+  "The upload was cancelled. The evidence board has been refreshed; check it before retrying. This is not confirmation that the file was stored or that it was rolled back.";
+const CANCELLED_UPLOAD_REFRESH_FAILED =
+  "The upload was cancelled, and the evidence board could not be refreshed. Reload and check the inventory before retrying. This is not confirmation that the file was stored or that it was rolled back.";
+const UNKNOWN_FREEZE_REFRESHED =
+  "The freeze outcome is unknown. The evidence board has been refreshed; check snapshots before freezing again. This is not confirmation that a snapshot was created or that it was rolled back.";
+const UNKNOWN_FREEZE_REFRESH_FAILED =
+  "The freeze outcome is unknown, and the evidence board could not be refreshed. Reload and check snapshots before freezing again. This is not confirmation that a snapshot was created or that it was rolled back.";
+const UNKNOWN_UPLOAD_FREEZE_REFRESHED =
+  "The file was uploaded, but the freeze outcome is unknown. The evidence board has been refreshed; check snapshots before freezing again. This is not confirmation that a snapshot was created or that it was rolled back.";
+const UNKNOWN_UPLOAD_FREEZE_REFRESH_FAILED =
+  "The file was uploaded, but the freeze outcome is unknown, and the evidence board could not be refreshed. Reload and check snapshots before freezing again. This is not confirmation that a snapshot was created or that it was rolled back.";
 const UNUSABLE_UPLOAD_RESPONSE =
   "The server returned an unusable upload response. Check the evidence board before retrying.";
 const UNUSABLE_UPLOAD_REFRESH_FAILED =
@@ -139,6 +152,71 @@ function parseErrorCode(body: string): string | null {
     return typeof parsed.error === "string" ? parsed.error : null;
   } catch {
     return null;
+  }
+}
+
+function cancelResponseReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    void reader.cancel().catch(() => undefined);
+  } catch {
+    // Failure cleanup must not delay truthful UI reconciliation.
+  }
+}
+
+async function readKnownErrorCode(response: Response, signal: AbortSignal): Promise<string | null> {
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (
+    signal.aborted
+    || response.body === null
+    || !contentType
+    || (contentType !== "application/json" && !contentType.endsWith("+json"))
+  ) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  let wakeAbort: (() => void) | null = null;
+  const abortWake = new Promise<null>((resolve) => {
+    wakeAbort = () => resolve(null);
+  });
+  const onAbort = () => {
+    cancelResponseReader(reader);
+    wakeAbort?.();
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    while (true) {
+      const next = await Promise.race([reader.read(), abortWake]);
+      if (next === null || signal.aborted) return null;
+      if (next.done) break;
+      if (next.value.byteLength === 0) continue;
+      if (next.value.byteLength > MAX_KNOWN_ERROR_BODY_BYTES - byteLength) {
+        cancelResponseReader(reader);
+        return null;
+      }
+      chunks.push(next.value.slice());
+      byteLength += next.value.byteLength;
+    }
+    if (signal.aborted) return null;
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return parseErrorCode(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+      return null;
+    }
+  } catch {
+    return null;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A hostile pending read may retain the lock after best-effort cancel.
+    }
   }
 }
 
@@ -434,6 +512,8 @@ export function CaseBoardPanel(props: {
   );
   const [freezeAfterUpload, setFreezeAfterUpload] = useState(false);
   const [freezing, setFreezing] = useState(false);
+  const [uploadReconciliationRequired, setUploadReconciliationRequired] = useState(false);
+  const [freezeReconciliationRequired, setFreezeReconciliationRequired] = useState(false);
   const [fileInputGeneration, setFileInputGeneration] = useState(0);
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [inspectText, setInspectText] = useState<string | null>(null);
@@ -544,6 +624,8 @@ export function CaseBoardPanel(props: {
     setKind("log");
     setPrivacyClass(defaultPrivacyClass);
     setFreezeAfterUpload(false);
+    setUploadReconciliationRequired(false);
+    setFreezeReconciliationRequired(false);
     setFileInputGeneration((current) => current + 1);
     setInspecting(null);
     setInspectText(null);
@@ -610,6 +692,8 @@ export function CaseBoardPanel(props: {
       setSnapshots(snapshotsBody.snapshots ?? []);
       setBoard(boardBody);
       setSelectedSnapshotId(boardBody.snapshotId);
+      setUploadReconciliationRequired(false);
+      setFreezeReconciliationRequired(false);
       loadedCaseRef.current = caseId;
       return true;
     } catch (cause) {
@@ -793,7 +877,7 @@ export function CaseBoardPanel(props: {
   }
 
   async function freezeSnapshot() {
-    if (freezeInFlight.current) return;
+    if (freezeInFlight.current || freezeReconciliationRequired) return;
     const visibleIds = new Set(visibleArtifacts.map((artifact) => artifact.id));
     const evidenceIds = selectedEvidence.filter((id) => visibleIds.has(id));
     if (evidenceIds.length === 0) return;
@@ -822,9 +906,23 @@ export function CaseBoardPanel(props: {
       });
       if (!isCurrent()) return;
       if (!response.ok) {
-        const message = await errorText(response, "Snapshot could not be frozen.");
+        if (response.status === 401 || response.status === 403) {
+          setError("Snapshot could not be frozen.");
+          setErrorSource("board");
+          return;
+        }
+        const errorCode = await readKnownErrorCode(response, controller.signal);
         if (!isCurrent()) return;
-        setError(message);
+        if (response.status === 503 && errorCode === "commit_outcome_unknown") {
+          const refreshed = await load(null, { preserveError: true });
+          if (!isCurrent()) return;
+          setFreezeReconciliationRequired(!refreshed);
+          if (!refreshed) setFreezeAfterUpload(false);
+          setError(refreshed ? UNKNOWN_FREEZE_REFRESHED : UNKNOWN_FREEZE_REFRESH_FAILED);
+          setErrorSource("board");
+          return;
+        }
+        setError("Snapshot could not be frozen.");
         setErrorSource("board");
         return;
       }
@@ -876,7 +974,12 @@ export function CaseBoardPanel(props: {
   }
 
   async function runUpload() {
-    if (props.readOnly || !props.canWrite || uploadInFlight.current) return;
+    if (
+      props.readOnly
+      || !props.canWrite
+      || uploadInFlight.current
+      || uploadReconciliationRequired
+    ) return;
     if (!selectedFile) {
       setError("Choose an evidence file to upload.");
       setErrorSource("upload");
@@ -899,7 +1002,7 @@ export function CaseBoardPanel(props: {
     const file = selectedFile;
     const artifactKind = kind;
     const privacy = privacyClass;
-    const shouldFreeze = props.canLead && freezeAfterUpload;
+    const shouldFreeze = props.canLead && !freezeReconciliationRequired && freezeAfterUpload;
     const payload = new FormData();
     payload.append("kind", artifactKind);
     payload.append("summary", trimmedSummary);
@@ -941,6 +1044,7 @@ export function CaseBoardPanel(props: {
       if (response.status === 503 && parseErrorCode(bodyText) === "commit_outcome_unknown") {
         const refreshed = await load(null, { preserveError: true });
         if (!stillThisUpload()) return;
+        setUploadReconciliationRequired(!refreshed);
         setError(refreshed ? UNKNOWN_UPLOAD_REFRESHED : UNKNOWN_UPLOAD_REFRESH_FAILED);
         setErrorSource("upload");
         restoreActionFocus();
@@ -972,6 +1076,7 @@ export function CaseBoardPanel(props: {
       ) {
         const refreshed = await load(null, { preserveError: true });
         if (!stillThisUpload()) return;
+        setUploadReconciliationRequired(!refreshed);
         setError(refreshed ? UNUSABLE_UPLOAD_RESPONSE : UNUSABLE_UPLOAD_REFRESH_FAILED);
         setErrorSource("upload");
         restoreActionFocus();
@@ -992,12 +1097,31 @@ export function CaseBoardPanel(props: {
         });
         if (!stillThisUpload()) return;
         if (!snapshotResponse.ok) {
-          const message = await errorText(
-            snapshotResponse,
-            "Upload succeeded but the snapshot could not be frozen.",
-          );
+          if (snapshotResponse.status === 401 || snapshotResponse.status === 403) {
+            setError("Upload succeeded but the snapshot could not be frozen.");
+            setErrorSource("upload");
+            resetUploadForm();
+            await load(null, { preserveError: true });
+            if (!stillThisUpload()) return;
+            restoreActionFocus();
+            announceEvidenceChanged();
+            return;
+          }
+          const freezeErrorCode = await readKnownErrorCode(snapshotResponse, controller.signal);
           if (!stillThisUpload()) return;
-          setError(message);
+          if (snapshotResponse.status === 503 && freezeErrorCode === "commit_outcome_unknown") {
+            resetUploadForm();
+            const refreshed = await load(null, { preserveError: true });
+            if (!stillThisUpload()) return;
+            setFreezeReconciliationRequired(!refreshed);
+            if (!refreshed) setFreezeAfterUpload(false);
+            setError(refreshed ? UNKNOWN_UPLOAD_FREEZE_REFRESHED : UNKNOWN_UPLOAD_FREEZE_REFRESH_FAILED);
+            setErrorSource("upload");
+            restoreActionFocus();
+            if (refreshed) announceEvidenceChanged();
+            return;
+          }
+          setError("Upload succeeded but the snapshot could not be frozen.");
           setErrorSource("upload");
           resetUploadForm();
           await load(null, { preserveError: true });
@@ -1031,10 +1155,14 @@ export function CaseBoardPanel(props: {
     } catch (cause) {
       if (!stillThisUpload()) return;
       if (isAbortFailure(cause)) {
-        setUploadNotice("Upload cancelled.");
-        setError(null);
-        setErrorSource(null);
+        const refreshed = await load(null, { preserveError: true });
+        if (!stillThisUpload()) return;
+        setUploadReconciliationRequired(!refreshed);
+        setError(refreshed ? CANCELLED_UPLOAD_REFRESHED : CANCELLED_UPLOAD_REFRESH_FAILED);
+        setErrorSource("upload");
+        setUploadNotice(null);
         restoreActionFocus();
+        if (refreshed) announceEvidenceChanged();
         return;
       }
       setError(
@@ -1086,7 +1214,12 @@ export function CaseBoardPanel(props: {
     uploadProgress && uploadProgress.total && uploadProgress.total > 0
       ? Math.min(100, Math.round((uploadProgress.loaded / uploadProgress.total) * 100))
       : null;
-  const canRetryUpload = Boolean(selectedFile && !uploading && (errorSource === "upload" || uploadNotice === "Upload cancelled."));
+  const canRetryUpload = Boolean(
+    selectedFile
+    && !uploading
+    && !uploadReconciliationRequired
+    && errorSource === "upload",
+  );
   const visibleSelectedIds = selectedEvidence.filter((id) =>
     visibleArtifacts.some((artifact) => artifact.id === id),
   );
@@ -1391,7 +1524,7 @@ export function CaseBoardPanel(props: {
                           name="freezeAfterUpload"
                           type="checkbox"
                           checked={freezeAfterUpload}
-                          disabled={uploading}
+                          disabled={uploading || freezeReconciliationRequired}
                           onChange={(event) => setFreezeAfterUpload(event.target.checked)}
                         /> Freeze a snapshot with
                         this upload
@@ -1415,7 +1548,7 @@ export function CaseBoardPanel(props: {
                       <button
                         className="login__submit"
                         type="submit"
-                        disabled={uploading}
+                        disabled={uploading || uploadReconciliationRequired}
                         ref={submitButtonRef}
                       >
                         {uploading ? "Uploading…" : "Upload evidence"}
@@ -1448,7 +1581,11 @@ export function CaseBoardPanel(props: {
                   className="login__submit"
                   type="button"
                   onClick={() => void freezeSnapshot()}
-                  disabled={visibleSelectedIds.length === 0 || freezing}
+                  disabled={
+                    visibleSelectedIds.length === 0
+                    || freezing
+                    || freezeReconciliationRequired
+                  }
                   aria-busy={freezing}
                 >
                   {freezing

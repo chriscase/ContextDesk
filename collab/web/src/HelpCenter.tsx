@@ -304,7 +304,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Register files on the evidence board with a summary, kind, and privacy class; each upload is hashed on arrival.",
         keywords: ["evidence", "file", "upload", "artifact", "log", "email", "attachment", "hash", "verification"],
         what:
-          "Single-file uploads still live on the Analyze stage's evidence board. Each upload takes a file (1 MB or smaller), a required summary, an artifact kind (log, email, attachment, or file_server_ref), and a privacy class. The board lists every artifact with its kind, verification status, uploader, and content hash. ZIP archives and directories belong on Capture — see Add logs from files, ZIP, or a directory.",
+          "War Room Analyze uses native streaming upload on the evidence board, subject to the configured server limit. Investigation First's legacy JSON/base64 single-file path remains limited to 1 MB. Each upload takes a file, a required summary, an artifact kind (log, email, or attachment), and a privacy class. The board lists every artifact with its kind, verification status, uploader, and content hash. ZIP archives and directories belong on Capture — see Add logs from files, ZIP, or a directory.",
         when:
           "Upload a single sanitized file before freezing a snapshot, so AI lanes and human review can cite exactly what the team collected.",
         steps: [
@@ -315,7 +315,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each artifact records its uploader, kind, privacy class, and content hash. A verification status is shown per artifact — \"verification unknown\" is displayed honestly when none is recorded.",
         limits:
-          "Files larger than 1 MB are rejected. Upload sanitized content only — the privacy class controls export eligibility, but it does not scrub the file for you.",
+          "War Room Analyze streaming uploads use the configured server limit, not a fixed 1 MB cap. Investigation First's legacy JSON/base64 single-file path remains limited to 1 MB. Upload sanitized content only — the privacy class controls export eligibility, but it does not scrub the file for you.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
       },
       {

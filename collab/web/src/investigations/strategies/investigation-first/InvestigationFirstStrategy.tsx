@@ -32,6 +32,11 @@ const CONTEXT_FIELDS: readonly [keyof InvestigationContext, string][] = [
   ["productName", "Product or software"], ["version", "Version"], ["build", "Build"],
   ["component", "Component"], ["environment", "Environment"], ["organization", "Customer, team, or organization"],
 ];
+const UPLOAD_KINDS = ["attachment", "log", "email"] as const;
+const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
+const SHARE_SAFE_PRIVACY_CLASSES = ["share_safe"] as const;
+type UploadKind = (typeof UPLOAD_KINDS)[number];
+type UploadPrivacyClass = (typeof PRIVACY_CLASSES)[number];
 
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function display(value: unknown): string { return text(value) || "Not recorded"; }
@@ -75,6 +80,7 @@ function createFailureCopy(error: RuntimeFailure): string {
   if (error.kind === "conflict") return "The create request conflicted with current server state. Check the investigation list before trying again.";
   if (error.kind === "not_found") return "The create request could not find the required server resource. Check the investigation list before trying again.";
   if (error.kind === "network") return "The connection failed before ContextDesk could confirm the result. Check the investigation list before trying again.";
+  if (error.kind === "unavailable" && error.reason === "commit_outcome_unknown") return "The create result was not confirmed. Check the investigation list before continuing.";
   if (error.kind === "unavailable" || error.kind === "server_failure") return "The service could not complete the create request right now. Check the investigation list before trying again.";
   if (error.kind === "aborted") return "The create request was canceled before it finished. Check the investigation list before trying again.";
   if (error.kind === "unexpected_response" || error.kind === "protocol") return "The server response could not be verified. Check the investigation list before trying again.";
@@ -97,6 +103,11 @@ function failureCopy(error: RuntimeFailure, subject: "list" | "detail" | "eviden
   if (error.kind === "validation") return "The recorded values could not be accepted. Review them and try again.";
   if (error.kind === "conflict") return "The investigation changed before this action completed. Refresh and try again.";
   const labels = { list: "Investigations", detail: "This investigation", evidence: "Evidence inventory", annotations: "Evidence annotations", create: "The investigation", upload: "The evidence", lifecycle: "Lifecycle information" } as const;
+  if (error.kind === "unavailable" && error.reason === "commit_outcome_unknown") {
+    return subject === "upload"
+      ? "The upload result was not confirmed. The evidence inventory is being refreshed; check it before uploading again."
+      : `${labels[subject]} result was not confirmed. Check the current record before continuing.`;
+  }
   if (error.kind === "unavailable" || error.kind === "server_failure" || error.kind === "network") return `${labels[subject]} could not be loaded right now. Try again.`;
   return `${labels[subject]} could not be processed safely. Try again.`;
 }
@@ -188,6 +199,9 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const [severity, setSeverity] = useState<CaseV1["severity"]>("medium");
   const [situation, setSituation] = useState<SituationDraft>(EMPTY_SITUATION);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [privacyClass, setPrivacyClass] = useState<UploadPrivacyClass>(
+    runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe",
+  );
   const titleRef = useRef<HTMLInputElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -256,6 +270,9 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     setSituation(EMPTY_SITUATION);
     setAdvancedOpen(false);
   }, [draftOwnerKey]);
+  useLayoutEffect(() => {
+    setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
+  }, [runtime.capabilities.canReadPrivate]);
   useEffect(() => setSelectedEvidence([]), [props.focusCaseId]);
   useEffect(() => {
     const available = new Set(evidenceSelectionKey ? evidenceSelectionKey.split("\u0000") : []);
@@ -292,10 +309,21 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     const form = event.currentTarget;
     const file = (form.elements.namedItem("file") as HTMLInputElement | null)?.files?.[0] ?? null;
     const summary = (form.elements.namedItem("summary") as HTMLInputElement | null)?.value ?? "";
-    const kind = ((form.elements.namedItem("kind") as HTMLSelectElement | null)?.value ?? "attachment") as "attachment" | "log" | "email" | "file_server_ref";
-    const privacyClass = ((form.elements.namedItem("privacyClass") as HTMLSelectElement | null)?.value ?? "owner_only") as "owner_only" | "share_safe";
-    const result = await command({ file, summary, kind, privacyClass });
-    if (result.status === "succeeded") form.reset();
+    const requestedKind = (form.elements.namedItem("kind") as HTMLSelectElement | null)?.value ?? "attachment";
+    const kind: UploadKind = requestedKind === "log" || requestedKind === "email" || requestedKind === "attachment"
+      ? requestedKind
+      : "attachment";
+    const requestedPrivacy = (form.elements.namedItem("privacyClass") as HTMLSelectElement | null)?.value
+      ?? privacyClass;
+    const submittedPrivacy: UploadPrivacyClass = runtime.capabilities.canReadPrivate
+      && requestedPrivacy === "owner_only"
+      ? "owner_only"
+      : "share_safe";
+    const result = await command({ file, summary, kind, privacyClass: submittedPrivacy });
+    if (result.status === "succeeded") {
+      form.reset();
+      setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
+    }
   }
 
   function renderCreateForm() {
@@ -410,7 +438,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       ) : null}
       <div className="investigation-first__bulk-actions"><span>{selectedEvidence.length} selected</span><button type="button" disabled aria-describedby="investigation-first-trash-description">Move selected to trash</button><button type="button" onClick={() => setSelectedEvidence([])} disabled={!selectedEvidence.length}>Clear selection</button><small id="investigation-first-trash-description">Bulk trash is reserved for a recoverable, audited lifecycle workflow; no file is deleted here.</small></div>
       {upload.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
-      {uploadCommand !== null ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment"><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option><option value="file_server_ref">File reference</option></select></label><label>Privacy<select name="privacyClass" defaultValue="owner_only"><option value="owner_only">Owner only</option><option value="share_safe">Share safe</option></select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running"}>{upload.status === "running" ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
+      {uploadCommand !== null ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment">{UPLOAD_KINDS.map((option) => <option key={option} value={option}>{option === "attachment" ? "Attachment" : option === "log" ? "Log" : "Email"}</option>)}</select></label><label>Privacy<select name="privacyClass" value={privacyClass} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}>{(runtime.capabilities.canReadPrivate ? PRIVACY_CLASSES : SHARE_SAFE_PRIVACY_CLASSES).map((option) => <option key={option} value={option}>{option === "owner_only" ? "Owner only" : "Share safe"}</option>)}</select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running"}>{upload.status === "running" ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
     </section>;
   }
 

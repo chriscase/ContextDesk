@@ -9,6 +9,7 @@ describe("investigation runtime capability projection", () => {
       "run:strategies",
     ], false)).toEqual({
       canRead: true,
+      canReadPrivate: false,
       canCreate: true,
       canUpload: true,
       canContribute: true,
@@ -25,6 +26,7 @@ describe("investigation runtime capability projection", () => {
       "portable:restore",
     ], false)).toEqual({
       canRead: false,
+      canReadPrivate: false,
       canCreate: true,
       canUpload: true,
       canContribute: true,
@@ -33,6 +35,7 @@ describe("investigation runtime capability projection", () => {
     });
     expect(projectInvestigationCapabilities(["run:strategies"], false)).toEqual({
       canRead: false,
+      canReadPrivate: false,
       canCreate: false,
       canUpload: false,
       canContribute: false,
@@ -48,6 +51,7 @@ describe("investigation runtime capability projection", () => {
       "run:strategies",
     ], true)).toEqual({
       canRead: true,
+      canReadPrivate: false,
       canCreate: false,
       canUpload: false,
       canContribute: false,
@@ -64,6 +68,7 @@ describe("investigation runtime capability projection", () => {
       "admin:users",
     ], false)).toEqual({
       canRead: true,
+      canReadPrivate: false,
       canCreate: false,
       canUpload: false,
       canContribute: false,
@@ -75,6 +80,7 @@ describe("investigation runtime capability projection", () => {
   it("grants no write affordance to a reader, and never lets lifecycle imply either write seam", () => {
     expect(projectInvestigationCapabilities(["investigation:read"], false)).toEqual({
       canRead: true,
+      canReadPrivate: false,
       canCreate: false,
       canUpload: false,
       canContribute: false,
@@ -86,6 +92,7 @@ describe("investigation runtime capability projection", () => {
       "run:strategies",
     ], false)).toEqual({
       canRead: true,
+      canReadPrivate: false,
       canCreate: false,
       canUpload: false,
       canContribute: false,
@@ -105,8 +112,48 @@ describe("investigation runtime capability projection", () => {
       "canEditSituation",
       "canManageLifecycle",
       "canRead",
+      "canReadPrivate",
       "canUpload",
     ]);
     expect(Object.values(projected).every((value) => typeof value === "boolean")).toBe(true);
+  });
+
+  it("projects exact evidence:private:read and never infers it from write, run, or roles", () => {
+    expect(projectInvestigationCapabilities([
+      "investigation:read",
+      "investigation:write",
+      "run:strategies",
+      "decision:accept",
+      "export:create",
+      "portable:restore",
+    ], false).canReadPrivate).toBe(false);
+    expect(projectInvestigationCapabilities([
+      "evidence:private:read",
+    ], false)).toEqual({
+      canRead: false,
+      canReadPrivate: true,
+      canCreate: false,
+      canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
+      canManageLifecycle: false,
+    });
+  });
+
+  it("keeps private-read authority in static read-only mode when granted", () => {
+    expect(projectInvestigationCapabilities([
+      "investigation:read",
+      "investigation:write",
+      "run:strategies",
+      "evidence:private:read",
+    ], true)).toEqual({
+      canRead: true,
+      canReadPrivate: true,
+      canCreate: false,
+      canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
+      canManageLifecycle: false,
+    });
   });
 });
