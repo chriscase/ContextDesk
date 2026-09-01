@@ -180,12 +180,16 @@ describe("Beacon rapid-intake strategy", () => {
     });
     const privacy = await screen.findByRole("combobox", { name: "Privacy" }) as HTMLSelectElement;
     expect(privacy.value).toBe("owner_only");
+    const fileInput = screen.getByLabelText(/File \(up to/u) as HTMLInputElement;
+    const privateFile = new File(["private draft"], "authority-change.log", { type: "text/plain" });
+    Object.defineProperty(fileInput, "files", { configurable: true, value: [privateFile] });
+    Object.defineProperty(fileInput, "value", { configurable: true, writable: true, value: "C:\\fakepath\\authority-change.log" });
     rerenderCapabilities(["investigation:read", "investigation:write"]);
     await waitFor(() => expect(privacy.value).toBe(""));
+    expect(fileInput.value).toBe("");
     expect(screen.queryByRole("option", { name: "Owner only" })).toBeNull();
     expect(screen.getByRole("alert").textContent).toMatch(/Choose a privacy level again/u);
-    const file = new File(["private draft"], "authority-change.log", { type: "text/plain" });
-    const fileInput = screen.getByLabelText(/File \(up to/u) as HTMLInputElement;
+    const file = new File(["reviewed share-safe content"], "authority-change.log", { type: "text/plain" });
     Object.defineProperty(fileInput, "files", { configurable: true, value: [file] });
     fireEvent.change(fileInput);
     fireEvent.change(screen.getByRole("textbox", { name: "Why does this matter?" }), { target: { value: "Captured before authority changed." } });
