@@ -45,12 +45,44 @@ async function useInvestigationFirst(page: Page): Promise<void> {
   await account.focus();
   await page.keyboard.press("Enter");
 
+  const effectiveResponse = await page.request.get("/api/ui-strategies/effective");
+  expect(effectiveResponse.ok(), await effectiveResponse.text()).toBeTruthy();
+  const effective = await effectiveResponse.json() as { effectiveId?: string };
+  const currentName = {
+    "war-room": "War Room",
+    "investigation-first": "Investigation First",
+    keystone: "Keystone",
+    beacon: "Beacon",
+  }[effective.effectiveId ?? ""];
+  expect(currentName, "effective strategy response did not name a shipped strategy").toBeTruthy();
+  await expect(page.getByRole("radio", { name: new RegExp(`^${currentName}\\b`, "u") }))
+    .toBeChecked();
+
   const strategy = page.getByRole("radio", { name: /^Investigation First/ });
-  await strategy.focus();
-  await page.keyboard.press("Space");
-  await expect(strategy).toBeChecked();
+  if (effective.effectiveId !== "investigation-first") {
+    await strategy.focus();
+    await page.keyboard.press("Space");
+    await expect(strategy).toBeChecked();
+
+    // Strategy selection is a draft until the user explicitly saves the
+    // server-backed preference. Exercise that confirmation with the keyboard
+    // so this journey proves the governed interaction instead of only changing
+    // the local radio state.
+    const save = page.getByRole("button", { name: "Use selected experience" });
+    await expect(save).toBeEnabled();
+    await save.focus();
+    await expect(save).toBeFocused();
+    const [saved] = await Promise.all([
+      page.waitForResponse((response) =>
+        response.url().endsWith("/api/ui-strategies/preference")
+        && response.request().method() === "PUT"),
+      page.keyboard.press("Enter"),
+    ]);
+    expect(saved.ok(), await saved.text()).toBeTruthy();
+  }
   await expect(page.locator(".topbar__title-app")).toHaveText("Investigation First");
 
+  await account.focus();
   await page.keyboard.press("Escape");
   await expect(account).toBeFocused();
   const after = new URL(page.url());
