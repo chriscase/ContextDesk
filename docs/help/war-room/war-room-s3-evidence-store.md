@@ -246,7 +246,7 @@ Create three owner-only files/directories in a disposable working directory:
 None belongs in git. Garage needs its configuration file as well as the two
 durable mounts; mounting only `/var/lib/garage/data` is not sufficient.
 
-Use this evaluation configuration. Replace `replace-with-64-hex-characters`
+Use this evaluation configuration. Replace `REPLACE_THIS_VALUE`
 with the output of `openssl rand -hex 32`; keep the file owner-readable only.
 
 ```toml
@@ -258,7 +258,7 @@ replication_factor = 1
 
 rpc_bind_addr = "[::]:3901"
 rpc_public_addr = "127.0.0.1:3901"
-rpc_secret = "replace-with-64-hex-characters"
+rpc_secret = "REPLACE_THIS_VALUE"
 
 [s3_api]
 s3_region = "garage"
@@ -303,7 +303,7 @@ openssl rand -hex 32
 ```
 
 Put that value into `rpc_secret` in `garage.toml`. Stop if the placeholder
-`replace-with-64-hex-characters` is still present — do not start Compose
+`REPLACE_THIS_VALUE` is still present — do not start Compose
 until it is gone. Then write evaluation-only bootstrap keys (Garage
 access-key ids must start with `GK`) and start:
 
@@ -311,7 +311,7 @@ access-key ids must start with `GK`) and start:
 (
   umask 077
   set -eu
-  if grep -q 'replace-with-64-hex-characters' garage.toml; then
+  if grep -q 'REPLACE_THIS_VALUE' garage.toml; then
     printf 'replace rpc_secret before starting\n' >&2
     exit 1
   fi

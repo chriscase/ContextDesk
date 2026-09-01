@@ -37,7 +37,7 @@ export const GARAGE_IMAGE = "dxflrs/garage:v2.3.0";
 export const DEFAULT_ENDPOINT = "http://127.0.0.1:3900";
 export const DEFAULT_REGION = "garage";
 export const COMPOSE_PROJECT = "cd-garage-evidence-eval";
-export const RPC_SECRET_PLACEHOLDER = "replace-with-64-hex-characters";
+export const RPC_SECRET_PLACEHOLDER = "REPLACE_THIS_VALUE";
 
 export const AWS_DEFAULT_CHAIN_ENV_NAMES = Object.freeze([
   "AWS_ACCESS_KEY_ID",
