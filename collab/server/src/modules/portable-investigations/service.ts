@@ -428,6 +428,13 @@ function privacySummary(archive: PortableArchiveV1): PortablePrivacySummary {
   };
 }
 
+function projectedBase64ByteLength(byteLength: number): number {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+    throw new PortableServerError("unsupported_state", "content byte length is unknown");
+  }
+  return 4 * Math.ceil(byteLength / 3);
+}
+
 function decodePortableBase64(raw: string, label: string): Uint8Array {
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw)) {
     throw new PortableServerError("archive_invalid", `${label} is not canonical base64`);
@@ -818,6 +825,7 @@ export class PortableInvestigationService {
         .filter((row) => row.kind === "evidence_registered" && row.targetId !== null)
         .map((row) => [row.targetId as string, row.serverTime]),
     );
+    let remainingArchiveBytes = MAX_PORTABLE_ARCHIVE_BYTES;
     for (const artifact of artifacts) {
       const digest = artifact.contentHash ?? artifact.expectedHash;
       if (!digest) {
@@ -826,20 +834,44 @@ export class PortableInvestigationService {
           "unhashed evidence cannot be represented by the portable contract",
         );
       }
-      const bytes = artifact.contentHash
-        ? await this.deps.cases.getArtifactBytes(caseId, artifact.id, actor, isAdmin, canReadPrivate)
-        : null;
-      if (artifact.contentHash && !bytes) {
-        throw new PortableServerError("integrity_failure", "held evidence bytes are missing");
-      }
-      const byteLength = artifact.byteLength ?? bytes?.byteLength;
-      if (byteLength === undefined) {
+      const catalogLength = artifact.byteLength;
+      if (catalogLength === null || catalogLength === undefined) {
         throw new PortableServerError(
           "unsupported_state",
           "evidence with unknown byte length cannot be represented",
         );
       }
-      addContent(digest, bytes, artifact.mediaType, byteLength);
+      let bytes: Uint8Array | null = null;
+      const prior = contents.get(digest);
+      if (artifact.contentHash && prior?.inclusion !== "present") {
+        const projected = projectedBase64ByteLength(catalogLength);
+        if (projected > remainingArchiveBytes) {
+          throw new PortableServerError("archive_size_limit", "portable archive exceeds size limit");
+        }
+        let result;
+        try {
+          result = await this.deps.cases.getArtifactBytes(
+            caseId,
+            artifact.id,
+            actor,
+            isAdmin,
+            canReadPrivate,
+            catalogLength,
+          );
+        } catch (error) {
+          if (error instanceof PortableServerError) throw error;
+          throw new PortableServerError("integrity_failure", "held evidence bytes are missing");
+        }
+        if (result.outcome === "too_large") {
+          throw new PortableServerError("archive_size_limit", "portable archive exceeds size limit");
+        }
+        if (result.outcome !== "ok") {
+          throw new PortableServerError("integrity_failure", "held evidence bytes are missing");
+        }
+        bytes = result.bytes;
+        remainingArchiveBytes -= projectedBase64ByteLength(result.byteLength);
+      }
+      addContent(digest, bytes, artifact.mediaType, catalogLength);
       if (!registeredAt.has(artifact.id)) {
         throw new PortableServerError("integrity_failure", "evidence registration time is missing");
       }

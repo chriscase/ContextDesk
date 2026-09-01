@@ -8,7 +8,7 @@ import {
   parseExternalRun,
   parsePromptPackage,
 } from "@cd-collab/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
@@ -26,7 +26,7 @@ import { CaseService } from "../cases/index.js";
 import { ImportService, MemoryRunStore } from "../import/index.js";
 import { canonicalJson } from "./canonical.js";
 import { testExportPrivacyConfig } from "./config.js";
-import { ExportService } from "./service.js";
+import { ExportService, MAX_EXPORT_INLINE_ARTIFACT_BYTES } from "./service.js";
 
 const ALICE = "fixture-alice-secret";
 const LOG = "2026-08-15T00:00:00Z mailer timeout id=syn-1\n";
@@ -101,6 +101,8 @@ async function withApp(
   fn: (ctx: {
     app: Awaited<ReturnType<typeof buildApp>>;
     audit: MemoryAuditStore;
+    store: FilesystemEvidenceStore;
+    domain: CaseService;
   }) => Promise<void>,
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-export-"));
@@ -147,7 +149,7 @@ async function withApp(
     },
   });
   try {
-    await fn({ app, audit });
+    await fn({ app, audit, store, domain });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -669,6 +671,66 @@ describe("triage brief and prompt-package export", () => {
       expect(canonicalJson(sharePayload.memory)).not.toContain(LOG);
       expect(sharePayload.attributions[0]?.actorLabel).toBeTruthy();
       expect(packageA.snapshotIdentity).toMatch(/^[0-9a-f]{64}$/);
+    });
+  });
+
+  it("omits inline artifact bytes over 1,000,000 with content null and bytesIncluded false", async () => {
+    await withApp(async ({ app, store, domain }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const created = JSON.parse(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/api/cases",
+            headers: { cookie: alice },
+            payload: { title: "Export inline cap" },
+          })
+        ).body,
+      ) as { id: string };
+      const huge = new Uint8Array(MAX_EXPORT_INLINE_ARTIFACT_BYTES + 1).fill(0x61);
+      async function* source(): AsyncIterable<Uint8Array> {
+        yield huge;
+      }
+      const uploaded = await domain.addStreamedEvidence(
+        created.id,
+        { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" },
+        {
+          kind: "log",
+          filename: "huge.log",
+          mediaType: "text/plain",
+          source: source(),
+          summary: "over the export inline cap",
+          privacyClass: "share_safe",
+          maxBytes: huge.byteLength,
+        },
+        "test",
+      );
+      const get = vi.spyOn(store, "get");
+      const head = vi.spyOn(store, "head");
+      const openRead = vi.spyOn(store, "openRead");
+      get.mockClear();
+      head.mockClear();
+      openRead.mockClear();
+      const brief = parseExportEnvelope(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "POST",
+              url: `/api/cases/${created.id}/export/brief`,
+              headers: { cookie: dave },
+              payload: { variant: "owner_only" },
+            })
+          ).body,
+        ),
+      );
+      const payload = parseBrief(brief.payload);
+      const item = payload.evidence.find((row) => row.id === uploaded.artifact.id);
+      expect(item?.content).toBeNull();
+      expect(item?.bytesIncluded).toBe(false);
+      expect(get).not.toHaveBeenCalled();
+      expect(head).not.toHaveBeenCalled();
+      expect(openRead).not.toHaveBeenCalled();
     });
   });
 });

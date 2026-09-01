@@ -622,6 +622,201 @@ describe("status-first bounded failures", () => {
   });
 });
 
+describe("upload commit-outcome-unknown 503 parsing", () => {
+  const uploadInput = { kind: "log" as const, summary: "Synthetic" };
+
+  it("preserves only the bounded unknown-outcome discriminant for the exact 503 body", async () => {
+    const response = jsonResponse({ error: "commit_outcome_unknown" }, 503);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    const result = await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(),
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    });
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(Object.keys((result as { error: object }).error).sort()).toEqual(["kind", "reason", "status"]);
+  });
+
+  it("recognizes the exact bounded code split across non-empty chunks", async () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ error: "commit_outcome_unknown" }));
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(stream) {
+        stream.enqueue(bytes.slice(0, 9));
+        stream.enqueue(bytes.slice(9));
+        stream.close();
+      },
+    }), {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(),
+    )).toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    });
+  });
+
+  it.each([401, 403] as const)(
+    "classifies %i as auth loss before a misleading commit-outcome-unknown body",
+    async (status) => {
+      const response = jsonResponse({ error: "commit_outcome_unknown" }, status);
+      const json = vi.spyOn(response, "json");
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+      const listener = vi.fn();
+      window.addEventListener(AUTH_LOST_EVENT, listener);
+      try {
+        const result = await investigationGateway.uploadEvidence(
+          RUNTIME_FIXTURE_IDS.populatedCase,
+          uploadInput,
+          options(),
+        );
+        expect(result).toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        expect(json).not.toHaveBeenCalled();
+        expect(listener).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener(AUTH_LOST_EVENT, listener);
+      }
+    },
+  );
+
+  it("treats malformed, non-JSON, and other 503 bodies as generic unavailable", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(new Response("not json", {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    }));
+    fetchMock.mockResolvedValueOnce(new Response("not json", { status: 503 }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "storage_unavailable" }, 503));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ private: "must-not-escape" }, 503));
+    const unavailable = { ok: false, error: { kind: "unavailable", status: 503 } };
+
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(),
+    )).toEqual(unavailable);
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(),
+    )).toEqual(unavailable);
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(),
+    )).toEqual(unavailable);
+    const other = await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(),
+    );
+    expect(other).toEqual(unavailable);
+    expect(JSON.stringify(other)).not.toContain("must-not-escape");
+  });
+
+  it("cancels and rejects an oversized chunked 503 body without retaining it", async () => {
+    const cancelled = vi.fn();
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(stream) {
+        stream.enqueue(new Uint8Array(700));
+        stream.enqueue(new Uint8Array(400));
+      },
+      cancel: cancelled,
+    }), {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(),
+    )).toEqual({ ok: false, error: { kind: "unavailable", status: 503 } });
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("promptly cancels a stalled body read when the caller aborts", async () => {
+    const controller = new AbortController();
+    const readStarted = createDeferred<void>();
+    const reader = {
+      read: vi.fn(() => {
+        readStarted.resolve();
+        return new Promise<ReadableStreamReadResult<Uint8Array>>(() => undefined);
+      }),
+      cancel: vi.fn(async () => undefined),
+      releaseLock: vi.fn(),
+    };
+    const response = {
+      ok: false,
+      status: 503,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: { getReader: () => reader },
+    } as unknown as Response;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    const pending = investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(controller),
+    );
+    await readStarted.promise;
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, error: { kind: "aborted" } });
+    expect(reader.cancel).toHaveBeenCalledTimes(1);
+    expect(reader.releaseLock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not read an upload failure body when the caller is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(controller),
+    )).toEqual({ ok: false, error: { kind: "aborted" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("checks abort again after the bounded body has been read", async () => {
+    const controller = new AbortController();
+    const bytes = new TextEncoder().encode(JSON.stringify({ error: "commit_outcome_unknown" }));
+    const reader = {
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: bytes })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn(async () => undefined),
+      releaseLock: vi.fn(() => controller.abort()),
+    };
+    const response = {
+      ok: false,
+      status: 503,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: { getReader: () => reader },
+    } as unknown as Response;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    expect(await investigationGateway.uploadEvidence(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      uploadInput,
+      options(controller),
+    )).toEqual({ ok: false, error: { kind: "aborted" } });
+  });
+});
+
 describe("successful response protocol and identity", () => {
   it("distinguishes content-type, JSON, and contract failures", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");

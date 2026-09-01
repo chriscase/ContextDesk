@@ -88,7 +88,12 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.inventory(id, loaded.ctx.actor, loaded.ctx.isAdmin);
+      return await deps.workbench.inventory(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        loaded.ctx.has("evidence:private:read"),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -103,7 +108,13 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.search(id, loaded.ctx.actor, loaded.ctx.isAdmin, request.body);
+      return await deps.workbench.search(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        request.body,
+        { canReadPrivate: loaded.ctx.has("evidence:private:read") },
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -128,6 +139,7 @@ export async function registerWorkbenchRoutes(
         query.evidenceId ?? "",
         Number.isFinite(startLine) ? startLine : 1,
         Number.isFinite(limit) ? limit : 80,
+        loaded.ctx.has("evidence:private:read"),
       );
     } catch (err) {
       void reply.code(statusFor(err));
@@ -150,6 +162,7 @@ export async function registerWorkbenchRoutes(
         loaded.ctx.isAdmin,
         (body.grouping as "file") ?? "file",
         Array.isArray(body.evidenceIds) ? body.evidenceIds : [],
+        loaded.ctx.has("evidence:private:read"),
       );
     } catch (err) {
       void reply.code(statusFor(err));
@@ -199,7 +212,12 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.reviewQueue(id, loaded.ctx.actor, loaded.ctx.isAdmin);
+      return await deps.workbench.reviewQueue(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        loaded.ctx.has("evidence:private:read"),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -215,7 +233,13 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.previewRule(id, loaded.ctx.actor, loaded.ctx.isAdmin, request.body);
+      return await deps.workbench.previewRule(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        request.body,
+        loaded.ctx.has("evidence:private:read"),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -230,7 +254,14 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return { views: await deps.workbench.listViews(id, loaded.ctx.actor, loaded.ctx.isAdmin) };
+      return {
+        views: await deps.workbench.listViews(
+          id,
+          loaded.ctx.actor,
+          loaded.ctx.isAdmin,
+          loaded.ctx.has("evidence:private:read"),
+        ),
+      };
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -255,7 +286,13 @@ export async function registerWorkbenchRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.workbench.saveView(id, loaded.ctx.actor, loaded.ctx.isAdmin, request.body);
+      return await deps.workbench.saveView(
+        id,
+        loaded.ctx.actor,
+        loaded.ctx.isAdmin,
+        request.body,
+        loaded.ctx.has("evidence:private:read"),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -271,7 +308,12 @@ export async function registerWorkbenchRoutes(
     }
     try {
       return {
-        bookmarks: await deps.workbench.listBookmarks(id, loaded.ctx.actor, loaded.ctx.isAdmin),
+        bookmarks: await deps.workbench.listBookmarks(
+          id,
+          loaded.ctx.actor,
+          loaded.ctx.isAdmin,
+          loaded.ctx.has("evidence:private:read"),
+        ),
       };
     } catch (err) {
       void reply.code(statusFor(err));
@@ -302,6 +344,7 @@ export async function registerWorkbenchRoutes(
         loaded.ctx.actor,
         loaded.ctx.isAdmin,
         request.body,
+        loaded.ctx.has("evidence:private:read"),
       );
     } catch (err) {
       void reply.code(statusFor(err));
@@ -317,6 +360,11 @@ export async function registerWorkbenchRoutes(
     if (!loaded.ctx.has("investigation:read")) {
       return privacySafeNotFound();
     }
-    return deps.workbench.resolveLocator(request.body, loaded.ctx.actor, loaded.ctx.isAdmin);
+    return deps.workbench.resolveLocator(
+      request.body,
+      loaded.ctx.actor,
+      loaded.ctx.isAdmin,
+      loaded.ctx.has("evidence:private:read"),
+    );
   });
 }

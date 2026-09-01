@@ -332,6 +332,7 @@ describe("InvestigationRuntimeProvider", () => {
     await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
     expect(currentRuntime().capabilities).toEqual({
       canRead: true,
+      canReadPrivate: false,
       canCreate: false,
       canUpload: false,
       canContribute: false,
@@ -350,6 +351,91 @@ describe("InvestigationRuntimeProvider", () => {
     expect(gateway.createContribution).not.toHaveBeenCalled();
     expect(gateway.updateSituation).not.toHaveBeenCalled();
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  it("publishes exact canReadPrivate field-by-field without raw capabilities", async () => {
+    const gateway = makeGateway();
+    const common = {
+      identityKey: "lead",
+      authorityKey: "lead-authority-v1",
+      readOnly: false,
+      active: true,
+      focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      isInvestigationLocation: true,
+      onOpenCreated: vi.fn(),
+      gateway,
+    } as const;
+    const view = render(
+      <ProviderUnderTest
+        {...common}
+        capabilities={[
+          "investigation:read",
+          "investigation:write",
+          "run:strategies",
+          "evidence:private:read",
+        ]}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    expect(currentRuntime().capabilities.canReadPrivate).toBe(true);
+    expect(Object.keys(currentRuntime().capabilities).sort()).toEqual([
+      "canContribute",
+      "canCreate",
+      "canEditSituation",
+      "canManageLifecycle",
+      "canRead",
+      "canReadPrivate",
+      "canUpload",
+    ]);
+    expect(JSON.stringify(currentRuntime())).not.toContain("evidence:private:read");
+
+    view.rerender(
+      <ProviderUnderTest
+        {...common}
+        capabilities={["investigation:read", "investigation:write", "run:strategies"]}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    expect(currentRuntime().capabilities.canReadPrivate).toBe(false);
+    expect(JSON.stringify(currentRuntime())).not.toContain("evidence:private:read");
+  });
+
+  it("keeps canReadPrivate in static read-only mode when the exact capability is granted", async () => {
+    const gateway = makeGateway();
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-read-only"
+        capabilities={[
+          "investigation:read",
+          "investigation:write",
+          "run:strategies",
+          "evidence:private:read",
+        ]}
+        readOnly
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    expect(currentRuntime().capabilities).toEqual({
+      canRead: true,
+      canReadPrivate: true,
+      canCreate: false,
+      canUpload: false,
+      canContribute: false,
+      canEditSituation: false,
+      canManageLifecycle: false,
+    });
+    expect(currentRuntime().commands.uploadEvidence).toBeNull();
   });
 
   it("removes case mutation commands when any case endpoint conceals lost access", async () => {
@@ -1072,6 +1158,7 @@ describe("InvestigationRuntimeProvider", () => {
 
     expect(currentRuntime().capabilities).toEqual({
       canRead: true,
+      canReadPrivate: false,
       canCreate: false,
       canUpload: false,
       canContribute: false,
@@ -1507,6 +1594,7 @@ describe("InvestigationRuntimeProvider", () => {
       // from the capability projection.
       expect(runtime.capabilities).toEqual({
         canRead: true,
+        canReadPrivate: false,
         canCreate: false,
         canUpload: false,
         canContribute: false,
@@ -1676,6 +1764,7 @@ describe("InvestigationRuntimeProvider", () => {
       // Knowing who is signed in is not permission to act as them.
       expect(runtime.capabilities).toEqual({
         canRead: true,
+        canReadPrivate: false,
         canCreate: false,
         canUpload: false,
         canContribute: false,

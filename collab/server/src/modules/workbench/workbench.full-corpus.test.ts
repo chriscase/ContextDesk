@@ -43,6 +43,7 @@ interface SyntheticFile {
   evidenceId: string;
   relativePath: string;
   text: string;
+  privacyClass?: "owner_only" | "share_safe";
 }
 
 /**
@@ -64,7 +65,7 @@ function harness(options: {
     relativePath: file.relativePath,
     digest: digest(file.text),
     intakeBatchId: null,
-    privacyClass: "owner_only",
+    privacyClass: file.privacyClass ?? "owner_only",
   });
   const cases: WorkbenchCasePort = {
     async getCase(id, actor) {
@@ -94,13 +95,15 @@ function harness(options: {
       return undefined;
     },
   };
+  const store = new MemoryWorkbenchStore();
   const service = new WorkbenchService({
-    store: new MemoryWorkbenchStore(),
+    store,
     cases,
     audit: new MemoryAuditStore(),
   });
   return {
     service,
+    store,
     reads,
     wholeCorpusReads: () => wholeCorpusReads,
     /** A second service over the same bytes: a cursor must survive a restart. */
@@ -112,6 +115,122 @@ function harness(options: {
       }),
   };
 }
+
+describe("private-read revocation", () => {
+  it("omits private files, never invokes an unscoped host, and preserves share-safe reads", async () => {
+    let hostCalls = 0;
+    const onlyPrivate = harness({
+      files: [{ evidenceId: BIG, relativePath: "private/app.log", text: "private\n" }],
+      hostSearch: async () => {
+        hostCalls += 1;
+        return null;
+      },
+    });
+    const hidden = await onlyPrivate.service.search(
+      CASE_ID,
+      ACTOR,
+      false,
+      {
+        ...SEARCH,
+        filters: {
+          ...SEARCH.filters,
+          timeFrom: "2024-03-10T00:00:00Z",
+          timeTo: "2024-03-11T00:00:00Z",
+        },
+      },
+      { canReadPrivate: false },
+    );
+    expect(hidden.scopeFileCount).toBe(0);
+    expect(onlyPrivate.reads).toEqual([]);
+    expect(hostCalls).toBe(0);
+    await expect(
+      onlyPrivate.service.page(CASE_ID, ACTOR, false, BIG, 1, 10, false),
+    ).rejects.toBeInstanceOf(WorkbenchNotFoundError);
+    expect(onlyPrivate.reads).toEqual([]);
+
+    let mixedHostCalls = 0;
+    const mixed = harness({
+      files: [
+        { evidenceId: BIG, relativePath: "private/app.log", text: "private\n" },
+        {
+          evidenceId: LATE,
+          relativePath: "shared/app.log",
+          text: "the needle is share safe\n",
+          privacyClass: "share_safe",
+        },
+      ],
+      hostSearch: async () => {
+        mixedHostCalls += 1;
+        return null;
+      },
+    });
+    const inventory = await mixed.service.inventory(CASE_ID, ACTOR, false, false);
+    expect(inventory.items.map((item) => item.evidenceId)).toEqual([LATE]);
+    expect(mixed.reads).toEqual([LATE]);
+    mixed.reads.length = 0;
+    await mixed.service.search(CASE_ID, ACTOR, false, {
+      ...SEARCH,
+      filters: {
+        ...SEARCH.filters,
+        timeFrom: "2024-03-10T00:00:00Z",
+        timeTo: "2024-03-11T00:00:00Z",
+      },
+    }, { canReadPrivate: false });
+    expect(mixedHostCalls).toBe(0);
+    expect(mixed.reads).toEqual([LATE]);
+  });
+
+  it("hides stored private bookmarks, locator tokens, and views before corpus reads", async () => {
+    const h = harness({
+      files: [{ evidenceId: LATE, relativePath: "private/app.log", text: "one\ntwo\n" }],
+    });
+    const bookmark = await h.service.saveBookmark(CASE_ID, ACTOR, false, {
+      locator: {
+        evidenceId: LATE,
+        digestAtBind: digest("one\ntwo\n"),
+        byteOffset: 0,
+        lineNumber: 1,
+        originalTimestamp: null,
+        normalizedUtc: null,
+        corpusRevision: null,
+      },
+      note: "private analyst note",
+      idempotencyKey: "private-bookmark-0001",
+    }, true);
+    await h.service.saveView(CASE_ID, ACTOR, false, {
+      name: "Private view",
+      filters: SEARCH.filters,
+      query: "private",
+      mode: "literal",
+      selectedPanes: [LATE],
+      timeFrom: null,
+      timeTo: null,
+      sort: "ingest_order",
+      grouping: "none",
+      display: {
+        syncScroll: true,
+        wrap: false,
+        lineNumbers: true,
+        displayTimezone: "UTC",
+      },
+      contextBefore: 0,
+      contextAfter: 0,
+      idempotencyKey: "private-view-0001",
+    }, true);
+
+    h.reads.length = 0;
+    await expect(h.service.listBookmarks(CASE_ID, ACTOR, false, false)).resolves.toEqual([]);
+    await expect(h.service.listViews(CASE_ID, ACTOR, false, false)).resolves.toEqual([]);
+    await expect(h.service.resolveLocator({
+      schemaId: "cd-collab.log_workbench_share_safe_locator.v1",
+      token: bookmark.shareSafeToken,
+    }, ACTOR, false, false)).resolves.toMatchObject({
+      found: false,
+      investigationId: null,
+    });
+    expect(h.reads).toEqual([]);
+  });
+});
 
 const SEARCH = {
   schemaId: "cd-collab.log_workbench_search_request.v1" as const,
@@ -284,6 +403,31 @@ describe("scope is applied before a byte is read", () => {
     ]);
     expect(page.rows[0]?.text).toContain("the needle is here late");
     expect(reads).toEqual([BIG]);
+  });
+});
+
+describe("review preview bounded evidence path", () => {
+  it("uses descriptors and read-one without invoking the legacy bulk fixture method", async () => {
+    const evidenceId = "77777777-7777-4777-8777-777777777777";
+    const { service, reads, wholeCorpusReads } = harness({
+      files: [{
+        evidenceId,
+        relativePath: "worker/batch.log",
+        text: "2024-03-10 01:30:00 INFO scheduled sweep\n",
+      }],
+    });
+    await service.previewRule(CASE_ID, ACTOR, false, {
+      schemaId: "cd-collab.log_time_review_rule.v1",
+      scope: "source",
+      source: "worker/batch.log",
+      rotationFamily: null,
+      selectedEvidenceIds: [],
+      ianaTimezone: "UTC",
+      expectedRevision: 3,
+      idempotencyKey: "bounded-preview-0001",
+    });
+    expect(wholeCorpusReads()).toBe(0);
+    expect(reads).toEqual([evidenceId]);
   });
 });
 

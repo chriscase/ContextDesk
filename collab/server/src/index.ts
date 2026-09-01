@@ -2,7 +2,9 @@ import { Pool } from "pg";
 import { buildApp } from "./app.js";
 import { createSqliteRuntime } from "./db/sqlite.js";
 import { loadRuntimeConfig } from "./config.js";
-import { FilesystemEvidenceStore } from "./evidence/store.js";
+import { createPostgresEvidenceWriteLease } from "./evidence/lease.js";
+import { createEvidenceStore } from "./evidence/provider.js";
+import { loadEvidenceS3Credentials } from "./evidence/s3-secrets.js";
 import {
   LogTimeService,
   MemoryLogTimeStore,
@@ -162,41 +164,26 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
   const storage = createStorage(config);
-  const store = new FilesystemEvidenceStore({
-    rootDir: config.evidenceRoot,
+  const store = createEvidenceStore({
+    settings: config.evidence,
+    ...(config.evidence.provider === "s3"
+      ? { credentials: loadEvidenceS3Credentials(process.env) }
+      : {}),
     ...(storage.pool
       ? {
-          acquireWriteLease: async () => {
-            const client = await storage.pool!.connect();
-            try {
-              await client.query(
-                `SELECT pg_advisory_lock(hashtextextended('contextdesk-evidence-write-v1', 0))`,
-              );
-              return async () => {
-                try {
-                  await client.query(
-                    `SELECT pg_advisory_unlock(hashtextextended('contextdesk-evidence-write-v1', 0))`,
-                  );
-                } finally {
-                  client.release();
-                }
-              };
-            } catch (error) {
-              client.release(error instanceof Error ? error : undefined);
-              throw error;
-            }
-          },
+          writeLeasePool: storage.pool,
+          createWriteLease: createPostgresEvidenceWriteLease,
         }
       : {}),
   });
+  store.addReferencedContentHashSource(() => storage.cases.listReferencedContentHashes());
+  store.addReferencedContentHashSource(() => storage.runs.listReferencedContentHashes());
   await store.ping();
+  await store.recoverUnreferencedWrites();
   const publicIdentities = await loadPublicIdentityCodec(
     config.evidenceRoot,
     process.env.COLLAB_PUBLIC_IDENTITY_KEY,
   );
-  store.addReferencedContentHashSource(() => storage.cases.listReferencedContentHashes());
-  store.addReferencedContentHashSource(() => storage.runs.listReferencedContentHashes());
-  await store.recoverUnreferencedWrites();
   const log = createAuthLog();
   const ldapConfig = config.authMode === "ldap" ? loadLdapConfig() : null;
   const adapter = ldapConfig

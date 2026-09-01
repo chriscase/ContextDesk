@@ -165,6 +165,14 @@ export function useUploadEvidence(
       if (!result.ok) {
         if (result.error.kind === "not_found" || result.error.kind === "auth_lost") {
           latestRef.current.onScopeDenied(scope.investigationId, result.error);
+        } else if (
+          result.error.kind === "unavailable"
+          && result.error.reason === "commit_outcome_unknown"
+        ) {
+          latestRef.current.onRefreshEvidence(scope.investigationId);
+          if (!isCurrent()) return { status: "ignored", reason: "stale" };
+          latestRef.current.onRefreshInvestigations();
+          if (!isCurrent()) return { status: "ignored", reason: "stale" };
         }
         const outcome: CommandOutcome<EvidenceUploadSuccessV1> = {
           status: "failed",

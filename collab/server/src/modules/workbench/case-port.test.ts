@@ -12,7 +12,12 @@ import {
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
-import { FilesystemEvidenceStore } from "../../evidence/store.js";
+import { BoundedEvidenceReadError } from "../../evidence/bounded-read.js";
+import {
+  FilesystemEvidenceStore,
+  sha256Hex,
+  type EvidenceStore,
+} from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import {
   MapAuthAdapter,
@@ -25,7 +30,10 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore } from "../cases/index.js";
 import { MemoryLogTimeStore } from "../log-time/index.js";
-import { createWorkbenchCasePort } from "./case-port.js";
+import {
+  WORKBENCH_EVIDENCE_MAX_BYTES,
+  createWorkbenchCasePort,
+} from "./case-port.js";
 import { MemoryWorkbenchStore, WorkbenchService } from "./index.js";
 
 const ALICE = "fixture-alice-secret";
@@ -121,7 +129,7 @@ describe("workbench case-port over committed intake", () => {
           schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
           origin: "files",
           sourceLabel: "fixture-files",
-          privacyClass: "owner_only",
+          privacyClass: "share_safe",
           idempotencyKey: "workbench-port-0001",
           files: [
             {
@@ -143,7 +151,7 @@ describe("workbench case-port over committed intake", () => {
           schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
           origin: "files",
           sourceLabel: "fixture-files",
-          privacyClass: "owner_only",
+          privacyClass: "share_safe",
           idempotencyKey: "workbench-port-0001",
           previewToken: report.previewToken,
           files: [
@@ -172,5 +180,135 @@ describe("workbench case-port over committed intake", () => {
       await app.close();
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("workbench case-port bounded evidence reads", () => {
+  const bytes = new TextEncoder().encode("2026-08-31T00:00:00Z INFO exact\n");
+  const hash = sha256Hex(bytes);
+  const actor = { id: "actor-1", username: "actor-one" };
+
+  function portFor(
+    byteLength = bytes.byteLength,
+    present = true,
+    privacyClass: "owner_only" | "share_safe" = "owner_only",
+  ) {
+    const calls = { get: 0, head: 0, openRead: 0 };
+    const artifact = {
+      id: "evidence-1",
+      caseId: "case-1",
+      filename: null,
+      relativePath: "logs/exact.log",
+      contentHash: hash,
+      byteLength,
+      refId: null,
+      intakeBatchId: null,
+      privacyClass,
+    };
+    const evidence = {
+      get: async () => {
+        calls.get += 1;
+        throw new Error("workbench bounded path must not call get");
+      },
+      head: async () => {
+        calls.head += 1;
+        return present ? { hash, byteLength, contentType: null } : null;
+      },
+      openRead: async () => {
+        calls.openRead += 1;
+        return {
+          meta: { hash, byteLength: bytes.byteLength, contentType: null },
+          range: null,
+          byteLength: bytes.byteLength,
+          bytes: async function* () { yield bytes; },
+        };
+      },
+    } as unknown as EvidenceStore;
+    const port = createWorkbenchCasePort({
+      cases: {
+        listArtifactsByCase: async () => [artifact],
+      } as unknown as MemoryCaseStore,
+      domain: {
+        getReadableHeldArtifact: async (
+          _caseId: string,
+          _evidenceId: string,
+          _actor: typeof actor,
+          _isAdmin: boolean,
+          canReadPrivate: boolean,
+        ) => privacyClass === "share_safe" || canReadPrivate ? artifact : null,
+      } as unknown as CaseService,
+      evidence,
+      currentNormalizationRevision: async () => null,
+    });
+    return { port, calls };
+  }
+
+  it("uses strict Head/OpenRead for one file and exposes no production bulk method", async () => {
+    const { port, calls } = portFor();
+    await expect(
+      port.listEvidenceDescriptors?.("case-1", actor, false, true),
+    ).resolves.toEqual([{
+      evidenceId: "evidence-1",
+      relativePath: "logs/exact.log",
+      digest: hash,
+      intakeBatchId: null,
+      privacyClass: "owner_only",
+    }]);
+    await expect(port.readEvidenceText?.("case-1", "evidence-1", actor, false, true))
+      .resolves.toBe(new TextDecoder().decode(bytes));
+    expect(port.listEvidenceFiles).toBeUndefined();
+    expect(calls).toEqual({ get: 0, head: 2, openRead: 1 });
+  });
+
+  it("keeps an over-cap artifact metadata-viewable but rejects its selected read before storage", async () => {
+    const { port, calls } = portFor(WORKBENCH_EVIDENCE_MAX_BYTES + 1);
+    await expect(port.listEvidenceDescriptors?.("case-1", actor, false, true))
+      .resolves.toHaveLength(1);
+    calls.head = 0;
+    await expect(port.readEvidenceText?.("case-1", "evidence-1", actor, false, true))
+      .rejects.toBeInstanceOf(BoundedEvidenceReadError);
+    expect(calls).toEqual({ get: 0, head: 0, openRead: 0 });
+  });
+
+  it("preserves missing-byte behavior without opening a body", async () => {
+    const { port, calls } = portFor(bytes.byteLength, false);
+    await expect(
+      port.listEvidenceDescriptors?.("case-1", actor, false, true),
+    ).resolves.toEqual([]);
+    await expect(
+      port.readEvidenceText?.("case-1", "evidence-1", actor, false, true),
+    ).resolves.toBeNull();
+    expect(calls).toEqual({ get: 0, head: 2, openRead: 0 });
+  });
+
+  it("omits owner-only descriptors and rechecks a revoked grant before bytes", async () => {
+    const { port, calls } = portFor();
+    await expect(
+      port.listEvidenceDescriptors?.("case-1", actor, false, false),
+    ).resolves.toEqual([]);
+    await expect(
+      port.readEvidenceText?.("case-1", "evidence-1", actor, false, false),
+    ).resolves.toBeNull();
+    expect(calls).toEqual({ get: 0, head: 0, openRead: 0 });
+
+    await expect(
+      port.listEvidenceDescriptors?.("case-1", actor, false, true),
+    ).resolves.toHaveLength(1);
+    calls.head = 0;
+    await expect(
+      port.readEvidenceText?.("case-1", "evidence-1", actor, false, false),
+    ).resolves.toBeNull();
+    expect(calls).toEqual({ get: 0, head: 0, openRead: 0 });
+  });
+
+  it("keeps share-safe evidence readable without a private-read capability", async () => {
+    const { port, calls } = portFor(bytes.byteLength, true, "share_safe");
+    await expect(
+      port.listEvidenceDescriptors?.("case-1", actor, false, false),
+    ).resolves.toHaveLength(1);
+    await expect(
+      port.readEvidenceText?.("case-1", "evidence-1", actor, false, false),
+    ).resolves.toBe(new TextDecoder().decode(bytes));
+    expect(calls).toEqual({ get: 0, head: 2, openRead: 1 });
   });
 });

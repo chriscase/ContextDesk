@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,7 +12,14 @@ import {
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
-import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../../evidence/store.js";
+import {
+  FilesystemEvidenceStore,
+  abandonWriteBatchForCrashTest,
+  sha256Hex,
+  type EvidenceFinalizeOptions,
+  type EvidenceStage,
+  type EvidenceStore,
+} from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import { MapAuthAdapter } from "../auth/index.js";
 import {
@@ -23,7 +30,11 @@ import {
 } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
-import { CaseService, MemoryCaseStore } from "../cases/index.js";
+import {
+  CaseService,
+  CaseStoreCommitOutcomeUnknownError,
+  MemoryCaseStore,
+} from "../cases/index.js";
 import { ImportService, MemoryRunStore } from "./index.js";
 import { initialCorroborationState } from "./model.js";
 
@@ -31,6 +42,102 @@ const ALICE = "fixture-alice-secret";
 const TRANSCRIPT = "The mailer pool is exhausted; workers time out after 30s.";
 const PROMPT = "What is failing in the mailer?";
 const INJECT = '<script>alert("xss")</script>';
+
+class UnknownCommitStore extends MemoryCaseStore {
+  unknownCommit = false;
+
+  override async withAtomic<T>(
+    operation: () => Promise<T>,
+    audit?: Parameters<MemoryCaseStore["withAtomic"]>[1],
+  ): Promise<T> {
+    const result = await super.withAtomic(operation, audit);
+    if (this.unknownCommit) throw new CaseStoreCommitOutcomeUnknownError();
+    return result;
+  }
+}
+
+function failBatchFinalizeAfterCleanup(
+  store: FilesystemEvidenceStore,
+  failureMode: "once" | "always",
+): string[] {
+  const events: string[] = [];
+  const original = store.beginWriteBatch.bind(store);
+  store.beginWriteBatch = async () => {
+    const batch = await original();
+    const promote = batch.promote.bind(batch);
+    const rollback = batch.rollback.bind(batch);
+    const finalize = batch.finalize.bind(batch);
+    let finalizeCalls = 0;
+    batch.promote = async () => {
+      events.push("promote");
+      await promote();
+    };
+    batch.rollback = async () => {
+      events.push("rollback");
+      await rollback();
+    };
+    batch.finalize = async (options?: EvidenceFinalizeOptions) => {
+      events.push(options?.retainPendingJournal ? "finalize:retain" : "finalize");
+      finalizeCalls += 1;
+      await finalize(options);
+      if (failureMode === "always" || finalizeCalls === 1) {
+        throw new Error("synthetic post-COMMIT finalize cleanup failure");
+      }
+    };
+    return batch;
+  };
+  return events;
+}
+
+async function pendingJournalNames(root: string): Promise<string[]> {
+  return (await readdir(join(root, ".pending")).catch(() => [] as string[]))
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+}
+
+function stageOnlyEvidence(store: FilesystemEvidenceStore): EvidenceStore & {
+  events: string[];
+} {
+  const events: string[] = [];
+  const originalStage = store.stage.bind(store);
+  return {
+    events,
+    get writeCoordination() {
+      return store.writeCoordination;
+    },
+    put: store.put.bind(store),
+    stage: async (bytes, options) => {
+      const stage = await originalStage(bytes, options);
+      const tracked: EvidenceStage = {
+        meta: stage.meta,
+        commit: async () => {
+          events.push("commit");
+          await stage.commit();
+        },
+        rollback: async () => {
+          events.push("rollback");
+          await stage.rollback();
+        },
+        release: () => {
+          events.push("release");
+          stage.release();
+        },
+      };
+      return tracked;
+    },
+    get: store.get.bind(store),
+    head: store.head.bind(store),
+    stageStream: store.stageStream.bind(store),
+    openRead: store.openRead.bind(store),
+    verify: store.verify.bind(store),
+    putFileServerReference: store.putFileServerReference.bind(store),
+    getFileServerReference: store.getFileServerReference.bind(store),
+    verifyFileServerReference: store.verifyFileServerReference.bind(store),
+    abandonFileServerReference: store.abandonFileServerReference.bind(store),
+    restoreFileServerReference: store.restoreFileServerReference.bind(store),
+    ping: store.ping.bind(store),
+  };
+}
 
 const roleMap =
   "cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin";
@@ -668,6 +775,159 @@ describe("external-run import", () => {
       expect(await cases.listContributions(created.id, actor, false)).toEqual([]);
       expect(await imports.listRuns(created.id, actor, false)).toEqual([]);
       expect(await evidence.head(sha256Hex(new TextEncoder().encode(outputText)))).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retries transient post-COMMIT import cleanup without rolling bytes back", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-import-finalize-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const events = failBatchFinalizeAfterCleanup(evidence, "once");
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const caseStore = new MemoryCaseStore();
+    const runs = new MemoryRunStore();
+    const cases = new CaseService(evidence, audit, caseStore, catalog);
+    const imports = new ImportService({ evidence, audit, cases, catalog, runs });
+    try {
+      const created = await cases.createCase(actor, { title: "Import cleanup retry" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const outputText = "synthetic import transient finalize failure";
+      const imported = await imports.importRun(
+        created.id,
+        actor,
+        {
+          outputText,
+          sourceId: source.id,
+          operatorId: actor.id,
+          operatorUsername: actor.username,
+        },
+        "test",
+        false,
+      );
+      expect(events).toEqual(["promote", "finalize", "finalize"]);
+      expect(events).not.toContain("rollback");
+      expect(await runs.get(imported.id)).not.toBeNull();
+      expect(await evidence.verify(imported.outputHash)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a committed import when post-COMMIT cleanup keeps failing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-import-finalize-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const events = failBatchFinalizeAfterCleanup(evidence, "always");
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const caseStore = new MemoryCaseStore();
+    const runs = new MemoryRunStore();
+    const cases = new CaseService(evidence, audit, caseStore, catalog);
+    const imports = new ImportService({ evidence, audit, cases, catalog, runs });
+    try {
+      const created = await cases.createCase(actor, { title: "Import cleanup recovery" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const outputText = "synthetic import persistent finalize failure";
+      const imported = await imports.importRun(
+        created.id,
+        actor,
+        {
+          outputText,
+          sourceId: source.id,
+          operatorId: actor.id,
+          operatorUsername: actor.username,
+        },
+        "test",
+        false,
+      );
+      expect(events).toEqual(["promote", "finalize", "finalize"]);
+      expect(events).not.toContain("rollback");
+      expect(await runs.get(imported.id)).not.toBeNull();
+      expect(await evidence.verify(imported.outputHash)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains promoted import bytes and the recovery journal on an unknown COMMIT", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-import-unknown-"));
+    const evidence = new FilesystemEvidenceStore({ rootDir: root });
+    const events = failBatchFinalizeAfterCleanup(evidence, "always");
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const caseStore = new UnknownCommitStore();
+    const runs = new MemoryRunStore();
+    const cases = new CaseService(evidence, audit, caseStore, catalog);
+    const imports = new ImportService({ evidence, audit, cases, catalog, runs });
+    try {
+      const created = await cases.createCase(actor, { title: "Unknown import commit" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const outputText = "synthetic import unknown commit";
+      const outputHash = sha256Hex(new TextEncoder().encode(outputText));
+      caseStore.unknownCommit = true;
+      await expect(
+        imports.importRun(
+          created.id,
+          actor,
+          {
+            outputText,
+            sourceId: source.id,
+            operatorId: actor.id,
+            operatorUsername: actor.username,
+          },
+          "test",
+          false,
+        ),
+      ).rejects.toBeInstanceOf(CaseStoreCommitOutcomeUnknownError);
+      expect(events).toEqual(["promote", "finalize:retain"]);
+      expect(events).not.toContain("rollback");
+      expect(await runs.listByCase(created.id)).toHaveLength(1);
+      expect(await evidence.verify(outputHash)).toBe(true);
+      expect(await pendingJournalNames(root)).not.toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("releases stage-only import bytes without rollback on an unknown COMMIT", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-import-unknown-stage-"));
+    const files = new FilesystemEvidenceStore({ rootDir: root });
+    const evidence = stageOnlyEvidence(files);
+    const audit = new MemoryAuditStore();
+    const catalog = new CatalogService(undefined, audit);
+    const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+    const caseStore = new UnknownCommitStore();
+    const runs = new MemoryRunStore();
+    const cases = new CaseService(evidence, audit, caseStore, catalog);
+    const imports = new ImportService({ evidence, audit, cases, catalog, runs });
+    try {
+      const created = await cases.createCase(actor, { title: "Unknown stage import commit" }, "test");
+      const source = await catalog.ensureHumanSource(actor);
+      const outputText = "synthetic stage-only import unknown commit";
+      const outputHash = sha256Hex(new TextEncoder().encode(outputText));
+      caseStore.unknownCommit = true;
+      await expect(
+        imports.importRun(
+          created.id,
+          actor,
+          {
+            outputText,
+            sourceId: source.id,
+            operatorId: actor.id,
+            operatorUsername: actor.username,
+          },
+          "test",
+          false,
+        ),
+      ).rejects.toBeInstanceOf(CaseStoreCommitOutcomeUnknownError);
+      expect(evidence.events).toEqual(["commit", "release"]);
+      expect(evidence.events).not.toContain("rollback");
+      expect(await runs.listByCase(created.id)).toHaveLength(1);
+      expect(await files.verify(outputHash)).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -28,7 +28,7 @@ type CoveredRuntimeOperation =
 const LEGACY_WAR_ROOM_RUNTIME_CALLS: Readonly<
   Record<string, readonly CoveredRuntimeOperation[]>
 > = Object.freeze({
-  "collab/web/src/CaseBoardPanel.tsx": ["GET evidence", "POST evidence"],
+  "collab/web/src/CaseBoardPanel.tsx": ["GET evidence"],
   "collab/web/src/CaseDiscussion.tsx": ["GET contributions", "POST contributions"],
   "collab/web/src/Cases.tsx": [
     "GET cases",

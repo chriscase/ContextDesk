@@ -16,7 +16,7 @@ import {
   type PortableInvestigationUnsigned,
   type TriageJobV1,
 } from "@cd-collab/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { migrateUp } from "../../db/migrate.js";
 import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
 import { buildApp } from "../../app.js";
@@ -1128,6 +1128,55 @@ describe("portable investigation routes", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("rejects a base64 projection over the archive budget before opening evidence", async () => {
+    const row = await fixture();
+    const overCapRaw = Math.floor(MAX_PORTABLE_ARCHIVE_BYTES / 4) * 3 + 1;
+    const originalList = row.cases.listArtifacts.bind(row.cases);
+    vi.spyOn(row.cases, "listArtifacts").mockImplementation(async (...args) => {
+      const artifacts = await originalList(...args);
+      return artifacts.map((artifact) => ({ ...artifact, byteLength: overCapRaw }));
+    });
+    const getBytes = vi.spyOn(row.cases, "getArtifactBytes");
+    const get = vi.spyOn(row.store, "get");
+    const head = vi.spyOn(row.store, "head");
+    const openRead = vi.spyOn(row.store, "openRead");
+    getBytes.mockClear();
+    get.mockClear();
+    head.mockClear();
+    openRead.mockClear();
+    await expect(
+      row.portable.exportArchive(row.caseId, ACTOR, false, true),
+    ).rejects.toMatchObject<Partial<PortableServerError>>({ code: "archive_size_limit" });
+    expect(getBytes).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(head).not.toHaveBeenCalled();
+    expect(openRead).not.toHaveBeenCalled();
+  });
+
+  it("does not open or double-count duplicate evidence digests", async () => {
+    const row = await fixture();
+    const duplicate = await row.cases.addEvidence(
+      row.caseId,
+      ACTOR,
+      {
+        kind: "log",
+        filename: "synthetic-worker-copy.log",
+        mediaType: "text/plain",
+        bytes: LOG_BYTES,
+        summary: "Duplicate synthetic worker warning",
+        privacyClass: "owner_only",
+      },
+      "fixture",
+    );
+    expect(duplicate.artifact.contentHash).toBe(row.evidenceHash);
+    const getBytes = vi.spyOn(row.cases, "getArtifactBytes");
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false, true);
+    expect(getBytes).toHaveBeenCalledTimes(1);
+    const matches = archive.investigation.evidence.filter((item) => item.digest === row.evidenceHash);
+    expect(matches.length).toBeGreaterThan(1);
+    expect(archive.investigation.contentObjects.filter((item) => item.digest === row.evidenceHash)).toHaveLength(1);
   });
 });
 

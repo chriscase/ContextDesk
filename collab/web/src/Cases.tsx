@@ -774,6 +774,9 @@ export function Cases(props: {
   const canWrite = !readOnly && (capabilitySet
     ? capabilitySet.has("investigation:write")
     : canLead || roles.includes("contributor"));
+  const canReadPrivate = capabilitySet
+    ? capabilitySet.has("evidence:private:read")
+    : roles.includes("case-lead") || roles.includes("admin");
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [casesLoaded, setCasesLoaded] = useState(false);
   const [activities, setActivities] = useState<ActivityItem[]>([]);
@@ -2671,9 +2674,11 @@ export function Cases(props: {
             <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
               <div hidden={workstreamFocused}>
                 <CaseBoardPanel
+                  key={current.id}
                   caseId={current.id}
                   canWrite={canWrite}
-                  canLead={canLead}
+                  canLead={canRunStrategies}
+                  canReadPrivate={canReadPrivate}
                   readOnly={readOnly}
                   {...(current.participants ? { participants: current.participants } : {})}
                   {...(props.focus && !workstreamFocused ? { routeFocus: props.focus } : {})}

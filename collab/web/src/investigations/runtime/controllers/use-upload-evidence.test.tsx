@@ -202,4 +202,106 @@ describe("useUploadEvidence", () => {
     expect(renderedStates[0]).toEqual({ status: "idle" });
     expect(result.current.state).toEqual({ status: "idle" });
   });
+
+  it("reconciles evidence and the investigation list after a commit-outcome-unknown upload", async () => {
+    const unknown = {
+      ok: false as const,
+      error: {
+        kind: "unavailable" as const,
+        status: 503 as const,
+        reason: "commit_outcome_unknown" as const,
+      },
+    };
+    const opts = options({
+      gateway: gatewayWithUpload(vi.fn(async () => unknown)),
+    });
+    const { result } = renderHook(() => useUploadEvidence(opts));
+
+    await act(async () => {
+      await expect(result.current.upload({
+        file: new Blob(["maybe"]),
+        summary: "Maybe stored",
+      })).resolves.toEqual({ status: "failed", error: unknown.error });
+    });
+
+    expect(opts.onUploaded).not.toHaveBeenCalled();
+    expect(opts.onScopeDenied).not.toHaveBeenCalled();
+    expect(opts.onRefreshEvidence).toHaveBeenCalledWith(RUNTIME_FIXTURE_IDS.populatedCase);
+    expect(opts.onRefreshInvestigations).toHaveBeenCalledOnce();
+    expect(result.current.state).toEqual({ status: "failed", error: unknown.error });
+  });
+
+  it("does not refresh after a misleading 401/403 body claim", async () => {
+    const authLost = {
+      ok: false as const,
+      error: { kind: "auth_lost" as const, status: 403 as const },
+    };
+    const opts = options({
+      gateway: gatewayWithUpload(vi.fn(async () => authLost)),
+    });
+    const { result } = renderHook(() => useUploadEvidence(opts));
+
+    await act(async () => {
+      await expect(result.current.upload({
+        file: new Blob(["revoked"]),
+        summary: "Access changed",
+      })).resolves.toEqual({ status: "failed", error: authLost.error });
+    });
+
+    expect(opts.onScopeDenied).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      authLost.error,
+    );
+    expect(opts.onRefreshEvidence).not.toHaveBeenCalled();
+    expect(opts.onRefreshInvestigations).not.toHaveBeenCalled();
+  });
+
+  it("does not refresh a stale scope after an unknown commit outcome", async () => {
+    const deferred = createDeferred<Awaited<ReturnType<InvestigationGateway["uploadEvidence"]>>>();
+    const first = options({ gateway: gatewayWithUpload(vi.fn(() => deferred.promise)) });
+    const { result, rerender } = renderHook(
+      ({ value }: { value: UseUploadEvidenceOptions }) => useUploadEvidence(value),
+      { initialProps: { value: first } },
+    );
+
+    let pending!: ReturnType<typeof result.current.upload>;
+    await act(async () => {
+      pending = result.current.upload({ file: new Blob(["late"]), summary: "Late" });
+      await Promise.resolve();
+    });
+    rerender({ value: { ...first, investigationId: "case-other" } });
+    let outcome;
+    await act(async () => {
+      deferred.resolve({
+        ok: false,
+        error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+      });
+      outcome = await pending;
+    });
+
+    expect(outcome).toEqual({ status: "ignored", reason: "stale" });
+    expect(first.onRefreshEvidence).not.toHaveBeenCalled();
+    expect(first.onRefreshInvestigations).not.toHaveBeenCalled();
+  });
+
+  it("does not refresh generic unavailable 503 uploads", async () => {
+    const unavailable = {
+      ok: false as const,
+      error: { kind: "unavailable" as const, status: 503 as const },
+    };
+    const opts = options({
+      gateway: gatewayWithUpload(vi.fn(async () => unavailable)),
+    });
+    const { result } = renderHook(() => useUploadEvidence(opts));
+
+    await act(async () => {
+      await expect(result.current.upload({
+        file: new Blob(["x"]),
+        summary: "Generic",
+      })).resolves.toEqual({ status: "failed", error: unavailable.error });
+    });
+
+    expect(opts.onRefreshEvidence).not.toHaveBeenCalled();
+    expect(opts.onRefreshInvestigations).not.toHaveBeenCalled();
+  });
 });

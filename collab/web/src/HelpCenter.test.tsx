@@ -411,6 +411,20 @@ describe("help for behavior this build ships", () => {
     expect(screen.getByText(/older open work can sit outside that window/)).toBeTruthy();
   });
 
+  it("distinguishes War Room streaming upload limits from Investigation First's 1 MB path", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "Upload evidence files" }));
+    expect(screen.getByText(/War Room Analyze uses native streaming upload/)).toBeTruthy();
+    expect(screen.getByText(/configured server limit, not a fixed 1 MB cap/)).toBeTruthy();
+    expect(
+      screen.getAllByText(/Investigation First's legacy JSON\/base64 single-file path remains limited to 1 MB/)
+        .length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/file_server_ref/)).toBeNull();
+    expect(screen.queryByText(/1 MB or smaller/)).toBeNull();
+    expect(screen.queryByText(/Files larger than 1 MB are rejected/)).toBeNull();
+  });
+
   it("says a copied workstream address is not an access grant", () => {
     renderHelp();
     fireEvent.click(screen.getByRole("button", { name: "Read a workstream" }));

@@ -17,6 +17,8 @@ import {
   snapshotFingerprint,
   type ArtifactKind,
   type ArtifactV1,
+  type BlobMetaV1,
+  type ContentHash,
   normalizeOccurredAt,
   statusRequiresResolution,
   type CaseSeverity,
@@ -36,9 +38,13 @@ import {
   type SnapshotV1,
 } from "@cd-collab/contracts";
 import {
+  isContentHash,
   sha256Hex,
+  type EvidenceReadHandle,
+  type EvidenceReadRange,
   type EvidenceStage,
   type EvidenceStore,
+  type EvidenceStreamStage,
   type EvidenceWriteBatch,
 } from "../../evidence/store.js";
 import { ResolutionRequiredError } from "../resolutions/index.js";
@@ -53,7 +59,7 @@ import {
   type ContributionKind,
   type HypothesisLinkInput,
 } from "../contributions/index.js";
-import { assertFilenameAllowed, assertUploadAllowed } from "../evidence/index.js";
+import { assertFilenameAllowed, assertUploadAllowed, MAX_UPLOAD_BYTES } from "../evidence/index.js";
 import {
   decodeBase64,
   corpusIntakeRequestDigest,
@@ -78,6 +84,7 @@ import {
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
 import { deriveCaseBoard, type AcceptedDecisionBoardInput } from "./board.js";
 import {
+  CaseStoreCommitOutcomeUnknownError,
   MemoryCaseStore,
   type Actor,
   type ArtifactRow,
@@ -96,6 +103,7 @@ import {
   type ActivityPageQuery,
 } from "./store.js";
 
+export { CaseStoreCommitOutcomeUnknownError };
 export type { Actor, ArtifactRow, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, OverviewVisibilityBoundary, RevisionRow, TimelineRow } from "./store.js";
 
 const ACTIVITY_DETAIL_KEYS = new Set([
@@ -217,6 +225,281 @@ export class ContributionConflictError extends Error {
     super("contribution conflict");
     this.name = "ContributionConflictError";
   }
+}
+
+async function settleEvidenceAfterCaseTransactionFailure(
+  error: unknown,
+  evidenceBatch: EvidenceWriteBatch | null,
+  stages: EvidenceStage[],
+  evidenceCommitted: boolean,
+): Promise<void> {
+  if (error instanceof CaseStoreCommitOutcomeUnknownError && evidenceCommitted) {
+    if (evidenceBatch) {
+      try {
+        await evidenceBatch.finalize({ retainPendingJournal: true });
+      } catch {
+        // Staging cleanup is best-effort; the COMMIT outcome remains unknown.
+      }
+    }
+    return;
+  }
+  if (evidenceBatch) {
+    await evidenceBatch.rollback();
+  } else {
+    await Promise.allSettled(stages.map((stage) => stage.rollback()));
+  }
+}
+
+async function settleStreamedEvidenceAfterCaseTransactionFailure(
+  error: unknown,
+  stage: EvidenceStreamStage | null,
+  evidenceCommitted: boolean,
+): Promise<void> {
+  if (!stage) return;
+  if (error instanceof CaseStoreCommitOutcomeUnknownError && evidenceCommitted) {
+    try {
+      await stage.finalize({ retainPendingJournal: true });
+    } catch {
+      // Staging cleanup is best-effort; the COMMIT outcome remains unknown.
+    }
+    return;
+  }
+  try {
+    await stage.rollback();
+  } catch {
+    // Rollback of a definite failure must not replace the original error.
+  }
+}
+
+async function finalizeCommittedStreamStage(stage: EvidenceStreamStage): Promise<void> {
+  try {
+    await stage.finalize();
+  } catch {
+    try {
+      // Settlement is idempotent for the same mode and options. A transient
+      // cleanup failure may therefore be completed without ever turning a
+      // confirmed database COMMIT into a destructive rollback.
+      await stage.finalize();
+    } catch {
+      // Catalog rows and canonical bytes are already durable. Provider
+      // recovery owns any remaining journal/scratch cleanup; the upload result
+      // must not become ambiguous and rollback must never run after COMMIT.
+    }
+  }
+}
+
+async function finalizeCommittedEvidenceBatch(batch: EvidenceWriteBatch | null): Promise<void> {
+  if (!batch) return;
+  try {
+    await batch.finalize();
+  } catch {
+    try {
+      // Provider cleanup after a confirmed catalog COMMIT is retryable, but it
+      // must never turn a durable reference into a destructive rollback.
+      await batch.finalize();
+    } catch {
+      // Canonical bytes and catalog rows are durable. Recovery owns any
+      // remaining journal/staging cleanup.
+    }
+  }
+}
+
+function throwIfStreamAborted(signal: AbortSignal | undefined): void {
+  if (!signal) return;
+  if (typeof signal.throwIfAborted === "function") {
+    signal.throwIfAborted();
+    return;
+  }
+  if (signal.aborted) {
+    const reason = signal.reason;
+    if (reason instanceof Error) throw reason;
+    throw new Error("evidence stream aborted");
+  }
+}
+
+function abortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  return new Error("evidence stream aborted");
+}
+
+async function nextWithAbort<T>(
+  iterator: AsyncIterator<T>,
+  signal: AbortSignal | undefined,
+): Promise<IteratorResult<T>> {
+  throwIfStreamAborted(signal);
+  if (!signal) return iterator.next();
+  return new Promise<IteratorResult<T>>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      finish(() => reject(abortReason(signal)));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    let next: Promise<IteratorResult<T>>;
+    try {
+      next = Promise.resolve(iterator.next());
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    void next.then(
+      (result) => finish(() => resolve(result)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+function releaseBoundedIterator(iterator: AsyncIterator<Uint8Array>): void {
+  if (typeof iterator.return !== "function") return;
+  try {
+    void Promise.resolve(iterator.return()).catch(() => undefined);
+  } catch {
+    // A hostile return() must not replace the collector failure.
+  }
+}
+
+async function* nonEmptyStreamChunks(
+  source: AsyncIterable<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncIterable<Uint8Array> {
+  let yielded = false;
+  for await (const chunk of source) {
+    throwIfStreamAborted(signal);
+    if (!(chunk instanceof Uint8Array)) {
+      throw new Error("evidence stream chunk must be a Uint8Array");
+    }
+    if (chunk.byteLength === 0) continue;
+    yielded = true;
+    yield chunk;
+  }
+  if (!yielded) throw new Error("evidence file must not be empty");
+}
+
+function boundedArtifactBytesUnavailable(): Error {
+  return new Error("evidence blob failed verification");
+}
+
+function assertSafeMaxBytes(maxBytes: number): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error("maxBytes must be a safe nonnegative integer");
+  }
+}
+
+export type ArtifactBytesOutcome =
+  | { outcome: "not_found" }
+  | { outcome: "too_large"; byteLength: number; maxBytes: number }
+  | { outcome: "ok"; bytes: Uint8Array; hash: ContentHash; byteLength: number };
+
+async function openBoundedEvidenceIterator(
+  handle: EvidenceReadHandle,
+): Promise<AsyncIterator<Uint8Array>> {
+  const source: unknown = await Promise.resolve(handle.bytes());
+  if (!source || typeof source !== "object") {
+    throw boundedArtifactBytesUnavailable();
+  }
+  const record = source as {
+    [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array>;
+    [Symbol.iterator]?: () => Iterator<Uint8Array>;
+    next?: AsyncIterator<Uint8Array>["next"];
+    return?: AsyncIterator<Uint8Array>["return"];
+  };
+  const asyncIterator = record[Symbol.asyncIterator];
+  if (typeof asyncIterator === "function") {
+    return asyncIterator.call(record);
+  }
+  const syncIterator = record[Symbol.iterator];
+  if (typeof syncIterator === "function") {
+    const iterator = syncIterator.call(record);
+    return {
+      next: async () => iterator.next(),
+      return: async () => {
+        if (typeof iterator.return === "function") iterator.return();
+        return { done: true, value: undefined };
+      },
+    };
+  }
+  if (typeof record.next === "function") {
+    return record as AsyncIterator<Uint8Array>;
+  }
+  throw boundedArtifactBytesUnavailable();
+}
+
+function concatExactChunks(chunks: Uint8Array[], byteLength: number): Uint8Array {
+  if (chunks.length === 1) {
+    const only = chunks[0];
+    if (only && only.byteLength === byteLength) return only;
+  }
+  const out = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+async function collectExactBoundedEvidenceBytes(
+  handle: EvidenceReadHandle,
+  expectedHash: string,
+  expectedLength: number,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (
+    handle.meta.hash !== expectedHash
+    || handle.meta.byteLength !== expectedLength
+    || handle.range !== null
+    || handle.byteLength !== expectedLength
+    || expectedLength > maxBytes
+    || handle.byteLength > maxBytes
+    || handle.meta.byteLength > maxBytes
+  ) {
+    throw boundedArtifactBytesUnavailable();
+  }
+  const hasher = createHash("sha256");
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  const iterator = await openBoundedEvidenceIterator(handle);
+  try {
+    for (;;) {
+      const next = await nextWithAbort(iterator, signal);
+      if (next.done) break;
+      const chunk = next.value;
+      if (!(chunk instanceof Uint8Array)) {
+        throw boundedArtifactBytesUnavailable();
+      }
+      if (chunk.byteLength === 0) continue;
+      const nextLength = received + chunk.byteLength;
+      if (nextLength > maxBytes || nextLength > expectedLength) {
+        throw boundedArtifactBytesUnavailable();
+      }
+      const copy = Uint8Array.from(chunk);
+      chunks.push(copy);
+      hasher.update(copy);
+      received = nextLength;
+    }
+  } catch (error) {
+    releaseBoundedIterator(iterator);
+    throw error;
+  }
+  const digest = hasher.digest("hex");
+  if (received !== expectedLength || digest !== expectedHash) {
+    releaseBoundedIterator(iterator);
+    throw boundedArtifactBytesUnavailable();
+  }
+  try {
+    throwIfStreamAborted(signal);
+  } catch (error) {
+    releaseBoundedIterator(iterator);
+    throw error;
+  }
+  return concatExactChunks(chunks, received);
 }
 
 interface ContributionWriteInput {
@@ -404,7 +687,14 @@ export class CaseService {
       try {
         return await this.store.withAtomic(operation, this.audit);
       } catch (error) {
-        await this.catalog.rollbackCaseInserts();
+        if (error instanceof CaseStoreCommitOutcomeUnknownError) {
+          throw error;
+        }
+        try {
+          await this.catalog.rollbackCaseInserts();
+        } catch {
+          // Catalog cleanup must never replace the authoritative mutation error.
+        }
         throw error;
       }
     });
@@ -1561,7 +1851,7 @@ export class CaseService {
           summary: input.summary,
         });
       } catch (error) {
-        if (refId) {
+        if (refId && !(error instanceof CaseStoreCommitOutcomeUnknownError)) {
           await this.evidence.abandonFileServerReference(refId);
         }
         throw error;
@@ -1576,6 +1866,7 @@ export class CaseService {
     }
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
+    let evidenceCommitted = false;
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
       const result = await this.withAtomic(async () => {
@@ -1642,23 +1933,141 @@ export class CaseService {
         } else {
           for (const stage of stages) await stage.commit();
         }
+        evidenceCommitted = true;
         if (!(await this.evidence.verify(meta.hash))) {
           throw new Error("hash verification failed after storage");
         }
         return { artifact: this.toArtifact(row), summary };
       });
-      await evidenceBatch?.finalize();
+      await finalizeCommittedEvidenceBatch(evidenceBatch);
       return result;
     } catch (error) {
-      if (evidenceBatch) {
-        await evidenceBatch.rollback();
-      } else {
-        await Promise.allSettled(stages.map((stage) => stage.rollback()));
-      }
+      await settleEvidenceAfterCaseTransactionFailure(
+        error,
+        evidenceBatch,
+        stages,
+        evidenceCommitted,
+      );
       throw error;
     } finally {
       for (const stage of stages) stage.release();
     }
+  }
+
+  async addStreamedEvidence(
+    caseId: string,
+    actor: Actor,
+    input: {
+      kind: ArtifactKind;
+      filename?: string;
+      mediaType?: string;
+      source: AsyncIterable<Uint8Array>;
+      expectedHash?: string | null;
+      summary: string;
+      privacyClass?: PrivacyClass;
+      clientTime?: string;
+      sourceId?: string;
+      maxBytes: number;
+      signal?: AbortSignal;
+    },
+    origin: string,
+  ): Promise<{ artifact: ArtifactV1; summary: ContributionV1 }> {
+    if (input.kind === "file_server_ref") {
+      throw new Error("streaming evidence does not accept file-server references");
+    }
+    const clientTime = canonicalClientTime(input.clientTime);
+    await this.requireCase(caseId);
+    const privacy = defaultPrivacy(input.privacyClass);
+    if (input.filename !== undefined) assertFilenameAllowed(input.filename);
+    const id = randomUUID();
+    const mediaType = input.mediaType
+      ?? (input.kind === "email" ? "message/rfc822" : "text/plain");
+    assertUploadAllowed(mediaType, 0);
+    if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 0) {
+      throw new Error("upload exceeds size cap");
+    }
+    const expectedHash: string | null = input.expectedHash ?? null;
+    throwIfStreamAborted(input.signal);
+    let stage: EvidenceStreamStage | null = null;
+    let evidenceCommitted = false;
+    let result: { artifact: ArtifactV1; summary: ContributionV1 };
+    try {
+      stage = await this.evidence.stageStream(
+        nonEmptyStreamChunks(input.source, input.signal),
+        {
+          contentType: mediaType,
+          maxBytes: input.maxBytes,
+          ...(input.signal ? { signal: input.signal } : {}),
+        },
+      );
+      if (expectedHash !== null && expectedHash !== stage.meta.hash) {
+        throw new Error("held evidence hash mismatch");
+      }
+      result = await this.withAtomic(async () => {
+        const sourceId = await this.resolveSourceId(actor, input.sourceId);
+        const summaryInput: ContributionWriteInput = {
+          kind: "upload",
+          body: input.summary,
+          privacyClass: privacy,
+          sourceId,
+        };
+        if (clientTime !== null) summaryInput.clientTime = clientTime;
+        const summary = await this.persistContribution(caseId, actor, summaryInput, origin);
+        const row: ArtifactRow = {
+          id,
+          caseId,
+          kind: input.kind,
+          filename: input.filename ?? null,
+          uri: null,
+          mediaType,
+          byteLength: stage!.meta.byteLength,
+          contentHash: stage!.meta.hash,
+          expectedHash,
+          verificationStatus: "verified",
+          refId: null,
+          privacyClass: privacy,
+          summaryContributionId: summary.id,
+          uploaderId: actor.id,
+          uploaderUsername: actor.username,
+          sourceId,
+        };
+        await this.store.insertArtifact(row);
+        await this.store.appendTimeline(caseId, {
+          kind: "evidence_registered",
+          actor,
+          targetId: id,
+          clientTime,
+          payload: {
+            artifactKind: input.kind,
+            contentHash: stage!.meta.hash,
+            privacyClass: privacy,
+            summaryId: summary.id,
+          },
+        });
+        await this.audit.append({
+          identity: actor.id,
+          action: "evidence_register",
+          target: id,
+          origin,
+          outcome: "success",
+        });
+        await stage!.promote();
+        evidenceCommitted = true;
+        if (!(await this.evidence.verify(stage!.meta.hash))) {
+          throw new Error("hash verification failed after storage");
+        }
+        return { artifact: this.toArtifact(row), summary };
+      });
+    } catch (error) {
+      await settleStreamedEvidenceAfterCaseTransactionFailure(
+        error,
+        stage,
+        evidenceCommitted,
+      );
+      throw error;
+    }
+    await finalizeCommittedStreamStage(stage);
+    return result;
   }
 
   async previewCorpusIntake(
@@ -1741,6 +2150,7 @@ export class CaseService {
     const createdAt = new Date().toISOString();
     const stages: EvidenceStage[] = [];
     let evidenceBatch: EvidenceWriteBatch | null = null;
+    let evidenceCommitted = false;
     try {
       evidenceBatch = await this.evidence.beginWriteBatch?.() ?? null;
       const result = await this.withAtomic(async () => {
@@ -1874,6 +2284,7 @@ export class CaseService {
         } else {
           for (const stage of stages) await stage.commit();
         }
+        evidenceCommitted = true;
         for (const meta of metaByDigest.values()) {
           if (!(await this.evidence.verify(meta.hash))) {
             throw new Error("hash verification failed after storage");
@@ -1895,14 +2306,15 @@ export class CaseService {
         });
         return batch;
       });
-      await evidenceBatch?.finalize();
+      await finalizeCommittedEvidenceBatch(evidenceBatch);
       return result;
     } catch (error) {
-      if (evidenceBatch) {
-        await evidenceBatch.rollback();
-      } else {
-        await Promise.allSettled(stages.map((stage) => stage.rollback()));
-      }
+      await settleEvidenceAfterCaseTransactionFailure(
+        error,
+        evidenceBatch,
+        stages,
+        evidenceCommitted,
+      );
       throw error;
     } finally {
       for (const stage of stages) stage.release();
@@ -1921,21 +2333,112 @@ export class CaseService {
     return this.toArtifact(row);
   }
 
+  async getReadableHeldArtifact(
+    caseId: string,
+    artifactId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<ArtifactRow | null> {
+    const caseRow = await this.store.getCase(caseId);
+    if (!caseRow) return null;
+    const row = await this.store.getArtifact(artifactId);
+    if (!row || row.caseId !== caseId) return null;
+    if (
+      !row.contentHash
+      || !isContentHash(row.contentHash)
+      || row.byteLength === null
+      || row.refId
+    ) {
+      return null;
+    }
+    if (row.privacyClass === "owner_only") {
+      if (!canReadPrivate) return null;
+      if (!isAdmin && !this.isMember(caseRow, actor.id)) return null;
+    }
+    return row;
+  }
+
   async getArtifactBytes(
     caseId: string,
     artifactId: string,
     actor: Actor,
     isAdmin: boolean,
     canReadPrivate: boolean,
-  ): Promise<Uint8Array | null> {
-    const caseRow = await this.requireCase(caseId);
-    const row = await this.store.getArtifact(artifactId);
-    if (!row || row.caseId !== caseId || !row.contentHash) return null;
-    if (row.privacyClass === "owner_only") {
-      if (!canReadPrivate) return null;
-      if (!isAdmin && !this.isMember(caseRow, actor.id)) return null;
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<ArtifactBytesOutcome> {
+    const row = await this.getReadableHeldArtifact(
+      caseId,
+      artifactId,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
+    if (!row?.contentHash || row.byteLength === null || !isContentHash(row.contentHash)) {
+      return { outcome: "not_found" };
     }
-    return this.evidence.get(row.contentHash);
+    assertSafeMaxBytes(maxBytes);
+    throwIfStreamAborted(signal);
+    if (row.byteLength > maxBytes) {
+      return { outcome: "too_large", byteLength: row.byteLength, maxBytes };
+    }
+    const hash = row.contentHash;
+    const expectedLength = row.byteLength;
+    const meta = await this.headEvidence(hash, signal);
+    if (!meta || meta.hash !== hash || meta.byteLength !== expectedLength) {
+      throw boundedArtifactBytesUnavailable();
+    }
+    if (meta.byteLength > maxBytes) {
+      return { outcome: "too_large", byteLength: meta.byteLength, maxBytes };
+    }
+    const handle = await this.openEvidenceRead(hash, undefined, signal);
+    const bytes = await collectExactBoundedEvidenceBytes(
+      handle,
+      hash,
+      expectedLength,
+      maxBytes,
+      signal,
+    );
+    return { outcome: "ok", bytes, hash, byteLength: bytes.byteLength };
+  }
+
+  async getArtifactJsonBytes(
+    caseId: string,
+    artifactId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<
+    { outcome: "not_found" } | { outcome: "too_large" } | { outcome: "ok"; bytes: Uint8Array }
+  > {
+    const result = await this.getArtifactBytes(
+      caseId,
+      artifactId,
+      actor,
+      isAdmin,
+      canReadPrivate,
+      MAX_UPLOAD_BYTES,
+    );
+    if (result.outcome === "ok") return { outcome: "ok", bytes: result.bytes };
+    if (result.outcome === "too_large") return { outcome: "too_large" };
+    return { outcome: "not_found" };
+  }
+
+  async headEvidence(hash: string, signal?: AbortSignal): Promise<BlobMetaV1 | null> {
+    if (!isContentHash(hash)) return null;
+    return this.evidence.head(hash, signal);
+  }
+
+  async openEvidenceRead(
+    hash: string,
+    range?: EvidenceReadRange,
+    signal?: AbortSignal,
+  ): Promise<EvidenceReadHandle> {
+    if (!isContentHash(hash)) {
+      throw new Error("invalid content hash");
+    }
+    return this.evidence.openRead(hash as ContentHash, range, signal);
   }
 
   async recheckReference(

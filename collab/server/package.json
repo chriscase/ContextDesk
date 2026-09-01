@@ -22,8 +22,11 @@
     "migrate:dry-run": "tsx src/db/cli.ts up --dry-run"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1121.0",
     "@cd-collab/contracts": "*",
+    "@fastify/multipart": "10.1.1",
     "@fastify/static": "^10.1.3",
+    "@smithy/node-http-handler": "^4.11.3",
     "fastify": "^5.2.1",
     "ldapts": "^9.0.0",
     "pg": "^8.14.1"

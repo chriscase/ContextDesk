@@ -100,8 +100,14 @@ export async function registerLogTimeRoutes(
       return { error: "not_found" };
     }
     try {
-      const state = await deps.logTime.getState(id);
-      const dependents = await deps.logTime.listDependents(id);
+      const state = await deps.logTime.getState(
+        id,
+        ctx.has("evidence:private:read"),
+      );
+      const dependents = await deps.logTime.listDependents(
+        id,
+        ctx.has("evidence:private:read"),
+      );
       return { state, dependents };
     } catch (err) {
       void reply.code(statusFor(err));
@@ -119,7 +125,11 @@ export async function registerLogTimeRoutes(
       return { error: "not_found" };
     }
     try {
-      return await deps.logTime.chronology(id, chronologyQuery(request));
+      return await deps.logTime.chronology(
+        id,
+        ctx.has("evidence:private:read"),
+        chronologyQuery(request),
+      );
     } catch (err) {
       void reply.code(statusFor(err));
       return { error: publicError(err) };
@@ -164,26 +174,31 @@ export async function registerLogTimeRoutes(
   };
 
   mutation("/api/cases/:id/log-time/build", "log_corpus_build", (ctx, id) =>
-    deps.logTime.buildCorpus(id, ctx.actor),
+    deps.logTime.buildCorpus(
+      id,
+      ctx.actor,
+      ctx.isAdmin,
+      ctx.has("evidence:private:read"),
+    ),
   );
 
   // Preview is a POST because it carries a body, but it publishes no revision.
   // It still requires write capability: it is the step before a durable change,
   // and it is the only place a proposed zone is named.
-  mutation("/api/cases/:id/log-time/preview", "log_time_preview", (_ctx, id, body) =>
-    deps.logTime.preview(id, body),
+  mutation("/api/cases/:id/log-time/preview", "log_time_preview", (ctx, id, body) =>
+    deps.logTime.preview(id, ctx.has("evidence:private:read"), body),
   );
 
   mutation("/api/cases/:id/log-time/apply", "log_time_apply", (ctx, id, body) =>
-    deps.logTime.apply(id, ctx.actor, body),
+    deps.logTime.apply(id, ctx.actor, ctx.has("evidence:private:read"), body),
   );
 
   mutation("/api/cases/:id/log-time/clear", "log_time_clear", (ctx, id, body) =>
-    deps.logTime.clear(id, ctx.actor, body),
+    deps.logTime.clear(id, ctx.actor, ctx.has("evidence:private:read"), body),
   );
 
   mutation("/api/cases/:id/log-time/undo", "log_time_undo", (ctx, id, body) =>
-    deps.logTime.undo(id, ctx.actor, body),
+    deps.logTime.undo(id, ctx.actor, ctx.has("evidence:private:read"), body),
   );
 }
 

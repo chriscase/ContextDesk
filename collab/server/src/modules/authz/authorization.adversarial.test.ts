@@ -2,9 +2,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { IdentityV1 } from "@cd-collab/contracts";
-import { parseAuthError } from "@cd-collab/contracts";
-import { describe, expect, it } from "vitest";
+import {
+  CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+  parseAuthError,
+  parseCorpusIntakePreviewReport,
+  type IdentityV1,
+} from "@cd-collab/contracts";
+import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
@@ -17,13 +22,28 @@ import {
   defaultSessionPolicy,
 } from "../auth/index.js";
 import { MemoryGroupRoleStore, MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
-import { CaseService } from "../cases/index.js";
+import { CatalogService } from "../catalog/index.js";
+import { CaseService, MemoryCaseStore } from "../cases/index.js";
+import {
+  LogTimeService,
+  MemoryLogTimeStore,
+  createLogTimeCasePort,
+  type HostResult,
+  type LogTimeAction,
+  type LogTimeBridge,
+} from "../log-time/index.js";
 import {
   CSRF_HEADER,
   CSRF_HEADER_VALUE,
   MemoryLocalGrantStore,
   MemoryUserProfileStore,
 } from "../people/index.js";
+import {
+  MemoryWorkbenchStore,
+  WorkbenchService,
+  createWorkbenchCasePort,
+} from "../workbench/index.js";
+import { MemoryTriageJobStore } from "../triage-runs/index.js";
 
 type UserRow = { password: string; identity: IdentityV1; groups: string[] };
 
@@ -33,6 +53,35 @@ const ALICE_PASSWORD = "fixture-alice-secret";
 const HISTORICAL_PASSWORD = "historical-secret";
 const HISTORICAL_ID = "imported:north-installation:actor-42";
 const LOG = "2026-08-15T00:00:00Z synthetic mailer timeout id=syn-authz-1\n";
+
+class RecordingLogTimeBridge implements LogTimeBridge {
+  readonly calls: LogTimeAction[] = [];
+
+  async run(caseId: string, action: LogTimeAction): Promise<HostResult> {
+    this.calls.push(action);
+    if (action.kind !== "build" && action.kind !== "status") {
+      throw new Error("unexpected log-time action in authorization oracle");
+    }
+    return {
+      caseId,
+      corpusId: "authz-private-corpus",
+      corpusRevision: 1,
+      ...(action.kind === "build"
+        ? {
+            build: {
+              corpusName: action.corpusName,
+              eventsImported: 1,
+              sourcesSelected: action.files.length,
+              sourcesFailed: 0,
+              partial: false,
+              timezoneAmbiguousSources: [],
+            },
+          }
+        : { sources: [] }),
+      declarations: {},
+    };
+  }
+}
 
 function users(): Map<string, UserRow> {
   return new Map<string, UserRow>([
@@ -84,6 +133,8 @@ async function withApp(
     app: Awaited<ReturnType<typeof buildApp>>;
     profiles: MemoryUserProfileStore;
     grants: MemoryLocalGrantStore;
+    evidence: FilesystemEvidenceStore;
+    logTimeBridge: RecordingLogTimeBridge;
   }) => Promise<void>,
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-authz-adversarial-"));
@@ -97,12 +148,39 @@ async function withApp(
   );
   const profiles = new MemoryUserProfileStore();
   const grants = new MemoryLocalGrantStore();
-  const domain = new CaseService(evidence, audit);
+  const caseStore = new MemoryCaseStore();
+  const catalog = new CatalogService(undefined, audit);
+  const domain = new CaseService(evidence, audit, caseStore, catalog);
+  const workbench = new WorkbenchService({
+    store: new MemoryWorkbenchStore(),
+    cases: createWorkbenchCasePort({
+      cases: caseStore,
+      domain,
+      evidence,
+      currentNormalizationRevision: async () => null,
+    }),
+    audit,
+  });
+  const logTimeBridge = new RecordingLogTimeBridge();
+  const logTime = new LogTimeService({
+    store: new MemoryLogTimeStore(),
+    bridge: logTimeBridge,
+    cases: createLogTimeCasePort({
+      cases: caseStore,
+      domain,
+      evidence,
+      jobs: new MemoryTriageJobStore(),
+    }),
+    audit,
+  });
   const app = await buildApp({
     config: testConfig({ evidenceRoot: root, authMode: "local" }),
     pool: null,
     store: evidence,
     domain,
+    catalog,
+    workbench,
+    logTime,
     profiles,
     grants,
     security: {
@@ -122,7 +200,7 @@ async function withApp(
     },
   });
   try {
-    await fn({ app, profiles, grants });
+    await fn({ app, profiles, grants, evidence, logTimeBridge });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -233,7 +311,7 @@ describe("authorization and suspension enforcement", () => {
   });
 
   it("requires evidence:private:read for owner_only bytes even for a case member", async () => {
-    await withApp(async ({ app, grants }) => {
+    await withApp(async ({ app, grants, evidence, logTimeBridge }) => {
       const aliceCookie = await login(app, "alice", ALICE_PASSWORD);
       const created = await app.inject({
         method: "POST",
@@ -261,12 +339,82 @@ describe("authorization and suspension enforcement", () => {
         ).body,
       ) as { artifact: { id: string } };
 
+      const files = [{
+        relativePath: "logs/private.log",
+        mediaType: "text/plain",
+        contentBase64: Buffer.from(LOG).toString("base64"),
+      }];
+      const preview = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/corpus-intake/preview`,
+        headers: { cookie: aliceCookie },
+        payload: {
+          schemaId: CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+          origin: "files",
+          sourceLabel: "private-authz-oracle",
+          privacyClass: "owner_only",
+          idempotencyKey: "private-authz-corpus-0001",
+          files,
+          archiveBase64: null,
+        },
+      });
+      expect(preview.statusCode).toBe(200);
+      const previewReport = parseCorpusIntakePreviewReport(JSON.parse(preview.body));
+      const committed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/corpus-intake`,
+        headers: { cookie: aliceCookie },
+        payload: {
+          schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+          origin: "files",
+          sourceLabel: "private-authz-oracle",
+          privacyClass: "owner_only",
+          idempotencyKey: "private-authz-corpus-0001",
+          previewToken: previewReport.previewToken,
+          files,
+          archiveBase64: null,
+        },
+      });
+      expect(committed.statusCode).toBe(200);
+
+      const head = vi.spyOn(evidence, "head");
+      const openRead = vi.spyOn(evidence, "openRead");
+
       const denied = await app.inject({
         method: "GET",
         url: `/api/cases/${caseId}/evidence/${uploaded.artifact.id}/bytes`,
         headers: { cookie: aliceCookie },
       });
-      expect(denied.statusCode).toBe(403);
+      expect(denied.statusCode).toBe(404);
+      expect(JSON.parse(denied.body)).toEqual({ error: "not_found" });
+
+      const hiddenInventory = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/workbench`,
+        headers: { cookie: aliceCookie },
+      });
+      expect(hiddenInventory.statusCode).toBe(200);
+      expect((JSON.parse(hiddenInventory.body) as { items: unknown[] }).items).toEqual([]);
+      const hiddenPage = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/workbench/page?evidenceId=${uploaded.artifact.id}&startLine=1&limit=10`,
+        headers: { cookie: aliceCookie },
+      });
+      expect(hiddenPage.statusCode).toBe(404);
+      expect(JSON.parse(hiddenPage.body)).toEqual({ error: "not_found" });
+      expect(head).not.toHaveBeenCalled();
+      expect(openRead).not.toHaveBeenCalled();
+      const deniedBuild = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/log-time/build`,
+        headers: { cookie: aliceCookie },
+        payload: {},
+      });
+      expect(deniedBuild.statusCode).toBe(404);
+      expect(JSON.parse(deniedBuild.body)).toEqual({ error: "not_found" });
+      expect(logTimeBridge.calls).toEqual([]);
+      expect(head).not.toHaveBeenCalled();
+      expect(openRead).not.toHaveBeenCalled();
 
       await grants.grant(
         "uid=alice,ou=people,dc=example,dc=test",
@@ -285,6 +433,24 @@ describe("authorization and suspension enforcement", () => {
           "base64",
         ).toString("utf8"),
       ).toBe(LOG);
+      const visibleInventory = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/workbench`,
+        headers: { cookie: aliceCookie },
+      });
+      expect(visibleInventory.statusCode).toBe(200);
+      expect(
+        (JSON.parse(visibleInventory.body) as { items: { evidenceId: string }[] }).items
+          .map((item) => item.evidenceId),
+      ).toContain(uploaded.artifact.id);
+      const allowedBuild = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/log-time/build`,
+        headers: { cookie: aliceCookie },
+        payload: {},
+      });
+      expect(allowedBuild.statusCode).toBe(200);
+      expect(logTimeBridge.calls.map((call) => call.kind)).toEqual(["build"]);
 
       await grants.revoke(
         "uid=alice,ou=people,dc=example,dc=test",
@@ -295,7 +461,28 @@ describe("authorization and suspension enforcement", () => {
         url: `/api/cases/${caseId}/evidence/${uploaded.artifact.id}/bytes`,
         headers: { cookie: aliceCookie },
       });
-      expect(afterRevoke.statusCode).toBe(403);
+      expect(afterRevoke.statusCode).toBe(404);
+      expect(JSON.parse(afterRevoke.body)).toEqual({ error: "not_found" });
+      head.mockClear();
+      openRead.mockClear();
+      const hiddenAgain = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/workbench`,
+        headers: { cookie: aliceCookie },
+      });
+      expect(hiddenAgain.statusCode).toBe(200);
+      expect((JSON.parse(hiddenAgain.body) as { items: unknown[] }).items).toEqual([]);
+      expect(head).not.toHaveBeenCalled();
+      expect(openRead).not.toHaveBeenCalled();
+      const bridgeCalls = logTimeBridge.calls.length;
+      const hiddenLogTime = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/log-time`,
+        headers: { cookie: aliceCookie },
+      });
+      expect(hiddenLogTime.statusCode).toBe(404);
+      expect(JSON.parse(hiddenLogTime.body)).toEqual({ error: "not_found" });
+      expect(logTimeBridge.calls).toHaveLength(bridgeCalls);
     });
   });
 

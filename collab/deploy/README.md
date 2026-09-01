@@ -9,8 +9,15 @@ only — no employer-specific hosts (`docs/NON_GOALS.md` item 4).
 One container/service serves the API and the built React shell. PostgreSQL is
 the default system of record. A private single-node deployment may use the
 explicit SQLite mode documented in `collab/README.md`; it does not provide
-PostgreSQL role separation or multi-worker HA. Evidence bytes live on a
-filesystem volume beside the database.
+PostgreSQL role separation or multi-worker HA. Evidence bytes use a filesystem
+volume beside the database (`COLLAB_EVIDENCE_ROOT`) by default. The commented
+S3 block in `.env.example` documents the shipped S3-compatible backend. To
+select it in this Compose example, set those values and enable the matching
+commented `app.environment` mappings in `docker-compose.example.yml`; the local
+root remains server-owned control state. The operator contract,
+least-privilege actions, and qualification sequence are in
+`docs/help/war-room/war-room-s3-evidence-store.md`. Selecting S3 does not
+migrate bytes already stored on the filesystem.
 
 ## Roles
 
@@ -60,6 +67,49 @@ docker compose -f deploy/docker-compose.example.yml --env-file deploy/.env up --
 curl -sS http://127.0.0.1:8787/health
 curl -sS http://127.0.0.1:8787/ready
 ```
+
+`--env-file` supplies Compose substitutions; it does not inject every name in
+that file into the `app` container. For S3, uncomment the matching
+`COLLAB_EVIDENCE_...` mappings under `app.environment` after setting their
+substitution values. Enable only the names selected for the deployment:
+present-but-empty optional S3 names are invalid, and filesystem mode rejects
+every present S3 name. `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` is accepted in both
+modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.
+S3 v1 defaults to 30 MiB at the 30,000 ms timeout and validates at most
+`floor(COLLAB_EVIDENCE_S3_TIMEOUT_MS / 1000) * 1 MiB` (up to 120 MiB at the
+120,000 ms timeout). Smithy's `requestTimeout` is absolute through PutObject
+and CopyObject response headers. The 1 MiB/s relationship is a conservative
+validation envelope, not a success guarantee; actual networks and providers
+may need a lower max. The separate HTTP transfer guard remains one hour and
+unknown-length streams remain count-enforced. The 5 GiB value is a protocol
+and future-multipart ceiling, not a supported S3 v1 operating size. Legacy
+JSON/base64 upload and JSON bytes download stay capped at 1,000,000 decoded
+bytes. This does not add retention or filesystem-to-S3 migration.
+
+Run `npm run doctor` with the intended environment before startup. For S3 it
+validates names, credential sources, the custom CA file, bounds, and the local
+control root, but deliberately does not contact the bucket. Server startup then
+selects the configured backend, pings it, and completes pending-write recovery
+before listening. `/health` is process liveness; `/ready` checks the database
+and the selected evidence backend. Neither replaces a normal authenticated War
+Room upload, metadata read, byte download, and SHA-256 comparison.
+
+`COLLAB_EVIDENCE_S3_CA_FILE` is an optional absolute PEM bundle mounted into
+the War Room process. The S3 request handler passes it as Node's TLS `ca`
+option, which **replaces** the default trust store for that S3 connection
+only. Operators who need public roots and an internal CA must provide one
+combined PEM bundle and keep certificate verification enabled. This does not
+change directory TLS (`COLLAB_LDAP_CA` / `NODE_EXTRA_CA_CERTS`) or ingress
+TLS. A custom CA cannot authenticate plaintext: configuration rejects
+`COLLAB_EVIDENCE_S3_CA_FILE` when the S3 endpoint uses HTTP.
+
+The example Compose file does not include Garage. From the `app` container,
+`127.0.0.1` is the app container itself. Put War Room and the object store on
+the same explicitly controlled network and use the object-store service name,
+or use a reachable private endpoint. Service names do not resolve across
+separate Compose project networks unless both projects join a named shared
+network. Plain HTTP still requires `COLLAB_EVIDENCE_S3_ALLOW_HTTP=1` and is for
+trusted local evaluation only.
 
 The Compose `migrate` one-shot service applies migrations inside the Compose
 network before `app` starts. To apply a later migration manually, use

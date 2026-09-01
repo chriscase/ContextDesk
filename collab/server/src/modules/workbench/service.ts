@@ -112,17 +112,30 @@ export interface WorkbenchCasePort {
     isAdmin: boolean,
   ): Promise<{ id: string } | null>;
   /**
-   * Whole-corpus read including bytes.
-   *
-   * Kept for callers written against the first port and for small fixtures.
-   * Anything corpus-sized must go through `listEvidenceDescriptors` plus
-   * `readEvidenceText`, because this method materializes every file at once.
+   * Legacy test-fixture compatibility only. Production composition must omit
+   * this whole-corpus materializer and implement the bounded pair below.
    */
-  listEvidenceFiles(caseId: string): Promise<WorkbenchEvidenceFile[]>;
+  listEvidenceFiles?(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<WorkbenchEvidenceFile[]>;
   /** Metadata only, so a selection can be applied before any byte is read. */
-  listEvidenceDescriptors?(caseId: string): Promise<WorkbenchEvidenceDescriptor[]>;
+  listEvidenceDescriptors?(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<WorkbenchEvidenceDescriptor[]>;
   /** One file's bytes, fetched only once that file is known to be in scope. */
-  readEvidenceText?(caseId: string, evidenceId: string): Promise<string | null>;
+  readEvidenceText?(
+    caseId: string,
+    evidenceId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<string | null>;
   /**
    * Host stamps for the normalization overlay, narrowed to the paths in scope.
    * Older implementations ignore the extra arguments and answer for the case.
@@ -244,25 +257,48 @@ export class WorkbenchService {
   private async openCorpus(
     caseId: string,
     scope: WorkbenchCorpusScope,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<ScopedCorpus> {
     const port = this.deps.cases;
     if (port.listEvidenceDescriptors && port.readEvidenceText) {
-      const all = (await port.listEvidenceDescriptors(caseId)).slice().sort(compareDescriptors);
+      const listed = (
+        await port.listEvidenceDescriptors(caseId, actor, isAdmin, canReadPrivate)
+      ).slice().sort(compareDescriptors);
+      // Production filters before Head in the case port. Keep this service
+      // boundary too so a legacy/test port cannot accidentally reintroduce a
+      // private descriptor into request processing.
+      const all = listed.filter(
+        (file) => canReadPrivate || file.privacyClass !== "owner_only",
+      );
       const files = all.filter((file) => fileInScope(scope, file));
       return {
         allFiles: all,
         files,
         scopeDigest: workbenchCorpusScopeDigest(files),
         read: async (evidenceId) => {
-          const text = await port.readEvidenceText!(caseId, evidenceId);
+          const text = await port.readEvidenceText!(
+            caseId,
+            evidenceId,
+            actor,
+            isAdmin,
+            canReadPrivate,
+          );
           return text === null ? null : decodeText(text);
         },
       };
     }
-    // Compatibility path for ports written against the first contract. It
-    // materializes every file, so it is only sound for small corpora; the
-    // shipped port implements the streaming methods above.
-    const loaded = (await port.listEvidenceFiles(caseId)).slice().sort(compareDescriptors);
+    // Fixture-only compatibility for ports written against the first contract.
+    // No production composition implements this bulk materialization method.
+    if (!port.listEvidenceFiles) {
+      throw new Error("workbench case port does not support bounded evidence reads");
+    }
+    const loaded = (
+      await port.listEvidenceFiles(caseId, actor, isAdmin, canReadPrivate)
+    ).slice().sort(compareDescriptors).filter(
+      (file) => canReadPrivate || file.privacyClass !== "owner_only",
+    );
     const byId = new Map(loaded.map((file) => [file.evidenceId, file.text]));
     const all = loaded.map(({ text: _text, ...rest }) => rest);
     const files = all.filter((file) => fileInScope(scope, file));
@@ -278,10 +314,23 @@ export class WorkbenchService {
   }
 
   /** Host stamps for exactly the paths in scope, or an empty overlay. */
+  private async canUseHost(caseId: string, canReadPrivate: boolean): Promise<boolean> {
+    return canReadPrivate
+      || (await this.deps.cases.casePrivacyClass(caseId)) === "share_safe";
+  }
+
   private async overlayFor(
     caseId: string,
     files: readonly WorkbenchEvidenceDescriptor[],
+    canReadPrivate: boolean,
   ): Promise<HostTimestampOverlay> {
+    // An empty source list means "all sources" to the log-time host. Never
+    // turn a corpus with only hidden private descriptors into an unscoped host
+    // request.
+    if (files.length === 0) return createHostTimestampOverlay([]);
+    if (!(await this.canUseHost(caseId, canReadPrivate))) {
+      return createHostTimestampOverlay([]);
+    }
     const stamps = await this.deps.cases.listHostEventStamps?.(
       caseId,
       files.map((file) => file.relativePath),
@@ -302,10 +351,13 @@ export class WorkbenchService {
    */
   async loadCorpus(
     caseId: string,
-    scope: WorkbenchCorpusScope = EMPTY_SCOPE,
+    scope: WorkbenchCorpusScope,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<WorkbenchCorpus> {
-    const corpus = await this.openCorpus(caseId, scope);
-    const overlay = await this.overlayFor(caseId, corpus.files);
+    const corpus = await this.openCorpus(caseId, scope, actor, isAdmin, canReadPrivate);
+    const overlay = await this.overlayFor(caseId, corpus.files, canReadPrivate);
     const lines: WorkbenchLine[] = [];
     const fullyRead = new Set<string>();
     const partiallyRead: string[] = [];
@@ -348,9 +400,12 @@ export class WorkbenchService {
 
   async loadLines(
     caseId: string,
-    scope: WorkbenchCorpusScope = EMPTY_SCOPE,
+    scope: WorkbenchCorpusScope,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<WorkbenchLine[]> {
-    return (await this.loadCorpus(caseId, scope)).lines;
+    return (await this.loadCorpus(caseId, scope, actor, isAdmin, canReadPrivate)).lines;
   }
 
   /**
@@ -365,13 +420,22 @@ export class WorkbenchService {
     evidenceId: string,
     startLine: number,
     maxRows: number,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<{ rows: WorkbenchLine[]; lineCount: number; found: boolean }> {
-    const corpus = await this.openCorpus(caseId, EMPTY_SCOPE);
+    const corpus = await this.openCorpus(
+      caseId,
+      EMPTY_SCOPE,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     const file = corpus.allFiles.find((item) => item.evidenceId === evidenceId);
     if (!file) return { rows: [], lineCount: 0, found: false };
     const text = await corpus.read(evidenceId);
     if (text === null) return { rows: [], lineCount: 0, found: false };
-    const overlay = await this.overlayFor(caseId, [file]);
+    const overlay = await this.overlayFor(caseId, [file], canReadPrivate);
     const rows: WorkbenchLine[] = [];
     for (const window of iterateLogLineWindows(file, text, { startLine })) {
       for (const row of overlay.apply(window)) {
@@ -383,7 +447,12 @@ export class WorkbenchService {
     return { rows, lineCount: countLogTextLines(text), found: true };
   }
 
-  async inventory(caseId: string, actor: Actor, isAdmin: boolean): Promise<{
+  async inventory(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate = true,
+  ): Promise<{
     items: {
       evidenceId: string;
       relativePath: string;
@@ -403,7 +472,13 @@ export class WorkbenchService {
     unreadFiles: string[];
   }> {
     await this.assertReadable(caseId, actor, isAdmin);
-    const corpus = await this.openCorpus(caseId, EMPTY_SCOPE);
+    const corpus = await this.openCorpus(
+      caseId,
+      EMPTY_SCOPE,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     const items: {
       evidenceId: string;
       relativePath: string;
@@ -456,7 +531,7 @@ export class WorkbenchService {
     actor: Actor,
     isAdmin: boolean,
     body: unknown,
-    options: { cancelled?: () => boolean } = {},
+    options: { cancelled?: () => boolean; canReadPrivate?: boolean } = {},
   ): Promise<WorkbenchSearchResultV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const request: WorkbenchSearchRequestV1 = parseWorkbenchSearchRequest(
@@ -475,7 +550,8 @@ export class WorkbenchService {
     }
 
     const scope = scopeFromSearchFilters(request.filters);
-    const corpus = await this.openCorpus(caseId, scope);
+    const canReadPrivate = options.canReadPrivate ?? true;
+    const corpus = await this.openCorpus(caseId, scope, actor, isAdmin, canReadPrivate);
 
     let resume: {
       matchOrdinal: number;
@@ -516,7 +592,13 @@ export class WorkbenchService {
     let overlay: HostTimestampOverlay;
     let timeAuthorityUnavailableReason: string | null = null;
     let hostBounded = false;
-    if (timeFilterApplied && this.deps.cases.hostSearch) {
+    const hostAllowed = await this.canUseHost(caseId, canReadPrivate);
+    if (
+      timeFilterApplied
+      && corpus.files.length > 0
+      && hostAllowed
+      && this.deps.cases.hostSearch
+    ) {
       // The host owns timestamp resolution. A time range answered from intake
       // bytes alone would silently drop every line whose clock carries no
       // offset, so the authority is consulted or the range is refused.
@@ -540,7 +622,7 @@ export class WorkbenchService {
         );
       }
       if (outcome === null) {
-        overlay = await this.overlayFor(caseId, corpus.files);
+        overlay = await this.overlayFor(caseId, corpus.files, canReadPrivate);
         timeAuthorityUnavailableReason =
           "This investigation has no built log corpus yet, so the time range was applied only to lines whose own timestamp already carries a UTC offset.";
       } else {
@@ -548,7 +630,7 @@ export class WorkbenchService {
         hostBounded = outcome.bounded || outcome.cancelled;
       }
     } else {
-      overlay = await this.overlayFor(caseId, corpus.files);
+      overlay = await this.overlayFor(caseId, corpus.files, canReadPrivate);
     }
 
     const scan = createLogSearchScan(request, {
@@ -616,13 +698,22 @@ export class WorkbenchService {
     evidenceId: string,
     startLine: number,
     limit: number,
+    canReadPrivate = true,
   ): Promise<WorkbenchPageV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const windowLimit = Math.min(Math.max(limit, 1), WORKBENCH_LIMITS.maxPageRows);
     const start = Math.max(1, startLine);
     // One row past the window, so "are there more lines" is answered from the
     // file itself rather than from how much of the corpus a budget reached.
-    const read = await this.readFileWindow(caseId, evidenceId, start, windowLimit + 1);
+    const read = await this.readFileWindow(
+      caseId,
+      evidenceId,
+      start,
+      windowLimit + 1,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     if (!read.found) throw new WorkbenchNotFoundError();
     if (read.rows.length === 0 && start > read.lineCount) {
       throw new WorkbenchConflictError(
@@ -638,16 +729,23 @@ export class WorkbenchService {
     isAdmin: boolean,
     grouping: WorkbenchChronologyV1["grouping"],
     evidenceIds: string[],
+    canReadPrivate = true,
   ): Promise<WorkbenchChronologyV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const current = await this.deps.cases.currentNormalizationRevision(caseId);
     // Narrowing the read to the selected files first means the work budget is
     // spent on what was asked for, not on files that get filtered out after.
-    const corpus = await this.loadCorpus(caseId, {
-      evidenceIds,
-      file: null,
-      rotationFamily: null,
-    });
+    const corpus = await this.loadCorpus(
+      caseId,
+      {
+        evidenceIds,
+        file: null,
+        rotationFamily: null,
+      },
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     const lines = corpus.lines;
     const anchors = new Map(
       (await this.deps.store.listAnchors(caseId)).map((row) => [
@@ -706,9 +804,20 @@ export class WorkbenchService {
     });
   }
 
-  async reviewQueue(caseId: string, actor: Actor, isAdmin: boolean) {
+  async reviewQueue(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate = true,
+  ) {
     await this.assertReadable(caseId, actor, isAdmin);
-    const lines = await this.loadLines(caseId);
+    const lines = await this.loadLines(
+      caseId,
+      EMPTY_SCOPE,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     const candidates = extractShapeCandidates(lines).filter(
       (item) => item.parseClass === "local_ambiguous" || item.parseClass === "date_only",
     );
@@ -724,6 +833,7 @@ export class WorkbenchService {
     actor: Actor,
     isAdmin: boolean,
     body: unknown,
+    canReadPrivate = true,
   ): Promise<WorkbenchReviewPreviewV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const rule = parseWorkbenchReviewRule(body);
@@ -733,8 +843,27 @@ export class WorkbenchService {
         `stale normalization revision: expected ${rule.expectedRevision}, current ${current ?? "none"}`,
       );
     }
-    const files = await this.deps.cases.listEvidenceFiles(caseId);
-    const lines = await this.loadLines(caseId);
+    if (!this.deps.cases.listEvidenceDescriptors || !this.deps.cases.readEvidenceText) {
+      throw new Error("workbench rule preview requires bounded evidence reads");
+    }
+    const files = (
+      await this.deps.cases.listEvidenceDescriptors(
+        caseId,
+        actor,
+        isAdmin,
+        canReadPrivate,
+      )
+    )
+      .filter((file) => canReadPrivate || file.privacyClass !== "owner_only")
+      .slice()
+      .sort(compareDescriptors);
+    const lines = await this.loadLines(
+      caseId,
+      EMPTY_SCOPE,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     const byId = new Map(lines.map((line) => [line.evidenceId, line]));
     return previewReviewRule(
       rule,
@@ -752,12 +881,16 @@ export class WorkbenchService {
     actor: Actor,
     isAdmin: boolean,
     body: unknown,
+    canReadPrivate = true,
   ): Promise<WorkbenchViewV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const draft = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
     const createdAt = new Date().toISOString();
     const id = typeof draft.id === "string" && draft.id ? draft.id : randomUUID();
     const privacyClass = await this.deps.cases.casePrivacyClass(caseId);
+    if (privacyClass === "owner_only" && !canReadPrivate) {
+      throw new WorkbenchNotFoundError();
+    }
     const document = parseWorkbenchView({
       schemaId: WORKBENCH_VIEW_SCHEMA_ID,
       id,
@@ -837,10 +970,13 @@ export class WorkbenchService {
     caseId: string,
     actor: Actor,
     isAdmin: boolean,
+    canReadPrivate = true,
   ): Promise<WorkbenchViewV1[]> {
     await this.assertReadable(caseId, actor, isAdmin);
     const rows = await this.deps.store.listViews(caseId);
-    return rows.map((row) => parseWorkbenchView(JSON.parse(row.payloadJson)));
+    return rows
+      .filter((row) => canReadPrivate || row.privacyClass !== "owner_only")
+      .map((row) => parseWorkbenchView(JSON.parse(row.payloadJson)));
   }
 
   async saveBookmark(
@@ -848,6 +984,7 @@ export class WorkbenchService {
     actor: Actor,
     isAdmin: boolean,
     body: unknown,
+    canReadPrivate = true,
   ): Promise<WorkbenchBookmarkV1> {
     await this.assertReadable(caseId, actor, isAdmin);
     const draft = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
@@ -855,8 +992,17 @@ export class WorkbenchService {
     const createdAt = new Date().toISOString();
     const id = typeof draft.id === "string" && draft.id ? draft.id : randomUUID();
     const privacyClass = await this.deps.cases.casePrivacyClass(caseId);
+    if (privacyClass === "owner_only" && !canReadPrivate) {
+      throw new WorkbenchNotFoundError();
+    }
     const shareSafeToken = workbenchShareSafeToken(caseId, locator);
-    const resolved = await this.resolveLocatorLine(caseId, locator);
+    const resolved = await this.resolveLocatorLine(
+      caseId,
+      locator,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     const status = resolveLocatorAgainstEvidence(locator, resolved.evidence);
     const document = parseWorkbenchBookmark({
       schemaId: WORKBENCH_BOOKMARK_SCHEMA_ID,
@@ -917,14 +1063,23 @@ export class WorkbenchService {
     caseId: string,
     actor: Actor,
     isAdmin: boolean,
+    canReadPrivate = true,
   ): Promise<WorkbenchBookmarkV1[]> {
     await this.assertReadable(caseId, actor, isAdmin);
     const rows = await this.deps.store.listBookmarks(caseId);
-    const stored = rows.map((row) => parseWorkbenchBookmark(JSON.parse(row.payloadJson)));
+    const stored = rows
+      .filter((row) => canReadPrivate || row.privacyClass !== "owner_only")
+      .map((row) => parseWorkbenchBookmark(JSON.parse(row.payloadJson)));
     // Bookmarks cluster on a handful of files. Reading each of those files
     // once, rather than once per bookmark, keeps a long list cheap without
     // ever holding more than one file.
-    const corpus = await this.openCorpus(caseId, EMPTY_SCOPE);
+    const corpus = await this.openCorpus(
+      caseId,
+      EMPTY_SCOPE,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     const byFile = new Map<string, { lineCount: number; lines: Map<number, WorkbenchLine> }>();
     for (const bookmark of stored) {
       const evidenceId = bookmark.locator.evidenceId;
@@ -939,7 +1094,7 @@ export class WorkbenchService {
               .filter((item) => item.locator.evidenceId === evidenceId)
               .map((item) => item.locator.lineNumber),
           );
-          const overlay = await this.overlayFor(caseId, [file]);
+          const overlay = await this.overlayFor(caseId, [file], canReadPrivate);
           for (const window of iterateLogLineWindows(file, text)) {
             for (const line of overlay.apply(window)) {
               if (wanted.has(line.lineNumber)) entry.lines.set(line.lineNumber, line);
@@ -979,6 +1134,9 @@ export class WorkbenchService {
   private async resolveLocatorLine(
     caseId: string,
     locator: WorkbenchBookmarkV1["locator"],
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<{
     line: WorkbenchLine | null;
     evidence: {
@@ -993,6 +1151,9 @@ export class WorkbenchService {
       locator.evidenceId,
       Math.max(1, locator.lineNumber),
       1,
+      actor,
+      isAdmin,
+      canReadPrivate,
     );
     const line = read.rows.find((row) => row.lineNumber === locator.lineNumber) ?? null;
     return {
@@ -1012,6 +1173,7 @@ export class WorkbenchService {
     tokenBody: unknown,
     actor: Actor,
     isAdmin: boolean,
+    canReadPrivate = true,
   ): Promise<WorkbenchLocatorResolveV1> {
     let token: string;
     try {
@@ -1021,10 +1183,19 @@ export class WorkbenchService {
     }
     const row = await this.deps.store.getBookmarkByToken(token);
     if (!row) return privacySafeNotFound();
+    if (row.privacyClass === "owner_only" && !canReadPrivate) {
+      return privacySafeNotFound();
+    }
     const readable = await this.deps.cases.getCase(row.caseId, actor, isAdmin);
     if (!readable) return privacySafeNotFound();
     const stored = parseWorkbenchBookmark(JSON.parse(row.payloadJson));
-    const resolved = await this.resolveLocatorLine(row.caseId, stored.locator);
+    const resolved = await this.resolveLocatorLine(
+      row.caseId,
+      stored.locator,
+      actor,
+      isAdmin,
+      canReadPrivate,
+    );
     const currentLine = resolved.line;
     const status = resolveLocatorAgainstEvidence(stored.locator, resolved.evidence);
     if (status.status !== "resolved") {

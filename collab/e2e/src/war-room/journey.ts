@@ -179,7 +179,10 @@ export async function inspectEvidence(
 ): Promise<{ row: ReturnType<typeof evidenceRow>; preview: ReturnType<typeof evidenceRow> }> {
   const row = evidenceRow(page, filename);
   await expect(row).toBeVisible();
-  await row.getByRole("button", { name: "Inspect log" }).click();
+  // Logs use the specialist "Inspect log" label; email/attachment evidence
+  // uses the more general "Preview" label. Keep the journey independent of
+  // that presentation detail while still requiring an explicit preview action.
+  await row.getByRole("button", { name: /^(Inspect log|Preview)$/ }).click();
   const preview = row.locator("ol.log-viewer__lines--preview");
   await expect(preview).toBeVisible();
   return { row, preview };

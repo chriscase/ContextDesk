@@ -204,6 +204,7 @@ export function InvestigationRuntimeProvider({
   const projected = projectInvestigationCapabilities(rawCapabilities, readOnly);
   const capabilities = useMemo<InvestigationRuntimeCapabilities>(() => Object.freeze({
     canRead: projected.canRead,
+    canReadPrivate: projected.canReadPrivate,
     canCreate: projected.canCreate,
     canUpload: projected.canUpload,
     canContribute: projected.canContribute,
@@ -215,6 +216,7 @@ export function InvestigationRuntimeProvider({
     projected.canEditSituation,
     projected.canManageLifecycle,
     projected.canRead,
+    projected.canReadPrivate,
     projected.canUpload,
   ]);
   // Narrowed field by field so that whatever else the shell's session object

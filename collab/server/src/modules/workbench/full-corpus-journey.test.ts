@@ -36,6 +36,7 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore } from "../cases/index.js";
 import { MemoryLogTimeStore } from "../log-time/index.js";
+import { MemoryLocalGrantStore } from "../people/index.js";
 import { createWorkbenchCasePort } from "./case-port.js";
 import { MemoryWorkbenchStore, WorkbenchService } from "./index.js";
 
@@ -91,6 +92,12 @@ async function harness(root: string) {
     audit,
   });
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(ROLE_MAP));
+  const grants = new MemoryLocalGrantStore();
+  await grants.grant(
+    "uid=alice,ou=people,dc=example,dc=test",
+    "evidence:private:read",
+    "fixture",
+  );
   const app = await buildApp({
     config: testConfig({ evidenceRoot: root }),
     pool: null,
@@ -98,6 +105,7 @@ async function harness(root: string) {
     domain,
     catalog,
     workbench,
+    grants,
     security: {
       auth: {
         adapter: new MapAuthAdapter(users()),

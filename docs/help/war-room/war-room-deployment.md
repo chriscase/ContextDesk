@@ -15,6 +15,7 @@ related:
   - war-room-workflow
   - war-room-evidence-review
   - war-room-ldap-directory
+  - war-room-s3-evidence-store
   - security-boundaries
 ---
 
@@ -32,12 +33,18 @@ runs on one workstation or behind shared infrastructure.
 | Shape | Shipped configuration | Important boundary |
 | --- | --- | --- |
 | Private local | Loopback service, SQLite, local authentication, and filesystem evidence storage | Single node; no PostgreSQL role separation or multi-worker high availability |
-| Shared | Operator-deployed service with PostgreSQL, filesystem evidence storage, and encrypted LDAP-capable sign-in | The operator must configure and qualify storage, TLS, directory access, ingress, and backups |
+| Shared | Operator-deployed service with PostgreSQL, filesystem or S3-compatible evidence storage, and encrypted LDAP-capable sign-in | The operator must configure and qualify database, byte storage, TLS, directory access, ingress, and backups |
 | Synthetic demo | Loopback-only fixture with temporary evidence and no PostgreSQL, LDAP, or provider call | Demonstration behavior is not production qualification |
 
 The browser is a client in every shape. Local deployment does not remove the
 browser/service trust boundary, and shared deployment does not make every link
 public; authorization still applies.
+
+Filesystem remains the default evidence-byte backend. A deployment may select
+the shipped S3-compatible backend with the exact server-only contract in
+help://war-room-s3-evidence-store. `COLLAB_EVIDENCE_ROOT` remains local
+server-owned control state in either mode. Selecting S3 does not migrate bytes
+already stored on the filesystem.
 
 ## Optional model bridge
 
@@ -83,7 +90,27 @@ surfaces.
   signatures are recorded as metadata but are not verified.
 - Automatic desktop embedding and automatic desktop/CLI synchronization are
   not shipped.
+- Filesystem is the default byte backend; S3-compatible storage is opt-in and
+  must pass configuration preflight, startup/readiness, provider permission,
+  and application write/read checks separately. A PostgreSQL-backed process
+  uses a database advisory lease for evidence writes; SQLite plus S3 is a
+  single-process evaluation shape and doctor warns about it. Doctor preflight
+  does not contact the bucket. An S3 custom CA file replaces the default
+  trust store for the S3 connection only; combine public roots and an
+  internal CA in one PEM. It requires an HTTPS endpoint and is rejected with
+  plaintext HTTP. There is no filesystem-to-S3 migration,
+  retention, lifecycle, or multi-provider failover automation.
+- Streamed evidence intake uses `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` in both
+  modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.
+  S3 v1 defaults to 30 MiB at 30,000 ms and couples its supported maximum to
+  the absolute PutObject/CopyObject request timeout, up to 120 MiB at 120,000
+  ms. The 5 GiB value is not a supported S3 v1 operating size. See
+  help://war-room-s3-evidence-store for the exact relationship and nonclaims.
+  Legacy JSON/base64 upload and JSON bytes download remain capped at 1,000,000
+  decoded bytes.
 
 For the operating sequence, open help://war-room-workflow. For provenance,
-lane, and human-decision checks, open help://war-room-evidence-review. Security
-boundaries for the desktop product are described in help://security-boundaries.
+lane, and human-decision checks, open help://war-room-evidence-review. For the
+S3-compatible evidence-byte contract and qualification workflow, open
+help://war-room-s3-evidence-store. Security boundaries for the desktop product
+are described in help://security-boundaries.

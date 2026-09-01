@@ -71,6 +71,10 @@ function harness(options: {
 } = {}) {
   const store = options.store ?? new MemoryWorkbenchStore();
   const timeline: { kind: string; targetId: string | null }[] = [];
+  const fixtureFiles = options.files ?? [
+    file(EVIDENCE_A, "gateway/edge.log", GATEWAY),
+    file(EVIDENCE_B, "worker/batch.log", WORKER),
+  ];
   const cases: WorkbenchCasePort = {
     async getCase(id, actor) {
       if (id !== CASE_ID) return null;
@@ -78,12 +82,13 @@ function harness(options: {
       return { id };
     },
     async listEvidenceFiles() {
-      return (
-        options.files ?? [
-          file(EVIDENCE_A, "gateway/edge.log", GATEWAY),
-          file(EVIDENCE_B, "worker/batch.log", WORKER),
-        ]
-      );
+      return fixtureFiles;
+    },
+    async listEvidenceDescriptors() {
+      return fixtureFiles.map(({ text: _text, ...descriptor }) => descriptor);
+    },
+    async readEvidenceText(_caseId, evidenceId) {
+      return fixtureFiles.find((item) => item.evidenceId === evidenceId)?.text ?? null;
     },
     async currentNormalizationRevision() {
       return options.revision === undefined ? 3 : options.revision;

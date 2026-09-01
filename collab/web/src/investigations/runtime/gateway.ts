@@ -409,6 +409,127 @@ async function requestParsed<T>(
   return parseSuccessfulResponse(fetched.response, signal, parser, identity);
 }
 
+const MAX_UPLOAD_FAILURE_BODY_BYTES = 1_024;
+
+type BoundedFailureBody =
+  | { kind: "body"; text: string }
+  | { kind: "aborted" }
+  | { kind: "invalid" };
+
+function cancelBodyReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    void reader.cancel().catch(() => undefined);
+  } catch {
+    // Cleanup is best-effort and must never delay failure classification.
+  }
+}
+
+async function readBoundedFailureBody(
+  response: Response,
+  signal: AbortSignal,
+): Promise<BoundedFailureBody> {
+  if (signal.aborted) return { kind: "aborted" };
+  if (response.body === null) return { kind: "invalid" };
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  let wakeAbort: (() => void) | null = null;
+  const abortWake = new Promise<{ kind: "aborted" }>((resolve) => {
+    wakeAbort = () => resolve({ kind: "aborted" });
+  });
+  const onAbort = () => {
+    cancelBodyReader(reader);
+    wakeAbort?.();
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    while (true) {
+      const next = await Promise.race([reader.read(), abortWake]);
+      if ("kind" in next) return next;
+      if (signal.aborted) return { kind: "aborted" };
+      if (next.done) break;
+      const chunk = next.value;
+      if (chunk.byteLength === 0) continue;
+      if (chunk.byteLength > MAX_UPLOAD_FAILURE_BODY_BYTES - byteLength) {
+        cancelBodyReader(reader);
+        return { kind: "invalid" };
+      }
+      chunks.push(chunk.slice());
+      byteLength += chunk.byteLength;
+    }
+    if (signal.aborted) return { kind: "aborted" };
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return {
+        kind: "body",
+        text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      };
+    } catch {
+      return { kind: "invalid" };
+    }
+  } catch {
+    return signal.aborted ? { kind: "aborted" } : { kind: "invalid" };
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A hostile pending read may keep the lock; cancellation above is enough.
+    }
+  }
+}
+
+/**
+ * Upload-only 503 parsing. Authentication loss is classified from status
+ * before any body claim, including a misleading `commit_outcome_unknown`.
+ * Only the bounded known code is kept; every other 503 is generic unavailable.
+ */
+async function parseUploadFailure(
+  response: Response,
+  signal: AbortSignal,
+): Promise<GatewayResult<EvidenceUploadSuccessV1>> {
+  const generic = (): GatewayResult<EvidenceUploadSuccessV1> =>
+    failed(classifyHttpFailure(response.status));
+  if (response.status === 401 || response.status === 403) {
+    return generic();
+  }
+  if (response.status !== 503) return generic();
+  if (!isJsonResponse(response)) return signal.aborted ? aborted() : generic();
+  if (signal.aborted) return aborted();
+
+  const bounded = await readBoundedFailureBody(response, signal);
+  if (bounded.kind === "aborted") return aborted();
+  if (bounded.kind === "invalid") return generic();
+  if (signal.aborted) return aborted();
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(bounded.text);
+  } catch {
+    return generic();
+  }
+  if (signal.aborted) return aborted();
+
+  try {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return generic();
+    }
+    const error: unknown = (raw as Record<string, unknown>).error;
+    if (error !== "commit_outcome_unknown") return generic();
+    if (signal.aborted) return aborted();
+    return failed(classifyHttpFailure(503, { kind: "commit_outcome_unknown" }));
+  } catch {
+    return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+  }
+}
+
 function caseCollectionIdentity(cases: readonly CaseV1[]): boolean {
   const identities = new Set<string>();
   for (const investigation of cases) {
@@ -644,16 +765,24 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
       : result;
   },
 
-  uploadEvidence(investigationId, input, { signal }) {
+  async uploadEvidence(investigationId, input, { signal }) {
     const serialized = serializeMutationBody(signal, () => uploadEvidenceBody(input));
-    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
-    return requestParsed(
+    if (!serialized.ok) return failed(serialized.error);
+    const fetched = await fetchProtected(
       caseRoute(investigationId, "/evidence"),
       {
         method: "POST",
         headers: JSON_HEADERS,
         body: serialized.value,
       },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    if (!fetched.response.ok) {
+      return parseUploadFailure(fetched.response, signal);
+    }
+    return parseSuccessfulResponse(
+      fetched.response,
       signal,
       parseEvidenceUploadSuccess,
       (value) => value.caseId === investigationId

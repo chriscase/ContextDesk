@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { loadRuntimeConfig, parseTrustProxy, testConfig } from "./config.js";
+import { loadEvidenceStorageSettings, loadRuntimeConfig, parseTrustProxy, testConfig } from "./config.js";
+import {
+  DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+  DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
+  DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+  EVIDENCE_STORAGE_ERRORS,
+} from "./evidence/s3-settings.js";
 
 describe("runtime configuration", () => {
   const database = {
@@ -20,6 +26,18 @@ describe("runtime configuration", () => {
   it("keeps test defaults explicit", () => {
     expect(testConfig().authMode).toBe("ldap");
     expect(testConfig().storage).toBe("postgres");
+    expect(testConfig().evidence).toEqual({
+      provider: "filesystem",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+    });
+    expect(testConfig({ evidenceRoot: "/tmp/ev", storage: "sqlite" }).evidence).toEqual({
+      provider: "filesystem",
+      controlRoot: "/tmp/ev",
+      storage: "sqlite",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+    });
   });
 
   it("supports an explicit SQLite local/single-node runtime without database URLs", () => {
@@ -69,5 +87,145 @@ describe("runtime configuration", () => {
       );
     }
     expect(() => parseTrustProxy("17")).toThrow(/hop count must be 0\.\.16/);
+  });
+
+  it("defaults evidence storage to filesystem and keeps the control-state root", () => {
+    const config = loadRuntimeConfig(database);
+    expect(config.evidenceRoot).toBe(".data/evidence");
+    expect(config.evidence).toEqual({
+      provider: "filesystem",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+      maxUploadBytes: DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES,
+    });
+    expect(loadEvidenceStorageSettings(database, {
+      controlRoot: config.evidenceRoot,
+      storage: config.storage,
+    })).toEqual(config.evidence);
+    expect(JSON.stringify(config)).not.toMatch(/COLLAB_EVIDENCE_S3/);
+    expect(config).not.toHaveProperty("credentials");
+  });
+
+  it("fails closed on leftover s3 configuration in filesystem mode", () => {
+    const canary = "https://s3-canary-host.invalid:8443";
+    expect(() =>
+      loadRuntimeConfig({ ...database, COLLAB_EVIDENCE_S3_ENDPOINT: canary }),
+    ).toThrow(/leftover s3 configuration/);
+    try {
+      loadRuntimeConfig({ ...database, COLLAB_EVIDENCE_S3_ENDPOINT: canary });
+    } catch (error) {
+      expect(String(error)).not.toContain(canary);
+    }
+  });
+
+  it("accepts s3 evidence settings without placing secrets on Config", () => {
+    const secret = "canarySecretAccessKeyValue!!";
+    const token = "canarySessionTokenValue!!";
+    const accessKey = "GKEXAMPLEKEYID0001";
+    const credentialFile = "/run/secrets/canary-s3-secret";
+    const config = loadRuntimeConfig({
+      ...database,
+      COLLAB_EVIDENCE_PROVIDER: "s3",
+      COLLAB_EVIDENCE_S3_ENDPOINT: "https://objects.example.test",
+      COLLAB_EVIDENCE_S3_REGION: "garage",
+      COLLAB_EVIDENCE_S3_BUCKET: "war-room-evidence",
+      COLLAB_EVIDENCE_S3_PREFIX: "assigned-prefix",
+      COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+      COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: accessKey,
+      COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY: secret,
+      COLLAB_EVIDENCE_S3_SESSION_TOKEN: token,
+    });
+    expect(config.evidenceRoot).toBe(".data/evidence");
+    expect(config).not.toHaveProperty("s3");
+    expect(config).not.toHaveProperty("credentials");
+    expect(config.evidence).toEqual({
+      provider: "s3",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+      maxUploadBytes: DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
+      s3: {
+        endpoint: "https://objects.example.test",
+        region: "garage",
+        bucket: "war-room-evidence",
+        prefix: "assigned-prefix/",
+        forcePathStyle: true,
+        allowHttp: false,
+        caConfigured: false,
+        caFilePath: null,
+        timeoutMs: DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+        maxUploadBytes: DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES,
+        credentialsMode: "static",
+      },
+    });
+    const json = JSON.stringify(config);
+    expect(json).not.toContain(secret);
+    expect(json).not.toContain(token);
+    expect(json).not.toContain(accessKey);
+    expect(json).not.toContain(credentialFile);
+    expect(json).not.toMatch(/BEGIN CERTIFICATE/);
+  });
+
+  it("fails closed on an impossible S3 size and absolute-timeout pair", () => {
+    const secret = "canarySecretAccessKeyValue!!";
+    const endpoint = "https://s3-canary-host.invalid:8443";
+    const env = {
+      ...database,
+      COLLAB_EVIDENCE_PROVIDER: "s3",
+      COLLAB_EVIDENCE_S3_ENDPOINT: endpoint,
+      COLLAB_EVIDENCE_S3_REGION: "garage",
+      COLLAB_EVIDENCE_S3_BUCKET: "war-room-evidence",
+      COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+      COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: "GKEXAMPLEKEYID0001",
+      COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY: secret,
+      COLLAB_EVIDENCE_S3_TIMEOUT_MS: "30000",
+      COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "31457281",
+    };
+    expect(() => loadRuntimeConfig(env)).toThrow(
+      EVIDENCE_STORAGE_ERRORS.s3UploadTimeout,
+    );
+    try {
+      loadRuntimeConfig(env);
+    } catch (error) {
+      const text = String(error);
+      expect(text).not.toContain(secret);
+      expect(text).not.toContain(endpoint);
+    }
+  });
+
+  it("always populates a provider-neutral maxUploadBytes on Config", () => {
+    const filesystem = loadRuntimeConfig(database);
+    expect(filesystem.evidence.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+    expect(testConfig().evidence.maxUploadBytes).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+    expect(
+      testConfig({
+        evidence: { provider: "filesystem", controlRoot: "/tmp/ev", storage: "sqlite" },
+      }).evidence.maxUploadBytes,
+    ).toBe(DEFAULT_EVIDENCE_MAX_UPLOAD_BYTES);
+  });
+
+  it("accepts COLLAB_EVIDENCE_MAX_UPLOAD_BYTES in filesystem mode", () => {
+    const config = loadRuntimeConfig({
+      ...database,
+      COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: "1048576",
+    });
+    expect(config.evidence).toEqual({
+      provider: "filesystem",
+      controlRoot: ".data/evidence",
+      storage: "postgres",
+      maxUploadBytes: 1_048_576,
+    });
+  });
+
+  it("fails closed on s3 credential load without storing credentials on Config", () => {
+    expect(() =>
+      loadRuntimeConfig({
+        ...database,
+        COLLAB_EVIDENCE_PROVIDER: "s3",
+        COLLAB_EVIDENCE_S3_ENDPOINT: "https://objects.example.test",
+        COLLAB_EVIDENCE_S3_REGION: "garage",
+        COLLAB_EVIDENCE_S3_BUCKET: "war-room-evidence",
+        COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+      }),
+    ).toThrow(/static credentials require an access key id and secret access key/);
   });
 });

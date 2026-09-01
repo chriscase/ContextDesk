@@ -1,0 +1,60 @@
+# ContextDesk S3 evidence evaluation — Garage v2.3.0 (not production).
+#
+# Single-node Garage has no redundancy. Do not reuse this Compose file as a
+# shared War Room store. Credentials are never committed; supply them via the
+# environment or collab/scripts/qualify-s3-evidence.mjs.
+#
+# Opt-in live qualification:
+#   export CONTEXTDESK_RUN_S3_LIVE=1
+#   node collab/scripts/qualify-s3-evidence.mjs
+#
+# S3 API is published on loopback only (127.0.0.1:3900). RPC, admin, and
+# website ports are intentionally unpublished. This is not a retention,
+# migration, or permanent-delete claim.
+
+name: cd-garage-evidence-eval
+
+services:
+  garage:
+    image: dxflrs/garage:v2.3.0
+    pull_policy: missing
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    restart: "no"
+    init: true
+    environment:
+      # Required evaluation-only values. Compose fails closed if unset.
+      GARAGE_DEFAULT_ACCESS_KEY: ${GARAGE_DEFAULT_ACCESS_KEY:?set evaluation-only GARAGE_DEFAULT_ACCESS_KEY}
+      GARAGE_DEFAULT_SECRET_KEY: ${GARAGE_DEFAULT_SECRET_KEY:?set evaluation-only GARAGE_DEFAULT_SECRET_KEY}
+      GARAGE_DEFAULT_BUCKET: ${GARAGE_DEFAULT_BUCKET:-cd-evidence-eval}
+    ports:
+      - "127.0.0.1:3900:3900"
+    volumes:
+      - ${GARAGE_CONFIG_FILE:-./garage-evidence-evaluation/garage.toml}:/etc/garage.toml:ro
+      - garage-evidence-eval-meta:/var/lib/garage/meta
+      - garage-evidence-eval-data:/var/lib/garage/data
+    networks:
+      - garage-evidence-eval
+    healthcheck:
+      # Process/layout health only. The live suite's HeadBucket assertion is
+      # the authoritative S3 readiness proof.
+      test: ["CMD", "/garage", "status"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "2"
+
+networks:
+  garage-evidence-eval:
+    name: cd-garage-evidence-eval
+    driver: bridge
+
+volumes:
+  garage-evidence-eval-meta:
+    name: cd-garage-evidence-eval-meta
+  garage-evidence-eval-data:
+    name: cd-garage-evidence-eval-data

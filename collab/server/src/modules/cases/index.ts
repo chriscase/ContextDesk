@@ -3,6 +3,7 @@ export const MODULE_ID = "cases" as const;
 
 export {
   CaseService,
+  CaseStoreCommitOutcomeUnknownError,
   ContributionConflictError,
   CorpusIntakeConflictError,
   LifecycleActionRequiredError,
