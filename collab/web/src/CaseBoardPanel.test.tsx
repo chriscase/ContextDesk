@@ -691,6 +691,64 @@ describe("CaseBoardPanel", () => {
     expect(screen.queryByRole("button", { name: "Download private.log" })).toBeNull();
   });
 
+  it("hides an already-loaded owner-only preview in the capability-revoke commit", async () => {
+    const artifact = {
+      id: "private-preview",
+      kind: "log",
+      filename: "private-preview.log",
+      contentHash: "a".repeat(64),
+      verificationStatus: "verified",
+      privacyClass: "owner_only",
+      uploaderId: "alice",
+      mediaType: "text/plain",
+      byteLength: 20,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/content")) {
+          return previewResponse({
+            status: 206,
+            headers: { "content-range": "bytes 0-19/20", "content-type": "text/plain" },
+            body: "private preview body",
+          });
+        }
+        if (url.endsWith("/evidence")) return jsonOk({ artifacts: [artifact] });
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+    let visibleDuringRevocationCommit: boolean | undefined;
+    function Host({ canReadPrivate }: { canReadPrivate: boolean }) {
+      return (
+        <div
+          ref={(node) => {
+            if (!canReadPrivate && node) {
+              visibleDuringRevocationCommit = node.textContent?.includes("private preview body") ?? false;
+            }
+          }}
+        >
+          <CaseBoardPanel
+            caseId="case-1"
+            canWrite={false}
+            canLead={false}
+            canReadPrivate={canReadPrivate}
+            readOnly
+          />
+        </div>
+      );
+    }
+    const view = render(<Host canReadPrivate />);
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect log" }));
+    expect(await screen.findByText("private preview body")).toBeTruthy();
+
+    view.rerender(<Host canReadPrivate={false} />);
+    expect(visibleDuringRevocationCommit).toBe(false);
+    expect(screen.queryByText("private preview body")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Hide preview" })).toBeNull();
+  });
+
   it("uploads a sanitized log and freezes a snapshot in one step", async () => {
     stubUploadXhr();
     let snapshotBody: unknown;
@@ -2090,6 +2148,69 @@ describe("upload protocol and selection fencing", () => {
     UploadXHR.pending[0]?.complete(200, uploadSuccessBody("artifact-stale", "case-1"));
     expect(screen.queryByText("Evidence uploaded.")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("clears stale upload focus restoration when an unkeyed host switches investigations", async () => {
+    stubUploadXhr();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/evidence")) return jsonOk({ artifacts: [] });
+        if (url.endsWith("/snapshots")) return jsonOk({ snapshots: [] });
+        return jsonOk({ snapshotId: null, notice: "", findings: [] });
+      }),
+    );
+    const panel = (caseId: string) => (
+      <CaseBoardPanel
+        canReadPrivate
+        caseId={caseId}
+        canWrite
+        canLead={false}
+        readOnly={false}
+      />
+    );
+    let evidenceChanged = 0;
+    let view!: ReturnType<typeof render>;
+    const switchToCaseB = () => {
+      evidenceChanged += 1;
+      view.rerender(panel("case-2"));
+    };
+    window.addEventListener("contextdesk:evidence-changed", switchToCaseB);
+    try {
+      view = render(panel("case-1"));
+      const form = (await screen.findByRole("heading", { name: "Upload evidence" })).closest("form")!;
+      const file = new File(["hello"], "checkout.log", { type: "text/plain" });
+      Object.defineProperty(screen.getByLabelText("File"), "files", {
+        configurable: true,
+        value: [file],
+      });
+      fireEvent.change(screen.getByLabelText("File"));
+      fireEvent.change(screen.getByLabelText("Summary"), {
+        target: { value: "Checkout request log" },
+      });
+      fireEvent.submit(form);
+      await waitFor(() => expect(UploadXHR.pending.length).toBe(1));
+      UploadXHR.pending[0]?.complete(200, uploadSuccessBody("artifact-a", "case-1"));
+      await waitFor(() => expect(evidenceChanged).toBe(1));
+      expect(screen.queryByText("Evidence uploaded.")).toBeNull();
+
+      (document.activeElement as HTMLElement).blur();
+      expect(document.activeElement).toBe(document.body);
+      const caseBForm = screen.getByRole("heading", { name: "Upload evidence" }).closest("form")!;
+      const caseBFile = new File(["hello"], "case-b.log", { type: "text/plain" });
+      Object.defineProperty(screen.getByLabelText("File"), "files", {
+        configurable: true,
+        value: [caseBFile],
+      });
+      fireEvent.change(screen.getByLabelText("File"));
+      fireEvent.submit(caseBForm);
+      const retry = await screen.findByRole("button", { name: "Retry upload" });
+      expect(document.activeElement).toBe(document.body);
+      expect(document.activeElement).not.toBe(retry);
+    } finally {
+      window.removeEventListener("contextdesk:evidence-changed", switchToCaseB);
+    }
   });
 
   it("aborts and ignores late inventory JSON when switching investigations", async () => {

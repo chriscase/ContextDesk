@@ -459,6 +459,7 @@ export function CaseBoardPanel(props: {
   const loadedCaseRef = useRef<string | null>(null);
   const retryButtonRef = useRef<HTMLButtonElement | null>(null);
   const submitButtonRef = useRef<HTMLButtonElement | null>(null);
+  const restoreActionFocusAfterUpload = useRef(false);
   caseIdRef.current = props.caseId;
   const dataMatchesCase = loadedCaseRef.current === props.caseId;
   const currentArtifacts = dataMatchesCase ? artifacts : EMPTY_ARTIFACTS;
@@ -513,9 +514,8 @@ export function CaseBoardPanel(props: {
     freezeAbort.current = null;
     uploadInFlight.current = false;
     freezeInFlight.current = false;
+    restoreActionFocusAfterUpload.current = false;
   }
-
-  const restoreActionFocusAfterUpload = useRef(false);
 
   function restoreActionFocus(): void {
     restoreActionFocusAfterUpload.current = true;
@@ -943,8 +943,8 @@ export function CaseBoardPanel(props: {
         if (!stillThisUpload()) return;
         setError(refreshed ? UNKNOWN_UPLOAD_REFRESHED : UNKNOWN_UPLOAD_REFRESH_FAILED);
         setErrorSource("upload");
-        if (refreshed) announceEvidenceChanged();
         restoreActionFocus();
+        if (refreshed) announceEvidenceChanged();
         return;
       }
       if (!response.ok) {
@@ -974,8 +974,8 @@ export function CaseBoardPanel(props: {
         if (!stillThisUpload()) return;
         setError(refreshed ? UNUSABLE_UPLOAD_RESPONSE : UNUSABLE_UPLOAD_REFRESH_FAILED);
         setErrorSource("upload");
-        if (refreshed) announceEvidenceChanged();
         restoreActionFocus();
+        if (refreshed) announceEvidenceChanged();
         return;
       }
       if (shouldFreeze) {
@@ -1002,8 +1002,8 @@ export function CaseBoardPanel(props: {
           resetUploadForm();
           await load(null, { preserveError: true });
           if (!stillThisUpload()) return;
-          announceEvidenceChanged();
           restoreActionFocus();
+          announceEvidenceChanged();
           return;
         }
         const snapshot = (await snapshotResponse.json()) as SnapshotView;
@@ -1013,21 +1013,21 @@ export function CaseBoardPanel(props: {
         setUploadNotice("Evidence uploaded and a snapshot was frozen.");
         await load(snapshot.id);
         if (!stillThisUpload()) return;
+        restoreActionFocus();
         window.dispatchEvent(
           new CustomEvent("contextdesk:snapshot-frozen", {
             detail: { caseId, snapshotId: snapshot.id },
           }),
         );
         announceEvidenceChanged();
-        restoreActionFocus();
         return;
       }
       resetUploadForm();
       setUploadNotice("Evidence uploaded.");
       await load(null);
       if (!stillThisUpload()) return;
-      announceEvidenceChanged();
       restoreActionFocus();
+      announceEvidenceChanged();
     } catch (cause) {
       if (!stillThisUpload()) return;
       if (isAbortFailure(cause)) {
@@ -1272,7 +1272,7 @@ export function CaseBoardPanel(props: {
                           </span>
                         )}
                       </div>
-                      {inspecting === artifact.id ? (
+                      {canReadArtifact && inspecting === artifact.id ? (
                         inspectUnavailable ? (
                           <p className="case-memory__note">{inspectUnavailable}</p>
                         ) : inspectText !== null ? (
