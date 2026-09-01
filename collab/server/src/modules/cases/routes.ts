@@ -1646,7 +1646,13 @@ export async function registerCaseRoutes(
     return {
       schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
       caseId: id,
-      annotations: await deps.domain.listArtifactAnnotations(id, ctx.actor, ctx.isAdmin),
+      annotations: await deps.domain.listArtifactAnnotations(
+        id,
+        ctx.actor,
+        ctx.isAdmin,
+        undefined,
+        ctx.has("evidence:private:read"),
+      ),
     };
   });
 
@@ -1670,6 +1676,7 @@ export async function registerCaseRoutes(
         ctx.actor,
         ctx.isAdmin,
         params.eid,
+        ctx.has("evidence:private:read"),
       ),
     };
   });

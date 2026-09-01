@@ -216,7 +216,7 @@ describe("cases timeline evidence provenance", () => {
   });
 
   it("appends artifact annotations and serves case- and artifact-scoped lists", async () => {
-    await withApp(async ({ app, audit }) => {
+    await withApp(async ({ app, audit, roles }) => {
       const alice = await login(app, "alice", ALICE);
       const created = parseCase(JSON.parse((await app.inject({
         method: "POST",
@@ -268,7 +268,7 @@ describe("cases timeline evidence provenance", () => {
       });
       expect(byArtifact.statusCode).toBe(200);
       expect(parseArtifactAnnotationList(JSON.parse(byArtifact.body)).annotations.map((item) => item.id).sort()).toEqual(
-        [first.id, second.id].sort(),
+        [second.id],
       );
 
       const byCase = await app.inject({
@@ -278,9 +278,42 @@ describe("cases timeline evidence provenance", () => {
       });
       expect(byCase.statusCode).toBe(200);
       const list = parseArtifactAnnotationList(JSON.parse(byCase.body));
-      expect(list.annotations).toHaveLength(2);
+      expect(list.annotations).toHaveLength(1);
       expect(list.annotations.every((item) => item.caseId === created.id)).toBe(true);
       expect(list.annotations.every((item) => item.artifactId === uploaded.artifact.id)).toBe(true);
+
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const adminList = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: dave },
+      });
+      expect(adminList.statusCode).toBe(200);
+      expect(parseArtifactAnnotationList(JSON.parse(adminList.body)).annotations.map((item) => item.id).sort()).toEqual(
+        [first.id, second.id].sort(),
+      );
+
+      // Private annotation visibility follows the live capability set, so a
+      // role grant reveals the owner-only body and revocation immediately
+      // removes it without changing case membership or stored history.
+      roles.set("cn=contributors,ou=groups,dc=example,dc=test", "case-lead");
+      const elevated = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: alice },
+      });
+      expect(parseArtifactAnnotationList(JSON.parse(elevated.body)).annotations.map((item) => item.id).sort()).toEqual(
+        [first.id, second.id].sort(),
+      );
+      roles.set("cn=contributors,ou=groups,dc=example,dc=test", "contributor");
+      const revoked = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: alice },
+      });
+      expect(parseArtifactAnnotationList(JSON.parse(revoked.body)).annotations.map((item) => item.id)).toEqual(
+        [second.id],
+      );
       expect(await audit.list({ action: "artifact_annotation_create" })).toHaveLength(2);
       const timeline = parseTimeline(JSON.parse((await app.inject({
         method: "GET",

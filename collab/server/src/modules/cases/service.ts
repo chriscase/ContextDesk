@@ -1351,11 +1351,15 @@ export class CaseService {
     actor: Actor,
     isAdmin: boolean,
     artifactId?: string,
+    canReadPrivate = false,
   ): Promise<ArtifactAnnotationV1[]> {
     if (!(await this.getCase(caseId, actor, isAdmin))) return [];
     const annotations = await this.store.listArtifactAnnotationsByCase(caseId);
     return annotations
       .filter((row) => artifactId === undefined || row.artifactId === artifactId)
+      // Annotation privacy follows the same fail-closed rule as private
+      // evidence: case membership alone must not disclose owner-only text.
+      .filter((row) => row.privacyClass !== "owner_only" || canReadPrivate)
       .map((row) => this.toArtifactAnnotation(row));
   }
 
