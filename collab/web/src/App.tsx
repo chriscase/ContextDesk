@@ -22,6 +22,7 @@ import {
   PEOPLE,
   PROFILE,
   SIGN_IN,
+  UI_STRATEGY_POLICY,
   historyUrl,
   isLdapAdminLocation,
   isModelPolicyLocation,
@@ -30,6 +31,7 @@ import {
   isShellLocation,
   isSignInLocation,
   isUnknownLocation,
+  isUiStrategyPolicyLocation,
   isWorkLocation,
   parseHashStage,
   parsePathname,
@@ -43,6 +45,7 @@ import {
 import { Cases } from "./Cases.js";
 import { InvestigationFirst } from "./InvestigationFirst.js";
 import { KeystoneStrategy } from "./investigations/strategies/keystone/index.js";
+import { BeaconStrategy } from "./investigations/strategies/beacon/index.js";
 import { Catalog } from "./Catalog.js";
 import { Entities } from "./Entities.js";
 import { Administration } from "./Administration.js";
@@ -71,6 +74,7 @@ import {
   type UiStrategyDescriptor,
   type UiStrategyId,
 } from "./ui-strategy.js";
+import { useUiStrategyGovernance } from "./useUiStrategyGovernance.js";
 
 interface SessionView {
   identityId: string;
@@ -182,6 +186,11 @@ const INVESTIGATION_STRATEGY_REGISTRATIONS = defineInvestigationStrategyRegistra
     presentationContract: INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT,
     component: KeystoneStrategy,
   },
+  "beacon": {
+    id: "beacon",
+    presentationContract: INVESTIGATION_STRATEGY_PRESENTATION_CONTRACT,
+    component: BeaconStrategy,
+  },
 });
 
 // The stored ids stay stable so existing saved preferences keep resolving;
@@ -215,21 +224,6 @@ function savedTheme(): ThemeName {
   }
 }
 
-const UI_STRATEGY_STORAGE_PREFIX = "cd-ui-strategy:";
-
-function uiStrategyStorageKey(username: string): string {
-  return `${UI_STRATEGY_STORAGE_PREFIX}${encodeURIComponent(username)}`;
-}
-
-function savedUiStrategy(username: string): UiStrategyDescriptor {
-  try {
-    const preferred = window.localStorage?.getItem(uiStrategyStorageKey(username));
-    return resolveUiStrategy({ preferred });
-  } catch {
-    return resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID });
-  }
-}
-
 declare global {
   interface Window {
     __CONTEXTDESK_STATIC_READ_ONLY__?: boolean;
@@ -255,27 +249,56 @@ function AccountMenu(props: {
   onThemeChange: (theme: ThemeName) => void;
   /** Saved personal preference, distinct from a history-scoped handoff. */
   strategy: UiStrategyDescriptor;
+  strategyOptions: readonly UiStrategyDescriptor[];
+  strategyStatus: "idle" | "loading" | "ready" | "saving" | "unavailable" | "conflict";
+  strategyMessage: string;
   temporaryStrategy: UiStrategyDescriptor | null;
-  onStrategyChange: (strategy: UiStrategyId) => void;
+  onStrategyChange: (strategy: UiStrategyId) => Promise<boolean>;
+  onRefreshStrategies: () => void;
   onSignOut: (() => void) | null;
 }) {
   const [open, setOpen] = useState(false);
+  const [draftStrategyId, setDraftStrategyId] = useState<UiStrategyId>(props.strategy.id);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const strategySaveAttemptRef = useRef(0);
+  const strategySaveOwnsFocusRef = useRef(false);
+
+  function closeMenu() {
+    strategySaveOwnsFocusRef.current = false;
+    setOpen(false);
+  }
 
   useEffect(() => {
     if (!open) return undefined;
     const onPointerDown = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) closeMenu();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (
+        strategySaveOwnsFocusRef.current
+        && event.target !== document.body
+      ) {
+        strategySaveOwnsFocusRef.current = false;
+      }
     };
     document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("focusin", onFocusIn);
+    };
   }, [open]);
+
+  useEffect(() => {
+    const draftIsSelectable = props.strategyOptions.some(({ id }) => id === draftStrategyId);
+    if (!open || !draftIsSelectable) setDraftStrategyId(props.strategy.id);
+  }, [draftStrategyId, open, props.strategy.id, props.strategyOptions]);
 
   function onKeyDown(event: React.KeyboardEvent) {
     if (event.key === "Escape" && open) {
       event.stopPropagation();
-      setOpen(false);
+      closeMenu();
       triggerRef.current?.focus();
     }
   }
@@ -288,7 +311,10 @@ function AccountMenu(props: {
         className="account__trigger"
         aria-expanded={open}
         aria-controls="account-panel"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => setOpen((current) => {
+          if (current) strategySaveOwnsFocusRef.current = false;
+          return !current;
+        })}
       >
         <span className="sr-only">Signed in as </span>
         {/* The initial is CSS-generated so the button's text reads exactly
@@ -318,7 +344,7 @@ function AccountMenu(props: {
                 return;
               }
               event.preventDefault();
-              setOpen(false);
+              closeMenu();
               props.onOpenProfile();
             }}
           >
@@ -351,14 +377,15 @@ function AccountMenu(props: {
                 preference remains {props.strategy.name}.
               </p>
             ) : null}
-            {UI_STRATEGIES.map((strategy) => (
+            {props.strategyOptions.map((strategy) => (
               <label key={strategy.id} className="account__strategy-option">
                 <input
                   type="radio"
                   name="ui-strategy"
                   value={strategy.id}
-                  checked={props.strategy.id === strategy.id}
-                  onChange={() => props.onStrategyChange(strategy.id)}
+                  checked={draftStrategyId === strategy.id}
+                  disabled={props.strategyStatus === "saving"}
+                  onChange={() => setDraftStrategyId(strategy.id)}
                 />
                 <span className="account__strategy-preview" data-preview={strategy.previewToken} aria-hidden="true" />
                 <span>
@@ -369,13 +396,52 @@ function AccountMenu(props: {
                 </span>
               </label>
             ))}
+            {props.strategyOptions.length === 0 ? (
+              <p className="account__strategy-note">
+                Personal selection is not available under the current workspace policy.
+              </p>
+            ) : (
+              <button
+                type="button"
+                disabled={draftStrategyId === props.strategy.id || props.strategyStatus !== "ready"}
+                onClick={() => {
+                  const attempt = ++strategySaveAttemptRef.current;
+                  strategySaveOwnsFocusRef.current = true;
+                  void props.onStrategyChange(draftStrategyId).then(() => {
+                    // Saving disables this button while it owns focus. Move
+                    // focus deliberately instead of allowing the browser to
+                    // drop it to <body>. If the user dismissed the chooser or
+                    // moved elsewhere while the request was pending, preserve
+                    // that newer focus intent instead.
+                    if (
+                      strategySaveAttemptRef.current !== attempt
+                      || !strategySaveOwnsFocusRef.current
+                    ) return;
+                    triggerRef.current?.focus();
+                  });
+                }}
+              >
+                {props.strategyStatus === "saving" ? "Saving…" : "Use selected experience"}
+              </button>
+            )}
+            {props.strategyMessage ? (
+              <p
+                className="account__strategy-note"
+                role={props.strategyStatus === "unavailable" || props.strategyStatus === "conflict" ? "alert" : "status"}
+              >
+                {props.strategyMessage}
+                {props.strategyStatus === "conflict" || props.strategyStatus === "unavailable" ? (
+                  <> <button type="button" onClick={props.onRefreshStrategies}>Refresh policy</button></>
+                ) : null}
+              </p>
+            ) : null}
           </fieldset>
           {props.onSignOut ? (
             <button
               className="account__signout"
               type="button"
               onClick={() => {
-                setOpen(false);
+                closeMenu();
                 props.onSignOut?.();
               }}
             >
@@ -424,13 +490,9 @@ export function App() {
   const [ready, setReady] = useState(false);
   const [setupAvailable, setSetupAvailable] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
-  const [preferredUiStrategy, setPreferredUiStrategy] = useState<UiStrategyDescriptor>(() =>
-    resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }),
-  );
   const [transientUiStrategyId, setTransientUiStrategyId] = useState<UiStrategyId | null>(() =>
     historyUiStrategyId(window.history.state),
   );
-  const [uiStrategyOwner, setUiStrategyOwner] = useState<string | null>(null);
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
@@ -457,8 +519,24 @@ export function App() {
   const sessionRef = useRef(session);
   sessionRef.current = session;
   const authorityGenerationRef = useRef(0);
+  const strategyGovernance = useUiStrategyGovernance({
+    identityId: session?.identityId ?? null,
+    authorityGeneration: session?.authorityGeneration ?? 0,
+    enabled: ready && session !== null && !staticReadOnly,
+  });
+  const preferredUiStrategy = resolveUiStrategy({
+    preferred: strategyGovernance.effective.effectiveId,
+    instanceDefault: strategyGovernance.effective.defaultId,
+    allowedIds: strategyGovernance.effective.enabledIds,
+  });
   const uiStrategy = transientUiStrategyId
-    ? resolveUiStrategy({ preferred: transientUiStrategyId })
+    ? resolveUiStrategy({
+        preferred: transientUiStrategyId,
+        instanceDefault: preferredUiStrategy.id,
+        allowedIds: transientUiStrategyId === DEFAULT_UI_STRATEGY_ID
+          ? [DEFAULT_UI_STRATEGY_ID]
+          : strategyGovernance.effective.enabledIds,
+      })
     : preferredUiStrategy;
   // UI strategies are alternate investigation workspaces, not shell themes.
   // Overview and the rest of the application keep the canonical War Room
@@ -482,6 +560,7 @@ export function App() {
       const current = locationRef.current;
       restoreRef.current = isWorkLocation(current) ? current : null;
       setFocusedCaseTitle(null);
+      setTransientUiStrategyId(null);
       setSession(null);
       setSessionIssue(null);
       setReady(true);
@@ -503,32 +582,10 @@ export function App() {
     }
   }, [theme]);
 
-  useEffect(() => {
-    if (!ready) return;
-    if (!session?.username) {
-      setUiStrategyOwner(null);
-      setPreferredUiStrategy(resolveUiStrategy({ preferred: DEFAULT_UI_STRATEGY_ID }));
-      setTransientUiStrategyId(null);
-      return;
-    }
-    const changedAuthenticatedUser = uiStrategyOwner !== null && uiStrategyOwner !== session.username;
-    setUiStrategyOwner(session.username);
-    setPreferredUiStrategy(savedUiStrategy(session.username));
-    if (changedAuthenticatedUser) setTransientUiStrategyId(null);
-  }, [ready, session?.username, uiStrategyOwner]);
-
-  useEffect(() => {
-    if (!session?.username || uiStrategyOwner !== session.username) return;
-    try {
-      window.localStorage?.setItem(uiStrategyStorageKey(session.username), preferredUiStrategy.id);
-    } catch {
-      // A blocked browser store should not prevent the selected surface from working this session.
-    }
-  }, [session?.username, preferredUiStrategy.id, uiStrategyOwner]);
-
   const refresh = useCallback(async () => {
     const res = await fetch("/api/auth/me");
     if (res.status === 503) {
+      setTransientUiStrategyId(null);
       setSession(null);
       setSessionIssue(
         "Your sign-in is valid, but the directory is temporarily unavailable. Try again when the directory connection is restored.",
@@ -537,6 +594,7 @@ export function App() {
       return;
     }
     if (!res.ok) {
+      setTransientUiStrategyId(null);
       setSession(null);
       setSessionIssue(null);
       setReady(true);
@@ -548,9 +606,13 @@ export function App() {
       capabilities?: string[];
     };
     const username = body.identity?.username ?? "";
+    const identityId = body.identity?.id?.trim() || username;
+    if (sessionRef.current && sessionRef.current.identityId !== identityId) {
+      setTransientUiStrategyId(null);
+    }
     authorityGenerationRef.current += 1;
     setSession({
-      identityId: body.identity?.id?.trim() || username,
+      identityId,
       username,
       displayName: body.identity?.displayName?.trim() || username,
       roles: body.roles ?? [],
@@ -717,8 +779,26 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
+  useEffect(() => {
+    if (!session || staticReadOnly || !isWorkLocation(location) || location.area !== "administration") return;
+    const capabilities = sessionCapabilities(session);
+    const canUsers = hasCapability(capabilities, "admin:users");
+    const canSystem = hasCapability(capabilities, "admin:system_config");
+    const systemTab = isModelPolicyLocation(location) || isUiStrategyPolicyLocation(location);
+    const target = systemTab && !canSystem && canUsers
+      ? ADMINISTRATION
+      : !systemTab && !canUsers && canSystem
+        ? UI_STRATEGY_POLICY
+        : null;
+    if (target) {
+      setLocation(target);
+      writeHistory(target, "replace");
+    }
+  }, [location, session, staticReadOnly]);
+
   function logout() {
     restoreRef.current = null;
+    setTransientUiStrategyId(null);
     setSession(null);
     setLocation(SIGN_IN);
     writeHistory(SIGN_IN, "replace");
@@ -754,6 +834,16 @@ export function App() {
   }
 
   function goToArea(area: AreaId) {
+    const navigationCapabilities = session ? sessionCapabilities(session) : [];
+    if (
+      area === "administration"
+      && !staticReadOnly
+      && !hasCapability(navigationCapabilities, "admin:users")
+      && hasCapability(navigationCapabilities, "admin:system_config")
+    ) {
+      guardedNavigate(UI_STRATEGY_POLICY);
+      return;
+    }
     const current = locationRef.current;
     const caseId =
       area === "help" && isWorkLocation(current) ? current.caseId : null;
@@ -827,12 +917,15 @@ export function App() {
 
   const roles = session.roles;
   const capabilities = sessionCapabilities(session);
+  const canReadInvestigations = hasCapability(capabilities, "investigation:read");
   const canWrite = !staticReadOnly && hasCapability(capabilities, "investigation:write");
   const canLeadCatalog =
     !staticReadOnly &&
     (hasCapability(capabilities, "run:strategies") ||
       hasCapability(capabilities, "admin:system_config"));
-  const canAdmin = !staticReadOnly && hasCapability(capabilities, "admin:users");
+  const canAdminUsers = !staticReadOnly && hasCapability(capabilities, "admin:users");
+  const canAdminSystem = !staticReadOnly && hasCapability(capabilities, "admin:system_config");
+  const canAdmin = canAdminUsers || canAdminSystem;
   const work: WorkLocation = isWorkLocation(location) ? location : HOME;
   const inCasesArea = work.area === "overview" || work.area === "investigations";
   const unknown = isUnknownLocation(location);
@@ -869,6 +962,21 @@ export function App() {
     guardedNavigate({ area: "investigations", caseId: null, stage: "situation" });
     setStartSignal((value) => value + 1);
   }
+
+  const requestedAdminTab = isPeopleLocation(work)
+    ? "people"
+    : isLdapAdminLocation(work)
+      ? "ldap"
+      : isModelPolicyLocation(work)
+        ? "model-policy"
+        : isUiStrategyPolicyLocation(work)
+          ? "ui-strategies"
+          : "roles";
+  const authorizedAdminTab = canAdminUsers && canAdminSystem
+    ? requestedAdminTab
+    : canAdminUsers
+      ? (requestedAdminTab === "model-policy" || requestedAdminTab === "ui-strategies" ? "roles" : requestedAdminTab)
+      : (requestedAdminTab === "roles" || requestedAdminTab === "people" || requestedAdminTab === "ldap" ? "ui-strategies" : requestedAdminTab);
 
   return (
     <div className="app">
@@ -935,15 +1043,23 @@ export function App() {
               roles={roles}
               theme={theme}
               strategy={preferredUiStrategy}
+              strategyOptions={UI_STRATEGIES.filter((strategy) =>
+                strategyGovernance.effective.selectableIds.includes(strategy.id))}
+              strategyStatus={strategyGovernance.status}
+              strategyMessage={strategyGovernance.message}
               temporaryStrategy={transientUiStrategyId ? uiStrategy : null}
               profileActive={work.area === "profile"}
               onOpenProfile={() => guardedNavigate(PROFILE)}
               onThemeChange={setTheme}
-              onStrategyChange={(strategyId) => {
-                setPreferredUiStrategy(resolveUiStrategy({ preferred: strategyId }));
-                setTransientUiStrategyId(null);
-                writeHistory(locationRef.current, "replace");
+              onStrategyChange={async (strategyId) => {
+                const saved = await strategyGovernance.savePreference(strategyId);
+                if (saved) {
+                  setTransientUiStrategyId(null);
+                  writeHistory(locationRef.current, "replace");
+                }
+                return saved;
               }}
+              onRefreshStrategies={strategyGovernance.refresh}
               onSignOut={staticReadOnly ? null : () => guardedLogout()}
             />
           </div>
@@ -999,43 +1115,55 @@ export function App() {
                 isInvestigationLocation={inCasesArea}
                 onOpenCreated={openCreatedInvestigation}
               >
-                <WarRoomStrategyContext.Provider value={warRoomBindings}>
-                  <InvestigationStrategyRenderer
-                    strategy={surfaceStrategy}
-                    registrations={INVESTIGATION_STRATEGY_REGISTRATIONS}
-                    view={work.area === "investigations" ? "investigations" : "overview"}
-                    focusCaseId={inCasesArea ? work.caseId : null}
-                    stage={work.stage}
-                    {...(work.focus ? { focus: work.focus } : {})}
-                    startSignal={startSignal}
-                    onOpenCase={(id) =>
-                      navigate({ area: "investigations", caseId: id, stage: "situation" })
-                    }
-                    onNavigateInvestigation={({ investigationId, stage, focus }) =>
-                      navigate({
-                        area: "investigations",
-                        caseId: investigationId,
-                        stage,
-                        ...(focus ? { focus } : {}),
-                      })
-                    }
-                    onExitFocus={() =>
-                      navigate({ area: "investigations", caseId: null, stage: "situation" })
-                    }
-                    onOpenAdvancedTools={(caseId, stage) => {
-                      // Specialist tools remain in the reference War Room. The
-                      // switch is explicit in the button label and preserves the
-                      // canonical case/stage URL and all shared record state.
-                      setTransientUiStrategyId(DEFAULT_UI_STRATEGY_ID);
-                      navigate(
-                        { area: "investigations", caseId, stage },
-                        "push",
-                        DEFAULT_UI_STRATEGY_ID,
-                      );
-                    }}
-                    onFocusedCaseTitle={setFocusedCaseTitle}
-                  />
-                </WarRoomStrategyContext.Provider>
+                {!canReadInvestigations && surfaceStrategy.id === DEFAULT_UI_STRATEGY_ID ? (
+                  <section className="not-found" aria-labelledby="investigations-read-denied-title">
+                    <h2 className="not-found__title" id="investigations-read-denied-title">
+                      Investigations unavailable in this view
+                    </h2>
+                    <p className="not-found__copy" role="status">
+                      Your current account cannot read investigations, so no investigation or
+                      evidence data was requested.
+                    </p>
+                  </section>
+                ) : (
+                  <WarRoomStrategyContext.Provider value={warRoomBindings}>
+                    <InvestigationStrategyRenderer
+                      strategy={surfaceStrategy}
+                      registrations={INVESTIGATION_STRATEGY_REGISTRATIONS}
+                      view={work.area === "investigations" ? "investigations" : "overview"}
+                      focusCaseId={inCasesArea ? work.caseId : null}
+                      stage={work.stage}
+                      {...(work.focus ? { focus: work.focus } : {})}
+                      startSignal={startSignal}
+                      onOpenCase={(id) =>
+                        navigate({ area: "investigations", caseId: id, stage: "situation" })
+                      }
+                      onNavigateInvestigation={({ investigationId, stage, focus }) =>
+                        navigate({
+                          area: "investigations",
+                          caseId: investigationId,
+                          stage,
+                          ...(focus ? { focus } : {}),
+                        })
+                      }
+                      onExitFocus={() =>
+                        navigate({ area: "investigations", caseId: null, stage: "situation" })
+                      }
+                      onOpenAdvancedTools={(caseId, stage) => {
+                        // Specialist tools remain in the reference War Room. The
+                        // switch is explicit in the button label and preserves the
+                        // canonical case/stage URL and all shared record state.
+                        setTransientUiStrategyId(DEFAULT_UI_STRATEGY_ID);
+                        navigate(
+                          { area: "investigations", caseId, stage },
+                          "push",
+                          DEFAULT_UI_STRATEGY_ID,
+                        );
+                      }}
+                      onFocusedCaseTitle={setFocusedCaseTitle}
+                    />
+                  </WarRoomStrategyContext.Provider>
+                )}
               </InvestigationRuntimeProvider>
             </section>
             <section
@@ -1091,15 +1219,9 @@ export function App() {
               canAdmin ? (
                 <section className="app__area" aria-label="Administration">
                   <Administration
-                    tab={
-                      isPeopleLocation(work)
-                        ? "people"
-                        : isLdapAdminLocation(work)
-                          ? "ldap"
-                          : isModelPolicyLocation(work)
-                            ? "model-policy"
-                            : "roles"
-                    }
+                    canManageUsers={canAdminUsers}
+                    canManageSystem={canAdminSystem}
+                    tab={authorizedAdminTab}
                     onSelectTab={(tab) =>
                       guardedNavigate(
                         tab === "people"
@@ -1108,7 +1230,9 @@ export function App() {
                             ? LDAP_ADMIN
                             : tab === "model-policy"
                               ? MODEL_POLICY
-                              : ADMINISTRATION,
+                              : tab === "ui-strategies"
+                                ? UI_STRATEGY_POLICY
+                                : ADMINISTRATION,
                       )
                     }
                   />
@@ -1119,8 +1243,8 @@ export function App() {
                     Administration is unavailable
                   </h2>
                   <p className="not-found__copy" role="status">
-                    Your current account does not include the admin:users capability, so
-                    administration is unavailable. No directory or permission data was requested.
+                    Your current account does not include an administration capability, so
+                    administration is unavailable. No directory, permission, or policy data was requested.
                   </p>
                   <button type="button" className="not-found__home" onClick={() => guardedNavigate(HOME)}>
                     Back to overview

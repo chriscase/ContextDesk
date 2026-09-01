@@ -411,6 +411,17 @@ const STRATEGY_COVERAGE_MANIFEST: Readonly<
     notSharedBecause:
       "The preview uses dedicated Keystone component and browser journeys rather than mounting Keystone in the strategy-neutral component runner; this manifest records both earned claims without calling them shared-runner coverage.",
   },
+  "beacon": {
+    kind: "dedicated-coverage",
+    dedicatedSpecs: [
+      "collab/web/src/investigations/strategies/beacon/BeaconStrategy.test.tsx",
+      "collab/e2e/specs/29-beacon-rapid-intake.spec.ts",
+    ],
+    evidence:
+      "The Beacon pilot has dedicated component and browser coverage for administrator rollout, Overview isolation, denied/no-read zero-call behavior, viewer zero-write behavior, sparse collection and detail states, append-only entry, explicit Situation and cited-hypothesis promotion, evidence attachment, focus return, canonical shell navigation, narrow reflow, forced colors, and reduced motion.",
+    notSharedBecause:
+      "Beacon is held to the shared component profile from its dedicated suite and qualified through a dedicated browser journey; this manifest records the earned coverage without claiming it is mounted by the strategy-neutral runner in this file.",
+  },
   "war-room": {
     kind: "dedicated-coverage",
     dedicatedSpecs: [
@@ -484,7 +495,18 @@ describe("shipped strategy conformance coverage", () => {
 
   it("separates a shared-profile claim from dedicated coverage", () => {
     expect(enrolledIds("shared-conformance")).toEqual(["investigation-first"]);
-    expect(enrolledIds("dedicated-coverage")).toEqual(["keystone", "war-room"]);
+    expect(enrolledIds("dedicated-coverage")).toEqual(["beacon", "keystone", "war-room"]);
+  });
+
+  it("records Beacon's shared component and dedicated browser qualification", () => {
+    const enrollment = dedicatedEnrollment("beacon");
+    expect([...enrollment.dedicatedSpecs]).toEqual([
+      "collab/web/src/investigations/strategies/beacon/BeaconStrategy.test.tsx",
+      "collab/e2e/specs/29-beacon-rapid-intake.spec.ts",
+    ]);
+    expect(repositorySource(enrollment.dedicatedSpecs[0]!)).toContain("runComponentConformance");
+    expect(repositorySource(enrollment.dedicatedSpecs[1]!)).toContain("emits no durable writes");
+    expect(enrollment.notSharedBecause).toContain("dedicated browser journey");
   });
 
   it("records Keystone's shared component-profile suite without claiming browser coverage", () => {

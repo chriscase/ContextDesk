@@ -347,6 +347,27 @@ describe("auth boundary", () => {
 });
 
 describe("authenticated application shell", () => {
+  it("does not mount the War Room data reader while a no-read account's strategy policy resolves", async () => {
+    window.history.replaceState(null, "", "/investigations/00000000-0000-4000-8000-000000000001/situation");
+    let resolvePolicy: ((response: Response) => void) | null = null;
+    const policyResponse = new Promise<Response>((resolve) => { resolvePolicy = resolve; });
+    const fetchStub = stubSignedInFetch({
+      username: "no-read",
+      roles: [],
+      capabilities: [],
+    }, (url) => url === "/api/ui-strategies/effective" ? policyResponse : null);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Investigations unavailable in this view" })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("no investigation or evidence data was requested");
+    const urls = fetchStub.mock.calls.map((call) => String(call[0]));
+    expect(urls).not.toContain("/api/cases");
+    expect(urls.some((url) => url.includes("/timeline"))).toBe(false);
+
+    act(() => resolvePolicy?.(new Response(JSON.stringify({ error: "unavailable" }), { status: 503 })));
+  });
+
   it("shows the War Room title, primary navigation, and start action", async () => {
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
@@ -368,12 +389,12 @@ describe("authenticated application shell", () => {
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
   });
 
-  it("shows Administration only with admin:users and does not fetch protected admin data for direct routes without it", async () => {
+  it("separates user administration from system policy and fetches neither without authority", async () => {
     window.history.replaceState(null, "", "/administration");
     const nonAdminFetch = stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Administration is unavailable" })).toBeTruthy();
-    expect(screen.getByText(/admin:users capability/)).toBeTruthy();
+    expect(screen.getByText(/does not include an administration capability/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
     expect(nonAdminFetch.mock.calls.map((call) => String(call[0]))).not.toContain(
       "/api/authz/group-role-map",
@@ -426,6 +447,124 @@ describe("authenticated application shell", () => {
     render(<App />);
     expect(await screen.findByRole("button", { name: "Administration" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Start investigation" })).toBeNull();
+    cleanup();
+
+    window.history.replaceState(null, "", "/");
+    const systemFetch = stubSignedInFetch({
+      username: "policy-owner",
+      roles: ["viewer"],
+      capabilities: ["investigation:read", "admin:system_config"],
+    }, (url) => {
+      if (url === "/api/admin/ui-strategies") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.ui_strategy_policy.v1",
+            revision: 0,
+            fingerprint: `sha256:${"0".repeat(64)}`,
+            updatedAt: "1970-01-01T00:00:00.000Z",
+            updatedBy: "system-default",
+            instance: {
+              enabledIds: ["war-room", "investigation-first", "keystone"],
+              visibleIds: ["war-room", "investigation-first", "keystone"],
+              defaultId: "war-room",
+              selectionMode: "free",
+              approvedIds: ["war-room", "investigation-first", "keystone"],
+            },
+            roleRules: [],
+          }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Administration" }));
+    expect(await screen.findByRole("heading", { name: "Investigation experiences" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/ui-strategies");
+    expect(systemFetch.mock.calls.map((call) => String(call[0]))).not.toContain(
+      "/api/authz/group-role-map",
+    );
+  });
+
+  it("normalizes a users-only system-policy deep link to the authorized roles surface", async () => {
+    window.history.replaceState(null, "", "/admin/ui-strategies");
+    const usersFetch = stubSignedInFetch({
+      username: "people-owner",
+      roles: ["viewer"],
+      capabilities: ["investigation:read", "admin:users"],
+    }, (url) => {
+      if (url === "/api/authz/group-role-map") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.admin_role_mapping_list.v1",
+            mappings: [],
+            limit: 500,
+            truncated: false,
+          }),
+        } as Response);
+      }
+      return null;
+    });
+
+    render(<App />);
+
+    expect(
+      (await screen.findByRole("tab", { name: "Group role mappings" })).getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(screen.queryByRole("tab", { name: "Investigation experiences" })).toBeNull();
+    await waitFor(() => expect(window.location.pathname).toBe("/administration"));
+    const urls = usersFetch.mock.calls.map((call) => String(call[0]));
+    expect(urls).not.toContain("/api/admin/ui-strategies");
+    expect(urls).not.toContain("/api/admin/model-policy");
+  });
+
+  it("normalizes a system-only people deep link to the authorized strategy-policy surface", async () => {
+    window.history.replaceState(null, "", "/admin/people");
+    const systemFetch = stubSignedInFetch({
+      username: "policy-owner",
+      roles: ["viewer"],
+      capabilities: ["investigation:read", "admin:system_config"],
+    }, (url) => {
+      if (url === "/api/admin/ui-strategies") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.ui_strategy_policy.v1",
+            revision: 0,
+            fingerprint: `sha256:${"0".repeat(64)}`,
+            updatedAt: "1970-01-01T00:00:00.000Z",
+            updatedBy: "system-default",
+            instance: {
+              enabledIds: ["war-room", "investigation-first", "keystone"],
+              visibleIds: ["war-room", "investigation-first", "keystone"],
+              defaultId: "war-room",
+              selectionMode: "free",
+              approvedIds: ["war-room", "investigation-first", "keystone"],
+            },
+            roleRules: [],
+          }),
+        } as Response);
+      }
+      return null;
+    });
+
+    render(<App />);
+
+    expect(
+      (await screen.findByRole("tab", { name: "Investigation experiences" })).getAttribute(
+        "aria-selected",
+      ),
+    ).toBe("true");
+    expect(screen.queryByRole("tab", { name: "People" })).toBeNull();
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/ui-strategies"));
+    const urls = systemFetch.mock.calls.map((call) => String(call[0]));
+    expect(urls).not.toContain("/api/admin/people/search");
+    expect(urls).not.toContain("/api/authz/group-role-map");
+    expect(urls).not.toContain("/api/admin/ldap/config");
   });
 
   it("treats /admin/people as the canonical People location and keeps /administration as the roles alias", async () => {

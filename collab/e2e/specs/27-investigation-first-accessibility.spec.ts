@@ -41,18 +41,60 @@ function strategyRoot(page: Page): Locator {
 
 async function useInvestigationFirst(page: Page): Promise<void> {
   const before = new URL(page.url());
+  const effectiveResponse = await page.request.get("/api/ui-strategies/effective");
+  expect(effectiveResponse.ok(), await effectiveResponse.text()).toBeTruthy();
+  const effective = await effectiveResponse.json() as { effectiveId?: string };
+  const currentName = {
+    "war-room": "War Room",
+    "investigation-first": "Investigation First",
+    keystone: "Keystone",
+    beacon: "Beacon",
+  }[effective.effectiveId ?? ""];
+  expect(currentName, "effective strategy response did not name a shipped strategy").toBeTruthy();
+
+  // The shell resolves the server-backed preference asynchronously after
+  // authentication. Wait for that effective presentation before opening the
+  // chooser; otherwise its intentionally stable draft can capture the
+  // fail-closed War Room default while the shell has already moved on.
+  await expect(page.locator(".topbar__title-app")).toHaveText(currentName!);
   const account = page.getByRole("button", { name: `Signed in as ${FIXTURE_USERS.dave.username}` });
   await account.focus();
   await page.keyboard.press("Enter");
+  await expect(page.getByRole("radio", { name: new RegExp(`^${currentName}\\b`, "u") }))
+    .toBeChecked();
 
   const strategy = page.getByRole("radio", { name: /^Investigation First/ });
-  await strategy.focus();
-  await page.keyboard.press("Space");
-  await expect(strategy).toBeChecked();
-  await expect(page.locator(".topbar__title-app")).toHaveText("Investigation First");
+  if (effective.effectiveId !== "investigation-first") {
+    await strategy.focus();
+    await page.keyboard.press("Space");
+    await expect(strategy).toBeChecked();
 
-  await page.keyboard.press("Escape");
+    // Strategy selection is a draft until the user explicitly saves the
+    // server-backed preference. Exercise that confirmation with the keyboard
+    // so this journey proves the governed interaction instead of only changing
+    // the local radio state.
+    const save = page.getByRole("button", { name: "Use selected experience" });
+    await expect(save).toBeEnabled();
+    await save.focus();
+    await expect(save).toBeFocused();
+    const [saved] = await Promise.all([
+      page.waitForResponse((response) =>
+        response.url().endsWith("/api/ui-strategies/preference")
+        && response.request().method() === "PUT"),
+      page.keyboard.press("Enter"),
+    ]);
+    expect(saved.ok(), await saved.text()).toBeTruthy();
+  } else {
+    // An already-saved preference leaves the chooser open; Escape remains the
+    // keyboard close path and returns focus to its trigger.
+    await page.keyboard.press("Escape");
+  }
+  await expect(page.locator(".topbar__title-app")).toHaveText("Investigation First");
   await expect(account).toBeFocused();
+  if (await account.getAttribute("aria-expanded") === "true") {
+    await page.keyboard.press("Escape");
+  }
+  await expect(account).toHaveAttribute("aria-expanded", "false");
   const after = new URL(page.url());
   expect(after.pathname).toBe(before.pathname);
   expect(after.search).toBe(before.search);

@@ -6,8 +6,8 @@ describe("migration versions", () => {
   // The integration-train migrations remain consecutively ordered: the
   // investigation record graph, the case-bound log corpus, the narrow
   // experiment row-lock privilege, the administrator model-use policy, the
-  // investigation log workbench, and structured investigation context.
-  it("pins the canonical PostgreSQL head at investigation context", () => {
+  // investigation log workbench, structured context, and UI strategy governance.
+  it("pins the canonical PostgreSQL head at UI strategy governance", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -18,7 +18,8 @@ describe("migration versions", () => {
     expect(versions).toContain("021_workbench");
     expect(versions).toContain("022_software_impact");
     expect(versions).toContain("023_investigation_context");
-    expect(latestMigrationVersion()).toBe("023_investigation_context");
+    expect(versions).toContain("024_ui_strategy_governance");
+    expect(latestMigrationVersion()).toBe("024_ui_strategy_governance");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -28,10 +29,10 @@ describe("migration versions", () => {
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
     expect(versions.slice(-4)).toEqual([
-      "020_model_purpose_policy",
       "021_workbench",
       "022_software_impact",
       "023_investigation_context",
+      "024_ui_strategy_governance",
     ]);
   });
 });
@@ -64,6 +65,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("021_workbench");
       expect(up.applied).toContain("022_software_impact");
       expect(up.applied).toContain("023_investigation_context");
+      expect(up.applied).toContain("024_ui_strategy_governance");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -131,6 +133,23 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(contextColumns.rows.map((row) => row.column_name)).toEqual([
         "investigation_context",
       ]);
+      const strategyTables = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename IN ('ui_strategy_policy_state', 'ui_strategy_policy_history',
+                             'ui_strategy_preferences')
+         ORDER BY tablename`,
+      );
+      expect(strategyTables.rows.map((row) => row.tablename)).toEqual([
+        "ui_strategy_policy_history",
+        "ui_strategy_policy_state",
+        "ui_strategy_preferences",
+      ]);
+      expect((await migrateDown(client)).rolledBack).toBe("024_ui_strategy_governance");
+      const strategyTablesAfterRollback = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename LIKE 'ui_strategy_%'`,
+      );
+      expect(strategyTablesAfterRollback.rows).toHaveLength(0);
       // 023 is storage for the case context, then the product migrations
       // unwind before the privilege and record migrations below.
       expect((await migrateDown(client)).rolledBack).toBe("023_investigation_context");
@@ -232,6 +251,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("021_workbench");
       expect(dry.pending).toContain("022_software_impact");
       expect(dry.pending).toContain("023_investigation_context");
+      expect(dry.pending).toContain("024_ui_strategy_governance");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

@@ -19,8 +19,16 @@ async function selectStrategy(page: Page, name: "War Room" | "Keystone"): Promis
   const account = page.getByRole("button", { name: `Signed in as ${FIXTURE_USERS.dave.username}` });
   await account.click();
   const strategy = page.getByRole("radio", { name: new RegExp(`^${name}\\b`, "u") });
-  await strategy.check();
-  await expect(strategy).toBeChecked();
+  if (!(await strategy.isChecked())) {
+    await strategy.check();
+    await expect(strategy).toBeChecked();
+    const save = page.getByRole("button", { name: "Use selected experience" });
+    await save.scrollIntoViewIfNeeded();
+    await save.click();
+  }
+  if (new URL(page.url()).pathname.startsWith("/investigations")) {
+    await expect(page.locator(".topbar__title-app")).toHaveText(name);
+  }
   await page.keyboard.press("Escape");
 }
 

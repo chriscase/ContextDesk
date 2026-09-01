@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CASE_LIST_SCHEMA_ID,
@@ -93,6 +93,24 @@ function runtimeReadResponse(url: string, cases: readonly CaseV1[]): Response | 
   return null;
 }
 
+function strategyEffective(
+  preferredId: "war-room" | "investigation-first" = "war-room",
+  preferenceRevision = preferredId === "war-room" ? 0 : 1,
+): Response {
+  return jsonResponse({
+    schemaId: "cd-collab.ui_strategy_effective.v1",
+    policyRevision: 1,
+    preferenceRevision,
+    preferredId: preferenceRevision === 0 ? null : preferredId,
+    effectiveId: preferredId,
+    defaultId: "war-room",
+    enabledIds: ["war-room", "investigation-first", "keystone"],
+    selectableIds: ["war-room", "investigation-first", "keystone"],
+    canSelect: true,
+    source: preferenceRevision === 0 ? "instance_default" : "user",
+  });
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -104,14 +122,55 @@ afterEach(() => {
 });
 
 describe("strategy selection in the shell", () => {
+  it("reconciles an open selector draft when a policy refresh removes that choice", async () => {
+    let restricted = false;
+    const fetchStub = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
+      if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["contributor"], capabilities: ["investigation:read"] }) };
+      if (url === "/api/ui-strategies/effective") {
+        return restricted ? jsonResponse({
+          schemaId: "cd-collab.ui_strategy_effective.v1",
+          policyRevision: 2,
+          preferenceRevision: 0,
+          preferredId: null,
+          effectiveId: "war-room",
+          defaultId: "war-room",
+          enabledIds: ["war-room"],
+          selectableIds: ["war-room"],
+          canSelect: true,
+          source: "instance_default",
+        }) : strategyEffective();
+      }
+      return runtimeReadResponse(url, []) ?? { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Signed in as Alice" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Investigation First/u }));
+    restricted = true;
+    act(() => window.dispatchEvent(new Event("contextdesk:ui-strategy-policy-changed")));
+
+    await waitFor(() => expect(screen.queryByRole("radio", { name: /Investigation First/u })).toBeNull());
+    expect((screen.getByRole("radio", { name: /War Room/u }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("button", { name: "Use selected experience" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("keeps Overview canonical while applying the selected strategy only to Investigations", async () => {
     if (typeof window.localStorage?.removeItem === "function") {
       window.localStorage.removeItem("cd-ui-strategy:alice");
     }
-    const fetchStub = vi.fn(async (input: RequestInfo, _init?: RequestInit) => {
+    let preferred: "war-room" | "investigation-first" = "war-room";
+    const fetchStub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
       if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["contributor"], capabilities: ["investigation:read", "investigation:write"] }) };
+      if (url === "/api/ui-strategies/effective") return strategyEffective(preferred, preferred === "war-room" ? 0 : 1);
+      if (url === "/api/ui-strategies/preference" && init?.method === "PUT") {
+        preferred = JSON.parse(String(init.body)).strategyId as typeof preferred;
+        return strategyEffective(preferred, 1);
+      }
       const runtime = runtimeReadResponse(url, []);
       if (runtime) return runtime;
       return { ok: false, status: 404, json: async () => ({}) };
@@ -123,9 +182,18 @@ describe("strategy selection in the shell", () => {
     await waitFor(() => {
       expect(fetchStub.mock.calls.filter(([input]) => String(input) === "/api/cases")).toHaveLength(2);
     });
-    fireEvent.click(screen.getByRole("button", { name: /Alice/ }));
+    const account = screen.getByRole("button", { name: /Alice/ });
+    fireEvent.click(account);
     fireEvent.click(screen.getByRole("radio", { name: /Investigation First/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Use selected experience" }));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(account);
+      expect(account.getAttribute("aria-expanded")).toBe("true");
+    });
+    expect(await screen.findByText(/is now your saved investigation experience/u)).toBeTruthy();
     expect(screen.getByText(/This choice applies inside Investigations; Overview remains the War Room activity dashboard\./u)).toBeTruthy();
+    fireEvent.keyDown(account, { key: "Escape" });
+    expect(account.getAttribute("aria-expanded")).toBe("false");
     expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room");
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
@@ -140,7 +208,63 @@ describe("strategy selection in the shell", () => {
     expect(fetchStub.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 
-  it("keeps a shared browser's preferences isolated by authenticated username", async () => {
+  it("does not steal focus when the chooser is dismissed while a preference save is pending", async () => {
+    let finishSave: ((response: Response) => void) | null = null;
+    const fetchStub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
+      if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["contributor"], capabilities: ["investigation:read", "investigation:write"] }) };
+      if (url === "/api/ui-strategies/effective") return strategyEffective();
+      if (url === "/api/ui-strategies/preference" && init?.method === "PUT") {
+        return await new Promise<Response>((resolve) => { finishSave = resolve; });
+      }
+      return runtimeReadResponse(url, []) ?? { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+
+    render(<App />);
+    const account = await screen.findByRole("button", { name: "Signed in as Alice" });
+    fireEvent.click(account);
+    fireEvent.click(screen.getByRole("radio", { name: /Investigation First/u }));
+    fireEvent.click(screen.getByRole("button", { name: "Use selected experience" }));
+    await waitFor(() => expect(finishSave).not.toBeNull());
+
+    const outside = screen.getByRole("button", { name: "Help" });
+    fireEvent.mouseDown(outside);
+    outside.focus();
+    expect(account.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(outside);
+
+    await act(async () => finishSave?.(strategyEffective("investigation-first", 1)));
+    await waitFor(() => expect(document.activeElement).toBe(outside));
+    expect(account.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps a failed preference visible and restores focus while the chooser still owns the interaction", async () => {
+    const fetchStub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
+      if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["contributor"], capabilities: ["investigation:read", "investigation:write"] }) };
+      if (url === "/api/ui-strategies/effective") return strategyEffective();
+      if (url === "/api/ui-strategies/preference" && init?.method === "PUT") {
+        return jsonResponse({ error: "unavailable" }, 503);
+      }
+      return runtimeReadResponse(url, []) ?? { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+
+    render(<App />);
+    const account = await screen.findByRole("button", { name: "Signed in as Alice" });
+    fireEvent.click(account);
+    fireEvent.click(screen.getByRole("radio", { name: /Investigation First/u }));
+    fireEvent.click(screen.getByRole("button", { name: "Use selected experience" }));
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(/preference was not confirmed/u);
+    expect(account.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(account);
+  });
+
+  it("keeps a shared browser's server preferences isolated by immutable authenticated identity", async () => {
     const values = new Map<string, string>();
     const storage: Storage = {
       get length() { return values.size; },
@@ -158,6 +282,9 @@ describe("strategy selection in the shell", () => {
       const url = String(input);
       if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
       if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username, displayName: username }, roles: ["contributor"], capabilities: ["investigation:read", "investigation:write"] }) };
+      if (url === "/api/ui-strategies/effective") {
+        return strategyEffective(username === "alice" ? "investigation-first" : "war-room", 1);
+      }
       const runtime = runtimeReadResponse(url, []);
       if (runtime) return runtime;
       return { ok: false, status: 404, json: async () => ({}) };
@@ -194,14 +321,16 @@ describe("strategy selection in the shell", () => {
     window.localStorage.setItem("cd-ui-strategy:alice", "investigation-first");
     window.history.replaceState(null, "", `/investigations/${caseId}`);
     const focusedInvestigation = investigation(caseId, "Checkout pauses", "open", "high");
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+    const fetchStub = vi.fn(async (input: RequestInfo) => {
       const url = String(input);
       if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
       if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["case-lead"], capabilities: ["investigation:read", "investigation:write", "run:strategies"] }) };
+      if (url === "/api/ui-strategies/effective") return strategyEffective("investigation-first", 1);
       const runtime = runtimeReadResponse(url, [focusedInvestigation]);
       if (runtime) return runtime;
       return { ok: false, status: 404, json: async () => ({}) };
-    }));
+    });
+    vi.stubGlobal("fetch", fetchStub);
 
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Checkout pauses" })).toBeTruthy();
@@ -245,16 +374,20 @@ describe("strategy selection in the shell", () => {
       `/investigations/${caseId}/analyze`,
     );
     const focusedInvestigation = investigation(caseId, "Reloaded technical review");
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+    const fetchStub = vi.fn(async (input: RequestInfo) => {
       const url = String(input);
       if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
       if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["case-lead"], capabilities: ["investigation:read", "run:strategies"] }) };
+      if (url === "/api/ui-strategies/effective") return strategyEffective("investigation-first", 1);
       const runtime = runtimeReadResponse(url, [focusedInvestigation]);
       if (runtime) return runtime;
       return { ok: false, status: 404, json: async () => ({}) };
-    }));
+    });
+    vi.stubGlobal("fetch", fetchStub);
 
     render(<App />);
+    await waitFor(() => expect(fetchStub.mock.calls.some(([input]) => String(input) === "/api/ui-strategies/effective")).toBe(true));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
     await waitFor(() => expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room"));
     expect(window.location.pathname).toBe(`/investigations/${caseId}/analyze`);
     expect(window.localStorage.getItem("cd-ui-strategy:alice")).toBe("investigation-first");
@@ -279,6 +412,7 @@ describe("strategy selection in the shell", () => {
       const url = String(input);
       if (url === "/api/setup/status") return { ok: false, status: 404, json: async () => ({}) };
       if (url === "/api/auth/me") return { ok: true, json: async () => ({ identity: { username: "alice", displayName: "Alice" }, roles: ["case-lead"], capabilities: ["investigation:read", "decision:accept"] }) };
+      if (url === "/api/ui-strategies/effective") return strategyEffective("investigation-first", 1);
       const runtime = runtimeReadResponse(url, [focusedInvestigation]);
       if (runtime) return runtime;
       return { ok: false, status: 404, json: async () => ({}) };

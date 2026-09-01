@@ -1,0 +1,342 @@
+.beacon {
+  --beacon-line: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.beacon .strategy-kit__hero {
+  background:
+    radial-gradient(circle at 8% 25%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 26%),
+    linear-gradient(125deg, var(--surface), var(--surface-deep));
+}
+
+.beacon__browse-grid,
+.beacon__detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(18rem, 0.95fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.beacon__detail-grid {
+  grid-template-columns: minmax(0, 1.45fr) minmax(19rem, 0.75fr);
+}
+
+.beacon__primary,
+.beacon__side {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.beacon__create-form,
+.beacon__advanced-grid,
+.beacon__upload {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.beacon__field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.beacon__field--wide {
+  grid-column: 1 / -1;
+}
+
+.beacon__field input,
+.beacon__field select,
+.beacon__field textarea,
+.beacon__search input {
+  min-width: 0;
+  width: 100%;
+  padding: 0.62rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  font: inherit;
+}
+
+.beacon__field textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.beacon__advanced {
+  padding: 0.75rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+}
+
+.beacon__advanced summary {
+  cursor: pointer;
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.beacon__advanced-grid {
+  margin-top: 0.8rem;
+}
+
+.beacon__submit {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.beacon__submit span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.beacon__search {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.85rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.beacon__case-list,
+.beacon__evidence-list,
+.beacon__stream {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.beacon__case-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.beacon__case-list button {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  width: 100%;
+  text-align: left;
+}
+
+.beacon__case-list button > span:first-child,
+.beacon__case-state {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.beacon__case-list strong,
+.beacon__case-list small {
+  overflow-wrap: anywhere;
+}
+
+.beacon__case-list small,
+.beacon__stream footer,
+.beacon__stream time,
+.beacon__evidence-list small {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.beacon__case-state {
+  justify-items: end;
+  flex: 0 0 auto;
+}
+
+.beacon__entry-form {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.3fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding: 0.9rem;
+  border: 1px solid var(--beacon-line);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-deep));
+}
+
+.beacon__entry-form > button,
+.beacon__entry-form > .strategy-kit__notice {
+  grid-column: 1 / -1;
+}
+
+.beacon__stream {
+  position: relative;
+  display: grid;
+  gap: 0;
+  padding-inline-start: 0.5rem;
+}
+
+.beacon__stream::before {
+  position: absolute;
+  inset-block: 0.75rem;
+  inset-inline-start: 0.85rem;
+  width: 2px;
+  background: var(--beacon-line);
+  content: "";
+}
+
+.beacon__stream li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  gap: 0.75rem;
+  padding-block: 0.55rem;
+}
+
+.beacon__stream-marker {
+  z-index: 1;
+  width: 0.72rem;
+  height: 0.72rem;
+  margin-top: 0.38rem;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.beacon__stream article {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.beacon__stream header,
+.beacon__evidence-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.beacon__stream p {
+  margin: 0.65rem 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.beacon__evidence-list {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.8rem;
+}
+
+.beacon__evidence-list li {
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+}
+
+.beacon__evidence-list li > span:first-child {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.beacon__evidence-list strong,
+.beacon__evidence-list small {
+  overflow-wrap: anywhere;
+}
+
+.beacon__upload {
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+.beacon__upload > button,
+.beacon__upload > .strategy-kit__notice {
+  grid-column: 1 / -1;
+}
+
+.beacon__facts {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+}
+
+.beacon__facts div {
+  display: grid;
+  gap: 0.2rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.beacon__facts dt {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.beacon__facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.beacon__promote-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.beacon__promote-grid section {
+  display: grid;
+  gap: 0.65rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.beacon__promote-grid h4,
+.beacon__promote-grid p {
+  margin: 0;
+}
+
+.beacon__promote-grid p {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 860px) {
+  .beacon__browse-grid,
+  .beacon__detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .beacon__create-form,
+  .beacon__advanced-grid,
+  .beacon__upload,
+  .beacon__entry-form {
+    grid-template-columns: 1fr;
+  }
+
+  .beacon__case-list button,
+  .beacon__stream header,
+  .beacon__evidence-list li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .beacon__case-state {
+    justify-items: start;
+  }
+}
+
+@media (forced-colors: active) {
+  .beacon__stream::before {
+    background: CanvasText;
+  }
+
+  .beacon__stream-marker {
+    border-color: CanvasText;
+    background: Canvas;
+  }
+}

@@ -129,6 +129,21 @@ export const MODEL_POLICY: WorkLocation = {
   },
 };
 
+/** Canonical administrator UI-strategy rollout policy tab. */
+export const UI_STRATEGY_POLICY_SECTION = "ui-strategies";
+export const UI_STRATEGY_POLICY: WorkLocation = {
+  area: "administration",
+  caseId: null,
+  stage: "situation",
+  focus: {
+    section: UI_STRATEGY_POLICY_SECTION,
+    item: null,
+    itemKind: null,
+    lane: null,
+    experiment: null,
+  },
+};
+
 export const SIGN_IN: SignInLocation = { kind: "sign-in" };
 
 export const DISCUSSION_SECTION = "discussion";
@@ -168,6 +183,14 @@ export function isModelPolicyLocation(value: unknown): value is WorkLocation {
     isWorkLocation(value)
     && value.area === "administration"
     && value.focus?.section === MODEL_POLICY_SECTION
+  );
+}
+
+export function isUiStrategyPolicyLocation(value: unknown): value is WorkLocation {
+  return (
+    isWorkLocation(value)
+    && value.area === "administration"
+    && value.focus?.section === UI_STRATEGY_POLICY_SECTION
   );
 }
 
@@ -380,6 +403,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/admin/model-policy") {
     return { ...MODEL_POLICY };
   }
+  if (path === "/admin/ui-strategies") {
+    return { ...UI_STRATEGY_POLICY };
+  }
   if (path === "/administration") {
     return { ...ADMINISTRATION };
   }
@@ -423,6 +449,8 @@ export function areaPathFor(location: WorkLocation): string {
   if (location.area === "administration") {
     if (isPeopleLocation(location)) return "/admin/people";
     if (isLdapAdminLocation(location)) return "/admin/ldap";
+    if (isModelPolicyLocation(location)) return "/admin/model-policy";
+    if (isUiStrategyPolicyLocation(location)) return "/admin/ui-strategies";
     return "/administration";
   }
   return "/investigations";
@@ -496,6 +524,8 @@ export function titleFor(
           ? `Directory · Administration · ${shellTitle}`
           : isModelPolicyLocation(location)
             ? `Model use · Administration · ${shellTitle}`
+            : isUiStrategyPolicyLocation(location)
+              ? `Investigation experiences · Administration · ${shellTitle}`
           : `Administration · ${shellTitle}`;
   }
   if (location.area === "investigations" && location.caseId) {

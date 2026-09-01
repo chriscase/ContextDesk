@@ -295,3 +295,39 @@ describe("Administration Directory tab", () => {
     expect(document.getElementById("administration-roles-panel")?.hasAttribute("hidden")).toBe(true);
   });
 });
+
+describe("Administration capability split", () => {
+  it("shows only system policy tabs and requests no people or role data for a system-only admin", async () => {
+    const fetchStub = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("/api/admin/ui-strategies");
+      return response({
+        schemaId: "cd-collab.ui_strategy_policy.v1",
+        revision: 0,
+        fingerprint: `sha256:${"0".repeat(64)}`,
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        updatedBy: "system-default",
+        instance: {
+          enabledIds: ["war-room", "investigation-first", "keystone"],
+          visibleIds: ["war-room", "investigation-first", "keystone"],
+          defaultId: "war-room",
+          selectionMode: "free",
+          approvedIds: ["war-room", "investigation-first", "keystone"],
+        },
+        roleRules: [],
+      });
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    render(<Administration tab="ui-strategies" canManageUsers={false} canManageSystem />);
+    expect(await screen.findByRole("heading", { name: "Investigation experiences" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "People" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Group role mappings" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Model use" })).toBeTruthy();
+    const requestedUrls = fetchStub.mock.calls.map((call) => String(call[0]));
+    expect(requestedUrls).toContain("/api/admin/ui-strategies");
+    expect(requestedUrls.some((url) => (
+      url.includes("/api/authz/group-role-map") ||
+      url.includes("/api/admin/directory/") ||
+      url.includes("/api/admin/users")
+    ))).toBe(false);
+  });
+});

@@ -33,6 +33,10 @@ import { MemoryExperimentStore, type ExperimentStore } from "../modules/experime
 import { MemoryTriageJobStore, type TriageJobStore } from "../modules/triage-runs/index.js";
 import { MemoryModelPurposePolicyStore, type ModelPurposePolicyStore } from "../modules/model-policy/index.js";
 import {
+  MemoryStrategyGovernanceStore,
+  type StrategyGovernanceStore,
+} from "../modules/strategy-governance/index.js";
+import {
   MemoryPortableApplyStateStore,
   type PortableApplyStateStore,
 } from "../modules/portable-investigations/index.js";
@@ -139,6 +143,8 @@ function methodNames(store: object): string[] {
 
 export class SqliteState {
   readonly db: DatabaseSync;
+  private serializedTail: Promise<void> = Promise.resolve();
+  private readonly serializedScope = new AsyncLocalStorage<boolean>();
 
   constructor(readonly path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -181,28 +187,45 @@ export class SqliteState {
     ).run(key, JSON.stringify(encode(value)), new Date().toISOString());
   }
 
+  /**
+   * One re-entrant process boundary protects the SQLite document and its
+   * in-memory mirrors. Awaiting domain work must not let another request write
+   * state that a later rollback can erase.
+   */
+  async serialized<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.serializedScope.getStore()) return operation();
+    const current = this.serializedTail.then(
+      () => this.serializedScope.run(true, operation),
+      () => this.serializedScope.run(true, operation),
+    );
+    this.serializedTail = current.then(() => undefined, () => undefined);
+    return current;
+  }
+
   async transaction<T>(
     stores: readonly { key: string; store: object }[],
     operation: () => Promise<T>,
     shouldPersist: (result: T) => boolean = () => true,
   ): Promise<T> {
-    const snapshots = stores.map(({ store }) => decode(encode(storeState(store))));
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = await operation();
-      if (shouldPersist(result)) {
-        for (const { key, store } of stores) this.write(key, storeState(store));
-      }
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
+    return this.serialized(async () => {
+      const snapshots = stores.map(({ store }) => decode(encode(storeState(store))));
+      this.db.exec("BEGIN IMMEDIATE");
       try {
-        this.db.exec("ROLLBACK");
-      } finally {
-        stores.forEach(({ store }, index) => restoreStore(store, snapshots[index]));
+        const result = await operation();
+        if (shouldPersist(result)) {
+          for (const { key, store } of stores) this.write(key, storeState(store));
+        }
+        this.db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          this.db.exec("ROLLBACK");
+        } finally {
+          stores.forEach(({ store }, index) => restoreStore(store, snapshots[index]));
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   close(): void {
@@ -225,9 +248,11 @@ function persistentMemoryStore<T extends object>(
     // await Promise.resolve(...) or restore receives a Promise and throws
     // DataCloneError without rolling the SQLite document back.
     Reflect.set(store, name, async (...args: unknown[]) => {
-      const result = await Reflect.apply(original, store, args);
-      if (mutatingMethods.has(name)) state.write(key, storeState(store));
-      return result;
+      return state.serialized(async () => {
+        const result = await Reflect.apply(original, store, args);
+        if (mutatingMethods.has(name)) state.write(key, storeState(store));
+        return result;
+      });
     });
   }
   return store;
@@ -288,6 +313,7 @@ export interface SqliteRuntime {
   experiments: ExperimentStore;
   jobs: TriageJobStore;
   modelPolicy: ModelPurposePolicyStore;
+  strategyGovernance: StrategyGovernanceStore;
   applyState: PortableApplyStateStore;
   profiles: UserProfileStore;
   grants: LocalGrantStore;
@@ -305,6 +331,21 @@ export function createSqliteRuntime(
   const state = new SqliteState(path);
   const rawAudit = new MemoryAuditStore();
   const audit = persistentMemoryStore(state, "audit", rawAudit, new Set(["append", "restore"]));
+  const rawStrategyGovernance: MemoryStrategyGovernanceStore =
+    new MemoryStrategyGovernanceStore((operation) =>
+      state.transaction(
+        [
+          { key: "audit", store: rawAudit },
+          { key: "ui_strategy_governance", store: rawStrategyGovernance },
+        ],
+        operation,
+      ));
+  const strategyGovernance = persistentMemoryStore(
+    state,
+    "ui_strategy_governance",
+    rawStrategyGovernance,
+    new Set(["savePolicy", "savePreference", "restore"]),
+  );
   const rawCatalog = new MemoryCatalogStore();
   const catalog = persistentMemoryStore(
     state,
@@ -448,6 +489,7 @@ export function createSqliteRuntime(
     experiments,
     jobs,
     modelPolicy,
+    strategyGovernance,
     applyState,
     profiles,
     grants,
