@@ -1806,6 +1806,7 @@ describe("artifact annotation runtime seam", () => {
         privacyClass: "owner_only",
         clientTime: "2026-02-03T20:21:00.000Z",
         sourceId: "source-human-note",
+        idempotencyKey: "annotation-runtime-1",
       },
       options(),
     )).resolves.toEqual({ ok: true, value: created });
@@ -1824,6 +1825,7 @@ describe("artifact annotation runtime seam", () => {
       privacyClass: "owner_only",
       clientTime: "2026-02-03T20:21:00.000Z",
       sourceId: "source-human-note",
+      idempotencyKey: "annotation-runtime-1",
     });
   });
 

@@ -231,6 +231,14 @@ export class ContributionConflictError extends Error {
   }
 }
 
+/** Reusing an annotation retry token with different content is a conflict. */
+export class ArtifactAnnotationConflictError extends Error {
+  constructor() {
+    super("artifact annotation conflict");
+    this.name = "ArtifactAnnotationConflictError";
+  }
+}
+
 async function settleEvidenceAfterCaseTransactionFailure(
   error: unknown,
   evidenceBatch: EvidenceWriteBatch | null,
@@ -537,6 +545,22 @@ function contributionWriteDigest(input: {
         sourceId: input.sourceId,
       }),
     )
+    .digest("hex");
+}
+
+function artifactAnnotationWriteDigest(input: {
+  artifactId: string;
+  body: string;
+  privacyClass: PrivacyClass;
+  sourceId: string;
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      artifactId: input.artifactId,
+      body: input.body,
+      privacyClass: input.privacyClass,
+      sourceId: input.sourceId,
+    }))
     .digest("hex");
 }
 
@@ -1372,6 +1396,7 @@ export class CaseService {
       privacyClass?: PrivacyClass;
       clientTime?: string;
       sourceId?: string;
+      idempotencyKey?: string;
     },
     origin: string,
   ): Promise<ArtifactAnnotationV1> {
@@ -1385,6 +1410,31 @@ export class CaseService {
       const artifact = await this.store.getArtifact(artifactId);
       if (!artifact || artifact.caseId !== caseId) throw new Error("evidence not found");
       const sourceId = await this.resolveSourceId(actor, input.sourceId);
+      const idempotencyKey = input.idempotencyKey;
+      const digest = artifactAnnotationWriteDigest({
+        artifactId,
+        body: input.body,
+        privacyClass: privacy,
+        sourceId,
+      });
+      if (idempotencyKey !== undefined) {
+        if (!isContributionIdempotencyKey(idempotencyKey)) {
+          throw new Error("invalid artifact annotation idempotency key");
+        }
+        await this.store.lockArtifactAnnotationIdempotency(caseId, actor.id, idempotencyKey);
+        const existing = await this.store.getArtifactAnnotationIdempotency(
+          caseId,
+          actor.id,
+          idempotencyKey,
+        );
+        if (existing) {
+          if (existing.requestDigest !== digest) throw new ArtifactAnnotationConflictError();
+          const replay = (await this.store.listArtifactAnnotationsByCase(caseId))
+            .find((row) => row.id === existing.annotationId);
+          if (!replay || replay.artifactId !== artifactId) throw new Error("evidence annotation not found");
+          return this.toArtifactAnnotation(replay);
+        }
+      }
       const row: ArtifactAnnotationRow = {
         id: randomUUID(),
         caseId,
@@ -1400,6 +1450,16 @@ export class CaseService {
         sourceId,
       };
       await this.store.insertArtifactAnnotation(row);
+      if (idempotencyKey !== undefined) {
+        await this.store.insertArtifactAnnotationIdempotency({
+          caseId,
+          actorId: actor.id,
+          idempotencyKey,
+          requestDigest: digest,
+          annotationId: row.id,
+          createdAt: row.createdAt,
+        });
+      }
       await this.store.appendTimeline(caseId, {
         kind: "artifact_annotation_created",
         actor,

@@ -40,6 +40,7 @@ import {
 import {
   CaseStoreCommitOutcomeUnknownError,
   ContributionConflictError,
+  ArtifactAnnotationConflictError,
   LifecycleActionRequiredError,
   LifecycleChangedError,
   LifecycleRefusedError,
@@ -182,6 +183,10 @@ function domainError(
     return err.currentRevision === undefined
       ? { error: "contribution_conflict" }
       : { error: "contribution_conflict", currentRevision: err.currentRevision };
+  }
+  if (err instanceof ArtifactAnnotationConflictError) {
+    void reply.code(409);
+    return { error: "artifact_annotation_conflict" };
   }
   if (err instanceof CaseStoreCommitOutcomeUnknownError) {
     void reply.code(503);
@@ -1721,6 +1726,14 @@ export async function registerCaseRoutes(
       void reply.code(400);
       return { error: "sourceId must be a string" };
     }
+    const idempotencyKey = body.idempotencyKey;
+    if (
+      idempotencyKey !== undefined
+      && (typeof idempotencyKey !== "string" || !isContributionIdempotencyKey(idempotencyKey))
+    ) {
+      void reply.code(400);
+      return { error: "invalid artifact annotation idempotency key" };
+    }
     try {
       return await deps.domain.addArtifactAnnotation(
         params.id,
@@ -1731,6 +1744,7 @@ export async function registerCaseRoutes(
           ...(privacy === undefined ? {} : { privacyClass: privacy as PrivacyClass }),
           ...(suppliedClientTime.value === undefined ? {} : { clientTime: suppliedClientTime.value }),
           ...(sourceId === undefined ? {} : { sourceId }),
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         },
         request.ip,
       );

@@ -12,6 +12,7 @@ import { InvestigationFirst } from "./InvestigationFirst.js";
 import {
   InvestigationRuntimeProvider,
   type InvestigationRuntimeIdentity,
+  type ArtifactAnnotationV1,
 } from "./investigations/runtime/public.js";
 import {
   createDeferred,
@@ -47,6 +48,23 @@ const CONTRIBUTOR_CAPABILITIES = [
 function makeLifecycle(investigation: CaseV1): InvestigationLifecycleV1 {
   const template = investigation.status === "archived" ? makeRestoreAllowedLifecycle() : makeArchiveAllowedLifecycle();
   return { ...template, investigationId: investigation.id, status: investigation.status };
+}
+
+function makeArtifactAnnotation(overrides: Partial<ArtifactAnnotationV1> = {}): ArtifactAnnotationV1 {
+  return {
+    schemaId: "cd-collab.artifact_annotation.v1",
+    id: "annotation-fixture-1",
+    caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+    artifactId: RUNTIME_FIXTURE_IDS.evidence,
+    body: "The request ID appears in the captured gateway log.",
+    contentHash: "sha256:annotation-fixture",
+    privacyClass: "share_safe",
+    authorId: "alice",
+    authorUsername: "alice",
+    createdAt: "2026-02-03T20:21:00.000Z",
+    sourceId: "source-human-note",
+    ...overrides,
+  };
 }
 
 const shellDefaults: InvestigationStrategyShellProps = {
@@ -394,6 +412,51 @@ describe("Investigation First Runtime V1 presentation", () => {
     const heading = await screen.findByRole("heading", { name: "Untitled investigation" });
     await waitFor(() => expect(onFocusedCaseTitle).toHaveBeenLastCalledWith("Untitled investigation"));
     expect(document.activeElement).toBe(heading);
+  });
+
+  it("shows durable artifact notes and submits a stable retry token", async () => {
+    const existing = makeArtifactAnnotation();
+    const created = makeArtifactAnnotation({ id: "annotation-created", body: "A second corroborating observation." });
+    const createArtifactAnnotation = vi.fn(async (
+      _caseId: string,
+      _artifactId: string,
+      input: { body: string; idempotencyKey?: string },
+    ) => gatewayOk({ ...created, body: input.body }));
+    const gateway = createInvestigationGatewayDouble({
+      listArtifactAnnotations: vi.fn(async () => gatewayOk<readonly ArtifactAnnotationV1[]>([existing])),
+      createArtifactAnnotation,
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    expect((await screen.findAllByText(existing.body)).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByText("Add a note"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Annotation for this evidence" }), {
+      target: { value: created.body },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    await waitFor(() => expect(createArtifactAnnotation).toHaveBeenCalledTimes(1));
+    const call = createArtifactAnnotation.mock.calls[0];
+    expect(call?.[0]).toBe(RUNTIME_FIXTURE_IDS.populatedCase);
+    expect(call?.[1]).toBe(RUNTIME_FIXTURE_IDS.evidence);
+    expect(call?.[2]).toEqual(expect.objectContaining({ body: created.body }));
+    expect(call?.[2].idempotencyKey).toMatch(/^annotation-/u);
+    expect(await screen.findByText("Note saved to this evidence.")).toBeTruthy();
+  });
+
+  it("keeps artifact annotation editing out of viewer and read-only views", async () => {
+    const gateway = createInvestigationGatewayDouble({
+      listArtifactAnnotations: vi.fn(async () => gatewayOk<readonly ArtifactAnnotationV1[]>([])),
+      createArtifactAnnotation: vi.fn(),
+    });
+    renderStrategy({
+      gateway,
+      capabilities: ["investigation:read"],
+      readOnly: true,
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByText("checkout-timeout.log");
+    expect(screen.queryByRole("button", { name: "Add a note" })).toBeNull();
+    expect(screen.getAllByText("Annotations are read-only in this view.").length).toBeGreaterThan(0);
+    expect(gateway.createArtifactAnnotation).not.toHaveBeenCalled();
   });
 
   it("keeps evidence visible when annotations fail independently", async () => {

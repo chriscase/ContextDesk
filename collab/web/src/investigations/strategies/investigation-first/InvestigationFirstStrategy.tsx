@@ -3,11 +3,13 @@ import {
   selectEvidenceInventory,
   selectResourceView,
   useInvestigationRuntime,
+  type ArtifactAnnotationV1,
   type CaseV1,
   type LifecycleAction,
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
+import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
@@ -210,6 +212,19 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const investigations = selectResourceView(runtime.resources.investigations);
   const investigation = selectResourceView(runtime.resources.investigation);
   const evidenceInventory = selectEvidenceInventory(runtime.resources.evidence, runtime.resources.contributions);
+  const artifactAnnotationView = selectResourceView(runtime.resources.artifactAnnotations);
+  const artifactAnnotations = artifactAnnotationView.availability === "available"
+    ? artifactAnnotationView.value
+    : [];
+  const artifactAnnotationsByEvidence = useMemo(() => {
+    const byEvidence = new Map<string, ArtifactAnnotationV1[]>();
+    for (const annotation of artifactAnnotations) {
+      const current = byEvidence.get(annotation.artifactId);
+      if (current) current.push(annotation);
+      else byEvidence.set(annotation.artifactId, [annotation]);
+    }
+    return byEvidence;
+  }, [artifactAnnotations]);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedEvidence, setSelectedEvidence] = useState<readonly string[]>([]);
@@ -221,6 +236,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const [privacyClass, setPrivacyClass] = useState<UploadPrivacyClass>(
     runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe",
   );
+  const [annotationMutationArtifactId, setAnnotationMutationArtifactId] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const browseHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -294,6 +310,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   }, [runtime.capabilities.canReadPrivate]);
   useEffect(() => setSelectedEvidence([]), [props.focusCaseId]);
   useEffect(() => setPreviewArtifactId(null), [props.focusCaseId]);
+  useEffect(() => setAnnotationMutationArtifactId(null), [props.focusCaseId]);
   useEffect(() => {
     const available = new Set(evidenceSelectionKey ? evidenceSelectionKey.split("\u0000") : []);
     setSelectedEvidence((current) => {
@@ -344,6 +361,13 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       form.reset();
       setPrivacyClass(runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe");
     }
+  }
+
+  async function createArtifactAnnotation(draft: ArtifactAnnotationDraft): Promise<unknown> {
+    const command = runtime.commands.createArtifactAnnotation;
+    if (command === null) return { status: "ignored", reason: "not_ready" };
+    setAnnotationMutationArtifactId(draft.artifactId);
+    return command(draft);
   }
 
   function togglePreview(artifactId: string) {
@@ -404,35 +428,48 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
 
   function renderEvidence() {
     const inventory = evidenceInventory.inventory;
-    const annotations = evidenceInventory.annotations;
+    const summaryAnnotations = evidenceInventory.annotations;
     const upload = runtime.mutations.uploadEvidence;
     const uploadCommand = runtime.commands.uploadEvidence;
     const previewState = runtime.evidencePreview.state;
     const busy = inventory.availability === "loading"
       || (inventory.availability === "available" && inventory.refresh === "loading")
-      || annotations.availability === "loading"
-      || (annotations.availability === "available" && annotations.refresh === "loading")
+      || artifactAnnotationView.availability === "loading"
+      || (artifactAnnotationView.availability === "available" && artifactAnnotationView.refresh === "loading")
       || upload.status === "running";
     const evidenceCountLabel = inventory.availability === "available"
       ? `${inventory.value.length} ${inventory.value.length === 1 ? "item" : "items"}`
       : inventory.availability === "unavailable"
         ? "Count unavailable"
         : "Counting evidence…";
-    const annotationsPending = annotations.availability === "idle"
-      || annotations.availability === "loading";
+    const annotationsPending = summaryAnnotations.availability === "idle"
+      || summaryAnnotations.availability === "loading"
+      || artifactAnnotationView.availability === "idle"
+      || artifactAnnotationView.availability === "loading";
+    const annotationMutation = runtime.mutations.createArtifactAnnotation;
+    const annotationCommand = runtime.commands.createArtifactAnnotation;
+    const annotationHistoryReady = artifactAnnotationView.availability === "available"
+      && artifactAnnotationView.refresh !== "failed";
     return <section className="investigation-first__card investigation-first__evidence" aria-labelledby="investigation-first-evidence-title" aria-busy={busy}>
       <div className="investigation-first__card-heading"><div><h3 id="investigation-first-evidence-title">Evidence inventory</h3><p>Files and references stay governed by the shared evidence and permission boundary.</p></div><span aria-live="polite">{evidenceCountLabel}</span></div>
       {inventory.availability === "idle" || inventory.availability === "loading" ? <p className="investigation-first__muted" role="status">Loading evidence inventory…</p> : null}
       {inventory.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(inventory.error, "evidence")}</p><button type="button" onClick={runtime.refresh.evidence}>Retry evidence inventory</button></div> : null}
       {inventory.availability === "available" && inventory.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(inventory.refreshError, "evidence")}</p><button type="button" onClick={runtime.refresh.evidence}>Retry evidence inventory</button></div> : null}
       {annotationsPending ? <p className="investigation-first__muted" role="status">Loading evidence annotations…</p> : null}
-      {annotations.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(annotations.error, "annotations")}</p><button type="button" onClick={runtime.refresh.contributions}>Retry evidence annotations</button></div> : null}
-      {annotations.availability === "available" && annotations.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(annotations.refreshError, "annotations")}</p><button type="button" onClick={runtime.refresh.contributions}>Retry evidence annotations</button></div> : null}
+      {summaryAnnotations.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(summaryAnnotations.error, "annotations")}</p><button type="button" onClick={runtime.refresh.contributions}>Retry evidence annotations</button></div> : null}
+      {summaryAnnotations.availability === "available" && summaryAnnotations.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(summaryAnnotations.refreshError, "annotations")}</p><button type="button" onClick={runtime.refresh.contributions}>Retry evidence annotations</button></div> : null}
+      {artifactAnnotationView.availability === "unavailable" ? <div className="investigation-first__error" role="status"><p>{failureCopy(artifactAnnotationView.error, "annotations")}</p><button type="button" onClick={runtime.refresh.artifactAnnotations}>Retry evidence annotations</button></div> : null}
+      {artifactAnnotationView.availability === "available" && artifactAnnotationView.refresh === "failed" ? <div className="investigation-first__error" role="status"><p>{failureCopy(artifactAnnotationView.refreshError, "annotations")}</p><button type="button" onClick={runtime.refresh.artifactAnnotations}>Retry evidence annotations</button></div> : null}
       {inventory.availability === "available" && inventory.value.length === 0 ? <p className="investigation-first__muted">No evidence has been registered yet.</p> : null}
       {inventory.availability === "available" && inventory.value.length > 0 ? (
         <ul className="investigation-first__evidence-list">
           {inventory.value.map(({ evidence, annotation }) => {
-            const annotationFallback = annotationsPending ? "Annotation loading…" : "Annotation not available";
+            const linkedAnnotations = artifactAnnotationsByEvidence.get(evidence.id) ?? [];
+            const latestArtifactAnnotation = linkedAnnotations[linkedAnnotations.length - 1] ?? null;
+            const annotationFallback = annotationsPending
+              ? "Annotation loading…"
+              : "Annotation not available";
+            const annotationText = latestArtifactAnnotation?.body ?? annotation?.body ?? annotationFallback;
             const size = compactByteLabel(evidence.byteLength);
             const evidenceName = evidence.filename || evidence.uri || "Unnamed evidence";
             const canReadArtifact = evidence.privacyClass !== "owner_only" || runtime.capabilities.canReadPrivate;
@@ -457,13 +494,26 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
                         <span>{display(evidence.verificationStatus)}</span>
                       </span>
                     </span>
-                    <small>{annotation?.body || annotationFallback}</small>
+                    <small>{annotationText}</small>
                   </span>
                 </label>
                 <details>
                   <summary>More details<span className="sr-only"> about {evidenceName}</span></summary>
-                  <dl className="investigation-first__evidence-meta"><div className="investigation-first__evidence-annotation"><dt>Annotation</dt><dd>{annotation?.body || annotationFallback}</dd></div><div><dt>Kind</dt><dd>{display(evidence.kind)}</dd></div><div><dt>Media type</dt><dd>{display(evidence.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(evidence.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(evidence.privacyClass)}</dd></div><div><dt>Content hash</dt><dd>{display(evidence.contentHash)}</dd></div><div><dt>Expected hash</dt><dd>{display(evidence.expectedHash)}</dd></div><div><dt>Size</dt><dd>{evidence.byteLength == null ? "Not recorded" : `${evidence.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(evidence.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(evidence.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(evidence.relativePath)}</dd></div><div><dt>Intake batch</dt><dd>{display(evidence.intakeBatchId)}</dd></div><div><dt>Annotation author</dt><dd>{annotation ? display(annotation.authorUsername) : annotationFallback}</dd></div><div><dt>Annotated</dt><dd>{annotation ? dateLabel(annotation.createdAt) : annotationFallback}</dd></div></dl>
+                  <dl className="investigation-first__evidence-meta"><div className="investigation-first__evidence-annotation"><dt>Latest note</dt><dd>{annotationText}</dd></div><div><dt>Kind</dt><dd>{display(evidence.kind)}</dd></div><div><dt>Media type</dt><dd>{display(evidence.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(evidence.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(evidence.privacyClass)}</dd></div><div><dt>Content hash</dt><dd>{display(evidence.contentHash)}</dd></div><div><dt>Expected hash</dt><dd>{display(evidence.expectedHash)}</dd></div><div><dt>Size</dt><dd>{evidence.byteLength == null ? "Not recorded" : `${evidence.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(evidence.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(evidence.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(evidence.relativePath)}</dd></div><div><dt>Intake batch</dt><dd>{display(evidence.intakeBatchId)}</dd></div><div><dt>Notes</dt><dd>{linkedAnnotations.length ? `${linkedAnnotations.length} durable ${linkedAnnotations.length === 1 ? "note" : "notes"}` : "None recorded"}</dd></div><div><dt>Annotation author</dt><dd>{latestArtifactAnnotation ? display(latestArtifactAnnotation.authorUsername) : annotation ? display(annotation.authorUsername) : annotationFallback}</dd></div><div><dt>Annotated</dt><dd>{latestArtifactAnnotation ? dateLabel(latestArtifactAnnotation.createdAt) : annotation ? dateLabel(annotation.createdAt) : annotationFallback}</dd></div></dl>
                 </details>
+                <ArtifactAnnotationPanel
+                  artifactId={evidence.id}
+                  annotations={linkedAnnotations}
+                  canAnnotate={annotationCommand !== null && annotationHistoryReady}
+                  canReadPrivate={runtime.capabilities.canReadPrivate}
+                  readOnly={!runtime.capabilities.canContribute}
+                  mutationStatus={annotationMutation.status}
+                  mutationArtifactId={annotationMutationArtifactId}
+                  mutationError={annotationMutation.status === "failed" ? failureCopy(annotationMutation.error, "annotations") : null}
+                  retryBlocked={annotationMutation.status === "failed" && annotationMutation.error.kind === "unavailable" && annotationMutation.error.reason === "commit_outcome_unknown"}
+                  onRefresh={runtime.refresh.artifactAnnotations}
+                  onCreate={createArtifactAnnotation}
+                />
                 <div className="investigation-first__evidence-preview-tools">
                   {canPreview ? <button type="button" aria-expanded={previewArtifactId === evidence.id} onClick={() => togglePreview(evidence.id)}>{previewArtifactId === evidence.id ? "Hide preview" : "Preview"}</button> : null}
                   {previewArtifactId === evidence.id && previewState.status === "running" ? <span role="status">Loading preview…</span> : null}

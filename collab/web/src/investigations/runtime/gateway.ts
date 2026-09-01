@@ -147,6 +147,8 @@ export interface CreateArtifactAnnotationInput {
   readonly privacyClass?: PrivacyClass;
   readonly clientTime?: string;
   readonly sourceId?: string;
+  /** Stable caller-generated token used to replay an uncertain commit safely. */
+  readonly idempotencyKey?: string;
 }
 
 /** The optional annotation transport is resolved as one fail-closed seam. */
@@ -380,6 +382,7 @@ function createArtifactAnnotationBody(
   if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
   if (input.clientTime !== undefined) body.clientTime = input.clientTime;
   if (input.sourceId !== undefined) body.sourceId = input.sourceId;
+  if (input.idempotencyKey !== undefined) body.idempotencyKey = input.idempotencyKey;
   return body;
 }
 

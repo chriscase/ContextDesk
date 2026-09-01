@@ -204,6 +204,11 @@ behavior:
 - preview readable evidence through the optional bounded preview seam; and
 - create one typed contribution, optionally citing artifact or contribution
   identities when its kind is `hypothesis`;
+- list and append typed artifact annotations through the optional evidence
+  workspace seam. Annotation creates carry a caller-generated idempotency key;
+  the server binds that key to the actor, case, artifact, privacy, source, and
+  body digest inside the same transaction, so a lost acknowledgement can be
+  retried without duplicating a note or accepting a changed payload;
 - update the active investigation's Situation using its parsed
   `situationVersion` as the required optimistic-concurrency token;
 - inspect and invoke archive/restore through the shared lifecycle authority.

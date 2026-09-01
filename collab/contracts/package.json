@@ -28,6 +28,10 @@
       "types": "./dist/evidence-storage-status.d.ts",
       "import": "./dist/evidence-storage-status.js"
     },
+    "./evidence-annotations": {
+      "types": "./dist/evidence-annotations.d.ts",
+      "import": "./dist/evidence-annotations.js"
+    },
     "./model-purpose-policy-shared": {
       "types": "./dist/model-purpose-policy-shared.d.ts",
       "import": "./dist/model-purpose-policy-shared.js"

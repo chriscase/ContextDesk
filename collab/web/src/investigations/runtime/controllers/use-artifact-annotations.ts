@@ -169,6 +169,7 @@ export interface CreateArtifactAnnotationCommand {
   readonly privacyClass?: "owner_only" | "share_safe";
   readonly clientTime?: string;
   readonly sourceId?: string;
+  readonly idempotencyKey?: string;
 }
 
 export interface UseCreateArtifactAnnotationOptions {
@@ -296,6 +297,7 @@ export function useCreateArtifactAnnotation(
         privacyClass?: "owner_only" | "share_safe";
         clientTime?: string;
         sourceId?: string;
+        idempotencyKey?: string;
       };
       try {
         input = {
@@ -303,6 +305,7 @@ export function useCreateArtifactAnnotation(
           ...(command.privacyClass === undefined ? {} : { privacyClass: command.privacyClass }),
           ...(command.clientTime === undefined ? {} : { clientTime: command.clientTime }),
           ...(command.sourceId === undefined ? {} : { sourceId: command.sourceId }),
+          ...(command.idempotencyKey === undefined ? {} : { idempotencyKey: command.idempotencyKey }),
         };
       } catch {
         return unexpected();

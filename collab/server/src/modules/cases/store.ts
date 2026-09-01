@@ -142,6 +142,16 @@ export interface ArtifactAnnotationRow {
   sourceId: string;
 }
 
+/** Insert-only intent record used to make annotation retries replay-safe. */
+export interface ArtifactAnnotationWriteIntent {
+  caseId: string;
+  actorId: string;
+  idempotencyKey: string;
+  requestDigest: string;
+  annotationId: string;
+  createdAt: string;
+}
+
 export interface IntakeBatchRow {
   id: string;
   caseId: string;
@@ -386,6 +396,13 @@ export interface CaseStore {
   listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   insertArtifact(row: ArtifactRow): Promise<void>;
   insertArtifactAnnotation(row: ArtifactAnnotationRow): Promise<void>;
+  lockArtifactAnnotationIdempotency(caseId: string, actorId: string, key: string): Promise<void>;
+  getArtifactAnnotationIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ArtifactAnnotationWriteIntent | null>;
+  insertArtifactAnnotationIdempotency(row: ArtifactAnnotationWriteIntent): Promise<void>;
   withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T>;
   lockIntakeIdempotency(caseId: string, key: string): Promise<void>;
   lockEvidenceDigest(digest: string): Promise<void>;
@@ -431,6 +448,7 @@ export class MemoryCaseStore implements CaseStore {
   private readonly revisions = new Map<string, RevisionRow[]>();
   private readonly artifacts = new Map<string, ArtifactRow>();
   private readonly artifactAnnotations = new Map<string, ArtifactAnnotationRow>();
+  private readonly artifactAnnotationIntents = new Map<string, ArtifactAnnotationWriteIntent>();
   private readonly snapshots = new Map<string, SnapshotRow>();
   private readonly intakeBatches = new Map<string, IntakeBatchRow>();
   private readonly contributionIntents = new Map<string, ContributionWriteIntent>();
@@ -448,6 +466,7 @@ export class MemoryCaseStore implements CaseStore {
       revisions: [...this.revisions.entries()],
       artifacts: [...this.artifacts.entries()],
       artifactAnnotations: [...this.artifactAnnotations.entries()],
+      artifactAnnotationIntents: [...this.artifactAnnotationIntents.entries()],
       snapshots: [...this.snapshots.entries()],
       intakeBatches: [...this.intakeBatches.entries()],
       contributionIntents: [...this.contributionIntents.entries()],
@@ -461,6 +480,7 @@ export class MemoryCaseStore implements CaseStore {
       revisions: [string, RevisionRow[]][];
       artifacts: [string, ArtifactRow][];
       artifactAnnotations?: [string, ArtifactAnnotationRow][];
+      artifactAnnotationIntents?: [string, ArtifactAnnotationWriteIntent][];
       snapshots: [string, SnapshotRow][];
       intakeBatches: [string, IntakeBatchRow][];
       contributionIntents?: [string, ContributionWriteIntent][];
@@ -470,6 +490,7 @@ export class MemoryCaseStore implements CaseStore {
     this.revisions.clear();
     this.artifacts.clear();
     this.artifactAnnotations.clear();
+    this.artifactAnnotationIntents.clear();
     this.snapshots.clear();
     this.intakeBatches.clear();
     this.contributionIntents.clear();
@@ -478,6 +499,7 @@ export class MemoryCaseStore implements CaseStore {
     for (const [id, value] of row.revisions) this.revisions.set(id, value);
     for (const [id, value] of row.artifacts) this.artifacts.set(id, value);
     for (const [id, value] of row.artifactAnnotations ?? []) this.artifactAnnotations.set(id, value);
+    for (const [id, value] of row.artifactAnnotationIntents ?? []) this.artifactAnnotationIntents.set(id, value);
     for (const [id, value] of row.snapshots) this.snapshots.set(id, value);
     for (const [id, value] of row.intakeBatches) this.intakeBatches.set(id, value);
     for (const [id, value] of row.contributionIntents ?? []) this.contributionIntents.set(id, value);
@@ -791,6 +813,26 @@ export class MemoryCaseStore implements CaseStore {
       throw new Error("artifact annotation already exists");
     }
     this.artifactAnnotations.set(row.id, { ...row });
+  }
+
+  async lockArtifactAnnotationIdempotency(_caseId: string, _actorId: string, _key: string): Promise<void> {
+    // Memory transactions are serialized by atomicBoundary.
+  }
+
+  async getArtifactAnnotationIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ArtifactAnnotationWriteIntent | null> {
+    return this.artifactAnnotationIntents.get(artifactAnnotationIntentKey(caseId, actorId, key)) ?? null;
+  }
+
+  async insertArtifactAnnotationIdempotency(row: ArtifactAnnotationWriteIntent): Promise<void> {
+    const key = artifactAnnotationIntentKey(row.caseId, row.actorId, row.idempotencyKey);
+    if (this.artifactAnnotationIntents.has(key)) {
+      throw new Error("artifact annotation idempotency key already exists");
+    }
+    this.artifactAnnotationIntents.set(key, { ...row });
   }
 
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
@@ -1456,6 +1498,44 @@ export class PgCaseStore implements CaseStore {
     );
   }
 
+  async lockArtifactAnnotationIdempotency(caseId: string, actorId: string, key: string): Promise<void> {
+    await this.db.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`artifact-annotation:${caseId}:${actorId}:${key}`],
+    );
+  }
+
+  async getArtifactAnnotationIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ArtifactAnnotationWriteIntent | null> {
+    const result = await this.db.query(
+      `SELECT case_id, actor_id, idempotency_key, request_digest, annotation_id, created_at
+       FROM artifact_annotation_write_intents
+       WHERE case_id = $1 AND actor_id = $2 AND idempotency_key = $3`,
+      [caseId, actorId, key],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asArtifactAnnotationWriteIntent(row) : null;
+  }
+
+  async insertArtifactAnnotationIdempotency(row: ArtifactAnnotationWriteIntent): Promise<void> {
+    await this.db.query(
+      `INSERT INTO artifact_annotation_write_intents (
+         case_id, actor_id, idempotency_key, request_digest, annotation_id, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        row.caseId,
+        row.actorId,
+        row.idempotencyKey,
+        row.requestDigest,
+        row.annotationId,
+        row.createdAt,
+      ],
+    );
+  }
+
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
     if (audit && (!(audit instanceof PgAuditStore) || !audit.isBoundTo(this.pool))) {
       throw new Error("PostgreSQL case and audit stores must share one connection source");
@@ -1694,6 +1774,10 @@ function contributionIntentKey(caseId: string, actorId: string, key: string): st
   return `${caseId}\0${actorId}\0${key}`;
 }
 
+function artifactAnnotationIntentKey(caseId: string, actorId: string, key: string): string {
+  return `${caseId}\0${actorId}\0${key}`;
+}
+
 function asContributionWriteIntent(row: Record<string, unknown>): ContributionWriteIntent {
   return {
     caseId: String(row.case_id),
@@ -1701,6 +1785,17 @@ function asContributionWriteIntent(row: Record<string, unknown>): ContributionWr
     idempotencyKey: String(row.idempotency_key),
     requestDigest: String(row.request_digest),
     contributionId: String(row.contribution_id),
+    createdAt: asIso(row.created_at),
+  };
+}
+
+function asArtifactAnnotationWriteIntent(row: Record<string, unknown>): ArtifactAnnotationWriteIntent {
+  return {
+    caseId: String(row.case_id),
+    actorId: String(row.actor_id),
+    idempotencyKey: String(row.idempotency_key),
+    requestDigest: String(row.request_digest),
+    annotationId: String(row.annotation_id),
     createdAt: asIso(row.created_at),
   };
 }

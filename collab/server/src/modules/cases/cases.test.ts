@@ -244,10 +244,35 @@ describe("cases timeline evidence provenance", () => {
         payload: {
           body: "The timeout begins after the retry boundary.",
           clientTime: "2026-09-01T11:00:00Z",
+          idempotencyKey: "annotation-retry-1",
         },
       });
       expect(firstResponse.statusCode).toBe(200);
       const first = parseArtifactAnnotation(JSON.parse(firstResponse.body));
+
+      const replayResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "The timeout begins after the retry boundary.",
+          clientTime: "2026-09-01T11:05:00Z",
+          idempotencyKey: "annotation-retry-1",
+        },
+      });
+      expect(replayResponse.statusCode).toBe(200);
+      expect(parseArtifactAnnotation(JSON.parse(replayResponse.body)).id).toBe(first.id);
+      const mismatchResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "A different note must not reuse the retry token.",
+          idempotencyKey: "annotation-retry-1",
+        },
+      });
+      expect(mismatchResponse.statusCode).toBe(409);
+      expect(JSON.parse(mismatchResponse.body)).toEqual({ error: "artifact_annotation_conflict" });
 
       const second = parseArtifactAnnotation(JSON.parse((await app.inject({
         method: "POST",
