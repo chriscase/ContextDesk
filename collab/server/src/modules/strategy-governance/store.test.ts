@@ -39,6 +39,21 @@ describe("PgStrategyGovernanceStore transaction faults", () => {
     expect(client.release.mock.calls[0]?.[0]).toBeInstanceOf(Error);
   });
 
+  it("discards a client that cannot confirm rollback", async () => {
+    const failure = new Error("mutation failed");
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "ROLLBACK") throw new Error("connection lost during rollback");
+        return { rows: [], rowCount: 0 };
+      }),
+      release: vi.fn(),
+    };
+    const store = new PgStrategyGovernanceStore(poolWithClient(client as unknown as PoolClient));
+    await expect(store.withAtomic(async () => { throw failure; })).rejects.toBe(failure);
+    expect(client.release).toHaveBeenCalledTimes(1);
+    expect(client.release.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+  });
+
   it("rejects malformed persisted PostgreSQL preference rows", async () => {
     const pool = {
       query: vi.fn(async () => ({

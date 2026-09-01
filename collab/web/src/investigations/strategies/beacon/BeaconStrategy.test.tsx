@@ -40,14 +40,18 @@ function mount(options: {
   readonly gateway?: InvestigationGateway;
   readonly shell?: Partial<InvestigationStrategyShellProps>;
   readonly capabilities?: readonly string[];
+  readonly identity?: InvestigationRuntimeIdentity;
 } = {}) {
   const gateway = options.gateway ?? createInvestigationGatewayDouble();
   const shell = { ...SHELL, ...options.shell };
-  const tree = (capabilities: readonly string[]) => (
+  const tree = (
+    capabilities: readonly string[],
+    identity: InvestigationRuntimeIdentity = options.identity ?? ALICE,
+  ) => (
     <InvestigationRuntimeGatewayHarness gateway={gateway}>
       <InvestigationRuntimeProvider
-        identityKey={ALICE.id}
-        identity={ALICE}
+        identityKey={identity.id}
+        identity={identity}
         authorityKey="alice-authority"
         capabilities={capabilities}
         readOnly={false}
@@ -65,6 +69,8 @@ function mount(options: {
     gateway,
     shell,
     rerenderCapabilities: (capabilities: readonly string[]) => view.rerender(tree(capabilities)),
+    rerenderIdentity: (identity: InvestigationRuntimeIdentity) =>
+      view.rerender(tree(options.capabilities ?? ["investigation:read", "investigation:write", "run:strategies"], identity)),
   };
 }
 
@@ -166,7 +172,9 @@ describe("Beacon rapid-intake strategy", () => {
   });
 
   it("drops an owner-only upload draft when private-read authority is removed", async () => {
+    const gateway = createInvestigationGatewayDouble();
     const { rerenderCapabilities } = mount({
+      gateway,
       capabilities: ["investigation:read", "investigation:write", "evidence:private:read"],
       shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
     });
@@ -175,6 +183,27 @@ describe("Beacon rapid-intake strategy", () => {
     rerenderCapabilities(["investigation:read", "investigation:write"]);
     await waitFor(() => expect(privacy.value).toBe("share_safe"));
     expect(screen.queryByRole("option", { name: "Owner only" })).toBeNull();
+    const file = new File(["private draft"], "authority-change.log", { type: "text/plain" });
+    const fileInput = screen.getByLabelText(/File \(up to/u) as HTMLInputElement;
+    Object.defineProperty(fileInput, "files", { configurable: true, value: [file] });
+    fireEvent.change(fileInput);
+    fireEvent.change(screen.getByRole("textbox", { name: "Why does this matter?" }), { target: { value: "Captured before authority changed." } });
+    fireEvent.submit(screen.getByRole("button", { name: "Attach evidence" }).closest("form")!);
+    await waitFor(() => expect(gateway.uploadEvidence).toHaveBeenCalledTimes(1));
+    expect(gateway.uploadEvidence).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      expect.objectContaining({ privacyClass: "share_safe" }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("clears browser-local intake drafts when the authenticated identity changes", async () => {
+    const { rerenderIdentity } = mount();
+    const title = await screen.findByRole("textbox", { name: "Investigation title" }) as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "Alice's unfinished signal" } });
+    expect(title.value).toBe("Alice's unfinished signal");
+    rerenderIdentity({ id: "bob", username: "bob", displayName: "Bob Singh" });
+    await waitFor(() => expect((screen.getByRole("textbox", { name: "Investigation title" }) as HTMLInputElement).value).toBe(""));
   });
 
   it("focuses a truthful, non-busy denied detail without issuing a read", async () => {

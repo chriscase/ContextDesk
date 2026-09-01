@@ -92,6 +92,30 @@ describe.skipIf(!adminUrl())("PgStrategyGovernanceStore", () => {
     });
   });
 
+  it("fails closed when a persisted PostgreSQL policy fingerprint is corrupted", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url });
+      try {
+        const service = new StrategyGovernanceService({
+          store: new PgStrategyGovernanceStore(pool),
+          audit: new PgAuditStore(pool),
+        });
+        await service.updatePolicy(policyUpdate, "local:admin", "test");
+        await pool.query(
+          `UPDATE ui_strategy_policy_state
+           SET policy = jsonb_set(policy, '{fingerprint}', to_jsonb($1::text))`,
+          [`sha256:${"0".repeat(64)}`],
+        );
+        await expect(service.loadPolicy()).rejects.toThrow(/fingerprint/u);
+        await expect(service.effective("local:alice", ["contributor"]))
+          .rejects.toThrow(/fingerprint/u);
+      } finally {
+        await pool.end();
+      }
+    });
+  });
+
   it("refuses an audit store bound to a different pool", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);

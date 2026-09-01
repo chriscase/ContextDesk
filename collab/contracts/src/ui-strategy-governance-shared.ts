@@ -180,6 +180,9 @@ export function parseUiStrategyPolicy(raw: unknown): UiStrategyGovernancePolicyV
   checkObject("$", policyShape, raw);
   const value = raw as UiStrategyGovernancePolicyV1;
   if (!/^sha256:[a-f0-9]{64}$/u.test(value.fingerprint)) throw new Error("strategy policy fingerprint is invalid");
+  if (Number.isNaN(Date.parse(value.updatedAt)) || new Date(value.updatedAt).toISOString() !== value.updatedAt) {
+    throw new Error("strategy policy updatedAt must be a canonical ISO timestamp");
+  }
   return { schemaId: UI_STRATEGY_POLICY_SCHEMA_ID, revision: value.revision, fingerprint: value.fingerprint,
     updatedAt: value.updatedAt, updatedBy: value.updatedBy, ...parsePolicyBody(raw) };
 }

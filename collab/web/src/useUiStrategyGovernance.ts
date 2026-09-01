@@ -51,6 +51,7 @@ export function useUiStrategyGovernance(input: {
   const [generation, setGeneration] = useState(0);
   const requestRef = useRef(0);
   const activeRequestRef = useRef<AbortController | null>(null);
+  const reconciliationNoticeRef = useRef("");
   const latestRef = useRef(input);
   latestRef.current = input;
 
@@ -61,6 +62,7 @@ export function useUiStrategyGovernance(input: {
     const controller = new AbortController();
     activeRequestRef.current = controller;
     if (!input.enabled || !input.identityId) {
+      reconciliationNoticeRef.current = "";
       setEffective(SAFE_EFFECTIVE);
       setStatus("idle");
       setMessage("");
@@ -71,7 +73,7 @@ export function useUiStrategyGovernance(input: {
     }
     setEffective(SAFE_EFFECTIVE);
     setStatus("loading");
-    setMessage("Loading the workspace investigation-experience policy…");
+    setMessage(reconciliationNoticeRef.current || "Loading the workspace investigation-experience policy…");
     void protectedApiFetch("/api/ui-strategies/effective", { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`policy request failed:${response.status}`);
@@ -83,7 +85,9 @@ export function useUiStrategyGovernance(input: {
         if (latest.identityId !== input.identityId || latest.authorityGeneration !== input.authorityGeneration) return;
         setEffective(loaded);
         setStatus("ready");
-        setMessage("");
+        const reconciled = reconciliationNoticeRef.current;
+        reconciliationNoticeRef.current = "";
+        setMessage(reconciled ? `${reconciled} Current policy is loaded.` : "");
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted || requestRef.current !== requestId) return;
@@ -136,7 +140,8 @@ export function useUiStrategyGovernance(input: {
       if (response.status === 409) {
         setEffective(SAFE_EFFECTIVE);
         setStatus("conflict");
-        setMessage("The workspace policy or your preference changed. War Room is active while current authority is reloaded.");
+        reconciliationNoticeRef.current = "Your preference was not saved because the workspace policy or your saved choice changed.";
+        setMessage(`${reconciliationNoticeRef.current} War Room is active while current authority is reloaded.`);
         setGeneration((value) => value + 1);
         return false;
       }
@@ -150,7 +155,8 @@ export function useUiStrategyGovernance(input: {
       if (requestRef.current !== requestId) return false;
       setEffective(SAFE_EFFECTIVE);
       setStatus("unavailable");
-      setMessage("Your preference was not confirmed. War Room is active while current authority is reloaded.");
+      reconciliationNoticeRef.current = "Your preference was not confirmed.";
+      setMessage(`${reconciliationNoticeRef.current} War Room is active while current authority is reloaded.`);
       setGeneration((value) => value + 1);
       return false;
     } finally {

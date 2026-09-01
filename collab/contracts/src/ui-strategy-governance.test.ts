@@ -18,6 +18,8 @@ describe("UI strategy governance contracts", () => {
     expect(policy.instance.enabledIds).toContain("war-room");
     expect(() => parseUiStrategyGovernancePolicy({ ...policy, fingerprint: `sha256:${"0".repeat(64)}` }))
       .toThrow(/fingerprint/);
+    expect(() => parseUiStrategyGovernancePolicy({ ...policy, updatedAt: "September 1, 2026" }))
+      .toThrow(/canonical ISO timestamp/);
   });
 
   it("rejects scope rules that remove the reference strategy or escape enabled IDs", () => {

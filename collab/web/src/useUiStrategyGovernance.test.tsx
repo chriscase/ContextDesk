@@ -91,6 +91,7 @@ describe("useUiStrategyGovernance", () => {
     expect(result.current.effective).toMatchObject({
       effectiveId: "war-room", preferredId: null, preferenceRevision: 0,
     });
+    expect(result.current.message).toMatch(/preference was not saved.*Current policy is loaded/u);
     expect(fetchStub).toHaveBeenCalledTimes(3);
   });
 
@@ -111,6 +112,7 @@ describe("useUiStrategyGovernance", () => {
     });
     await waitFor(() => expect(result.current.status).toBe("ready"));
     expect(result.current.effective.effectiveId).toBe("war-room");
+    expect(result.current.message).toMatch(/preference was not confirmed.*Current policy is loaded/u);
     expect(fetchStub).toHaveBeenCalledTimes(3);
   });
 });

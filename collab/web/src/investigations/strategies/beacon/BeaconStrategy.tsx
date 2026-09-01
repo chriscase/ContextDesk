@@ -227,7 +227,13 @@ function EvidenceCard() {
     const file = fileRef.current?.files?.[0] ?? null;
     if (!command || !file || busy) return;
     setFeedback(null);
-    const result = await command({ file, kind, summary, privacyClass });
+    // Revalidate privacy at the action boundary. A passive state repair alone
+    // leaves one render window in which revoked private-read authority could
+    // otherwise submit a stale owner-only draft.
+    const submittedPrivacy = runtime.capabilities.canReadPrivate && privacyClass === "owner_only"
+      ? "owner_only"
+      : "share_safe";
+    const result = await command({ file, kind, summary, privacyClass: submittedPrivacy });
     if (result.status === "succeeded") {
       setSummary("");
       if (fileRef.current) fileRef.current.value = "";
@@ -243,7 +249,7 @@ function EvidenceCard() {
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Evidence refresh failed" action={<button type="button" onClick={runtime.refresh.evidence}>Retry</button>}>The previously loaded inventory remains visible.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length === 0 ? <StrategyStateNotice>No supporting material has been recorded yet.</StrategyStateNotice> : null}
       {view.availability === "available" && view.value.length > 0 ? <ul className="beacon__evidence-list">{view.value.map((item) => <li key={item.id}><span><strong>{item.filename || item.uri || "Unnamed evidence"}</strong><small>{item.kind} · {item.mediaType || "media type not recorded"} · {item.privacyClass === "owner_only" ? "owner only" : "share safe"}</small></span><StrategyBadge>{item.verificationStatus || "verification not recorded"}</StrategyBadge></li>)}</ul> : null}
-      {runtime.capabilities.canUpload ? <form className="beacon__upload" onSubmit={(event) => void submit(event)}><label className="beacon__field"><span>File (up to {(MAX_EVIDENCE_UPLOAD_BYTES / 1_000_000).toFixed(0)} MB)</span><input ref={fileRef} type="file" required /></label><label className="beacon__field"><span>Kind</span><select value={kind} onChange={(event) => setKind(event.target.value as ArtifactKind)}><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option></select></label><label className="beacon__field"><span>Privacy</span><select value={privacyClass} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}><option value="share_safe">Share safe</option>{runtime.capabilities.canReadPrivate ? <option value="owner_only">Owner only</option> : null}</select></label><label className="beacon__field beacon__field--wide"><span>Why does this matter?</span><input value={summary} onChange={(event) => setSummary(event.target.value)} required /></label>{feedback ? <StrategyStateNotice tone={feedback.tone} role={feedback.tone === "danger" ? "alert" : "status"}>{feedback.text}</StrategyStateNotice> : null}<button type="submit" disabled={busy || !runtime.commands.uploadEvidence}>{busy ? "Attaching…" : runtime.commands.uploadEvidence ? "Attach evidence" : "Preparing upload…"}</button></form> : <StrategyStateNotice title="Evidence upload is read-only">You can review supporting material, but your current access cannot attach a file.</StrategyStateNotice>}
+      {runtime.capabilities.canUpload ? <form className="beacon__upload" onSubmit={(event) => void submit(event)}><label className="beacon__field"><span>File (up to {(MAX_EVIDENCE_UPLOAD_BYTES / 1_000_000).toFixed(0)} MB)</span><input ref={fileRef} type="file" required /></label><label className="beacon__field"><span>Kind</span><select value={kind} onChange={(event) => setKind(event.target.value as ArtifactKind)}><option value="attachment">Attachment</option><option value="log">Log</option><option value="email">Email</option></select></label><label className="beacon__field"><span>Privacy</span><select value={runtime.capabilities.canReadPrivate ? privacyClass : "share_safe"} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}><option value="share_safe">Share safe</option>{runtime.capabilities.canReadPrivate ? <option value="owner_only">Owner only</option> : null}</select></label><label className="beacon__field beacon__field--wide"><span>Why does this matter?</span><input value={summary} onChange={(event) => setSummary(event.target.value)} required /></label>{feedback ? <StrategyStateNotice tone={feedback.tone} role={feedback.tone === "danger" ? "alert" : "status"}>{feedback.text}</StrategyStateNotice> : null}<button type="submit" disabled={busy || !runtime.commands.uploadEvidence}>{busy ? "Attaching…" : runtime.commands.uploadEvidence ? "Attach evidence" : "Preparing upload…"}</button></form> : <StrategyStateNotice title="Evidence upload is read-only">You can review supporting material, but your current access cannot attach a file.</StrategyStateNotice>}
     </StrategyPanel>
   );
 }
@@ -359,7 +365,7 @@ function Detail(props: InvestigationStrategyShellProps) {
   );
 }
 
-export function BeaconStrategy(props: InvestigationStrategyShellProps) {
+function BeaconStrategyForIdentity(props: InvestigationStrategyShellProps) {
   const browseFocusRef = useRef<HTMLInputElement>(null);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
   useEffect(() => {
@@ -375,4 +381,13 @@ export function BeaconStrategy(props: InvestigationStrategyShellProps) {
       </>}
     </StrategySurface>
   );
+}
+
+export function BeaconStrategy(props: InvestigationStrategyShellProps) {
+  const { identity } = useInvestigationRuntime();
+  // Browser-local drafts belong to one authenticated person. Remounting the
+  // presentation on a descriptive identity transition prevents a shared
+  // browser from carrying another person's unfinished intake forward.
+  const draftOwner = `${identity.id}\u0000${identity.username}\u0000${identity.displayName}`;
+  return <BeaconStrategyForIdentity key={draftOwner} {...props} />;
 }

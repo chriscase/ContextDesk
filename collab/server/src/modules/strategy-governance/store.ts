@@ -266,7 +266,14 @@ export class PgStrategyGovernanceStore implements StrategyGovernanceStore {
         throw new StrategyGovernanceCommitOutcomeUnknownError();
       }
       if (transactionStarted) {
-        try { await client.query("ROLLBACK"); } catch { /* preserve the mutation failure */ }
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          // A client that cannot confirm rollback is not safe to return to the
+          // pool. Preserve the mutation error while discarding the connection.
+          client.release(new Error("strategy-governance rollback failed"));
+          released = true;
+        }
       }
       throw error;
     } finally {

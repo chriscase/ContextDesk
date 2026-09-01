@@ -264,11 +264,16 @@ test.describe("Beacon rapid-intake pilot", () => {
         });
       });
       const caseReads: string[] = [];
+      const caseWrites: string[] = [];
       const recordRead = (request: import("@playwright/test").Request) => {
         const pathname = new URL(request.url()).pathname;
         if (request.method() === "GET" && (pathname === "/api/cases" || pathname.startsWith("/api/cases/"))) {
           caseReads.push(pathname);
         }
+        if (
+          !["GET", "HEAD", "OPTIONS"].includes(request.method())
+          && (pathname === "/api/cases" || pathname.startsWith("/api/cases/"))
+        ) caseWrites.push(`${request.method()} ${pathname}`);
       };
       page.on("request", recordRead);
       await page.goto(`/investigations/${caseId}/situation`);
@@ -278,10 +283,12 @@ test.describe("Beacon rapid-intake pilot", () => {
       await expect(page.getByText("Opening investigation")).toHaveCount(0);
       await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
       expect(caseReads, "the denied Beacon detail requested case data").toEqual([]);
+      expect(caseWrites, "the denied Beacon detail attempted a durable case write").toEqual([]);
       await page.getByRole("button", { name: "Back to investigations" }).click();
       await expect(page).toHaveURL("/investigations");
       await expect(page.getByText("Your account cannot read investigations, so no investigation data was requested.")).toBeVisible();
       expect(caseReads, "the denied Beacon browse requested case data").toEqual([]);
+      expect(caseWrites, "the denied Beacon browse attempted a durable case write").toEqual([]);
       page.off("request", recordRead);
     } finally {
       await page.unroute("**/api/auth/me");
