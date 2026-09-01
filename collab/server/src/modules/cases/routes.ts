@@ -463,6 +463,43 @@ function nextTransferChunk(
   });
 }
 
+/**
+ * Evidence providers may expose a lazy async iterable directly or return one
+ * from an async adapter. Normalize both shapes before sending the response so
+ * provider wrappers cannot turn a valid catalog entry into a 500 at the
+ * transport boundary. A synchronous iterable/iterator is accepted as a
+ * compatibility seam for test and future provider adapters, but all emitted
+ * chunks are still validated and copied by the transfer loop.
+ */
+async function openTransferIterator(
+  handle: { bytes: () => unknown },
+): Promise<AsyncIterator<Uint8Array>> {
+  const source: unknown = await Promise.resolve(handle.bytes());
+  if (source === null || (typeof source !== "object" && typeof source !== "function")) {
+    throw new Error("evidence read handle did not return an iterable");
+  }
+  const record = source as {
+    [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array>;
+    [Symbol.iterator]?: () => Iterator<Uint8Array>;
+    next?: AsyncIterator<Uint8Array>["next"];
+  };
+  if (typeof record[Symbol.asyncIterator] === "function") {
+    return record[Symbol.asyncIterator]!.call(record);
+  }
+  if (typeof record[Symbol.iterator] === "function") {
+    const iterator = record[Symbol.iterator]!.call(record);
+    return {
+      next: async () => iterator.next(),
+      return: async () => {
+        if (typeof iterator.return === "function") iterator.return();
+        return { done: true, value: undefined };
+      },
+    };
+  }
+  if (typeof record.next === "function") return record as AsyncIterator<Uint8Array>;
+  throw new Error("evidence read handle did not return an iterator");
+}
+
 function releaseTransferIterator(iterator: AsyncIterator<Uint8Array>): void {
   if (typeof iterator.return !== "function") return;
   try {
@@ -1746,10 +1783,19 @@ export async function registerCaseRoutes(
         if (aborted) return;
         return storageUnavailable(reply);
       }
+      let iterator: AsyncIterator<Uint8Array>;
+      try {
+        iterator = await openTransferIterator(handle);
+        throwIfTransferAborted(transfer.signal);
+      } catch {
+        const aborted = transfer.signal.aborted;
+        transfer.dispose();
+        if (aborted) return;
+        return storageUnavailable(reply);
+      }
       applyContentHeaders(reply, representation);
       const cancel = transfer.signal;
       async function* evidenceBytes(): AsyncIterable<Uint8Array> {
-        const iterator = handle.bytes()[Symbol.asyncIterator]();
         let iteratorDone = false;
         try {
           for (;;) {

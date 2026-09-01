@@ -120,7 +120,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     await page.locator(".case-memory__upload-form").getByLabel("Privacy class").selectOption("share_safe");
     const [posted] = await Promise.all([
       page.waitForResponse(
-        (res) => res.url().includes("/api/cases/") && res.url().endsWith("/evidence") && res.request().method() === "POST",
+        (res) => res.url().includes("/api/cases/") && res.url().endsWith("/evidence/stream") && res.request().method() === "POST",
       ),
       page.getByRole("button", { name: "Upload evidence" }).click(),
     ]);

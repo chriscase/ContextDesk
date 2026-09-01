@@ -127,7 +127,7 @@ test.describe("complete war-room operator journey", () => {
       page.waitForResponse(
         (res) =>
           res.url().includes("/api/cases/") &&
-          res.url().endsWith("/evidence") &&
+          res.url().endsWith("/evidence/stream") &&
           res.request().method() === "POST",
       ),
       page.getByRole("button", { name: "Upload evidence" }).click(),
@@ -155,7 +155,7 @@ test.describe("complete war-room operator journey", () => {
       page.waitForResponse(
         (res) =>
           res.url().includes("/api/cases/") &&
-          res.url().endsWith("/evidence") &&
+          res.url().endsWith("/evidence/stream") &&
           res.request().method() === "POST",
       ),
       page.getByRole("button", { name: "Upload evidence" }).click(),

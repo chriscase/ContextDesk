@@ -524,6 +524,38 @@ describe("GET/HEAD evidence content and JSON bytes", () => {
     });
   });
 
+  it("serves content when a provider adapter returns its lazy iterable asynchronously", async () => {
+    await withApp(async ({ app, store }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const caseId = await createCase(app, alice, "Thenable content bytes");
+      const artifact = await streamUpload(app, alice, caseId, {
+        kind: "log",
+        filename: "thenable.log",
+        mediaType: "text/plain",
+        body: LOG,
+        summary: "thenable content",
+        privacyClass: "share_safe",
+      });
+      const originalOpen = store.openRead.bind(store);
+      store.openRead = vi.fn(async (hash, range, signal) => {
+        const handle = await originalOpen(hash, range, signal);
+        return {
+          ...handle,
+          bytes: async () => handle.bytes(),
+        };
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/evidence/${artifact.id}/content`,
+        headers: { cookie: dave },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toBe(LOG);
+    });
+  });
+
   it("returns authorized JSON bytes without calling EvidenceStore.get", async () => {
     await withApp(async ({ app, store }) => {
       const spies = spyJsonBytesStore(store);

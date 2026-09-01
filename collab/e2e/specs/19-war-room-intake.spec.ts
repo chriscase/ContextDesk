@@ -314,7 +314,7 @@ test.describe("War Room intake journeys", () => {
 
     await record.check("email-kind-distinct-from-log", async () => {
       await expect(
-        chainRow.locator(".case-memory__meta").first(),
+        chainRow.locator(".case-memory__item-kind"),
         "the chain is not labelled as email evidence",
       ).toContainText("email");
       return "the evidence row labels the chain as email, distinct from the log inventory";
