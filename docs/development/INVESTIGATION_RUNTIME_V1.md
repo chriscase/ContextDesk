@@ -16,6 +16,12 @@ Situation-update seams onto that frozen base. They are optional gateway members
 resolved through a fail-closed write contract, so pre-V1.1 read-shaped gateways
 remain valid and cannot accidentally acquire mutation authority.
 
+The Evidence Workspace slice adds a secret-free administrator storage report,
+streamed evidence intake, append-only artifact annotations, and a bounded
+read-only text preview. These additions keep provider credentials, byte
+integrity, authorization, and audit history on the server; the preview is an
+optional read seam so older strategy/test doubles remain valid.
+
 Runtime V1 is the shared browser-side boundary that lets ContextDesk ship more
 than one investigation presentation without creating competing authorities for
 case data, evidence, permissions, lifecycle, audit history, or navigation.
@@ -40,6 +46,9 @@ The runtime owns browser-side orchestration only:
 - loading collection, detail, evidence, and lifecycle state;
 - invoking investigation create, evidence upload, contribution create,
   Situation update, archive, and restore commands;
+- requesting a bounded, text-only evidence preview with range and ETag
+  validation, while keeping binary and metadata-only references out of the
+  browser preview surface;
 - cancelling or fencing requests whose route, case, or identity is stale;
 - preserving canonical case, stage, focus, and URL state across strategies.
 
@@ -75,7 +84,9 @@ replaceable strategy components stay below `strategies/`. Browser consumers
 import transport contracts through the browser-safe
 `@cd-collab/contracts/investigation-runtime` subpath, backed by
 `collab/contracts/src/investigation-runtime-browser.ts`, rather than the
-Node-capable package root.
+Node-capable package root. The administrator evidence-storage panel likewise
+uses the browser-safe `@cd-collab/contracts/evidence-storage` subpath; the
+Node-capable contracts barrel is never a production web dependency.
 
 The dependency direction is one way:
 
@@ -190,6 +201,7 @@ behavior:
 - create an investigation and return its authoritative identifier;
 - list evidence and contribution annotations;
 - upload bounded evidence through the existing protected route;
+- preview readable evidence through the optional bounded preview seam; and
 - create one typed contribution, optionally citing artifact or contribution
   identities when its kind is `hypothesis`;
 - update the active investigation's Situation using its parsed
@@ -199,6 +211,9 @@ behavior:
 Specialist log exploration remains an explicit handoff to War Room. Permanent
 deletion, recoverable trash implementation, storage-provider migration, plugin
 execution, and server-side strategy governance are not Runtime V1 operations.
+The Evidence Workspace preview is inspection only: it cannot download, mutate,
+or change the authoritative evidence record, and a `file_server_ref` remains a
+metadata-only reference.
 
 ### Transport contracts
 
