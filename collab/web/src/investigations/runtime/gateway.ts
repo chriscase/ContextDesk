@@ -25,6 +25,11 @@ import {
   type LifecycleAction,
   type PrivacyClass,
 } from "@cd-collab/contracts/investigation-runtime";
+import {
+  parseArtifactAnnotation,
+  parseArtifactAnnotationList,
+} from "./annotation-contract.js";
+import type { ArtifactAnnotationV1 } from "./annotation-contract.js";
 import { protectedApiFetch } from "../../protected-api.js";
 import {
   classifyHttpFailure,
@@ -136,6 +141,28 @@ export interface UpdateSituationInput {
   readonly clientTime?: string;
 }
 
+/** Transport-ready metadata for one append-only artifact annotation. */
+export interface CreateArtifactAnnotationInput {
+  readonly body: string;
+  readonly privacyClass?: PrivacyClass;
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+}
+
+/** The optional annotation transport is resolved as one fail-closed seam. */
+export interface InvestigationAnnotationGateway {
+  listArtifactAnnotations(
+    investigationId: string,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<readonly ArtifactAnnotationV1[]>>;
+  createArtifactAnnotation(
+    investigationId: string,
+    artifactId: string,
+    input: CreateArtifactAnnotationInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<ArtifactAnnotationV1>>;
+}
+
 export interface ApplyLifecycleActionInput {
   readonly action: LifecycleAction;
   readonly expected: InvestigationLifecycleExpectedV1;
@@ -168,7 +195,8 @@ export interface InvestigationWriteGateway {
 export type InvestigationGatewayWithWrites =
   InvestigationGateway & InvestigationWriteGateway;
 
-export interface InvestigationGateway extends Partial<InvestigationWriteGateway> {
+export interface InvestigationGateway
+  extends Partial<InvestigationWriteGateway>, Partial<InvestigationAnnotationGateway> {
   listInvestigations(
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<readonly CaseV1[]>>;
@@ -342,6 +370,16 @@ function createContributionBody(input: CreateContributionInput): Record<string, 
   if (input.clientTime !== undefined) body.clientTime = input.clientTime;
   if (input.sourceId !== undefined) body.sourceId = input.sourceId;
   if (input.idempotencyKey !== undefined) body.idempotencyKey = input.idempotencyKey;
+  return body;
+}
+
+function createArtifactAnnotationBody(
+  input: CreateArtifactAnnotationInput,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { body: input.body };
+  if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  if (input.sourceId !== undefined) body.sourceId = input.sourceId;
   return body;
 }
 
@@ -732,6 +770,23 @@ function contributionCollectionIdentity(
   return true;
 }
 
+function annotationCollectionIdentity(
+  investigationId: string,
+  annotations: readonly ArtifactAnnotationV1[],
+): boolean {
+  const identities = new Set<string>();
+  for (const annotation of annotations) {
+    if (
+      annotation.caseId !== investigationId
+      || annotation.id.length === 0
+      || annotation.artifactId.length === 0
+      || identities.has(annotation.id)
+    ) return false;
+    identities.add(annotation.id);
+  }
+  return true;
+}
+
 function caseRoute(investigationId: string, suffix = ""): string {
   return `/api/cases/${encodeURIComponent(investigationId)}${suffix}`;
 }
@@ -832,6 +887,13 @@ const UNAVAILABLE_WRITE_GATEWAY: InvestigationWriteGateway = Object.freeze({
   updateSituation: () => Promise.resolve(failed<CaseV1>(WRITE_SEAM_UNAVAILABLE)),
 });
 
+const UNAVAILABLE_ANNOTATION_GATEWAY: InvestigationAnnotationGateway = Object.freeze({
+  listArtifactAnnotations: () =>
+    Promise.resolve(failed<readonly ArtifactAnnotationV1[]>(WRITE_SEAM_UNAVAILABLE)),
+  createArtifactAnnotation: () =>
+    Promise.resolve(failed<ArtifactAnnotationV1>(WRITE_SEAM_UNAVAILABLE)),
+});
+
 /**
  * Resolve the write seams a gateway actually implements.
  *
@@ -853,6 +915,36 @@ export function investigationWriteGateway(
     },
     updateSituation(investigationId, input, options) {
       return updateSituation.call(gateway, investigationId, input, options);
+    },
+  };
+  return Object.freeze(resolved);
+}
+
+/**
+ * Resolve the complete artifact-annotation seam or expose an unavailable
+ * adapter. Keeping the list and append operations together prevents a
+ * partially upgraded transport from making the UI believe it can annotate
+ * records that it cannot subsequently read.
+ */
+export function investigationAnnotationGateway(
+  gateway: InvestigationGateway,
+): InvestigationAnnotationGateway {
+  const { listArtifactAnnotations, createArtifactAnnotation } = gateway;
+  if (listArtifactAnnotations === undefined || createArtifactAnnotation === undefined) {
+    return UNAVAILABLE_ANNOTATION_GATEWAY;
+  }
+  const resolved: InvestigationAnnotationGateway = {
+    listArtifactAnnotations(investigationId, options) {
+      return listArtifactAnnotations.call(gateway, investigationId, options);
+    },
+    createArtifactAnnotation(investigationId, artifactId, input, options) {
+      return createArtifactAnnotation.call(
+        gateway,
+        investigationId,
+        artifactId,
+        input,
+        options,
+      );
     },
   };
   return Object.freeze(resolved);
@@ -909,6 +1001,20 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
     );
     return result.ok
       ? { ok: true, value: deepFreezeDto([...result.value.artifacts]) }
+      : result;
+  },
+
+  async listArtifactAnnotations(investigationId, { signal }) {
+    const result = await requestParsed(
+      caseRoute(investigationId, "/evidence/annotations"),
+      {},
+      signal,
+      parseArtifactAnnotationList,
+      (value) => value.caseId === investigationId
+        && annotationCollectionIdentity(investigationId, value.annotations),
+    );
+    return result.ok
+      ? { ok: true, value: deepFreezeDto([...result.value.annotations]) }
       : result;
   },
 
@@ -1052,6 +1158,27 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
       signal,
       parseContribution,
       (value) => value.caseId === investigationId && value.id.length > 0,
+    );
+  },
+
+  createArtifactAnnotation(investigationId, artifactId, input, { signal }) {
+    const serialized = serializeMutationBody(signal, () => createArtifactAnnotationBody(input));
+    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
+    return requestParsed(
+      caseRoute(
+        investigationId,
+        `/evidence/${encodeURIComponent(artifactId)}/annotations`,
+      ),
+      {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: serialized.value,
+      },
+      signal,
+      parseArtifactAnnotation,
+      (value) => value.caseId === investigationId
+        && value.artifactId === artifactId
+        && value.id.length > 0,
     );
   },
 

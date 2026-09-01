@@ -14,10 +14,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUTH_LOST_EVENT } from "../../protected-api.js";
 import {
   investigationGateway,
+  investigationAnnotationGateway,
   investigationWriteGateway,
   type InvestigationGateway,
   type InvestigationWriteGateway,
 } from "./gateway.js";
+import {
+  ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+  ARTIFACT_ANNOTATION_SCHEMA_ID,
+  type ArtifactAnnotationV1,
+} from "./annotation-contract.js";
 import { createInvestigationGatewayDouble } from "./testkit/gateway-double.js";
 import {
   RUNTIME_FIXTURE_IDS,
@@ -66,6 +72,25 @@ function createdHypothesisContribution(): ContributionV1 {
     kind: "hypothesis",
     body: "Evidence points to connection-pool saturation.",
     hypothesisLinks: [{ kind: "artifact", id: RUNTIME_FIXTURE_IDS.evidence }],
+  };
+}
+
+function artifactAnnotation(
+  overrides: Partial<ArtifactAnnotationV1> = {},
+): ArtifactAnnotationV1 {
+  return {
+    schemaId: ARTIFACT_ANNOTATION_SCHEMA_ID,
+    id: "annotation-001",
+    caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+    artifactId: RUNTIME_FIXTURE_IDS.evidence,
+    body: "The first error appears after the configuration reload.",
+    contentHash: "a".repeat(64),
+    privacyClass: "share_safe",
+    authorId: "identity-lead",
+    authorUsername: "lead",
+    createdAt: "2026-02-03T20:20:00.000Z",
+    sourceId: "source-human-note",
+    ...overrides,
   };
 }
 
@@ -1696,6 +1721,148 @@ describe("Runtime V1.1 write seams", () => {
       { expectedVersion: 4, impact: "Synthetic" },
       options(),
     )).toEqual({ ok: false, error: { kind: "protocol", reason: "content_type" } });
+  });
+});
+
+describe("artifact annotation runtime seam", () => {
+  it("reads a frozen, case-scoped annotation collection", async () => {
+    const annotation = artifactAnnotation();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+        caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+        annotations: [annotation],
+      }),
+    );
+
+    const result = await investigationGateway.listArtifactAnnotations!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    );
+
+    expect(result).toEqual({ ok: true, value: [annotation] });
+    if (!result.ok) return;
+    expect(Object.isFrozen(result.value)).toBe(true);
+    expect(Object.isFrozen(result.value[0])).toBe(true);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `/api/cases/${RUNTIME_FIXTURE_IDS.populatedCase}/evidence/annotations`,
+    );
+  });
+
+  it.each([
+    ["wrong list schema", {
+      schemaId: "cd-collab.future_annotations.v9",
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      annotations: [],
+    }],
+    ["unknown annotation member", {
+      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      annotations: [{ ...artifactAnnotation(), privateNote: "must not cross" }],
+    }],
+    ["row bound to another case", {
+      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      annotations: [artifactAnnotation({ caseId: "case-other" })],
+    }],
+  ] as const)("rejects %s before exposing annotation data", async (_label, body) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(body));
+
+    await expect(investigationGateway.listArtifactAnnotations!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "contract" } });
+  });
+
+  it("rejects duplicate annotation identities after parsing", async () => {
+    const annotation = artifactAnnotation();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      annotations: [annotation, annotation],
+    }));
+
+    await expect(investigationGateway.listArtifactAnnotations!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+  });
+
+  it("creates an annotation through the protected artifact route", async () => {
+    const created = artifactAnnotation({
+      id: "annotation-created",
+      body: "The request id appears in the gateway log.",
+      privacyClass: "owner_only",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(created),
+    );
+
+    await expect(investigationGateway.createArtifactAnnotation!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      {
+        body: "The request id appears in the gateway log.",
+        privacyClass: "owner_only",
+        clientTime: "2026-02-03T20:21:00.000Z",
+        sourceId: "source-human-note",
+      },
+      options(),
+    )).resolves.toEqual({ ok: true, value: created });
+
+    const [route, init] = fetchMock.mock.calls[0] ?? [];
+    expect(route).toBe(
+      `/api/cases/${RUNTIME_FIXTURE_IDS.populatedCase}/evidence/${RUNTIME_FIXTURE_IDS.evidence}/annotations`,
+    );
+    expect(init?.method).toBe("POST");
+    expect(init?.headers).toEqual({
+      "content-type": "application/json",
+      "x-cd-collab-csrf": "1",
+    });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      body: "The request id appears in the gateway log.",
+      privacyClass: "owner_only",
+      clientTime: "2026-02-03T20:21:00.000Z",
+      sourceId: "source-human-note",
+    });
+  });
+
+  it.each([401, 403] as const)(
+    "preserves protected auth-loss semantics for annotation reads and writes (%i)",
+    async (status) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({ error: "forbidden" }, status),
+      );
+      const listener = vi.fn();
+      window.addEventListener(AUTH_LOST_EVENT, listener);
+      try {
+        await expect(investigationGateway.listArtifactAnnotations!(
+          RUNTIME_FIXTURE_IDS.populatedCase,
+          options(),
+        )).resolves.toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        await expect(investigationGateway.createArtifactAnnotation!(
+          RUNTIME_FIXTURE_IDS.populatedCase,
+          RUNTIME_FIXTURE_IDS.evidence,
+          { body: "Synthetic" },
+          options(),
+        )).resolves.toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        expect(listener).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } finally {
+        window.removeEventListener(AUTH_LOST_EVENT, listener);
+      }
+    },
+  );
+
+  it("resolves both annotation methods together and fails a partial gateway closed", async () => {
+    const partial = {
+      listArtifactAnnotations: investigationGateway.listArtifactAnnotations,
+    } as InvestigationGateway;
+    const resolved = investigationAnnotationGateway(partial);
+    expect(await resolved.listArtifactAnnotations(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).toEqual({ ok: false, error: { kind: "unavailable", status: 503 } });
   });
 });
 

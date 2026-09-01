@@ -55,6 +55,15 @@ export {
   type UseEvidencePreviewOptions,
 } from "./use-evidence-preview.js";
 export {
+  useArtifactAnnotations,
+  useCreateArtifactAnnotation,
+  type ArtifactAnnotationsController,
+  type CreateArtifactAnnotationCommand,
+  type CreateArtifactAnnotationController,
+  type UseArtifactAnnotationsOptions,
+  type UseCreateArtifactAnnotationOptions,
+} from "./use-artifact-annotations.js";
+export {
   useUploadEvidence,
   type UploadEvidenceCommand,
   type UploadEvidenceController,

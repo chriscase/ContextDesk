@@ -7,6 +7,7 @@ export {
   InvestigationRuntimeProvider,
   useInvestigationRuntime,
   type InvestigationContributionCommand,
+  type InvestigationArtifactAnnotationCommand,
   type InvestigationCreateInput,
   type InvestigationEvidenceUploadCommand,
   type InvestigationEvidencePreviewCommand,
@@ -20,6 +21,10 @@ export {
   type InvestigationRuntimeResources,
   type InvestigationSituationCommand,
 } from "./InvestigationRuntimeProvider.js";
+export type {
+  ArtifactAnnotationListV1,
+  ArtifactAnnotationV1,
+} from "./annotation-contract.js";
 export {
   type EvidencePreviewValue,
   type PreviewEvidenceInput,
