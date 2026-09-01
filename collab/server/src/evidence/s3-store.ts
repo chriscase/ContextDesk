@@ -50,6 +50,11 @@ export interface S3EvidenceStoreOptions {
   /** Test/injection seam. Production constructs an AWS SDK v3 `S3Client`. */
   client?: S3EvidenceClient;
   acquireWriteLease?: () => Promise<() => void | Promise<void>>;
+  /**
+   * Per-await GetObject body idle deadline in milliseconds. `undefined`
+   * disables the deadline (direct unit fakes). When present, a safe integer >= 1.
+   */
+  responseBodyIdleTimeoutMs?: number;
 }
 
 export class S3EvidenceError extends Error {
@@ -109,6 +114,7 @@ export function createS3ClientConfig(opts: S3EvidenceStoreOptions): S3ClientConf
  */
 export class S3EvidenceStore implements EvidenceStore {
   readonly writeCoordination: "single_process" | "external";
+  readonly responseBodyIdleTimeoutMs: number | undefined;
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly client: S3EvidenceClient;
@@ -122,6 +128,9 @@ export class S3EvidenceStore implements EvidenceStore {
   private writeTail: Promise<void> = Promise.resolve();
 
   constructor(opts: S3EvidenceStoreOptions) {
+    this.responseBodyIdleTimeoutMs = validatedResponseBodyIdleTimeoutMs(
+      opts.responseBodyIdleTimeoutMs,
+    );
     const config = createS3ClientConfig(opts);
     this.bucket = normalizeBucket(opts.bucket);
     this.prefix = normalizePrefix(opts.prefix);
@@ -749,6 +758,7 @@ export class S3EvidenceStore implements EvidenceStore {
         numericLength(record.ContentLength),
         MAX_FILE_REF_BYTES,
         "getFileServerReference",
+        this.responseBodyIdleTimeoutMs,
       );
       return parseStoredReference(bytes, id, "getFileServerReference");
     } catch (error) {
@@ -1012,7 +1022,12 @@ export class S3EvidenceStore implements EvidenceStore {
       );
       if (output === null) return null;
       const record = asRecord(output, operation);
-      return await readObjectBytes(record.Body, numericLength(record.ContentLength), operation);
+      return await readObjectBytes(
+        record.Body,
+        numericLength(record.ContentLength),
+        operation,
+        this.responseBodyIdleTimeoutMs,
+      );
     } catch (error) {
       if (error instanceof S3EvidenceError) throw error;
       throw new S3EvidenceError(operation, "unavailable");
@@ -1029,7 +1044,13 @@ export class S3EvidenceStore implements EvidenceStore {
       const record = asRecord(output, operation);
       const contentLength = numericLength(record.ContentLength);
       if (contentLength === undefined || contentLength > MAX_JOURNAL_BYTES) return "malformed";
-      return await readBoundedObjectBytes(record.Body, contentLength, MAX_JOURNAL_BYTES, operation);
+      return await readBoundedObjectBytes(
+        record.Body,
+        contentLength,
+        MAX_JOURNAL_BYTES,
+        operation,
+        this.responseBodyIdleTimeoutMs,
+      );
     } catch (error) {
       if (error instanceof S3EvidenceError && error.operation === operation) {
         if (error.message.endsWith("malformed pending write journal") || error.message.endsWith("inconsistent object")) {
@@ -1352,7 +1373,14 @@ export class S3EvidenceStore implements EvidenceStore {
     if (contentLength !== meta.byteLength) {
       throw new S3EvidenceError(operation, "inconsistent object");
     }
-    await hashBodyExact(record.Body, meta.byteLength, hash, operation, signal);
+    await hashBodyExact(
+      record.Body,
+      meta.byteLength,
+      hash,
+      operation,
+      signal,
+      this.responseBodyIdleTimeoutMs,
+    );
     throwIfAborted(signal);
   }
 
@@ -1369,6 +1397,7 @@ export class S3EvidenceStore implements EvidenceStore {
       readSignal?: AbortSignal,
     ): Promise<unknown> => this.sendConditional(operation, command, readSignal);
     const request = this.conditionalGetInput(hash, fence, range);
+    const idleTimeoutMs = this.responseBodyIdleTimeoutMs;
     return {
       async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
         throwIfAborted(signal);
@@ -1399,7 +1428,12 @@ export class S3EvidenceStore implements EvidenceStore {
         }
         const hasher = range === null ? createHash("sha256") : null;
         let received = 0;
-        for await (const chunk of iterateObjectBody(record.Body, "openRead", signal)) {
+        for await (const chunk of iterateObjectBody(
+          record.Body,
+          "openRead",
+          signal,
+          idleTimeoutMs,
+        )) {
           throwIfAborted(signal);
           if (chunk.byteLength === 0) continue;
           if (received + chunk.byteLength > want) {
@@ -1827,6 +1861,8 @@ async function readObjectBytes(
   body: unknown,
   contentLength: number | undefined,
   operation: string,
+  idleTimeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   if (contentLength === undefined) {
     throw new S3EvidenceError(operation, "inconsistent object");
@@ -1835,20 +1871,38 @@ async function readObjectBytes(
     if (contentLength === 0) return new Uint8Array();
     throw new S3EvidenceError(operation, "unavailable");
   }
-  let bytes: Uint8Array | null = null;
-  if (body instanceof Uint8Array) bytes = new Uint8Array(body);
-  else if (
-    typeof body === "object" &&
-    typeof (body as { transformToByteArray?: unknown }).transformToByteArray === "function"
-  ) {
-    const raw = await (body as { transformToByteArray: () => Promise<unknown> }).transformToByteArray();
-    if (raw instanceof Uint8Array) bytes = new Uint8Array(raw);
+  if (body instanceof Uint8Array) {
+    if (body.byteLength !== contentLength) {
+      throw new S3EvidenceError(operation, "inconsistent object");
+    }
+    return new Uint8Array(body);
   }
-  if (bytes === null) throw new S3EvidenceError(operation, "unavailable");
-  if (bytes.byteLength !== contentLength) {
-    throw new S3EvidenceError(operation, "inconsistent object");
+  if (isAsyncIterable(body)) {
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    try {
+      for await (const chunk of iterateObjectBody(body, operation, signal, idleTimeoutMs)) {
+        if (chunk.byteLength === 0) continue;
+        if (received + chunk.byteLength > contentLength) {
+          throw new S3EvidenceError(operation, "inconsistent object");
+        }
+        chunks.push(chunk);
+        received += chunk.byteLength;
+      }
+    } catch (error) {
+      throwIfAborted(signal);
+      if (error instanceof S3EvidenceError) throw error;
+      throw new S3EvidenceError(operation, "unavailable");
+    }
+    if (received !== contentLength) {
+      throw new S3EvidenceError(operation, "inconsistent object");
+    }
+    return concatBytes(chunks, received);
   }
-  return bytes;
+  // Production AWS SDK response bodies are Uint8Array or async iterable. A
+  // transform-only body cannot be cancelled reliably if its Promise stalls,
+  // so fail closed instead of creating an unbounded body-read seam.
+  throw new S3EvidenceError(operation, "unavailable");
 }
 
 async function readBoundedObjectBytes(
@@ -1856,6 +1910,8 @@ async function readBoundedObjectBytes(
   contentLength: number | undefined,
   maxBytes: number,
   operation: string,
+  idleTimeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   const malformed = boundedReadFailure(operation);
   if (contentLength === undefined || contentLength > maxBytes) {
@@ -1874,18 +1930,22 @@ async function readBoundedObjectBytes(
   if (isAsyncIterable(body)) {
     const chunks: Uint8Array[] = [];
     let received = 0;
-    for await (const chunk of body) {
-      if (!(chunk instanceof Uint8Array)) {
-        throw new S3EvidenceError(operation, "unavailable");
+    try {
+      for await (const chunk of iterateObjectBody(body, operation, signal, idleTimeoutMs)) {
+        if (chunk.byteLength === 0) continue;
+        if (received + chunk.byteLength > limit) {
+          throw new S3EvidenceError(
+            operation,
+            received + chunk.byteLength > maxBytes ? malformed : "inconsistent object",
+          );
+        }
+        chunks.push(chunk);
+        received += chunk.byteLength;
       }
-      if (received + chunk.byteLength > limit) {
-        throw new S3EvidenceError(
-          operation,
-          received + chunk.byteLength > maxBytes ? malformed : "inconsistent object",
-        );
-      }
-      chunks.push(chunk);
-      received += chunk.byteLength;
+    } catch (error) {
+      throwIfAborted(signal);
+      if (error instanceof S3EvidenceError) throw error;
+      throw new S3EvidenceError(operation, "unavailable");
     }
     if (received !== contentLength) {
       throw new S3EvidenceError(operation, "inconsistent object");
@@ -2083,6 +2143,14 @@ function assertSafeNonNegativeInteger(value: number, label: string): void {
   }
 }
 
+function validatedResponseBodyIdleTimeoutMs(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new S3EvidenceError("configure", "invalid responseBodyIdleTimeoutMs");
+  }
+  return value;
+}
+
 function assertAbortSignal(signal: AbortSignal): void {
   if (typeof signal !== "object" || signal === null || typeof signal.aborted !== "boolean") {
     throw new Error("signal must be an AbortSignal");
@@ -2173,11 +2241,125 @@ function parseInclusiveContentRange(
   return { start, end, total };
 }
 
+function terminateGetObjectBody(body: unknown, reason?: unknown): void {
+  if (typeof body !== "object" || body === null) return;
+  const destroy = (body as { destroy?: unknown }).destroy;
+  if (typeof destroy === "function") {
+    try {
+      (destroy as (error?: Error) => void).call(
+        body,
+        reason instanceof Error ? reason : undefined,
+      );
+    } catch {
+      // Hostile destroy cannot block abort/idle cleanup.
+    }
+    return;
+  }
+  const cancel = (body as { cancel?: unknown }).cancel;
+  if (typeof cancel === "function") {
+    try {
+      void Promise.resolve(
+        (cancel as (error?: Error) => unknown).call(
+          body,
+          reason instanceof Error ? reason : undefined,
+        ),
+      ).catch(() => undefined);
+    } catch {
+      // Hostile cancel cannot block abort/idle cleanup.
+    }
+  }
+}
+
+function cancelGetObjectIterator(iterator: AsyncIterator<unknown>): void {
+  if (typeof iterator.return !== "function") return;
+  try {
+    void Promise.resolve(iterator.return()).catch(() => undefined);
+  } catch {
+    // Never await a hostile iterator.return on abort/idle/error.
+  }
+}
+
+async function nextGetObjectChunk<T>(
+  iterator: AsyncIterator<T>,
+  opts: {
+    operation: string;
+    signal: AbortSignal | undefined;
+    idleTimeoutMs: number | undefined;
+    idleDeadline: number | undefined;
+  },
+): Promise<IteratorResult<T>> {
+  throwIfAborted(opts.signal);
+  if (opts.signal === undefined && opts.idleTimeoutMs === undefined) {
+    return iterator.next();
+  }
+  return new Promise<IteratorResult<T>>((resolve, reject) => {
+    let settled = false;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const signal = opts.signal;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (idleTimer !== undefined) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      const reason = signal?.reason;
+      if (reason instanceof Error) {
+        finish(() => reject(reason));
+        return;
+      }
+      if (reason !== undefined) {
+        finish(() => reject(reason));
+        return;
+      }
+      finish(() => reject(new Error("evidence stream aborted")));
+    };
+    const onIdle = (): void => {
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      finish(() => reject(new S3EvidenceError(opts.operation, "unavailable")));
+    };
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    if (opts.idleTimeoutMs !== undefined) {
+      const now = Date.now();
+      const deadline = opts.idleDeadline ?? now + opts.idleTimeoutMs;
+      const remaining = deadline - now;
+      if (remaining <= 0) {
+        onIdle();
+      } else {
+        idleTimer = setTimeout(onIdle, remaining);
+      }
+    }
+    if (settled) return;
+    let next: Promise<IteratorResult<T>>;
+    try {
+      next = Promise.resolve(iterator.next());
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    void next.then(
+      (result) => finish(() => resolve(result)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+    if (signal?.aborted) onAbort();
+  });
+}
+
 async function* iterateObjectBody(
   body: unknown,
   operation: string,
   signal?: AbortSignal,
-): AsyncIterable<Uint8Array> {
+  idleTimeoutMs?: number,
+): AsyncGenerator<Uint8Array, void, undefined> {
   throwIfAborted(signal);
   if (body == null) return;
   if (body instanceof Uint8Array) {
@@ -2188,31 +2370,50 @@ async function* iterateObjectBody(
     throw new S3EvidenceError(operation, "unavailable");
   }
   const iterator = body[Symbol.asyncIterator]();
+  let idleDeadline: number | undefined;
+  let completed = false;
+  let failureReason: unknown;
   try {
     for (;;) {
-      const next = await nextWithAbort(iterator, signal);
-      if (next.done) break;
+      const now = Date.now();
+      const deadline =
+        idleTimeoutMs === undefined ? undefined : idleDeadline ?? now + idleTimeoutMs;
+      const next = await nextGetObjectChunk(iterator, {
+        operation,
+        signal,
+        idleTimeoutMs,
+        idleDeadline: deadline,
+      });
+      if (next.done) {
+        completed = true;
+        break;
+      }
       const chunk = next.value;
       if (!(chunk instanceof Uint8Array)) {
         throw new S3EvidenceError(operation, "unavailable");
       }
       throwIfAborted(signal);
+      if (chunk.byteLength === 0) {
+        // Empty chunks are not progress. Keep the same absolute deadline and
+        // immediately await the next chunk without exposing caller work time.
+        idleDeadline = deadline;
+        continue;
+      }
+      idleDeadline = undefined;
       yield Uint8Array.from(chunk);
     }
   } catch (error) {
-    throwIfAborted(signal);
+    failureReason = signal?.aborted ? signal.reason ?? error : error;
+    if (signal?.aborted) {
+      throwIfAborted(signal);
+      throw error;
+    }
     if (error instanceof S3EvidenceError) throw error;
     throw new S3EvidenceError(operation, "unavailable");
   } finally {
-    if (signal?.aborted && typeof (body as { destroy?: unknown }).destroy === "function") {
-      (body as unknown as { destroy: (error?: Error) => void }).destroy(
-        signal.reason instanceof Error ? signal.reason : undefined,
-      );
-    }
-    if (typeof iterator.return === "function") {
-      const closing = Promise.resolve(iterator.return()).catch(() => undefined);
-      if (signal?.aborted) void closing;
-      else await closing;
+    if (!completed) {
+      terminateGetObjectBody(body, failureReason);
+      cancelGetObjectIterator(iterator);
     }
   }
 }
@@ -2223,12 +2424,13 @@ async function hashBodyExact(
   expectedHash: ContentHash,
   operation: string,
   signal?: AbortSignal,
+  idleTimeoutMs?: number,
 ): Promise<void> {
   throwIfAborted(signal);
   const hasher = createHash("sha256");
   let received = 0;
   try {
-    for await (const chunk of iterateObjectBody(body, operation, signal)) {
+    for await (const chunk of iterateObjectBody(body, operation, signal, idleTimeoutMs)) {
       throwIfAborted(signal);
       if (chunk.byteLength === 0) continue;
       if (received + chunk.byteLength > expectedLength) {

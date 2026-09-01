@@ -124,6 +124,7 @@ function createS3EvidenceStore(
     endpoint: settings.s3.endpoint,
     forcePathStyle: settings.s3.forcePathStyle,
     client,
+    responseBodyIdleTimeoutMs: settings.s3.timeoutMs,
     ...(acquireWriteLease ? { acquireWriteLease } : {}),
   };
   return new S3EvidenceStore(storeOptions);
@@ -268,8 +269,8 @@ class OpaqueS3EvidenceClient implements S3EvidenceClient {
     this.#send = inner.send.bind(inner);
   }
 
-  send(command: unknown): Promise<unknown> {
-    return this.#send(command);
+  send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
+    return this.#send(command, options);
   }
 
   toJSON(): { configured: true } {

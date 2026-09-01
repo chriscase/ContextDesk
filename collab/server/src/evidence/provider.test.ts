@@ -58,16 +58,20 @@ class FakeS3Error extends Error {
 }
 
 class FakeS3Client {
-  readonly calls: Array<{ name: string; input: Record<string, unknown> }> = [];
+  readonly calls: Array<{
+    name: string;
+    input: Record<string, unknown>;
+    abortSignal?: AbortSignal;
+  }> = [];
   bucketExists = true;
   putKeys: string[] = [];
 
   constructor(private readonly bucket: string) {}
 
-  async send(command: unknown): Promise<unknown> {
+  async send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
     const name = commandName(command);
     const input = commandInput(command);
-    this.calls.push({ name, input: { ...input } });
+    this.calls.push({ name, input: { ...input }, abortSignal: options?.abortSignal });
     if (command instanceof HeadBucketCommand) {
       if (!this.bucketExists || input.Bucket !== this.bucket) {
         throw new FakeS3Error(
@@ -615,6 +619,56 @@ describe("createEvidenceStore readiness and sources", () => {
     await store.recoverUnreferencedWrites();
     expect(loaders).toEqual(["cases", "runs"]);
     expect(constructed).toBe(1);
+  });
+});
+
+describe("createEvidenceStore response-body idle deadline", () => {
+  it("passes validated timeoutMs as responseBodyIdleTimeoutMs, keeps Smithy header timeouts, and forwards abortSignal", async () => {
+    const fake = new FakeS3Client("war-room-evidence");
+    const handlers: EvidenceS3RequestHandlerOptions[] = [];
+    const settings = loadS3Settings(
+      s3Env({ COLLAB_EVIDENCE_S3_TIMEOUT_MS: "45000" }),
+    );
+    const store = createEvidenceStore({
+      settings,
+      credentials: staticCredentials(),
+      createRequestHandler: (options) => {
+        handlers.push(options);
+        return { kind: "idle-handler" };
+      },
+      createS3Client: () => fake,
+    });
+    expect(store).toBeInstanceOf(S3EvidenceStore);
+    expect((store as S3EvidenceStore).responseBodyIdleTimeoutMs).toBe(45_000);
+    expect(settings.s3.timeoutMs).toBe(45_000);
+    expect(handlers).toHaveLength(1);
+    expect(handlers[0]?.connectionTimeout).toBe(45_000);
+    expect(handlers[0]?.requestTimeout).toBe(45_000);
+    expect(handlers[0]?.throwOnRequestTimeout).toBe(true);
+    expect(handlers[0]).not.toHaveProperty("socketTimeout");
+    expectOpaqueStore(store);
+
+    const controller = new AbortController();
+    const hash = "a".repeat(64);
+    expect(await store.head(hash as never, controller.signal)).toBeNull();
+    const heads = fake.calls.filter((call) => call.name === "HeadObjectCommand");
+    expect(heads).toHaveLength(1);
+    expect(heads[0]?.abortSignal).toBe(controller.signal);
+    expectOpaqueStore(store);
+  });
+
+  it("defaults responseBodyIdleTimeoutMs to the validated settings timeout", () => {
+    const fake = new FakeS3Client("war-room-evidence");
+    const settings = loadS3Settings();
+    const store = createEvidenceStore({
+      settings,
+      credentials: staticCredentials(),
+      createS3Client: () => fake,
+    });
+    expect((store as S3EvidenceStore).responseBodyIdleTimeoutMs).toBe(
+      DEFAULT_EVIDENCE_S3_TIMEOUT_MS,
+    );
+    expect((store as S3EvidenceStore).responseBodyIdleTimeoutMs).toBe(settings.s3.timeoutMs);
   });
 });
 

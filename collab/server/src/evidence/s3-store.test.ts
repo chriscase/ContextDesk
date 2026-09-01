@@ -9,7 +9,7 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import { FILE_SERVER_REF_SCHEMA_ID, parseFileServerReference } from "@cd-collab/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   abandonS3WriteBatchForCrashTest,
   createS3ClientConfig,
@@ -69,10 +69,15 @@ interface FakeObject {
   iteratorReturns?: { value: number };
   iteratorReturnHangs?: boolean;
   bodyDestroys?: { value: number };
+  bodyCancelOnly?: boolean;
+  bodyCancels?: { value: number };
+  bodyCancelHangs?: boolean;
   transformOnly?: boolean;
   failAfterYields?: number;
   failYieldError?: Error;
   sequentialNext?: { pending: boolean; concurrent: number };
+  headerDelayMs?: number;
+  immediateUint8Body?: boolean;
 }
 
 class FakeS3Client {
@@ -195,6 +200,14 @@ class FakeS3Client {
         : stored.reportedEtag === undefined
           ? stored.etag
           : stored.reportedEtag;
+      if (stored.headerDelayMs !== undefined && stored.headerDelayMs > 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, stored.headerDelayMs);
+        });
+        if (options?.abortSignal?.aborted) {
+          throw options.abortSignal.reason ?? new Error("aborted");
+        }
+      }
       return {
         Body: sdkBody(stored, responseChunks, etagAtStart, () => {
           this.transformToByteArrayCalls += 1;
@@ -324,6 +337,9 @@ class FakeS3Client {
       iteratorReturns?: { value: number };
       iteratorReturnHangs?: boolean;
       bodyDestroys?: { value: number };
+      bodyCancelOnly?: boolean;
+      bodyCancels?: { value: number };
+      bodyCancelHangs?: boolean;
       transformOnly?: boolean;
       etag?: string;
       reportedEtag?: string | null;
@@ -334,6 +350,8 @@ class FakeS3Client {
       failAfterYields?: number;
       failYieldError?: Error;
       sequentialNext?: { pending: boolean; concurrent: number };
+      headerDelayMs?: number;
+      immediateUint8Body?: boolean;
     },
   ): void {
     const stored: FakeObject = {
@@ -349,6 +367,9 @@ class FakeS3Client {
     if (extra?.iteratorReturns) stored.iteratorReturns = extra.iteratorReturns;
     if (extra?.iteratorReturnHangs) stored.iteratorReturnHangs = true;
     if (extra?.bodyDestroys) stored.bodyDestroys = extra.bodyDestroys;
+    if (extra?.bodyCancelOnly) stored.bodyCancelOnly = true;
+    if (extra?.bodyCancels) stored.bodyCancels = extra.bodyCancels;
+    if (extra?.bodyCancelHangs) stored.bodyCancelHangs = true;
     if (extra?.transformOnly) stored.transformOnly = true;
     if (extra?.reportedEtag !== undefined) stored.reportedEtag = extra.reportedEtag;
     if (extra?.reportedGetEtag !== undefined) stored.reportedGetEtag = extra.reportedGetEtag;
@@ -359,6 +380,8 @@ class FakeS3Client {
     if (extra?.failAfterYields !== undefined) stored.failAfterYields = extra.failAfterYields;
     if (extra?.failYieldError) stored.failYieldError = extra.failYieldError;
     if (extra?.sequentialNext) stored.sequentialNext = extra.sequentialNext;
+    if (extra?.headerDelayMs !== undefined) stored.headerDelayMs = extra.headerDelayMs;
+    if (extra?.immediateUint8Body) stored.immediateUint8Body = true;
     this.objects.set(`${this.bucket}/${key}`, stored);
   }
 
@@ -434,6 +457,16 @@ function sdkBody(
   if (stored.transformOnly) {
     return { transformToByteArray };
   }
+  if (stored.immediateUint8Body) {
+    const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return out;
+  }
   const producers = stored.chunkProducers ?? chunks.map((chunk) => () => chunk);
   let index = 0;
   const iterator: AsyncIterator<Uint8Array> = {
@@ -468,14 +501,26 @@ function sdkBody(
       return { done: true, value: undefined };
     },
   };
-  return {
+  const base = {
     [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
       return iterator;
     },
+    transformToByteArray,
+  };
+  if (stored.bodyCancelOnly) {
+    return {
+      ...base,
+      cancel(): Promise<void> | void {
+        if (stored.bodyCancels) stored.bodyCancels.value += 1;
+        if (stored.bodyCancelHangs) return new Promise<void>(() => undefined);
+      },
+    };
+  }
+  return {
+    ...base,
     destroy(): void {
       if (stored.bodyDestroys) stored.bodyDestroys.value += 1;
     },
-    transformToByteArray,
   };
 }
 
@@ -574,7 +619,11 @@ function lowercaseRecord(value: unknown): Record<string, string> {
 
 function garageOptions(
   client: FakeS3Client,
-  extra?: { prefix?: string; acquireWriteLease?: () => Promise<() => void | Promise<void>> },
+  extra?: {
+    prefix?: string;
+    acquireWriteLease?: () => Promise<() => void | Promise<void>>;
+    responseBodyIdleTimeoutMs?: number;
+  },
 ) {
   return {
     bucket: SYNTHETIC_BUCKET,
@@ -586,15 +635,27 @@ function garageOptions(
     client,
     ...(extra?.prefix === undefined ? {} : { prefix: extra.prefix }),
     ...(extra?.acquireWriteLease ? { acquireWriteLease: extra.acquireWriteLease } : {}),
+    ...(extra?.responseBodyIdleTimeoutMs === undefined
+      ? {}
+      : { responseBodyIdleTimeoutMs: extra.responseBodyIdleTimeoutMs }),
   };
 }
 
 function openStore(
   prefix?: string,
-  extra?: { acquireWriteLease?: () => Promise<() => void | Promise<void>> },
+  extra?: {
+    acquireWriteLease?: () => Promise<() => void | Promise<void>>;
+    responseBodyIdleTimeoutMs?: number;
+  },
 ): { fake: FakeS3Client; store: S3EvidenceStore } {
   const fake = new FakeS3Client(SYNTHETIC_BUCKET);
   return { fake, store: new S3EvidenceStore(garageOptions(fake, { prefix, ...extra })) };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function blobKey(hash: string, prefix?: string): string {
@@ -3173,7 +3234,7 @@ describe("S3EvidenceStore", () => {
     }
   });
 
-  it("rejects transform-only canonical bodies while legacy get still consumes them", async () => {
+  it("rejects transform-only canonical bodies on every read path", async () => {
     const { fake, store } = openStore();
     const bytes = new TextEncoder().encode("transform-only-canonical\n");
     const hash = sha256Hex(bytes);
@@ -3195,10 +3256,11 @@ describe("S3EvidenceStore", () => {
       assertSanitized(error);
     }
     expect(fake.transformToByteArrayCalls).toBe(0);
-    const got = await store.get(hash);
-    expect(got).not.toBeNull();
-    expect(Buffer.from(got ?? []).equals(Buffer.from(bytes))).toBe(true);
-    expect(fake.transformToByteArrayCalls).toBeGreaterThan(0);
+    await expect(store.get(hash)).rejects.toMatchObject({
+      operation: "get",
+      message: "s3 evidence get failed: unavailable",
+    });
+    expect(fake.transformToByteArrayCalls).toBe(0);
   });
 
   it("fails closed on hostile truncated oversized dishonest ContentRange and mutation without draining later chunks", async () => {
@@ -3469,6 +3531,373 @@ describe("S3EvidenceStore", () => {
     expect(streamListOrDelete(fake)).toEqual([]);
     expect(streamStagingKeys(fake).sort()).toEqual([inFlightKey, ".stream-staging/foreign-live/residue"].sort());
     await batch.rollback();
+    await stage.rollback();
+  });
+});
+
+describe("S3EvidenceStore response-body idle deadline", () => {
+  const IDLE_MS = 80;
+
+  function openIdleStore(idleMs = IDLE_MS): { fake: FakeS3Client; store: S3EvidenceStore } {
+    return openStore(undefined, { responseBodyIdleTimeoutMs: idleMs });
+  }
+
+  function hangChunk(): Promise<Uint8Array> {
+    return new Promise(() => undefined);
+  }
+
+  function expectUnavailable(error: unknown, operation: string): void {
+    expect(error).toBeInstanceOf(S3EvidenceError);
+    expect((error as S3EvidenceError).operation).toBe(operation);
+    expect((error as S3EvidenceError).message).toBe(`s3 evidence ${operation} failed: unavailable`);
+    assertSanitized(error, ["idle", "timeout", "socketTimeout", String(IDLE_MS)]);
+  }
+
+  async function expectPromptUnavailable(
+    work: Promise<unknown>,
+    operation: string,
+  ): Promise<unknown> {
+    const started = Date.now();
+    let caught: unknown;
+    try {
+      await Promise.race([
+        work,
+        delay(IDLE_MS * 3).then(() => {
+          throw new Error(`${operation} idle deadline did not fire`);
+        }),
+      ]);
+    } catch (error) {
+      caught = error;
+    }
+    if (caught === undefined) {
+      throw new Error(`expected ${operation} to fail closed`);
+    }
+    if (caught instanceof Error && /did not fire/.test(caught.message)) {
+      throw caught;
+    }
+    expectUnavailable(caught, operation);
+    expect(Date.now() - started).toBeLessThan(IDLE_MS * 3);
+    return caught;
+  }
+
+  it("treats undefined responseBodyIdleTimeoutMs as disabled and rejects invalid values", () => {
+    const { fake, store } = openStore();
+    expect(store.responseBodyIdleTimeoutMs).toBeUndefined();
+    for (const invalid of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => new S3EvidenceStore(garageOptions(fake, {
+        responseBodyIdleTimeoutMs: invalid,
+      }))).toThrow(/invalid responseBodyIdleTimeoutMs/);
+    }
+    const armed = new S3EvidenceStore(garageOptions(fake, { responseBodyIdleTimeoutMs: 1 }));
+    expect(armed.responseBodyIdleTimeoutMs).toBe(1);
+  });
+
+  it("does not count slow GetObject headers toward the body idle deadline", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("slow-headers-still-ok\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.headerDelayMs = IDLE_MS + 40;
+    const started = Date.now();
+    expect(await store.verify(meta.hash)).toBe(true);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(IDLE_MS);
+  });
+
+  it("fails closed on a stalled first body chunk without aborting the caller signal", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("stall-first-body-chunk\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    const iteratorReturns = { value: 0 };
+    const bodyDestroys = { value: 0 };
+    stored.chunkProducers = [() => hangChunk()];
+    stored.iteratorReturns = iteratorReturns;
+    stored.iteratorReturnHangs = true;
+    stored.bodyDestroys = bodyDestroys;
+    const controller = new AbortController();
+    const opening = store.openRead(meta.hash, undefined, controller.signal);
+    await expectPromptUnavailable(opening, "openRead");
+    expect(controller.signal.aborted).toBe(false);
+    expect(iteratorReturns.value).toBeGreaterThan(0);
+    expect(bodyDestroys.value).toBeGreaterThan(0);
+  });
+
+  it("fails closed on a stalled later body chunk", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("stall-later-body-chunk!!");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.chunkProducers = [
+      () => bytes.slice(0, 8),
+      () => hangChunk(),
+    ];
+    stored.iteratorReturns = { value: 0 };
+    stored.iteratorReturnHangs = true;
+    stored.bodyDestroys = { value: 0 };
+    await expectPromptUnavailable(store.verify(meta.hash), "verify");
+    expect(stored.iteratorReturns.value).toBeGreaterThan(0);
+    expect(stored.bodyDestroys.value).toBeGreaterThan(0);
+  });
+
+  it("allows a progressing body whose total duration exceeds idle while each gap is below it", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("progressing-body-gaps-ok!!");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    const parts = [
+      bytes.slice(0, 8),
+      bytes.slice(8, 16),
+      bytes.slice(16),
+    ];
+    stored.chunkProducers = parts.map((part) => async () => {
+      await delay(35);
+      return part;
+    });
+    const started = Date.now();
+    expect(await store.verify(meta.hash)).toBe(true);
+    expect(Date.now() - started).toBeGreaterThan(IDLE_MS);
+  });
+
+  it("does not treat an empty chunk as progress toward the next idle wait", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("empty-is-not-progress\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.chunkProducers = [
+      async () => {
+        await delay(50);
+        return new Uint8Array();
+      },
+      async () => {
+        await delay(50);
+        return bytes;
+      },
+    ];
+    stored.iteratorReturns = { value: 0 };
+    stored.iteratorReturnHangs = true;
+    stored.bodyDestroys = { value: 0 };
+    await expectPromptUnavailable(store.verify(meta.hash), "verify");
+    expect(stored.bodyDestroys.value).toBeGreaterThan(0);
+    expect(stored.iteratorReturns.value).toBeGreaterThan(0);
+  });
+
+  it("leaves immediate Uint8Array bodies timer-free even with a 1ms idle deadline", async () => {
+    const { fake, store } = openIdleStore(1);
+    const bytes = new TextEncoder().encode("immediate-uint8-body\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.immediateUint8Body = true;
+    fake.transformToByteArrayCalls = 0;
+    expect(await store.verify(meta.hash)).toBe(true);
+    const got = await store.get(meta.hash);
+    expect(got).not.toBeNull();
+    expect(Buffer.from(got ?? []).equals(Buffer.from(bytes))).toBe(true);
+    expect(fake.transformToByteArrayCalls).toBe(0);
+    const handle = await store.openRead(meta.hash, { start: 0, end: 8 });
+    expect(Buffer.from(await collectChunks(handle.bytes())).toString()).toBe("immediate");
+  });
+
+  it("preserves the original caller abort reason over idle expiry", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("caller-abort-wins-idle\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.chunkProducers = [() => hangChunk()];
+    stored.iteratorReturns = { value: 0 };
+    stored.iteratorReturnHangs = true;
+    stored.bodyDestroys = { value: 0 };
+    const controller = new AbortController();
+    const reason = new Error("original-caller-abort");
+    const opening = store.openRead(meta.hash, undefined, controller.signal);
+    await delay(20);
+    controller.abort(reason);
+    await expect(opening).rejects.toBe(reason);
+    expect(controller.signal.aborted).toBe(true);
+    expect(stored.iteratorReturns.value).toBeGreaterThan(0);
+    expect(stored.bodyDestroys.value).toBeGreaterThan(0);
+  });
+
+  it("cleans up a hostile iterator.return on idle without waiting", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("hostile-return-on-idle\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.chunkProducers = [() => hangChunk()];
+    stored.iteratorReturns = { value: 0 };
+    stored.iteratorReturnHangs = true;
+    stored.bodyDestroys = { value: 0 };
+    const started = Date.now();
+    await expectPromptUnavailable(store.verify(meta.hash), "verify");
+    expect(Date.now() - started).toBeLessThan(IDLE_MS * 3);
+    expect(stored.iteratorReturns.value).toBeGreaterThan(0);
+    expect(stored.bodyDestroys.value).toBeGreaterThan(0);
+  });
+
+  it("fire-and-forgets a hostile cancel-only body when an idle wait expires", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("hostile-cancel-on-idle\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.chunkProducers = [() => hangChunk()];
+    stored.iteratorReturns = { value: 0 };
+    stored.iteratorReturnHangs = true;
+    stored.bodyCancelOnly = true;
+    stored.bodyCancels = { value: 0 };
+    stored.bodyCancelHangs = true;
+    await expectPromptUnavailable(store.verify(meta.hash), "verify");
+    expect(stored.bodyCancels.value).toBeGreaterThan(0);
+    expect(stored.iteratorReturns.value).toBeGreaterThan(0);
+  });
+
+  it("does not call a hostile return after done and clears every success timer and listener", async () => {
+    const successIdleMs = 12_345;
+    const { fake, store } = openIdleStore(successIdleMs);
+    const bytes = new TextEncoder().encode("success-cleans-listeners\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.bodyDestroys = { value: 0 };
+    stored.iteratorReturns = { value: 0 };
+    stored.iteratorReturnHangs = true;
+    const controller = new AbortController();
+    const addSpy = vi.spyOn(controller.signal, "addEventListener");
+    const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      const handle = await store.openRead(meta.hash, undefined, controller.signal);
+      expect(Buffer.from(await collectChunks(handle.bytes())).equals(Buffer.from(bytes))).toBe(true);
+      const idleHandles = setTimeoutSpy.mock.calls.flatMap((call, index) =>
+        call[1] === successIdleMs ? [setTimeoutSpy.mock.results[index]?.value] : []
+      );
+      const clearedHandles = clearTimeoutSpy.mock.calls.map((call) => call[0]);
+      const abortAdds = addSpy.mock.calls.filter((call) => call[0] === "abort").length;
+      const abortRemoves = removeSpy.mock.calls.filter((call) => call[0] === "abort").length;
+      expect(idleHandles.length).toBeGreaterThan(0);
+      expect(idleHandles.every((handle) => clearedHandles.includes(handle))).toBe(true);
+      expect(abortAdds).toBeGreaterThan(0);
+      expect(abortRemoves).toBe(abortAdds);
+      expect(stored.bodyDestroys.value).toBe(0);
+      expect(stored.iteratorReturns.value).toBe(0);
+    } finally {
+      clearTimeoutSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+      removeSpy.mockRestore();
+      addSpy.mockRestore();
+    }
+    controller.abort(new Error("abort-after-success"));
+    await delay(20);
+    expect(stored.bodyDestroys.value).toBe(0);
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  it("enforces the idle deadline on a stalled ranged GET after preflight", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("0123456789");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    const handle = await store.openRead(meta.hash, { start: 2, end: 5 });
+    stored.chunkProducers = [() => hangChunk()];
+    stored.reportedGetLength = 4;
+    stored.iteratorReturns = { value: 0 };
+    stored.iteratorReturnHangs = true;
+    stored.bodyDestroys = { value: 0 };
+    await expectPromptUnavailable(collectChunks(handle.bytes()), "openRead");
+    expect(stored.bodyDestroys.value).toBeGreaterThan(0);
+    expect(stored.iteratorReturns.value).toBeGreaterThan(0);
+  });
+
+  it("enforces the idle deadline on the post-copy canonical probe", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("post-copy-probe-idle\n");
+    const meta = await store.put(bytes);
+    const stored = fake.object(blobKey(meta.hash));
+    if (!stored) throw new Error("missing object");
+    stored.chunkProducers = [() => hangChunk()];
+    stored.iteratorReturns = { value: 0 };
+    stored.iteratorReturnHangs = true;
+    stored.bodyDestroys = { value: 0 };
+    await expectPromptUnavailable(store.put(bytes), "put");
+    expect(stored.bodyDestroys.value).toBeGreaterThan(0);
+  });
+
+  it("enforces the idle deadline on journal, file-ref, and legacy iterable get paths", async () => {
+    const { fake, store } = openIdleStore();
+    const bytes = new TextEncoder().encode("legacy-iterable-get\n");
+    const meta = await store.put(bytes);
+    const blob = fake.object(blobKey(meta.hash));
+    if (!blob) throw new Error("missing blob");
+    blob.chunkProducers = [() => hangChunk()];
+    blob.iteratorReturnHangs = true;
+    blob.bodyDestroys = { value: 0 };
+    fake.transformToByteArrayCalls = 0;
+    await expectPromptUnavailable(store.get(meta.hash), "get");
+    expect(fake.transformToByteArrayCalls).toBe(0);
+    expect(blob.bodyDestroys.value).toBeGreaterThan(0);
+
+    const created = await store.putFileServerReference({ uri: SYNTHETIC_URI });
+    const ref = fake.object(`refs/${created.id}.json`);
+    if (!ref) throw new Error("missing ref");
+    ref.chunkProducers = [() => hangChunk()];
+    ref.iteratorReturnHangs = true;
+    ref.bodyDestroys = { value: 0 };
+    await expectPromptUnavailable(
+      store.getFileServerReference(created.id),
+      "getFileServerReference",
+    );
+    expect(ref.bodyDestroys.value).toBeGreaterThan(0);
+
+    const journalId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const journalBytes = new TextEncoder().encode(JSON.stringify({
+      schemaId: EVIDENCE_PENDING_WRITE_SCHEMA_ID,
+      id: journalId,
+      hashes: [],
+    }));
+    fake.putRaw(`.pending/${journalId}.json`, journalBytes, {}, undefined, {
+      chunkProducers: [() => hangChunk()],
+      iteratorReturnHangs: true,
+      bodyDestroys: { value: 0 },
+    });
+    const journal = fake.object(`.pending/${journalId}.json`);
+    if (!journal) throw new Error("missing journal");
+    await expectPromptUnavailable(
+      store.getJournalObject(`.pending/${journalId}.json`, "recoverUnreferencedWrites"),
+      "recoverUnreferencedWrites",
+    );
+    expect(journal.bodyDestroys?.value).toBeGreaterThan(0);
+
+    const batch = await store.beginWriteBatch();
+    const unpromoted = await batch.put(new TextEncoder().encode("unpromoted-idle-verify\n"));
+    const stagingKey = stagingKeys(fake)[0];
+    if (!stagingKey) throw new Error("missing staging key");
+    const staged = fake.object(stagingKey);
+    if (!staged) throw new Error("missing staged object");
+    staged.chunkProducers = [() => hangChunk()];
+    staged.iteratorReturnHangs = true;
+    staged.bodyDestroys = { value: 0 };
+    await expectPromptUnavailable(batch.verify(unpromoted.hash), "get");
+    await batch.rollback();
+  });
+
+  it("does not apply the GetObject idle deadline to intake chunk iteration", async () => {
+    const { store } = openIdleStore(30);
+    async function* slowIntake(): AsyncIterable<Uint8Array> {
+      yield new Uint8Array([1, 2, 3]);
+      await delay(80);
+      yield new Uint8Array([4, 5, 6]);
+    }
+    const stage = await store.stageStream(slowIntake(), { maxBytes: 8 });
+    expect(stage.meta.byteLength).toBe(6);
     await stage.rollback();
   });
 });
