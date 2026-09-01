@@ -69,6 +69,9 @@ export interface LogTimeCasePort {
   ): Promise<{ id: string; snapshotId: string | null; createdAt: string }[]>;
   listCorpusFilesForCase(
     caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
   ): Promise<{ relativePath: string; contentBase64: string }[]>;
   casePrivacyClass(caseId: string): Promise<PrivacyClass>;
   appendTimeline(
@@ -118,6 +121,12 @@ function digestOf(value: unknown): string {
 function assertBounded(name: string, value: string, max: number): void {
   if (!value || value.length > max) {
     throw new LogTimeRequestError(`${name} is not a bounded value`);
+  }
+}
+
+function assertCanReadCorpus(privacyClass: PrivacyClass, canReadPrivate: boolean): void {
+  if (privacyClass === "owner_only" && !canReadPrivate) {
+    throw new LogTimeNotFoundError("not_found");
   }
 }
 
@@ -220,21 +229,24 @@ export class LogTimeService {
     };
   }
 
-  async getState(caseId: string): Promise<LogCorpusStateV1> {
+  async getState(caseId: string, canReadPrivate: boolean): Promise<LogCorpusStateV1> {
     const corpus = await this.deps.store.getCorpus(caseId);
     if (!corpus) {
+      const privacyClass = await this.deps.cases.casePrivacyClass(caseId);
+      assertCanReadCorpus(privacyClass, canReadPrivate);
       return parseLogCorpusState({
         schemaId: LOG_CORPUS_STATE_SCHEMA_ID,
         caseId,
         corpusId: null,
         corpusRevision: 0,
         builtAt: null,
-        privacyClass: await this.deps.cases.casePrivacyClass(caseId),
+        privacyClass,
         sources: [],
         reviewOutstanding: false,
         undoableRevision: null,
       });
     }
+    assertCanReadCorpus(corpus.privacyClass, canReadPrivate);
     const host = await this.deps.bridge.run(caseId, {
       kind: "status",
       corpusId: corpus.corpusId,
@@ -247,9 +259,13 @@ export class LogTimeService {
    * provenance and DST decisions; this layer only applies the wire contract
    * and keeps the returned message/source fields bounded.
    */
-  async chronology(caseId: string, raw: unknown): Promise<LogChronologyPageV1> {
+  async chronology(
+    caseId: string,
+    canReadPrivate: boolean,
+    raw: unknown,
+  ): Promise<LogChronologyPageV1> {
+    const corpus = await this.requireCorpus(caseId, canReadPrivate);
     const request = parseLogChronologyQuery(raw);
-    const corpus = await this.requireCorpus(caseId);
     const host = await this.deps.bridge.run(caseId, {
       kind: "chronology",
       corpusId: corpus.corpusId,
@@ -335,7 +351,12 @@ export class LogTimeService {
   }
 
   /** Latest recorded disposition per dependent, for the review surface. */
-  async listDependents(caseId: string): Promise<LogTimeDependentV1[]> {
+  async listDependents(
+    caseId: string,
+    canReadPrivate: boolean,
+  ): Promise<LogTimeDependentV1[]> {
+    const corpus = await this.deps.store.getCorpus(caseId);
+    if (corpus) assertCanReadCorpus(corpus.privacyClass, canReadPrivate);
     const rows = await this.deps.store.listLatestDependents(caseId);
     return rows.map(toDependent);
   }
@@ -349,19 +370,31 @@ export class LogTimeService {
    * case. One corpus per case: rebuilding would silently discard the
    * declarations reviewers made against the old one.
    */
-  async buildCorpus(caseId: string, actor: Actor): Promise<LogCorpusStateV1> {
+  async buildCorpus(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    canReadPrivate: boolean,
+  ): Promise<LogCorpusStateV1> {
     return this.deps.store.withCaseLock(caseId, async () => {
       const existing = await this.deps.store.getCorpus(caseId);
       if (existing) {
+        assertCanReadCorpus(existing.privacyClass, canReadPrivate);
         throw new LogTimeConflictError("this case already has a log corpus");
       }
-      const files = await this.deps.cases.listCorpusFilesForCase(caseId);
+      const privacyClass = await this.deps.cases.casePrivacyClass(caseId);
+      assertCanReadCorpus(privacyClass, canReadPrivate);
+      const files = await this.deps.cases.listCorpusFilesForCase(
+        caseId,
+        actor,
+        isAdmin,
+        canReadPrivate,
+      );
       if (files.length === 0) {
         throw new LogTimeRequestError(
           "this case has no committed log files to build a corpus from",
         );
       }
-      const privacyClass = await this.deps.cases.casePrivacyClass(caseId);
       const corpusName = `case ${caseId} log corpus`;
       const host = await this.deps.bridge.run(caseId, {
         kind: "build",
@@ -407,9 +440,13 @@ export class LogTimeService {
   // -------------------------------------------------------------------------
 
   /** Recompute a preview. Never mutates the corpus. */
-  async preview(caseId: string, raw: unknown): Promise<LogTimePreviewV1> {
+  async preview(
+    caseId: string,
+    canReadPrivate: boolean,
+    raw: unknown,
+  ): Promise<LogTimePreviewV1> {
+    const corpus = await this.requireCorpus(caseId, canReadPrivate);
     const request = parseLogTimePreviewRequest(raw);
-    const corpus = await this.requireCorpus(caseId);
     const host = await this.deps.bridge.run(caseId, {
       kind: "preview",
       corpusId: corpus.corpusId,
@@ -462,11 +499,13 @@ export class LogTimeService {
   async apply(
     caseId: string,
     actor: Actor,
+    canReadPrivate: boolean,
     raw: unknown,
   ): Promise<LogTimeOutcomeV1> {
+    await this.requireCorpus(caseId, canReadPrivate);
     const request = parseLogTimeApplyRequest(raw);
     assertBounded("source", request.source, LOG_TIME_LIMITS.maxSourceChars);
-    return this.mutate(caseId, actor, "apply", request.source, request.idempotencyKey, request, async (corpus) => {
+    return this.mutate(caseId, actor, canReadPrivate, "apply", request.source, request.idempotencyKey, request, async (corpus) => {
       const declaredAt = Math.floor(this.now().getTime() / 1000);
       const host = await this.deps.bridge.run(caseId, {
         kind: "apply",
@@ -494,11 +533,13 @@ export class LogTimeService {
   async clear(
     caseId: string,
     actor: Actor,
+    canReadPrivate: boolean,
     raw: unknown,
   ): Promise<LogTimeOutcomeV1> {
+    await this.requireCorpus(caseId, canReadPrivate);
     const request = parseLogTimeClearRequest(raw);
     assertBounded("source", request.source, LOG_TIME_LIMITS.maxSourceChars);
-    return this.mutate(caseId, actor, "clear", request.source, request.idempotencyKey, request, async (corpus) => {
+    return this.mutate(caseId, actor, canReadPrivate, "clear", request.source, request.idempotencyKey, request, async (corpus) => {
       const host = await this.deps.bridge.run(caseId, {
         kind: "clear",
         corpusId: corpus.corpusId,
@@ -513,10 +554,12 @@ export class LogTimeService {
   async undo(
     caseId: string,
     actor: Actor,
+    canReadPrivate: boolean,
     raw: unknown,
   ): Promise<LogTimeOutcomeV1> {
+    await this.requireCorpus(caseId, canReadPrivate);
     const request = parseLogTimeUndoRequest(raw);
-    return this.mutate(caseId, actor, "undo", null, request.idempotencyKey, request, async (corpus) => {
+    return this.mutate(caseId, actor, canReadPrivate, "undo", null, request.idempotencyKey, request, async (corpus) => {
       const host = await this.deps.bridge.run(caseId, {
         kind: "undo",
         corpusId: corpus.corpusId,
@@ -558,6 +601,7 @@ export class LogTimeService {
   private async mutate(
     caseId: string,
     actor: Actor,
+    canReadPrivate: boolean,
     operation: Exclude<LogTimeOperation, "preview">,
     source: string | null,
     idempotencyKey: string,
@@ -566,7 +610,7 @@ export class LogTimeService {
   ): Promise<LogTimeOutcomeV1> {
     const requestDigest = digestOf({ caseId, actor: actor.id, operation, request });
     return this.deps.store.withCaseLock(caseId, async () => {
-      const corpus = await this.requireCorpus(caseId);
+      const corpus = await this.requireCorpus(caseId, canReadPrivate);
       const replay = await this.deps.store.getOperationByIdempotency(
         caseId,
         idempotencyKey,
@@ -786,11 +830,15 @@ export class LogTimeService {
     });
   }
 
-  private async requireCorpus(caseId: string): Promise<LogCorpusRow> {
+  private async requireCorpus(
+    caseId: string,
+    canReadPrivate: boolean,
+  ): Promise<LogCorpusRow> {
     const corpus = await this.deps.store.getCorpus(caseId);
     if (!corpus) {
       throw new LogTimeNotFoundError("this case has no log corpus yet");
     }
+    assertCanReadCorpus(corpus.privacyClass, canReadPrivate);
     return corpus;
   }
 }

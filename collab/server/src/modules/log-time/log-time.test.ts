@@ -288,6 +288,7 @@ function harness(options: HarnessOptions = {}) {
   const bridge = new FakeBridge();
   const audit = new FakeAudit();
   const timeline: { kind: string; payload: Record<string, unknown> }[] = [];
+  let corpusFileLists = 0;
   let clock = Date.parse("2024-03-11T12:00:00Z");
 
   const cases: LogTimeCasePort = {
@@ -301,6 +302,7 @@ function harness(options: HarnessOptions = {}) {
       return options.runs ?? [];
     },
     async listCorpusFilesForCase() {
+      corpusFileLists += 1;
       return (
         options.files ?? [
           { relativePath: SOURCE, contentBase64: Buffer.from("synthetic\n").toString("base64") },
@@ -323,12 +325,19 @@ function harness(options: HarnessOptions = {}) {
     audit: audit as unknown as AuditStore,
     now: () => new Date((clock += 1000)),
   });
-  return { service, store, bridge, audit, timeline };
+  return {
+    service,
+    store,
+    bridge,
+    audit,
+    timeline,
+    corpusFileLists: () => corpusFileLists,
+  };
 }
 
 async function built(options: HarnessOptions = {}) {
   const h = harness(options);
-  await h.service.buildCorpus(CASE_ID, ACTOR);
+  await h.service.buildCorpus(CASE_ID, ACTOR, false, true);
   return h;
 }
 
@@ -355,7 +364,7 @@ function applyRequest(expectedRevision: number, key = "apply-worker-0001") {
 describe("case-bound log corpus", () => {
   it("reports no corpus and no outstanding review before one is built", async () => {
     const { service } = harness();
-    const state = await service.getState(CASE_ID);
+    const state = await service.getState(CASE_ID, true);
     expect(state.corpusId).toBeNull();
     expect(state.corpusRevision).toBe(0);
     expect(state.sources).toEqual([]);
@@ -364,7 +373,7 @@ describe("case-bound log corpus", () => {
 
   it("builds a durable corpus that starts with no declaration at all", async () => {
     const { service, store } = await built();
-    const state = await service.getState(CASE_ID);
+    const state = await service.getState(CASE_ID, true);
 
     expect(state.corpusId).toBe(CORPUS_ID);
     expect(state.sources[0]?.declaration).toBeNull();
@@ -375,14 +384,14 @@ describe("case-bound log corpus", () => {
 
   it("refuses to rebuild over an existing corpus", async () => {
     const { service } = await built();
-    await expect(service.buildCorpus(CASE_ID, ACTOR)).rejects.toBeInstanceOf(
+    await expect(service.buildCorpus(CASE_ID, ACTOR, false, true)).rejects.toBeInstanceOf(
       LogTimeConflictError,
     );
   });
 
   it("refuses to build a corpus from a case with no committed log files", async () => {
     const h = harness({ files: [] });
-    await expect(h.service.buildCorpus(CASE_ID, ACTOR)).rejects.toBeInstanceOf(
+    await expect(h.service.buildCorpus(CASE_ID, ACTOR, false, true)).rejects.toBeInstanceOf(
       LogTimeRequestError,
     );
   });
@@ -390,7 +399,7 @@ describe("case-bound log corpus", () => {
   it("fails closed on every review operation before a corpus exists", async () => {
     const { service } = harness();
     await expect(
-      service.preview(CASE_ID, {
+      service.preview(CASE_ID, true, {
         schemaId: "cd-collab.log_time_preview_request.v1",
         source: SOURCE,
         ianaTimezone: "America/Chicago",
@@ -398,15 +407,67 @@ describe("case-bound log corpus", () => {
       }),
     ).rejects.toBeInstanceOf(LogTimeNotFoundError);
     await expect(
-      service.apply(CASE_ID, ACTOR, applyRequest(1)),
+      service.apply(CASE_ID, ACTOR, true, applyRequest(1)),
     ).rejects.toBeInstanceOf(LogTimeNotFoundError);
+  });
+
+  it("denies a private build before listing bytes or calling the host", async () => {
+    const h = harness();
+    await expect(
+      h.service.buildCorpus(CASE_ID, ACTOR, false, false),
+    ).rejects.toBeInstanceOf(LogTimeNotFoundError);
+    expect(h.corpusFileLists()).toBe(0);
+    expect(h.bridge.calls).toEqual([]);
+    await expect(h.service.getState(CASE_ID, false)).rejects.toBeInstanceOf(
+      LogTimeNotFoundError,
+    );
+    expect(h.bridge.calls).toEqual([]);
+  });
+
+  it("rechecks an owner-only durable corpus after revoke before every host call", async () => {
+    const h = await built();
+    const bridgeCalls = h.bridge.calls.length;
+    const expectDeniedWithoutBridge = async (operation: Promise<unknown>) => {
+      await expect(operation).rejects.toBeInstanceOf(LogTimeNotFoundError);
+      expect(h.bridge.calls).toHaveLength(bridgeCalls);
+    };
+
+    await expectDeniedWithoutBridge(h.service.getState(CASE_ID, false));
+    await expectDeniedWithoutBridge(h.service.listDependents(CASE_ID, false));
+    await expectDeniedWithoutBridge(h.service.chronology(CASE_ID, false, {
+      schemaId: "cd-collab.log_chronology_query.v1",
+      search: null,
+      sources: [],
+      limit: 100,
+      cursor: null,
+    }));
+    await expectDeniedWithoutBridge(h.service.preview(CASE_ID, false, {
+      schemaId: "cd-collab.log_time_preview_request.v1",
+      source: SOURCE,
+      ianaTimezone: "America/Chicago",
+      expectedRevision: 1,
+    }));
+    await expectDeniedWithoutBridge(
+      h.service.apply(CASE_ID, ACTOR, false, applyRequest(1, "revoked-apply-0001")),
+    );
+    await expectDeniedWithoutBridge(h.service.clear(CASE_ID, ACTOR, false, {
+      schemaId: "cd-collab.log_time_clear_request.v1",
+      source: SOURCE,
+      expectedRevision: 1,
+      idempotencyKey: "revoked-clear-0001",
+    }));
+    await expectDeniedWithoutBridge(h.service.undo(CASE_ID, ACTOR, false, {
+      schemaId: "cd-collab.log_time_undo_request.v1",
+      expectedRevision: 1,
+      idempotencyKey: "revoked-undo-0001",
+    }));
   });
 });
 
 describe("preview", () => {
   it("returns DST reporting and raw-beside-normalized samples without mutating", async () => {
     const { service, store } = await built();
-    const preview = await service.preview(CASE_ID, {
+    const preview = await service.preview(CASE_ID, true, {
       schemaId: "cd-collab.log_time_preview_request.v1",
       source: SOURCE,
       ianaTimezone: "America/Chicago",
@@ -427,7 +488,7 @@ describe("preview", () => {
     const { service, bridge } = await built();
     const before = bridge.calls.length;
     await expect(
-      service.preview(CASE_ID, {
+      service.preview(CASE_ID, true, {
         schemaId: "cd-collab.log_time_preview_request.v1",
         source: SOURCE,
         ianaTimezone: "CST (probably)",
@@ -441,7 +502,7 @@ describe("preview", () => {
 describe("normalized chronology", () => {
   it("projects retained local text, explicit order-only state, and exact filters", async () => {
     const { service, bridge, store } = await built();
-    const page = await service.chronology(CASE_ID, {
+    const page = await service.chronology(CASE_ID, true, {
       schemaId: "cd-collab.log_chronology_query.v1",
       search: "heartbeat%",
       sources: [SOURCE],
@@ -477,7 +538,7 @@ describe("normalized chronology", () => {
     const { service, bridge } = await built();
     const before = bridge.calls.length;
     await expect(
-      service.chronology(CASE_ID, {
+      service.chronology(CASE_ID, true, {
         schemaId: "cd-collab.log_chronology_query.v1",
         search: null,
         sources: [],
@@ -492,7 +553,7 @@ describe("normalized chronology", () => {
 describe("apply, clear, undo", () => {
   it("records the declaration with the fingerprint and identity that decided it", async () => {
     const { service, store } = await built();
-    const outcome = await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    const outcome = await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
 
     expect(outcome.operation).toBe("apply");
     expect(outcome.appliedRevision).toBe(2);
@@ -508,8 +569,8 @@ describe("apply, clear, undo", () => {
 
   it("keeps the unresolvable line as order-only evidence after applying", async () => {
     const { service } = await built();
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
-    const state = await service.getState(CASE_ID);
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
+    const state = await service.getState(CASE_ID, true);
 
     expect(state.sources[0]?.resolvedLocalRecords).toBe(4);
     expect(state.sources[0]?.unresolvedLocalRecords).toBe(1);
@@ -518,16 +579,16 @@ describe("apply, clear, undo", () => {
 
   it("fails closed when the caller's revision has moved", async () => {
     const { service } = await built();
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
     await expect(
-      service.apply(CASE_ID, ACTOR, applyRequest(1, "apply-worker-0002")),
+      service.apply(CASE_ID, ACTOR, true, applyRequest(1, "apply-worker-0002")),
     ).rejects.toBeInstanceOf(LogTimeConflictError);
   });
 
   it("replays an identical retry without publishing a second revision", async () => {
     const { service, store } = await built();
-    const first = await service.apply(CASE_ID, ACTOR, applyRequest(1));
-    const second = await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    const first = await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
+    const second = await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
 
     expect(first.replayed).toBe(false);
     expect(second.replayed).toBe(true);
@@ -537,9 +598,9 @@ describe("apply, clear, undo", () => {
 
   it("refuses to reuse an idempotency key for a different request", async () => {
     const { service } = await built();
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
     await expect(
-      service.apply(CASE_ID, ACTOR, {
+      service.apply(CASE_ID, ACTOR, true, {
         ...applyRequest(2),
         ianaTimezone: "Europe/Berlin",
       }),
@@ -548,8 +609,8 @@ describe("apply, clear, undo", () => {
 
   it("clearing returns the source to order-only and drops the declaration", async () => {
     const { service, store } = await built();
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
-    const outcome = await service.clear(CASE_ID, ACTOR, {
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
+    const outcome = await service.clear(CASE_ID, ACTOR, true, {
       schemaId: "cd-collab.log_time_clear_request.v1",
       source: SOURCE,
       expectedRevision: 2,
@@ -561,21 +622,21 @@ describe("apply, clear, undo", () => {
     expect(outcome.declarations).toEqual([]);
     expect(await store.listDeclarations(CASE_ID)).toEqual([]);
 
-    const state = await service.getState(CASE_ID);
+    const state = await service.getState(CASE_ID, true);
     expect(state.sources[0]?.unresolvedLocalRecords).toBe(5);
     expect(state.sources[0]?.declaration).toBeNull();
   });
 
   it("undo advances the revision and names the earlier one it restored", async () => {
     const { service } = await built();
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
-    await service.clear(CASE_ID, ACTOR, {
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
+    await service.clear(CASE_ID, ACTOR, true, {
       schemaId: "cd-collab.log_time_clear_request.v1",
       source: SOURCE,
       expectedRevision: 2,
       idempotencyKey: "clear-worker-0001",
     });
-    const outcome = await service.undo(CASE_ID, ACTOR, {
+    const outcome = await service.undo(CASE_ID, ACTOR, true, {
       schemaId: "cd-collab.log_time_undo_request.v1",
       expectedRevision: 3,
       idempotencyKey: "undo-worker-0001",
@@ -590,14 +651,14 @@ describe("apply, clear, undo", () => {
 
   it("keeps the original preview fingerprint on a declaration undo restores", async () => {
     const { service } = await built();
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
-    await service.clear(CASE_ID, ACTOR, {
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
+    await service.clear(CASE_ID, ACTOR, true, {
       schemaId: "cd-collab.log_time_clear_request.v1",
       source: SOURCE,
       expectedRevision: 2,
       idempotencyKey: "clear-worker-0001",
     });
-    const outcome = await service.undo(CASE_ID, ACTOR, {
+    const outcome = await service.undo(CASE_ID, ACTOR, true, {
       schemaId: "cd-collab.log_time_undo_request.v1",
       expectedRevision: 3,
       idempotencyKey: "undo-worker-0001",
@@ -610,7 +671,7 @@ describe("apply, clear, undo", () => {
 
   it("audits every durable change", async () => {
     const { service, audit } = await built();
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
     expect(audit.entries.map((entry) => entry.action)).toEqual([
       "log_corpus_build",
       "log_time_apply",
@@ -634,7 +695,7 @@ describe("dependent snapshots and runs", () => {
         },
       ],
     });
-    const outcome = await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    const outcome = await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
 
     const snapshot = outcome.dependents.find((d) => d.kind === "snapshot");
     const run = outcome.dependents.find((d) => d.kind === "triage_run");
@@ -657,7 +718,7 @@ describe("dependent snapshots and runs", () => {
         },
       ],
     });
-    const outcome = await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    const outcome = await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
 
     for (const dependent of outcome.dependents) {
       expect(dependent.disposition).toBe("unknown_basis");
@@ -671,7 +732,7 @@ describe("dependent snapshots and runs", () => {
         { id: "run-synthetic-0003", snapshotId: null, createdAt: AFTER_BUILD },
       ],
     });
-    const outcome = await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    const outcome = await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
     expect(outcome.dependents[0]?.disposition).toBe("unknown_basis");
   });
 
@@ -686,7 +747,7 @@ describe("dependent snapshots and runs", () => {
       if (result.revision) result.revision.changedRecords = 0;
       return result;
     };
-    const outcome = await h.service.apply(CASE_ID, ACTOR, applyRequest(1));
+    const outcome = await h.service.apply(CASE_ID, ACTOR, true, applyRequest(1));
     expect(outcome.dependents).toEqual([]);
   });
 
@@ -694,15 +755,15 @@ describe("dependent snapshots and runs", () => {
     const { service } = await built({
       snapshots: [{ id: "snapshot-synthetic-0001", createdAt: AFTER_BUILD }],
     });
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
-    await service.clear(CASE_ID, ACTOR, {
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
+    await service.clear(CASE_ID, ACTOR, true, {
       schemaId: "cd-collab.log_time_clear_request.v1",
       source: SOURCE,
       expectedRevision: 2,
       idempotencyKey: "clear-worker-0001",
     });
 
-    const dependents = await service.listDependents(CASE_ID);
+    const dependents = await service.listDependents(CASE_ID, true);
     expect(dependents).toHaveLength(1);
     expect(dependents[0]?.disposition).toBe("revised");
   });
@@ -718,7 +779,7 @@ describe("dependent snapshots and runs", () => {
         },
       ],
     });
-    await service.apply(CASE_ID, ACTOR, applyRequest(1));
+    await service.apply(CASE_ID, ACTOR, true, applyRequest(1));
 
     const entry = timeline.find((item) => item.kind === "log_time_apply");
     expect(entry?.payload.revisedSnapshots).toBe(1);

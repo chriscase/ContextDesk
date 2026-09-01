@@ -14,7 +14,7 @@ import { isContentHash, type EvidenceStore } from "../../evidence/store.js";
 import type { Actor, CaseService, CaseStore } from "../cases/index.js";
 import type { TriageJobStore } from "../triage-runs/index.js";
 import type { LogTimeCasePort } from "./service.js";
-import { LogTimeRequestError } from "./bridge.js";
+import { LogTimeNotFoundError, LogTimeRequestError } from "./bridge.js";
 
 /** The log host's per-source materialization envelope. */
 export const LOG_CORPUS_MAX_FILE_BYTES = 64 * 1024 * 1024;
@@ -42,7 +42,7 @@ export function corpusBuilderCapacityError(
 
 export interface LogTimeCasePortDeps {
   cases: CaseStore;
-  domain: Pick<CaseService, "getCase">;
+  domain: Pick<CaseService, "getCase" | "getReadableHeldArtifact">;
   evidence: EvidenceStore;
   jobs: TriageJobStore;
 }
@@ -78,7 +78,12 @@ export function createLogTimeCasePort(deps: LogTimeCasePortDeps): LogTimeCasePor
      * anything whose stored bytes cannot be read is skipped rather than sent as
      * an empty file, so a corpus never silently contains a blank source.
      */
-    async listCorpusFilesForCase(caseId: string) {
+    async listCorpusFilesForCase(
+      caseId: string,
+      actor: Actor,
+      isAdmin: boolean,
+      canReadPrivate: boolean,
+    ) {
       const artifacts = await deps.cases.listArtifactsByCase(caseId);
       const ordered = artifacts
         .filter((artifact) => {
@@ -93,19 +98,31 @@ export function createLogTimeCasePort(deps: LogTimeCasePortDeps): LogTimeCasePor
           return leftPath < rightPath ? -1 : 1;
         });
 
+      const seen = new Set<string>();
+      const selected = ordered.filter((artifact) => {
+        const path = artifact.relativePath as string;
+        if (seen.has(path)) return false;
+        seen.add(path);
+        return true;
+      });
+
+      // Privacy authorization precedes even catalog capacity diagnostics: an
+      // over-cap hidden source must not reveal its size through a different
+      // public error.
+      if (!canReadPrivate && selected.some((artifact) => artifact.privacyClass === "owner_only")) {
+        throw new LogTimeNotFoundError("not_found");
+      }
+
       const eligible: {
+        evidenceId: string;
         relativePath: string;
         contentHash: ContentHash;
         byteLength: number;
+        privacyClass: PrivacyClass;
       }[] = [];
-      const seen = new Set<string>();
       let total = 0;
-      for (const artifact of ordered) {
+      for (const artifact of selected) {
         const path = artifact.relativePath as string;
-        // Intake permits the same relative path across batches; the corpus
-        // needs one file per path, so the first committed wins.
-        if (seen.has(path)) continue;
-        seen.add(path);
         if (!Number.isSafeInteger(artifact.byteLength) || (artifact.byteLength ?? -1) < 0) {
           throw new LogTimeRequestError("log corpus artifact has an invalid catalog byte length");
         }
@@ -118,14 +135,34 @@ export function createLogTimeCasePort(deps: LogTimeCasePortDeps): LogTimeCasePor
         if (capacityError) throw new LogTimeRequestError(capacityError);
         total += byteLength;
         eligible.push({
+          evidenceId: artifact.id,
           relativePath: path,
           contentHash: artifact.contentHash as ContentHash,
           byteLength,
+          privacyClass: artifact.privacyClass,
         });
       }
 
       const files: { relativePath: string; contentBase64: string }[] = [];
       for (const artifact of eligible) {
+        // Re-authorize each selected source immediately before materializing
+        // it. A grant checked during catalog preflight is not a read lease.
+        const readable = await deps.domain.getReadableHeldArtifact(
+          caseId,
+          artifact.evidenceId,
+          actor,
+          isAdmin,
+          canReadPrivate,
+        );
+        if (!readable) throw new LogTimeNotFoundError("not_found");
+        if (
+          readable.relativePath !== artifact.relativePath
+          || readable.contentHash !== artifact.contentHash
+          || readable.byteLength !== artifact.byteLength
+          || readable.privacyClass !== artifact.privacyClass
+        ) {
+          throw new LogTimeRequestError("log corpus artifact changed during authorization");
+        }
         const bytes = await collectBoundedEvidenceBytes({
           evidence: deps.evidence,
           hash: artifact.contentHash,
@@ -146,10 +183,32 @@ export function createLogTimeCasePort(deps: LogTimeCasePortDeps): LogTimeCasePor
      * built from. A corpus that contains one owner-only file is owner-only.
      */
     async casePrivacyClass(caseId: string): Promise<PrivacyClass> {
-      const artifacts = await deps.cases.listArtifactsByCase(caseId);
-      return artifacts.some((artifact) => artifact.privacyClass === "owner_only")
+      const artifacts = (await deps.cases.listArtifactsByCase(caseId))
+        .filter((artifact) => {
+          const path = artifact.relativePath;
+          return Boolean(
+            path
+            && artifact.contentHash
+            && isContentHash(artifact.contentHash)
+            && corpusAllowedExtension(path) !== null,
+          );
+        })
+        .sort((left, right) => {
+          const leftPath = left.relativePath as string;
+          const rightPath = right.relativePath as string;
+          if (leftPath === rightPath) return 0;
+          return leftPath < rightPath ? -1 : 1;
+        });
+      const seen = new Set<string>();
+      const selected = artifacts.filter((artifact) => {
+        const path = artifact.relativePath as string;
+        if (seen.has(path)) return false;
+        seen.add(path);
+        return true;
+      });
+      return selected.some((artifact) => artifact.privacyClass === "owner_only")
         ? "owner_only"
-        : artifacts.length > 0
+        : selected.length > 0
           ? "share_safe"
           : "owner_only";
     },
