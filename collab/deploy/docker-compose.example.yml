@@ -55,6 +55,7 @@ services:
       # COLLAB_EVIDENCE_S3_PREFIX: ${COLLAB_EVIDENCE_S3_PREFIX}
       # COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE: ${COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE}
       # COLLAB_EVIDENCE_S3_ALLOW_HTTP: ${COLLAB_EVIDENCE_S3_ALLOW_HTTP}
+      # CA_FILE is HTTPS-only; the server rejects it with a plaintext endpoint.
       # COLLAB_EVIDENCE_S3_CA_FILE: ${COLLAB_EVIDENCE_S3_CA_FILE}
       # COLLAB_EVIDENCE_S3_TIMEOUT_MS: ${COLLAB_EVIDENCE_S3_TIMEOUT_MS}
       # Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.

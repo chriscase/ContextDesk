@@ -236,6 +236,28 @@ function harnessEvaluateLiveSafety(env: NodeJS.ProcessEnv): { ok: boolean; reaso
   return JSON.parse(stdout) as { ok: boolean; reason: string };
 }
 
+function harnessRestoreSkipComposeSessionTokenSources(
+  target: NodeJS.ProcessEnv,
+  source: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const href = pathToFileURL(HARNESS_FILE).href;
+  const script = `
+    import { restoreSkipComposeSessionTokenSources } from ${JSON.stringify(href)};
+    const target = ${JSON.stringify(target)};
+    process.stdout.write(JSON.stringify(
+      restoreSkipComposeSessionTokenSources(target, ${JSON.stringify(source)}),
+    ));
+  `;
+  const stdout = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    encoding: "utf8",
+    env: isolateAwsDefaultChainEnv({
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+    }),
+  });
+  return JSON.parse(stdout) as NodeJS.ProcessEnv;
+}
+
 function liveOptInEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     [LIVE_OPT_IN_ENV]: "1",
@@ -361,6 +383,37 @@ describe("S3 Garage live qualification gates", () => {
     expect(isolated.COLLAB_EVIDENCE_S3_ACCESS_KEY_ID).toBe("GKkeep");
     expect(JSON.stringify(isolated)).not.toContain("aws-default-id-synthetic");
     expect(JSON.stringify(isolated)).not.toContain("aws-default-chain-secret");
+  });
+
+  it("restores only explicit --skip-compose session-token sources", () => {
+    const direct = harnessRestoreSkipComposeSessionTokenSources(
+      {
+        COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE: "/stale/token",
+        COLLAB_EVIDENCE_S3_SESSION_TOKEN_REF: "file:/stale/token",
+      },
+      { COLLAB_EVIDENCE_S3_SESSION_TOKEN: "synthetic-session-token" },
+    );
+    expect(direct).toEqual({
+      COLLAB_EVIDENCE_S3_SESSION_TOKEN: "synthetic-session-token",
+    });
+
+    const byFile = harnessRestoreSkipComposeSessionTokenSources(
+      { COLLAB_EVIDENCE_S3_SESSION_TOKEN: "stale-token" },
+      { COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE: "/run/secrets/session-token" },
+    );
+    expect(byFile).toEqual({
+      COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE: "/run/secrets/session-token",
+    });
+
+    const absent = harnessRestoreSkipComposeSessionTokenSources(
+      {
+        COLLAB_EVIDENCE_S3_SESSION_TOKEN: "stale-token",
+        COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE: "/stale/token",
+        COLLAB_EVIDENCE_S3_SESSION_TOKEN_REF: "file:/stale/token",
+      },
+      {},
+    );
+    expect(absent).toEqual({});
   });
 
   it("redacts credentials and signature material", () => {

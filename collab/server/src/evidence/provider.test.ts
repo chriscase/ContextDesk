@@ -554,6 +554,32 @@ describe("createEvidenceStore HTTP allowlist", () => {
     }
   });
 
+  it("fails closed when handcrafted HTTP settings claim a custom CA", () => {
+    const fake = new FakeS3Client("war-room-evidence");
+    const settings = loadS3Settings();
+    const inconsistent: EvidenceStorageSettings = {
+      ...settings,
+      s3: {
+        ...settings.s3,
+        endpoint: HTTP_CANARY_ENDPOINT,
+        allowHttp: true,
+        caConfigured: true,
+        caFilePath: CANARY_CRED_FILE,
+      },
+    };
+    try {
+      createEvidenceStore({
+        settings: inconsistent,
+        credentials: staticCredentials(),
+        createS3Client: () => fake,
+      });
+      throw new Error("expected plaintext custom CA refusal");
+    } catch (error) {
+      expect((error as Error).message).toBe(EVIDENCE_S3_PROVIDER_CONFIG_ERROR);
+      expectSanitized(error);
+    }
+  });
+
   it("fails closed on handcrafted non-origin endpoints and out-of-range timeouts", () => {
     const fake = new FakeS3Client("war-room-evidence");
     const settings = loadS3Settings();

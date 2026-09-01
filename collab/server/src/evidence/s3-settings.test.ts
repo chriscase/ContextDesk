@@ -451,6 +451,24 @@ describe("evidence s3 prefix, bucket, timeout, and size", () => {
 });
 
 describe("evidence s3 custom CA file", () => {
+  it("refuses a custom CA for an explicitly allowed plaintext endpoint", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cd-collab-s3-ca-http-"));
+    const file = join(dir, "ca.pem");
+    await writeFile(file, CANARY_CA_BODY, { mode: 0o644 });
+    try {
+      expectThrow(
+        s3Base({
+          COLLAB_EVIDENCE_S3_ENDPOINT: "http://127.0.0.1:3900",
+          COLLAB_EVIDENCE_S3_ALLOW_HTTP: "1",
+          COLLAB_EVIDENCE_S3_CA_FILE: file,
+        }),
+        EVIDENCE_STORAGE_ERRORS.caFileHttp,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("stores only path and boolean after validating a bounded regular PEM file", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cd-collab-s3-ca-"));
     const file = join(dir, "ca.pem");

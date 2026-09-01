@@ -86,6 +86,8 @@ export const EVIDENCE_STORAGE_ERRORS = {
   s3UploadTimeout:
     "s3 evidence COLLAB_EVIDENCE_MAX_UPLOAD_BYTES exceeds the supported request-timeout envelope; set it to no more than floor(COLLAB_EVIDENCE_S3_TIMEOUT_MS / 1000) * 1048576",
   caFile: "evidence s3 CA file is invalid",
+  caFileHttp:
+    "COLLAB_EVIDENCE_S3_CA_FILE requires an https evidence s3 endpoint",
   credentialsMode:
     "COLLAB_EVIDENCE_S3_CREDENTIALS_MODE must be default_chain or static",
   defaultChainLeftover:
@@ -676,6 +678,9 @@ export function loadEvidenceStorageSettings(
     assertDefaultChainHasNoStaticLeftovers(env);
   }
   const caFilePath = parseCaFile(env);
+  if (endpoint.startsWith("http://") && caFilePath !== null) {
+    fail(EVIDENCE_STORAGE_ERRORS.caFileHttp);
+  }
   return {
     provider,
     controlRoot: options.controlRoot,

@@ -65,6 +65,12 @@ export const AWS_DEFAULT_CHAIN_ENV_NAMES = Object.freeze([
   "AWS_CA_BUNDLE",
 ]);
 
+const S3_SESSION_TOKEN_SOURCE_NAMES = Object.freeze([
+  "COLLAB_EVIDENCE_S3_SESSION_TOKEN",
+  "COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE",
+  "COLLAB_EVIDENCE_S3_SESSION_TOKEN_REF",
+]);
+
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 export const COLLAB_ROOT = resolve(scriptDir, "..");
 export const DEPLOY_DIR = join(COLLAB_ROOT, "deploy");
@@ -491,6 +497,22 @@ function buildLiveEnv(base, secrets, generated) {
   return env;
 }
 
+/**
+ * Preserve an operator's explicitly selected temporary-credential source only
+ * for --skip-compose. Harness-managed Garage always uses a generated long-lived
+ * evaluation key pair and must not inherit these caller values.
+ */
+export function restoreSkipComposeSessionTokenSources(target, source) {
+  for (const name of S3_SESSION_TOKEN_SOURCE_NAMES) {
+    if (Object.hasOwn(source, name) && source[name] !== undefined) {
+      target[name] = source[name];
+    } else {
+      delete target[name];
+    }
+  }
+  return target;
+}
+
 function vitestBin() {
   const candidates = [
     join(SERVER_DIR, "node_modules", ".bin", "vitest"),
@@ -589,6 +611,13 @@ async function main() {
     }
     if (!present(liveEnv, "COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY")) {
       delete liveEnv.COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY;
+    }
+  }
+  if (args.skipCompose) {
+    restoreSkipComposeSessionTokenSources(liveEnv, process.env);
+    const sessionToken = liveEnv.COLLAB_EVIDENCE_S3_SESSION_TOKEN;
+    if (typeof sessionToken === "string" && sessionToken.length >= 4) {
+      secrets.push(sessionToken);
     }
   }
 

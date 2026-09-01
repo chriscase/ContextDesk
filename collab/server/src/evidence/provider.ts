@@ -185,6 +185,7 @@ function assertConsistentS3Settings(
   }
   if (url.protocol === "http:") {
     if (s3.allowHttp !== true) failClosed();
+    if (s3.caConfigured === true) failClosed();
   } else if (url.protocol !== "https:") {
     failClosed();
   }

@@ -97,7 +97,8 @@ surfaces.
   single-process evaluation shape and doctor warns about it. Doctor preflight
   does not contact the bucket. An S3 custom CA file replaces the default
   trust store for the S3 connection only; combine public roots and an
-  internal CA in one PEM. There is no filesystem-to-S3 migration,
+  internal CA in one PEM. It requires an HTTPS endpoint and is rejected with
+  plaintext HTTP. There is no filesystem-to-S3 migration,
   retention, lifecycle, or multi-provider failover automation.
 - Streamed evidence intake uses `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` in both
   modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.

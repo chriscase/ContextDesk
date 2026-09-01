@@ -100,7 +100,8 @@ option, which **replaces** the default trust store for that S3 connection
 only. Operators who need public roots and an internal CA must provide one
 combined PEM bundle and keep certificate verification enabled. This does not
 change directory TLS (`COLLAB_LDAP_CA` / `NODE_EXTRA_CA_CERTS`) or ingress
-TLS.
+TLS. A custom CA cannot authenticate plaintext: configuration rejects
+`COLLAB_EVIDENCE_S3_CA_FILE` when the S3 endpoint uses HTTP.
 
 The example Compose file does not include Garage. From the `app` container,
 `127.0.0.1` is the app container itself. Put War Room and the object store on
