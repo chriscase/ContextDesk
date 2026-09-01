@@ -15,6 +15,27 @@ const BIND_SECRET_MAX_BYTES = 16 * 1024;
 
 export type EvidenceS3CredentialsMode = "default_chain" | "static";
 
+export type EvidenceS3SecretBytesReader = (
+  path: string,
+  options: { maxBytes: number; ownerOnly: boolean; platform?: NodeJS.Platform },
+) => Buffer;
+
+/** Readonly test/production seam. Defaults to the real process platform. */
+export type EvidenceS3CredentialLoaderDeps = {
+  readonly platform: NodeJS.Platform;
+  readonly readUnfollowedRegularFile: EvidenceS3SecretBytesReader;
+};
+
+function resolveCredentialLoaderDeps(
+  deps?: EvidenceS3CredentialLoaderDeps,
+): EvidenceS3CredentialLoaderDeps {
+  return {
+    platform: deps?.platform ?? process.platform,
+    readUnfollowedRegularFile:
+      deps?.readUnfollowedRegularFile ?? readUnfollowedRegularFile,
+  };
+}
+
 class DefaultChainCredentials {
   readonly mode = "default_chain" as const;
 
@@ -84,23 +105,38 @@ function decodeSecretBytes(bytes: Buffer): string {
   return body;
 }
 
-function readSecretFile(path: string): string {
+function isKnownCredentialError(error: unknown, message: string): boolean {
+  return error instanceof Error && error.message === message;
+}
+
+function assertCredentialFileSourcesSupported(platform: NodeJS.Platform): void {
+  if (platform === "win32") {
+    fail(EVIDENCE_STORAGE_ERRORS.credentialFileWindows);
+  }
+}
+
+function readSecretFile(
+  path: string,
+  deps: EvidenceS3CredentialLoaderDeps,
+): string {
+  assertCredentialFileSourcesSupported(deps.platform);
   let bytes: Buffer;
   try {
-    bytes = readUnfollowedRegularFile(path, {
+    bytes = deps.readUnfollowedRegularFile(path, {
       maxBytes: BIND_SECRET_MAX_BYTES,
       ownerOnly: true,
+      platform: deps.platform,
     });
-  } catch {
+  } catch (error) {
+    if (isKnownCredentialError(error, EVIDENCE_STORAGE_ERRORS.credentialFileWindows)) {
+      throw error;
+    }
     fail(EVIDENCE_STORAGE_ERRORS.credentialFile);
   }
   try {
     return decodeSecretBytes(bytes);
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === EVIDENCE_STORAGE_ERRORS.credentialInvalid
-    ) {
+    if (isKnownCredentialError(error, EVIDENCE_STORAGE_ERRORS.credentialInvalid)) {
       throw error;
     }
     fail(EVIDENCE_STORAGE_ERRORS.credentialFile);
@@ -117,11 +153,22 @@ function resolveFileRef(raw: string): string {
   return path;
 }
 
+function readOwnerOnlyCredentialSource(
+  raw: string,
+  kind: "file" | "ref",
+  deps: EvidenceS3CredentialLoaderDeps,
+): string {
+  assertCredentialFileSourcesSupported(deps.platform);
+  const path = kind === "ref" ? resolveFileRef(raw) : raw.trim();
+  return readSecretFile(path, deps);
+}
+
 type SecretSource = { kind: "env" | "file" | "ref"; value: string };
 
 function resolveSecretSource(
   env: NodeJS.ProcessEnv,
   baseName: string,
+  deps: EvidenceS3CredentialLoaderDeps,
 ): SecretSource | undefined {
   const directPresent = envIsPresent(env, baseName);
   const filePresent = envIsPresent(env, `${baseName}_FILE`);
@@ -137,18 +184,19 @@ function resolveSecretSource(
     return { kind: "env", value: raw };
   }
   if (filePresent) {
-    const path = (presentEnvValue(env, `${baseName}_FILE`) ?? "").trim();
-    return { kind: "file", value: readSecretFile(path) };
+    const raw = presentEnvValue(env, `${baseName}_FILE`) ?? "";
+    return { kind: "file", value: readOwnerOnlyCredentialSource(raw, "file", deps) };
   }
   const ref = presentEnvValue(env, `${baseName}_REF`) ?? "";
-  return { kind: "ref", value: readSecretFile(resolveFileRef(ref)) };
+  return { kind: "ref", value: readOwnerOnlyCredentialSource(ref, "ref", deps) };
 }
 
 function loadStaticSecret(
   env: NodeJS.ProcessEnv,
   baseName: string,
+  deps: EvidenceS3CredentialLoaderDeps,
 ): string | undefined {
-  const source = resolveSecretSource(env, baseName);
+  const source = resolveSecretSource(env, baseName, deps);
   return source?.value;
 }
 
@@ -158,7 +206,9 @@ function loadStaticSecret(
  */
 export function loadEvidenceS3Credentials(
   env: NodeJS.ProcessEnv,
+  deps?: EvidenceS3CredentialLoaderDeps,
 ): EvidenceS3Credentials {
+  const resolved = resolveCredentialLoaderDeps(deps);
   const modeRaw = presentEnvValue(env, "COLLAB_EVIDENCE_S3_CREDENTIALS_MODE")?.trim();
   if (modeRaw !== "default_chain" && modeRaw !== "static") {
     fail(EVIDENCE_STORAGE_ERRORS.credentialsMode);
@@ -169,9 +219,21 @@ export function loadEvidenceS3Credentials(
     }
     return new DefaultChainCredentials();
   }
-  const accessKeyId = loadStaticSecret(env, "COLLAB_EVIDENCE_S3_ACCESS_KEY_ID");
-  const secretAccessKey = loadStaticSecret(env, "COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY");
-  const sessionToken = loadStaticSecret(env, "COLLAB_EVIDENCE_S3_SESSION_TOKEN");
+  const accessKeyId = loadStaticSecret(
+    env,
+    "COLLAB_EVIDENCE_S3_ACCESS_KEY_ID",
+    resolved,
+  );
+  const secretAccessKey = loadStaticSecret(
+    env,
+    "COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY",
+    resolved,
+  );
+  const sessionToken = loadStaticSecret(
+    env,
+    "COLLAB_EVIDENCE_S3_SESSION_TOKEN",
+    resolved,
+  );
   if (sessionToken && (!accessKeyId || !secretAccessKey)) {
     fail(EVIDENCE_STORAGE_ERRORS.tokenWithoutPair);
   }

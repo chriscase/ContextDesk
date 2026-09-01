@@ -6,13 +6,40 @@ import { describe, expect, it } from "vitest";
 import {
   EVIDENCE_S3_SECRET_NAMES,
   EVIDENCE_STORAGE_ERRORS,
+  readUnfollowedRegularFile,
 } from "./s3-settings.js";
-import { loadEvidenceS3Credentials } from "./s3-secrets.js";
+import {
+  loadEvidenceS3Credentials,
+  redactEvidenceS3Error,
+  type EvidenceS3CredentialLoaderDeps,
+} from "./s3-secrets.js";
 
 const CANARY_ACCESS = "CANARYACCESSKEYIDXX";
 const CANARY_SECRET = "canarySecretAccessKeyValue!!";
 const CANARY_TOKEN = "canarySessionTokenValue!!";
 const AWS_CANARY = "aws-env-canary-must-not-copy";
+const WIN32_CANARY_PATH = "C:\\Users\\canary\\secret-access-key";
+const WIN32_CANARY_REF = `file:${WIN32_CANARY_PATH}`;
+const UNIX_CANARY_ACCESS_PATH = "/run/secrets/canary-access";
+const UNIX_CANARY_SECRET_PATH = "/run/secrets/canary-secret";
+
+const unixLoaderDeps: EvidenceS3CredentialLoaderDeps = {
+  platform: "linux",
+  readUnfollowedRegularFile,
+};
+
+function unusedCredentialReader(): Buffer {
+  throw new Error("credential file content must not be read");
+}
+
+function win32LoaderDeps(
+  readUnfollowedRegularFile = unusedCredentialReader,
+): EvidenceS3CredentialLoaderDeps {
+  return {
+    platform: "win32",
+    readUnfollowedRegularFile,
+  };
+}
 
 function staticEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -29,7 +56,14 @@ function expectRedacted(error: unknown) {
   expect(text).not.toContain(CANARY_SECRET);
   expect(text).not.toContain(CANARY_TOKEN);
   expect(text).not.toContain(AWS_CANARY);
-  expect(text).not.toMatch(/\/run\/secrets|\/tmp\/|file:/);
+  expect(text).not.toContain(WIN32_CANARY_PATH);
+  expect(text).not.toContain(WIN32_CANARY_REF);
+  expect(text).not.toContain(UNIX_CANARY_ACCESS_PATH);
+  expect(text).not.toContain(UNIX_CANARY_SECRET_PATH);
+  expect(text).not.toMatch(/\/run\/secrets|\/tmp\/|C:\\Users\\canary/);
+  if (text !== EVIDENCE_STORAGE_ERRORS.credentialFileWindows) {
+    expect(text).not.toMatch(/file:/);
+  }
 }
 
 function expectPubliclyOpaque(value: object) {
@@ -143,22 +177,22 @@ describe("evidence s3 credentials static source matrix", () => {
     }
   });
 
-  it("loads owner-only _FILE and absolute file: _REF sources", async () => {
+  it.skipIf(process.platform === "win32")(
+    "loads owner-only _FILE and absolute file: _REF sources",
+    async () => {
     const dir = await mkdtemp(join(tmpdir(), "cd-collab-s3-secret-"));
     const access = join(dir, "access");
     const secret = join(dir, "secret");
     await writeFile(access, `${CANARY_ACCESS}\n`, { mode: 0o600 });
     await writeFile(secret, `${CANARY_SECRET}\n`, { mode: 0o600 });
-    if (process.platform !== "win32") {
-      await chmod(access, 0o600);
-      await chmod(secret, 0o600);
-    }
+    await chmod(access, 0o600);
+    await chmod(secret, 0o600);
     try {
       const fromFile = loadEvidenceS3Credentials({
         COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
         COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
         COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: secret,
-      });
+      }, unixLoaderDeps);
       if (fromFile.mode !== "static") throw new Error("expected static");
       expect(fromFile.accessKeyId()).toBe(CANARY_ACCESS);
       expect(fromFile.secretAccessKey()).toBe(CANARY_SECRET);
@@ -168,20 +202,20 @@ describe("evidence s3 credentials static source matrix", () => {
         COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
         COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_REF: `file:${access}`,
         COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_REF: `file:${secret}`,
-      });
+      }, unixLoaderDeps);
       if (fromRef.mode !== "static") throw new Error("expected static");
       expect(fromRef.accessKeyId()).toBe(CANARY_ACCESS);
       expectPubliclyOpaque(fromRef);
 
       const token = join(dir, "token");
       await writeFile(token, `${CANARY_TOKEN}\n`, { mode: 0o600 });
-      if (process.platform !== "win32") await chmod(token, 0o600);
+      await chmod(token, 0o600);
       const withTokenFiles = loadEvidenceS3Credentials({
         COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
         COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
         COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_REF: `file:${secret}`,
         COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE: token,
-      });
+      }, unixLoaderDeps);
       if (withTokenFiles.mode !== "static") throw new Error("expected static");
       expect(withTokenFiles.sessionToken()).toBe(CANARY_TOKEN);
       expectPubliclyOpaque(withTokenFiles);
@@ -191,7 +225,7 @@ describe("evidence s3 credentials static source matrix", () => {
         COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_REF: `file:${access}`,
         COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: secret,
         COLLAB_EVIDENCE_S3_SESSION_TOKEN_REF: `file:${token}`,
-      });
+      }, unixLoaderDeps);
       if (withTokenRef.mode !== "static") throw new Error("expected static");
       expect(withTokenRef.sessionToken()).toBe(CANARY_TOKEN);
       expectPubliclyOpaque(withTokenRef);
@@ -210,7 +244,7 @@ describe("evidence s3 credentials static source matrix", () => {
                 ? CANARY_SECRET
                 : CANARY_TOKEN,
             [`${baseName}_FILE`]: token,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.sourceConflict);
       }
 
@@ -219,19 +253,20 @@ describe("evidence s3 credentials static source matrix", () => {
           COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
           COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_REF: "file:./access",
           COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_REF: `file:${secret}`,
-        }),
+        }, unixLoaderDeps),
       ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
       expect(() =>
         loadEvidenceS3Credentials({
           COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
           COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_REF: `file://${access}`,
           COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_REF: `file:${secret}`,
-        }),
+        }, unixLoaderDeps),
       ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialInvalid);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+    },
+  );
 
   it("rejects relative secret files without echoing the path", () => {
     expect(() =>
@@ -239,7 +274,7 @@ describe("evidence s3 credentials static source matrix", () => {
         COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
         COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: "secrets/access",
         COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: "secrets/secret",
-      }),
+      }, unixLoaderDeps),
     ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
   });
 });
@@ -277,56 +312,56 @@ describe("evidence s3 credential files", () => {
             COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
             COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
             COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: world,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
         expect(() =>
           loadEvidenceS3Credentials({
             COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
             COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
             COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: group,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
         expect(() =>
           loadEvidenceS3Credentials({
             COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
             COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
             COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: link,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
         expect(() =>
           loadEvidenceS3Credentials({
             COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
             COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
             COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_REF: `file:${link}`,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
         expect(() =>
           loadEvidenceS3Credentials({
             COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
             COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
             COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: empty,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
         expect(() =>
           loadEvidenceS3Credentials({
             COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
             COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
             COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: nul,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialInvalid);
         expect(() =>
           loadEvidenceS3Credentials({
             COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
             COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
             COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: oversize,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
         expect(() =>
           loadEvidenceS3Credentials({
             COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
             COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
             COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: nested,
-          }),
+          }, unixLoaderDeps),
         ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -334,20 +369,172 @@ describe("evidence s3 credential files", () => {
     },
   );
 
-  it("still enforces regular-file and path bounds on every platform", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "cd-collab-s3-secret-portable-"));
-    const access = join(dir, "access");
-    await writeFile(access, CANARY_ACCESS, { mode: 0o600 });
+  it.skipIf(process.platform === "win32")(
+    "still enforces regular-file and path bounds on injected Unix",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "cd-collab-s3-secret-portable-"));
+      const access = join(dir, "access");
+      await writeFile(access, CANARY_ACCESS, { mode: 0o600 });
+      await chmod(access, 0o600);
+      try {
+        expect(() =>
+          loadEvidenceS3Credentials({
+            COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+            COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
+            COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: dir,
+          }, unixLoaderDeps),
+        ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe("evidence s3 credentials injected win32", () => {
+  function expectWin32FileRefusal(run: () => unknown) {
+    const platformBefore = process.platform;
     try {
-      expect(() =>
-        loadEvidenceS3Credentials({
-          COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
-          COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: access,
-          COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: dir,
-        }),
-      ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFile);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
+      run();
+      throw new Error("expected Windows credential file refusal");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        EVIDENCE_STORAGE_ERRORS.credentialFileWindows,
+      );
+      expectRedacted(error);
+      expect(redactEvidenceS3Error(error)).toBe(
+        EVIDENCE_STORAGE_ERRORS.credentialFileWindows,
+      );
     }
+    expect(process.platform).toBe(platformBefore);
+  }
+
+  it("rejects _FILE sources before any filesystem access", () => {
+    const deps = win32LoaderDeps();
+    expectWin32FileRefusal(() =>
+      loadEvidenceS3Credentials({
+        COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+        COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: WIN32_CANARY_PATH,
+        COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_FILE: WIN32_CANARY_PATH,
+      }, deps),
+    );
+  });
+
+  it("rejects file: _REF sources before any filesystem access", () => {
+    const deps = win32LoaderDeps();
+    expectWin32FileRefusal(() =>
+      loadEvidenceS3Credentials({
+        COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+        COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_REF: WIN32_CANARY_REF,
+        COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_REF: WIN32_CANARY_REF,
+      }, deps),
+    );
+    expectWin32FileRefusal(() =>
+      loadEvidenceS3Credentials({
+        COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+        COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_REF: `file://${WIN32_CANARY_PATH}`,
+        COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY: CANARY_SECRET,
+      }, deps),
+    );
+  });
+
+  it("rejects a session-token file source even when the key pair is direct", () => {
+    const deps = win32LoaderDeps();
+    expectWin32FileRefusal(() =>
+      loadEvidenceS3Credentials(
+        staticEnv({ COLLAB_EVIDENCE_S3_SESSION_TOKEN_FILE: WIN32_CANARY_PATH }),
+        deps,
+      ),
+    );
+  });
+
+  it("still accepts direct static environment credentials", () => {
+    const platformBefore = process.platform;
+    const credentials = loadEvidenceS3Credentials(staticEnv(), win32LoaderDeps());
+    expect(process.platform).toBe(platformBefore);
+    expect(credentials.mode).toBe("static");
+    if (credentials.mode !== "static") throw new Error("expected static");
+    expect(credentials.accessKeyId()).toBe(CANARY_ACCESS);
+    expect(credentials.secretAccessKey()).toBe(CANARY_SECRET);
+    expectPubliclyOpaque(credentials);
+  });
+
+  it("still accepts default_chain and rejects leftover static names", () => {
+    const platformBefore = process.platform;
+    const credentials = loadEvidenceS3Credentials({
+      COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "default_chain",
+      AWS_ACCESS_KEY_ID: AWS_CANARY,
+    }, win32LoaderDeps());
+    expect(process.platform).toBe(platformBefore);
+    expect(credentials.mode).toBe("default_chain");
+    expectPubliclyOpaque(credentials);
+    expect(() =>
+      loadEvidenceS3Credentials({
+        COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "default_chain",
+        COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: WIN32_CANARY_PATH,
+      }, win32LoaderDeps()),
+    ).toThrow(EVIDENCE_STORAGE_ERRORS.defaultChainLeftover);
+  });
+
+  it("still fails closed on source conflicts before reading files", () => {
+    const platformBefore = process.platform;
+    expect(() =>
+      loadEvidenceS3Credentials({
+        COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+        COLLAB_EVIDENCE_S3_ACCESS_KEY_ID: CANARY_ACCESS,
+        COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY: CANARY_SECRET,
+        COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: WIN32_CANARY_PATH,
+      }, win32LoaderDeps()),
+    ).toThrow(EVIDENCE_STORAGE_ERRORS.sourceConflict);
+    expect(process.platform).toBe(platformBefore);
+  });
+});
+
+describe("evidence s3 credentials injected unix", () => {
+  it("loads _FILE and file: _REF through owner-only reads without mutating process.platform", () => {
+    const platformBefore = process.platform;
+    const reads: Array<{ path: string; ownerOnly: boolean; platform?: NodeJS.Platform }> = [];
+    const credentials = loadEvidenceS3Credentials({
+      COLLAB_EVIDENCE_S3_CREDENTIALS_MODE: "static",
+      COLLAB_EVIDENCE_S3_ACCESS_KEY_ID_FILE: UNIX_CANARY_ACCESS_PATH,
+      COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY_REF: `file:${UNIX_CANARY_SECRET_PATH}`,
+    }, {
+      platform: "linux",
+      readUnfollowedRegularFile: (path, options) => {
+        reads.push({
+          path,
+          ownerOnly: options.ownerOnly,
+          platform: options.platform,
+        });
+        if (path === UNIX_CANARY_ACCESS_PATH) return Buffer.from(CANARY_ACCESS);
+        if (path === UNIX_CANARY_SECRET_PATH) return Buffer.from(CANARY_SECRET);
+        throw new Error("unexpected credential path");
+      },
+    });
+    expect(process.platform).toBe(platformBefore);
+    expect(reads).toEqual([
+      {
+        path: UNIX_CANARY_ACCESS_PATH,
+        ownerOnly: true,
+        platform: "linux",
+      },
+      {
+        path: UNIX_CANARY_SECRET_PATH,
+        ownerOnly: true,
+        platform: "linux",
+      },
+    ]);
+    if (credentials.mode !== "static") throw new Error("expected static");
+    expect(credentials.accessKeyId()).toBe(CANARY_ACCESS);
+    expect(credentials.secretAccessKey()).toBe(CANARY_SECRET);
+    expectPubliclyOpaque(credentials);
+  });
+
+  it("preserves known credential errors through redaction", () => {
+    expect(redactEvidenceS3Error(new Error(EVIDENCE_STORAGE_ERRORS.credentialFileWindows)))
+      .toBe(EVIDENCE_STORAGE_ERRORS.credentialFileWindows);
+    expect(redactEvidenceS3Error(new Error(`ENOENT ${WIN32_CANARY_PATH}`)))
+      .toBe("s3 evidence configuration is invalid");
   });
 });

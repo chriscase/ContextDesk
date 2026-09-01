@@ -59,7 +59,7 @@ certification.
 | TLS and trust | Production traffic uses TLS. If the certificate is issued by an internal CA, mount a PEM bundle for the **War Room process** and set `COLLAB_EVIDENCE_S3_CA_FILE`. The S3 request handler's Node TLS `ca` option replaces the default trust store for that connection; include required public roots plus the internal CA in one combined PEM when both are needed. Certificate verification remains enabled. This setting does not change LDAP or ingress TLS |
 | Stable DNS | The name the War Room service uses must keep resolving to the intended hosts. Do not put credentials in the URL |
 | Least-privilege identity | A dedicated service identity with only bucket readiness/list plus object read, write, and delete below the assigned location. The shipped provider does not use multipart APIs. No console root, browser user, or unused bucket-admin APIs |
-| Non-browser credentials | Access keys stay in a secret manager or owner-only files on the host. They never enter the webview, Help, git, or screenshots |
+| Non-browser credentials | Access keys stay in a secret manager or owner-only files on the host. They never enter the webview, Help, git, or screenshots. Windows refuses S3 credential `_FILE` and `file:` `_REF` sources until owner-only ACL verification exists; use `default_chain` or platform/orchestrator-injected direct environment values, and never put direct values in committed env files |
 | Persistence | Metadata and object bytes survive process and container restarts on durable volumes |
 | Capacity and monitoring | Disk, inode, and object-count headroom with alerts before the store is full |
 | Backup and recovery | A tested restore of object bytes and store metadata together with the collaboration database. Replication and versioning are not backups |
@@ -151,17 +151,21 @@ control-state root in both modes.
 | Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Connection and request timeout in milliseconds; defaults to `30000`, valid range `1000..120000`. |
 | Streamed intake size bound | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Provider-neutral. Governs streamed evidence intake for the default filesystem provider and the opt-in S3 provider. Default 512 MiB (`536870912`), valid range `1..5368709120` (5 GiB). Legacy JSON/base64 evidence upload and the legacy JSON bytes download remain separately capped at exactly 1,000,000 decoded bytes. This setting does not raise those JSON caps. |
 | Credential mode | `COLLAB_EVIDENCE_S3_CREDENTIALS_MODE` | Required in S3 mode; there is no default. `static` requires the explicit pair below; `default_chain` uses the server process's AWS-compatible provider chain and rejects leftover static `COLLAB_EVIDENCE_S3_*` credential names. |
-| Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID`, `_FILE`, or `_REF` | Dedicated service identity, not a human console login. Configure exactly one source. |
-| Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; files must be owner-protected and `_REF` must be an absolute `file:/...` reference, not `file://...`. |
-| Session token | `COLLAB_EVIDENCE_S3_SESSION_TOKEN`, `_FILE`, or `_REF` | Optional; use only when the selected static credentials require it. |
+| Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID`, `_FILE`, or `_REF` | Dedicated service identity, not a human console login. Configure exactly one source. Windows refuses `_FILE` and `file:` `_REF`. |
+| Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; on Unix, files must be owner-protected and `_REF` must be an absolute `file:/...` reference, not `file://...`. Windows refuses `_FILE` and `file:` `_REF`. |
+| Session token | `COLLAB_EVIDENCE_S3_SESSION_TOKEN`, `_FILE`, or `_REF` | Optional; use only when the selected static credentials require it. Windows refuses `_FILE` and `file:` `_REF`. |
 | Custom CA | `COLLAB_EVIDENCE_S3_CA_FILE` | Optional absolute path to a regular PEM CA bundle (maximum 1 MiB). The S3 request handler passes it as Node's TLS `ca` option, which replaces the default trust store for that S3 connection. Operators who need public roots and an internal CA must combine them in one PEM, mount it into the server process, and keep verification enabled. Unlike credential files, the CA file need not be owner-only. This setting does not change LDAP or ingress TLS. |
 
 In `static` mode, access key id and secret access key must both resolve. A
 session token is optional but is invalid without that pair. For each value,
 configure exactly one of the direct name, `_FILE`, or `_REF`; relative paths,
 symlinks, empty files, group/world-readable secret files on Unix, and
-`file://` references are refused. Direct environment values exist for
-orchestrator secret injection, but do not put them in a committed env file.
+`file://` references are refused. This Node boundary cannot verify owner-only
+Windows ACL semantics, so Windows refuses S3 credential `_FILE` and `file:`
+`_REF` until that verification exists. On Windows, use `default_chain` or
+platform/orchestrator-injected direct environment values. Direct environment
+values exist for orchestrator secret injection, but do not put them in a
+committed env file.
 
 Filesystem mode rejects leftover `COLLAB_EVIDENCE_S3_*` names, including names
 that are present with empty values. `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` is
@@ -560,7 +564,11 @@ connection owned by the War Room process.
 
 Use a deployment secret manager or owner-only mounted secret files. Never
 commit credentials, put them in a URL, type them into the browser, paste them
-into logs, or leave them in screenshots or ordinary env examples.
+into logs, or leave them in screenshots or ordinary env examples. Windows
+hosts cannot use S3 credential `_FILE` or `file:` `_REF` in this release;
+configure `default_chain` or inject the direct environment names into the
+War Room process. Do not treat that injection as permission to commit the
+values.
 
 Give War Room a dedicated service identity. Do not reuse a human key, a
 node-admin key, or the identity used for desktop Settings → Backup.
@@ -718,6 +726,7 @@ object-store CLI put is not a substitute.
 | Connection refused from War Room, works on the host | Endpoint is loopback in a different network namespace | From the War Room container, `127.0.0.1` is that container. Use a compose network name, host gateway, or publish on an address that namespace can reach |
 | Missing object, database row exists | Prefix, bucket, or key layout mismatch; bytes never persisted | Head the exact key; do not treat object-store 404 as authorization |
 | Writes fail after a period of success | Full disk, inode exhaustion, or quota | Data volume **and** metadata volume; capacity alerts |
+| Doctor or startup refuses S3 credential `_FILE` or `file:` `_REF` on Windows | This Node boundary cannot verify owner-only Windows ACL semantics for credential files | Use `default_chain` or process-injected `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID` / `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY` (and session token if required). Do not put those values in a committed env file. `COLLAB_EVIDENCE_S3_CA_FILE` is not a credential file and is still accepted |
 
 ## Backups and versioning
 

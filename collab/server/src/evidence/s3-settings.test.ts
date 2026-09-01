@@ -9,6 +9,7 @@ import {
   evidenceMaxUploadBytes,
   loadEvidenceStorageSettings,
   normalizeEvidenceS3Prefix,
+  readUnfollowedRegularFile,
 } from "./s3-settings.js";
 
 const CONTROL = ".data/evidence";
@@ -450,6 +451,50 @@ describe("evidence s3 custom CA file", () => {
       );
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reject CA files merely because the injected platform is win32", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cd-collab-s3-ca-win32-"));
+    const file = join(dir, "ca.pem");
+    await writeFile(file, CANARY_CA_BODY, { mode: 0o644 });
+    try {
+      const bytes = readUnfollowedRegularFile(file, {
+        maxBytes: CANARY_CA_BODY.length,
+        ownerOnly: false,
+        platform: "win32",
+      });
+      expect(bytes.toString("utf8")).toBe(CANARY_CA_BODY);
+      const settings = load(s3Base({ COLLAB_EVIDENCE_S3_CA_FILE: file }));
+      if (settings.provider !== "s3") throw new Error("expected s3");
+      expect(settings.s3.caConfigured).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses owner-only credential reads on injected win32 before path access", () => {
+    const canary = "C:\\Users\\canary\\secret-access-key";
+    const platformBefore = process.platform;
+    expect(() =>
+      readUnfollowedRegularFile(canary, {
+        maxBytes: 16 * 1024,
+        ownerOnly: true,
+        platform: "win32",
+      }),
+    ).toThrow(EVIDENCE_STORAGE_ERRORS.credentialFileWindows);
+    expect(process.platform).toBe(platformBefore);
+    try {
+      readUnfollowedRegularFile(canary, {
+        maxBytes: 16 * 1024,
+        ownerOnly: true,
+        platform: "win32",
+      });
+    } catch (error) {
+      const text = String(error);
+      expect(text).not.toContain(canary);
+      expect(text).not.toContain("C:\\Users\\canary");
+      expect(text).not.toContain(CANARY_CA_BODY);
     }
   });
 });

@@ -90,6 +90,8 @@ export const EVIDENCE_STORAGE_ERRORS = {
     "s3 evidence session token requires static access key id and secret access key",
   credentialInvalid: "s3 evidence credential is invalid",
   credentialFile: "s3 evidence credential file is unreadable",
+  credentialFileWindows:
+    "s3 evidence credential _FILE and file: _REF sources are unsupported on Windows; use default_chain or process-injected direct environment credentials",
 } as const;
 
 export type EvidenceCredentialsMode = "default_chain" | "static";
@@ -461,8 +463,14 @@ function closeQuietly(descriptor: number | undefined): void {
 
 export function readUnfollowedRegularFile(
   path: string,
-  options: { maxBytes: number; ownerOnly: boolean },
+  options: { maxBytes: number; ownerOnly: boolean; platform?: NodeJS.Platform },
 ): Buffer {
+  // Owner-only credential reads cannot prove Windows ACL semantics here.
+  // Refuse those sources before path parsing or filesystem access. CA files
+  // use ownerOnly=false and are not credential files.
+  if (options.ownerOnly && (options.platform ?? process.platform) === "win32") {
+    fail(EVIDENCE_STORAGE_ERRORS.credentialFileWindows);
+  }
   const resolved = assertSafeAbsolutePath(path);
   let descriptor: number | undefined;
   try {
@@ -477,7 +485,7 @@ export function readUnfollowedRegularFile(
     // Bind the opened file to the entry inspected before open so a concurrent
     // replacement cannot swap in a different inode between lstat and read.
     if (link.dev !== metadata.dev || link.ino !== metadata.ino) fail("unreadable");
-    if (process.platform !== "win32" && options.ownerOnly) {
+    if (options.ownerOnly) {
       const uid = process.getuid?.();
       if (uid === undefined || metadata.uid !== uid || (metadata.mode & 0o077) !== 0) {
         fail("unreadable");
@@ -503,7 +511,13 @@ export function readUnfollowedRegularFile(
     return bytes;
   } catch (error) {
     closeQuietly(descriptor);
-    if (error instanceof Error && error.message === "unreadable") throw error;
+    if (
+      error instanceof Error &&
+      (error.message === "unreadable" ||
+        error.message === EVIDENCE_STORAGE_ERRORS.credentialFileWindows)
+    ) {
+      throw error;
+    }
     fail("unreadable");
   }
 }
