@@ -128,6 +128,20 @@ export interface ArtifactRow {
   intakeBatchId?: string | null;
 }
 
+/** Durable, insert-only annotation attached to one evidence artifact. */
+export interface ArtifactAnnotationRow {
+  id: string;
+  caseId: string;
+  artifactId: string;
+  body: string;
+  contentHash: string;
+  privacyClass: PrivacyClass;
+  authorId: string;
+  authorUsername: string;
+  createdAt: string;
+  sourceId: string;
+}
+
 export interface IntakeBatchRow {
   id: string;
   caseId: string;
@@ -367,9 +381,11 @@ export interface CaseStore {
   insertRevision(rev: RevisionRow): Promise<void>;
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
   listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
+  listArtifactAnnotationsByCase(caseId: string): Promise<ArtifactAnnotationRow[]>;
   listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   insertArtifact(row: ArtifactRow): Promise<void>;
+  insertArtifactAnnotation(row: ArtifactAnnotationRow): Promise<void>;
   withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T>;
   lockIntakeIdempotency(caseId: string, key: string): Promise<void>;
   lockEvidenceDigest(digest: string): Promise<void>;
@@ -414,6 +430,7 @@ export class MemoryCaseStore implements CaseStore {
   private readonly timeline = new Map<string, TimelineRow[]>();
   private readonly revisions = new Map<string, RevisionRow[]>();
   private readonly artifacts = new Map<string, ArtifactRow>();
+  private readonly artifactAnnotations = new Map<string, ArtifactAnnotationRow>();
   private readonly snapshots = new Map<string, SnapshotRow>();
   private readonly intakeBatches = new Map<string, IntakeBatchRow>();
   private readonly contributionIntents = new Map<string, ContributionWriteIntent>();
@@ -430,6 +447,7 @@ export class MemoryCaseStore implements CaseStore {
       timeline: [...this.timeline.entries()],
       revisions: [...this.revisions.entries()],
       artifacts: [...this.artifacts.entries()],
+      artifactAnnotations: [...this.artifactAnnotations.entries()],
       snapshots: [...this.snapshots.entries()],
       intakeBatches: [...this.intakeBatches.entries()],
       contributionIntents: [...this.contributionIntents.entries()],
@@ -442,6 +460,7 @@ export class MemoryCaseStore implements CaseStore {
       timeline: [string, TimelineRow[]][];
       revisions: [string, RevisionRow[]][];
       artifacts: [string, ArtifactRow][];
+      artifactAnnotations?: [string, ArtifactAnnotationRow][];
       snapshots: [string, SnapshotRow][];
       intakeBatches: [string, IntakeBatchRow][];
       contributionIntents?: [string, ContributionWriteIntent][];
@@ -450,6 +469,7 @@ export class MemoryCaseStore implements CaseStore {
     this.timeline.clear();
     this.revisions.clear();
     this.artifacts.clear();
+    this.artifactAnnotations.clear();
     this.snapshots.clear();
     this.intakeBatches.clear();
     this.contributionIntents.clear();
@@ -457,6 +477,7 @@ export class MemoryCaseStore implements CaseStore {
     for (const [id, value] of row.timeline) this.timeline.set(id, value);
     for (const [id, value] of row.revisions) this.revisions.set(id, value);
     for (const [id, value] of row.artifacts) this.artifacts.set(id, value);
+    for (const [id, value] of row.artifactAnnotations ?? []) this.artifactAnnotations.set(id, value);
     for (const [id, value] of row.snapshots) this.snapshots.set(id, value);
     for (const [id, value] of row.intakeBatches) this.intakeBatches.set(id, value);
     for (const [id, value] of row.contributionIntents ?? []) this.contributionIntents.set(id, value);
@@ -729,6 +750,13 @@ export class MemoryCaseStore implements CaseStore {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  async listArtifactAnnotationsByCase(caseId: string): Promise<ArtifactAnnotationRow[]> {
+    return [...this.artifactAnnotations.values()]
+      .filter((row) => row.caseId === caseId)
+      .map((row) => ({ ...row }))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
   async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
     const hashes = new Set<string>();
     for (const row of this.artifacts.values()) {
@@ -752,6 +780,17 @@ export class MemoryCaseStore implements CaseStore {
       }
     }
     this.artifacts.set(row.id, { ...row });
+  }
+
+  async insertArtifactAnnotation(row: ArtifactAnnotationRow): Promise<void> {
+    const artifact = this.artifacts.get(row.artifactId);
+    if (!artifact || artifact.caseId !== row.caseId) {
+      throw new Error("artifact annotation target does not belong to the case");
+    }
+    if (this.artifactAnnotations.has(row.id)) {
+      throw new Error("artifact annotation already exists");
+    }
+    this.artifactAnnotations.set(row.id, { ...row });
   }
 
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
@@ -1333,6 +1372,18 @@ export class PgCaseStore implements CaseStore {
     return result.rows.map((row) => asArtifact(row as Record<string, unknown>));
   }
 
+  async listArtifactAnnotationsByCase(caseId: string): Promise<ArtifactAnnotationRow[]> {
+    const result = await this.db.query(
+      `SELECT id, case_id, artifact_id, body, content_hash, privacy_class,
+              author_id, author_username, created_at, source_id
+       FROM artifact_annotations
+       WHERE case_id = $1
+       ORDER BY created_at ASC, id ASC`,
+      [caseId],
+    );
+    return result.rows.map((row) => asArtifactAnnotation(row as Record<string, unknown>));
+  }
+
   async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
     const result = await this.db.query<{ hash: string | null }>(
       `SELECT hash FROM (
@@ -1380,6 +1431,27 @@ export class PgCaseStore implements CaseStore {
         row.sourceId,
         row.relativePath ?? row.filename,
         row.intakeBatchId ?? null,
+      ],
+    );
+  }
+
+  async insertArtifactAnnotation(row: ArtifactAnnotationRow): Promise<void> {
+    await this.db.query(
+      `INSERT INTO artifact_annotations (
+         id, case_id, artifact_id, body, content_hash, privacy_class,
+         author_id, author_username, created_at, source_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        row.id,
+        row.caseId,
+        row.artifactId,
+        row.body,
+        row.contentHash,
+        row.privacyClass,
+        row.authorId,
+        row.authorUsername,
+        row.createdAt,
+        row.sourceId,
       ],
     );
   }
@@ -1875,6 +1947,21 @@ function asArtifact(row: Record<string, unknown>): ArtifactRow {
       row.intake_batch_id === null || row.intake_batch_id === undefined
         ? null
         : String(row.intake_batch_id),
+  };
+}
+
+function asArtifactAnnotation(row: Record<string, unknown>): ArtifactAnnotationRow {
+  return {
+    id: String(row.id),
+    caseId: String(row.case_id),
+    artifactId: String(row.artifact_id),
+    body: String(row.body),
+    contentHash: String(row.content_hash),
+    privacyClass: row.privacy_class as PrivacyClass,
+    authorId: String(row.author_id),
+    authorUsername: String(row.author_username),
+    createdAt: asIso(row.created_at),
+    sourceId: String(row.source_id),
   };
 }
 

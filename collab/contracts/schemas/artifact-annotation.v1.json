@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/artifact-annotation.v1.json",
+  "title": "cd-collab Artifact Annotation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "caseId",
+    "artifactId",
+    "body",
+    "contentHash",
+    "privacyClass",
+    "authorId",
+    "authorUsername",
+    "createdAt",
+    "sourceId"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.artifact_annotation.v1" },
+    "id": { "type": "string" },
+    "caseId": { "type": "string" },
+    "artifactId": { "type": "string" },
+    "body": { "type": "string", "minLength": 1 },
+    "contentHash": { "type": "string" },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "authorId": { "type": "string" },
+    "authorUsername": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "sourceId": { "type": "string" }
+  }
+}

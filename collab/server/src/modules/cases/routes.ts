@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { Multipart, MultipartFile } from "@fastify/multipart";
 import {
+  ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
   ARTIFACT_KINDS,
   AUTH_ERROR_SCHEMA_ID,
   ContractViolation,
@@ -194,6 +195,7 @@ function domainError(
   if (
     message === "case not found" ||
     message === "contribution not found" ||
+    message === "evidence not found" ||
     message === "snapshot not found"
   ) {
     void reply.code(404);
@@ -1631,6 +1633,103 @@ export async function registerCaseRoutes(
       caseId: id,
       artifacts: await deps.domain.listArtifacts(id, ctx.actor, ctx.isAdmin),
     };
+  });
+
+  app.get("/api/cases/:id/evidence/annotations", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return { error: "not_found" };
+    }
+    return {
+      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+      caseId: id,
+      annotations: await deps.domain.listArtifactAnnotations(id, ctx.actor, ctx.isAdmin),
+    };
+  });
+
+  app.get("/api/cases/:id/evidence/:eid/annotations", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    const params = request.params as { id: string; eid: string };
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
+      return { error: "not_found" };
+    }
+    if (!(await deps.domain.getArtifact(params.id, params.eid))) {
+      void reply.code(404);
+      return { error: "not_found" };
+    }
+    return {
+      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+      caseId: params.id,
+      annotations: await deps.domain.listArtifactAnnotations(
+        params.id,
+        ctx.actor,
+        ctx.isAdmin,
+        params.eid,
+      ),
+    };
+  });
+
+  app.post("/api/cases/:id/evidence/:eid/annotations", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
+      await deps.audit.append({
+        identity: ctx.actor.id,
+        action: "artifact_annotation_create",
+        target: "forbidden",
+        origin: request.ip,
+        outcome: "denied",
+      });
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const params = request.params as { id: string; eid: string };
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
+      return authError("forbidden");
+    }
+    const body = asRecord(request.body);
+    const text = str(body.body);
+    if (text === undefined) {
+      void reply.code(400);
+      return { error: "body is required" };
+    }
+    const suppliedClientTime = clientTimeInput(body);
+    if (!suppliedClientTime.valid) {
+      void reply.code(400);
+      return { error: "clientTime must be a string" };
+    }
+    const privacy = body.privacyClass;
+    if (privacy !== undefined && (typeof privacy !== "string" || !(PRIVACY_CLASSES as readonly string[]).includes(privacy))) {
+      void reply.code(400);
+      return { error: "invalid privacyClass" };
+    }
+    const sourceId = body.sourceId;
+    if (sourceId !== undefined && typeof sourceId !== "string") {
+      void reply.code(400);
+      return { error: "sourceId must be a string" };
+    }
+    try {
+      return await deps.domain.addArtifactAnnotation(
+        params.id,
+        params.eid,
+        ctx.actor,
+        {
+          body: text,
+          ...(privacy === undefined ? {} : { privacyClass: privacy as PrivacyClass }),
+          ...(suppliedClientTime.value === undefined ? {} : { clientTime: suppliedClientTime.value }),
+          ...(sourceId === undefined ? {} : { sourceId }),
+        },
+        request.ip,
+      );
+    } catch (err) {
+      return domainError(reply, err);
+    }
   });
 
   app.get("/api/cases/:id/evidence/:eid", async (request, reply) => {

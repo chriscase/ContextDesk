@@ -6,8 +6,9 @@ describe("migration versions", () => {
   // The integration-train migrations remain consecutively ordered: the
   // investigation record graph, the case-bound log corpus, the narrow
   // experiment row-lock privilege, the administrator model-use policy, the
-  // investigation log workbench, structured context, and UI strategy governance.
-  it("pins the canonical PostgreSQL head at UI strategy governance", () => {
+  // investigation log workbench, structured context, UI strategy governance,
+  // and first-class artifact annotations.
+  it("pins the canonical PostgreSQL head at artifact annotations", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -19,7 +20,8 @@ describe("migration versions", () => {
     expect(versions).toContain("022_software_impact");
     expect(versions).toContain("023_investigation_context");
     expect(versions).toContain("024_ui_strategy_governance");
-    expect(latestMigrationVersion()).toBe("024_ui_strategy_governance");
+    expect(versions).toContain("025_artifact_annotations");
+    expect(latestMigrationVersion()).toBe("025_artifact_annotations");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -28,11 +30,12 @@ describe("migration versions", () => {
     // localeCompare ordering is what the runner applies, so assert on it
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
-    expect(versions.slice(-4)).toEqual([
+    expect(versions.slice(-5)).toEqual([
       "021_workbench",
       "022_software_impact",
       "023_investigation_context",
       "024_ui_strategy_governance",
+      "025_artifact_annotations",
     ]);
   });
 });
@@ -66,6 +69,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("022_software_impact");
       expect(up.applied).toContain("023_investigation_context");
       expect(up.applied).toContain("024_ui_strategy_governance");
+      expect(up.applied).toContain("025_artifact_annotations");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -144,6 +148,14 @@ describe.skipIf(!adminUrl())("migrations", () => {
         "ui_strategy_policy_state",
         "ui_strategy_preferences",
       ]);
+      const annotationTables = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename = 'artifact_annotations'`,
+      );
+      expect(annotationTables.rows.map((row) => row.tablename)).toEqual([
+        "artifact_annotations",
+      ]);
+      expect((await migrateDown(client)).rolledBack).toBe("025_artifact_annotations");
       expect((await migrateDown(client)).rolledBack).toBe("024_ui_strategy_governance");
       const strategyTablesAfterRollback = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
@@ -252,6 +264,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("022_software_impact");
       expect(dry.pending).toContain("023_investigation_context");
       expect(dry.pending).toContain("024_ui_strategy_governance");
+      expect(dry.pending).toContain("025_artifact_annotations");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

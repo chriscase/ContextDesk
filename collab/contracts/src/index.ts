@@ -323,6 +323,17 @@ export type {
 } from "./artifact.js";
 
 export {
+  ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+  ARTIFACT_ANNOTATION_SCHEMA_ID,
+  parseArtifactAnnotation,
+  parseArtifactAnnotationList,
+} from "./artifact-annotation.js";
+export type {
+  ArtifactAnnotationListV1,
+  ArtifactAnnotationV1,
+} from "./artifact-annotation.js";
+
+export {
   CORPUS_ALLOWED_EXTENSIONS,
   CORPUS_ALLOWED_MEDIA,
   CORPUS_INTAKE_BATCH_SCHEMA_ID,

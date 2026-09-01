@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  parseArtifactAnnotation,
+  parseArtifactAnnotationList,
   isRfc4122Uuid,
   parseArtifact,
   parseCase,
@@ -210,6 +212,82 @@ describe("cases timeline evidence provenance", () => {
       const populated = parseEvidenceList(JSON.parse(populatedResponse.body));
       expect(populated.caseId).toBe(created.id);
       expect(populated.artifacts.map((artifact) => artifact.id)).toEqual([uploaded.artifact.id]);
+    });
+  });
+
+  it("appends artifact annotations and serves case- and artifact-scoped lists", async () => {
+    await withApp(async ({ app, audit }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Artifact annotation fixture" },
+      })).body));
+      const uploaded = parseEvidenceUploadSuccess(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "attachment",
+          filename: "annotated.txt",
+          mediaType: "text/plain",
+          contentBase64: Buffer.from("annotated evidence").toString("base64"),
+          summary: "Evidence with durable annotations",
+        },
+      })).body));
+
+      const firstResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "The timeout begins after the retry boundary.",
+          clientTime: "2026-09-01T11:00:00Z",
+        },
+      });
+      expect(firstResponse.statusCode).toBe(200);
+      const first = parseArtifactAnnotation(JSON.parse(firstResponse.body));
+
+      const second = parseArtifactAnnotation(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "This is an independent observation, not a revised first note.",
+          privacyClass: "share_safe",
+        },
+      })).body));
+      expect(second.id).not.toBe(first.id);
+      expect(second.privacyClass).toBe("share_safe");
+
+      const byArtifact = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+      });
+      expect(byArtifact.statusCode).toBe(200);
+      expect(parseArtifactAnnotationList(JSON.parse(byArtifact.body)).annotations.map((item) => item.id).sort()).toEqual(
+        [first.id, second.id].sort(),
+      );
+
+      const byCase = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: alice },
+      });
+      expect(byCase.statusCode).toBe(200);
+      const list = parseArtifactAnnotationList(JSON.parse(byCase.body));
+      expect(list.annotations).toHaveLength(2);
+      expect(list.annotations.every((item) => item.caseId === created.id)).toBe(true);
+      expect(list.annotations.every((item) => item.artifactId === uploaded.artifact.id)).toBe(true);
+      expect(await audit.list({ action: "artifact_annotation_create" })).toHaveLength(2);
+      const timeline = parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body));
+      expect(timeline.events.filter((event) => event.kind === "artifact_annotation_created")).toHaveLength(2);
     });
   });
 

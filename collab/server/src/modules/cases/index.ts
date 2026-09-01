@@ -17,6 +17,7 @@ export {
 } from "./service.js";
 export type {
   Actor,
+  ArtifactAnnotationRow,
   ArtifactRow,
   CaseStore,
   CaseTimelineRow,

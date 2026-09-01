@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/artifact-annotation-list.v1.json",
+  "title": "cd-collab Artifact Annotation List v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "caseId", "annotations"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.artifact_annotation_list.v1" },
+    "caseId": { "type": "string" },
+    "annotations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/annotation" }
+    }
+  },
+  "$defs": {
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "id",
+        "caseId",
+        "artifactId",
+        "body",
+        "contentHash",
+        "privacyClass",
+        "authorId",
+        "authorUsername",
+        "createdAt",
+        "sourceId"
+      ],
+      "properties": {
+        "schemaId": { "type": "string", "const": "cd-collab.artifact_annotation.v1" },
+        "id": { "type": "string" },
+        "caseId": { "type": "string" },
+        "artifactId": { "type": "string" },
+        "body": { "type": "string", "minLength": 1 },
+        "contentHash": { "type": "string" },
+        "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+        "authorId": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "sourceId": { "type": "string" }
+      }
+    }
+  }
+}
