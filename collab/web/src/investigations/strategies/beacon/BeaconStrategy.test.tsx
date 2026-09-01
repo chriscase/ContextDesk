@@ -191,6 +191,7 @@ describe("Beacon rapid-intake strategy", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Why does this matter?" }), { target: { value: "Captured before authority changed." } });
     expect((screen.getByRole("button", { name: "Attach evidence" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(privacy, { target: { value: "share_safe" } });
+    expect(screen.queryByRole("alert")).toBeNull();
     fireEvent.submit(screen.getByRole("button", { name: "Attach evidence" }).closest("form")!);
     await waitFor(() => expect(gateway.uploadEvidence).toHaveBeenCalledTimes(1));
     expect(gateway.uploadEvidence).toHaveBeenCalledWith(
