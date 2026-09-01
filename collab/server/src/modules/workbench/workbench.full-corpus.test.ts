@@ -287,6 +287,31 @@ describe("scope is applied before a byte is read", () => {
   });
 });
 
+describe("review preview bounded evidence path", () => {
+  it("uses descriptors and read-one without invoking the legacy bulk fixture method", async () => {
+    const evidenceId = "77777777-7777-4777-8777-777777777777";
+    const { service, reads, wholeCorpusReads } = harness({
+      files: [{
+        evidenceId,
+        relativePath: "worker/batch.log",
+        text: "2024-03-10 01:30:00 INFO scheduled sweep\n",
+      }],
+    });
+    await service.previewRule(CASE_ID, ACTOR, false, {
+      schemaId: "cd-collab.log_time_review_rule.v1",
+      scope: "source",
+      source: "worker/batch.log",
+      rotationFamily: null,
+      selectedEvidenceIds: [],
+      ianaTimezone: "UTC",
+      expectedRevision: 3,
+      idempotencyKey: "bounded-preview-0001",
+    });
+    expect(wholeCorpusReads()).toBe(0);
+    expect(reads).toEqual([evidenceId]);
+  });
+});
+
 describe("duplicate names and nested paths stay distinct", () => {
   const files: SyntheticFile[] = [
     { evidenceId: DUPE_A, relativePath: "alpha/app.log", text: "ERROR the needle is here in alpha\n" },

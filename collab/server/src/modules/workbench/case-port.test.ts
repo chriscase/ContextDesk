@@ -12,7 +12,12 @@ import {
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
-import { FilesystemEvidenceStore } from "../../evidence/store.js";
+import { BoundedEvidenceReadError } from "../../evidence/bounded-read.js";
+import {
+  FilesystemEvidenceStore,
+  sha256Hex,
+  type EvidenceStore,
+} from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import {
   MapAuthAdapter,
@@ -25,7 +30,10 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore } from "../cases/index.js";
 import { MemoryLogTimeStore } from "../log-time/index.js";
-import { createWorkbenchCasePort } from "./case-port.js";
+import {
+  WORKBENCH_EVIDENCE_MAX_BYTES,
+  createWorkbenchCasePort,
+} from "./case-port.js";
 import { MemoryWorkbenchStore, WorkbenchService } from "./index.js";
 
 const ALICE = "fixture-alice-secret";
@@ -172,5 +180,82 @@ describe("workbench case-port over committed intake", () => {
       await app.close();
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("workbench case-port bounded evidence reads", () => {
+  const bytes = new TextEncoder().encode("2026-08-31T00:00:00Z INFO exact\n");
+  const hash = sha256Hex(bytes);
+
+  function portFor(byteLength = bytes.byteLength, present = true) {
+    const calls = { get: 0, head: 0, openRead: 0 };
+    const evidence = {
+      get: async () => {
+        calls.get += 1;
+        throw new Error("workbench bounded path must not call get");
+      },
+      head: async () => {
+        calls.head += 1;
+        return present ? { hash, byteLength, contentType: null } : null;
+      },
+      openRead: async () => {
+        calls.openRead += 1;
+        return {
+          meta: { hash, byteLength: bytes.byteLength, contentType: null },
+          range: null,
+          byteLength: bytes.byteLength,
+          bytes: async function* () { yield bytes; },
+        };
+      },
+    } as unknown as EvidenceStore;
+    const port = createWorkbenchCasePort({
+      cases: {
+        listArtifactsByCase: async () => [{
+          id: "evidence-1",
+          filename: null,
+          relativePath: "logs/exact.log",
+          contentHash: hash,
+          byteLength,
+          intakeBatchId: null,
+          privacyClass: "owner_only",
+        }],
+      } as unknown as MemoryCaseStore,
+      domain: {} as CaseService,
+      evidence,
+      currentNormalizationRevision: async () => null,
+    });
+    return { port, calls };
+  }
+
+  it("uses strict Head/OpenRead for one file and exposes no production bulk method", async () => {
+    const { port, calls } = portFor();
+    await expect(port.listEvidenceDescriptors?.("case-1")).resolves.toEqual([{
+      evidenceId: "evidence-1",
+      relativePath: "logs/exact.log",
+      digest: hash,
+      intakeBatchId: null,
+      privacyClass: "owner_only",
+    }]);
+    await expect(port.readEvidenceText?.("case-1", "evidence-1"))
+      .resolves.toBe(new TextDecoder().decode(bytes));
+    expect(port.listEvidenceFiles).toBeUndefined();
+    expect(calls).toEqual({ get: 0, head: 2, openRead: 1 });
+  });
+
+  it("keeps an over-cap artifact metadata-viewable but rejects its selected read before storage", async () => {
+    const { port, calls } = portFor(WORKBENCH_EVIDENCE_MAX_BYTES + 1);
+    await expect(port.listEvidenceDescriptors?.("case-1"))
+      .resolves.toHaveLength(1);
+    calls.head = 0;
+    await expect(port.readEvidenceText?.("case-1", "evidence-1"))
+      .rejects.toBeInstanceOf(BoundedEvidenceReadError);
+    expect(calls).toEqual({ get: 0, head: 0, openRead: 0 });
+  });
+
+  it("preserves missing-byte behavior without opening a body", async () => {
+    const { port, calls } = portFor(bytes.byteLength, false);
+    await expect(port.listEvidenceDescriptors?.("case-1")).resolves.toEqual([]);
+    await expect(port.readEvidenceText?.("case-1", "evidence-1")).resolves.toBeNull();
+    expect(calls).toEqual({ get: 0, head: 2, openRead: 0 });
   });
 });

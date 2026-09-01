@@ -3,18 +3,25 @@
  */
 import {
   corpusAllowedExtension,
+  type ContentHash,
   type HostEventStampV1,
   type PrivacyClass,
 } from "@cd-collab/contracts";
-import type { EvidenceStore } from "../../evidence/store.js";
+import {
+  BoundedEvidenceReadError,
+  collectBoundedEvidenceBytes,
+} from "../../evidence/bounded-read.js";
+import { isContentHash, type EvidenceStore } from "../../evidence/store.js";
 import type { Actor, CaseService, CaseStore } from "../cases/index.js";
 import type {
   WorkbenchCasePort,
   WorkbenchEvidenceDescriptor,
-  WorkbenchEvidenceFile,
   WorkbenchHostSearchInput,
   WorkbenchHostSearchOutcome,
 } from "./service.js";
+
+/** One Workbench selection may materialize at most one 64 MiB log source. */
+export const WORKBENCH_EVIDENCE_MAX_BYTES = 64 * 1024 * 1024;
 
 export interface WorkbenchCasePortDeps {
   cases: CaseStore;
@@ -70,9 +77,15 @@ export function createWorkbenchCasePort(deps: WorkbenchCasePortDeps): WorkbenchC
       const files: WorkbenchEvidenceDescriptor[] = [];
       for (const artifact of artifacts) {
         const path = artifact.relativePath ?? artifact.filename;
-        if (!path || !artifact.contentHash) continue;
+        if (!path || !artifact.contentHash || !isContentHash(artifact.contentHash)) continue;
         if (corpusAllowedExtension(path) === null) continue;
-        if (!(await deps.evidence.head(artifact.contentHash))) continue;
+        if (!Number.isSafeInteger(artifact.byteLength) || (artifact.byteLength ?? -1) < 0) continue;
+        const byteLength = artifact.byteLength as number;
+        const meta = await deps.evidence.head(artifact.contentHash);
+        if (!meta) continue;
+        if (meta.hash !== artifact.contentHash || meta.byteLength !== byteLength) {
+          throw new BoundedEvidenceReadError();
+        }
         files.push({
           evidenceId: artifact.id,
           relativePath: path,
@@ -88,33 +101,18 @@ export function createWorkbenchCasePort(deps: WorkbenchCasePortDeps): WorkbenchC
     async readEvidenceText(caseId: string, evidenceId: string): Promise<string | null> {
       const artifacts = await deps.cases.listArtifactsByCase(caseId);
       const artifact = artifacts.find((item) => item.id === evidenceId);
-      if (!artifact?.contentHash) return null;
+      if (!artifact?.contentHash || !isContentHash(artifact.contentHash)) return null;
       const path = artifact.relativePath ?? artifact.filename;
       if (!path || corpusAllowedExtension(path) === null) return null;
-      const bytes = await deps.evidence.get(artifact.contentHash);
+      if (!Number.isSafeInteger(artifact.byteLength) || (artifact.byteLength ?? -1) < 0) return null;
+      const bytes = await collectBoundedEvidenceBytes({
+        evidence: deps.evidence,
+        hash: artifact.contentHash as ContentHash,
+        expectedLength: artifact.byteLength as number,
+        maxBytes: WORKBENCH_EVIDENCE_MAX_BYTES,
+      });
       if (!bytes) return null;
       return new TextDecoder("utf-8").decode(bytes);
-    },
-
-    async listEvidenceFiles(caseId: string): Promise<WorkbenchEvidenceFile[]> {
-      const artifacts = await deps.cases.listArtifactsByCase(caseId);
-      const files: WorkbenchEvidenceFile[] = [];
-      for (const artifact of artifacts) {
-        const path = artifact.relativePath ?? artifact.filename;
-        if (!path || !artifact.contentHash) continue;
-        if (corpusAllowedExtension(path) === null) continue;
-        const bytes = await deps.evidence.get(artifact.contentHash);
-        if (!bytes) continue;
-        files.push({
-          evidenceId: artifact.id,
-          relativePath: path,
-          digest: artifact.contentHash,
-          intakeBatchId: artifact.intakeBatchId ?? null,
-          privacyClass: artifact.privacyClass,
-          text: new TextDecoder("utf-8").decode(bytes),
-        });
-      }
-      return files.sort(byPath);
     },
 
     currentNormalizationRevision: deps.currentNormalizationRevision,

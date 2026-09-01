@@ -6,13 +6,18 @@
 import {
   CORPUS_INTAKE_LIMITS,
   corpusAllowedExtension,
+  type ContentHash,
   type PrivacyClass,
 } from "@cd-collab/contracts";
-import type { EvidenceStore } from "../../evidence/store.js";
+import { collectBoundedEvidenceBytes } from "../../evidence/bounded-read.js";
+import { isContentHash, type EvidenceStore } from "../../evidence/store.js";
 import type { Actor, CaseService, CaseStore } from "../cases/index.js";
 import type { TriageJobStore } from "../triage-runs/index.js";
 import type { LogTimeCasePort } from "./service.js";
 import { LogTimeRequestError } from "./bridge.js";
+
+/** The log host's per-source materialization envelope. */
+export const LOG_CORPUS_MAX_FILE_BYTES = 64 * 1024 * 1024;
 
 /**
  * The analysis builder shares intake's file and expanded-byte envelope. It
@@ -26,7 +31,7 @@ export function corpusBuilderCapacityError(
   if (fileCount > CORPUS_INTAKE_LIMITS.maxFileCount) {
     return `log corpus exceeds the ${CORPUS_INTAKE_LIMITS.maxFileCount.toLocaleString("en-US")}-file intake limit`;
   }
-  if (nextFileBytes > CORPUS_INTAKE_LIMITS.maxFileBytes) {
+  if (nextFileBytes > LOG_CORPUS_MAX_FILE_BYTES) {
     return "a log corpus file exceeds the 64 MiB intake limit";
   }
   if (nextFileBytes > CORPUS_INTAKE_LIMITS.maxExpandedBytes - currentBytes) {
@@ -75,36 +80,61 @@ export function createLogTimeCasePort(deps: LogTimeCasePortDeps): LogTimeCasePor
      */
     async listCorpusFilesForCase(caseId: string) {
       const artifacts = await deps.cases.listArtifactsByCase(caseId);
-      const eligible = artifacts
+      const ordered = artifacts
         .filter((artifact) => {
           const path = artifact.relativePath;
-          if (!path || !artifact.contentHash) return false;
+          if (!path || !artifact.contentHash || !isContentHash(artifact.contentHash)) return false;
           return corpusAllowedExtension(path) !== null;
         })
-        .sort((left, right) =>
-          (left.relativePath ?? "").localeCompare(right.relativePath ?? ""),
-        );
+        .sort((left, right) => {
+          const leftPath = left.relativePath as string;
+          const rightPath = right.relativePath as string;
+          if (leftPath === rightPath) return 0;
+          return leftPath < rightPath ? -1 : 1;
+        });
 
-      const files: { relativePath: string; contentBase64: string }[] = [];
+      const eligible: {
+        relativePath: string;
+        contentHash: ContentHash;
+        byteLength: number;
+      }[] = [];
       const seen = new Set<string>();
       let total = 0;
-      for (const artifact of eligible) {
+      for (const artifact of ordered) {
         const path = artifact.relativePath as string;
         // Intake permits the same relative path across batches; the corpus
         // needs one file per path, so the first committed wins.
         if (seen.has(path)) continue;
-        const bytes = await deps.evidence.get(artifact.contentHash as string);
-        if (!bytes) continue;
+        seen.add(path);
+        if (!Number.isSafeInteger(artifact.byteLength) || (artifact.byteLength ?? -1) < 0) {
+          throw new LogTimeRequestError("log corpus artifact has an invalid catalog byte length");
+        }
+        const byteLength = artifact.byteLength as number;
         const capacityError = corpusBuilderCapacityError(
-          files.length + 1,
+          eligible.length + 1,
           total,
-          bytes.byteLength,
+          byteLength,
         );
         if (capacityError) throw new LogTimeRequestError(capacityError);
-        total += bytes.byteLength;
-        seen.add(path);
-        files.push({
+        total += byteLength;
+        eligible.push({
           relativePath: path,
+          contentHash: artifact.contentHash as ContentHash,
+          byteLength,
+        });
+      }
+
+      const files: { relativePath: string; contentBase64: string }[] = [];
+      for (const artifact of eligible) {
+        const bytes = await collectBoundedEvidenceBytes({
+          evidence: deps.evidence,
+          hash: artifact.contentHash,
+          expectedLength: artifact.byteLength,
+          maxBytes: LOG_CORPUS_MAX_FILE_BYTES,
+        });
+        if (!bytes) continue;
+        files.push({
+          relativePath: artifact.relativePath,
           contentBase64: Buffer.from(bytes).toString("base64"),
         });
       }

@@ -112,13 +112,10 @@ export interface WorkbenchCasePort {
     isAdmin: boolean,
   ): Promise<{ id: string } | null>;
   /**
-   * Whole-corpus read including bytes.
-   *
-   * Kept for callers written against the first port and for small fixtures.
-   * Anything corpus-sized must go through `listEvidenceDescriptors` plus
-   * `readEvidenceText`, because this method materializes every file at once.
+   * Legacy test-fixture compatibility only. Production composition must omit
+   * this whole-corpus materializer and implement the bounded pair below.
    */
-  listEvidenceFiles(caseId: string): Promise<WorkbenchEvidenceFile[]>;
+  listEvidenceFiles?(caseId: string): Promise<WorkbenchEvidenceFile[]>;
   /** Metadata only, so a selection can be applied before any byte is read. */
   listEvidenceDescriptors?(caseId: string): Promise<WorkbenchEvidenceDescriptor[]>;
   /** One file's bytes, fetched only once that file is known to be in scope. */
@@ -259,9 +256,11 @@ export class WorkbenchService {
         },
       };
     }
-    // Compatibility path for ports written against the first contract. It
-    // materializes every file, so it is only sound for small corpora; the
-    // shipped port implements the streaming methods above.
+    // Fixture-only compatibility for ports written against the first contract.
+    // No production composition implements this bulk materialization method.
+    if (!port.listEvidenceFiles) {
+      throw new Error("workbench case port does not support bounded evidence reads");
+    }
     const loaded = (await port.listEvidenceFiles(caseId)).slice().sort(compareDescriptors);
     const byId = new Map(loaded.map((file) => [file.evidenceId, file.text]));
     const all = loaded.map(({ text: _text, ...rest }) => rest);
@@ -733,7 +732,12 @@ export class WorkbenchService {
         `stale normalization revision: expected ${rule.expectedRevision}, current ${current ?? "none"}`,
       );
     }
-    const files = await this.deps.cases.listEvidenceFiles(caseId);
+    if (!this.deps.cases.listEvidenceDescriptors || !this.deps.cases.readEvidenceText) {
+      throw new Error("workbench rule preview requires bounded evidence reads");
+    }
+    const files = (await this.deps.cases.listEvidenceDescriptors(caseId))
+      .slice()
+      .sort(compareDescriptors);
     const lines = await this.loadLines(caseId);
     const byId = new Map(lines.map((line) => [line.evidenceId, line]));
     return previewReviewRule(
