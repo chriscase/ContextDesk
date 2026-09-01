@@ -40,6 +40,23 @@ id = "generic-api-key"
   regexes = ['''"token": "[a-z]{2,8}-[0-9A-F]{8}",?''']
   paths = ['''^fixtures/log-lab/scenarios/retrieval-ablation/cases/[a-z0-9-]+/truth/manifest\.json$''']
 
+  # The first published Garage evaluation commits used this literal marker
+  # before it was renamed to the lower-entropy REPLACE_THIS_VALUE sentinel.
+  # Gitleaks scans the complete first-parent PR range, so the old marker must
+  # remain narrowly allowlisted for these four non-secret fixture/doc files;
+  # no generated or operator credential is exempted.
+  [[rules.allowlists]]
+  description = "Historical Garage placeholder marker (not a credential)"
+  condition = "AND"
+  regexTarget = "line"
+  regexes = ['''replace-with-64-hex-characters''']
+  paths = [
+    '''^collab/deploy/garage-evidence-evaluation/garage\.toml$''',
+    '''^collab/scripts/qualify-s3-evidence\.mjs$''',
+    '''^collab/server/src/evidence/s3-garage\.integration\.test\.ts$''',
+    '''^docs/help/war-room/war-room-s3-evidence-store\.md$''',
+  ]
+
   # rb14-secrets-malformed deliberately contains synthetic auth-service log
   # lines ("token issued subject=svc-<hex8> ttl=…") to exercise secret-aware
   # handling. The subjects are synthetic service ids; nothing authenticates.
