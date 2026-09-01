@@ -749,7 +749,7 @@ function expectS3OperatorGuidance(body: string) {
   expect(body).toMatch(/unknown-length streams remain count-enforced/);
   expect(body).toMatch(/Filesystem mode rejects every present COLLAB_EVIDENCE_S3_\*/);
   expect(body).not.toMatch(
-    /COLLAB_EVIDENCE_S3_\* name and(?:\n#)? COLLAB_EVIDENCE_MAX_UPLOAD_BYTES/,
+    /COLLAB_EVIDENCE_S3_\* name and(?:\r?\n#)? COLLAB_EVIDENCE_MAX_UPLOAD_BYTES/,
   );
   expect(body).not.toMatch(/does not apply it to PutObject/);
   expect(body).toMatch(/1,000,000/);
@@ -765,7 +765,7 @@ function expectS3OperatorGuidance(body: string) {
   );
   expect(body).toMatch(/owner-only regular files/);
   expect(body).toMatch(/replaces the default trust store/);
-  expect(body).toMatch(/combined(?:\n#)? PEM bundle/);
+  expect(body).toMatch(/combined(?:\r?\n#)? PEM bundle/);
   expect(body).toMatch(/no retention, lifecycle, migration, or multi-provider failover/);
   expect(body).toMatch(/secret-store-sourced/);
   expect(body).not.toMatch(/CORS|ACL|presign|AKIA/i);
