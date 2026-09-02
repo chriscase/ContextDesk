@@ -83,7 +83,7 @@ export function ArtifactAnnotationPanel({
   // A lost acknowledgement blocks retries only for the artifact whose write
   // may have committed. Other evidence rows must remain independently usable.
   const canSubmit = canAnnotate && !readOnly && body.trim().length > 0 && !working && !refreshing
-    && (!retryBlocked || !isThisMutation || outcomeChecked);
+    && (!retryBlocked || outcomeChecked);
 
   async function refreshHistory() {
     if (refreshing) return;
@@ -168,7 +168,7 @@ export function ArtifactAnnotationPanel({
         </div>
       </form>
       {isThisMutation && mutationStatus === "failed" && mutationError ? <p className="investigation-first__error" role="alert">{mutationError}</p> : null}
-      {isThisMutation && retryBlocked ? <div className="investigation-first__annotation-unknown" role="alert"><p>The server did not confirm this note. Refresh annotation history before submitting this note again.</p><button type="button" disabled={refreshing} onClick={() => void refreshHistory()}>{refreshing ? "Refreshing history…" : "Refresh annotation history"}</button>{outcomeChecked ? <small>History refreshed. Check for this note before saving again.</small> : null}</div> : null}
+      {retryBlocked ? <div className="investigation-first__annotation-unknown" role="alert"><p>The server did not confirm this note. Refresh annotation history before submitting this note again.</p><button type="button" disabled={refreshing} onClick={() => void refreshHistory()}>{refreshing ? "Refreshing history…" : "Refresh annotation history"}</button>{outcomeChecked ? <small>History refreshed. Check for this note before saving again.</small> : null}</div> : null}
       {isThisMutation && mutationStatus === "succeeded" ? <p className="investigation-first__success" role="status">Note saved to this evidence.</p> : null}
     </details> : readOnly ? <small className="investigation-first__muted">Annotations are read-only in this view.</small> : null}
   </div>;

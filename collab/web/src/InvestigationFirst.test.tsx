@@ -481,10 +481,16 @@ describe("Investigation First Runtime V1 presentation", () => {
   it("does not carry an unknown-outcome block from one evidence row to another", async () => {
     const first = makeEvidenceList().artifacts[0]!;
     const second = { ...first, id: "evidence-second", filename: "request-context.txt" };
-    const createArtifactAnnotation = vi.fn(async () => ({
-      ok: false as const,
-      error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
-    }));
+    const createArtifactAnnotation = vi.fn(async (
+      _caseId: string,
+      artifactId: string,
+      input: { body: string },
+    ) => createArtifactAnnotation.mock.calls.length === 1
+      ? {
+        ok: false as const,
+        error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+      }
+      : gatewayOk(makeArtifactAnnotation({ id: `annotation-${artifactId}`, artifactId, body: input.body })));
     renderStrategy({
       gateway: createInvestigationGatewayDouble({
         listEvidence: vi.fn(async () => gatewayOk([first, second])),
@@ -505,7 +511,18 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByText("Add a note"));
     const secondBody = screen.getByRole("textbox", { name: "Annotation for this evidence" });
     fireEvent.change(secondBody, { target: { value: "Second attempt" } });
-    expect((screen.getByRole("button", { name: "Save note" }) as HTMLButtonElement).disabled).toBe(false);
+    const secondSave = screen.getByRole("button", { name: "Save note" }) as HTMLButtonElement;
+    expect(secondSave.disabled).toBe(false);
+    fireEvent.click(secondSave);
+    await waitFor(() => expect(createArtifactAnnotation).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for checkout-timeout.log" }));
+    fireEvent.click(screen.getByText("Add a note"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Annotation for this evidence" }), {
+      target: { value: "Return to the first row." },
+    });
+    expect((screen.getByRole("button", { name: "Save note" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Refresh annotation history" })).toBeTruthy();
   });
 
   it("keeps artifact annotation editing out of viewer and read-only views", async () => {

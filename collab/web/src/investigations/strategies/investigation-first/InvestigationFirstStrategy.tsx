@@ -230,6 +230,9 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const [selectedEvidence, setSelectedEvidence] = useState<readonly string[]>([]);
   const [previewArtifactId, setPreviewArtifactId] = useState<string | null>(null);
   const [annotationArtifactId, setAnnotationArtifactId] = useState<string | null>(null);
+  const [unknownAnnotationArtifacts, setUnknownAnnotationArtifacts] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [title, setTitle] = useState("");
   const [severity, setSeverity] = useState<CaseV1["severity"]>("medium");
   const [situation, setSituation] = useState<SituationDraft>(EMPTY_SITUATION);
@@ -314,6 +317,11 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   useEffect(() => setAnnotationArtifactId(null), [props.focusCaseId]);
   useEffect(() => setAnnotationMutationArtifactId(null), [props.focusCaseId]);
   useEffect(() => {
+    // An outcome-unknown acknowledgement belongs to one case and artifact;
+    // never carry that recovery block into another focused record or person.
+    setUnknownAnnotationArtifacts(new Set());
+  }, [props.focusCaseId, runtime.identity.id]);
+  useEffect(() => {
     if (annotationMutationArtifactId !== null) setAnnotationArtifactId(annotationMutationArtifactId);
   }, [annotationMutationArtifactId]);
   useEffect(() => {
@@ -372,7 +380,21 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     const command = runtime.commands.createArtifactAnnotation;
     if (command === null) return { status: "ignored", reason: "not_ready" };
     setAnnotationMutationArtifactId(draft.artifactId);
-    return command(draft);
+    const result = await command(draft);
+    if (result.status === "failed"
+      && result.error.kind === "unavailable"
+      && result.error.reason === "commit_outcome_unknown") {
+      setUnknownAnnotationArtifacts((current) => new Set(current).add(draft.artifactId));
+    }
+    if (result.status === "succeeded") {
+      setUnknownAnnotationArtifacts((current) => {
+        if (!current.has(draft.artifactId)) return current;
+        const next = new Set(current);
+        next.delete(draft.artifactId);
+        return next;
+      });
+    }
+    return result;
   }
 
   function togglePreview(artifactId: string) {
@@ -531,7 +553,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
                     mutationStatus={annotationMutation.status}
                     mutationArtifactId={annotationMutationArtifactId}
                     mutationError={annotationMutation.status === "failed" ? failureCopy(annotationMutation.error, "annotations") : null}
-                    retryBlocked={annotationMutation.status === "failed" && annotationMutation.error.kind === "unavailable" && annotationMutation.error.reason === "commit_outcome_unknown"}
+                    retryBlocked={unknownAnnotationArtifacts.has(evidence.id)}
                     onRefresh={runtime.refresh.artifactAnnotations}
                     onCreate={createArtifactAnnotation}
                   />
