@@ -26,6 +26,7 @@ import {
 import {
   createS3ClientConfig,
   createNonRetryingS3UploadClient,
+  createTrackedAbortUploadClient,
   S3EvidenceStore,
   type S3EvidenceClient,
   type S3EvidenceStoreOptions,
@@ -307,17 +308,23 @@ class OpaqueS3EvidenceClient implements S3EvidenceClient {
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
     }
+    const tracked = createTrackedAbortUploadClient(this.#streamClient, abortController.signal);
+    let failure: unknown;
     try {
       await new Upload({
-        client: this.#streamClient,
+        client: tracked.client,
         params: input,
         queueSize: 1,
         leavePartsOnError: false,
         abortController,
       }).done();
+    } catch (error) {
+      failure = error;
     } finally {
+      await tracked.waitForRequests();
       signal?.removeEventListener("abort", onAbort);
     }
+    if (failure !== undefined) throw failure;
   }
 
   toJSON(): { configured: true } {

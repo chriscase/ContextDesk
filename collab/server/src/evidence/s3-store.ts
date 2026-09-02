@@ -91,6 +91,49 @@ export function createNonRetryingS3UploadClient(client: S3Client): S3Client {
   return new S3Client(config);
 }
 
+interface TrackedUploadClient {
+  readonly client: S3Client;
+  waitForRequests(): Promise<void>;
+}
+
+/**
+ * lib-storage's Upload accepts an AbortController, but v3.1121 does not pass
+ * that signal to the individual S3Client.send calls. Wrap the client so every
+ * request receives the same signal, and keep a handle to in-flight requests
+ * so callers do not release staging storage until the SDK has actually
+ * observed cancellation.
+ */
+export function createTrackedAbortUploadClient(
+  client: S3Client,
+  signal: AbortSignal,
+): TrackedUploadClient {
+  const pending = new Set<Promise<unknown>>();
+  const proxied = new Proxy(client, {
+    get(target, property, receiver) {
+      if (property === "send") {
+        return (command: unknown, options?: { abortSignal?: AbortSignal }) => {
+          const request = target.send(command as never, {
+            ...(options ?? {}),
+            abortSignal: signal,
+          });
+          pending.add(request);
+          void request.finally(() => pending.delete(request)).catch(() => undefined);
+          return request;
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  }) as unknown as S3Client;
+  return {
+    client: proxied,
+    async waitForRequests(): Promise<void> {
+      while (pending.size > 0) {
+        await Promise.allSettled([...pending]);
+      }
+    },
+  };
+}
+
 export class S3EvidenceError extends Error {
   readonly operation: string;
 
@@ -1088,20 +1131,29 @@ export class S3EvidenceStore implements EvidenceStore {
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
     }
+    const tracked = createTrackedAbortUploadClient(
+      createNonRetryingS3UploadClient(sdkClient),
+      uploadAbort.signal,
+    );
+    let failure: unknown;
     try {
       await new Upload({
-        client: createNonRetryingS3UploadClient(sdkClient),
+        client: tracked.client,
         params: input,
         queueSize: 1,
         leavePartsOnError: false,
         abortController: uploadAbort,
       }).done();
       throwIfAborted(signal);
-    } catch {
+    } catch (error) {
+      failure = error;
+    } finally {
+      await tracked.waitForRequests();
+      signal?.removeEventListener("abort", onAbort);
+    }
+    if (failure !== undefined) {
       throwIfAborted(signal);
       throw new S3EvidenceError(operation, "unavailable");
-    } finally {
-      signal?.removeEventListener("abort", onAbort);
     }
   }
 

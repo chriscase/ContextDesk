@@ -2755,6 +2755,71 @@ describe("S3EvidenceStore", () => {
     client.destroy();
   });
 
+  it("forwards stream abort to the SDK request and waits for it before cleanup", async () => {
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    let requestSignal: AbortSignal | undefined;
+    let requestSettled = false;
+    const requestHandler = {
+      handle: async (request: unknown, options?: unknown) => {
+        const method = typeof request === "object" && request !== null && "method" in request
+          ? String(request.method)
+          : "UNKNOWN";
+        if (method === "DELETE") {
+          return { response: { statusCode: 204, headers: {}, body: Readable.from([]) } };
+        }
+        requestSignal = typeof options === "object" && options !== null && "abortSignal" in options
+          ? options.abortSignal instanceof AbortSignal
+            ? options.abortSignal
+            : undefined
+          : undefined;
+        requestStarted();
+        await new Promise<never>((_resolve, reject) => {
+          const abort = (): void => {
+            requestSettled = true;
+            reject(requestSignal?.reason ?? new Error("aborted"));
+          };
+          if (requestSignal?.aborted) abort();
+          else requestSignal?.addEventListener("abort", abort, { once: true });
+        });
+        throw new Error("request should have been aborted");
+      },
+    };
+    const client = new S3Client({
+      region: "us-east-1",
+      endpoint: SYNTHETIC_ENDPOINT,
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: SYNTHETIC_ACCESS,
+        secretAccessKey: SYNTHETIC_SECRET,
+      },
+      requestHandler,
+    });
+    const store = new S3EvidenceStore({
+      bucket: SYNTHETIC_BUCKET,
+      region: "us-east-1",
+      endpoint: SYNTHETIC_ENDPOINT,
+      forcePathStyle: true,
+      client,
+    });
+    const controller = new AbortController();
+    const staging = store.stageStream(
+      asAsyncChunks([new TextEncoder().encode("abort-aware-upload")]),
+      { maxBytes: 64, signal: controller.signal },
+    );
+    await started;
+    expect(requestSignal).toBeDefined();
+    expect(requestSignal?.aborted).toBe(false);
+    const reason = new Error("cancelled-by-caller");
+    controller.abort(reason);
+    await expect(staging).rejects.toBe(reason);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(requestSettled).toBe(true);
+    client.destroy();
+  });
+
   it("rejects oversize, expectedLength mismatch, non-Uint8Array chunks, and invalid options", async () => {
     const { fake, store } = openStore();
     await expect(
