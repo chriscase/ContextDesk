@@ -210,7 +210,7 @@ test.describe("Beacon rapid-intake pilot", () => {
       expect(writes.filter(({ method, url }) => method === "PATCH" && url.endsWith("/situation"))).toHaveLength(0);
 
       const fileName = "beacon-gateway-timeouts.log";
-      await page.getByLabel(/File \(up to/u).setInputFiles({
+      await page.getByLabel(/File \((?:up to|server-configured limit)/u).setInputFiles({
         name: fileName,
         mimeType: "text/plain",
         buffer: Buffer.from("timeout=upstream status=504\n", "utf8"),

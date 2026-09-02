@@ -67,6 +67,18 @@ export type {
 } from "./model-purpose-policy.js";
 
 export {
+  EVIDENCE_STORAGE_PROVIDERS,
+  EVIDENCE_STORAGE_STATES,
+  EVIDENCE_STORAGE_STATUS_SCHEMA_ID,
+  parseEvidenceStorageStatus,
+} from "./evidence-storage-status.js";
+export type {
+  EvidenceStorageProvider,
+  EvidenceStorageState,
+  EvidenceStorageStatusV1,
+} from "./evidence-storage-status.js";
+
+export {
   HEALTH_SCHEMA_ID,
   READY_SCHEMA_ID,
   parseHealthResponse,
@@ -309,6 +321,17 @@ export type {
   EvidenceListV1,
   EvidenceUploadSuccessV1,
 } from "./artifact.js";
+
+export {
+  ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+  ARTIFACT_ANNOTATION_SCHEMA_ID,
+  parseArtifactAnnotation,
+  parseArtifactAnnotationList,
+} from "./artifact-annotation.js";
+export type {
+  ArtifactAnnotationListV1,
+  ArtifactAnnotationV1,
+} from "./artifact-annotation.js";
 
 export {
   CORPUS_ALLOWED_EXTENSIONS,

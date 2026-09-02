@@ -647,7 +647,10 @@ describe.skipIf(!live)("S3EvidenceStore live Garage qualification", () => {
       await stage.commit();
       expect(await liveStore().verify(stage.meta.hash)).toBe(true);
       await stage.rollback();
-      expect(await liveStore().head(stage.meta.hash)).toBeNull();
+      // A committed content-addressed blob is intentionally retained on
+      // rollback: it may already be adopted by another transaction, and
+      // unreferenced recovery is the safe reclamation boundary.
+      expect(await liveStore().verify(stage.meta.hash)).toBe(true);
     } finally {
       stage.release();
     }

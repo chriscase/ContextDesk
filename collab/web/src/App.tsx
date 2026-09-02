@@ -16,6 +16,7 @@ import {
 } from "@cd-collab/contracts/admin";
 import {
   ADMINISTRATION,
+  EVIDENCE_STORAGE_ADMIN,
   HOME,
   LDAP_ADMIN,
   MODEL_POLICY,
@@ -32,6 +33,7 @@ import {
   isSignInLocation,
   isUnknownLocation,
   isUiStrategyPolicyLocation,
+  isEvidenceStorageAdminLocation,
   isWorkLocation,
   parseHashStage,
   parsePathname,
@@ -784,7 +786,7 @@ export function App() {
     const capabilities = sessionCapabilities(session);
     const canUsers = hasCapability(capabilities, "admin:users");
     const canSystem = hasCapability(capabilities, "admin:system_config");
-    const systemTab = isModelPolicyLocation(location) || isUiStrategyPolicyLocation(location);
+    const systemTab = isModelPolicyLocation(location) || isUiStrategyPolicyLocation(location) || isEvidenceStorageAdminLocation(location);
     const target = systemTab && !canSystem && canUsers
       ? ADMINISTRATION
       : !systemTab && !canUsers && canSystem
@@ -971,11 +973,13 @@ export function App() {
         ? "model-policy"
         : isUiStrategyPolicyLocation(work)
           ? "ui-strategies"
-          : "roles";
+          : isEvidenceStorageAdminLocation(work)
+            ? "storage"
+            : "roles";
   const authorizedAdminTab = canAdminUsers && canAdminSystem
     ? requestedAdminTab
     : canAdminUsers
-      ? (requestedAdminTab === "model-policy" || requestedAdminTab === "ui-strategies" ? "roles" : requestedAdminTab)
+      ? (requestedAdminTab === "model-policy" || requestedAdminTab === "ui-strategies" || requestedAdminTab === "storage" ? "roles" : requestedAdminTab)
       : (requestedAdminTab === "roles" || requestedAdminTab === "people" || requestedAdminTab === "ldap" ? "ui-strategies" : requestedAdminTab);
 
   return (
@@ -1232,6 +1236,8 @@ export function App() {
                               ? MODEL_POLICY
                               : tab === "ui-strategies"
                                 ? UI_STRATEGY_POLICY
+                                : tab === "storage"
+                                  ? EVIDENCE_STORAGE_ADMIN
                                 : ADMINISTRATION,
                       )
                     }

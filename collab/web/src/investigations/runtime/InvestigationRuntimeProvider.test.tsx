@@ -9,6 +9,10 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayResult, InvestigationGateway } from "./gateway.js";
 import {
+  ARTIFACT_ANNOTATION_SCHEMA_ID,
+  type ArtifactAnnotationV1,
+} from "./annotation-contract.js";
+import {
   InvestigationRuntimeGatewayHarness,
   InvestigationRuntimeProvider,
   type InvestigationRuntime,
@@ -42,6 +46,25 @@ const unexpected = async <T,>(): Promise<GatewayResult<T>> => ({
 
 function succeeded<T>(value: T): GatewayResult<T> {
   return { ok: true, value };
+}
+
+function artifactAnnotation(
+  overrides: Partial<ArtifactAnnotationV1> = {},
+): ArtifactAnnotationV1 {
+  return {
+    schemaId: ARTIFACT_ANNOTATION_SCHEMA_ID,
+    id: "annotation-001",
+    caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+    artifactId: RUNTIME_FIXTURE_IDS.evidence,
+    body: "A note on the retained evidence.",
+    contentHash: "a".repeat(64),
+    privacyClass: "share_safe",
+    authorId: "identity-lead",
+    authorUsername: "lead",
+    createdAt: "2026-02-03T20:20:00.000Z",
+    sourceId: "source-human-note",
+    ...overrides,
+  };
 }
 
 function makeGateway(overrides: Partial<InvestigationGateway> = {}): InvestigationGateway {
@@ -298,6 +321,7 @@ describe("InvestigationRuntimeProvider", () => {
       createContribution: null,
       updateSituation: null,
       applyLifecycle: null,
+      createArtifactAnnotation: null,
     });
     expect(gateway.listInvestigations).not.toHaveBeenCalled();
     expect(gateway.getInvestigation).not.toHaveBeenCalled();
@@ -345,6 +369,7 @@ describe("InvestigationRuntimeProvider", () => {
       createContribution: null,
       updateSituation: null,
       applyLifecycle: null,
+      createArtifactAnnotation: null,
     });
     expect(gateway.createInvestigation).not.toHaveBeenCalled();
     expect(gateway.uploadEvidence).not.toHaveBeenCalled();
@@ -887,6 +912,121 @@ describe("InvestigationRuntimeProvider", () => {
     // A contribution is not evidence and does not change the collection.
     expect(gateway.listEvidence).toHaveBeenCalledTimes(1);
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes and refreshes an artifact annotation through the public runtime", async () => {
+    const created = artifactAnnotation({
+      id: "annotation-created",
+      body: "The file records the first failing request.",
+      privacyClass: "owner_only",
+    });
+    let annotationReads = 0;
+    const listArtifactAnnotations = vi.fn(async () => {
+      annotationReads += 1;
+      return succeeded<readonly ArtifactAnnotationV1[]>(annotationReads === 1 ? [] : [created]);
+    });
+    const createArtifactAnnotation = vi.fn(async () => succeeded(created));
+    const gateway = makeGateway({ listArtifactAnnotations, createArtifactAnnotation });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.artifactAnnotations).toEqual({
+      status: "ready",
+      value: [],
+    }));
+
+    const command = currentRuntime().commands.createArtifactAnnotation;
+    expect(command).not.toBeNull();
+    await act(async () => {
+      await expect(command?.({
+        artifactId: RUNTIME_FIXTURE_IDS.evidence,
+        body: created.body,
+        privacyClass: "owner_only",
+      })).resolves.toEqual({ status: "succeeded", value: created });
+    });
+    expect(createArtifactAnnotation).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      { body: created.body, privacyClass: "owner_only" },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(currentRuntime().resources.artifactAnnotations).toEqual({
+      status: "ready",
+      value: [created],
+    });
+    expect(currentRuntime().mutations.createArtifactAnnotation).toEqual({
+      status: "succeeded",
+      value: created,
+    });
+    const mutation = currentRuntime().mutations.createArtifactAnnotation;
+    if (mutation.status === "succeeded") {
+      expect(Object.isFrozen(mutation.value)).toBe(true);
+    }
+    expect(listArtifactAnnotations).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the annotation command unavailable in static read-only mode", async () => {
+    const createArtifactAnnotation = vi.fn();
+    const gateway = makeGateway({
+      listArtifactAnnotations: vi.fn(async () => succeeded<readonly ArtifactAnnotationV1[]>([])),
+      createArtifactAnnotation,
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="viewer"
+        authorityKey="viewer-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.artifactAnnotations.status).toBe("ready"));
+    expect(currentRuntime().commands.createArtifactAnnotation).toBeNull();
+    expect(createArtifactAnnotation).not.toHaveBeenCalled();
+  });
+
+  it("does not read or expose annotation writes without read authority", async () => {
+    const listArtifactAnnotations = vi.fn();
+    const createArtifactAnnotation = vi.fn();
+    const gateway = makeGateway({ listArtifactAnnotations, createArtifactAnnotation });
+    render(
+      <ProviderUnderTest
+        identityKey="viewer"
+        authorityKey="viewer-authority-v1"
+        capabilities={["investigation:write"]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await act(async () => undefined);
+    expect(currentRuntime().resources.artifactAnnotations).toEqual({ status: "idle" });
+    expect(currentRuntime().commands.createArtifactAnnotation).toBeNull();
+    expect(listArtifactAnnotations).not.toHaveBeenCalled();
+    expect(createArtifactAnnotation).not.toHaveBeenCalled();
   });
 
   it("publishes a situation revision into the case and collection lanes", async () => {
@@ -1452,6 +1592,7 @@ describe("InvestigationRuntimeProvider", () => {
       createContribution: null,
       updateSituation: null,
       applyLifecycle: null,
+      createArtifactAnnotation: null,
     });
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
     // One initial read, one freshness read for the case transition, and one
@@ -1607,6 +1748,7 @@ describe("InvestigationRuntimeProvider", () => {
         createContribution: null,
         updateSituation: null,
         applyLifecycle: null,
+        createArtifactAnnotation: null,
       });
     });
 
@@ -1777,6 +1919,7 @@ describe("InvestigationRuntimeProvider", () => {
         createContribution: null,
         updateSituation: null,
         applyLifecycle: null,
+        createArtifactAnnotation: null,
       });
     });
 

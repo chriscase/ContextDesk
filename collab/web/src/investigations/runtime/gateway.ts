@@ -25,6 +25,11 @@ import {
   type LifecycleAction,
   type PrivacyClass,
 } from "@cd-collab/contracts/investigation-runtime";
+import {
+  parseArtifactAnnotation,
+  parseArtifactAnnotationList,
+} from "./annotation-contract.js";
+import type { ArtifactAnnotationV1 } from "./annotation-contract.js";
 import { protectedApiFetch } from "../../protected-api.js";
 import {
   classifyHttpFailure,
@@ -72,6 +77,37 @@ export interface UploadEvidenceInput {
   readonly sourceId?: string;
 }
 
+/**
+ * Browser file upload input for the server's streaming multipart endpoint.
+ * The Blob is passed to FormData unchanged; this seam intentionally has no
+ * base64 or byte-array member, so large evidence never needs to be buffered
+ * into a second in-memory representation.
+ */
+export interface UploadEvidenceStreamInput {
+  readonly kind: ArtifactKind;
+  readonly summary: string;
+  readonly file: Blob;
+  readonly filename?: string;
+  readonly mediaType?: string;
+  readonly expectedHash?: string | null;
+  readonly privacyClass?: PrivacyClass;
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+}
+
+/** A bounded, text-only projection of one evidence artifact's bytes. */
+export interface EvidencePreviewValue {
+  readonly artifactId: string;
+  readonly text: string;
+  readonly truncated: boolean;
+  readonly etag: string | null;
+}
+
+/** Optional validator for a cached preview representation. */
+export interface PreviewEvidenceInput {
+  readonly ifNoneMatch?: string;
+}
+
 /** Transport-ready contribution create input. Body composition is a controller concern. */
 export interface CreateContributionInput {
   readonly kind: ContributionKind;
@@ -103,6 +139,30 @@ export interface UpdateSituationInput {
   readonly openQuestions?: readonly string[];
   readonly investigationContext?: CaseV1["investigationContext"];
   readonly clientTime?: string;
+}
+
+/** Transport-ready metadata for one append-only artifact annotation. */
+export interface CreateArtifactAnnotationInput {
+  readonly body: string;
+  readonly privacyClass?: PrivacyClass;
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+  /** Stable caller-generated token used to replay an uncertain commit safely. */
+  readonly idempotencyKey?: string;
+}
+
+/** The optional annotation transport is resolved as one fail-closed seam. */
+export interface InvestigationAnnotationGateway {
+  listArtifactAnnotations(
+    investigationId: string,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<readonly ArtifactAnnotationV1[]>>;
+  createArtifactAnnotation(
+    investigationId: string,
+    artifactId: string,
+    input: CreateArtifactAnnotationInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<ArtifactAnnotationV1>>;
 }
 
 export interface ApplyLifecycleActionInput {
@@ -137,7 +197,8 @@ export interface InvestigationWriteGateway {
 export type InvestigationGatewayWithWrites =
   InvestigationGateway & InvestigationWriteGateway;
 
-export interface InvestigationGateway extends Partial<InvestigationWriteGateway> {
+export interface InvestigationGateway
+  extends Partial<InvestigationWriteGateway>, Partial<InvestigationAnnotationGateway> {
   listInvestigations(
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<readonly CaseV1[]>>;
@@ -153,6 +214,13 @@ export interface InvestigationGateway extends Partial<InvestigationWriteGateway>
     investigationId: string,
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<readonly ArtifactV1[]>>;
+  /** Read at most the bounded text preview; never exposes a raw Response. */
+  previewEvidence?(
+    investigationId: string,
+    artifactId: string,
+    input: PreviewEvidenceInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<EvidencePreviewValue & { readonly notModified?: boolean }>>;
   listContributions(
     investigationId: string,
     options: GatewayRequestOptions,
@@ -160,6 +228,12 @@ export interface InvestigationGateway extends Partial<InvestigationWriteGateway>
   uploadEvidence(
     investigationId: string,
     input: UploadEvidenceInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<EvidenceUploadSuccessV1>>;
+  /** Optional streaming transport; legacy JSON gateways remain valid. */
+  uploadEvidenceStream?(
+    investigationId: string,
+    input: UploadEvidenceStreamInput,
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<EvidenceUploadSuccessV1>>;
   getLifecycle(
@@ -254,6 +328,23 @@ function uploadEvidenceBody(input: UploadEvidenceInput): Record<string, unknown>
   return body;
 }
 
+function uploadEvidenceStreamBody(input: UploadEvidenceStreamInput): FormData {
+  const body = new FormData();
+  body.append("kind", input.kind);
+  body.append("summary", input.summary);
+  if (input.filename !== undefined) body.append("filename", input.filename);
+  if (input.mediaType !== undefined) body.append("mediaType", input.mediaType);
+  if (input.expectedHash !== undefined && input.expectedHash !== null) {
+    body.append("expectedHash", input.expectedHash);
+  }
+  if (input.privacyClass !== undefined) body.append("privacyClass", input.privacyClass);
+  if (input.clientTime !== undefined) body.append("clientTime", input.clientTime);
+  if (input.sourceId !== undefined) body.append("sourceId", input.sourceId);
+  if (input.filename === undefined) body.append("file", input.file);
+  else body.append("file", input.file, input.filename);
+  return body;
+}
+
 function createContributionBody(input: CreateContributionInput): Record<string, unknown> {
   const body: Record<string, unknown> = {
     kind: input.kind,
@@ -277,6 +368,17 @@ function createContributionBody(input: CreateContributionInput): Record<string, 
       return { kind, id };
     });
   }
+  if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  if (input.sourceId !== undefined) body.sourceId = input.sourceId;
+  if (input.idempotencyKey !== undefined) body.idempotencyKey = input.idempotencyKey;
+  return body;
+}
+
+function createArtifactAnnotationBody(
+  input: CreateArtifactAnnotationInput,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { body: input.body };
   if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
   if (input.clientTime !== undefined) body.clientTime = input.clientTime;
   if (input.sourceId !== undefined) body.sourceId = input.sourceId;
@@ -487,16 +589,16 @@ async function readBoundedFailureBody(
 }
 
 /**
- * Upload-only 503 parsing. Authentication loss is classified from status
- * before any body claim, including a misleading `commit_outcome_unknown`.
- * Only the bounded known code is kept; every other 503 is generic unavailable.
+ * Parse the one bounded commit acknowledgement claim shared by mutating
+ * evidence operations. Authentication loss is classified from status before
+ * any body claim, including a misleading `commit_outcome_unknown`. Only the
+ * bounded known code is kept; every other 503 is generic unavailable.
  */
-async function parseUploadFailure(
+async function parseCommitOutcomeUnknownFailure<T>(
   response: Response,
   signal: AbortSignal,
-): Promise<GatewayResult<EvidenceUploadSuccessV1>> {
-  const generic = (): GatewayResult<EvidenceUploadSuccessV1> =>
-    failed(classifyHttpFailure(response.status));
+): Promise<GatewayResult<T>> {
+  const generic = (): GatewayResult<T> => failed(classifyHttpFailure(response.status));
   if (response.status === 401 || response.status === 403) {
     return generic();
   }
@@ -530,6 +632,13 @@ async function parseUploadFailure(
   }
 }
 
+async function parseUploadFailure(
+  response: Response,
+  signal: AbortSignal,
+): Promise<GatewayResult<EvidenceUploadSuccessV1>> {
+  return parseCommitOutcomeUnknownFailure<EvidenceUploadSuccessV1>(response, signal);
+}
+
 function caseCollectionIdentity(cases: readonly CaseV1[]): boolean {
   const identities = new Set<string>();
   for (const investigation of cases) {
@@ -555,6 +664,106 @@ function evidenceCollectionIdentity(
   return true;
 }
 
+const EVIDENCE_PREVIEW_LIMIT_BYTES = 65_536;
+const EVIDENCE_PREVIEW_RANGE = `bytes=0-${EVIDENCE_PREVIEW_LIMIT_BYTES - 1}`;
+
+function previewContentRange(
+  header: string | null,
+): { start: number; end: number; total: number | null } | null {
+  if (!header) return null;
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(header.trim());
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = match[3] === "*" ? null : Number(match[3]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) return null;
+  if (total !== null && (!Number.isSafeInteger(total) || total < end + 1)) return null;
+  return { start, end, total };
+}
+
+function previewContentLength(response: Response): number | null {
+  const raw = response.headers.get("content-length");
+  if (raw === null || raw.trim() === "") return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+async function readBoundedPreview(
+  response: Response,
+  signal: AbortSignal,
+): Promise<GatewayResult<{ bytes: Uint8Array; truncated: boolean; received: number }>> {
+  if (signal.aborted) return aborted();
+  const declared = previewContentLength(response);
+  if (declared !== null && declared > EVIDENCE_PREVIEW_LIMIT_BYTES) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // Best-effort cancellation of a server that ignored the range request.
+    }
+    return failed(protocolFailure("content_type"));
+  }
+  const body = response.body;
+  if (body === null || typeof body.getReader !== "function") {
+    return failed(protocolFailure("content_type"));
+  }
+  const reader = body.getReader();
+  const bounded = new Uint8Array(EVIDENCE_PREVIEW_LIMIT_BYTES);
+  let received = 0;
+  let truncated = false;
+  const onAbort = () => {
+    try {
+      void reader.cancel().catch(() => undefined);
+    } catch {
+      // Best-effort cancellation; fetch has already observed the same signal.
+    }
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (signal.aborted) return aborted();
+      if (next.done) break;
+      const chunk = next.value;
+      if (!chunk || chunk.byteLength === 0) continue;
+      const remaining = EVIDENCE_PREVIEW_LIMIT_BYTES - received;
+      const retained = Math.min(remaining, chunk.byteLength);
+      if (retained > 0) {
+        bounded.set(chunk.subarray(0, retained), received);
+        received += retained;
+      }
+      if (chunk.byteLength > remaining) {
+        truncated = true;
+        try {
+          await reader.cancel();
+        } catch {
+          // The bytes already retained are still a valid bounded preview.
+        }
+        break;
+      }
+    }
+  } catch {
+    return signal.aborted ? aborted() : failed(protocolFailure("content_type"));
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A canceled stream may already have released its reader.
+    }
+  }
+  return { ok: true, value: { bytes: bounded.subarray(0, received), truncated, received } };
+}
+
+function decodeBoundedPreview(bytes: Uint8Array): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return text.includes("\uFFFD") ? null : text;
+  } catch {
+    return null;
+  }
+}
+
 function contributionCollectionIdentity(
   investigationId: string,
   contributions: readonly ContributionV1[],
@@ -567,6 +776,23 @@ function contributionCollectionIdentity(
       || identities.has(contribution.id)
     ) return false;
     identities.add(contribution.id);
+  }
+  return true;
+}
+
+function annotationCollectionIdentity(
+  investigationId: string,
+  annotations: readonly ArtifactAnnotationV1[],
+): boolean {
+  const identities = new Set<string>();
+  for (const annotation of annotations) {
+    if (
+      annotation.caseId !== investigationId
+      || annotation.id.length === 0
+      || annotation.artifactId.length === 0
+      || identities.has(annotation.id)
+    ) return false;
+    identities.add(annotation.id);
   }
   return true;
 }
@@ -671,6 +897,13 @@ const UNAVAILABLE_WRITE_GATEWAY: InvestigationWriteGateway = Object.freeze({
   updateSituation: () => Promise.resolve(failed<CaseV1>(WRITE_SEAM_UNAVAILABLE)),
 });
 
+const UNAVAILABLE_ANNOTATION_GATEWAY: InvestigationAnnotationGateway = Object.freeze({
+  listArtifactAnnotations: () =>
+    Promise.resolve(failed<readonly ArtifactAnnotationV1[]>(WRITE_SEAM_UNAVAILABLE)),
+  createArtifactAnnotation: () =>
+    Promise.resolve(failed<ArtifactAnnotationV1>(WRITE_SEAM_UNAVAILABLE)),
+});
+
 /**
  * Resolve the write seams a gateway actually implements.
  *
@@ -692,6 +925,36 @@ export function investigationWriteGateway(
     },
     updateSituation(investigationId, input, options) {
       return updateSituation.call(gateway, investigationId, input, options);
+    },
+  };
+  return Object.freeze(resolved);
+}
+
+/**
+ * Resolve the complete artifact-annotation seam or expose an unavailable
+ * adapter. Keeping the list and append operations together prevents a
+ * partially upgraded transport from making the UI believe it can annotate
+ * records that it cannot subsequently read.
+ */
+export function investigationAnnotationGateway(
+  gateway: InvestigationGateway,
+): InvestigationAnnotationGateway {
+  const { listArtifactAnnotations, createArtifactAnnotation } = gateway;
+  if (listArtifactAnnotations === undefined || createArtifactAnnotation === undefined) {
+    return UNAVAILABLE_ANNOTATION_GATEWAY;
+  }
+  const resolved: InvestigationAnnotationGateway = {
+    listArtifactAnnotations(investigationId, options) {
+      return listArtifactAnnotations.call(gateway, investigationId, options);
+    },
+    createArtifactAnnotation(investigationId, artifactId, input, options) {
+      return createArtifactAnnotation.call(
+        gateway,
+        investigationId,
+        artifactId,
+        input,
+        options,
+      );
     },
   };
   return Object.freeze(resolved);
@@ -751,6 +1014,78 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
       : result;
   },
 
+  async listArtifactAnnotations(investigationId, { signal }) {
+    const result = await requestParsed(
+      caseRoute(investigationId, "/evidence/annotations"),
+      {},
+      signal,
+      parseArtifactAnnotationList,
+      (value) => value.caseId === investigationId
+        && annotationCollectionIdentity(investigationId, value.annotations),
+    );
+    return result.ok
+      ? { ok: true, value: deepFreezeDto([...result.value.annotations]) }
+      : result;
+  },
+
+  async previewEvidence(investigationId, artifactId, input, { signal }) {
+    const headers: Record<string, string> = { Range: EVIDENCE_PREVIEW_RANGE };
+    if (input.ifNoneMatch !== undefined) headers["If-None-Match"] = input.ifNoneMatch;
+    const fetched = await fetchProtected(
+      caseRoute(investigationId, `/evidence/${encodeURIComponent(artifactId)}/content`),
+      { headers },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    const response = fetched.response;
+    if (response.status === 304) {
+      const etag = response.headers.get("etag");
+      return {
+        ok: true,
+        value: deepFreezeDto({
+          artifactId,
+          text: "",
+          truncated: false,
+          etag,
+          notModified: true as const,
+        }),
+      };
+    }
+    if (!response.ok) return failed(classifyHttpFailure(response.status));
+    if (response.status !== 200 && response.status !== 206) {
+      return failed({ kind: "unexpected_response", status: response.status });
+    }
+    const contentRange = previewContentRange(response.headers.get("content-range"));
+    if (response.status === 206 && (!contentRange || contentRange.start !== 0)) {
+      try {
+        await response.body?.cancel();
+      } catch {
+        // Best-effort stop after an invalid range representation.
+      }
+      return failed(protocolFailure("content_type"));
+    }
+    const bytes = await readBoundedPreview(response, signal);
+    if (!bytes.ok) return bytes;
+    const text = decodeBoundedPreview(bytes.value.bytes);
+    if (text === null) return failed(protocolFailure("content_type"));
+    const total = contentRange?.total ?? null;
+    const covered = contentRange === null
+      ? bytes.value.received
+      : contentRange.end - contentRange.start + 1;
+    const truncated = bytes.value.truncated
+      || (total !== null && total > covered)
+      || (total !== null && total > EVIDENCE_PREVIEW_LIMIT_BYTES);
+    return {
+      ok: true,
+      value: deepFreezeDto({
+        artifactId,
+        text,
+        truncated,
+        etag: response.headers.get("etag"),
+      }),
+    };
+  },
+
   async listContributions(investigationId, { signal }) {
     const result = await requestParsed(
       caseRoute(investigationId, "/contributions"),
@@ -793,6 +1128,33 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
     );
   },
 
+  async uploadEvidenceStream(investigationId, input, { signal }) {
+    let body: FormData;
+    try {
+      if (signal.aborted) return aborted();
+      body = uploadEvidenceStreamBody(input);
+    } catch {
+      return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+    }
+    const fetched = await fetchProtected(
+      caseRoute(investigationId, "/evidence/stream"),
+      { method: "POST", body },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    if (!fetched.response.ok) return parseUploadFailure(fetched.response, signal);
+    return parseSuccessfulResponse(
+      fetched.response,
+      signal,
+      parseEvidenceUploadSuccess,
+      (value) => value.caseId === investigationId
+        && value.artifact.caseId === investigationId
+        && value.summary.caseId === investigationId
+        && value.artifact.id.length > 0
+        && value.summary.id.length > 0,
+    );
+  },
+
   createContribution(investigationId, input, { signal }) {
     const serialized = serializeMutationBody(signal, () => createContributionBody(input));
     if (!serialized.ok) return Promise.resolve(failed(serialized.error));
@@ -807,6 +1169,38 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
       parseContribution,
       (value) => value.caseId === investigationId && value.id.length > 0,
     );
+  },
+
+  createArtifactAnnotation(investigationId, artifactId, input, { signal }) {
+    const serialized = serializeMutationBody(signal, () => createArtifactAnnotationBody(input));
+    if (!serialized.ok) return Promise.resolve(failed(serialized.error));
+    const route = caseRoute(
+      investigationId,
+      `/evidence/${encodeURIComponent(artifactId)}/annotations`,
+    );
+    return (async () => {
+      const fetched = await fetchProtected(
+        route,
+        {
+          method: "POST",
+          headers: JSON_HEADERS,
+          body: serialized.value,
+        },
+        signal,
+      );
+      if (!fetched.ok) return failed(fetched.error);
+      if (!fetched.response.ok) {
+        return parseCommitOutcomeUnknownFailure<ArtifactAnnotationV1>(fetched.response, signal);
+      }
+      return parseSuccessfulResponse(
+        fetched.response,
+        signal,
+        parseArtifactAnnotation,
+        (value) => value.caseId === investigationId
+          && value.artifactId === artifactId
+          && value.id.length > 0,
+      );
+    })();
   },
 
   updateSituation(investigationId, input, { signal }) {

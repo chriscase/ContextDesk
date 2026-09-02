@@ -38,6 +38,7 @@ import {
   runtimeComponentHealth,
   type ComponentHealthProvider,
 } from "./modules/component-health/index.js";
+import { registerEvidenceStorageStatusRoutes } from "./modules/evidence-storage/index.js";
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerCorpusIntakeRoutes } from "./modules/corpus-intake/index.js";
@@ -298,6 +299,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await registerComponentHealthRoutes(app, {
       sessionAuth,
       provider: deps.componentHealth ?? (() => runtimeComponentHealth(deps.config)),
+    });
+    await registerEvidenceStorageStatusRoutes(app, {
+      sessionAuth,
+      config: deps.config,
+      store: deps.store,
     });
     await registerAdminAuditRoutes(app, {
       sessionAuth,

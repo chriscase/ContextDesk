@@ -308,6 +308,7 @@ const GATEWAY_READS = [
   "getInvestigation",
   "listEvidence",
   "listContributions",
+  "listArtifactAnnotations",
   "getLifecycle",
 ] as const;
 
@@ -315,6 +316,7 @@ const GATEWAY_WRITES = [
   "createInvestigation",
   "uploadEvidence",
   "createContribution",
+  "createArtifactAnnotation",
   "updateSituation",
   "applyLifecycleAction",
 ] as const;

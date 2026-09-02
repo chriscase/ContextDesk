@@ -6,12 +6,13 @@ import {
   type InvestigationLifecycleActionSuccessV1,
   type InvestigationLifecycleV1,
 } from "@cd-collab/contracts";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationFirst } from "./InvestigationFirst.js";
 import {
   InvestigationRuntimeProvider,
   type InvestigationRuntimeIdentity,
+  type ArtifactAnnotationV1,
 } from "./investigations/runtime/public.js";
 import {
   createDeferred,
@@ -47,6 +48,23 @@ const CONTRIBUTOR_CAPABILITIES = [
 function makeLifecycle(investigation: CaseV1): InvestigationLifecycleV1 {
   const template = investigation.status === "archived" ? makeRestoreAllowedLifecycle() : makeArchiveAllowedLifecycle();
   return { ...template, investigationId: investigation.id, status: investigation.status };
+}
+
+function makeArtifactAnnotation(overrides: Partial<ArtifactAnnotationV1> = {}): ArtifactAnnotationV1 {
+  return {
+    schemaId: "cd-collab.artifact_annotation.v1",
+    id: "annotation-fixture-1",
+    caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+    artifactId: RUNTIME_FIXTURE_IDS.evidence,
+    body: "The request ID appears in the captured gateway log.",
+    contentHash: "sha256:annotation-fixture",
+    privacyClass: "share_safe",
+    authorId: "alice",
+    authorUsername: "alice",
+    createdAt: "2026-02-03T20:21:00.000Z",
+    sourceId: "source-human-note",
+    ...overrides,
+  };
 }
 
 const shellDefaults: InvestigationStrategyShellProps = {
@@ -396,6 +414,135 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(document.activeElement).toBe(heading);
   });
 
+  it("shows durable artifact notes and submits a stable retry token", async () => {
+    const existing = makeArtifactAnnotation();
+    const created = makeArtifactAnnotation({ id: "annotation-created", body: "A second corroborating observation." });
+    const createArtifactAnnotation = vi.fn(async (
+      _caseId: string,
+      _artifactId: string,
+      input: { body: string; idempotencyKey?: string },
+    ) => gatewayOk({ ...created, body: input.body }));
+    const gateway = createInvestigationGatewayDouble({
+      listArtifactAnnotations: vi.fn(async () => gatewayOk<readonly ArtifactAnnotationV1[]>([existing])),
+      createArtifactAnnotation,
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    expect((await screen.findAllByText(existing.body)).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Notes (1) for checkout-timeout.log" }));
+    fireEvent.click(screen.getByText("Add a note"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Annotation for this evidence" }), {
+      target: { value: created.body },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    await waitFor(() => expect(createArtifactAnnotation).toHaveBeenCalledTimes(1));
+    const call = createArtifactAnnotation.mock.calls[0];
+    expect(call?.[0]).toBe(RUNTIME_FIXTURE_IDS.populatedCase);
+    expect(call?.[1]).toBe(RUNTIME_FIXTURE_IDS.evidence);
+    expect(call?.[2]).toEqual(expect.objectContaining({ body: created.body }));
+    expect(call?.[2].idempotencyKey).toMatch(/^annotation-/u);
+    expect(await screen.findByText("Note saved to this evidence.")).toBeTruthy();
+  });
+
+  it("keeps an unknown annotation outcome blocked until history refresh settles", async () => {
+    const existing = makeArtifactAnnotation();
+    const refreshed = createDeferred<GatewayResult<readonly ArtifactAnnotationV1[]>>();
+    let listCalls = 0;
+    const listArtifactAnnotations = vi.fn(() => {
+      listCalls += 1;
+      return listCalls === 1
+        ? Promise.resolve(gatewayOk<readonly ArtifactAnnotationV1[]>([existing]))
+        : refreshed.promise;
+    });
+    const createArtifactAnnotation = vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+    }));
+    renderStrategy({
+      gateway: createInvestigationGatewayDouble({ listArtifactAnnotations, createArtifactAnnotation }),
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByRole("button", { name: "Notes (1) for checkout-timeout.log" });
+    fireEvent.click(screen.getByRole("button", { name: "Notes (1) for checkout-timeout.log" }));
+    fireEvent.click(screen.getByText("Add a note"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Annotation for this evidence" }), {
+      target: { value: "Check the retry boundary." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+
+    await screen.findByRole("button", { name: "Refresh annotation history" });
+    const saveButton = screen.getByRole("button", { name: "Save note" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh annotation history" }));
+    expect(saveButton.disabled).toBe(true);
+    refreshed.resolve(gatewayOk<readonly ArtifactAnnotationV1[]>([existing]));
+    await waitFor(() => expect(saveButton.disabled).toBe(false));
+  });
+
+  it("does not carry an unknown-outcome block from one evidence row to another", async () => {
+    const first = makeEvidenceList().artifacts[0]!;
+    const second = { ...first, id: "evidence-second", filename: "request-context.txt" };
+    const createArtifactAnnotation = vi.fn(async (
+      _caseId: string,
+      artifactId: string,
+      input: { body: string },
+    ) => createArtifactAnnotation.mock.calls.length === 1
+      ? {
+        ok: false as const,
+        error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+      }
+      : gatewayOk(makeArtifactAnnotation({ id: `annotation-${artifactId}`, artifactId, body: input.body })));
+    renderStrategy({
+      gateway: createInvestigationGatewayDouble({
+        listEvidence: vi.fn(async () => gatewayOk([first, second])),
+        createArtifactAnnotation,
+      }),
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByRole("button", { name: "Show notes for checkout-timeout.log" });
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for checkout-timeout.log" }));
+    fireEvent.click(screen.getByText("Add a note"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Annotation for this evidence" }), {
+      target: { value: "First attempt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    await screen.findByRole("button", { name: "Refresh annotation history" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for request-context.txt" }));
+    fireEvent.click(screen.getByText("Add a note"));
+    const secondBody = screen.getByRole("textbox", { name: "Annotation for this evidence" });
+    fireEvent.change(secondBody, { target: { value: "Second attempt" } });
+    const secondSave = screen.getByRole("button", { name: "Save note" }) as HTMLButtonElement;
+    expect(secondSave.disabled).toBe(false);
+    fireEvent.click(secondSave);
+    await waitFor(() => expect(createArtifactAnnotation).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for checkout-timeout.log" }));
+    fireEvent.click(screen.getByText("Add a note"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Annotation for this evidence" }), {
+      target: { value: "Return to the first row." },
+    });
+    expect((screen.getByRole("button", { name: "Save note" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Refresh annotation history" })).toBeTruthy();
+  });
+
+  it("keeps artifact annotation editing out of viewer and read-only views", async () => {
+    const gateway = createInvestigationGatewayDouble({
+      listArtifactAnnotations: vi.fn(async () => gatewayOk<readonly ArtifactAnnotationV1[]>([])),
+      createArtifactAnnotation: vi.fn(),
+    });
+    renderStrategy({
+      gateway,
+      capabilities: ["investigation:read"],
+      readOnly: true,
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByText("checkout-timeout.log");
+    expect(screen.queryByRole("button", { name: "Add a note" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for checkout-timeout.log" }));
+    expect(screen.getAllByText("Annotations are read-only in this view.").length).toBeGreaterThan(0);
+    expect(gateway.createArtifactAnnotation).not.toHaveBeenCalled();
+  });
+
   it("keeps evidence visible when annotations fail independently", async () => {
     const gateway = createInvestigationGatewayDouble({ listContributions: vi.fn(async () => gatewayUnavailable<readonly ContributionV1[]>()) });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
@@ -429,6 +576,9 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(details?.open).toBe(false);
     const disclosure = row?.querySelector("summary");
     expect(disclosure?.textContent).toBe("More details about checkout-timeout.log");
+    expect(row?.querySelector(".investigation-first__annotation-panel")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for checkout-timeout.log" }));
+    expect(row?.querySelector(".investigation-first__annotation-panel")).toBeTruthy();
     fireEvent.click(disclosure!);
     expect(details?.open).toBe(true);
     expect(row?.textContent).toContain("Gateway timeout excerpt captured during the affected interval.");
@@ -438,6 +588,53 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(row?.textContent).toContain("Expected hash");
     expect(row?.textContent).toContain("sha256:24b005aa8796e5655d4c9cc728fdbcd24542d1ee4eab264b8308efcd350a23d1");
     expect(row?.textContent).toContain("sha256:expected-checksum");
+  });
+
+  it("previews text evidence through the runtime and keeps the row metadata visible", async () => {
+    const artifactId = RUNTIME_FIXTURE_IDS.evidence;
+    const gateway = createInvestigationGatewayDouble({
+      previewEvidence: vi.fn(async () => gatewayOk({
+        artifactId,
+        text: "2026-09-01T12:00:00Z timeout observed",
+        truncated: true,
+        etag: '"fixture-preview"',
+      })),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    const row = (await screen.findByText("checkout-timeout.log")).closest("li");
+    expect(row).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    const preview = await screen.findByRole("region", { name: "Preview of checkout-timeout.log" });
+    expect(preview.textContent).toContain("timeout observed");
+    expect(screen.getByText("Showing the first 64 KiB. Use War Room technical tools for the complete file.")).toBeTruthy();
+    expect(gateway.previewEvidence).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      artifactId,
+      {},
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hide preview" }));
+    expect(screen.queryByRole("region", { name: "Preview of checkout-timeout.log" })).toBeNull();
+  });
+
+  it("does not offer a bytes preview for private evidence without private-read authority", async () => {
+    const previewEvidence = vi.fn(async () => gatewayOk({
+      artifactId: RUNTIME_FIXTURE_IDS.evidence,
+      text: "must not be requested",
+      truncated: false,
+      etag: null,
+    }));
+    const gateway = createInvestigationGatewayDouble({ previewEvidence });
+    renderStrategy({
+      gateway,
+      capabilities: CONTRIBUTOR_CAPABILITIES,
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    const row = (await screen.findByText("checkout-timeout.log")).closest("li");
+    expect(row).toBeTruthy();
+    expect(within(row!).queryByRole("button", { name: "Preview" })).toBeNull();
+    expect(within(row!).queryByText("Metadata only")).toBeNull();
+    expect(previewEvidence).not.toHaveBeenCalled();
   });
 
   it("describes annotations as loading until their independent lane settles", async () => {

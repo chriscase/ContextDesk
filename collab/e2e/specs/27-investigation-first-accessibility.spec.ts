@@ -232,7 +232,12 @@ test.describe("Investigation First accessibility and browser conformance", () =>
     const addEvidence = page.getByRole("button", { name: "Add to evidence inventory" });
     const [uploaded] = await Promise.all([
       page.waitForResponse(
-        (response) => response.url().endsWith(`/api/cases/${caseId}/evidence`) && response.request().method() === "POST",
+        (response) => {
+          const pathname = new URL(response.url()).pathname;
+          return response.request().method() === "POST"
+            && (pathname === `/api/cases/${caseId}/evidence`
+              || pathname === `/api/cases/${caseId}/evidence/stream`);
+        },
       ),
       activate(addEvidence, page),
     ]);

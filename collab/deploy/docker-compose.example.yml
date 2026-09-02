@@ -60,7 +60,8 @@ services:
       # COLLAB_EVIDENCE_S3_TIMEOUT_MS: ${COLLAB_EVIDENCE_S3_TIMEOUT_MS}
       # Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.
       # S3 v1 defaults to 30 MiB at 30000 ms and must remain at or below
-      # floor(timeoutMs/1000)*1 MiB; 5 GiB is not a supported S3 v1 size.
+      # floor(timeoutMs/1000)*1 MiB; multipart handles streams above one part,
+      # while 5 GiB is not a supported S3 v1 operating size.
       # See .env.example for timeout semantics and the complete envelope.
       # COLLAB_EVIDENCE_MAX_UPLOAD_BYTES: ${COLLAB_EVIDENCE_MAX_UPLOAD_BYTES}
       # Required: static or default_chain. See .env.example for the complete

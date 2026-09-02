@@ -9,7 +9,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { InvestigationGateway } from "../gateway.js";
 import type { RuntimeFailure } from "../errors.js";
 import type { CommandOutcome, MutationState } from "../types.js";
-import { prepareEvidenceUpload } from "./file-base64.js";
+import {
+  prepareEvidenceStreamUpload,
+  prepareEvidenceUpload,
+} from "./file-base64.js";
 import { RequestSlot, type RequestToken } from "./request-slot.js";
 import {
   emptyScopedMutationState,
@@ -138,12 +141,20 @@ export function useUploadEvidence(
     };
 
     try {
-      const prepared = await prepareEvidenceUpload(command.file, command.summary, {
-        ...(command.kind === undefined ? {} : { kind: command.kind }),
-        ...(command.privacyClass === undefined ? {} : { privacyClass: command.privacyClass }),
-        ...(command.clientTime === undefined ? {} : { clientTime: command.clientTime }),
-        ...(command.sourceId === undefined ? {} : { sourceId: command.sourceId }),
-      });
+      const streamGateway = start.gateway.uploadEvidenceStream;
+      const prepared = streamGateway !== undefined
+        ? prepareEvidenceStreamUpload(command.file, command.summary, {
+            ...(command.kind === undefined ? {} : { kind: command.kind }),
+            ...(command.privacyClass === undefined ? {} : { privacyClass: command.privacyClass }),
+            ...(command.clientTime === undefined ? {} : { clientTime: command.clientTime }),
+            ...(command.sourceId === undefined ? {} : { sourceId: command.sourceId }),
+          })
+        : await prepareEvidenceUpload(command.file, command.summary, {
+            ...(command.kind === undefined ? {} : { kind: command.kind }),
+            ...(command.privacyClass === undefined ? {} : { privacyClass: command.privacyClass }),
+            ...(command.clientTime === undefined ? {} : { clientTime: command.clientTime }),
+            ...(command.sourceId === undefined ? {} : { sourceId: command.sourceId }),
+          });
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
       if (prepared.status !== "succeeded") {
         if (prepared.status === "failed") {
@@ -155,11 +166,28 @@ export function useUploadEvidence(
         return prepared;
       }
 
-      const result = await start.gateway.uploadEvidence(
-        scope.investigationId,
-        prepared.value,
-        { signal: token.signal },
-      );
+      let result: Awaited<ReturnType<InvestigationGateway["uploadEvidence"]>>;
+      if (streamGateway !== undefined) {
+        // Keep the optional seam fail-closed if a custom transport ever
+        // disagrees with the preparation branch at runtime.
+        if (!("file" in prepared.value)) {
+          const outcome = unexpected();
+          setStoredState(scopedMutationState(scopeKey, { status: "failed", error: outcome.error }));
+          return outcome;
+        }
+        result = await streamGateway.call(start.gateway, scope.investigationId, prepared.value, { signal: token.signal });
+      } else {
+        if ("file" in prepared.value) {
+          const outcome = unexpected();
+          setStoredState(scopedMutationState(scopeKey, { status: "failed", error: outcome.error }));
+          return outcome;
+        }
+        result = await start.gateway.uploadEvidence(
+          scope.investigationId,
+          prepared.value,
+          { signal: token.signal },
+        );
+      }
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
 
       if (!result.ok) {

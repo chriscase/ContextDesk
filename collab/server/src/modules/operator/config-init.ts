@@ -47,19 +47,20 @@ function s3EvidenceComments(): string {
 # COLLAB_EVIDENCE_MAX_UPLOAD_BYTES is accepted in both modes. Filesystem
 # defaults to 536870912 bytes / 512 MiB and retains the protocol ceiling of
 # ${MAX_EVIDENCE_UPLOAD_BYTES} bytes / 5 GiB. S3 v1 instead validates a
-# conservative single-Put/Copy operating envelope: no more than
+# conservative request-time upload envelope: no more than
 # floor(COLLAB_EVIDENCE_S3_TIMEOUT_MS / 1000) *
 # ${EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND} bytes. With both values
 # unset, S3 defaults to ${DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES} bytes / 30 MiB
 # at ${DEFAULT_EVIDENCE_S3_TIMEOUT_MS} ms. Its largest accepted pair is
 # ${MAX_EVIDENCE_S3_UPLOAD_BYTES} bytes / 120 MiB at
-# ${MAX_EVIDENCE_S3_TIMEOUT_MS} ms. The 5 GiB value is only a protocol and
-# future multipart-upload ceiling, not a supported S3 v1 operating size.
+# ${MAX_EVIDENCE_S3_TIMEOUT_MS} ms. Multipart upload is used for streams above
+# one SDK part; the 5 GiB value is only a protocol ceiling, not a supported S3 v1
+# operating size.
 # The 1 MiB/s validation envelope does not guarantee success; actual networks
 # or object stores may require a lower max. Legacy JSON/base64 evidence upload
 # and JSON bytes download remain capped at exactly 1,000,000 decoded bytes.
-# The object-store role must allow bucket readiness/list plus GetObject and
-# PutObject (also used by same-prefix CopyObject).
+# The object-store role must allow bucket readiness/list plus GetObject,
+# PutObject, and multipart upload/abort for larger unknown-length streams.
 # DeleteObject is required for staging, journal, and rollback cleanup.
 # It is not a user-facing delete feature.
 # There is no retention, lifecycle, migration, or multi-provider failover.
@@ -80,10 +81,10 @@ function s3EvidenceComments(): string {
 # PEM bundle into the server process. Certificate verification stays enabled.
 # COLLAB_EVIDENCE_S3_CA_FILE=/etc/ssl/certs/s3-internal-ca.pem
 # Smithy connection timeout and absolute requestTimeout, 1000..120000 ms.
-# requestTimeout covers PutObject and CopyObject through response headers.
+# requestTimeout covers PutObject, CopyObject, and multipart requests through response headers.
 # COLLAB_EVIDENCE_S3_TIMEOUT_MS=${DEFAULT_EVIDENCE_S3_TIMEOUT_MS}
-# S3 single-Put/Copy cap for the timeout above. HTTP transfer remains guarded
-# separately for one hour, and unknown-length streams remain count-enforced.
+# S3 upload cap for the timeout above. HTTP transfer remains guarded separately
+# for one hour, and unknown-length streams remain count-enforced.
 # COLLAB_EVIDENCE_MAX_UPLOAD_BYTES=${DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES}
 # Required in S3 mode; no default. static or default_chain. default_chain
 # rejects all static COLLAB_EVIDENCE_S3_* credential names below.

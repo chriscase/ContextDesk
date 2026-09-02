@@ -14,10 +14,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUTH_LOST_EVENT } from "../../protected-api.js";
 import {
   investigationGateway,
+  investigationAnnotationGateway,
   investigationWriteGateway,
   type InvestigationGateway,
   type InvestigationWriteGateway,
 } from "./gateway.js";
+import {
+  ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+  ARTIFACT_ANNOTATION_SCHEMA_ID,
+  type ArtifactAnnotationV1,
+} from "./annotation-contract.js";
 import { createInvestigationGatewayDouble } from "./testkit/gateway-double.js";
 import {
   RUNTIME_FIXTURE_IDS,
@@ -69,6 +75,25 @@ function createdHypothesisContribution(): ContributionV1 {
   };
 }
 
+function artifactAnnotation(
+  overrides: Partial<ArtifactAnnotationV1> = {},
+): ArtifactAnnotationV1 {
+  return {
+    schemaId: ARTIFACT_ANNOTATION_SCHEMA_ID,
+    id: "annotation-001",
+    caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+    artifactId: RUNTIME_FIXTURE_IDS.evidence,
+    body: "The first error appears after the configuration reload.",
+    contentHash: "a".repeat(64),
+    privacyClass: "share_safe",
+    authorId: "identity-lead",
+    authorUsername: "lead",
+    createdAt: "2026-02-03T20:20:00.000Z",
+    sourceId: "source-human-note",
+    ...overrides,
+  };
+}
+
 /** The case a situation update answers with, one version ahead of the fixture. */
 function revisedSituationCase(): CaseV1 {
   const current = makePopulatedCase();
@@ -112,6 +137,81 @@ function lifecycleRefused() {
 }
 
 describe("the complete Runtime V1 transport surface", () => {
+  it("reads a bounded text evidence preview through the protected gateway", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      "first line\nsecond line",
+      {
+        status: 206,
+        headers: {
+          "content-type": "text/plain",
+          "content-range": "bytes 0-21/22",
+          "content-length": "22",
+          etag: '"preview-etag"',
+        },
+      },
+    ));
+    const result = await investigationGateway.previewEvidence?.(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      {},
+      options(),
+    );
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        artifactId: RUNTIME_FIXTURE_IDS.evidence,
+        text: "first line\nsecond line",
+        truncated: false,
+        etag: '"preview-etag"',
+      },
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `/api/cases/${encodeURIComponent(RUNTIME_FIXTURE_IDS.populatedCase)}/evidence/${encodeURIComponent(RUNTIME_FIXTURE_IDS.evidence)}/content`,
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({
+      Range: "bytes=0-65535",
+    });
+  });
+
+  it("rejects binary-looking preview bytes without publishing decoded content", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      new Uint8Array([0, 1, 2]),
+      { status: 206, headers: { "content-range": "bytes 0-2/3" } },
+    ));
+    await expect(investigationGateway.previewEvidence?.(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      {},
+      options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "content_type" } });
+  });
+
+  it("uses the protected streaming multipart endpoint without base64 buffering", async () => {
+    const success = makeEvidenceUploadSuccess();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      expect(String(input)).toBe(`/api/cases/${encodeURIComponent(RUNTIME_FIXTURE_IDS.populatedCase)}/evidence/stream`);
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBeInstanceOf(FormData);
+      const form = init?.body as FormData;
+      expect(form.get("kind")).toBe("log");
+      expect(form.get("summary")).toBe("A streamed log");
+      const file = form.get("file");
+      expect(file).toBeInstanceOf(Blob);
+      expect((file as Blob).size).toBeGreaterThan(1_000_000);
+      return jsonResponse(success);
+    });
+
+    const file = new File([new Uint8Array(1_000_001)], "large.log", { type: "text/plain" });
+    const result = await investigationGateway.uploadEvidenceStream!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { kind: "log", summary: "A streamed log", file },
+      options(),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("uses the ten protected routes and publishes only parsed values", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input, init) => {
@@ -1621,6 +1721,165 @@ describe("Runtime V1.1 write seams", () => {
       { expectedVersion: 4, impact: "Synthetic" },
       options(),
     )).toEqual({ ok: false, error: { kind: "protocol", reason: "content_type" } });
+  });
+});
+
+describe("artifact annotation runtime seam", () => {
+  it("reads a frozen, case-scoped annotation collection", async () => {
+    const annotation = artifactAnnotation();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+        caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+        annotations: [annotation],
+      }),
+    );
+
+    const result = await investigationGateway.listArtifactAnnotations!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    );
+
+    expect(result).toEqual({ ok: true, value: [annotation] });
+    if (!result.ok) return;
+    expect(Object.isFrozen(result.value)).toBe(true);
+    expect(Object.isFrozen(result.value[0])).toBe(true);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `/api/cases/${RUNTIME_FIXTURE_IDS.populatedCase}/evidence/annotations`,
+    );
+  });
+
+  it.each([
+    ["wrong list schema", {
+      schemaId: "cd-collab.future_annotations.v9",
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      annotations: [],
+    }],
+    ["unknown annotation member", {
+      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      annotations: [{ ...artifactAnnotation(), privateNote: "must not cross" }],
+    }],
+    ["row bound to another case", {
+      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      annotations: [artifactAnnotation({ caseId: "case-other" })],
+    }],
+  ] as const)("rejects %s before exposing annotation data", async (_label, body) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(body));
+
+    await expect(investigationGateway.listArtifactAnnotations!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "contract" } });
+  });
+
+  it("rejects duplicate annotation identities after parsing", async () => {
+    const annotation = artifactAnnotation();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      schemaId: ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      annotations: [annotation, annotation],
+    }));
+
+    await expect(investigationGateway.listArtifactAnnotations!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+  });
+
+  it("creates an annotation through the protected artifact route", async () => {
+    const created = artifactAnnotation({
+      id: "annotation-created",
+      body: "The request id appears in the gateway log.",
+      privacyClass: "owner_only",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(created),
+    );
+
+    await expect(investigationGateway.createArtifactAnnotation!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      {
+        body: "The request id appears in the gateway log.",
+        privacyClass: "owner_only",
+        clientTime: "2026-02-03T20:21:00.000Z",
+        sourceId: "source-human-note",
+        idempotencyKey: "annotation-runtime-1",
+      },
+      options(),
+    )).resolves.toEqual({ ok: true, value: created });
+
+    const [route, init] = fetchMock.mock.calls[0] ?? [];
+    expect(route).toBe(
+      `/api/cases/${RUNTIME_FIXTURE_IDS.populatedCase}/evidence/${RUNTIME_FIXTURE_IDS.evidence}/annotations`,
+    );
+    expect(init?.method).toBe("POST");
+    expect(init?.headers).toEqual({
+      "content-type": "application/json",
+      "x-cd-collab-csrf": "1",
+    });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      body: "The request id appears in the gateway log.",
+      privacyClass: "owner_only",
+      clientTime: "2026-02-03T20:21:00.000Z",
+      sourceId: "source-human-note",
+      idempotencyKey: "annotation-runtime-1",
+    });
+  });
+
+  it("preserves an annotation commit-outcome-unknown response without exposing its body", async () => {
+    const response = jsonResponse({ error: "commit_outcome_unknown", private: "must-not-escape" }, 503);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    await expect(investigationGateway.createArtifactAnnotation!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      { body: "Synthetic annotation", idempotencyKey: "annotation-unknown-1" },
+      options(),
+    )).resolves.toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    });
+  });
+
+  it.each([401, 403] as const)(
+    "preserves protected auth-loss semantics for annotation reads and writes (%i)",
+    async (status) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({ error: "forbidden" }, status),
+      );
+      const listener = vi.fn();
+      window.addEventListener(AUTH_LOST_EVENT, listener);
+      try {
+        await expect(investigationGateway.listArtifactAnnotations!(
+          RUNTIME_FIXTURE_IDS.populatedCase,
+          options(),
+        )).resolves.toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        await expect(investigationGateway.createArtifactAnnotation!(
+          RUNTIME_FIXTURE_IDS.populatedCase,
+          RUNTIME_FIXTURE_IDS.evidence,
+          { body: "Synthetic" },
+          options(),
+        )).resolves.toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        expect(listener).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } finally {
+        window.removeEventListener(AUTH_LOST_EVENT, listener);
+      }
+    },
+  );
+
+  it("resolves both annotation methods together and fails a partial gateway closed", async () => {
+    const partial = {
+      listArtifactAnnotations: investigationGateway.listArtifactAnnotations,
+    } as InvestigationGateway;
+    const resolved = investigationAnnotationGateway(partial);
+    expect(await resolved.listArtifactAnnotations(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).toEqual({ ok: false, error: { kind: "unavailable", status: 503 } });
   });
 });
 

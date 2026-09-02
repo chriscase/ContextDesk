@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  ARTIFACT_ANNOTATION_SCHEMA_ID,
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
   ContractViolation,
@@ -16,6 +17,7 @@ import {
   snapshotFairness,
   snapshotFingerprint,
   type ArtifactKind,
+  type ArtifactAnnotationV1,
   type ArtifactV1,
   type BlobMetaV1,
   type ContentHash,
@@ -87,6 +89,7 @@ import {
   CaseStoreCommitOutcomeUnknownError,
   MemoryCaseStore,
   type Actor,
+  type ArtifactAnnotationRow,
   type ArtifactRow,
   type CaseStore,
   type CaseTimelineRow,
@@ -105,6 +108,7 @@ import {
 
 export { CaseStoreCommitOutcomeUnknownError };
 export type { Actor, ArtifactRow, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, OverviewVisibilityBoundary, RevisionRow, TimelineRow } from "./store.js";
+export type { ArtifactAnnotationRow } from "./store.js";
 
 const ACTIVITY_DETAIL_KEYS = new Set([
   "kind",
@@ -224,6 +228,14 @@ export class ContributionConflictError extends Error {
   constructor(readonly currentRevision?: number) {
     super("contribution conflict");
     this.name = "ContributionConflictError";
+  }
+}
+
+/** Reusing an annotation retry token with different content is a conflict. */
+export class ArtifactAnnotationConflictError extends Error {
+  constructor() {
+    super("artifact annotation conflict");
+    this.name = "ArtifactAnnotationConflictError";
   }
 }
 
@@ -533,6 +545,22 @@ function contributionWriteDigest(input: {
         sourceId: input.sourceId,
       }),
     )
+    .digest("hex");
+}
+
+function artifactAnnotationWriteDigest(input: {
+  artifactId: string;
+  body: string;
+  privacyClass: PrivacyClass;
+  sourceId: string;
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      artifactId: input.artifactId,
+      body: input.body,
+      privacyClass: input.privacyClass,
+      sourceId: input.sourceId,
+    }))
     .digest("hex");
 }
 
@@ -1340,6 +1368,119 @@ export class CaseService {
   async listArtifacts(caseId: string, actor: Actor, isAdmin: boolean): Promise<ArtifactV1[]> {
     if (!(await this.getCase(caseId, actor, isAdmin))) return [];
     return (await this.store.listArtifactsByCase(caseId)).map((row) => this.toArtifact(row));
+  }
+
+  async listArtifactAnnotations(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    artifactId?: string,
+    canReadPrivate = false,
+  ): Promise<ArtifactAnnotationV1[]> {
+    if (!(await this.getCase(caseId, actor, isAdmin))) return [];
+    const annotations = await this.store.listArtifactAnnotationsByCase(caseId);
+    return annotations
+      .filter((row) => artifactId === undefined || row.artifactId === artifactId)
+      // Annotation privacy follows the same fail-closed rule as private
+      // evidence: case membership alone must not disclose owner-only text.
+      .filter((row) => row.privacyClass !== "owner_only" || canReadPrivate)
+      .map((row) => this.toArtifactAnnotation(row));
+  }
+
+  async addArtifactAnnotation(
+    caseId: string,
+    artifactId: string,
+    actor: Actor,
+    input: {
+      body: string;
+      privacyClass?: PrivacyClass;
+      clientTime?: string;
+      sourceId?: string;
+      idempotencyKey?: string;
+    },
+    origin: string,
+  ): Promise<ArtifactAnnotationV1> {
+    const clientTime = canonicalClientTime(input.clientTime);
+    if (typeof input.body !== "string" || input.body.trim().length === 0) {
+      throw new ContractViolation("$.body", "must be a non-empty string");
+    }
+    const privacy = defaultPrivacy(input.privacyClass);
+    return this.store.withAtomic(async () => {
+      await this.requireCase(caseId);
+      const artifact = await this.store.getArtifact(artifactId);
+      if (!artifact || artifact.caseId !== caseId) throw new Error("evidence not found");
+      const sourceId = await this.resolveSourceId(actor, input.sourceId);
+      const idempotencyKey = input.idempotencyKey;
+      const digest = artifactAnnotationWriteDigest({
+        artifactId,
+        body: input.body,
+        privacyClass: privacy,
+        sourceId,
+      });
+      if (idempotencyKey !== undefined) {
+        if (!isContributionIdempotencyKey(idempotencyKey)) {
+          throw new Error("invalid artifact annotation idempotency key");
+        }
+        await this.store.lockArtifactAnnotationIdempotency(caseId, actor.id, idempotencyKey);
+        const existing = await this.store.getArtifactAnnotationIdempotency(
+          caseId,
+          actor.id,
+          idempotencyKey,
+        );
+        if (existing) {
+          if (existing.requestDigest !== digest) throw new ArtifactAnnotationConflictError();
+          const replay = (await this.store.listArtifactAnnotationsByCase(caseId))
+            .find((row) => row.id === existing.annotationId);
+          if (!replay || replay.artifactId !== artifactId) throw new Error("evidence annotation not found");
+          return this.toArtifactAnnotation(replay);
+        }
+      }
+      const row: ArtifactAnnotationRow = {
+        id: randomUUID(),
+        caseId,
+        artifactId,
+        body: input.body,
+        contentHash: createHash("sha256")
+          .update(`artifact-annotation\n${artifactId}\n${input.body}`)
+          .digest("hex"),
+        privacyClass: privacy,
+        authorId: actor.id,
+        authorUsername: actor.username,
+        createdAt: new Date().toISOString(),
+        sourceId,
+      };
+      await this.store.insertArtifactAnnotation(row);
+      if (idempotencyKey !== undefined) {
+        await this.store.insertArtifactAnnotationIdempotency({
+          caseId,
+          actorId: actor.id,
+          idempotencyKey,
+          requestDigest: digest,
+          annotationId: row.id,
+          createdAt: row.createdAt,
+        });
+      }
+      await this.store.appendTimeline(caseId, {
+        kind: "artifact_annotation_created",
+        actor,
+        targetId: artifactId,
+        clientTime,
+        payload: {
+          annotationId: row.id,
+          artifactId,
+          contentHash: row.contentHash,
+          privacyClass: privacy,
+        },
+      });
+      await this.audit.append({
+        identity: actor.id,
+        action: "artifact_annotation_create",
+        target: `${artifactId}:${row.id}`,
+        origin,
+        outcome: "success",
+      });
+      return this.toArtifactAnnotation(row);
+    }, this.audit);
   }
 
   async listSnapshots(caseId: string, actor: Actor, isAdmin: boolean): Promise<SnapshotV1[]> {
@@ -2741,6 +2882,22 @@ export class CaseService {
       sourceId: row.sourceId,
       relativePath: row.relativePath ?? row.filename,
       intakeBatchId: row.intakeBatchId ?? null,
+    };
+  }
+
+  private toArtifactAnnotation(row: ArtifactAnnotationRow): ArtifactAnnotationV1 {
+    return {
+      schemaId: ARTIFACT_ANNOTATION_SCHEMA_ID,
+      id: row.id,
+      caseId: row.caseId,
+      artifactId: row.artifactId,
+      body: row.body,
+      contentHash: row.contentHash,
+      privacyClass: row.privacyClass,
+      authorId: row.authorId,
+      authorUsername: row.authorUsername,
+      createdAt: row.createdAt,
+      sourceId: row.sourceId,
     };
   }
 

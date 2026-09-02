@@ -5,7 +5,9 @@
  * hardening can keep using an injected client.
  */
 import { Agent as HttpsAgent } from "node:https";
-import { S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
+import type { Readable } from "node:stream";
+import { PutObjectCommand, S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import {
   createPostgresEvidenceWriteLease,
@@ -23,6 +25,8 @@ import {
 } from "./s3-settings.js";
 import {
   createS3ClientConfig,
+  createNonRetryingS3UploadClient,
+  createTrackedAbortUploadClient,
   S3EvidenceStore,
   type S3EvidenceClient,
   type S3EvidenceStoreOptions,
@@ -265,13 +269,54 @@ function rethrowSanitized(error: unknown): never {
 
 class OpaqueS3EvidenceClient implements S3EvidenceClient {
   readonly #send: S3EvidenceClient["send"];
+  readonly #streamClient: S3Client | null;
 
   constructor(inner: S3EvidenceClient) {
     this.#send = inner.send.bind(inner);
+    this.#streamClient = inner instanceof S3Client
+      ? createNonRetryingS3UploadClient(inner)
+      : null;
   }
 
   send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
     return this.#send(command, options);
+  }
+
+  async uploadStream(
+    input: {
+      Bucket: string;
+      Key: string;
+      Body: Readable;
+      ContentLength?: number;
+      ContentType?: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.#streamClient) {
+      await this.#send(
+        new PutObjectCommand(input),
+        signal ? { abortSignal: signal } : undefined,
+      );
+      return;
+    }
+    const tracked = createTrackedAbortUploadClient(
+      this.#streamClient,
+      signal ?? new AbortController().signal,
+    );
+    let failure: unknown;
+    try {
+      await new Upload({
+        client: tracked.client,
+        params: input,
+        queueSize: 1,
+        leavePartsOnError: false,
+      }).done();
+    } catch (error) {
+      failure = error;
+    } finally {
+      await tracked.waitForRequests();
+    }
+    if (failure !== undefined) throw failure;
   }
 
   toJSON(): { configured: true } {

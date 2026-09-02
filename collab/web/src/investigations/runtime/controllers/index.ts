@@ -1,6 +1,8 @@
 export {
   prepareEvidenceUpload,
+  prepareEvidenceStreamUpload,
   type PrepareEvidenceUploadOptions,
+  type PrepareEvidenceStreamUploadOptions,
 } from "./file-base64.js";
 export {
   RequestSlot,
@@ -46,6 +48,21 @@ export {
   type UpdateSituationController,
   type UseUpdateSituationOptions,
 } from "./use-update-situation.js";
+export {
+  useEvidencePreview,
+  type EvidencePreviewController,
+  type PreviewEvidenceCommand,
+  type UseEvidencePreviewOptions,
+} from "./use-evidence-preview.js";
+export {
+  useArtifactAnnotations,
+  useCreateArtifactAnnotation,
+  type ArtifactAnnotationsController,
+  type CreateArtifactAnnotationCommand,
+  type CreateArtifactAnnotationController,
+  type UseArtifactAnnotationsOptions,
+  type UseCreateArtifactAnnotationOptions,
+} from "./use-artifact-annotations.js";
 export {
   useUploadEvidence,
   type UploadEvidenceCommand,

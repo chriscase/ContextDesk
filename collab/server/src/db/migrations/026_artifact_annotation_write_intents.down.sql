@@ -1,0 +1,4 @@
+DROP TRIGGER IF EXISTS artifact_annotation_write_intents_no_update ON artifact_annotation_write_intents;
+DROP FUNCTION IF EXISTS artifact_annotation_write_intents_immutable();
+DROP TABLE IF EXISTS artifact_annotation_write_intents;
+DELETE FROM schema_migrations WHERE version = '026_artifact_annotation_write_intents';

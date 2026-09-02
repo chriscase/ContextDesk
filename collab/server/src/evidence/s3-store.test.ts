@@ -11,12 +11,14 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import { ConfiguredRetryStrategy } from "@smithy/core/retry";
 import { FILE_SERVER_REF_SCHEMA_ID, parseFileServerReference } from "@cd-collab/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   abandonS3WriteBatchForCrashTest,
   createS3ClientConfig,
+  createTrackedAbortUploadClient,
   S3EvidenceError,
   S3EvidenceStore,
 } from "./s3-store.js";
@@ -2753,6 +2755,194 @@ describe("S3EvidenceStore", () => {
     await expect(store.ping()).rejects.toMatchObject({ operation: "ping" });
     expect(attempts.get("HEAD")).toBe(3);
     client.destroy();
+  });
+
+  it("forwards stream abort to the SDK request and waits for it before cleanup", async () => {
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    let requestSignal: AbortSignal | undefined;
+    let requestSettled = false;
+    const requestHandler = {
+      handle: async (request: unknown, options?: unknown) => {
+        const method = typeof request === "object" && request !== null && "method" in request
+          ? String(request.method)
+          : "UNKNOWN";
+        if (method === "DELETE") {
+          return { response: { statusCode: 204, headers: {}, body: Readable.from([]) } };
+        }
+        requestSignal = typeof options === "object" && options !== null && "abortSignal" in options
+          ? options.abortSignal instanceof AbortSignal
+            ? options.abortSignal
+            : undefined
+          : undefined;
+        requestStarted();
+        await new Promise<never>((_resolve, reject) => {
+          const abort = (): void => {
+            requestSettled = true;
+            reject(requestSignal?.reason ?? new Error("aborted"));
+          };
+          if (requestSignal?.aborted) abort();
+          else requestSignal?.addEventListener("abort", abort, { once: true });
+        });
+        throw new Error("request should have been aborted");
+      },
+    };
+    const client = new S3Client({
+      region: "us-east-1",
+      endpoint: SYNTHETIC_ENDPOINT,
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: SYNTHETIC_ACCESS,
+        secretAccessKey: SYNTHETIC_SECRET,
+      },
+      requestHandler,
+    });
+    const store = new S3EvidenceStore({
+      bucket: SYNTHETIC_BUCKET,
+      region: "us-east-1",
+      endpoint: SYNTHETIC_ENDPOINT,
+      forcePathStyle: true,
+      client,
+    });
+    const controller = new AbortController();
+    const staging = store.stageStream(
+      asAsyncChunks([new TextEncoder().encode("abort-aware-upload")]),
+      { maxBytes: 64, signal: controller.signal },
+    );
+    await started;
+    expect(requestSignal).toBeDefined();
+    expect(requestSignal?.aborted).toBe(false);
+    const reason = new Error("cancelled-by-caller");
+    controller.abort(reason);
+    await expect(staging).rejects.toBe(reason);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(requestSettled).toBe(true);
+    client.destroy();
+  });
+
+  it("completes multipart abort cleanup before reporting cancellation", async () => {
+    let partStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      partStarted = resolve;
+    });
+    let partSignal: AbortSignal | undefined;
+    let abortCompleted = false;
+    const fake = {
+      config: {
+        requestHandler: {},
+        requestChecksumCalculation: async () => "WHEN_REQUIRED",
+        forcePathStyle: true,
+      },
+      send: async (command: unknown, options?: { abortSignal?: AbortSignal }) => {
+        const name = typeof command === "object" && command !== null && "constructor" in command
+          ? String((command as { constructor?: { name?: string } }).constructor?.name)
+          : "unknown";
+        if (name === "CreateMultipartUploadCommand") return { UploadId: "upload-1" };
+        if (name === "UploadPartCommand") {
+          partSignal = options?.abortSignal;
+          partStarted();
+          return new Promise<never>((_resolve, reject) => {
+            const abort = (): void => {
+              reject(partSignal?.reason ?? new Error("part aborted"));
+            };
+            if (partSignal?.aborted) abort();
+            else partSignal?.addEventListener("abort", abort, { once: true });
+          });
+        }
+        if (name === "AbortMultipartUploadCommand") {
+          expect(options?.abortSignal).toBeUndefined();
+          abortCompleted = true;
+          return {};
+        }
+        throw new Error(`unexpected command ${name}`);
+      },
+    } as unknown as S3Client;
+    const controller = new AbortController();
+    const tracked = createTrackedAbortUploadClient(fake, controller.signal);
+    const upload = new Upload({
+      client: tracked.client,
+      params: {
+        Bucket: SYNTHETIC_BUCKET,
+        Key: "stream-multipart-abort",
+        Body: Readable.from([Buffer.alloc(6 * 1024 * 1024)]),
+      },
+      queueSize: 1,
+      leavePartsOnError: false,
+    });
+    const result = upload.done();
+    await started;
+    controller.abort(new Error("cancelled-multipart"));
+    await expect(result).rejects.toThrow("cancelled-multipart");
+    expect(partSignal?.aborted).toBe(true);
+    expect(abortCompleted).toBe(true);
+    await tracked.waitForRequests();
+  });
+
+  it("lets multipart completion settle after caller cancellation", async () => {
+    let completeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      completeStarted = resolve;
+    });
+    let releaseComplete!: () => void;
+    const complete = new Promise<void>((resolve) => {
+      releaseComplete = resolve;
+    });
+    let completeSignal: AbortSignal | undefined;
+    const fake = {
+      config: {
+        requestHandler: {},
+        requestChecksumCalculation: async () => "WHEN_REQUIRED",
+        forcePathStyle: true,
+      },
+      send: async (command: unknown, options?: { abortSignal?: AbortSignal }) => {
+        const name = typeof command === "object" && command !== null && "constructor" in command
+          ? String((command as { constructor?: { name?: string } }).constructor?.name)
+          : "unknown";
+        if (name === "CreateMultipartUploadCommand") return { UploadId: "upload-2" };
+        if (name === "UploadPartCommand") return { ETag: "etag" };
+        if (name === "CompleteMultipartUploadCommand") {
+          completeSignal = options?.abortSignal;
+          completeStarted();
+          if (completeSignal) {
+            await new Promise<never>((_resolve, reject) => {
+              if (completeSignal?.aborted) {
+                reject(completeSignal.reason ?? new Error("completion aborted"));
+                return;
+              }
+              completeSignal.addEventListener(
+                "abort",
+                () => reject(completeSignal?.reason ?? new Error("completion aborted")),
+                { once: true },
+              );
+            });
+          }
+          await complete;
+          return {};
+        }
+        throw new Error(`unexpected command ${name}`);
+      },
+    } as unknown as S3Client;
+    const controller = new AbortController();
+    const tracked = createTrackedAbortUploadClient(fake, controller.signal);
+    const upload = new Upload({
+      client: tracked.client,
+      params: {
+        Bucket: SYNTHETIC_BUCKET,
+        Key: "stream-multipart-complete",
+        Body: Readable.from([Buffer.alloc(6 * 1024 * 1024)]),
+      },
+      queueSize: 1,
+      leavePartsOnError: false,
+    });
+    const result = upload.done();
+    await started;
+    controller.abort(new Error("cancelled-before-complete"));
+    releaseComplete();
+    await expect(result).resolves.toEqual({});
+    expect(completeSignal).toBeUndefined();
+    await tracked.waitForRequests();
   });
 
   it("rejects oversize, expectedLength mismatch, non-Uint8Array chunks, and invalid options", async () => {

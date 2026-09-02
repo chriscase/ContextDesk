@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  parseArtifactAnnotation,
+  parseArtifactAnnotationList,
   isRfc4122Uuid,
   parseArtifact,
   parseCase,
@@ -210,6 +212,140 @@ describe("cases timeline evidence provenance", () => {
       const populated = parseEvidenceList(JSON.parse(populatedResponse.body));
       expect(populated.caseId).toBe(created.id);
       expect(populated.artifacts.map((artifact) => artifact.id)).toEqual([uploaded.artifact.id]);
+    });
+  });
+
+  it("appends artifact annotations and serves case- and artifact-scoped lists", async () => {
+    await withApp(async ({ app, audit, roles }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Artifact annotation fixture" },
+      })).body));
+      const uploaded = parseEvidenceUploadSuccess(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "attachment",
+          filename: "annotated.txt",
+          mediaType: "text/plain",
+          contentBase64: Buffer.from("annotated evidence").toString("base64"),
+          summary: "Evidence with durable annotations",
+        },
+      })).body));
+
+      const firstResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "The timeout begins after the retry boundary.",
+          clientTime: "2026-09-01T11:00:00Z",
+          idempotencyKey: "annotation-retry-1",
+        },
+      });
+      expect(firstResponse.statusCode).toBe(200);
+      const first = parseArtifactAnnotation(JSON.parse(firstResponse.body));
+
+      const replayResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "The timeout begins after the retry boundary.",
+          clientTime: "2026-09-01T11:05:00Z",
+          idempotencyKey: "annotation-retry-1",
+        },
+      });
+      expect(replayResponse.statusCode).toBe(200);
+      expect(parseArtifactAnnotation(JSON.parse(replayResponse.body)).id).toBe(first.id);
+      const mismatchResponse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "A different note must not reuse the retry token.",
+          idempotencyKey: "annotation-retry-1",
+        },
+      });
+      expect(mismatchResponse.statusCode).toBe(409);
+      expect(JSON.parse(mismatchResponse.body)).toEqual({ error: "artifact_annotation_conflict" });
+
+      const second = parseArtifactAnnotation(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "This is an independent observation, not a revised first note.",
+          privacyClass: "share_safe",
+        },
+      })).body));
+      expect(second.id).not.toBe(first.id);
+      expect(second.privacyClass).toBe("share_safe");
+
+      const byArtifact = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/${uploaded.artifact.id}/annotations`,
+        headers: { cookie: alice },
+      });
+      expect(byArtifact.statusCode).toBe(200);
+      expect(parseArtifactAnnotationList(JSON.parse(byArtifact.body)).annotations.map((item) => item.id).sort()).toEqual(
+        [second.id],
+      );
+
+      const byCase = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: alice },
+      });
+      expect(byCase.statusCode).toBe(200);
+      const list = parseArtifactAnnotationList(JSON.parse(byCase.body));
+      expect(list.annotations).toHaveLength(1);
+      expect(list.annotations.every((item) => item.caseId === created.id)).toBe(true);
+      expect(list.annotations.every((item) => item.artifactId === uploaded.artifact.id)).toBe(true);
+
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const adminList = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: dave },
+      });
+      expect(adminList.statusCode).toBe(200);
+      expect(parseArtifactAnnotationList(JSON.parse(adminList.body)).annotations.map((item) => item.id).sort()).toEqual(
+        [first.id, second.id].sort(),
+      );
+
+      // Private annotation visibility follows the live capability set, so a
+      // role grant reveals the owner-only body and revocation immediately
+      // removes it without changing case membership or stored history.
+      roles.set("cn=contributors,ou=groups,dc=example,dc=test", "case-lead");
+      const elevated = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: alice },
+      });
+      expect(parseArtifactAnnotationList(JSON.parse(elevated.body)).annotations.map((item) => item.id).sort()).toEqual(
+        [first.id, second.id].sort(),
+      );
+      roles.set("cn=contributors,ou=groups,dc=example,dc=test", "contributor");
+      const revoked = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: alice },
+      });
+      expect(parseArtifactAnnotationList(JSON.parse(revoked.body)).annotations.map((item) => item.id)).toEqual(
+        [second.id],
+      );
+      expect(await audit.list({ action: "artifact_annotation_create" })).toHaveLength(2);
+      const timeline = parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body));
+      expect(timeline.events.filter((event) => event.kind === "artifact_annotation_created")).toHaveLength(2);
     });
   });
 

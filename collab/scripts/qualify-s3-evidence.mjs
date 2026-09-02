@@ -704,7 +704,7 @@ async function main() {
 
     await runVitest(liveEnv, secrets, true);
     process.stdout.write(
-      "live Garage qualification passed (evaluation only; no retention/migration/delete claims)\n",
+      `${args.skipCompose ? "live S3-compatible endpoint" : "live Garage"} qualification passed (evaluation only; no retention/migration/delete claims)\n`,
     );
   } finally {
     process.removeListener("SIGINT", onSignal);

@@ -144,6 +144,21 @@ export const UI_STRATEGY_POLICY: WorkLocation = {
   },
 };
 
+/** Canonical administrator evidence-storage diagnostics tab. */
+export const EVIDENCE_STORAGE_SECTION = "evidence-storage";
+export const EVIDENCE_STORAGE_ADMIN: WorkLocation = {
+  area: "administration",
+  caseId: null,
+  stage: "situation",
+  focus: {
+    section: EVIDENCE_STORAGE_SECTION,
+    item: null,
+    itemKind: null,
+    lane: null,
+    experiment: null,
+  },
+};
+
 export const SIGN_IN: SignInLocation = { kind: "sign-in" };
 
 export const DISCUSSION_SECTION = "discussion";
@@ -191,6 +206,14 @@ export function isUiStrategyPolicyLocation(value: unknown): value is WorkLocatio
     isWorkLocation(value)
     && value.area === "administration"
     && value.focus?.section === UI_STRATEGY_POLICY_SECTION
+  );
+}
+
+export function isEvidenceStorageAdminLocation(value: unknown): value is WorkLocation {
+  return (
+    isWorkLocation(value)
+    && value.area === "administration"
+    && value.focus?.section === EVIDENCE_STORAGE_SECTION
   );
 }
 
@@ -406,6 +429,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/admin/ui-strategies") {
     return { ...UI_STRATEGY_POLICY };
   }
+  if (path === "/admin/storage") {
+    return { ...EVIDENCE_STORAGE_ADMIN };
+  }
   if (path === "/administration") {
     return { ...ADMINISTRATION };
   }
@@ -451,6 +477,7 @@ export function areaPathFor(location: WorkLocation): string {
     if (isLdapAdminLocation(location)) return "/admin/ldap";
     if (isModelPolicyLocation(location)) return "/admin/model-policy";
     if (isUiStrategyPolicyLocation(location)) return "/admin/ui-strategies";
+    if (isEvidenceStorageAdminLocation(location)) return "/admin/storage";
     return "/administration";
   }
   return "/investigations";
@@ -526,7 +553,9 @@ export function titleFor(
             ? `Model use · Administration · ${shellTitle}`
             : isUiStrategyPolicyLocation(location)
               ? `Investigation experiences · Administration · ${shellTitle}`
-          : `Administration · ${shellTitle}`;
+              : isEvidenceStorageAdminLocation(location)
+                ? `Evidence storage · Administration · ${shellTitle}`
+                : `Administration · ${shellTitle}`;
   }
   if (location.area === "investigations" && location.caseId) {
     if (options.includeInvestigationStage === false) {
