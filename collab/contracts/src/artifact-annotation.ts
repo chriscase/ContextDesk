@@ -49,28 +49,14 @@ export interface ArtifactAnnotationListV1 {
 const artifactAnnotationListShape: ObjectShape = {
   schemaId: f.req(f.en(ARTIFACT_ANNOTATION_LIST_SCHEMA_ID)),
   caseId: f.req(f.str),
-  annotations: f.req(f.arr(f.str)),
+  annotations: f.req(f.arr(f.obj(artifactAnnotationShape))),
 };
-
-const nestedContractMarker = "__validated_by_nested_contract__";
-
-function isPlainRecord(raw: unknown): raw is Record<string, unknown> {
-  return typeof raw === "object" && raw !== null && !Array.isArray(raw);
-}
-
-function annotationListEnvelope(raw: unknown): unknown {
-  if (!isPlainRecord(raw) || !Array.isArray(raw.annotations)) return raw;
-  return {
-    ...raw,
-    annotations: Array.from(raw.annotations, () => nestedContractMarker),
-  };
-}
 
 /** Parse a strict annotation-list envelope and bind every row to its case. */
 export function parseArtifactAnnotationList(
   raw: unknown,
 ): ArtifactAnnotationListV1 {
-  checkObject("$", artifactAnnotationListShape, annotationListEnvelope(raw));
+  checkObject("$", artifactAnnotationListShape, raw);
   const list = raw as ArtifactAnnotationListV1;
   for (let index = 0; index < list.annotations.length; index += 1) {
     const annotation = parseArtifactAnnotation(list.annotations[index]);

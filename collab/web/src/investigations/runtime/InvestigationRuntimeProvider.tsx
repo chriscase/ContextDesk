@@ -85,7 +85,7 @@ export interface InvestigationRuntimeRefresh {
   readonly evidence: () => void;
   readonly contributions: () => void;
   readonly lifecycle: () => void;
-  readonly artifactAnnotations: () => void;
+  readonly artifactAnnotations: () => Promise<void>;
   readonly activeInvestigation: () => void;
 }
 

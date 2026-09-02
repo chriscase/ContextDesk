@@ -43,7 +43,8 @@ export interface UseArtifactAnnotationsOptions {
 
 export interface ArtifactAnnotationsController {
   readonly annotations: ResourceState<readonly ArtifactAnnotationV1[]>;
-  readonly refresh: () => void;
+  /** Resolve after the next authoritative refresh has settled. */
+  readonly refresh: () => Promise<void>;
   /** Publish only a server-confirmed annotation for the active case. */
   readonly publish: (annotation: ArtifactAnnotationV1) => void;
 }
@@ -99,8 +100,14 @@ export function useArtifactAnnotations(
     () => createResourceState<AnnotationScope, readonly ArtifactAnnotationV1[]>(),
   );
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const refreshResolversRef = useRef<Array<() => void>>([]);
   const latestRef = useRef(options);
   latestRef.current = options;
+
+  const settleRefreshWaiters = useCallback(() => {
+    const waiters = refreshResolversRef.current.splice(0);
+    waiters.forEach((resolve) => resolve());
+  }, []);
 
   const load = useCallback(async (
     currentScope: AnnotationScope,
@@ -114,6 +121,7 @@ export function useArtifactAnnotations(
     if (scope === null) {
       requestSlot.current.invalidate();
       setResource(resetResource<AnnotationScope, readonly ArtifactAnnotationV1[]>());
+      settleRefreshWaiters();
       return;
     }
 
@@ -133,6 +141,7 @@ export function useArtifactAnnotations(
         setResource((current) => result.ok
           ? succeedResourceLoad(current, scope, result.value)
           : failResourceLoad(current, scope, result.error));
+        settleRefreshWaiters();
       })
       .catch(() => {
         if (!requestSlot.current.isCurrent(token)) return;
@@ -141,14 +150,21 @@ export function useArtifactAnnotations(
           scope,
           { kind: "unexpected" },
         ));
+        settleRefreshWaiters();
       });
 
     return () => requestSlot.current.invalidate();
-  }, [load, refreshGeneration, scope]);
+  }, [load, refreshGeneration, scope, settleRefreshWaiters]);
+
+  useEffect(() => () => settleRefreshWaiters(), [settleRefreshWaiters]);
 
   const refresh = useCallback(() => {
-    setRefreshGeneration((current) => current + 1);
-  }, []);
+    if (scope === null) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      refreshResolversRef.current.push(resolve);
+      setRefreshGeneration((current) => current + 1);
+    });
+  }, [scope]);
 
   const publish = useCallback((annotation: ArtifactAnnotationV1) => {
     if (scope === null || annotation.caseId !== scope.investigationId) return;

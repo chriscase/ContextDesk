@@ -110,6 +110,33 @@ describe("useArtifactAnnotations", () => {
     );
   });
 
+  it("resolves a refresh only after the authoritative response settles", async () => {
+    const refreshed = createDeferred<GatewayResult<readonly ArtifactAnnotationV1[]>>();
+    let calls = 0;
+    const gateway = annotationGateway({
+      listArtifactAnnotations: vi.fn(() => {
+        calls += 1;
+        return calls === 1
+          ? Promise.resolve({ ok: true as const, value: [annotation()] })
+          : refreshed.promise;
+      }),
+    });
+    const { result } = renderHook(() => useArtifactAnnotations(readOptions({ gateway })));
+    await waitFor(() => expect(result.current.annotations.status).toBe("ready"));
+
+    let settled = false;
+    const pending = result.current.refresh().then(() => { settled = true; });
+    await act(async () => undefined);
+    expect(settled).toBe(false);
+    refreshed.resolve({ ok: true, value: [annotation({ id: "annotation-refreshed" })] });
+    await pending;
+    expect(settled).toBe(true);
+    await waitFor(() => expect(result.current.annotations).toMatchObject({
+      status: "ready",
+      value: [{ id: "annotation-refreshed" }],
+    }));
+  });
+
   it.each([
     ["inactive", { active: false }],
     ["read denied", { canRead: false }],

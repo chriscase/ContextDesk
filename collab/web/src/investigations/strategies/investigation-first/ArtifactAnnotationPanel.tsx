@@ -19,7 +19,7 @@ export interface ArtifactAnnotationPanelProps {
   readonly mutationError: string | null;
   /** A lost acknowledgement must be checked against the refreshed history. */
   readonly retryBlocked: boolean;
-  readonly onRefresh: () => void;
+  readonly onRefresh: () => Promise<void>;
   readonly onCreate: (draft: ArtifactAnnotationDraft) => Promise<unknown>;
 }
 
@@ -69,6 +69,7 @@ export function ArtifactAnnotationPanel({
   );
   const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
   const [outcomeChecked, setOutcomeChecked] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   useEffect(() => {
     if (!canReadPrivate && privacyClass === "owner_only") setPrivacyClass("share_safe");
   }, [canReadPrivate, privacyClass]);
@@ -79,7 +80,19 @@ export function ArtifactAnnotationPanel({
   const visibleAnnotations = annotations.length > 0 ? annotations : [];
   const isThisMutation = mutationArtifactId === artifactId;
   const working = isThisMutation && mutationStatus === "running";
-  const canSubmit = canAnnotate && !readOnly && body.trim().length > 0 && !working && (!retryBlocked || outcomeChecked);
+  const canSubmit = canAnnotate && !readOnly && body.trim().length > 0 && !working && !refreshing && (!retryBlocked || outcomeChecked);
+
+  async function refreshHistory() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setOutcomeChecked(false);
+    try {
+      await onRefresh();
+      setOutcomeChecked(true);
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -152,7 +165,7 @@ export function ArtifactAnnotationPanel({
         </div>
       </form>
       {isThisMutation && mutationStatus === "failed" && mutationError ? <p className="investigation-first__error" role="alert">{mutationError}</p> : null}
-      {isThisMutation && retryBlocked ? <div className="investigation-first__annotation-unknown" role="alert"><p>The server did not confirm this note. Refresh annotation history before submitting this note again.</p><button type="button" onClick={() => { onRefresh(); setOutcomeChecked(true); }}>Refresh annotation history</button>{outcomeChecked ? <small>History refreshed. Check for this note before saving again.</small> : null}</div> : null}
+      {isThisMutation && retryBlocked ? <div className="investigation-first__annotation-unknown" role="alert"><p>The server did not confirm this note. Refresh annotation history before submitting this note again.</p><button type="button" disabled={refreshing} onClick={() => void refreshHistory()}>{refreshing ? "Refreshing history…" : "Refresh annotation history"}</button>{outcomeChecked ? <small>History refreshed. Check for this note before saving again.</small> : null}</div> : null}
       {isThisMutation && mutationStatus === "succeeded" ? <p className="investigation-first__success" role="status">Note saved to this evidence.</p> : null}
     </details> : readOnly ? <small className="investigation-first__muted">Annotations are read-only in this view.</small> : null}
   </div>;
