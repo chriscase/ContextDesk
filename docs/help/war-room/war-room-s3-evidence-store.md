@@ -91,9 +91,11 @@ the server-side uploader and never exposed to the browser. In AWS IAM,
 `HeadBucket` and `ListObjectsV2` map to `s3:ListBucket`, while same-prefix
 `CopyObject` uses `s3:GetObject` on the source and `s3:PutObject` on the
 destination. ContextDesk requires `s3:DeleteObject` for staging, journal
-recovery, and rollback cleanup. Multipart actions are required for streams
-that exceed the SDK's single-request part threshold; bucket-administration
-APIs are not used.
+recovery, and rollback cleanup. AWS IAM authorizes multipart create, part, and
+complete operations with `s3:PutObject`; abort uses
+`s3:AbortMultipartUpload`. Multipart permissions are required for streams that
+exceed the SDK's single-request part threshold; bucket-administration APIs are
+not used.
 
 The bucket-level statement below is intentionally not prefix-conditioned:
 startup uses `HeadBucket`, which carries no object prefix. That makes a
@@ -120,10 +122,7 @@ negative isolation tests, or use a dedicated bucket.
         "s3:GetObject",
         "s3:PutObject",
         "s3:DeleteObject",
-        "s3:AbortMultipartUpload",
-        "s3:CompleteMultipartUpload",
-        "s3:CreateMultipartUpload",
-        "s3:UploadPart"
+        "s3:AbortMultipartUpload"
       ],
       "Resource": ["arn:aws:s3:::war-room-evidence/assigned-prefix/*"]
     }

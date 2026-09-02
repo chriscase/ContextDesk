@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import {
+  AbortMultipartUploadCommand,
   CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
@@ -97,11 +98,12 @@ interface TrackedUploadClient {
 }
 
 /**
- * lib-storage's Upload accepts an AbortController, but v3.1121 does not pass
- * that signal to the individual S3Client.send calls. Wrap the client so every
- * request receives the same signal, and keep a handle to in-flight requests
- * so callers do not release staging storage until the SDK has actually
- * observed cancellation.
+ * lib-storage v3.1121 does not pass its abort controller to individual
+ * S3Client.send calls. Wrap the client so data requests receive the caller's
+ * signal, while the SDK's final AbortMultipartUpload cleanup remains
+ * cancellable only by its own request result. Keep a handle to in-flight
+ * requests so callers do not release staging storage until the SDK has
+ * completed its cancellation path.
  */
 export function createTrackedAbortUploadClient(
   client: S3Client,
@@ -114,7 +116,9 @@ export function createTrackedAbortUploadClient(
         return (command: unknown, options?: { abortSignal?: AbortSignal }) => {
           const request = target.send(command as never, {
             ...(options ?? {}),
-            abortSignal: signal,
+            ...(command instanceof AbortMultipartUploadCommand
+              ? {}
+              : { abortSignal: signal }),
           });
           pending.add(request);
           void request.finally(() => pending.delete(request)).catch(() => undefined);
@@ -1122,18 +1126,10 @@ export class S3EvidenceStore implements EvidenceStore {
       return;
     }
 
-    const uploadAbort = new AbortController();
-    const onAbort = (): void => {
-      const reason = signal?.reason;
-      uploadAbort.abort(reason instanceof Error ? reason : undefined);
-    };
-    if (signal) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-    }
+    const uploadSignal = signal ?? new AbortController().signal;
     const tracked = createTrackedAbortUploadClient(
       createNonRetryingS3UploadClient(sdkClient),
-      uploadAbort.signal,
+      uploadSignal,
     );
     let failure: unknown;
     try {
@@ -1142,14 +1138,12 @@ export class S3EvidenceStore implements EvidenceStore {
         params: input,
         queueSize: 1,
         leavePartsOnError: false,
-        abortController: uploadAbort,
       }).done();
       throwIfAborted(signal);
     } catch (error) {
       failure = error;
     } finally {
       await tracked.waitForRequests();
-      signal?.removeEventListener("abort", onAbort);
     }
     if (failure !== undefined) {
       throwIfAborted(signal);

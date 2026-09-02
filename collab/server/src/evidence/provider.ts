@@ -299,16 +299,10 @@ class OpaqueS3EvidenceClient implements S3EvidenceClient {
       );
       return;
     }
-    const abortController = new AbortController();
-    const onAbort = (): void => {
-      const reason = signal?.reason;
-      abortController.abort(reason instanceof Error ? reason : undefined);
-    };
-    if (signal) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-    }
-    const tracked = createTrackedAbortUploadClient(this.#streamClient, abortController.signal);
+    const tracked = createTrackedAbortUploadClient(
+      this.#streamClient,
+      signal ?? new AbortController().signal,
+    );
     let failure: unknown;
     try {
       await new Upload({
@@ -316,13 +310,11 @@ class OpaqueS3EvidenceClient implements S3EvidenceClient {
         params: input,
         queueSize: 1,
         leavePartsOnError: false,
-        abortController,
       }).done();
     } catch (error) {
       failure = error;
     } finally {
       await tracked.waitForRequests();
-      signal?.removeEventListener("abort", onAbort);
     }
     if (failure !== undefined) throw failure;
   }

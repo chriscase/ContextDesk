@@ -11,12 +11,14 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import { ConfiguredRetryStrategy } from "@smithy/core/retry";
 import { FILE_SERVER_REF_SCHEMA_ID, parseFileServerReference } from "@cd-collab/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   abandonS3WriteBatchForCrashTest,
   createS3ClientConfig,
+  createTrackedAbortUploadClient,
   S3EvidenceError,
   S3EvidenceStore,
 } from "./s3-store.js";
@@ -2818,6 +2820,64 @@ describe("S3EvidenceStore", () => {
     expect(requestSignal?.aborted).toBe(true);
     expect(requestSettled).toBe(true);
     client.destroy();
+  });
+
+  it("completes multipart abort cleanup before reporting cancellation", async () => {
+    let partStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      partStarted = resolve;
+    });
+    let partSignal: AbortSignal | undefined;
+    let abortCompleted = false;
+    const fake = {
+      config: {
+        requestHandler: {},
+        requestChecksumCalculation: async () => "WHEN_REQUIRED",
+        forcePathStyle: true,
+      },
+      send: async (command: unknown, options?: { abortSignal?: AbortSignal }) => {
+        const name = typeof command === "object" && command !== null && "constructor" in command
+          ? String((command as { constructor?: { name?: string } }).constructor?.name)
+          : "unknown";
+        if (name === "CreateMultipartUploadCommand") return { UploadId: "upload-1" };
+        if (name === "UploadPartCommand") {
+          partSignal = options?.abortSignal;
+          partStarted();
+          return new Promise<never>((_resolve, reject) => {
+            const abort = (): void => {
+              reject(partSignal?.reason ?? new Error("part aborted"));
+            };
+            if (partSignal?.aborted) abort();
+            else partSignal?.addEventListener("abort", abort, { once: true });
+          });
+        }
+        if (name === "AbortMultipartUploadCommand") {
+          expect(options?.abortSignal).toBeUndefined();
+          abortCompleted = true;
+          return {};
+        }
+        throw new Error(`unexpected command ${name}`);
+      },
+    } as unknown as S3Client;
+    const controller = new AbortController();
+    const tracked = createTrackedAbortUploadClient(fake, controller.signal);
+    const upload = new Upload({
+      client: tracked.client,
+      params: {
+        Bucket: SYNTHETIC_BUCKET,
+        Key: "stream-multipart-abort",
+        Body: Readable.from([Buffer.alloc(6 * 1024 * 1024)]),
+      },
+      queueSize: 1,
+      leavePartsOnError: false,
+    });
+    const result = upload.done();
+    await started;
+    controller.abort(new Error("cancelled-multipart"));
+    await expect(result).rejects.toThrow("cancelled-multipart");
+    expect(partSignal?.aborted).toBe(true);
+    expect(abortCompleted).toBe(true);
+    await tracked.waitForRequests();
   });
 
   it("rejects oversize, expectedLength mismatch, non-Uint8Array chunks, and invalid options", async () => {
