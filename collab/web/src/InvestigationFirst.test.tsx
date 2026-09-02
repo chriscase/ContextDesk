@@ -478,6 +478,36 @@ describe("Investigation First Runtime V1 presentation", () => {
     await waitFor(() => expect(saveButton.disabled).toBe(false));
   });
 
+  it("does not carry an unknown-outcome block from one evidence row to another", async () => {
+    const first = makeEvidenceList().artifacts[0]!;
+    const second = { ...first, id: "evidence-second", filename: "request-context.txt" };
+    const createArtifactAnnotation = vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+    }));
+    renderStrategy({
+      gateway: createInvestigationGatewayDouble({
+        listEvidence: vi.fn(async () => gatewayOk([first, second])),
+        createArtifactAnnotation,
+      }),
+      shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase },
+    });
+    await screen.findByRole("button", { name: "Show notes for checkout-timeout.log" });
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for checkout-timeout.log" }));
+    fireEvent.click(screen.getByText("Add a note"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Annotation for this evidence" }), {
+      target: { value: "First attempt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    await screen.findByRole("button", { name: "Refresh annotation history" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for request-context.txt" }));
+    fireEvent.click(screen.getByText("Add a note"));
+    const secondBody = screen.getByRole("textbox", { name: "Annotation for this evidence" });
+    fireEvent.change(secondBody, { target: { value: "Second attempt" } });
+    expect((screen.getByRole("button", { name: "Save note" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("keeps artifact annotation editing out of viewer and read-only views", async () => {
     const gateway = createInvestigationGatewayDouble({
       listArtifactAnnotations: vi.fn(async () => gatewayOk<readonly ArtifactAnnotationV1[]>([])),

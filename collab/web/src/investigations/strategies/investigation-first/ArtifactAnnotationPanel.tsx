@@ -80,7 +80,10 @@ export function ArtifactAnnotationPanel({
   const visibleAnnotations = annotations.length > 0 ? annotations : [];
   const isThisMutation = mutationArtifactId === artifactId;
   const working = isThisMutation && mutationStatus === "running";
-  const canSubmit = canAnnotate && !readOnly && body.trim().length > 0 && !working && !refreshing && (!retryBlocked || outcomeChecked);
+  // A lost acknowledgement blocks retries only for the artifact whose write
+  // may have committed. Other evidence rows must remain independently usable.
+  const canSubmit = canAnnotate && !readOnly && body.trim().length > 0 && !working && !refreshing
+    && (!retryBlocked || !isThisMutation || outcomeChecked);
 
   async function refreshHistory() {
     if (refreshing) return;
