@@ -229,6 +229,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedEvidence, setSelectedEvidence] = useState<readonly string[]>([]);
   const [previewArtifactId, setPreviewArtifactId] = useState<string | null>(null);
+  const [annotationArtifactId, setAnnotationArtifactId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [severity, setSeverity] = useState<CaseV1["severity"]>("medium");
   const [situation, setSituation] = useState<SituationDraft>(EMPTY_SITUATION);
@@ -310,7 +311,11 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   }, [runtime.capabilities.canReadPrivate]);
   useEffect(() => setSelectedEvidence([]), [props.focusCaseId]);
   useEffect(() => setPreviewArtifactId(null), [props.focusCaseId]);
+  useEffect(() => setAnnotationArtifactId(null), [props.focusCaseId]);
   useEffect(() => setAnnotationMutationArtifactId(null), [props.focusCaseId]);
+  useEffect(() => {
+    if (annotationMutationArtifactId !== null) setAnnotationArtifactId(annotationMutationArtifactId);
+  }, [annotationMutationArtifactId]);
   useEffect(() => {
     const available = new Set(evidenceSelectionKey ? evidenceSelectionKey.split("\u0000") : []);
     setSelectedEvidence((current) => {
@@ -474,6 +479,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
             const evidenceName = evidence.filename || evidence.uri || "Unnamed evidence";
             const canReadArtifact = evidence.privacyClass !== "owner_only" || runtime.capabilities.canReadPrivate;
             const canPreview = canReadArtifact && previewableTextArtifact(evidence);
+            const annotationsOpen = annotationArtifactId === evidence.id;
             return (
               <li key={evidence.id}>
                 <label className="investigation-first__evidence-select">
@@ -501,24 +507,35 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
                   <summary>More details<span className="sr-only"> about {evidenceName}</span></summary>
                   <dl className="investigation-first__evidence-meta"><div className="investigation-first__evidence-annotation"><dt>Latest note</dt><dd>{annotationText}</dd></div><div><dt>Kind</dt><dd>{display(evidence.kind)}</dd></div><div><dt>Media type</dt><dd>{display(evidence.mediaType)}</dd></div><div><dt>Verification</dt><dd>{display(evidence.verificationStatus)}</dd></div><div><dt>Privacy</dt><dd>{display(evidence.privacyClass)}</dd></div><div><dt>Content hash</dt><dd>{display(evidence.contentHash)}</dd></div><div><dt>Expected hash</dt><dd>{display(evidence.expectedHash)}</dd></div><div><dt>Size</dt><dd>{evidence.byteLength == null ? "Not recorded" : `${evidence.byteLength.toLocaleString()} bytes`}</dd></div><div><dt>Source</dt><dd>{display(evidence.sourceId)}</dd></div><div><dt>Uploader</dt><dd>{display(evidence.uploaderId)}</dd></div><div><dt>Path</dt><dd>{display(evidence.relativePath)}</dd></div><div><dt>Intake batch</dt><dd>{display(evidence.intakeBatchId)}</dd></div><div><dt>Notes</dt><dd>{linkedAnnotations.length ? `${linkedAnnotations.length} durable ${linkedAnnotations.length === 1 ? "note" : "notes"}` : "None recorded"}</dd></div><div><dt>Annotation author</dt><dd>{latestArtifactAnnotation ? display(latestArtifactAnnotation.authorUsername) : annotation ? display(annotation.authorUsername) : annotationFallback}</dd></div><div><dt>Annotated</dt><dd>{latestArtifactAnnotation ? dateLabel(latestArtifactAnnotation.createdAt) : annotation ? dateLabel(annotation.createdAt) : annotationFallback}</dd></div></dl>
                 </details>
-                <ArtifactAnnotationPanel
-                  artifactId={evidence.id}
-                  annotations={linkedAnnotations}
-                  canAnnotate={annotationCommand !== null && annotationHistoryReady}
-                  canReadPrivate={runtime.capabilities.canReadPrivate}
-                  readOnly={!runtime.capabilities.canContribute}
-                  mutationStatus={annotationMutation.status}
-                  mutationArtifactId={annotationMutationArtifactId}
-                  mutationError={annotationMutation.status === "failed" ? failureCopy(annotationMutation.error, "annotations") : null}
-                  retryBlocked={annotationMutation.status === "failed" && annotationMutation.error.kind === "unavailable" && annotationMutation.error.reason === "commit_outcome_unknown"}
-                  onRefresh={runtime.refresh.artifactAnnotations}
-                  onCreate={createArtifactAnnotation}
-                />
                 <div className="investigation-first__evidence-preview-tools">
+                  <button
+                    type="button"
+                    aria-expanded={annotationsOpen}
+                    aria-controls={`investigation-first-annotations-${evidence.id}`}
+                    onClick={() => setAnnotationArtifactId((current) => current === evidence.id ? null : evidence.id)}
+                  >
+                    {annotationsOpen ? "Hide notes" : linkedAnnotations.length ? `Notes (${linkedAnnotations.length})` : "Show notes"}
+                    <span className="sr-only"> for {evidenceName}</span>
+                  </button>
                   {canPreview ? <button type="button" aria-expanded={previewArtifactId === evidence.id} onClick={() => togglePreview(evidence.id)}>{previewArtifactId === evidence.id ? "Hide preview" : "Preview"}</button> : null}
                   {previewArtifactId === evidence.id && previewState.status === "running" ? <span role="status">Loading preview…</span> : null}
                   {!canPreview && canReadArtifact && evidence.kind === "file_server_ref" ? <span className="investigation-first__muted">Metadata only; bytes are not stored here.</span> : null}
                 </div>
+                {annotationsOpen ? <div id={`investigation-first-annotations-${evidence.id}`} className="investigation-first__annotation-drawer">
+                  <ArtifactAnnotationPanel
+                    artifactId={evidence.id}
+                    annotations={linkedAnnotations}
+                    canAnnotate={annotationCommand !== null && annotationHistoryReady}
+                    canReadPrivate={runtime.capabilities.canReadPrivate}
+                    readOnly={!runtime.capabilities.canContribute}
+                    mutationStatus={annotationMutation.status}
+                    mutationArtifactId={annotationMutationArtifactId}
+                    mutationError={annotationMutation.status === "failed" ? failureCopy(annotationMutation.error, "annotations") : null}
+                    retryBlocked={annotationMutation.status === "failed" && annotationMutation.error.kind === "unavailable" && annotationMutation.error.reason === "commit_outcome_unknown"}
+                    onRefresh={runtime.refresh.artifactAnnotations}
+                    onCreate={createArtifactAnnotation}
+                  />
+                </div> : null}
                 {previewArtifactId === evidence.id && canPreview && previewState.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(previewState.error, "evidence")}</p> : null}
                 {previewArtifactId === evidence.id && canPreview && previewState.status === "succeeded" && previewState.value.artifactId === evidence.id ? <div className="investigation-first__evidence-preview" role="region" aria-label={`Preview of ${evidenceName}`}><pre>{previewState.value.text}</pre>{previewState.value.truncated ? <small role="status">Showing the first 64 KiB. Use War Room technical tools for the complete file.</small> : null}</div> : null}
               </li>

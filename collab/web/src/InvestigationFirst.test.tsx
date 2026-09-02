@@ -428,6 +428,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     });
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     expect((await screen.findAllByText(existing.body)).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Notes (1) for checkout-timeout.log" }));
     fireEvent.click(screen.getByText("Add a note"));
     fireEvent.change(screen.getByRole("textbox", { name: "Annotation for this evidence" }), {
       target: { value: created.body },
@@ -455,6 +456,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     });
     await screen.findByText("checkout-timeout.log");
     expect(screen.queryByRole("button", { name: "Add a note" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for checkout-timeout.log" }));
     expect(screen.getAllByText("Annotations are read-only in this view.").length).toBeGreaterThan(0);
     expect(gateway.createArtifactAnnotation).not.toHaveBeenCalled();
   });
@@ -492,6 +494,9 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(details?.open).toBe(false);
     const disclosure = row?.querySelector("summary");
     expect(disclosure?.textContent).toBe("More details about checkout-timeout.log");
+    expect(row?.querySelector(".investigation-first__annotation-panel")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show notes for checkout-timeout.log" }));
+    expect(row?.querySelector(".investigation-first__annotation-panel")).toBeTruthy();
     fireEvent.click(disclosure!);
     expect(details?.open).toBe(true);
     expect(row?.textContent).toContain("Gateway timeout excerpt captured during the affected interval.");
