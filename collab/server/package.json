@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1121.0",
+    "@aws-sdk/lib-storage": "3.1121.0",
     "@cd-collab/contracts": "*",
     "@fastify/multipart": "10.1.1",
     "@fastify/static": "^10.1.3",

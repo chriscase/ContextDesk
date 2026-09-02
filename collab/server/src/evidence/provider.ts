@@ -5,7 +5,9 @@
  * hardening can keep using an injected client.
  */
 import { Agent as HttpsAgent } from "node:https";
+import type { Readable } from "node:stream";
 import { S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import {
   createPostgresEvidenceWriteLease,
@@ -23,6 +25,7 @@ import {
 } from "./s3-settings.js";
 import {
   createS3ClientConfig,
+  createNonRetryingS3UploadClient,
   S3EvidenceStore,
   type S3EvidenceClient,
   type S3EvidenceStoreOptions,
@@ -265,13 +268,52 @@ function rethrowSanitized(error: unknown): never {
 
 class OpaqueS3EvidenceClient implements S3EvidenceClient {
   readonly #send: S3EvidenceClient["send"];
+  readonly #streamClient: S3Client | null;
 
   constructor(inner: S3EvidenceClient) {
     this.#send = inner.send.bind(inner);
+    this.#streamClient = inner instanceof S3Client
+      ? createNonRetryingS3UploadClient(inner)
+      : null;
   }
 
   send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
     return this.#send(command, options);
+  }
+
+  async uploadStream(
+    input: {
+      Bucket: string;
+      Key: string;
+      Body: Readable;
+      ContentLength?: number;
+      ContentType?: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.#streamClient) {
+      throw new Error("opaque S3 client does not support stream uploads");
+    }
+    const abortController = new AbortController();
+    const onAbort = (): void => {
+      const reason = signal?.reason;
+      abortController.abort(reason instanceof Error ? reason : undefined);
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    try {
+      await new Upload({
+        client: this.#streamClient,
+        params: input,
+        queueSize: 1,
+        leavePartsOnError: false,
+        abortController,
+      }).done();
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   toJSON(): { configured: true } {

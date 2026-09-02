@@ -11,6 +11,8 @@ import {
   type S3ClientConfig,
   S3Client,
 } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
+import { ConfiguredRetryStrategy } from "@smithy/core/retry";
 import {
   FILE_SERVER_REF_SCHEMA_ID,
   parseFileServerReference,
@@ -36,6 +38,22 @@ import {
 
 export interface S3EvidenceClient {
   send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
+  /**
+   * Optional opaque stream-upload capability supplied by the provider
+   * adapter. It keeps the concrete SDK client and credentials behind the
+   * server-only projection while allowing unknown-length streams to use the
+   * SDK multipart uploader.
+   */
+  uploadStream?(
+    input: {
+      Bucket: string;
+      Key: string;
+      Body: Readable;
+      ContentLength?: number;
+      ContentType?: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 export interface S3EvidenceStoreOptions {
@@ -55,6 +73,22 @@ export interface S3EvidenceStoreOptions {
    * disables the deadline (direct unit fakes). When present, a safe integer >= 1.
    */
   responseBodyIdleTimeoutMs?: number;
+}
+
+/**
+ * Build a view of an SDK client whose middleware stack omits retries.
+ *
+ * Stream staging must not replay a source that the store cannot rewind. The
+ * normal client remains untouched, so ordinary idempotent requests retain
+ * the provider's configured retry policy.
+ */
+export function createNonRetryingS3UploadClient(client: S3Client): S3Client {
+  const config = {
+    ...client.config,
+    maxAttempts: 1,
+    retryStrategy: new ConfiguredRetryStrategy(1, 0),
+  } as unknown as S3ClientConfig;
+  return new S3Client(config);
 }
 
 export class S3EvidenceError extends Error {
@@ -435,7 +469,14 @@ export class S3EvidenceStore implements EvidenceStore {
       if (opts.expectedLength !== undefined) input.ContentLength = opts.expectedLength;
       if (opts.contentType !== undefined) input.ContentType = opts.contentType;
       try {
-        await this.send("stageStream", new PutObjectCommand(input), opts.signal);
+        await this.putStreamObject(
+          scratchKey,
+          input.Body,
+          opts.contentType,
+          opts.expectedLength,
+          "stageStream",
+          opts.signal,
+        );
       } catch (error) {
         if (intakeError !== null) throw intakeError;
         throw error;
@@ -977,6 +1018,84 @@ export class S3EvidenceStore implements EvidenceStore {
       if (canonical) {
         this.invalidateVerifiedGeneration(key);
       }
+    }
+  }
+
+  /**
+   * Upload an opaque stream without requiring the caller to know its length.
+   *
+   * A plain PutObject with an unknown-length Node stream relies on HTTP
+   * chunked transfer, which a number of otherwise-compatible S3 servers (for
+   * example MinIO) reject with 411 MissingContentLength.  The AWS SDK
+   * uploader buffers bounded multipart parts and supplies a concrete length
+   * when it can use a single request, while retaining abort and cleanup
+   * semantics for true multipart uploads.  Test doubles keep the original
+   * command path so the injected client contract stays small and deterministic.
+   */
+  private async putStreamObject(
+    key: string,
+    body: Readable,
+    contentType: string | undefined,
+    contentLength: number | undefined,
+    operation: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const input: {
+      Bucket: string;
+      Key: string;
+      Body: Readable;
+      ContentLength?: number;
+      ContentType?: string;
+    } = {
+      Bucket: this.bucket,
+      Key: key,
+      Body: body,
+    };
+    if (contentLength !== undefined) input.ContentLength = contentLength;
+    if (contentType !== undefined) {
+      assertMetadataValue(contentType, operation);
+      input.ContentType = contentType;
+    }
+
+    if (typeof this.client.uploadStream === "function") {
+      await this.client.uploadStream(input, signal);
+      throwIfAborted(signal);
+      return;
+    }
+
+    // Keep the injected client route for unit tests and alternate adapters
+    // that intentionally expose only `send`.
+    const sdkClient = this.client as S3Client & {
+      middlewareStack?: { resolve?: unknown };
+    };
+    if (typeof sdkClient.middlewareStack?.resolve !== "function") {
+      await this.send(operation, new PutObjectCommand(input), signal);
+      return;
+    }
+
+    const uploadAbort = new AbortController();
+    const onAbort = (): void => {
+      const reason = signal?.reason;
+      uploadAbort.abort(reason instanceof Error ? reason : undefined);
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    try {
+      await new Upload({
+        client: createNonRetryingS3UploadClient(sdkClient),
+        params: input,
+        queueSize: 1,
+        leavePartsOnError: false,
+        abortController: uploadAbort,
+      }).done();
+      throwIfAborted(signal);
+    } catch {
+      throwIfAborted(signal);
+      throw new S3EvidenceError(operation, "unavailable");
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
     }
   }
 

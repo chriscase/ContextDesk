@@ -893,7 +893,7 @@ async function assertHttpContentContract(
   expect(headerValue(head.headers, "content-length")).toBe(String(size));
   expect(headerValue(head.headers, "content-type")).toBe(NATIVE_MEDIA_TYPE);
   expect(headerValue(head.headers, "content-disposition")).toBe(
-    `attachment; filename="${NATIVE_FILENAME}"`,
+    `attachment; filename="${NATIVE_FILENAME}"; filename*=UTF-8''${encodeURIComponent(NATIVE_FILENAME)}`,
   );
 
   const full = await nativeRequest({
