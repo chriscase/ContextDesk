@@ -78,11 +78,12 @@ modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling.
 S3 v1 defaults to 30 MiB at the 30,000 ms timeout and validates at most
 `floor(COLLAB_EVIDENCE_S3_TIMEOUT_MS / 1000) * 1 MiB` (up to 120 MiB at the
 120,000 ms timeout). Smithy's `requestTimeout` is absolute through PutObject
-and CopyObject response headers. The 1 MiB/s relationship is a conservative
+and multipart request response headers. The 1 MiB/s relationship is a conservative
 validation envelope, not a success guarantee; actual networks and providers
 may need a lower max. The separate HTTP transfer guard remains one hour and
-unknown-length streams remain count-enforced. The 5 GiB value is a protocol
-and future-multipart ceiling, not a supported S3 v1 operating size. Legacy
+unknown-length streams remain count-enforced. Multipart upload is used for
+streams above one SDK part; the 5 GiB value is a protocol ceiling, not a
+supported S3 v1 operating size. Legacy
 JSON/base64 upload and JSON bytes download stay capped at 1,000,000 decoded
 bytes. This does not add retention or filesystem-to-S3 migration.
 

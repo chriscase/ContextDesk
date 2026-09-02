@@ -34,7 +34,7 @@ const S3_UPLOAD_ENVELOPE_SUMMARY =
   + `max upload must be <= floor(timeoutMs/1000)*${EVIDENCE_S3_SUPPORTED_UPLOAD_BYTES_PER_SECOND} `
   + `(default ${DEFAULT_EVIDENCE_S3_MAX_UPLOAD_BYTES} at ${DEFAULT_EVIDENCE_S3_TIMEOUT_MS} ms; `
   + `maximum ${MAX_EVIDENCE_S3_UPLOAD_BYTES} at ${MAX_EVIDENCE_S3_TIMEOUT_MS} ms); `
-  + `${MAX_EVIDENCE_UPLOAD_BYTES} is a protocol/future-MPU ceiling, not supported S3 v1; `
+  + `${MAX_EVIDENCE_UPLOAD_BYTES} is a protocol ceiling; configured S3 v1 max is separately bounded; `
   + "1 MiB/s is a conservative validation envelope, not a success guarantee, and networks/providers may require less; "
   + "HTTP transfer remains guarded separately for one hour; unknown-length uploads remain count-enforced";
 

@@ -737,7 +737,7 @@ function expectS3OperatorGuidance(body: string) {
   expect(body).toMatch(/local server-owned control state/);
   expect(body).toMatch(/Exact 0\/1/);
   expect(body).toMatch(/absolute requestTimeout, 1000\.\.120000 ms/);
-  expect(body).toMatch(/PutObject and CopyObject through response headers/);
+  expect(body).toMatch(/PutObject, CopyObject, and multipart requests through response headers/);
   expect(body).toMatch(/floor\(COLLAB_EVIDENCE_S3_TIMEOUT_MS \/ 1000\)/);
   expect(body).toMatch(/1048576/);
   expect(body).toMatch(/31457280/);

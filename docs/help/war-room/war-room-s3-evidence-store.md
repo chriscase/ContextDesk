@@ -58,7 +58,7 @@ certification.
 | Path-style addressing | Local and many self-hosted endpoints need path-style requests (`/bucket/key`). Virtual-hosted `bucket.hostname` names often fail on loopback |
 | TLS and trust | Production traffic uses TLS. If the certificate is issued by an internal CA, mount a PEM bundle for the **War Room process** and set `COLLAB_EVIDENCE_S3_CA_FILE`. The S3 request handler's Node TLS `ca` option replaces the default trust store for that connection; include required public roots plus the internal CA in one combined PEM when both are needed. Certificate verification remains enabled. This setting does not change LDAP or ingress TLS |
 | Stable DNS | The name the War Room service uses must keep resolving to the intended hosts. Do not put credentials in the URL |
-| Least-privilege identity | A dedicated service identity with only bucket readiness/list plus object read, write, and delete below the assigned location. The shipped provider does not use multipart APIs. No console root, browser user, or unused bucket-admin APIs |
+| Least-privilege identity | A dedicated service identity with bucket readiness/list, object read/write/delete, and multipart upload/abort below the assigned location. Unknown-length streams use the SDK multipart path when a single request is not sufficient. No console root, browser user, or unused bucket-admin APIs |
 | Non-browser credentials | Access keys stay in a secret manager or owner-only files on the host. They never enter the webview, Help, git, or screenshots. Windows refuses S3 credential `_FILE` and `file:` `_REF` sources until owner-only ACL verification exists; use `default_chain` or platform/orchestrator-injected direct environment values, and never put direct values in committed env files |
 | Persistence | Metadata and object bytes survive process and container restarts on durable volumes |
 | Capacity and monitoring | Disk, inode, and object-count headroom with alerts before the store is full |
@@ -84,12 +84,16 @@ Policy syntax is provider-specific. For services that accept AWS-style IAM
 policies, this is a starting shape rather than a provider-neutral copy/paste
 policy. Replace the bucket and prefix and verify it against the selected S3
 service. The shipped client calls `HeadBucket`, `HeadObject`, `GetObject`,
-`PutObject`, `CopyObject`, `DeleteObject`, and `ListObjectsV2`. In AWS IAM,
+`PutObject`, `CopyObject`, `DeleteObject`, and `ListObjectsV2`. Unknown-length
+streams may additionally call `CreateMultipartUpload`, `UploadPart`,
+`CompleteMultipartUpload`, and `AbortMultipartUpload`; these are used only by
+the server-side uploader and never exposed to the browser. In AWS IAM,
 `HeadBucket` and `ListObjectsV2` map to `s3:ListBucket`, while same-prefix
 `CopyObject` uses `s3:GetObject` on the source and `s3:PutObject` on the
 destination. ContextDesk requires `s3:DeleteObject` for staging, journal
-recovery, and rollback cleanup. It does not call multipart or
-bucket-administration APIs.
+recovery, and rollback cleanup. Multipart actions are required for streams
+that exceed the SDK's single-request part threshold; bucket-administration
+APIs are not used.
 
 The bucket-level statement below is intentionally not prefix-conditioned:
 startup uses `HeadBucket`, which carries no object prefix. That makes a
@@ -115,7 +119,11 @@ negative isolation tests, or use a dedicated bucket.
       "Action": [
         "s3:GetObject",
         "s3:PutObject",
-        "s3:DeleteObject"
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:CompleteMultipartUpload",
+        "s3:CreateMultipartUpload",
+        "s3:UploadPart"
       ],
       "Resource": ["arn:aws:s3:::war-room-evidence/assigned-prefix/*"]
     }
@@ -148,8 +156,8 @@ control-state root in both modes.
 | Key prefix | `COLLAB_EVIDENCE_S3_PREFIX` | Optional application key prefix. A configured value is normalized with one trailing `/`; an empty configured value is rejected. Prefer a dedicated bucket because `HeadBucket` needs bucket-level permission. |
 | Path-style | `COLLAB_EVIDENCE_S3_FORCE_PATH_STYLE` | Exact `0` or `1`. When unset, custom endpoints (including Garage) default to path-style and AWS-managed endpoints default to virtual-host style. |
 | HTTP opt-in | `COLLAB_EVIDENCE_S3_ALLOW_HTTP` | Exact `0` or `1`; defaults to `0`. Set to `1` only for a trusted local evaluation network. |
-| Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Smithy connection timeout and absolute `requestTimeout` in milliseconds; defaults to `30000`, valid range `1000..120000`. The absolute request timer covers PutObject and CopyObject through response headers. |
-| Streamed intake size bound | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Accepted in both modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling. S3 v1 defaults to 30 MiB at 30,000 ms and accepts at most `floor(timeoutMs / 1000) * 1 MiB`, up to 120 MiB at 120,000 ms. With an unset S3 max, the effective default is the lower of 30 MiB and that timeout envelope. The 1 MiB/s relationship is conservative validation, not a throughput guarantee; use a lower max when the network or provider requires it. The separate HTTP transfer guard remains one hour, and unknown-length streams remain count-enforced. The 5 GiB value is only the protocol/future-multipart ceiling, not a supported S3 v1 size. Legacy JSON/base64 upload and JSON bytes download remain capped at exactly 1,000,000 decoded bytes. |
+| Request timeout | `COLLAB_EVIDENCE_S3_TIMEOUT_MS` | Smithy connection timeout and absolute `requestTimeout` in milliseconds; defaults to `30000`, valid range `1000..120000`. The absolute request timer covers each PutObject, CopyObject, and multipart request through response headers. |
+| Streamed intake size bound | `COLLAB_EVIDENCE_MAX_UPLOAD_BYTES` | Accepted in both modes. Filesystem defaults to 512 MiB and retains the 5 GiB protocol ceiling. S3 v1 defaults to 30 MiB at 30,000 ms and accepts at most `floor(timeoutMs / 1000) * 1 MiB`, up to 120 MiB at 120,000 ms. With an unset S3 max, the effective default is the lower of 30 MiB and that timeout envelope. The 1 MiB/s relationship is conservative validation, not a throughput guarantee; use a lower max when the network or provider requires it. The separate HTTP transfer guard remains one hour, and unknown-length streams remain count-enforced. Multipart upload supports streams above one request within that configured max; the 5 GiB value is only the protocol ceiling, not a supported S3 v1 operating size. Legacy JSON/base64 upload and JSON bytes download remain capped at exactly 1,000,000 decoded bytes. |
 | Credential mode | `COLLAB_EVIDENCE_S3_CREDENTIALS_MODE` | Required in S3 mode; there is no default. `static` requires the explicit pair below; `default_chain` uses the server process's AWS-compatible provider chain and rejects leftover static `COLLAB_EVIDENCE_S3_*` credential names. |
 | Access key id | `COLLAB_EVIDENCE_S3_ACCESS_KEY_ID`, `_FILE`, or `_REF` | Dedicated service identity, not a human console login. Configure exactly one source. Windows refuses `_FILE` and `file:` `_REF`. |
 | Secret access key | `COLLAB_EVIDENCE_S3_SECRET_ACCESS_KEY`, `_FILE`, or `_REF` | Configure exactly one source; on Unix, files must be owner-protected and `_REF` must be an absolute `file:/...` reference, not `file://...`. Windows refuses `_FILE` and `file:` `_REF`. |
