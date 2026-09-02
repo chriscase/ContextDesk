@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import {
   AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
   CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
@@ -100,10 +101,12 @@ interface TrackedUploadClient {
 /**
  * lib-storage v3.1121 does not pass its abort controller to individual
  * S3Client.send calls. Wrap the client so data requests receive the caller's
- * signal, while the SDK's final AbortMultipartUpload cleanup remains
- * cancellable only by its own request result. Keep a handle to in-flight
- * requests so callers do not release staging storage until the SDK has
- * completed its cancellation path.
+ * signal, while the SDK's terminal CompleteMultipartUpload and
+ * AbortMultipartUpload requests are allowed to settle without a caller
+ * signal. Cancelling either terminal request can strand an MPU because
+ * lib-storage does not recover from completion errors. Keep a handle to
+ * in-flight requests so callers do not release staging storage until the SDK
+ * has completed its cancellation path.
  */
 export function createTrackedAbortUploadClient(
   client: S3Client,
@@ -117,6 +120,7 @@ export function createTrackedAbortUploadClient(
           const request = target.send(command as never, {
             ...(options ?? {}),
             ...(command instanceof AbortMultipartUploadCommand
+              || command instanceof CompleteMultipartUploadCommand
               ? {}
               : { abortSignal: signal }),
           });

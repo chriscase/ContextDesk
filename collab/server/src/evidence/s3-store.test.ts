@@ -2880,6 +2880,71 @@ describe("S3EvidenceStore", () => {
     await tracked.waitForRequests();
   });
 
+  it("lets multipart completion settle after caller cancellation", async () => {
+    let completeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      completeStarted = resolve;
+    });
+    let releaseComplete!: () => void;
+    const complete = new Promise<void>((resolve) => {
+      releaseComplete = resolve;
+    });
+    let completeSignal: AbortSignal | undefined;
+    const fake = {
+      config: {
+        requestHandler: {},
+        requestChecksumCalculation: async () => "WHEN_REQUIRED",
+        forcePathStyle: true,
+      },
+      send: async (command: unknown, options?: { abortSignal?: AbortSignal }) => {
+        const name = typeof command === "object" && command !== null && "constructor" in command
+          ? String((command as { constructor?: { name?: string } }).constructor?.name)
+          : "unknown";
+        if (name === "CreateMultipartUploadCommand") return { UploadId: "upload-2" };
+        if (name === "UploadPartCommand") return { ETag: "etag" };
+        if (name === "CompleteMultipartUploadCommand") {
+          completeSignal = options?.abortSignal;
+          completeStarted();
+          if (completeSignal) {
+            await new Promise<never>((_resolve, reject) => {
+              if (completeSignal?.aborted) {
+                reject(completeSignal.reason ?? new Error("completion aborted"));
+                return;
+              }
+              completeSignal.addEventListener(
+                "abort",
+                () => reject(completeSignal?.reason ?? new Error("completion aborted")),
+                { once: true },
+              );
+            });
+          }
+          await complete;
+          return {};
+        }
+        throw new Error(`unexpected command ${name}`);
+      },
+    } as unknown as S3Client;
+    const controller = new AbortController();
+    const tracked = createTrackedAbortUploadClient(fake, controller.signal);
+    const upload = new Upload({
+      client: tracked.client,
+      params: {
+        Bucket: SYNTHETIC_BUCKET,
+        Key: "stream-multipart-complete",
+        Body: Readable.from([Buffer.alloc(6 * 1024 * 1024)]),
+      },
+      queueSize: 1,
+      leavePartsOnError: false,
+    });
+    const result = upload.done();
+    await started;
+    controller.abort(new Error("cancelled-before-complete"));
+    releaseComplete();
+    await expect(result).resolves.toEqual({});
+    expect(completeSignal).toBeUndefined();
+    await tracked.waitForRequests();
+  });
+
   it("rejects oversize, expectedLength mismatch, non-Uint8Array chunks, and invalid options", async () => {
     const { fake, store } = openStore();
     await expect(
