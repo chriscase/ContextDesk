@@ -114,6 +114,48 @@ describe("synthetic demo server", () => {
     expect(resolutions.statusCode).toBe(200);
   });
 
+  it("exposes the default strategy policy used by the administrator demo", async () => {
+    const demo = await buildDemoApp({ staticDir: null });
+    apps.push(demo);
+    const login = await demo.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: DEMO_USERNAME, password: DEMO_PASSWORD },
+    });
+    const headers = { cookie: cookie(login) };
+
+    const effective = await demo.app.inject({
+      method: "GET",
+      url: "/api/ui-strategies/effective",
+      headers,
+    });
+    expect(effective.statusCode).toBe(200);
+    expect(JSON.parse(effective.body)).toMatchObject({
+      schemaId: "cd-collab.ui_strategy_effective.v1",
+      effectiveId: "war-room",
+      defaultId: "war-room",
+      enabledIds: ["war-room", "investigation-first", "keystone"],
+      selectableIds: ["war-room", "investigation-first", "keystone"],
+      canSelect: true,
+    });
+
+    const policy = await demo.app.inject({
+      method: "GET",
+      url: "/api/admin/ui-strategies",
+      headers,
+    });
+    expect(policy.statusCode).toBe(200);
+    expect(JSON.parse(policy.body)).toMatchObject({
+      schemaId: "cd-collab.ui_strategy_policy.v1",
+      revision: 0,
+      instance: {
+        defaultId: "war-room",
+        selectionMode: "free",
+        enabledIds: ["war-room", "investigation-first", "keystone"],
+      },
+    });
+  });
+
   it("can expose provider-free log chronology through an explicitly configured local bridge", async () => {
     const demo = await buildDemoApp({
       staticDir: null,

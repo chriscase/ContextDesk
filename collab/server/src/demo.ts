@@ -58,6 +58,10 @@ import { ResolutionService } from "./modules/resolutions/index.js";
 import { syntheticComponentHealth } from "./modules/component-health/index.js";
 import { MemoryModelPurposePolicyStore, ModelPurposePolicyService } from "./modules/model-policy/index.js";
 import {
+  MemoryStrategyGovernanceStore,
+  StrategyGovernanceService,
+} from "./modules/strategy-governance/index.js";
+import {
   CORPUS_INTAKE_COMMIT_SCHEMA_ID,
   CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
@@ -938,6 +942,13 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     store: new MemoryModelPurposePolicyStore(),
     profiles: triageProfiles,
   });
+  // Keep the synthetic demo representative of the authenticated product
+  // surface: strategy governance is memory-backed here, but it still uses the
+  // same protected routes, revision checks, and audit path as a deployment.
+  const strategyGovernance = new StrategyGovernanceService({
+    store: new MemoryStrategyGovernanceStore(),
+    audit,
+  });
   const triageRuns = new TriageRunService({
     cases,
     audit,
@@ -1086,6 +1097,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       imports,
       triageRuns,
       modelPolicy,
+      strategyGovernance,
       ...(logTime ? { logTime } : {}),
       workbench,
       presence,
