@@ -1058,9 +1058,15 @@ export class S3EvidenceStore implements EvidenceStore {
     }
 
     if (typeof this.client.uploadStream === "function") {
-      await this.client.uploadStream(input, signal);
-      throwIfAborted(signal);
-      return;
+      try {
+        await this.client.uploadStream(input, signal);
+        throwIfAborted(signal);
+        return;
+      } catch (error) {
+        throwIfAborted(signal);
+        if (error instanceof S3EvidenceError) throw error;
+        throw new S3EvidenceError(operation, "unavailable");
+      }
     }
 
     // Keep the injected client route for unit tests and alternate adapters

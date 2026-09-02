@@ -65,6 +65,7 @@ class FakeS3Client {
   }> = [];
   bucketExists = true;
   putKeys: string[] = [];
+  putBytes: number[] = [];
 
   constructor(private readonly bucket: string) {}
 
@@ -87,6 +88,12 @@ class FakeS3Client {
     }
     if (command instanceof PutObjectCommand) {
       this.putKeys.push(String(input.Key ?? ""));
+      const body = input.Body;
+      if (body && typeof body === "object" && Symbol.asyncIterator in body) {
+        for await (const chunk of body as AsyncIterable<Uint8Array>) {
+          this.putBytes.push(chunk.byteLength);
+        }
+      }
       return {};
     }
     if (command instanceof ListObjectsV2Command) {
@@ -616,6 +623,24 @@ describe("createEvidenceStore readiness and sources", () => {
     } catch (error) {
       expectSanitized(error);
     }
+  });
+
+  it("keeps send-only injected clients compatible with streamed intake", async () => {
+    const fake = new FakeS3Client("war-room-evidence");
+    const store = createEvidenceStore({
+      settings: loadS3Settings(),
+      credentials: staticCredentials(),
+      createS3Client: () => fake,
+    });
+    const stage = await store.stageStream(
+      (async function* (): AsyncIterable<Uint8Array> {
+        yield new Uint8Array([1, 2, 3]);
+      })(),
+      { maxBytes: 3, expectedLength: 3, contentType: "text/plain" },
+    );
+    expect(stage.meta.byteLength).toBe(3);
+    expect(fake.putKeys).toHaveLength(1);
+    expect(fake.putBytes).toEqual([3]);
   });
 
   it("constructs the S3 client once and leaves reference sources to the caller, once each", async () => {

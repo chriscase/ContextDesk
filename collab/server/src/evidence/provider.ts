@@ -6,7 +6,7 @@
  */
 import { Agent as HttpsAgent } from "node:https";
 import type { Readable } from "node:stream";
-import { S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
+import { PutObjectCommand, S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import {
@@ -292,7 +292,11 @@ class OpaqueS3EvidenceClient implements S3EvidenceClient {
     signal?: AbortSignal,
   ): Promise<void> {
     if (!this.#streamClient) {
-      throw new Error("opaque S3 client does not support stream uploads");
+      await this.#send(
+        new PutObjectCommand(input),
+        signal ? { abortSignal: signal } : undefined,
+      );
+      return;
     }
     const abortController = new AbortController();
     const onAbort = (): void => {
