@@ -1829,6 +1829,21 @@ describe("artifact annotation runtime seam", () => {
     });
   });
 
+  it("preserves an annotation commit-outcome-unknown response without exposing its body", async () => {
+    const response = jsonResponse({ error: "commit_outcome_unknown", private: "must-not-escape" }, 503);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    await expect(investigationGateway.createArtifactAnnotation!(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.evidence,
+      { body: "Synthetic annotation", idempotencyKey: "annotation-unknown-1" },
+      options(),
+    )).resolves.toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    });
+  });
+
   it.each([401, 403] as const)(
     "preserves protected auth-loss semantics for annotation reads and writes (%i)",
     async (status) => {

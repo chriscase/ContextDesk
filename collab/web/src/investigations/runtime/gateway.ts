@@ -589,16 +589,16 @@ async function readBoundedFailureBody(
 }
 
 /**
- * Upload-only 503 parsing. Authentication loss is classified from status
- * before any body claim, including a misleading `commit_outcome_unknown`.
- * Only the bounded known code is kept; every other 503 is generic unavailable.
+ * Parse the one bounded commit acknowledgement claim shared by mutating
+ * evidence operations. Authentication loss is classified from status before
+ * any body claim, including a misleading `commit_outcome_unknown`. Only the
+ * bounded known code is kept; every other 503 is generic unavailable.
  */
-async function parseUploadFailure(
+async function parseCommitOutcomeUnknownFailure<T>(
   response: Response,
   signal: AbortSignal,
-): Promise<GatewayResult<EvidenceUploadSuccessV1>> {
-  const generic = (): GatewayResult<EvidenceUploadSuccessV1> =>
-    failed(classifyHttpFailure(response.status));
+): Promise<GatewayResult<T>> {
+  const generic = (): GatewayResult<T> => failed(classifyHttpFailure(response.status));
   if (response.status === 401 || response.status === 403) {
     return generic();
   }
@@ -630,6 +630,13 @@ async function parseUploadFailure(
   } catch {
     return signal.aborted ? aborted() : failed({ kind: "unexpected" });
   }
+}
+
+async function parseUploadFailure(
+  response: Response,
+  signal: AbortSignal,
+): Promise<GatewayResult<EvidenceUploadSuccessV1>> {
+  return parseCommitOutcomeUnknownFailure<EvidenceUploadSuccessV1>(response, signal);
 }
 
 function caseCollectionIdentity(cases: readonly CaseV1[]): boolean {
@@ -1167,22 +1174,33 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
   createArtifactAnnotation(investigationId, artifactId, input, { signal }) {
     const serialized = serializeMutationBody(signal, () => createArtifactAnnotationBody(input));
     if (!serialized.ok) return Promise.resolve(failed(serialized.error));
-    return requestParsed(
-      caseRoute(
-        investigationId,
-        `/evidence/${encodeURIComponent(artifactId)}/annotations`,
-      ),
-      {
-        method: "POST",
-        headers: JSON_HEADERS,
-        body: serialized.value,
-      },
-      signal,
-      parseArtifactAnnotation,
-      (value) => value.caseId === investigationId
-        && value.artifactId === artifactId
-        && value.id.length > 0,
+    const route = caseRoute(
+      investigationId,
+      `/evidence/${encodeURIComponent(artifactId)}/annotations`,
     );
+    return (async () => {
+      const fetched = await fetchProtected(
+        route,
+        {
+          method: "POST",
+          headers: JSON_HEADERS,
+          body: serialized.value,
+        },
+        signal,
+      );
+      if (!fetched.ok) return failed(fetched.error);
+      if (!fetched.response.ok) {
+        return parseCommitOutcomeUnknownFailure<ArtifactAnnotationV1>(fetched.response, signal);
+      }
+      return parseSuccessfulResponse(
+        fetched.response,
+        signal,
+        parseArtifactAnnotation,
+        (value) => value.caseId === investigationId
+          && value.artifactId === artifactId
+          && value.id.length > 0,
+      );
+    })();
   },
 
   updateSituation(investigationId, input, { signal }) {
