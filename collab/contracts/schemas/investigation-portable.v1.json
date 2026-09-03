@@ -297,7 +297,7 @@
           "id": { "type": "string", "minLength": 1 },
           "kind": {
             "type": "string",
-            "enum": ["message", "note", "hypothesis", "action", "upload", "external_run"]
+            "enum": ["message", "note", "hypothesis", "action", "upload", "external_run", "handoff"]
           },
           "revision": { "type": "integer", "minimum": 0 },
           "predecessorRevision": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
