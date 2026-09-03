@@ -264,8 +264,13 @@
   display: grid;
   gap: 0.7rem;
   margin: 0;
-  padding: 0;
-  list-style: none;
+  padding-inline-start: 1.45rem;
+  list-style: decimal;
+}
+
+.strategy-kit__handoff-history li::marker {
+  color: var(--muted);
+  font-size: 0.8em;
 }
 
 .strategy-kit__handoff-form label {

@@ -53,6 +53,7 @@ function contributionLabel(contribution: ContributionV1): string {
   if (contribution.kind === "hypothesis") return "Hypothesis";
   if (contribution.kind === "action") return "Next action";
   if (contribution.kind === "message") return "Team update";
+  if (contribution.kind === "handoff") return "Handoff";
   if (contribution.kind === "upload") return "Evidence added";
   return "Observation";
 }

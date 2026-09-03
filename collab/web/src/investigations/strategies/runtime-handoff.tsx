@@ -2,7 +2,6 @@ import {
   useInvestigationRuntime,
   type CaseV1,
   type ContributionV1,
-  type MutationState,
   type ResourceState,
 } from "../runtime/public.js";
 import {
@@ -10,7 +9,6 @@ import {
   type HandoffContributionRecord,
   type HandoffCreateInput,
   type HandoffCreateResult,
-  type HandoffMutationState,
   type HandoffResourceState,
 } from "./shared/index.js";
 
@@ -45,21 +43,6 @@ function toHandoffContributions(
   }
 }
 
-function toHandoffMutation(
-  state: MutationState<ContributionV1>,
-): HandoffMutationState {
-  switch (state.status) {
-    case "idle":
-      return { status: "idle" };
-    case "running":
-      return { status: "running" };
-    case "succeeded":
-      return { status: "succeeded", value: state.value };
-    case "failed":
-      return { status: "failed", error: { kind: state.error.kind } };
-  }
-}
-
 /**
  * Runtime-to-presentation adapter for the shared handoff panel.
  *
@@ -88,7 +71,6 @@ export function RuntimeHandoffPanel({ investigation }: { readonly investigation:
       contributions={toHandoffContributions(runtime.resources.contributions)}
       createContribution={createHandoff}
       refreshContributions={runtime.refresh.contributions}
-      mutationState={toHandoffMutation(runtime.mutations.createContribution)}
     />
   );
 }
