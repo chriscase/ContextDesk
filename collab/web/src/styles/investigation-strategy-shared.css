@@ -209,6 +209,12 @@
   min-width: 0;
 }
 
+/* The reference War Room keeps its own stage layout. The bridge gives the
+   shared handoff card a quiet separation when it follows that surface. */
+.war-room-handoff-bridge {
+  margin-top: 1rem;
+}
+
 .strategy-kit__handoff-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: start;

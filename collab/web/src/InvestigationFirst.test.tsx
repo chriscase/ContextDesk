@@ -22,6 +22,7 @@ import {
   InvestigationRuntimeGatewayHarness,
   makeArchiveAllowedLifecycle,
   makeCaseList,
+  makeContributionList,
   makeEvidenceUploadSuccess,
   makeEvidenceList,
   makePopulatedCase,
@@ -414,6 +415,41 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(document.activeElement).toBe(heading);
   });
 
+  it("records a shared handoff from the investigation-first detail view", async () => {
+    const handoff = makePopulatedCase();
+    const handoffContribution = {
+      ...makeContributionList().contributions[0]!,
+      id: "investigation-first-handoff",
+      kind: "handoff" as const,
+      body: "Note: The overnight queue remains elevated.",
+    };
+    const createContribution = vi.fn(async () => gatewayOk(handoffContribution));
+    const gateway = createInvestigationGatewayDouble({
+      getInvestigation: vi.fn(async () => gatewayOk(handoff)),
+      listEvidence: vi.fn(async () => gatewayOk([])),
+      listContributions: vi.fn(async () => gatewayOk([])),
+      getLifecycle: vi.fn(async () => gatewayOk(makeLifecycle(handoff))),
+      createContribution,
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: handoff.id } });
+    await screen.findByRole("heading", { name: handoff.title });
+    fireEvent.change(screen.getByRole("textbox", { name: "Note" }), {
+      target: { value: "The overnight queue remains elevated." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Record handoff" }));
+    await waitFor(() => expect(createContribution).toHaveBeenCalledTimes(1));
+    expect(createContribution).toHaveBeenCalledWith(
+      handoff.id,
+      expect.objectContaining({
+      kind: "handoff",
+      body: "Note: The overnight queue remains elevated.",
+      privacyClass: "share_safe",
+      idempotencyKey: expect.stringMatching(/^handoff-/u),
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
   it("shows durable artifact notes and submits a stable retry token", async () => {
     const existing = makeArtifactAnnotation();
     const created = makeArtifactAnnotation({ id: "annotation-created", body: "A second corroborating observation." });
@@ -548,7 +584,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
     expect(await screen.findByText("checkout-timeout.log")).toBeTruthy();
     expect(screen.getAllByText("Annotation not available").length).toBeGreaterThan(0);
-    expect(screen.getByRole("alert").textContent).toContain("Evidence annotations could not be loaded");
+    expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("Evidence annotations could not be loaded"))).toBe(true);
     expect(screen.getByRole("button", { name: "Retry evidence annotations" })).toBeTruthy();
   });
 

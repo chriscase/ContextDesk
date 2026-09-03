@@ -152,6 +152,40 @@ describe("Beacon rapid-intake strategy", () => {
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
   });
 
+  it("records a handoff through the shared panel without inventing workflow state", async () => {
+    const handoff = {
+      ...makeContributionList().contributions[0]!,
+      id: "beacon-handoff",
+      kind: "handoff" as const,
+      body: "Note: Overnight queue time remains high.\n\nNext action: Recheck the pool.",
+    };
+    const createContribution = vi.fn(async () => gatewayOk(handoff));
+    const gateway = createInvestigationGatewayDouble({ createContribution });
+    mount({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Handoff" });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Note" }), {
+      target: { value: "Overnight queue time remains high." },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Next action (optional)" }), {
+      target: { value: "Recheck the pool." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Record handoff" }));
+
+    await waitFor(() => expect(createContribution).toHaveBeenCalledTimes(1));
+    expect(createContribution).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      expect.objectContaining({
+        kind: "handoff",
+        body: "Note: Overnight queue time remains high.\n\nNext action: Recheck the pool.",
+        privacyClass: "share_safe",
+        idempotencyKey: expect.stringMatching(/^handoff-/u),
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(document.body.textContent).not.toMatch(/priority|SLA|assignment|progress/iu);
+  });
+
   it("attaches a log through the shared evidence command", async () => {
     const gateway = createInvestigationGatewayDouble();
     mount({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });

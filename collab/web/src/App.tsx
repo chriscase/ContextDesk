@@ -61,6 +61,7 @@ import {
   InvestigationRuntimeProvider,
   useInvestigationRuntime,
 } from "./investigations/runtime/public.js";
+import { RuntimeHandoffPanel } from "./investigations/strategies/runtime-handoff.js";
 import {
   InvestigationStrategyRenderer,
 } from "./investigations/strategies/StrategyRenderer.js";
@@ -133,37 +134,44 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
   if (bindings === null) return null;
 
   return (
-    <Cases
-      roles={bindings.roles}
-      capabilities={bindings.capabilities}
-      readOnly={bindings.readOnly}
-      participant={bindings.participant}
-      view={props.view}
-      focusCaseId={props.focusCaseId}
-      stage={props.stage}
-      {...(props.focus ? { focus: props.focus } : {})}
-      {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })}
-      onOpenCase={props.onOpenCase}
-      onStageChange={bindings.onStageChange}
-      onDeepNavigate={bindings.onDeepNavigate}
-      onActivityOpen={bindings.onActivityOpen}
-      onExitFocus={bindings.onExitFocus}
-      {...(props.onFocusedCaseTitle
-        ? { onFocusedCaseTitle: props.onFocusedCaseTitle }
-        : {})}
-      lifecycleBinding={{
-        lifecycle: runtime.resources.lifecycle,
-        lifecycleMutation: runtime.mutations.lifecycle,
-        canManage: runtime.capabilities.canManageLifecycle,
-        readOnly: bindings.readOnly,
-        applyAction: runtime.commands.applyLifecycle,
-        retryLifecycle: () => {
-          runtime.refresh.investigation();
-          runtime.refresh.investigations();
-          runtime.refresh.lifecycle();
-        },
-      }}
-    />
+    <>
+      <Cases
+        roles={bindings.roles}
+        capabilities={bindings.capabilities}
+        readOnly={bindings.readOnly}
+        participant={bindings.participant}
+        view={props.view}
+        focusCaseId={props.focusCaseId}
+        stage={props.stage}
+        {...(props.focus ? { focus: props.focus } : {})}
+        {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })}
+        onOpenCase={props.onOpenCase}
+        onStageChange={bindings.onStageChange}
+        onDeepNavigate={bindings.onDeepNavigate}
+        onActivityOpen={bindings.onActivityOpen}
+        onExitFocus={bindings.onExitFocus}
+        {...(props.onFocusedCaseTitle
+          ? { onFocusedCaseTitle: props.onFocusedCaseTitle }
+          : {})}
+        lifecycleBinding={{
+          lifecycle: runtime.resources.lifecycle,
+          lifecycleMutation: runtime.mutations.lifecycle,
+          canManage: runtime.capabilities.canManageLifecycle,
+          readOnly: bindings.readOnly,
+          applyAction: runtime.commands.applyLifecycle,
+          retryLifecycle: () => {
+            runtime.refresh.investigation();
+            runtime.refresh.investigations();
+            runtime.refresh.lifecycle();
+          },
+        }}
+      />
+      {props.focusCaseId !== null && runtime.resources.investigation.status === "ready" ? (
+        <div className="war-room-handoff-bridge">
+          <RuntimeHandoffPanel investigation={runtime.resources.investigation.value} />
+        </div>
+      ) : null}
+    </>
   );
 }
 
