@@ -12,6 +12,8 @@ export interface WarRoomCollectionQueryPresentation {
   readonly input: InvestigationCollectionQueryInput;
   readonly view: ResourceView<InvestigationCollectionPageV1>;
   readonly refresh: () => void;
+  /** Continue with the server-issued opaque cursor without changing the URL. */
+  readonly nextPage: () => void;
 }
 
 function inputForLocation(query: CollectionQueryLocation): InvestigationCollectionQueryInput {
@@ -65,6 +67,19 @@ export function useWarRoomCollectionQuery(
   }), [input]);
   const command = runtime.commands.queryInvestigations;
   const enabled = locationQuery !== undefined && command !== null && command !== undefined;
+  const view = enabled
+    ? selectResourceView(runtime.resources.investigationCollection)
+    : { availability: "idle" } as const;
+
+  const nextPage = useMemo(() => {
+    if (!enabled || command === null || command === undefined) {
+      return () => undefined;
+    }
+    return () => {
+      if (view.availability !== "available" || view.value.nextCursor === null) return;
+      command(Object.freeze({ ...input, cursor: view.value.nextCursor }));
+    };
+  }, [command, enabled, input, view]);
 
   useEffect(() => {
     if (!enabled || !command) return;
@@ -73,9 +88,8 @@ export function useWarRoomCollectionQuery(
 
   return {
     input,
-    view: enabled
-      ? selectResourceView(runtime.resources.investigationCollection)
-      : { availability: "idle" },
+    view,
     refresh: runtime.refresh.investigationCollection,
+    nextPage,
   };
 }

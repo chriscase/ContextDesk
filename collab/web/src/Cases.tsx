@@ -772,6 +772,7 @@ export function Cases(props: {
   collectionQuery?: CollectionQueryLocation;
   onCollectionQueryChange?: (query: CollectionQueryLocation) => void;
   onCollectionRefresh?: () => void;
+  onCollectionNextPage?: () => void;
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
@@ -1689,6 +1690,9 @@ export function Cases(props: {
             ? { onQueryChange: props.onCollectionQueryChange }
             : {})}
           onRefresh={props.onCollectionRefresh ?? (() => undefined)}
+          {...(props.onCollectionNextPage
+            ? { onNextPage: props.onCollectionNextPage }
+            : {})}
           onOpenCase={openCase}
         />
         {createForm}

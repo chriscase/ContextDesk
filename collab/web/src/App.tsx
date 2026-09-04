@@ -166,6 +166,7 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
               collectionPage: collection.view,
               collectionQuery: props.collectionQuery,
               onCollectionQueryChange: props.onCollectionQueryChange,
+              onCollectionNextPage: collection.nextPage,
             })}
         lifecycleBinding={{
           lifecycle: runtime.resources.lifecycle,

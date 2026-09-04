@@ -15,6 +15,7 @@ export interface WarRoomCollectionListProps {
   readonly onOccurredFromChange: (value: string) => void;
   readonly onQueryChange?: (query: CollectionQueryLocation) => void;
   readonly onRefresh: () => void;
+  readonly onNextPage?: () => void;
   readonly onOpenCase: (id: string) => void;
 }
 
@@ -206,6 +207,18 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
             </li>
           ))}
         </ul>
+      ) : null}
+      {page.availability === "available" && page.value.nextCursor !== null && props.onNextPage ? (
+        <nav className="case-list__pagination" aria-label="Investigation pages">
+          <button
+            type="button"
+            className="case-list__archived-reveal"
+            onClick={props.onNextPage}
+            disabled={page.refresh === "loading"}
+          >
+            {page.refresh === "loading" ? "Loading next page…" : "Load next page"}
+          </button>
+        </nav>
       ) : null}
     </section>
   );
