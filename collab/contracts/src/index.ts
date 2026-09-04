@@ -229,6 +229,8 @@ export type {
   InvestigationCollectionFacetFamilyV1,
   InvestigationCollectionFacetV1,
   InvestigationCollectionFacetsV1,
+  InvestigationCollectionImpactIdentityFacetBucketV1,
+  InvestigationCollectionImpactIdentityFacetV1,
   InvestigationCollectionPageV1,
   InvestigationCollectionQueryV1,
   InvestigationCollectionStatusV1,

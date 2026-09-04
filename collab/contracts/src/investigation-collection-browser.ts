@@ -16,6 +16,7 @@ import {
 import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import {
   normalizeSoftwareImpactIdentity,
+  softwareImpactIdentityKey,
   type SoftwareImpactIdentityV1,
 } from "./investigation-software-impact.js";
 import { isIsoInstant } from "./temporal.js";
@@ -70,15 +71,26 @@ export interface InvestigationCollectionFacetBucketV1 {
   count: number;
 }
 
+export interface InvestigationCollectionImpactIdentityFacetBucketV1 {
+  key: string;
+  count: number;
+  identity: SoftwareImpactIdentityV1;
+}
+
 export interface InvestigationCollectionFacetV1 {
   top: InvestigationCollectionFacetBucketV1[];
+  otherCount: number;
+}
+
+export interface InvestigationCollectionImpactIdentityFacetV1 {
+  top: InvestigationCollectionImpactIdentityFacetBucketV1[];
   otherCount: number;
 }
 
 export interface InvestigationCollectionFacetsV1 {
   status: InvestigationCollectionFacetV1;
   entity: InvestigationCollectionFacetV1;
-  impactIdentity: InvestigationCollectionFacetV1;
+  impactIdentity: InvestigationCollectionImpactIdentityFacetV1;
   contributor: InvestigationCollectionFacetV1;
 }
 
@@ -103,11 +115,11 @@ const queryShape: ObjectShape = {
   q: f.opt(f.str),
   status: f.opt(f.arr(f.en(...CASE_STATUSES))),
   includeArchived: f.opt(f.bool),
-  entityId: f.opt(f.nstr),
-  impactIdentity: f.opt(f.obj(impactIdentityShape)),
-  contributorId: f.opt(f.nstr),
-  recordedFrom: f.opt(f.nstr),
-  recordedTo: f.opt(f.nstr),
+  entityId: f.optNul(f.nstr),
+  impactIdentity: f.optNul(f.obj(impactIdentityShape)),
+  contributorId: f.optNul(f.nstr),
+  recordedFrom: f.optNul(f.nstr),
+  recordedTo: f.optNul(f.nstr),
   cursor: f.optNul(f.str),
   limit: f.opt(f.u64),
 };
@@ -117,15 +129,26 @@ const facetBucketShape: ObjectShape = {
   count: f.req(f.u64),
 };
 
+const impactIdentityFacetBucketShape: ObjectShape = {
+  key: f.req(f.nstr),
+  count: f.req(f.u64),
+  identity: f.req(f.obj(impactIdentityShape)),
+};
+
 const facetShape: ObjectShape = {
   top: f.req(f.arr(f.obj(facetBucketShape))),
+  otherCount: f.req(f.u64),
+};
+
+const impactIdentityFacetShape: ObjectShape = {
+  top: f.req(f.arr(f.obj(impactIdentityFacetBucketShape))),
   otherCount: f.req(f.u64),
 };
 
 const facetsShape: ObjectShape = {
   status: f.req(f.obj(facetShape)),
   entity: f.req(f.obj(facetShape)),
-  impactIdentity: f.req(f.obj(facetShape)),
+  impactIdentity: f.req(f.obj(impactIdentityFacetShape)),
   contributor: f.req(f.obj(facetShape)),
 };
 
@@ -211,10 +234,27 @@ function parseCollectionCase(raw: unknown, index: number): CaseV1 {
   }
 }
 
+function assertFacetBucketKey(
+  keyPath: string,
+  key: string,
+  family: InvestigationCollectionFacetFamilyV1,
+): void {
+  if (hasControlChars(key) || key.length > INVESTIGATION_COLLECTION_LIMITS.maxFacetKeyChars) {
+    throw new ContractViolation(keyPath, "facet key is not bounded display text");
+  }
+  if (family === "status") {
+    if (!(CASE_STATUSES as readonly string[]).includes(key)) {
+      throw new ContractViolation(keyPath, "status facet key is not a recorded case status");
+    }
+  } else if (family !== "impactIdentity" && !FILTER_ID_RE.test(key)) {
+    throw new ContractViolation(keyPath, "expected a bounded identity token");
+  }
+}
+
 function assertFacet(
   path: string,
   facet: InvestigationCollectionFacetV1,
-  family: InvestigationCollectionFacetFamilyV1,
+  family: Exclude<InvestigationCollectionFacetFamilyV1, "impactIdentity">,
 ): void {
   if (facet.top.length > INVESTIGATION_COLLECTION_LIMITS.maxFacetTop) {
     throw new ContractViolation(`${path}.top`, "facet top exceeds cap");
@@ -222,16 +262,7 @@ function assertFacet(
   const seen = new Set<string>();
   facet.top.forEach((bucket, index) => {
     const keyPath = `${path}.top[${index}].key`;
-    if (hasControlChars(bucket.key) || bucket.key.length > INVESTIGATION_COLLECTION_LIMITS.maxFacetKeyChars) {
-      throw new ContractViolation(keyPath, "facet key is not bounded display text");
-    }
-    if (family === "status") {
-      if (!(CASE_STATUSES as readonly string[]).includes(bucket.key)) {
-        throw new ContractViolation(keyPath, "status facet key is not a recorded case status");
-      }
-    } else if (family !== "impactIdentity" && !FILTER_ID_RE.test(bucket.key)) {
-      throw new ContractViolation(keyPath, "expected a bounded identity token");
-    }
+    assertFacetBucketKey(keyPath, bucket.key, family);
     if (seen.has(bucket.key)) {
       throw new ContractViolation(keyPath, "duplicate facet count identity");
     }
@@ -239,23 +270,36 @@ function assertFacet(
   });
 }
 
-function assertItemIdentities(items: CaseV1[]): void {
+function assertImpactIdentityFacet(
+  path: string,
+  facet: InvestigationCollectionImpactIdentityFacetV1,
+): InvestigationCollectionImpactIdentityFacetV1 {
+  if (facet.top.length > INVESTIGATION_COLLECTION_LIMITS.maxFacetTop) {
+    throw new ContractViolation(`${path}.top`, "facet top exceeds cap");
+  }
+  const seen = new Set<string>();
+  const top = facet.top.map((bucket, index) => {
+    const keyPath = `${path}.top[${index}].key`;
+    const identityPath = `${path}.top[${index}].identity`;
+    assertFacetBucketKey(keyPath, bucket.key, "impactIdentity");
+    const identity = normalizeSoftwareImpactIdentity(bucket.identity, identityPath);
+    const canonical = softwareImpactIdentityKey(identity);
+    if (seen.has(canonical)) {
+      throw new ContractViolation(identityPath, "duplicate facet count identity");
+    }
+    seen.add(canonical);
+    return { key: bucket.key, count: bucket.count, identity };
+  });
+  return { top, otherCount: facet.otherCount };
+}
+
+function assertUniqueCaseIdentities(items: CaseV1[]): void {
   const seen = new Set<string>();
   items.forEach((item, index) => {
     if (seen.has(item.id)) {
       throw new ContractViolation(`$.items[${index}].id`, "duplicate case identity");
     }
     seen.add(item.id);
-    const participants = new Set<string>();
-    item.participants.forEach((participant, participantIndex) => {
-      if (participants.has(participant.identityId)) {
-        throw new ContractViolation(
-          `$.items[${index}].participants[${participantIndex}].identityId`,
-          "duplicate participant identity",
-        );
-      }
-      participants.add(participant.identityId);
-    });
   });
 }
 
@@ -266,21 +310,21 @@ export function parseInvestigationCollectionQuery(raw: unknown): InvestigationCo
     q?: string;
     status?: CaseStatus[];
     includeArchived?: boolean;
-    entityId?: string;
-    impactIdentity?: SoftwareImpactIdentityV1;
-    contributorId?: string;
-    recordedFrom?: string;
-    recordedTo?: string;
+    entityId?: string | null;
+    impactIdentity?: SoftwareImpactIdentityV1 | null;
+    contributorId?: string | null;
+    recordedFrom?: string | null;
+    recordedTo?: string | null;
     cursor?: string | null;
     limit?: number;
   };
   const q = assertQueryText("$.q", body.q ?? "");
   const status = body.status ? [...body.status] : [];
   assertUniqueStatuses(status);
-  if (body.entityId !== undefined) assertFilterId("$.entityId", body.entityId);
-  if (body.contributorId !== undefined) assertFilterId("$.contributorId", body.contributorId);
+  if (body.entityId != null) assertFilterId("$.entityId", body.entityId);
+  if (body.contributorId != null) assertFilterId("$.contributorId", body.contributorId);
   const impactIdentity =
-    body.impactIdentity === undefined
+    body.impactIdentity == null
       ? null
       : normalizeSoftwareImpactIdentity(body.impactIdentity, "$.impactIdentity");
   const recordedFrom = body.recordedFrom ?? null;
@@ -322,17 +366,25 @@ export function parseInvestigationCollectionPage(raw: unknown): InvestigationCol
   }
   const page = raw as InvestigationCollectionPageV1;
   const items = record.items.map((item, index) => parseCollectionCase(item, index));
-  assertItemIdentities(items);
+  assertUniqueCaseIdentities(items);
   if (page.nextCursor !== null) assertOpaqueCursor("$.nextCursor", page.nextCursor);
   assertFacet("$.facets.status", page.facets.status, "status");
   assertFacet("$.facets.entity", page.facets.entity, "entity");
-  assertFacet("$.facets.impactIdentity", page.facets.impactIdentity, "impactIdentity");
+  const impactIdentity = assertImpactIdentityFacet(
+    "$.facets.impactIdentity",
+    page.facets.impactIdentity,
+  );
   assertFacet("$.facets.contributor", page.facets.contributor, "contributor");
   return {
     schemaId: INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
     items,
     nextCursor: page.nextCursor,
     hiddenArchivedCount: page.hiddenArchivedCount,
-    facets: page.facets,
+    facets: {
+      status: page.facets.status,
+      entity: page.facets.entity,
+      impactIdentity,
+      contributor: page.facets.contributor,
+    },
   };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CASE_LIST_SCHEMA_ID, parseCaseList } from "./case.js";
+import { CASE_LIST_SCHEMA_ID, parseCase, parseCaseList } from "./case.js";
 import { ContractViolation } from "./parse.js";
 import {
   INVESTIGATION_COLLECTION_LIMITS,
@@ -12,6 +12,14 @@ import {
 const CASE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CASE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const OPAQUE_CURSOR = "eyJzZXJ2ZXJPd25lZCI6dHJ1ZX0";
+const IMPACT_IDENTITY = {
+  productName: "Fixture Desk",
+  version: "4.2",
+  build: "",
+  component: "queue-worker",
+  environment: "",
+};
+const IMPACT_IDENTITY_LABEL = "Fixture Desk · 4.2 · queue-worker";
 
 function caseRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -59,7 +67,7 @@ function facets(overrides: Record<string, unknown> = {}) {
       otherCount: 3,
     },
     impactIdentity: {
-      top: [{ key: "Fixture Desk · 4.2 · queue-worker", count: 1 }],
+      top: [{ key: IMPACT_IDENTITY_LABEL, count: 1, identity: IMPACT_IDENTITY }],
       otherCount: 4,
     },
     contributor: {
@@ -137,6 +145,55 @@ describe("investigation collection query", () => {
     expect(parsed.recordedTo).toBe("2026-08-26T00:00:00.000Z");
     expect(parsed.cursor).toBe(OPAQUE_CURSOR);
     expect(parsed.limit).toBe(25);
+  });
+
+  it("treats absent and null optional filters as the same omitted bound", () => {
+    const omitted = parseInvestigationCollectionQuery({
+      schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+    });
+    const explicitNulls = parseInvestigationCollectionQuery({
+      schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+      entityId: null,
+      impactIdentity: null,
+      contributorId: null,
+      recordedFrom: null,
+      recordedTo: null,
+      cursor: null,
+    });
+    expect(explicitNulls).toEqual(omitted);
+    expect(explicitNulls.entityId).toBeNull();
+    expect(explicitNulls.impactIdentity).toBeNull();
+    expect(explicitNulls.contributorId).toBeNull();
+    expect(explicitNulls.recordedFrom).toBeNull();
+    expect(explicitNulls.recordedTo).toBeNull();
+    expect(explicitNulls.cursor).toBeNull();
+  });
+
+  it("round-trips its own normalized output when paging with a cursor", () => {
+    const parsed = parseInvestigationCollectionQuery({
+      schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+    });
+    const next = parseInvestigationCollectionQuery({
+      ...parsed,
+      cursor: OPAQUE_CURSOR,
+    });
+    expect(next).toEqual({ ...parsed, cursor: OPAQUE_CURSOR });
+    const full = parseInvestigationCollectionQuery({
+      schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+      q: "storefront",
+      status: ["open"],
+      includeArchived: true,
+      entityId: "ent-northwind",
+      impactIdentity: IMPACT_IDENTITY,
+      contributorId: "identity-alice",
+      recordedFrom: "2026-01-01T00:00:00.000Z",
+      recordedTo: "2026-08-26T00:00:00.000Z",
+      limit: 25,
+    });
+    expect(parseInvestigationCollectionQuery({ ...full, cursor: OPAQUE_CURSOR })).toEqual({
+      ...full,
+      cursor: OPAQUE_CURSOR,
+    });
   });
 
   it("parses a valid filtered query without ranking fields", () => {
@@ -294,6 +351,9 @@ describe("investigation collection page", () => {
       "resolved",
       "archived",
     ]);
+    expect(parsed.facets.impactIdentity.top).toEqual([
+      { key: IMPACT_IDENTITY_LABEL, count: 1, identity: IMPACT_IDENTITY },
+    ]);
   });
 
   it("parses an empty filtered page without inventing ranking", () => {
@@ -414,27 +474,111 @@ describe("investigation collection page", () => {
     expect(isolated.facets.entity.top[0]?.key).toBe("open");
     expect(isolated.facets.status.top[0]?.key).toBe("open");
     expect(isolated.facets.impactIdentity.top[0]?.key).toContain("Fixture Desk");
+    expect(isolated.facets.impactIdentity.top[0]?.identity).toEqual(IMPACT_IDENTITY);
     expect(isolated.facets.contributor.top[0]?.key).toBe("identity-alice");
   });
 
-  it("rejects duplicate case and participant identities", () => {
-    expect(() =>
-      parseInvestigationCollectionPage(page({ items: [caseRow(), caseRow()] })),
-    ).toThrow(/duplicate case identity/);
+  it("keeps impactIdentity facet identity canonical and does not invent order", () => {
+    const collidingLabel = "Fixture Desk · 4.2";
+    const parsed = parseInvestigationCollectionPage(
+      page({
+        facets: facets({
+          impactIdentity: {
+            top: [
+              {
+                key: collidingLabel,
+                count: 1,
+                identity: {
+                  productName: "Fixture Desk",
+                  version: "4.2",
+                  build: "",
+                  component: "",
+                  environment: "",
+                },
+              },
+              {
+                key: collidingLabel,
+                count: 2,
+                identity: {
+                  productName: "Fixture Desk · 4.2",
+                  version: "",
+                  build: "",
+                  component: "",
+                  environment: "",
+                },
+              },
+            ],
+            otherCount: 0,
+          },
+        }),
+      }),
+    );
+    expect(parsed.facets.impactIdentity.top.map((bucket) => bucket.identity.productName)).toEqual([
+      "Fixture Desk",
+      "Fixture Desk · 4.2",
+    ]);
     expect(() =>
       parseInvestigationCollectionPage(
         page({
-          items: [
-            caseRow({
-              participants: [
-                { identityId: "identity-alice", username: "alice" },
-                { identityId: "identity-alice", username: "Alice" },
+          facets: facets({
+            impactIdentity: {
+              top: [
+                { key: "Fixture Desk", count: 1, identity: IMPACT_IDENTITY },
+                {
+                  key: "fixture desk · 4.2 · queue-worker",
+                  count: 2,
+                  identity: {
+                    productName: "fixture desk",
+                    version: "4.2",
+                    build: "",
+                    component: "queue-worker",
+                    environment: "",
+                  },
+                },
               ],
-            }),
-          ],
+              otherCount: 0,
+            },
+          }),
         }),
       ),
-    ).toThrow(/duplicate participant identity/);
+    ).toThrow(/duplicate facet count identity/);
+    expect(() =>
+      parseInvestigationCollectionPage(
+        page({
+          facets: facets({
+            impactIdentity: { top: [{ key: IMPACT_IDENTITY_LABEL, count: 1 }], otherCount: 0 },
+          }),
+        }),
+      ),
+    ).toThrow(/missing required key/);
+    expect(() =>
+      parseInvestigationCollectionPage(
+        page({
+          facets: facets({
+            entity: {
+              top: [{ key: "ent-northwind", count: 1, identity: IMPACT_IDENTITY }],
+              otherCount: 0,
+            },
+          }),
+        }),
+      ),
+    ).toThrow(/unknown key/);
+  });
+
+  it("rejects duplicate case identities on a page and accepts CaseV1 participant lists", () => {
+    expect(() =>
+      parseInvestigationCollectionPage(page({ items: [caseRow(), caseRow()] })),
+    ).toThrow(/duplicate case identity/);
+    const acceptedByCase = caseRow({
+      participants: [
+        { identityId: "identity-alice", username: "alice" },
+        { identityId: "identity-alice", username: "Alice" },
+      ],
+    });
+    expect(parseCase(acceptedByCase).participants).toHaveLength(2);
+    expect(
+      parseInvestigationCollectionPage(page({ items: [acceptedByCase] })).items[0]?.participants,
+    ).toHaveLength(2);
   });
 
   it("leaves the current case list envelope compatible and distinct", () => {
