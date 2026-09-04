@@ -21,9 +21,10 @@ const ARTIFACT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 type MutablePage = {
   items: Array<{
     actorLabel: string;
+    investigationId: string;
     resolvedRoute: string;
     secondaryContext?: { label: string; value: string };
-    locator: { kind: string; resourceId: string; pathname: string };
+    locator: { investigationId: string; kind: string; resourceId: string; pathname: string };
   }>;
 };
 
@@ -96,6 +97,12 @@ describe("browser investigation activity contract", () => {
       (candidate) => { candidate.items[0].locator.kind = "decision_revision"; },
       (candidate) => { candidate.items[0].actorLabel = "Participant\u200bhidden"; },
       (candidate) => { candidate.items[0].secondaryContext = { label: "stage\u202e", value: "capture" }; },
+      (candidate) => {
+        candidate.items[0].investigationId = CASE_ID.toUpperCase();
+        candidate.items[0].locator.investigationId = CASE_ID.toUpperCase();
+        candidate.items[0].locator.pathname = candidate.items[0].locator.pathname.replaceAll(CASE_ID, CASE_ID.toUpperCase());
+        candidate.items[0].resolvedRoute = candidate.items[0].locator.pathname;
+      },
     ];
     for (const mutate of mutations) {
       const candidate = structuredClone(page()) as MutablePage;
@@ -103,5 +110,16 @@ describe("browser investigation activity contract", () => {
       expect(() => parseServerPage(candidate)).toThrow();
       expect(() => parseInvestigationActivityPage(candidate)).toThrow();
     }
+  });
+
+  it("accepts the same lowercase RFC 4122 version range as the server", () => {
+    const versionSevenId = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa";
+    const candidate = structuredClone(page()) as MutablePage;
+    candidate.items[0]!.investigationId = versionSevenId;
+    candidate.items[0]!.locator.investigationId = versionSevenId;
+    candidate.items[0]!.locator.pathname = candidate.items[0]!.locator.pathname.replaceAll(CASE_ID, versionSevenId);
+    candidate.items[0]!.resolvedRoute = candidate.items[0]!.locator.pathname;
+    expect(() => parseServerPage(candidate)).not.toThrow();
+    expect(() => parseInvestigationActivityPage(candidate)).not.toThrow();
   });
 });
