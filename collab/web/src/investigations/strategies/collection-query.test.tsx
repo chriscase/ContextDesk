@@ -46,6 +46,13 @@ function pageFixture() {
   });
 }
 
+function pageFixtureWithCursor(nextCursor: string): ReturnType<typeof pageFixture> {
+  return parseInvestigationCollectionPage({
+    ...pageFixture(),
+    nextCursor,
+  });
+}
+
 function Probe({ query }: { readonly query?: CollectionQueryLocation }) {
   const collection = useInvestigationCollectionQuery(query);
   const runtime = useInvestigationRuntime();
@@ -124,6 +131,46 @@ describe("investigation collection query shell adapter", () => {
       q: "checkout",
       status: ["monitoring"],
       includeArchived: false,
+    });
+  });
+
+  it("continues with the runtime cursor without changing shell query state", async () => {
+    const queryInvestigations = vi.fn<QueryFn>(
+      async () => gatewayOk(pageFixtureWithCursor("eyJwYWdlIjoyfQ")),
+    );
+    let nextPage: (() => void) | undefined;
+    function ProbeWithNext() {
+      const collection = useInvestigationCollectionQuery({
+        ...DEFAULT_COLLECTION_QUERY,
+        q: "checkout",
+      });
+      nextPage = collection.nextPage;
+      return <output data-testid="cursor-page">{collection.view.availability}</output>;
+    }
+    render(
+      <InvestigationRuntimeGatewayHarness gateway={createInvestigationGatewayDouble({ queryInvestigations })}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <ProbeWithNext />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>,
+    );
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(document.querySelector("[data-testid=cursor-page]")?.textContent).toBe("available"));
+    nextPage?.();
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({
+      q: "checkout",
+      cursor: "eyJwYWdlIjoyfQ",
     });
   });
 

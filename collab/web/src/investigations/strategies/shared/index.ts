@@ -29,3 +29,6 @@ export type {
 
 export { HandoffPanel } from "./HandoffPanel.js";
 export type { HandoffPanelProps } from "./HandoffPanel.js";
+
+export { CollectionPagination } from "./CollectionPagination.js";
+export type { CollectionPageView, CollectionPaginationProps } from "./CollectionPagination.js";

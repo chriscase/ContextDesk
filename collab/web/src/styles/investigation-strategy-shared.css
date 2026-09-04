@@ -125,6 +125,16 @@
   justify-content: flex-start;
 }
 
+.strategy-kit__pagination {
+  display: flex;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.strategy-kit__pagination button:disabled {
+  cursor: wait;
+}
+
 .strategy-kit button,
 .strategy-kit input,
 .strategy-kit select {

@@ -16,6 +16,8 @@ export interface InvestigationCollectionQueryPresentation {
   readonly input: InvestigationCollectionQueryInput;
   readonly view: ResourceView<InvestigationCollectionPageV1>;
   readonly refresh: () => void;
+  /** Continue with the server-issued cursor without changing shell location. */
+  readonly nextPage: () => void;
 }
 
 function inputForLocation(query: CollectionQueryLocation): InvestigationCollectionQueryInput {
@@ -61,6 +63,19 @@ export function useInvestigationCollectionQuery(
   }), [input]);
   const command = runtime.commands.queryInvestigations;
   const enabled = locationQuery !== undefined && command !== undefined && command !== null;
+  const view = enabled
+    ? selectResourceView(runtime.resources.investigationCollection)
+    : { availability: "idle" } as const;
+
+  const nextPage = useMemo(() => {
+    if (!enabled || command === undefined || command === null) {
+      return () => undefined;
+    }
+    return () => {
+      if (view.availability !== "available" || view.value.nextCursor === null || view.refresh === "loading") return;
+      command(Object.freeze({ ...input, cursor: view.value.nextCursor }));
+    };
+  }, [command, enabled, input, view]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -70,9 +85,8 @@ export function useInvestigationCollectionQuery(
   return {
     enabled,
     input,
-    view: enabled
-      ? selectResourceView(runtime.resources.investigationCollection)
-      : { availability: "idle" },
+    view,
     refresh: runtime.refresh.investigationCollection,
+    nextPage,
   };
 }
