@@ -31,7 +31,6 @@ const LEGACY_WAR_ROOM_RUNTIME_CALLS: Readonly<
   "collab/web/src/CaseBoardPanel.tsx": ["GET evidence"],
   "collab/web/src/CaseDiscussion.tsx": ["GET contributions", "POST contributions"],
   "collab/web/src/Cases.tsx": [
-    "GET cases",
     "POST cases",
     "GET contributions",
     "POST contributions",
@@ -39,6 +38,7 @@ const LEGACY_WAR_ROOM_RUNTIME_CALLS: Readonly<
   ],
   "collab/web/src/ExperimentLab.tsx": ["GET evidence"],
   "collab/web/src/TriageRunPanel.tsx": ["GET evidence"],
+  "collab/web/src/legacy-cases-fetch.ts": ["GET cases"],
 });
 
 const EXPECTED_COVERED_OPERATION_DEBT: Readonly<
@@ -371,6 +371,7 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
   const sharedRoot = resolve(strategiesRoot, "shared");
   const sharedIndexModule = resolve(sharedRoot, "index");
   const runtimeHandoffModule = resolve(strategiesRoot, "runtime-handoff");
+  const collectionQueryAdapterModule = resolve(strategiesRoot, "collection-query");
 
   const relativeInvestigationPath = relative(INVESTIGATIONS_ROOT, path).split(sep).join("/");
   const inRuntime = relativeInvestigationPath.startsWith("runtime/");
@@ -430,6 +431,7 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
       const isStrategyContract = sameModule(resolvedModule, contractModule);
       const isSharedIndex = sameModule(resolvedModule, sharedIndexModule);
       const isRuntimeHandoffAdapter = sameModule(resolvedModule, runtimeHandoffModule);
+      const isCollectionQueryAdapter = sameModule(resolvedModule, collectionQueryAdapterModule);
 
       if (
         strategyId === "shared"
@@ -447,6 +449,7 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
         && !isStrategyContract
         && !isSharedIndex
         && !isRuntimeHandoffAdapter
+        && !isCollectionQueryAdapter
       ) {
         violations.push(
           `${location} imports investigation behavior outside runtime/public.ts, strategies/contract.ts, the exact shared/index.ts presentation surface, or the reviewed runtime-handoff adapter`,

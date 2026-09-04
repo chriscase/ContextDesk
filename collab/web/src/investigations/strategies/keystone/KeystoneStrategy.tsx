@@ -7,6 +7,7 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
+import { useInvestigationCollectionQuery } from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
@@ -77,6 +78,10 @@ function tabForStage(stage: InvestigationStrategyShellProps["stage"]): KeystoneI
 export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   const runtime = useInvestigationRuntime();
   const investigations = selectResourceView(runtime.resources.investigations);
+  const collection = useInvestigationCollectionQuery(
+    props.focusCaseId === null ? props.collectionQuery : undefined,
+  );
+  const collectionView = collection.view;
   const investigation = selectResourceView(runtime.resources.investigation);
   const evidenceInventory = useMemo(
     () => selectEvidenceInventory(
@@ -102,9 +107,24 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   const priorFocusId = useRef<string | null>(props.focusCaseId);
   const focusedArrival = useRef<string | null>(null);
   const cases = investigations.availability === "available" ? investigations.value : [];
+  const collectionCases = collectionView.availability === "available"
+    ? collectionView.value.items
+    : [];
+  const collectionEnabled = collection.enabled;
+  const collectionQuery = props.collectionQuery;
+  const browseQuery = collectionEnabled && collectionQuery !== undefined
+    ? collectionQuery.q
+    : query;
+  const browseStatus = collectionEnabled && collectionQuery !== undefined
+    ? collectionQuery.status[0] ?? "all"
+    : status;
+  const browseIncludeArchived = collectionEnabled && collectionQuery !== undefined
+    ? collectionQuery.includeArchived
+    : false;
+  const browseCases = collectionEnabled ? collectionCases : cases;
   const filteredCases = useMemo(
-    () => filterInvestigations(cases, query, status),
-    [cases, query, status],
+    () => collectionEnabled ? browseCases : filterInvestigations(browseCases, query, status),
+    [browseCases, collectionEnabled, query, status],
   );
   const identityScopeKey = JSON.stringify([
     "keystone-identity-v1",
@@ -225,6 +245,26 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     setWorkingSetState({ scope, ids: [] });
   }
 
+  function updateCollectionQuery(next: {
+    q?: string;
+    status?: KeystoneStatusFilter;
+    includeArchived?: boolean;
+  }) {
+    if (collectionEnabled && collectionQuery !== undefined && props.onCollectionQueryChange) {
+      props.onCollectionQueryChange({
+        ...collectionQuery,
+        ...(next.q === undefined ? {} : { q: next.q }),
+        ...(next.status === undefined ? {} : {
+          status: next.status === "all" ? [] : [next.status],
+        }),
+        ...(next.includeArchived === undefined ? {} : { includeArchived: next.includeArchived }),
+      });
+      return;
+    }
+    if (next.q !== undefined) setQuery(next.q);
+    if (next.status !== undefined) setStatus(next.status);
+  }
+
   function changeInspectorTab(tab: KeystoneInspectorTab) {
     setInspectorTab(tab);
     if (props.focusCaseId === null) return;
@@ -236,10 +276,24 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
 
   function renderCollection() {
     const denied = !runtime.capabilities.canRead;
+    const listView = collectionEnabled ? collectionView : investigations;
     const initialLoading = !denied
-      && (investigations.availability === "idle" || investigations.availability === "loading");
-    const refreshLoading = investigations.availability === "available"
-      && investigations.refresh === "loading";
+      && (listView.availability === "idle" || listView.availability === "loading");
+    const refreshLoading = listView.availability === "available"
+      && listView.refresh === "loading";
+    const statusFacets = collectionEnabled && collectionView.availability === "available"
+      ? collectionView.value.facets.status.top
+      : [];
+    const hiddenArchivedCount = collectionEnabled && collectionView.availability === "available"
+      ? collectionView.value.hiddenArchivedCount
+      : 0;
+    const countLabel = denied || listView.availability === "unavailable"
+      ? "Count unavailable"
+      : listView.availability === "available"
+        ? `${filteredCases.length} shown${hiddenArchivedCount > 0
+          ? ` · ${hiddenArchivedCount} archived hidden`
+          : ""}`
+        : "Counting investigations…";
     return (
       <StrategySurface className="keystone-strategy" labelledBy="keystone-collection-title">
         <StrategyHero
@@ -255,26 +309,24 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
           title="Recorded collection"
           titleId="keystone-collection-panel-title"
           description={<p>Search and status filters narrow this view only. They do not assign priority or reorder investigations.</p>}
-          actions={investigations.availability === "available"
-            ? <StrategyBadge>{filteredCases.length} shown · {cases.length} total</StrategyBadge>
-            : null}
+          actions={<StrategyBadge>{countLabel}</StrategyBadge>}
           busy={initialLoading || refreshLoading}
         >
           <div className="keystone-strategy__filters">
             <label>
               <span>Search investigations</span>
-              <input
-                type="search"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                <input
+                  type="search"
+                value={browseQuery}
+                onChange={(event) => updateCollectionQuery({ q: event.target.value })}
                 placeholder="Title, ID, product, build, or recorded context"
               />
             </label>
             <label>
               <span>Status</span>
-              <select
-                value={status}
-                onChange={(event) => setStatus(event.target.value as KeystoneStatusFilter)}
+                <select
+                value={browseStatus}
+                onChange={(event) => updateCollectionQuery({ status: event.target.value as KeystoneStatusFilter })}
               >
                 <option value="all">All recorded statuses</option>
                 <option value="open">Open</option>
@@ -283,46 +335,73 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 <option value="archived">Archived</option>
               </select>
             </label>
+            {collectionEnabled ? (
+              <label className="keystone-strategy__checkbox">
+                <input
+                  type="checkbox"
+                  checked={browseIncludeArchived}
+                  onChange={(event) => updateCollectionQuery({ includeArchived: event.target.checked })}
+                />
+                <span>Include archived</span>
+              </label>
+            ) : null}
           </div>
+          {statusFacets.length > 0 ? (
+            <div className="keystone-strategy__facets" aria-label="Recorded status counts">
+              {statusFacets.map((facet) => (
+                <button
+                  key={facet.key}
+                  type="button"
+                  aria-pressed={browseStatus === facet.key}
+                  onClick={() => updateCollectionQuery({
+                    status: browseStatus === facet.key ? "all" : facet.key as KeystoneStatusFilter,
+                  })}
+                >
+                  <span>{facet.key}</span>
+                  <strong>{facet.count}</strong>
+                </button>
+              ))}
+            </div>
+          ) : null}
           {denied ? (
             <StrategyStateNotice title="Investigation reading unavailable">
               Your current access does not include reading investigations. No investigation data was requested.
             </StrategyStateNotice>
           ) : null}
           {initialLoading ? <StrategyStateNotice busy>Loading investigations…</StrategyStateNotice> : null}
-          {investigations.availability === "unavailable" ? (
+          {listView.availability === "unavailable" ? (
             <StrategyStateNotice
               role="alert"
               tone="danger"
               title="Investigation collection unavailable"
-              action={<button type="button" onClick={runtime.refresh.investigations}>Retry loading investigations</button>}
+              action={<button type="button" onClick={collectionEnabled ? collection.refresh : runtime.refresh.investigations}>Retry loading investigations</button>}
             >
-              {readFailure(investigations.error, "collection")}
+              {readFailure(listView.error, "collection")}
             </StrategyStateNotice>
           ) : null}
-          {investigations.availability === "available" && investigations.refresh === "loading" ? (
+          {listView.availability === "available" && listView.refresh === "loading" ? (
             <StrategyStateNotice busy title="Refreshing collection">
               The last available collection remains usable while a newer read is in progress.
             </StrategyStateNotice>
           ) : null}
-          {investigations.availability === "available" && investigations.refresh === "failed" ? (
+          {listView.availability === "available" && listView.refresh === "failed" ? (
             <StrategyStateNotice
               role="alert"
               tone="warning"
               title="Collection refresh incomplete"
-              action={<button type="button" onClick={runtime.refresh.investigations}>Retry loading investigations</button>}
+              action={<button type="button" onClick={collectionEnabled ? collection.refresh : runtime.refresh.investigations}>Retry loading investigations</button>}
             >
-              {readFailure(investigations.refreshError, "collection")} The last available collection remains visible.
+              {readFailure(listView.refreshError, "collection")} The last available collection remains visible.
             </StrategyStateNotice>
           ) : null}
-          {investigations.availability === "available" && filteredCases.length === 0 ? (
-            <StrategyStateNotice title={cases.length === 0 ? "No investigations recorded" : "No matching investigations"}>
-              {cases.length === 0
+          {listView.availability === "available" && filteredCases.length === 0 ? (
+            <StrategyStateNotice title={browseCases.length === 0 ? "No investigations recorded" : "No matching investigations"}>
+              {browseCases.length === 0
                 ? "The available collection is empty."
                 : "Try a different search or recorded status."}
             </StrategyStateNotice>
           ) : null}
-          {investigations.availability === "available" && filteredCases.length > 0 ? (
+          {listView.availability === "available" && filteredCases.length > 0 ? (
             <ol className="keystone-strategy__collection-list">
               {filteredCases.map((row) => (
                 <li key={row.id}>

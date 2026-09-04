@@ -131,4 +131,30 @@ describe("software impact service", () => {
     );
     expect(suggestions.values).toEqual(["QA / us-central"]);
   });
+
+  it("projects only canonical identities from the authorized collection set", async () => {
+    const service = new SoftwareImpactService({
+      investigations: {
+        getCase: async (id) => ({ id, title: id }),
+        appendDomainTimeline: async () => undefined,
+      },
+    });
+    await service.record("case-a", alice, false, {
+      productName: "Fixture Desk",
+      version: "4.2",
+      status: "observed",
+    }, "test");
+    await service.record("case-b", bob, false, {
+      productName: "Secret Catalog",
+      status: "suspected",
+    }, "test");
+    expect(await service.collectionIdentities(["case-a"])).toEqual([{
+      caseId: "case-a",
+      productName: "Fixture Desk",
+      version: "4.2",
+      build: "",
+      component: "",
+      environment: "",
+    }]);
+  });
 });

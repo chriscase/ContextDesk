@@ -319,6 +319,31 @@ export class EntityService {
     };
   }
 
+  /**
+   * Storage-backed collection-query projection for a membership-authorized
+   * investigation set. It intentionally carries only the link identity and a
+   * display label; profile and privacy metadata never enter the case query.
+   */
+  async collectionLinks(
+    visibleCaseIds: readonly string[],
+  ): Promise<Array<{ caseId: string; entityId: string; label: string }>> {
+    const allowed = new Set(visibleCaseIds);
+    const rows = (await this.store.listAllInvolvements()).filter((row) => allowed.has(row.caseId));
+    const entities = new Map<string, EntityRow | null>();
+    const links: Array<{ caseId: string; entityId: string; label: string }> = [];
+    for (const row of rows) {
+      if (!entities.has(row.entityId)) {
+        entities.set(row.entityId, await this.store.getEntity(row.entityId));
+      }
+      links.push({
+        caseId: row.caseId,
+        entityId: row.entityId,
+        label: entities.get(row.entityId)?.label ?? row.recordedLabel,
+      });
+    }
+    return links;
+  }
+
   async recordInvolvement(
     caseId: string,
     actor: Actor,

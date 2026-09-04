@@ -40,6 +40,8 @@ export function createInvestigationGatewayDouble(
     error: { kind: "unexpected" },
   });
   return {
+    // queryInvestigations is intentionally absent so a pre-query double stays
+    // valid; the fail-closed resolver reports unavailable instead of a page.
     listInvestigations: vi.fn(async () => gatewayOk(makeCaseList().cases)),
     getInvestigation: vi.fn(async () => gatewayOk(makePopulatedCase())),
     createInvestigation: vi.fn(() => unexpected<CaseV1>()),

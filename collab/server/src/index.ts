@@ -40,7 +40,12 @@ import {
   type GroupRoleStore,
 } from "./modules/authz/index.js";
 import { CatalogService, PgCatalogStore, type CatalogStore } from "./modules/catalog/index.js";
-import { CaseService, PgCaseStore, type CaseStore } from "./modules/cases/index.js";
+import {
+  CaseService,
+  createInvestigationCollectionGraph,
+  PgCaseStore,
+  type CaseStore,
+} from "./modules/cases/index.js";
 import { ExportService, loadExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, PgRunStore, type RunStore } from "./modules/import/index.js";
 import { ExperimentService, PgExperimentStore, type ExperimentStore } from "./modules/experiments/index.js";
@@ -236,6 +241,12 @@ async function main(): Promise<void> {
         investigations,
       })
     : null;
+  domain.bindCollectionGraph(createInvestigationCollectionGraph({
+    loadEntities: (caseIds) => entities.collectionLinks(caseIds),
+    ...(softwareImpact
+      ? { loadImpacts: (caseIds: readonly string[]) => softwareImpact.collectionIdentities(caseIds) }
+      : {}),
+  }));
   const references = new ReferenceService({
     store: storage.references,
     audit,

@@ -9,6 +9,8 @@ import type {
   LifecycleAction,
 } from "./investigations/runtime/public.js";
 import { makePopulatedCase } from "./investigations/runtime/testkit/fixtures.js";
+import { DEFAULT_COLLECTION_QUERY } from "./app-location.js";
+import type { InvestigationCollectionPageV1, ResourceView } from "./investigations/runtime/public.js";
 
 afterEach(() => {
   cleanup();
@@ -3088,5 +3090,159 @@ describe("recorded contribution kinds", () => {
     expect(activityLabel(legacy("contribution_created", { kind: "hypothesis" }))).toBe("proposed a working hypothesis");
     expect(activityLabel(legacy("contribution_created", { kind: "action" }))).toBe("recorded a next action");
     expect(activityLabel(legacy("contribution_created", { kind: "upload" }))).toBe("recorded an evidence upload");
+  });
+});
+
+describe("War Room collection-query browse", () => {
+  it("uses the supplied runtime page without issuing the legacy case-list request", async () => {
+    const stub = stubCaseFetch();
+    const item = makePopulatedCase();
+    const page: InvestigationCollectionPageV1 = {
+      schemaId: "cd-collab.investigation_collection_page.v1",
+      items: [item],
+      nextCursor: null,
+      hiddenArchivedCount: 2,
+      facets: {
+        status: { top: [{ key: "open", count: 1 }], otherCount: 0 },
+        entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 },
+        contributor: { top: [], otherCount: 0 },
+      },
+    };
+    const collectionPage: ResourceView<InvestigationCollectionPageV1> = {
+      availability: "available",
+      value: page,
+      refresh: "settled",
+    };
+    render(
+      <Cases
+        roles={["case-lead"]}
+        capabilities={["investigation:read", "investigation:write"]}
+        view="investigations"
+        collectionPage={collectionPage}
+        collectionQuery={DEFAULT_COLLECTION_QUERY}
+        onCollectionQueryChange={vi.fn()}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: item.title })).toBeTruthy();
+    expect(screen.getByText(/2 archived investigations are hidden/u)).toBeTruthy();
+    await waitFor(() => {
+      const requested = stub.mock.calls.map((call) => String(call[0]));
+      expect(requested).not.toContain("/api/cases");
+    });
+  });
+
+  it("uses server entity facets and keeps observed-date filtering local to the loaded page", async () => {
+    const onQueryChange = vi.fn();
+    const stub = stubCaseFetch({
+      onRequest: (url) => url === "/api/entities"
+        ? Promise.resolve({
+            ok: true,
+            json: async () => ({ entities: [{ id: "entity-checkout", label: "Checkout API" }] }),
+          })
+        : null,
+    });
+    const first = {
+      ...makePopulatedCase(),
+      id: "11111111-1111-4111-8111-111111111111",
+      title: "Server first",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+    };
+    const second = {
+      ...makePopulatedCase(),
+      id: "22222222-2222-4222-8222-222222222222",
+      title: "Server second",
+      occurredAt: "2026-03-01T00:00:00.000Z",
+    };
+    const collectionPage: ResourceView<InvestigationCollectionPageV1> = {
+      availability: "available",
+      value: {
+        schemaId: "cd-collab.investigation_collection_page.v1",
+        items: [first, second],
+        nextCursor: null,
+        hiddenArchivedCount: 0,
+        facets: {
+          status: { top: [{ key: "open", count: 2 }], otherCount: 0 },
+          entity: { top: [{ key: "entity-checkout", count: 2 }], otherCount: 0 },
+          impactIdentity: { top: [], otherCount: 0 },
+          contributor: { top: [], otherCount: 0 },
+        },
+      },
+      refresh: "settled",
+    };
+    render(
+      <Cases
+        roles={["case-lead"]}
+        capabilities={["investigation:read"]}
+        view="investigations"
+        collectionPage={collectionPage}
+        collectionQuery={DEFAULT_COLLECTION_QUERY}
+        onCollectionQueryChange={onQueryChange}
+      />,
+    );
+
+    const entity = await screen.findByRole("combobox", {
+      name: "Filter investigations by involved entity",
+    });
+    expect(within(entity).getByRole("option", { name: "Checkout API (2)" })).toBeTruthy();
+    fireEvent.change(entity, { target: { value: "entity-checkout" } });
+    expect(onQueryChange).toHaveBeenCalledWith({
+      ...DEFAULT_COLLECTION_QUERY,
+      entityId: "entity-checkout",
+    });
+
+    const observed = screen.getByLabelText("Filter investigations by observed date");
+    fireEvent.change(observed, { target: { value: "2026-02-01" } });
+    expect(screen.queryByRole("button", { name: "Server first" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Server second" })).toBeTruthy();
+    expect(screen.getByText(/loaded on this page/u)).toBeTruthy();
+    expect(onQueryChange).toHaveBeenCalledTimes(1);
+    fireEvent.change(observed, { target: { value: "" } });
+    expect(screen.getAllByRole("button", { name: /Server (first|second)/u }).map((button) => button.textContent)).toEqual([
+      "Server first",
+      "Server second",
+    ]);
+    expect(stub.mock.calls.map((call) => String(call[0]))).not.toContain("/api/cases");
+  });
+
+  it("shows an honest denied state without retry or transport", async () => {
+    const stub = stubCaseFetch();
+    render(
+      <Cases
+        roles={["viewer"]}
+        capabilities={[]}
+        view="investigations"
+        collectionPage={{ availability: "idle" }}
+        collectionQuery={DEFAULT_COLLECTION_QUERY}
+      />,
+    );
+    expect(screen.getByRole("status").textContent).toMatch(/cannot read investigations/u);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    await waitFor(() => {
+      expect(stub.mock.calls.map((call) => String(call[0]))).toContain("/api/catalog/sources");
+    });
+    const requested = stub.mock.calls.map((call) => String(call[0]));
+    expect(requested.filter((url) => url === "/api/cases")).toHaveLength(0);
+    expect(requested.filter((url) => url === "/api/entities")).toHaveLength(0);
+    expect(requested.filter((url) => url === "/api/involvement/index")).toHaveLength(0);
+  });
+
+  it("does not fall back to the legacy transport after a collection failure", () => {
+    const stub = stubCaseFetch();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        capabilities={["investigation:read"]}
+        view="investigations"
+        collectionPage={{
+          availability: "unavailable",
+          error: { kind: "network" },
+        }}
+        collectionQuery={DEFAULT_COLLECTION_QUERY}
+      />,
+    );
+    expect(screen.getByRole("alert").textContent).toMatch(/unavailable right now/u);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(stub.mock.calls.map((call) => String(call[0]))).not.toContain("/api/cases");
   });
 });

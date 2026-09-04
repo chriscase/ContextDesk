@@ -26,6 +26,14 @@ import {
   type PrivacyClass,
 } from "@cd-collab/contracts/investigation-runtime";
 import {
+  INVESTIGATION_COLLECTION_LIMITS,
+  INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+  parseInvestigationCollectionPage,
+  parseInvestigationCollectionQuery,
+  type InvestigationCollectionPageV1,
+  type InvestigationCollectionQueryV1,
+} from "@cd-collab/contracts/investigation-collection";
+import {
   ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
   parseArtifactAnnotation,
   parseArtifactAnnotationBulkResult,
@@ -228,8 +236,44 @@ export interface InvestigationWriteGateway {
 export type InvestigationGatewayWithWrites =
   InvestigationGateway & InvestigationWriteGateway;
 
+/**
+ * Presentation-safe collection filters. The runtime supplies the schema opt-in;
+ * extra keys never become query parameters.
+ */
+export interface InvestigationCollectionQueryInput {
+  readonly q?: InvestigationCollectionQueryV1["q"];
+  readonly status?: ReadonlyArray<InvestigationCollectionQueryV1["status"][number]>;
+  readonly includeArchived?: InvestigationCollectionQueryV1["includeArchived"];
+  readonly entityId?: InvestigationCollectionQueryV1["entityId"];
+  readonly impactIdentity?: InvestigationCollectionQueryV1["impactIdentity"];
+  readonly contributorId?: InvestigationCollectionQueryV1["contributorId"];
+  readonly recordedFrom?: InvestigationCollectionQueryV1["recordedFrom"];
+  readonly recordedTo?: InvestigationCollectionQueryV1["recordedTo"];
+  readonly limit?: InvestigationCollectionQueryV1["limit"];
+  readonly cursor?: InvestigationCollectionQueryV1["cursor"];
+}
+
+/**
+ * Optional versioned collection-query transport.
+ *
+ * It is deliberately not required on `InvestigationGateway`: a list-shaped
+ * double written before this seam existed stays valid. Callers resolve it
+ * through `investigationCollectionQueryGateway`, which fails closed when the
+ * method is missing instead of inventing a page or falling back to the list.
+ */
+export interface InvestigationCollectionQueryGateway {
+  queryInvestigations(
+    query: InvestigationCollectionQueryInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<InvestigationCollectionPageV1>>;
+}
+
 export interface InvestigationGateway
-  extends Partial<InvestigationWriteGateway>, Partial<InvestigationAnnotationGateway> {
+  extends
+    Partial<InvestigationWriteGateway>,
+    Partial<InvestigationAnnotationGateway>,
+    Partial<InvestigationCollectionQueryGateway>
+{
   listInvestigations(
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<readonly CaseV1[]>>;
@@ -695,6 +739,150 @@ function caseCollectionIdentity(cases: readonly CaseV1[]): boolean {
   return true;
 }
 
+function investigationCollectionPageIdentity(page: InvestigationCollectionPageV1): boolean {
+  const identities = new Set<string>();
+  for (const item of page.items) {
+    if (item.id.length === 0 || identities.has(item.id)) return false;
+    identities.add(item.id);
+  }
+  return true;
+}
+
+const COLLECTION_QUERY_FILTER_KEYS = [
+  "q",
+  "status",
+  "includeArchived",
+  "entityId",
+  "impactIdentity",
+  "contributorId",
+  "recordedFrom",
+  "recordedTo",
+  "limit",
+  "cursor",
+] as const;
+
+function snapshotImpactIdentity(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const identity = value as Record<string, unknown>;
+  return {
+    productName: identity.productName,
+    version: identity.version,
+    build: identity.build,
+    component: identity.component,
+    environment: identity.environment,
+  };
+}
+
+/**
+ * Copy only contract-approved filters. Inherited and unknown keys are dropped
+ * so a later serializer cannot opt into ranking or a second schema.
+ */
+export function snapshotInvestigationCollectionQueryInput(
+  input: InvestigationCollectionQueryInput,
+): InvestigationCollectionQueryInput {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return Object.freeze({ q: "\u0000" });
+  }
+  const record = input as Record<string, unknown>;
+  const snapshot: Record<string, unknown> = {};
+  if (record.q !== undefined) snapshot.q = record.q;
+  if (record.status !== undefined) {
+    snapshot.status = Array.isArray(record.status) ? Array.from(record.status) : record.status;
+  }
+  if (record.includeArchived !== undefined) snapshot.includeArchived = record.includeArchived;
+  if (record.entityId !== undefined) snapshot.entityId = record.entityId;
+  if (record.impactIdentity !== undefined) {
+    snapshot.impactIdentity = snapshotImpactIdentity(record.impactIdentity);
+  }
+  if (record.contributorId !== undefined) snapshot.contributorId = record.contributorId;
+  if (record.recordedFrom !== undefined) snapshot.recordedFrom = record.recordedFrom;
+  if (record.recordedTo !== undefined) snapshot.recordedTo = record.recordedTo;
+  if (record.limit !== undefined) snapshot.limit = record.limit;
+  if (record.cursor !== undefined) snapshot.cursor = record.cursor;
+  return deepFreezeDto(snapshot) as InvestigationCollectionQueryInput;
+}
+
+export function parseInvestigationCollectionQueryInput(
+  input: InvestigationCollectionQueryInput,
+): GatewayResult<InvestigationCollectionQueryV1> {
+  try {
+    const snapshot = snapshotInvestigationCollectionQueryInput(input);
+    const body: Record<string, unknown> = {
+      schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+    };
+    const record = snapshot as Record<string, unknown>;
+    for (const key of COLLECTION_QUERY_FILTER_KEYS) {
+      if (record[key] !== undefined) body[key] = record[key];
+    }
+    return { ok: true, value: deepFreezeDto(parseInvestigationCollectionQuery(body)) };
+  } catch (cause) {
+    return cause instanceof ContractViolation
+      ? failed(protocolFailure("contract"))
+      : failed({ kind: "unexpected" });
+  }
+}
+
+function serializeInvestigationCollectionQuery(
+  query: InvestigationCollectionQueryV1,
+): string {
+  const params = new URLSearchParams();
+  params.set("schemaId", query.schemaId);
+  if (query.q !== "") params.set("q", query.q);
+  for (const status of query.status) params.append("status", status);
+  if (query.includeArchived) params.set("includeArchived", "true");
+  if (query.entityId !== null) params.set("entityId", query.entityId);
+  if (query.impactIdentity !== null) {
+    params.set("impactIdentity", JSON.stringify({
+      productName: query.impactIdentity.productName,
+      version: query.impactIdentity.version,
+      build: query.impactIdentity.build,
+      component: query.impactIdentity.component,
+      environment: query.impactIdentity.environment,
+    }));
+  }
+  if (query.contributorId !== null) params.set("contributorId", query.contributorId);
+  if (query.recordedFrom !== null) params.set("recordedFrom", query.recordedFrom);
+  if (query.recordedTo !== null) params.set("recordedTo", query.recordedTo);
+  if (query.limit !== INVESTIGATION_COLLECTION_LIMITS.defaultLimit) {
+    params.set("limit", String(query.limit));
+  }
+  if (query.cursor !== null) params.set("cursor", query.cursor);
+  return params.toString();
+}
+
+export function investigationCollectionQueryKeyFromInput(
+  input: InvestigationCollectionQueryInput | null,
+): string | null {
+  if (input === null) return null;
+  const parsed = parseInvestigationCollectionQueryInput(input);
+  return parsed.ok ? investigationCollectionQueryKey(parsed.value) : "invalid";
+}
+
+export function investigationCollectionQueryKey(
+  query: InvestigationCollectionQueryV1,
+): string {
+  return JSON.stringify({
+    q: query.q,
+    status: [...query.status].sort(),
+    includeArchived: query.includeArchived,
+    entityId: query.entityId,
+    impactIdentity: query.impactIdentity === null
+      ? null
+      : {
+          productName: query.impactIdentity.productName,
+          version: query.impactIdentity.version,
+          build: query.impactIdentity.build,
+          component: query.impactIdentity.component,
+          environment: query.impactIdentity.environment,
+        },
+    contributorId: query.contributorId,
+    recordedFrom: query.recordedFrom,
+    recordedTo: query.recordedTo,
+    cursor: query.cursor,
+    limit: query.limit,
+  });
+}
+
 function evidenceCollectionIdentity(
   investigationId: string,
   artifacts: readonly ArtifactV1[],
@@ -976,6 +1164,11 @@ const WRITE_SEAM_UNAVAILABLE: RuntimeFailure = Object.freeze({
   status: 503,
 });
 
+const QUERY_SEAM_UNAVAILABLE: RuntimeFailure = Object.freeze({
+  kind: "unavailable",
+  status: 503,
+});
+
 const UNAVAILABLE_WRITE_GATEWAY: InvestigationWriteGateway = Object.freeze({
   createContribution: () =>
     Promise.resolve(failed<ContributionV1>(WRITE_SEAM_UNAVAILABLE)),
@@ -992,6 +1185,11 @@ const UNAVAILABLE_ANNOTATION_GATEWAY: InvestigationAnnotationGateway = Object.fr
 const UNAVAILABLE_BULK_ANNOTATION_GATEWAY: InvestigationBulkAnnotationGateway = Object.freeze({
   createArtifactAnnotationsBulk: () =>
     Promise.resolve(failed<ArtifactAnnotationBulkResultV1>(WRITE_SEAM_UNAVAILABLE)),
+});
+
+const UNAVAILABLE_COLLECTION_QUERY_GATEWAY: InvestigationCollectionQueryGateway = Object.freeze({
+  queryInvestigations: () =>
+    Promise.resolve(failed<InvestigationCollectionPageV1>(QUERY_SEAM_UNAVAILABLE)),
 });
 
 /**
@@ -1079,7 +1277,26 @@ export function investigationBulkAnnotationGateway(
   return Object.freeze(resolved);
 }
 
-export const investigationGateway: InvestigationGatewayWithWrites = {
+/**
+ * Resolve the optional collection-query method independently of the legacy
+ * unpaged list. Older test doubles remain valid, but a query request against
+ * one is reported as unavailable rather than rewritten as `listInvestigations`.
+ */
+export function investigationCollectionQueryGateway(
+  gateway: InvestigationGateway,
+): InvestigationCollectionQueryGateway {
+  const queryInvestigations = gateway.queryInvestigations;
+  if (queryInvestigations === undefined) return UNAVAILABLE_COLLECTION_QUERY_GATEWAY;
+  const resolved: InvestigationCollectionQueryGateway = {
+    queryInvestigations(query, options) {
+      return queryInvestigations.call(gateway, query, options);
+    },
+  };
+  return Object.freeze(resolved);
+}
+
+export const investigationGateway: InvestigationGatewayWithWrites
+  & InvestigationCollectionQueryGateway = {
   async listInvestigations({ signal }) {
     const result = await requestParsed(
       "/api/cases",
@@ -1091,6 +1308,28 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
     return result.ok
       ? { ok: true, value: deepFreezeDto([...result.value.cases]) }
       : result;
+  },
+
+  async queryInvestigations(input, { signal }) {
+    if (signal.aborted) return aborted();
+    const parsed = parseInvestigationCollectionQueryInput(input);
+    if (signal.aborted) return aborted();
+    if (!parsed.ok) return parsed;
+    let search: string;
+    try {
+      if (signal.aborted) return aborted();
+      search = serializeInvestigationCollectionQuery(parsed.value);
+    } catch {
+      return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+    }
+    if (signal.aborted) return aborted();
+    return requestParsed(
+      `/api/cases?${search}`,
+      {},
+      signal,
+      parseInvestigationCollectionPage,
+      investigationCollectionPageIdentity,
+    );
   },
 
   getInvestigation(investigationId, { signal }) {

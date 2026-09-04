@@ -1,4 +1,8 @@
 import type {
+  InvestigationCollectionPageV1,
+  InvestigationCollectionQueryV1,
+} from "@cd-collab/contracts/investigation-collection";
+import type {
   ArtifactV1,
   CaseV1,
   ContributionV1,
@@ -40,12 +44,16 @@ import {
   type UpdateSituationCommand,
   type UploadEvidenceCommand,
 } from "./controllers/index.js";
+import { useInvestigationCollectionQuery } from "./controllers/use-investigation-list.js";
 import {
   investigationGateway,
   investigationAnnotationGateway,
   investigationBulkAnnotationGateway,
+  investigationCollectionQueryGateway,
   investigationWriteGateway,
+  snapshotInvestigationCollectionQueryInput,
   type CreateInvestigationInput,
+  type InvestigationCollectionQueryInput,
   type InvestigationGateway,
   type EvidencePreviewValue,
 } from "./gateway.js";
@@ -70,6 +78,8 @@ export type InvestigationSituationCommand = UpdateSituationCommand;
 
 export interface InvestigationRuntimeResources {
   readonly investigations: ResourceState<readonly CaseV1[]>;
+  readonly investigationCollection: ResourceState<InvestigationCollectionPageV1>;
+  readonly investigationCollectionQuery: InvestigationCollectionQueryV1 | null;
   readonly investigation: ResourceState<CaseV1>;
   readonly evidence: ResourceState<readonly ArtifactV1[]>;
   readonly contributions: ResourceState<readonly ContributionV1[]>;
@@ -89,6 +99,7 @@ export interface InvestigationRuntimeMutations {
 
 export interface InvestigationRuntimeRefresh {
   readonly investigations: () => void;
+  readonly investigationCollection: () => void;
   readonly investigation: () => void;
   readonly evidence: () => void;
   readonly contributions: () => void;
@@ -119,6 +130,10 @@ export interface InvestigationRuntimeCommands {
   readonly createArtifactAnnotations: ((
     command: InvestigationArtifactAnnotationsBulkCommand,
   ) => Promise<CommandOutcome<ArtifactAnnotationBulkResultV1>>) | null;
+  /** Additive collection-query command; omit it only in pre-query snapshots. */
+  readonly queryInvestigations?: ((
+    input: InvestigationCollectionQueryInput,
+  ) => void) | null;
 }
 
 /** Read-only evidence inspection keeps its bounded command separate from writes. */
@@ -243,6 +258,15 @@ export function InvestigationRuntimeProvider({
     () => investigationBulkAnnotationGateway(gateway),
     [gateway],
   );
+  const collectionQueryGateway = useMemo(
+    () => investigationCollectionQueryGateway(gateway),
+    [gateway],
+  );
+  const [collectionQueryInput, setCollectionQueryInput] =
+    useState<InvestigationCollectionQueryInput | null>(null);
+  const requestInvestigationCollection = useCallback((input: InvestigationCollectionQueryInput) => {
+    setCollectionQueryInput(snapshotInvestigationCollectionQueryInput(input));
+  }, []);
   const projected = projectInvestigationCapabilities(rawCapabilities, readOnly);
   const capabilities = useMemo<InvestigationRuntimeCapabilities>(() => Object.freeze({
     canRead: projected.canRead,
@@ -282,6 +306,13 @@ export function InvestigationRuntimeProvider({
     enabled: capabilities.canRead,
     identityKey,
     authorityKey,
+  });
+  const investigationCollection = useInvestigationCollectionQuery({
+    gateway: collectionQueryGateway,
+    enabled: capabilities.canRead && collectionQueryInput !== null,
+    identityKey,
+    authorityKey,
+    query: collectionQueryInput,
   });
   const listSnapshotRef = useRef({
     latestRequestGeneration: investigationList.latestRequestGeneration,
@@ -521,6 +552,8 @@ export function InvestigationRuntimeProvider({
     capabilities,
     resources: {
       investigations: investigationList.investigations,
+      investigationCollection: investigationCollection.page,
+      investigationCollectionQuery: investigationCollection.query,
       investigation: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : activeInvestigation.investigation,
@@ -553,6 +586,7 @@ export function InvestigationRuntimeProvider({
     },
     refresh: {
       investigations: investigationList.refresh,
+      investigationCollection: investigationCollection.refresh,
       investigation: activeInvestigation.refreshInvestigation,
       evidence: activeInvestigation.refreshEvidence,
       contributions: activeInvestigation.refreshContributions,
@@ -598,6 +632,7 @@ export function InvestigationRuntimeProvider({
         && !activeScopeUnavailable
         ? artifactAnnotationsBulkController.create
         : null,
+      queryInvestigations: capabilities.canRead ? requestInvestigationCollection : null,
     },
   }), [
     activeReadyCaseId,
@@ -632,8 +667,12 @@ export function InvestigationRuntimeProvider({
     artifactAnnotationsBulkController.create,
     artifactAnnotationsBulkController.state,
     identity,
+    investigationCollection.page,
+    investigationCollection.query,
+    investigationCollection.refresh,
     investigationList.investigations,
     investigationList.refresh,
+    requestInvestigationCollection,
     isInvestigationLocation,
     lifecycleController.apply,
     lifecycleController.state,

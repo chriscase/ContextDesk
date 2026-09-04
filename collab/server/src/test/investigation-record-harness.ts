@@ -25,7 +25,7 @@ import {
 } from "../modules/auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../modules/authz/index.js";
 import { CatalogService } from "../modules/catalog/index.js";
-import { CaseService } from "../modules/cases/index.js";
+import { CaseService, createInvestigationCollectionGraph } from "../modules/cases/index.js";
 import { EntityService } from "../modules/entities/index.js";
 import { SoftwareImpactService } from "../modules/software-impact/index.js";
 import { ExportService } from "../modules/export/index.js";
@@ -141,6 +141,10 @@ export async function withRecordApp(fn: (ctx: RecordHarness) => Promise<void>): 
   resolutions.bindInvestigations(investigations);
   const entities = new EntityService({ audit, investigations });
   const softwareImpact = new SoftwareImpactService({ audit, investigations });
+  domain.bindCollectionGraph(createInvestigationCollectionGraph({
+    loadEntities: (caseIds) => entities.collectionLinks(caseIds),
+    loadImpacts: (caseIds) => softwareImpact.collectionIdentities(caseIds),
+  }));
   const references = new ReferenceService({ audit, investigations });
   const imports = new ImportService({ evidence: store, audit, cases: domain, catalog });
   // The same read-only record source production wires, so export behaviour is

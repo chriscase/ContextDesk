@@ -48,6 +48,10 @@
       "types": "./dist/investigation-activity-browser.d.ts",
       "import": "./dist/investigation-activity-browser.js"
     },
+    "./investigation-collection": {
+      "types": "./dist/investigation-collection-browser.d.ts",
+      "import": "./dist/investigation-collection-browser.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

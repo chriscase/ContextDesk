@@ -23,7 +23,11 @@ import {
 } from "../../server/src/modules/auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../../server/src/modules/authz/index.js";
 import { CatalogService, MemoryCatalogStore } from "../../server/src/modules/catalog/index.js";
-import { CaseService, MemoryCaseStore } from "../../server/src/modules/cases/index.js";
+import {
+  CaseService,
+  createInvestigationCollectionGraph,
+  MemoryCaseStore,
+} from "../../server/src/modules/cases/index.js";
 import { ExportService, testExportPrivacyConfig } from "../../server/src/modules/export/index.js";
 import { EntityService } from "../../server/src/modules/entities/index.js";
 import { ReferenceService } from "../../server/src/modules/references/index.js";
@@ -143,6 +147,9 @@ async function main(): Promise<void> {
   };
   resolutions.bindInvestigations(investigations);
   const entities = new EntityService({ audit, investigations });
+  domain.bindCollectionGraph(createInvestigationCollectionGraph({
+    loadEntities: (caseIds) => entities.collectionLinks(caseIds),
+  }));
   const references = new ReferenceService({ audit, investigations });
   const imports = new ImportService({
     evidence: store,

@@ -16,6 +16,7 @@ import {
 } from "@cd-collab/contracts/admin";
 import {
   ADMINISTRATION,
+  DEFAULT_COLLECTION_QUERY,
   EVIDENCE_STORAGE_ADMIN,
   HOME,
   LDAP_ADMIN,
@@ -79,6 +80,7 @@ import {
 } from "./ui-strategy.js";
 import { useUiStrategyGovernance } from "./useUiStrategyGovernance.js";
 import { ActivityCenter } from "./overview/ActivityCenter.js";
+import { useWarRoomCollectionQuery } from "./investigations/war-room/useWarRoomCollectionQuery.js";
 
 interface SessionView {
   identityId: string;
@@ -132,6 +134,9 @@ const WarRoomStrategyContext = createContext<WarRoomStrategyBindings | null>(nul
 function WarRoomStrategy(props: InvestigationStrategyShellProps) {
   const bindings = useContext(WarRoomStrategyContext);
   const runtime = useInvestigationRuntime();
+  const collection = useWarRoomCollectionQuery(
+    props.focusCaseId === null ? props.collectionQuery : undefined,
+  );
   if (bindings === null) return null;
 
   return (
@@ -151,9 +156,17 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
         onDeepNavigate={bindings.onDeepNavigate}
         onActivityOpen={bindings.onActivityOpen}
         onExitFocus={bindings.onExitFocus}
+        onCollectionRefresh={collection.refresh}
         {...(props.onFocusedCaseTitle
           ? { onFocusedCaseTitle: props.onFocusedCaseTitle }
           : {})}
+        {...(props.collectionQuery === undefined
+          ? {}
+          : {
+              collectionPage: collection.view,
+              collectionQuery: props.collectionQuery,
+              onCollectionQueryChange: props.onCollectionQueryChange,
+            })}
         lifecycleBinding={{
           lifecycle: runtime.resources.lifecycle,
           lifecycleMutation: runtime.mutations.lifecycle,
@@ -1180,6 +1193,18 @@ export function App() {
                       onExitFocus={() =>
                         navigate({ area: "investigations", caseId: null, stage: "situation" })
                       }
+                      {...(work.caseId === null
+                        ? {
+                            collectionQuery: work.collectionQuery ?? DEFAULT_COLLECTION_QUERY,
+                            onCollectionQueryChange: (collectionQuery) =>
+                              navigate({
+                                area: "investigations",
+                                caseId: null,
+                                stage: "situation",
+                                collectionQuery,
+                              }, "replace"),
+                          }
+                        : {})}
                       onOpenAdvancedTools={(caseId, stage) => {
                         // Specialist tools remain in the reference War Room. The
                         // switch is explicit in the button label and preserves the

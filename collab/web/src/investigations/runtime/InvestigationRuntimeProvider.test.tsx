@@ -1,4 +1,9 @@
 import {
+  INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+  parseInvestigationCollectionPage,
+  type InvestigationCollectionPageV1,
+} from "@cd-collab/contracts/investigation-collection";
+import {
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   type CaseV1,
   type ContributionV1,
@@ -7,7 +12,12 @@ import {
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GatewayResult, InvestigationGateway } from "./gateway.js";
+import {
+  parseInvestigationCollectionQueryInput,
+  type GatewayResult,
+  type InvestigationCollectionQueryInput,
+  type InvestigationGateway,
+} from "./gateway.js";
 import {
   ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
   ARTIFACT_ANNOTATION_SCHEMA_ID,
@@ -317,6 +327,8 @@ describe("InvestigationRuntimeProvider", () => {
     await act(async () => undefined);
     expect(currentRuntime().resources.investigations).toEqual({ status: "idle" });
     expect(currentRuntime().resources.investigation).toEqual({ status: "idle" });
+    expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+    expect(currentRuntime().resources.investigationCollectionQuery).toBeNull();
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
       uploadEvidence: null,
@@ -325,8 +337,10 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycle: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryInvestigations: null,
     });
     expect(gateway.listInvestigations).not.toHaveBeenCalled();
+    expect(gateway.queryInvestigations).toBeUndefined();
     expect(gateway.getInvestigation).not.toHaveBeenCalled();
     expect(gateway.listEvidence).not.toHaveBeenCalled();
     expect(gateway.listContributions).not.toHaveBeenCalled();
@@ -374,6 +388,7 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycle: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryInvestigations: expect.any(Function),
     });
     expect(gateway.createInvestigation).not.toHaveBeenCalled();
     expect(gateway.uploadEvidence).not.toHaveBeenCalled();
@@ -1655,6 +1670,7 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycle: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
+      queryInvestigations: expect.any(Function),
     });
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
     // One initial read, one freshness read for the case transition, and one
@@ -1812,6 +1828,7 @@ describe("InvestigationRuntimeProvider", () => {
         applyLifecycle: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
+        queryInvestigations: expect.any(Function),
       });
     });
 
@@ -1984,6 +2001,7 @@ describe("InvestigationRuntimeProvider", () => {
         applyLifecycle: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
+        queryInvestigations: expect.any(Function),
       });
     });
 
@@ -1995,6 +2013,172 @@ describe("InvestigationRuntimeProvider", () => {
       expect(() => render(<IdentityProbe />)).toThrow(
         "useInvestigationRuntime must be used within InvestigationRuntimeProvider",
       );
+    });
+  });
+
+  describe("collection query resource", () => {
+    const OPAQUE_CURSOR = "eyJzZXJ2ZXJPd25lZCI6dHJ1ZX0";
+
+    function collectionPage(
+      overrides: Record<string, unknown> = {},
+    ): InvestigationCollectionPageV1 {
+      return parseInvestigationCollectionPage({
+        schemaId: INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+        items: makeCaseList().cases,
+        nextCursor: null,
+        hiddenArchivedCount: 0,
+        facets: {
+          status: { top: [], otherCount: 0 },
+          entity: { top: [], otherCount: 0 },
+          impactIdentity: { top: [], otherCount: 0 },
+          contributor: { top: [], otherCount: 0 },
+        },
+        ...overrides,
+      });
+    }
+
+    it("does not query until asked and fails closed when the gateway lacks the seam", async () => {
+      const listInvestigations = vi.fn(async () => succeeded(makeCaseList().cases));
+      const gateway = makeGateway({ listInvestigations });
+      render(
+        <ProviderUnderTest
+          identityKey="alice"
+          authorityKey="alice-authority-v1"
+          capabilities={FULL_CAPABILITIES}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+      expect(currentRuntime().commands.queryInvestigations).not.toBeNull();
+
+      act(() => currentRuntime().commands.queryInvestigations?.({ q: "checkout" }));
+      await waitFor(() => expect(currentRuntime().resources.investigationCollection).toEqual({
+        status: "failed",
+        error: { kind: "unavailable", status: 503 },
+      }));
+      expect(listInvestigations).toHaveBeenCalledTimes(1);
+      expect(currentRuntime().resources.investigations.status).toBe("ready");
+    });
+
+    it("publishes a frozen page for a query without falling back to the list", async () => {
+      const page = collectionPage({ hiddenArchivedCount: 2 });
+      const queryInvestigations = vi.fn(
+        async (
+          _query: InvestigationCollectionQueryInput,
+          _options: { signal: AbortSignal },
+        ) => succeeded(page),
+      );
+      const listInvestigations = vi.fn(async () => succeeded(makeCaseList().cases));
+      const gateway = makeGateway({ listInvestigations, queryInvestigations });
+      render(
+        <ProviderUnderTest
+          identityKey="alice"
+          authorityKey="alice-authority-v1"
+          capabilities={FULL_CAPABILITIES}
+          readOnly
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+
+      act(() => currentRuntime().commands.queryInvestigations?.({
+        q: "checkout",
+        sort: "urgency",
+      } as never));
+      await waitFor(() => expect(currentRuntime().resources.investigationCollection.status).toBe("ready"));
+
+      const resource = currentRuntime().resources.investigationCollection;
+      expect(resource).toEqual({ status: "ready", value: page });
+      expect(Object.isFrozen(currentRuntime().resources.investigationCollectionQuery)).toBe(true);
+      if (resource.status === "ready") {
+        expect(Object.isFrozen(resource.value)).toBe(true);
+        expect(Object.isFrozen(resource.value.items)).toBe(true);
+        expect(Object.isFrozen(resource.value.facets)).toBe(true);
+        expect(() => {
+          (resource.value.items as CaseV1[]).push(makeSparseImportedCase());
+        }).toThrow();
+      }
+      expect(queryInvestigations).toHaveBeenCalledTimes(1);
+      const requested = parseInvestigationCollectionQueryInput({ q: "checkout" });
+      expect(queryInvestigations.mock.calls[0]?.[0]).toEqual(
+        requested.ok ? requested.value : null,
+      );
+      expect(listInvestigations).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not publish a stale query after a cursor continuation", async () => {
+      const firstPage = collectionPage({ nextCursor: OPAQUE_CURSOR });
+      const secondPage = collectionPage({
+        items: [makeSparseImportedCase()],
+        nextCursor: null,
+      });
+      const first = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+      const second = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+      const requests: unknown[] = [];
+      const pages = [first, second];
+      let requestIndex = 0;
+      const gateway = makeGateway({
+        queryInvestigations: vi.fn((query) => {
+          requests.push(query);
+          return pages[requestIndex++]!.promise;
+        }),
+      });
+      render(
+        <ProviderUnderTest
+          identityKey="alice"
+          authorityKey="alice-authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+
+      act(() => currentRuntime().commands.queryInvestigations?.({ q: "checkout" }));
+      await waitFor(() => expect(requests).toHaveLength(1));
+      act(() => currentRuntime().commands.queryInvestigations?.({
+        q: "checkout",
+        cursor: OPAQUE_CURSOR,
+      }));
+      await waitFor(() => expect(requests).toHaveLength(2));
+
+      await act(async () => {
+        first.resolve(succeeded(firstPage));
+      });
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "loading" });
+
+      await act(async () => {
+        second.resolve(succeeded(secondPage));
+      });
+      expect(currentRuntime().resources.investigationCollection).toEqual({
+        status: "ready",
+        value: secondPage,
+      });
+      expect(currentRuntime().resources.investigationCollectionQuery?.cursor).toBe(OPAQUE_CURSOR);
+      const continued = parseInvestigationCollectionQueryInput({
+        q: "checkout",
+        cursor: OPAQUE_CURSOR,
+      });
+      expect(requests[1]).toEqual(continued.ok ? continued.value : null);
     });
   });
 });

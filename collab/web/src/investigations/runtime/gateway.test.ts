@@ -10,13 +10,21 @@ import {
   type CaseV1,
   type ContributionV1,
 } from "@cd-collab/contracts/investigation-runtime";
+import {
+  INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+  INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+  parseInvestigationCollectionPage,
+  type InvestigationCollectionPageV1,
+} from "@cd-collab/contracts/investigation-collection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUTH_LOST_EVENT } from "../../protected-api.js";
 import {
   investigationGateway,
   investigationAnnotationGateway,
   investigationBulkAnnotationGateway,
+  investigationCollectionQueryGateway,
   investigationWriteGateway,
+  parseInvestigationCollectionQueryInput,
   type InvestigationGateway,
   type InvestigationWriteGateway,
 } from "./gateway.js";
@@ -2151,5 +2159,211 @@ describe("write-seam resolution", () => {
 
     expect(receivers).toEqual([stateful, stateful]);
     expect(Object.isFrozen(writes)).toBe(true);
+  });
+});
+
+const OPAQUE_COLLECTION_CURSOR = "eyJzZXJ2ZXJPd25lZCI6dHJ1ZX0";
+const COLLECTION_IMPACT_IDENTITY = {
+  productName: "Fixture Desk",
+  version: "4.2",
+  build: "",
+  component: "queue-worker",
+  environment: "",
+};
+
+function emptyCollectionFacets() {
+  return {
+    status: { top: [] as Array<{ key: string; count: number }>, otherCount: 0 },
+    entity: { top: [] as Array<{ key: string; count: number }>, otherCount: 0 },
+    impactIdentity: { top: [] as Array<{ key: string; count: number; identity: typeof COLLECTION_IMPACT_IDENTITY }>, otherCount: 0 },
+    contributor: { top: [] as Array<{ key: string; count: number }>, otherCount: 0 },
+  };
+}
+
+function collectionPageJson(
+  overrides: Record<string, unknown> = {},
+): InvestigationCollectionPageV1 {
+  return parseInvestigationCollectionPage({
+    schemaId: INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+    items: makeCaseList().cases,
+    nextCursor: null,
+    hiddenArchivedCount: 0,
+    facets: emptyCollectionFacets(),
+    ...overrides,
+  });
+}
+
+describe("collection query seam", () => {
+  it("serializes only approved filters and the schema opt-in", async () => {
+    const page = collectionPageJson();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(page));
+    const input = Object.assign(
+      Object.create({ inheritedFilter: "must-not-cross" }) as Record<string, unknown>,
+      {
+        q: "  storefront operators  ",
+        status: ["open", "monitoring"],
+        includeArchived: true,
+        entityId: "ent-northwind",
+        impactIdentity: Object.assign(
+          Object.create({ inheritedIdentity: "must-not-cross" }) as Record<string, unknown>,
+          { ...COLLECTION_IMPACT_IDENTITY, extraIdentityField: "must-not-cross" },
+        ),
+        contributorId: "identity-alice",
+        recordedFrom: "2026-01-01T00:00:00.000Z",
+        recordedTo: "2026-08-26T00:00:00.000Z",
+        cursor: OPAQUE_COLLECTION_CURSOR,
+        limit: 25,
+        sort: "urgency",
+        urgency: "high",
+        completeness: 1,
+        hiddenArchivedCount: 9,
+      },
+    );
+
+    const result = await investigationGateway.queryInvestigations(
+      input as Parameters<typeof investigationGateway.queryInvestigations>[0],
+      options(),
+    );
+
+    expect(result).toEqual({ ok: true, value: page });
+    expect(result.ok && Object.isFrozen(result.value)).toBe(true);
+    expect(result.ok && Object.isFrozen(result.value.items)).toBe(true);
+    expect(result.ok && Object.isFrozen(result.value.facets)).toBe(true);
+    const requested = String(fetchMock.mock.calls[0]?.[0]);
+    const url = new URL(requested, "http://runtime.test");
+    expect(url.pathname).toBe("/api/cases");
+    expect(url.searchParams.get("schemaId")).toBe(INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID);
+    expect(url.searchParams.get("q")).toBe("storefront operators");
+    expect(url.searchParams.getAll("status")).toEqual(["open", "monitoring"]);
+    expect(url.searchParams.get("includeArchived")).toBe("true");
+    expect(url.searchParams.get("entityId")).toBe("ent-northwind");
+    expect(JSON.parse(url.searchParams.get("impactIdentity") ?? "null")).toEqual(
+      COLLECTION_IMPACT_IDENTITY,
+    );
+    expect(url.searchParams.get("contributorId")).toBe("identity-alice");
+    expect(url.searchParams.get("recordedFrom")).toBe("2026-01-01T00:00:00.000Z");
+    expect(url.searchParams.get("recordedTo")).toBe("2026-08-26T00:00:00.000Z");
+    expect(url.searchParams.get("limit")).toBe("25");
+    expect(url.searchParams.get("cursor")).toBe(OPAQUE_COLLECTION_CURSOR);
+    expect(url.searchParams.get("sort")).toBeNull();
+    expect(url.searchParams.get("urgency")).toBeNull();
+    expect(url.searchParams.get("completeness")).toBeNull();
+    expect(url.searchParams.get("hiddenArchivedCount")).toBeNull();
+    expect(url.searchParams.get("inheritedFilter")).toBeNull();
+  });
+
+  it("opts a default query in with schemaId and does not call the legacy list parser", async () => {
+    const page = collectionPageJson({ items: [], hiddenArchivedCount: 0 });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(page));
+
+    const result = await investigationGateway.queryInvestigations({}, options());
+
+    expect(result).toEqual({ ok: true, value: page });
+    const requested = String(fetchMock.mock.calls[0]?.[0]);
+    const url = new URL(requested, "http://runtime.test");
+    expect(url.pathname).toBe("/api/cases");
+    expect([...url.searchParams.keys()]).toEqual(["schemaId"]);
+    expect(url.searchParams.get("schemaId")).toBe(INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID);
+    expect(result.ok && result.value.facets.status.top).toEqual([]);
+    expect(result.ok && result.value.hiddenArchivedCount).toBe(0);
+  });
+
+  it("keeps listInvestigations on the unpaged envelope and does not invent a page", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(makeCaseList()));
+    const listed = await investigationGateway.listInvestigations(options());
+    expect(listed).toEqual({ ok: true, value: makeCaseList().cases });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/api/cases");
+  });
+
+  it("rejects a malformed page through the contract and does not fall back to the list", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse(makeCaseList()));
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+      items: makeCaseList().cases,
+      nextCursor: null,
+      hiddenArchivedCount: 0,
+    }));
+
+    expect(await investigationGateway.queryInvestigations({ q: "checkout" }, options())).toEqual({
+      ok: false,
+      error: { kind: "protocol", reason: "contract" },
+    });
+    expect(await investigationGateway.queryInvestigations({ q: "checkout" }, options())).toEqual({
+      ok: false,
+      error: { kind: "protocol", reason: "contract" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not fetch when the query itself fails the contract", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    expect(await investigationGateway.queryInvestigations({ limit: 101 }, options())).toEqual({
+      ok: false,
+      error: { kind: "protocol", reason: "contract" },
+    });
+    expect(parseInvestigationCollectionQueryInput({ q: "checkout", limit: 101 })).toEqual({
+      ok: false,
+      error: { kind: "protocol", reason: "contract" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403] as const)(
+    "classifies collection-query auth loss for %i without reading the body",
+    async (status) => {
+      const response = jsonResponse(collectionPageJson(), status);
+      const json = vi.spyOn(response, "json");
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+      const listener = vi.fn();
+      window.addEventListener(AUTH_LOST_EVENT, listener);
+      try {
+        expect(await investigationGateway.queryInvestigations({}, options())).toEqual({
+          ok: false,
+          error: { kind: "auth_lost", status },
+        });
+        expect(json).not.toHaveBeenCalled();
+        expect(listener).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener(AUTH_LOST_EVENT, listener);
+      }
+    },
+  );
+
+  it("keeps an empty parsed page distinct from an unavailable query", async () => {
+    const empty = collectionPageJson({ items: [], hiddenArchivedCount: 0 });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockResolvedValueOnce(jsonResponse(empty));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "unavailable" }, 503));
+
+    expect(await investigationGateway.queryInvestigations({}, options())).toEqual({
+      ok: true,
+      value: empty,
+    });
+    expect(await investigationGateway.queryInvestigations({}, options())).toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503 },
+    });
+  });
+
+  it("fails closed when a gateway double lacks the query seam", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const resolved = investigationCollectionQueryGateway(createInvestigationGatewayDouble());
+    expect(await resolved.queryInvestigations({ q: "checkout" }, options())).toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503 },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not fetch when already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    expect(await investigationGateway.queryInvestigations({}, options(controller))).toEqual({
+      ok: false,
+      error: { kind: "aborted" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
