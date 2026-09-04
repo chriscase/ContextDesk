@@ -7,6 +7,7 @@ import {
   type InvestigationRuntime,
   type InvestigationRuntimeIdentity,
   type CaseV1,
+  type InvestigationCollectionPageV1,
 } from "../../runtime/public.js";
 import {
   createDeferred,
@@ -22,6 +23,7 @@ import {
   type InvestigationGateway,
 } from "../../runtime/testkit/index.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
+import { DEFAULT_COLLECTION_QUERY } from "../../../app-location.js";
 import { KeystoneStrategy } from "./KeystoneStrategy.js";
 
 const FULL_CAPABILITIES = ["investigation:read", "investigation:write", "run:strategies"] as const;
@@ -95,6 +97,57 @@ function mountStrategy(options: {
 afterEach(() => cleanup());
 
 describe("Keystone engineer strategy", () => {
+  it("uses the public collection page and shell-owned query state when available", async () => {
+    const rows = makeCaseList().cases;
+    const queryPage: InvestigationCollectionPageV1 = {
+      schemaId: "cd-collab.investigation_collection_page.v1",
+      items: [rows[1]!],
+      nextCursor: null,
+      hiddenArchivedCount: 2,
+      facets: {
+        status: { top: [{ key: "monitoring", count: 1 }], otherCount: 0 },
+        entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 },
+        contributor: { top: [], otherCount: 0 },
+      },
+    };
+    const queryInvestigations = vi.fn(async (..._args: unknown[]) => gatewayOk(queryPage));
+    const onCollectionQueryChange = vi.fn();
+    const mounted = mountStrategy({
+      gateway: createInvestigationGatewayDouble({ queryInvestigations }),
+      shell: {
+        collectionQuery: {
+          ...DEFAULT_COLLECTION_QUERY,
+          q: "checkout",
+          status: ["monitoring"],
+          includeArchived: true,
+        },
+        onCollectionQueryChange,
+      },
+    });
+
+    expect(await screen.findByRole("button", { name: /Checkout latency after 4\.8\.0 rollout/u })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Imported investigation/u })).toBeNull();
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({
+      q: "checkout",
+      status: ["monitoring"],
+      includeArchived: true,
+    });
+    expect(screen.getByText(/2 archived hidden/u)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /monitoring 1/u }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search investigations" }), {
+      target: { value: "gateway" },
+    });
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ q: "gateway" }));
+    fireEvent.click(screen.getByRole("button", { name: /monitoring 1/u }));
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ status: [] }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include archived" }));
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ includeArchived: false }));
+    expect(mounted.gateway.listInvestigations).toHaveBeenCalled();
+  });
+
   it("keeps server collection order through sparse-safe search and status filtering", async () => {
     const onOpenCase = vi.fn();
     const mounted = mountStrategy({ shell: { onOpenCase } });
