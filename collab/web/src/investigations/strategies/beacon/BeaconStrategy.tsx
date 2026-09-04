@@ -10,6 +10,7 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
+import { useInvestigationCollectionQuery } from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
@@ -152,24 +153,74 @@ function CreateCard({ startSignal }: { readonly startSignal?: number }) {
   );
 }
 
-function Browse({ onOpenCase, focusRef }: Pick<InvestigationStrategyShellProps, "onOpenCase"> & { readonly focusRef: Ref<HTMLInputElement> }) {
+type BrowseStatus = "all" | CaseV1["status"];
+
+function Browse({
+  onOpenCase,
+  focusRef,
+  collectionQuery,
+  onCollectionQueryChange,
+}: Pick<InvestigationStrategyShellProps, "onOpenCase" | "collectionQuery" | "onCollectionQueryChange"> & { readonly focusRef: Ref<HTMLInputElement> }) {
   const runtime = useInvestigationRuntime();
-  const view = selectResourceView(runtime.resources.investigations);
-  const [query, setQuery] = useState("");
+  const legacyView = selectResourceView(runtime.resources.investigations);
+  const collection = useInvestigationCollectionQuery(collectionQuery);
+  const collectionView = collection.view;
+  const view = collection.enabled ? collection.view : legacyView;
+  const [localQuery, setLocalQuery] = useState("");
+  const [localStatus, setLocalStatus] = useState<BrowseStatus>("all");
+  const query = collection.enabled ? collectionQuery?.q ?? "" : localQuery;
+  const status = collection.enabled ? collectionQuery?.status[0] ?? "all" : localStatus;
+  const includeArchived = collectionQuery?.includeArchived ?? false;
   const normalized = query.trim().toLocaleLowerCase();
-  const filtered = useMemo(() => view.availability === "available"
-    ? view.value.filter((item) => [item.title, item.problemStatement, item.impact, item.investigationContext?.productName, item.investigationContext?.build].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalized))
-    : [], [normalized, view]);
+  const legacyCases = legacyView.availability === "available" ? legacyView.value : [];
+  const collectionCases = collectionView.availability === "available" ? collectionView.value.items : [];
+  const cases = collection.enabled ? collectionCases : legacyCases;
+  const filtered = useMemo(() => collection.enabled
+    ? cases
+    : cases.filter((item) => (status === "all" || item.status === status)
+      && (!normalized || [item.title, item.problemStatement, item.impact, item.investigationContext?.productName, item.investigationContext?.build].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalized))), [cases, collection.enabled, normalized, status]);
+  const statusFacets = collection.enabled && collectionView.availability === "available"
+    ? collectionView.value.facets.status.top
+    : [];
+  const hiddenArchivedCount = collection.enabled && collectionView.availability === "available"
+    ? collectionView.value.hiddenArchivedCount
+    : 0;
+  const countLabel = !collection.enabled
+    ? undefined
+    : collectionView.availability === "available"
+      ? `${filtered.length} shown${hiddenArchivedCount > 0 ? ` · ${hiddenArchivedCount} archived hidden` : ""}`
+      : collectionView.availability === "unavailable"
+        ? "Count unavailable"
+        : "Counting investigations…";
+
+  function updateQuery(next: { q?: string; status?: BrowseStatus; includeArchived?: boolean }) {
+    if (collection.enabled && collectionQuery !== undefined && onCollectionQueryChange) {
+      onCollectionQueryChange({
+        ...collectionQuery,
+        ...(next.q === undefined ? {} : { q: next.q }),
+        ...(next.status === undefined ? {} : { status: next.status === "all" ? [] : [next.status] }),
+        ...(next.includeArchived === undefined ? {} : { includeArchived: next.includeArchived }),
+      });
+      return;
+    }
+    if (next.q !== undefined) setLocalQuery(next.q);
+    if (next.status !== undefined) setLocalStatus(next.status);
+  }
 
   if (!runtime.capabilities.canRead) return (
     <StrategyStateNotice title="Investigations unavailable">Your account cannot read investigations, so no investigation data was requested.</StrategyStateNotice>
   );
   return (
-    <StrategyPanel title="Recent signals" titleId="beacon-browse-title" description="Open a record to append what happened next or attach supporting material." busy={view.availability === "loading" || (view.availability === "available" && view.refresh === "loading")}>
-      <label className="beacon__search"><span>Find an investigation</span><input ref={focusRef} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Title, problem, product, or build" /></label>
+      <StrategyPanel title="Recent signals" titleId="beacon-browse-title" description="Open a record to append what happened next or attach supporting material." actions={countLabel ? <StrategyBadge>{countLabel}</StrategyBadge> : undefined} busy={view.availability === "loading" || (view.availability === "available" && view.refresh === "loading")}>
+      <div className="beacon__browse-filters">
+        <label className="beacon__search"><span>Find an investigation</span><input ref={focusRef} type="search" value={query} onChange={(event) => updateQuery({ q: event.target.value })} placeholder="Title, problem, product, or build" /></label>
+        <label className="beacon__field"><span>Status</span><select value={status} onChange={(event) => updateQuery({ status: event.target.value as BrowseStatus })}><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label>
+        {collection.enabled ? <label className="beacon__checkbox"><input type="checkbox" checked={includeArchived} onChange={(event) => updateQuery({ includeArchived: event.target.checked })} /><span>Include archived</span></label> : null}
+      </div>
+      {statusFacets.length > 0 ? <div className="beacon__facets" aria-label="Recorded status counts">{statusFacets.map((facet) => <button key={facet.key} type="button" aria-pressed={status === facet.key} onClick={() => updateQuery({ status: status === facet.key ? "all" : facet.key as BrowseStatus })}><span>{facet.key}</span><strong>{facet.count}</strong></button>)}</div> : null}
       {view.availability === "idle" || view.availability === "loading" ? <StrategyStateNotice busy>Loading investigations…</StrategyStateNotice> : null}
-      {view.availability === "unavailable" ? <StrategyStateNotice tone="danger" role="alert" title="Investigation list unavailable" action={<button type="button" onClick={runtime.refresh.investigations}>Retry</button>}>{failureCopy(view.error, "The investigation list")}</StrategyStateNotice> : null}
-      {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Refresh failed" action={<button type="button" onClick={runtime.refresh.investigations}>Retry</button>}>The previously loaded list is still shown.</StrategyStateNotice> : null}
+      {view.availability === "unavailable" ? <StrategyStateNotice tone="danger" role="alert" title="Investigation list unavailable" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>{failureCopy(view.error, "The investigation list")}</StrategyStateNotice> : null}
+      {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Refresh failed" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>The previously loaded list is still shown.</StrategyStateNotice> : null}
       {view.availability === "available" && filtered.length === 0 ? <StrategyStateNotice>{normalized ? "No investigations match this search." : "No investigations have been recorded yet."}</StrategyStateNotice> : null}
       {view.availability === "available" && filtered.length > 0 ? <ul className="beacon__case-list">{filtered.map((item) => <li key={item.id}><button type="button" onClick={() => onOpenCase(item.id)}><span><strong>{titleOf(item)}</strong><small>{recorded(item.problemStatement)}</small></span><span className="beacon__case-state"><StrategyBadge tone={item.status === "resolved" ? "success" : item.status === "open" ? "accent" : "neutral"}>{item.status}</StrategyBadge><small>{dateLabel(item.createdAt)}</small></span></button></li>)}</ul> : null}
     </StrategyPanel>
@@ -386,7 +437,7 @@ function BeaconStrategyForIdentity(props: InvestigationStrategyShellProps) {
     <StrategySurface className="beacon" labelledBy={props.focusCaseId ? "beacon-detail-title" : "beacon-page-title"}>
       {props.focusCaseId ? <Detail {...props} /> : <>
         <StrategyHero eyebrow="Beacon · Rapid Intake" title="Capture the signal. Keep the trail." titleId="beacon-page-title" description="A calm, append-first workspace for fast triage intake and clear handoff. Every promotion is explicit; the shared record remains authoritative." />
-        <div className="beacon__browse-grid"><CreateCard {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })} /><Browse onOpenCase={props.onOpenCase} focusRef={browseFocusRef} /></div>
+        <div className="beacon__browse-grid"><CreateCard {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })} /><Browse onOpenCase={props.onOpenCase} focusRef={browseFocusRef} {...(props.collectionQuery === undefined ? {} : { collectionQuery: props.collectionQuery })} {...(props.onCollectionQueryChange === undefined ? {} : { onCollectionQueryChange: props.onCollectionQueryChange })} /></div>
       </>}
     </StrategySurface>
   );

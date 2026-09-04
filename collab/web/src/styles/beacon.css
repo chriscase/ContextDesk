@@ -104,6 +104,69 @@
   font-weight: 650;
 }
 
+.beacon__browse-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 0.4fr) auto;
+  gap: 0.7rem;
+  align-items: end;
+}
+
+.beacon__browse-filters .beacon__search {
+  margin-bottom: 0;
+}
+
+.beacon__checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.5rem;
+  padding-bottom: 0.65rem;
+  color: var(--fg);
+  font-size: 0.8rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.beacon__checkbox input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.beacon__facets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: -0.1rem 0 0.85rem;
+}
+
+.beacon__facets button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 1.9rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-input);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.beacon__facets button:hover,
+.beacon__facets button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.beacon__facets strong {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
 .beacon__case-list,
 .beacon__evidence-list,
 .beacon__stream {
