@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { Client } from "pg";
 import { describe, expect, it } from "vitest";
 import { adminUrl, withDisposableDb } from "../test/disposable-db.js";
 import { latestMigrationVersion, listMigrations, migrateDown, migrateUp } from "./migrate.js";
@@ -96,6 +97,12 @@ describe("migration versions", () => {
     );
     expect(migration).toBeDefined();
     const sql = readFileSync(migration!.downPath, "utf8");
+    const projectionLock = sql.indexOf(
+      "LOCK TABLE investigation_coordination IN ACCESS EXCLUSIVE MODE",
+    );
+    const intentLock = sql.indexOf(
+      "LOCK TABLE investigation_coordination_success_intents IN ACCESS EXCLUSIVE MODE",
+    );
     const projectionGuard = sql.indexOf(
       "IF EXISTS (SELECT 1 FROM investigation_coordination LIMIT 1)",
     );
@@ -103,9 +110,63 @@ describe("migration versions", () => {
       "OR EXISTS (SELECT 1 FROM investigation_coordination_success_intents LIMIT 1)",
     );
     const firstDrop = sql.indexOf("DROP TRIGGER");
-    expect(projectionGuard).toBeGreaterThanOrEqual(0);
+    expect(intentLock).toBeGreaterThanOrEqual(0);
+    expect(projectionLock).toBeGreaterThan(intentLock);
+    expect(projectionGuard).toBeGreaterThan(projectionLock);
     expect(intentGuard).toBeGreaterThan(projectionGuard);
     expect(firstDrop).toBeGreaterThan(intentGuard);
+  });
+
+  it("runs down migration SQL and version bookkeeping in one explicit transaction", async () => {
+    const queries: string[] = [];
+    const client = {
+      async query(sql: string) {
+        queries.push(sql);
+        if (sql.includes("to_regclass")) {
+          return { rows: [{ to_regclass: "schema_migrations" }] };
+        }
+        if (sql.includes("SELECT version FROM schema_migrations")) {
+          return { rows: [{ version: "029_investigation_coordination" }] };
+        }
+        return { rows: [] };
+      },
+    } as unknown as Client;
+
+    expect((await migrateDown(client)).rolledBack).toBe("029_investigation_coordination");
+    const begin = queries.indexOf("BEGIN");
+    const migration = queries.findIndex((sql) => sql.includes("LOCK TABLE investigation_coordination"));
+    const bookkeeping = queries.findIndex((sql) =>
+      sql.trimStart().startsWith("DELETE FROM schema_migrations WHERE version = $1")
+    );
+    const commit = queries.indexOf("COMMIT");
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(migration).toBeGreaterThan(begin);
+    expect(bookkeeping).toBeGreaterThan(migration);
+    expect(commit).toBeGreaterThan(bookkeeping);
+  });
+
+  it("rolls back the explicit migration transaction after down SQL fails", async () => {
+    const queries: string[] = [];
+    const client = {
+      async query(sql: string) {
+        queries.push(sql);
+        if (sql.includes("to_regclass")) {
+          return { rows: [{ to_regclass: "schema_migrations" }] };
+        }
+        if (sql.includes("SELECT version FROM schema_migrations")) {
+          return { rows: [{ version: "029_investigation_coordination" }] };
+        }
+        if (sql.includes("LOCK TABLE investigation_coordination")) {
+          throw new Error("synthetic down failure");
+        }
+        return { rows: [] };
+      },
+    } as unknown as Client;
+
+    await expect(migrateDown(client)).rejects.toThrow("synthetic down failure");
+    expect(queries).toContain("BEGIN");
+    expect(queries.at(-1)).toBe("ROLLBACK");
+    expect(queries).not.toContain("COMMIT");
   });
 });
 
@@ -417,6 +478,76 @@ describe.skipIf(!adminUrl())("migrations", () => {
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('evidence_file_references', 'audit_events', 'experiment_packages')`,
       );
       expect(gone.rows).toHaveLength(0);
+    });
+  });
+
+  it("excludes concurrent writers from both coordination tables during the rollback guard", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      await client.query(`
+        INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
+        VALUES (
+          '11111111-1111-4111-8111-111111111111',
+          'synthetic coordination lock fixture',
+          'low', 'open', 'synthetic-actor', 'synthetic-actor'
+        )
+      `);
+      const writer = new Client({ connectionString: url });
+      await writer.connect();
+      let lockTransactionOpen = false;
+      try {
+        await writer.query("SET lock_timeout = '100ms'");
+        await client.query("BEGIN");
+        lockTransactionOpen = true;
+        await client.query(
+          `LOCK TABLE investigation_coordination_success_intents IN ACCESS EXCLUSIVE MODE`,
+        );
+        await client.query(
+          `LOCK TABLE investigation_coordination IN ACCESS EXCLUSIVE MODE`,
+        );
+
+        await expect(writer.query(`
+          INSERT INTO investigation_coordination (
+            case_id, coordinator_identity_id, coordinator_username, revision,
+            updated_at, updated_by_identity_id, updated_by_username
+          ) VALUES (
+            '11111111-1111-4111-8111-111111111111', NULL, NULL, 1,
+            CURRENT_TIMESTAMP, 'synthetic-actor', 'synthetic-actor'
+          )
+        `)).rejects.toMatchObject({ code: "55P03" });
+        await expect(writer.query(`
+          INSERT INTO investigation_coordination_success_intents (
+            case_id, actor_id, idempotency_key, action, target_identity_id,
+            success_json, created_at
+          ) VALUES (
+            '11111111-1111-4111-8111-111111111111', 'synthetic-actor',
+            'coord-lock-intent', 'claim_self', NULL, '{}', CURRENT_TIMESTAMP
+          )
+        `)).rejects.toMatchObject({ code: "55P03" });
+
+        await client.query("ROLLBACK");
+        lockTransactionOpen = false;
+        await writer.query(`
+          INSERT INTO investigation_coordination (
+            case_id, coordinator_identity_id, coordinator_username, revision,
+            updated_at, updated_by_identity_id, updated_by_username
+          ) VALUES (
+            '11111111-1111-4111-8111-111111111111', NULL, NULL, 1,
+            CURRENT_TIMESTAMP, 'synthetic-actor', 'synthetic-actor'
+          )
+        `);
+        await expect(migrateDown(client)).rejects.toThrow(
+          /cannot roll back 029_investigation_coordination while coordination data exists/,
+        );
+        expect((await client.query(
+          `SELECT case_id FROM investigation_coordination`,
+        )).rows).toEqual([
+          { case_id: "11111111-1111-4111-8111-111111111111" },
+        ]);
+      } finally {
+        if (lockTransactionOpen) await client.query("ROLLBACK");
+        await writer.end();
+      }
     });
   });
 

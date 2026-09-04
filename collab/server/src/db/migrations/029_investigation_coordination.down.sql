@@ -1,3 +1,8 @@
+-- Match the mutator's intent-lookup-before-projection access order so rollback
+-- cannot introduce an avoidable lock-order inversion with an in-flight write.
+LOCK TABLE investigation_coordination_success_intents IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE investigation_coordination IN ACCESS EXCLUSIVE MODE;
+
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM investigation_coordination LIMIT 1)
