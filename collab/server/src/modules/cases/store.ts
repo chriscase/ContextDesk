@@ -152,6 +152,16 @@ export interface ArtifactAnnotationWriteIntent {
   createdAt: string;
 }
 
+/** One parent intent owns the complete, deterministic result of a bulk request. */
+export interface ArtifactAnnotationBulkWriteIntent {
+  caseId: string;
+  actorId: string;
+  idempotencyKey: string;
+  requestDigest: string;
+  resultJson: string;
+  createdAt: string;
+}
+
 export interface IntakeBatchRow {
   id: string;
   caseId: string;
@@ -390,6 +400,7 @@ export interface CaseStore {
   listLatestRevisions(caseId: string): Promise<RevisionRow[]>;
   insertRevision(rev: RevisionRow): Promise<void>;
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
+  getArtifactsByIds(artifactIds: readonly string[]): Promise<ArtifactRow[]>;
   listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
   listArtifactAnnotationsByCase(caseId: string): Promise<ArtifactAnnotationRow[]>;
   listReferencedContentHashes(): Promise<ReadonlySet<string>>;
@@ -403,6 +414,13 @@ export interface CaseStore {
     key: string,
   ): Promise<ArtifactAnnotationWriteIntent | null>;
   insertArtifactAnnotationIdempotency(row: ArtifactAnnotationWriteIntent): Promise<void>;
+  lockArtifactAnnotationBulkIdempotency(caseId: string, actorId: string, key: string): Promise<void>;
+  getArtifactAnnotationBulkIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ArtifactAnnotationBulkWriteIntent | null>;
+  insertArtifactAnnotationBulkIdempotency(row: ArtifactAnnotationBulkWriteIntent): Promise<void>;
   withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T>;
   lockIntakeIdempotency(caseId: string, key: string): Promise<void>;
   lockEvidenceDigest(digest: string): Promise<void>;
@@ -449,6 +467,7 @@ export class MemoryCaseStore implements CaseStore {
   private readonly artifacts = new Map<string, ArtifactRow>();
   private readonly artifactAnnotations = new Map<string, ArtifactAnnotationRow>();
   private readonly artifactAnnotationIntents = new Map<string, ArtifactAnnotationWriteIntent>();
+  private readonly artifactAnnotationBulkIntents = new Map<string, ArtifactAnnotationBulkWriteIntent>();
   private readonly snapshots = new Map<string, SnapshotRow>();
   private readonly intakeBatches = new Map<string, IntakeBatchRow>();
   private readonly contributionIntents = new Map<string, ContributionWriteIntent>();
@@ -467,6 +486,7 @@ export class MemoryCaseStore implements CaseStore {
       artifacts: [...this.artifacts.entries()],
       artifactAnnotations: [...this.artifactAnnotations.entries()],
       artifactAnnotationIntents: [...this.artifactAnnotationIntents.entries()],
+      artifactAnnotationBulkIntents: [...this.artifactAnnotationBulkIntents.entries()],
       snapshots: [...this.snapshots.entries()],
       intakeBatches: [...this.intakeBatches.entries()],
       contributionIntents: [...this.contributionIntents.entries()],
@@ -481,6 +501,7 @@ export class MemoryCaseStore implements CaseStore {
       artifacts: [string, ArtifactRow][];
       artifactAnnotations?: [string, ArtifactAnnotationRow][];
       artifactAnnotationIntents?: [string, ArtifactAnnotationWriteIntent][];
+      artifactAnnotationBulkIntents?: [string, ArtifactAnnotationBulkWriteIntent][];
       snapshots: [string, SnapshotRow][];
       intakeBatches: [string, IntakeBatchRow][];
       contributionIntents?: [string, ContributionWriteIntent][];
@@ -491,6 +512,7 @@ export class MemoryCaseStore implements CaseStore {
     this.artifacts.clear();
     this.artifactAnnotations.clear();
     this.artifactAnnotationIntents.clear();
+    this.artifactAnnotationBulkIntents.clear();
     this.snapshots.clear();
     this.intakeBatches.clear();
     this.contributionIntents.clear();
@@ -500,6 +522,7 @@ export class MemoryCaseStore implements CaseStore {
     for (const [id, value] of row.artifacts) this.artifacts.set(id, value);
     for (const [id, value] of row.artifactAnnotations ?? []) this.artifactAnnotations.set(id, value);
     for (const [id, value] of row.artifactAnnotationIntents ?? []) this.artifactAnnotationIntents.set(id, value);
+    for (const [id, value] of row.artifactAnnotationBulkIntents ?? []) this.artifactAnnotationBulkIntents.set(id, value);
     for (const [id, value] of row.snapshots) this.snapshots.set(id, value);
     for (const [id, value] of row.intakeBatches) this.intakeBatches.set(id, value);
     for (const [id, value] of row.contributionIntents ?? []) this.contributionIntents.set(id, value);
@@ -765,6 +788,13 @@ export class MemoryCaseStore implements CaseStore {
     return row ? { ...row } : null;
   }
 
+  async getArtifactsByIds(artifactIds: readonly string[]): Promise<ArtifactRow[]> {
+    return artifactIds.flatMap((id) => {
+      const row = this.artifacts.get(id);
+      return row ? [{ ...row }] : [];
+    });
+  }
+
   async listArtifactsByCase(caseId: string): Promise<ArtifactRow[]> {
     return [...this.artifacts.values()]
       .filter((row) => row.caseId === caseId)
@@ -833,6 +863,31 @@ export class MemoryCaseStore implements CaseStore {
       throw new Error("artifact annotation idempotency key already exists");
     }
     this.artifactAnnotationIntents.set(key, { ...row });
+  }
+
+  async lockArtifactAnnotationBulkIdempotency(
+    _caseId: string,
+    _actorId: string,
+    _key: string,
+  ): Promise<void> {
+    // Memory transactions are serialized by atomicBoundary.
+  }
+
+  async getArtifactAnnotationBulkIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ArtifactAnnotationBulkWriteIntent | null> {
+    const row = this.artifactAnnotationBulkIntents.get(artifactAnnotationIntentKey(caseId, actorId, key));
+    return row ? { ...row } : null;
+  }
+
+  async insertArtifactAnnotationBulkIdempotency(row: ArtifactAnnotationBulkWriteIntent): Promise<void> {
+    const key = artifactAnnotationIntentKey(row.caseId, row.actorId, row.idempotencyKey);
+    if (this.artifactAnnotationBulkIntents.has(key)) {
+      throw new Error("artifact annotation bulk idempotency key already exists");
+    }
+    this.artifactAnnotationBulkIntents.set(key, { ...row });
   }
 
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
@@ -1406,6 +1461,15 @@ export class PgCaseStore implements CaseStore {
     return row ? asArtifact(row) : null;
   }
 
+  async getArtifactsByIds(artifactIds: readonly string[]): Promise<ArtifactRow[]> {
+    if (artifactIds.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT * FROM evidence_artifacts WHERE id::text = ANY($1::text[])`,
+      [artifactIds],
+    );
+    return result.rows.map((row) => asArtifact(row as Record<string, unknown>));
+  }
+
   async listArtifactsByCase(caseId: string): Promise<ArtifactRow[]> {
     const result = await this.db.query(
       `SELECT * FROM evidence_artifacts WHERE case_id = $1 ORDER BY id ASC`,
@@ -1533,6 +1597,37 @@ export class PgCaseStore implements CaseStore {
         row.annotationId,
         row.createdAt,
       ],
+    );
+  }
+
+  async lockArtifactAnnotationBulkIdempotency(caseId: string, actorId: string, key: string): Promise<void> {
+    await this.db.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`artifact-annotation-bulk:${caseId}:${actorId}:${key}`],
+    );
+  }
+
+  async getArtifactAnnotationBulkIdempotency(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<ArtifactAnnotationBulkWriteIntent | null> {
+    const result = await this.db.query(
+      `SELECT case_id, actor_id, idempotency_key, request_digest, result_json, created_at
+       FROM artifact_annotation_bulk_write_intents
+       WHERE case_id = $1 AND actor_id = $2 AND idempotency_key = $3`,
+      [caseId, actorId, key],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asArtifactAnnotationBulkWriteIntent(row) : null;
+  }
+
+  async insertArtifactAnnotationBulkIdempotency(row: ArtifactAnnotationBulkWriteIntent): Promise<void> {
+    await this.db.query(
+      `INSERT INTO artifact_annotation_bulk_write_intents (
+         case_id, actor_id, idempotency_key, request_digest, result_json, created_at
+       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+      [row.caseId, row.actorId, row.idempotencyKey, row.requestDigest, row.resultJson, row.createdAt],
     );
   }
 
@@ -1796,6 +1891,17 @@ function asArtifactAnnotationWriteIntent(row: Record<string, unknown>): Artifact
     idempotencyKey: String(row.idempotency_key),
     requestDigest: String(row.request_digest),
     annotationId: String(row.annotation_id),
+    createdAt: asIso(row.created_at),
+  };
+}
+
+function asArtifactAnnotationBulkWriteIntent(row: Record<string, unknown>): ArtifactAnnotationBulkWriteIntent {
+  return {
+    caseId: String(row.case_id),
+    actorId: String(row.actor_id),
+    idempotencyKey: String(row.idempotency_key),
+    requestDigest: String(row.request_digest),
+    resultJson: typeof row.result_json === "string" ? row.result_json : JSON.stringify(row.result_json),
     createdAt: asIso(row.created_at),
   };
 }

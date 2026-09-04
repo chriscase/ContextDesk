@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/artifact-annotation-bulk-request.v1.json",
+  "title": "cd-collab Artifact Annotation Bulk Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "artifactIds", "body", "idempotencyKey"],
+  "properties": {
+    "schemaId": { "const": "cd-collab.artifact_annotation_bulk_request.v1" },
+    "artifactIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      }
+    },
+    "body": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "clientTime": { "type": "string" },
+    "sourceId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "idempotencyKey": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$" }
+  }
+}

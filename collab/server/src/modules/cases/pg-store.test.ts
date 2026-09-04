@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
   CORPUS_INTAKE_COMMIT_SCHEMA_ID,
   ContractViolation,
   SNAPSHOT_SCHEMA_ID,
@@ -302,6 +303,60 @@ async function insertSqlSnapshot(
 }
 
 describe.skipIf(!adminUrl())("pg-backed case memory", () => {
+  it("serializes one parent bulk annotation intent with memory-equivalent replay", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 4 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-bulk-annotation-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(pool), catalog);
+      const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      try {
+        const created = await cases.createCase(actor, { title: "Concurrent bulk annotation" }, "test");
+        const first = await cases.addEvidence(created.id, actor, {
+          kind: "attachment",
+          filename: "bulk-pg-a.txt",
+          bytes: new TextEncoder().encode("bulk-pg-a"),
+          summary: "bulk pg a",
+        }, "test");
+        const second = await cases.addEvidence(created.id, actor, {
+          kind: "attachment",
+          filename: "bulk-pg-b.txt",
+          bytes: new TextEncoder().encode("bulk-pg-b"),
+          summary: "bulk pg b",
+        }, "test");
+        const request = {
+          schemaId: ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
+          artifactIds: [second.artifact.id, first.artifact.id],
+          body: "One parent transaction",
+          idempotencyKey: "bulk-pg-concurrent-0001",
+        };
+        const results = await Promise.all([
+          cases.addArtifactAnnotationsBulk(created.id, actor, request, "test"),
+          cases.addArtifactAnnotationsBulk(created.id, actor, {
+            ...request,
+            artifactIds: [...request.artifactIds].reverse(),
+            clientTime: "2026-09-03T00:00:00Z",
+          }, "test"),
+        ]);
+        expect(results.flatMap((result) => result.items.map((item) => item.outcome)).sort())
+          .toEqual(["created", "created", "replayed", "replayed"]);
+        expect((await pool.query("SELECT id FROM artifact_annotations")).rows).toHaveLength(2);
+        expect((await pool.query("SELECT * FROM artifact_annotation_bulk_write_intents")).rows)
+          .toHaveLength(1);
+        expect((await pool.query(
+          "SELECT * FROM timeline_events WHERE kind = 'artifact_annotation_created'",
+        )).rows).toHaveLength(2);
+        expect(await audit.list({ action: "artifact_annotation_bulk_create" })).toHaveLength(1);
+      } finally {
+        await pool.end();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("serializes concurrent corpus idempotency and commits one batch, artifact, and audit", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);

@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import type { Multipart, MultipartFile } from "@fastify/multipart";
 import {
   ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
+  parseArtifactAnnotationBulkRequest,
   ARTIFACT_KINDS,
   AUTH_ERROR_SCHEMA_ID,
   ContractViolation,
@@ -18,6 +19,7 @@ import {
   SNAPSHOT_LIST_SCHEMA_ID,
   TIMELINE_SCHEMA_ID,
   isContributionIdempotencyKey,
+  isRfc4122Uuid,
   parseInvestigationLifecycleActionRequest,
   type ArtifactKind,
   type AuthErrorV1,
@@ -1684,6 +1686,37 @@ export async function registerCaseRoutes(
         ctx.has("evidence:private:read"),
       ),
     };
+  });
+
+  app.post("/api/cases/:id/evidence/annotations", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    if (!ctx.has("investigation:write")) {
+      await deps.audit.append({
+        identity: ctx.actor.id,
+        action: "artifact_annotation_bulk_create",
+        target: "forbidden",
+        origin: request.ip,
+        outcome: "denied",
+      });
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const caseId = (request.params as { id: string }).id;
+    if (!isRfc4122Uuid(caseId)) {
+      void reply.code(400);
+      return { error: "invalid", detail: "$.caseId: must be an RFC 4122 UUID" };
+    }
+    if (!(await requireCaseAccess(deps.domain, ctx, caseId, reply))) {
+      return authError("forbidden");
+    }
+    try {
+      const body = parseArtifactAnnotationBulkRequest(request.body);
+      return await deps.domain.addArtifactAnnotationsBulk(caseId, ctx.actor, body, request.ip);
+    } catch (err) {
+      return domainError(reply, err);
+    }
   });
 
   app.post("/api/cases/:id/evidence/:eid/annotations", async (request, reply) => {

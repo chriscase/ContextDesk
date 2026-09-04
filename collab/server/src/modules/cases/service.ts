@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   ARTIFACT_ANNOTATION_SCHEMA_ID,
+  ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
   ContractViolation,
@@ -13,11 +14,15 @@ import {
   describeDeleteRequest,
   isRfc4122Uuid,
   isContributionIdempotencyKey,
+  parseArtifactAnnotationBulkResult,
+  parseArtifactAnnotationBulkRequest,
   normalizeInvestigationContext,
   snapshotFairness,
   snapshotFingerprint,
   type ArtifactKind,
   type ArtifactAnnotationV1,
+  type ArtifactAnnotationBulkRequestV1,
+  type ArtifactAnnotationBulkResultV1,
   type ArtifactV1,
   type BlobMetaV1,
   type ContentHash,
@@ -562,6 +567,27 @@ function artifactAnnotationWriteDigest(input: {
       sourceId: input.sourceId,
     }))
     .digest("hex");
+}
+
+/** Canonical parent digest: target set + durable content, never client clock or request order. */
+export function artifactAnnotationBulkWriteDigest(input: {
+  artifactIds: readonly string[];
+  body: string;
+  privacyClass: PrivacyClass;
+  sourceId: string;
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      artifactIds: [...input.artifactIds].sort(compareArtifactIds),
+      body: input.body,
+      privacyClass: input.privacyClass,
+      sourceId: input.sourceId,
+    }))
+    .digest("hex");
+}
+
+function compareArtifactIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function sameHypothesisLinks(
@@ -1480,6 +1506,123 @@ export class CaseService {
         outcome: "success",
       });
       return this.toArtifactAnnotation(row);
+    }, this.audit);
+  }
+
+  async addArtifactAnnotationsBulk(
+    caseId: string,
+    actor: Actor,
+    input: ArtifactAnnotationBulkRequestV1,
+    origin: string,
+  ): Promise<ArtifactAnnotationBulkResultV1> {
+    if (!isRfc4122Uuid(caseId)) throw new ContractViolation("$.caseId", "must be an RFC 4122 UUID");
+    const request = parseArtifactAnnotationBulkRequest(input);
+    const clientTime = canonicalClientTime(request.clientTime);
+    const privacy = defaultPrivacy(request.privacyClass);
+    const requestArtifactIds = [...request.artifactIds];
+    const artifactIds = [...requestArtifactIds].sort(compareArtifactIds);
+    return this.store.withAtomic(async () => {
+      if (!(await this.store.lockCase(caseId))) throw new Error("case not found");
+      const sourceId = await this.resolveSourceId(actor, request.sourceId);
+      const digest = artifactAnnotationBulkWriteDigest({
+        artifactIds,
+        body: request.body,
+        privacyClass: privacy,
+        sourceId,
+      });
+      await this.store.lockArtifactAnnotationBulkIdempotency(caseId, actor.id, request.idempotencyKey);
+      const existing = await this.store.getArtifactAnnotationBulkIdempotency(
+        caseId,
+        actor.id,
+        request.idempotencyKey,
+      );
+      if (existing) {
+        if (existing.requestDigest !== digest) throw new ArtifactAnnotationConflictError();
+        const stored = parseArtifactAnnotationBulkResult(JSON.parse(existing.resultJson));
+        const byArtifactId = new Map(stored.items.map((item) => [item.artifactId, item]));
+        return {
+          ...stored,
+          items: requestArtifactIds.map((artifactId) => {
+            const item = byArtifactId.get(artifactId);
+            if (!item) throw new Error("artifact annotation bulk result is incomplete");
+            return item.outcome === "not_found"
+              ? item
+              : { ...item, outcome: "replayed" as const };
+          }),
+        };
+      }
+
+      const found = new Map(
+        (await this.store.getArtifactsByIds(artifactIds))
+          .filter((artifact) => artifact.caseId === caseId)
+          .map((artifact) => [artifact.id, artifact]),
+      );
+      const createdAt = new Date().toISOString();
+      const result: ArtifactAnnotationBulkResultV1 = {
+        schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
+        caseId,
+        items: [],
+      };
+      for (const artifactId of artifactIds) {
+        if (!found.has(artifactId)) {
+          result.items.push({ artifactId, outcome: "not_found" });
+          continue;
+        }
+        const row: ArtifactAnnotationRow = {
+          id: randomUUID(),
+          caseId,
+          artifactId,
+          body: request.body,
+          contentHash: createHash("sha256")
+            .update(`artifact-annotation\n${artifactId}\n${request.body}`)
+            .digest("hex"),
+          privacyClass: privacy,
+          authorId: actor.id,
+          authorUsername: actor.username,
+          createdAt,
+          sourceId,
+        };
+        await this.store.insertArtifactAnnotation(row);
+        const annotation = this.toArtifactAnnotation(row);
+        result.items.push({ artifactId, outcome: "created", annotation });
+        await this.store.appendTimeline(caseId, {
+          kind: "artifact_annotation_created",
+          actor,
+          targetId: artifactId,
+          clientTime,
+          payload: {
+            annotationId: row.id,
+            artifactId,
+            contentHash: row.contentHash,
+            privacyClass: privacy,
+            bulk: true,
+          },
+        });
+      }
+      await this.store.insertArtifactAnnotationBulkIdempotency({
+        caseId,
+        actorId: actor.id,
+        idempotencyKey: request.idempotencyKey,
+        requestDigest: digest,
+        resultJson: JSON.stringify(result),
+        createdAt,
+      });
+      await this.audit.append({
+        identity: actor.id,
+        action: "artifact_annotation_bulk_create",
+        target: `${caseId}:${request.idempotencyKey}`,
+        origin,
+        outcome: "success",
+      });
+      const byArtifactId = new Map(result.items.map((item) => [item.artifactId, item]));
+      return {
+        ...result,
+        items: requestArtifactIds.map((artifactId) => {
+          const item = byArtifactId.get(artifactId);
+          if (!item) throw new Error("artifact annotation bulk result is incomplete");
+          return item;
+        }),
+      };
     }, this.audit);
   }
 

@@ -7,8 +7,9 @@ describe("migration versions", () => {
   // investigation record graph, the case-bound log corpus, the narrow
   // experiment row-lock privilege, the administrator model-use policy, the
   // investigation log workbench, structured context, UI strategy governance,
-  // first-class artifact annotations, and replay-safe annotation writes.
-  it("pins the canonical PostgreSQL head at annotation write intents", () => {
+  // first-class artifact annotations, replay-safe singular writes, and one
+  // parent intent for each replay-safe bulk write.
+  it("pins the canonical PostgreSQL head at bulk annotation write intents", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -22,7 +23,8 @@ describe("migration versions", () => {
     expect(versions).toContain("024_ui_strategy_governance");
     expect(versions).toContain("025_artifact_annotations");
     expect(versions).toContain("026_artifact_annotation_write_intents");
-    expect(latestMigrationVersion()).toBe("026_artifact_annotation_write_intents");
+    expect(versions).toContain("027_artifact_annotation_bulk_write_intents");
+    expect(latestMigrationVersion()).toBe("027_artifact_annotation_bulk_write_intents");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -32,12 +34,12 @@ describe("migration versions", () => {
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
     expect(versions.slice(-6)).toEqual([
-      "021_workbench",
       "022_software_impact",
       "023_investigation_context",
       "024_ui_strategy_governance",
       "025_artifact_annotations",
       "026_artifact_annotation_write_intents",
+      "027_artifact_annotation_bulk_write_intents",
     ]);
   });
 });
@@ -73,6 +75,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("024_ui_strategy_governance");
       expect(up.applied).toContain("025_artifact_annotations");
       expect(up.applied).toContain("026_artifact_annotation_write_intents");
+      expect(up.applied).toContain("027_artifact_annotation_bulk_write_intents");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -165,6 +168,19 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(annotationIntentTables.rows.map((row) => row.tablename)).toEqual([
         "artifact_annotation_write_intents",
       ]);
+      const bulkIntentTables = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename = 'artifact_annotation_bulk_write_intents'`,
+      );
+      expect(bulkIntentTables.rows.map((row) => row.tablename)).toEqual([
+        "artifact_annotation_bulk_write_intents",
+      ]);
+      expect((await migrateDown(client)).rolledBack).toBe("027_artifact_annotation_bulk_write_intents");
+      const bulkIntentTablesAfterRollback = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename = 'artifact_annotation_bulk_write_intents'`,
+      );
+      expect(bulkIntentTablesAfterRollback.rows).toHaveLength(0);
       expect((await migrateDown(client)).rolledBack).toBe("026_artifact_annotation_write_intents");
       const annotationIntentTablesAfterRollback = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
@@ -282,6 +298,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("024_ui_strategy_governance");
       expect(dry.pending).toContain("025_artifact_annotations");
       expect(dry.pending).toContain("026_artifact_annotation_write_intents");
+      expect(dry.pending).toContain("027_artifact_annotation_bulk_write_intents");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,
