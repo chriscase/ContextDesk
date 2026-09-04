@@ -10,7 +10,10 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
-import { useInvestigationCollectionQuery } from "../collection-query.js";
+import {
+  useInvestigationCollectionQuery,
+  type InvestigationCollectionQueryPresentation,
+} from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
@@ -161,10 +164,13 @@ function Browse({
   focusRef,
   collectionQuery,
   onCollectionQueryChange,
-}: Pick<InvestigationStrategyShellProps, "onOpenCase" | "collectionQuery" | "onCollectionQueryChange"> & { readonly focusRef: Ref<HTMLInputElement> }) {
+  collection,
+}: Pick<InvestigationStrategyShellProps, "onOpenCase" | "collectionQuery" | "onCollectionQueryChange"> & {
+  readonly focusRef: Ref<HTMLInputElement>;
+  readonly collection: InvestigationCollectionQueryPresentation;
+}) {
   const runtime = useInvestigationRuntime();
   const legacyView = selectResourceView(runtime.resources.investigations);
-  const collection = useInvestigationCollectionQuery(collectionQuery);
   const collectionView = collection.view;
   const view = collection.enabled ? collection.view : legacyView;
   const [localQuery, setLocalQuery] = useState("");
@@ -430,6 +436,9 @@ function Detail(props: InvestigationStrategyShellProps) {
 function BeaconStrategyForIdentity(props: InvestigationStrategyShellProps) {
   const browseFocusRef = useRef<HTMLInputElement>(null);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
+  const collection = useInvestigationCollectionQuery(
+    props.focusCaseId === null ? props.collectionQuery : undefined,
+  );
   useEffect(() => {
     const previous = priorFocusId.current;
     priorFocusId.current = props.focusCaseId;
@@ -439,7 +448,7 @@ function BeaconStrategyForIdentity(props: InvestigationStrategyShellProps) {
     <StrategySurface className="beacon" labelledBy={props.focusCaseId ? "beacon-detail-title" : "beacon-page-title"}>
       {props.focusCaseId ? <Detail {...props} /> : <>
         <StrategyHero eyebrow="Beacon · Rapid Intake" title="Capture the signal. Keep the trail." titleId="beacon-page-title" description="A calm, append-first workspace for fast triage intake and clear handoff. Every promotion is explicit; the shared record remains authoritative." />
-        <div className="beacon__browse-grid"><CreateCard {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })} /><Browse onOpenCase={props.onOpenCase} focusRef={browseFocusRef} {...(props.collectionQuery === undefined ? {} : { collectionQuery: props.collectionQuery })} {...(props.onCollectionQueryChange === undefined ? {} : { onCollectionQueryChange: props.onCollectionQueryChange })} /></div>
+        <div className="beacon__browse-grid"><CreateCard {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })} /><Browse collection={collection} onOpenCase={props.onOpenCase} focusRef={browseFocusRef} {...(props.collectionQuery === undefined ? {} : { collectionQuery: props.collectionQuery })} {...(props.onCollectionQueryChange === undefined ? {} : { onCollectionQueryChange: props.onCollectionQueryChange })} /></div>
       </>}
     </StrategySurface>
   );

@@ -130,6 +130,61 @@ describe("Beacon rapid-intake strategy", () => {
     expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ includeArchived: false }));
   });
 
+  it("refreshes the same collection once after detail without reading while focused", async () => {
+    const selected = makePopulatedCase();
+    const page: InvestigationCollectionPageV1 = {
+      schemaId: "cd-collab.investigation_collection_page.v1",
+      items: [selected],
+      nextCursor: null,
+      hiddenArchivedCount: 0,
+      facets: {
+        status: { top: [], otherCount: 0 },
+        entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 },
+        contributor: { top: [], otherCount: 0 },
+      },
+    };
+    const queryInvestigations = vi.fn(async (..._args: unknown[]) => gatewayOk(page));
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    const collectionQuery = { ...DEFAULT_COLLECTION_QUERY, q: "checkout " };
+    const tree = (focusCaseId: string | null) => {
+      const shell = { ...SHELL, focusCaseId, collectionQuery };
+      return (
+        <InvestigationRuntimeGatewayHarness gateway={gateway}>
+          <InvestigationRuntimeProvider
+            identityKey={ALICE.id}
+            identity={ALICE}
+            authorityKey="alice-authority"
+            capabilities={["investigation:read", "investigation:write", "run:strategies"]}
+            readOnly={false}
+            active
+            focusCaseId={focusCaseId}
+            isInvestigationLocation
+            onOpenCreated={shell.onOpenCase}
+          >
+            <BeaconStrategy {...shell} />
+          </InvestigationRuntimeProvider>
+        </InvestigationRuntimeGatewayHarness>
+      );
+    };
+    const rendered = render(tree(null));
+    await screen.findByRole("heading", { name: "Recent signals" });
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+
+    rendered.rerender(tree(RUNTIME_FIXTURE_IDS.populatedCase));
+    await screen.findByRole("heading", { name: selected.title });
+    expect(queryInvestigations).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(tree(null));
+    await screen.findByRole("heading", { name: "Recent signals" });
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[1]?.[0]).toEqual(queryInvestigations.mock.calls[0]?.[0]);
+
+    rendered.rerender(tree(null));
+    await screen.findByRole("heading", { name: "Recent signals" });
+    expect(queryInvestigations).toHaveBeenCalledTimes(2);
+  });
+
   it("meets every strategy-neutral Runtime component requirement", async () => {
     const report = await runComponentConformance({
       label: "Beacon rapid intake",
