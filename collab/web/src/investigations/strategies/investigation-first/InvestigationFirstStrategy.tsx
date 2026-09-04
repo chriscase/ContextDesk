@@ -13,6 +13,7 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { EvidenceAnnotationWorkspace } from "../shared/index.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
 import { useInvestigationCollectionQuery } from "../collection-query.js";
+import { CollectionPagination } from "../shared/index.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
@@ -491,6 +492,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       {listView.availability === "available" && listView.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(listView.refreshError, "list")}</p><button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
       {listView.availability === "available" && filteredCases.length === 0 ? <p className="investigation-first__empty">{runtime.capabilities.canCreate ? "No investigations match this view. Try a different search or create a new one." : "No investigations match this view. Try a different search."}</p> : null}
       {listView.availability === "available" ? <ul className="investigation-first__list">{filteredCases.map((row) => { const missing = [row.problemStatement, row.affectedParties, row.impact].filter((value) => !text(value)).length; return <li key={row.id} className="investigation-first__list-item"><button type="button" className="investigation-first__list-button" onClick={() => props.onOpenCase(row.id)}><span className="investigation-first__list-title">{row.title || "Untitled investigation"}</span><span className="investigation-first__list-meta"><span className={`status-pill status-pill--${row.status}`}>{row.status}</span><span>{row.severity}</span>{row.investigationContext?.productName ? <span>{row.investigationContext.productName}{row.investigationContext.build ? ` · ${row.investigationContext.build}` : ""}</span> : null}</span><span className="investigation-first__list-hint">{missing ? `${missing} key ${missing === 1 ? "field" : "fields"} not recorded` : "Core context recorded"}</span></button></li>; })}</ul> : null}
+      {collection.enabled ? <CollectionPagination view={collectionView} onNextPage={collection.nextPage} /> : null}
     </section>;
   }
 

@@ -15,6 +15,7 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
+  CollectionPagination,
   StrategyHero,
   StrategyPanel,
   StrategyStateNotice,
@@ -223,6 +224,7 @@ function Browse({
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Refresh failed" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>The previously loaded list is still shown.</StrategyStateNotice> : null}
       {view.availability === "available" && filtered.length === 0 ? <StrategyStateNotice>{normalized ? "No investigations match this search." : "No investigations have been recorded yet."}</StrategyStateNotice> : null}
       {view.availability === "available" && filtered.length > 0 ? <ul className="beacon__case-list">{filtered.map((item) => <li key={item.id}><button type="button" onClick={() => onOpenCase(item.id)}><span><strong>{titleOf(item)}</strong><small>{recorded(item.problemStatement)}</small></span><span className="beacon__case-state"><StrategyBadge tone={item.status === "resolved" ? "success" : item.status === "open" ? "accent" : "neutral"}>{item.status}</StrategyBadge><small>{dateLabel(item.createdAt)}</small></span></button></li>)}</ul> : null}
+      {collection.enabled ? <CollectionPagination view={collectionView} onNextPage={collection.nextPage} /> : null}
     </StrategyPanel>
   );
 }

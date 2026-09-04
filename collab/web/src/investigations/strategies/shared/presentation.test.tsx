@@ -1,6 +1,7 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CollectionPagination,
   StrategyActionRow,
   StrategyBadge,
   StrategyHero,
@@ -8,6 +9,22 @@ import {
   StrategyStateNotice,
   StrategySurface,
 } from "./index.js";
+import type { InvestigationCollectionPageV1 } from "../../runtime/public.js";
+
+const PAGE_WITH_CURSOR: InvestigationCollectionPageV1 = {
+  schemaId: "cd-collab.investigation_collection_page.v1",
+  items: [],
+  nextCursor: "opaque-next-page",
+  hiddenArchivedCount: 0,
+  facets: {
+    status: { top: [], otherCount: 0 },
+    entity: { top: [], otherCount: 0 },
+    impactIdentity: { top: [], otherCount: 0 },
+    contributor: { top: [], otherCount: 0 },
+  },
+};
+
+afterEach(cleanup);
 
 describe("shared investigation strategy presentation kit", () => {
   it("provides labelled, composable presentation without behavior authority", () => {
@@ -37,5 +54,38 @@ describe("shared investigation strategy presentation kit", () => {
     expect(screen.getByRole("region", { name: "Recorded evidence" })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain("last available value");
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("renders a keyboard-accessible continuation and disables it during refresh", () => {
+    const onNextPage = vi.fn();
+    const { rerender } = render(
+      <CollectionPagination
+        view={{ availability: "available", value: PAGE_WITH_CURSOR, refresh: "settled" }}
+        onNextPage={onNextPage}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Load next page" });
+    expect(screen.getByRole("navigation", { name: "Investigation pages" })).toBeTruthy();
+    button.click();
+    expect(onNextPage).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <CollectionPagination
+        view={{ availability: "available", value: PAGE_WITH_CURSOR, refresh: "loading" }}
+        onNextPage={onNextPage}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Loading next page…" })).toHaveProperty("disabled", true);
+  });
+
+  it("does not invent a continuation when the Runtime has no cursor", () => {
+    const onNextPage = vi.fn();
+    render(
+      <CollectionPagination
+        view={{ availability: "available", value: { ...PAGE_WITH_CURSOR, nextCursor: null }, refresh: "settled" }}
+        onNextPage={onNextPage}
+      />,
+    );
+    expect(screen.queryByRole("navigation", { name: "Investigation pages" })).toBeNull();
   });
 });

@@ -32,3 +32,6 @@ export type { HandoffPanelProps } from "./HandoffPanel.js";
 
 export { EvidenceAnnotationWorkspace } from "./EvidenceAnnotationWorkspace.js";
 export type { EvidenceAnnotationWorkspaceProps } from "./EvidenceAnnotationWorkspace.js";
+
+export { CollectionPagination } from "./CollectionPagination.js";
+export type { CollectionPageView, CollectionPaginationProps } from "./CollectionPagination.js";
