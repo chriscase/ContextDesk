@@ -34,6 +34,8 @@ import {
   type CaseStatus,
   type CaseV1,
   type ContributionV1,
+  type InvestigationCollectionPageV1,
+  type InvestigationCollectionQueryV1,
   type HypothesisStatus,
   type InvestigationContextV1,
   type InvestigationLifecycleActionRequestV1,
@@ -90,6 +92,8 @@ import {
 } from "@cd-collab/contracts";
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
 import { deriveCaseBoard, type AcceptedDecisionBoardInput } from "./board.js";
+import type { InvestigationCollectionGraph } from "./collection-graph.js";
+import { buildInvestigationCollectionPage } from "./collection-query.js";
 import {
   CaseStoreCommitOutcomeUnknownError,
   MemoryCaseStore,
@@ -721,6 +725,7 @@ export class CaseService {
   private normalizationRevisionFor:
     | ((caseId: string) => Promise<number | null>)
     | null = null;
+  private collectionGraph: InvestigationCollectionGraph | null = null;
 
   constructor(
     private readonly evidence: EvidenceStore,
@@ -734,6 +739,14 @@ export class CaseService {
     lookup: (caseId: string) => Promise<number | null>,
   ): void {
     this.normalizationRevisionFor = lookup;
+  }
+
+  /**
+   * Optional entity/impact index for collection facets and filters.
+   * Unbound, those families stay empty and those filters match nothing.
+   */
+  bindCollectionGraph(graph: InvestigationCollectionGraph | null): void {
+    this.collectionGraph = graph;
   }
 
   async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
@@ -763,6 +776,23 @@ export class CaseService {
   async listCases(actor: Actor, isAdmin: boolean): Promise<CaseV1[]> {
     const rows = await this.store.listCases();
     return rows.filter((c) => isAdmin || this.isMember(c, actor.id)).map((c) => this.toCase(c));
+  }
+
+  async listCollectionPage(
+    actor: Actor,
+    isAdmin: boolean,
+    query: InvestigationCollectionQueryV1,
+  ): Promise<InvestigationCollectionPageV1> {
+    const rows = await this.store.listCases();
+    const authorized = rows.filter((row) => isAdmin || this.isMember(row, actor.id));
+    return buildInvestigationCollectionPage({
+      authorized,
+      query,
+      actor,
+      isAdmin,
+      graph: this.collectionGraph,
+      toCase: (row) => this.toCase(row),
+    });
   }
 
   async listActivityPage(
