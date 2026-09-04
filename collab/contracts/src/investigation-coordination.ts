@@ -218,6 +218,9 @@ function normalizedSafeText(
   if (typeof value !== "string") {
     throw new ContractViolation(path, "expected string");
   }
+  if (value.length > maxLength) {
+    throw new ContractViolation(path, `expected at most ${maxLength} wire characters`);
+  }
   const normalized = value.normalize("NFKC").trim();
   if (normalized.length === 0) {
     throw new ContractViolation(path, "expected non-empty text");
@@ -234,12 +237,45 @@ function normalizedSafeText(
   return normalized;
 }
 
+function exactSafeWireText(
+  value: unknown,
+  path: string,
+  maxLength: number,
+): string {
+  if (typeof value !== "string") {
+    throw new ContractViolation(path, "expected string");
+  }
+  if (value.length === 0) {
+    throw new ContractViolation(path, "expected non-empty text");
+  }
+  if (value.length > maxLength) {
+    throw new ContractViolation(path, `expected at most ${maxLength} wire characters`);
+  }
+  if (hasDangerousUnicode(value)) {
+    throw new ContractViolation(
+      path,
+      "control characters or invisible/bidi-override formatting characters are not allowed",
+    );
+  }
+  const normalized = value.normalize("NFKC").trim();
+  if (normalized.length === 0) {
+    throw new ContractViolation(path, "expected non-empty text");
+  }
+  if (normalized !== value) {
+    throw new ContractViolation(
+      path,
+      "must already be normalized and contain no surrounding whitespace",
+    );
+  }
+  return value;
+}
+
 function idValue(value: unknown, path: string): string {
-  return normalizedSafeText(value, path, INVESTIGATION_COORDINATION_ID_MAX_LENGTH);
+  return exactSafeWireText(value, path, INVESTIGATION_COORDINATION_ID_MAX_LENGTH);
 }
 
 function usernameValue(value: unknown, path: string): string {
-  return normalizedSafeText(value, path, INVESTIGATION_COORDINATION_USERNAME_MAX_LENGTH);
+  return exactSafeWireText(value, path, INVESTIGATION_COORDINATION_USERNAME_MAX_LENGTH);
 }
 
 function targetForAction(

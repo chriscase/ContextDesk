@@ -167,6 +167,29 @@ describe("investigation coordination projection", () => {
       parseInvestigationCoordination(recorded({ identityId: "identity-alice", username: "x".repeat(129) })),
     ).toThrow(/128/);
   });
+
+  it("preserves opaque wire identities byte-for-byte and rejects normalization drift", () => {
+    const ldapIdentity = {
+      identityId: "uid=Alice,ou=People,dc=example,dc=test",
+      username: "Alice@example.test",
+    };
+    expect(parseInvestigationCoordination(recorded(ldapIdentity)).coordinator).toEqual(
+      ldapIdentity,
+    );
+    for (const identityId of [
+      " identity-alice",
+      "identity-alice ",
+      "uid=Ａlice,ou=People,dc=example,dc=test",
+      `${"x".repeat(512)}y`,
+    ]) {
+      expect(() =>
+        parseInvestigationCoordination(recorded({ identityId, username: "alice" })),
+      ).toThrow(/normalized|512/);
+    }
+    expect(() =>
+      parseInvestigationCoordination(recorded({ identityId: "identity-alice", username: " alice" })),
+    ).toThrow(/normalized/);
+  });
 });
 
 describe("coordination action requests", () => {
@@ -290,6 +313,14 @@ describe("coordination success", () => {
     const archived = success("claim_self", null, ALICE, ALICE);
     archived.applied = { ...archived.applied, archived: true };
     expect(() => parseInvestigationCoordinationActionSuccess(archived)).toThrow(/cannot archive/);
+    const hiddenNormalizedMismatch = success("claim_self", null, ALICE, ALICE);
+    hiddenNormalizedMismatch.applied = {
+      ...hiddenNormalizedMismatch.applied,
+      investigationId: " case-1 ",
+    };
+    expect(() => parseInvestigationCoordinationActionSuccess(hiddenNormalizedMismatch)).toThrow(
+      /normalized/,
+    );
   });
 
   it("rejects no-op and impossible self transitions", () => {
@@ -535,6 +566,7 @@ describe("coordination changed and refused envelopes", () => {
     expect(() => parseInvestigationCoordinationActionRefused(base)).toThrow(/cannot refuse/);
     expect(() => parseInvestigationCoordinationActionRefused({ ...base, action: "claim_self", current: recorded(ALICE, { investigationId: "case-2" }) })).toThrow(/root/);
     expect(() => parseInvestigationCoordinationActionRefused({ ...base, action: "claim_self", detail: "x".repeat(601) })).toThrow(/600/);
+    expect(() => parseInvestigationCoordinationActionRefused({ ...base, action: "claim_self", detail: `${" ".repeat(600)}x` })).toThrow(/600/);
     expect(() => parseInvestigationCoordinationActionRefused({ ...base, action: "claim_self", detail: "   " })).toThrow(/non-empty/);
   });
 
