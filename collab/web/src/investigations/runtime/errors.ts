@@ -1,4 +1,7 @@
 import type {
+  InvestigationCoordinationAction,
+  InvestigationCoordinationRefusal,
+  InvestigationCoordinationV1,
   InvestigationLifecycleV1,
   LifecycleAction,
   LifecycleRefusal,
@@ -13,8 +16,12 @@ export const RUNTIME_PROTOCOL_REASONS = [
 
 export type RuntimeProtocolReason = (typeof RUNTIME_PROTOCOL_REASONS)[number];
 
-export type RuntimeInputField = "title" | "file" | "summary";
-export type RuntimeInputReason = "required" | "too_large" | "unreadable";
+export type RuntimeInputField = "title" | "file" | "summary" | "idempotencyKey";
+export type RuntimeInputReason =
+  | "required"
+  | "too_large"
+  | "unreadable"
+  | "intent_mismatch";
 
 /**
  * A deliberately bounded failure vocabulary for presentation consumers.
@@ -28,6 +35,24 @@ export type RuntimeFailure =
   | { kind: "auth_lost"; status: 401 | 403 }
   | { kind: "not_found"; status: 404 }
   | { kind: "validation"; status: 400 }
+  | {
+      kind: "coordination_refused";
+      status: 409;
+      investigationId: string;
+      action: InvestigationCoordinationAction;
+      targetIdentityId: string | null;
+      reason: InvestigationCoordinationRefusal;
+      detail: string;
+      current: InvestigationCoordinationV1;
+    }
+  | {
+      kind: "coordination_changed";
+      status: 409;
+      investigationId: string;
+      action: InvestigationCoordinationAction;
+      targetIdentityId: string | null;
+      current: InvestigationCoordinationV1;
+    }
   | {
       kind: "lifecycle_refused";
       status: 409;

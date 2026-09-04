@@ -5,6 +5,7 @@ import {
   CASE_SCHEMA_ID,
   CONTRIBUTION_LIST_SCHEMA_ID,
   EVIDENCE_LIST_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_SCHEMA_ID,
   parseCase,
   type CaseV1,
@@ -70,6 +71,17 @@ function runtimeReadResponse(url: string, cases: readonly CaseV1[]): Response | 
       schemaId: CONTRIBUTION_LIST_SCHEMA_ID,
       caseId: nested.id,
       contributions: [],
+    });
+  }
+  if (url.endsWith("/coordination")) {
+    return jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
+      investigationId: nested.id,
+      coordinator: null,
+      revision: 0,
+      updatedAt: null,
+      updatedBy: null,
+      archived: nested.status === "archived",
     });
   }
   if (url.endsWith("/lifecycle")) {

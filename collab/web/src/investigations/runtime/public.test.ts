@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { InvestigationRuntimeProviderProps } from "./public.js";
 import type {
   ArtifactAnnotationBulkResultV1,
+  InvestigationCoordinationActionCommand,
   InvestigationArtifactAnnotationsBulkCommand,
   InvestigationRuntime,
 } from "./public.js";
@@ -41,7 +42,7 @@ describe("investigation runtime public surface", () => {
     expect(smuggled.capabilities).toEqual(["investigation:read"]);
   });
 
-  it("exposes the bulk annotation command and result only through the public seam", () => {
+  it("exposes typed annotation and coordination commands only through the public seam", () => {
     const command: InvestigationArtifactAnnotationsBulkCommand = {
       artifactIds: ["evidence-a", "evidence-b"],
       body: "A shared observation.",
@@ -55,6 +56,7 @@ describe("investigation runtime public surface", () => {
         createContribution: null,
         updateSituation: null,
         applyLifecycle: null,
+        applyCoordinationAction: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
       },
@@ -64,5 +66,28 @@ describe("investigation runtime public surface", () => {
     expect(publicRuntime.MAX_ARTIFACT_ANNOTATION_BULK_IDS).toBe(64);
     expect(result).toBeNull();
     expect(runtime.commands.createArtifactAnnotations).toBeNull();
+    const coordinationCommand: InvestigationCoordinationActionCommand = {
+      action: "claim_self",
+      idempotencyKey: "coord-public-0001",
+    };
+    expect(coordinationCommand.action).toBe("claim_self");
+    const participantCommand: InvestigationCoordinationActionCommand = {
+      action: "assign_participant",
+      targetIdentityId: "identity-bob",
+      idempotencyKey: "coord-public-0002",
+    };
+    expect(participantCommand.targetIdentityId).toBe("identity-bob");
+    // @ts-expect-error Self actions must never carry a participant target.
+    const invalidSelf: InvestigationCoordinationActionCommand = {
+      action: "release_self",
+      targetIdentityId: "identity-bob",
+      idempotencyKey: "coord-public-0003",
+    };
+    // @ts-expect-error Participant actions require an explicit target.
+    const invalidParticipant: InvestigationCoordinationActionCommand = {
+      action: "release_participant",
+      idempotencyKey: "coord-public-0004",
+    };
+    expect([invalidSelf.action, invalidParticipant.action]).toHaveLength(2);
   });
 });

@@ -11,12 +11,14 @@ describe("runtime failure classification", () => {
       { kind: "input", field: "title", reason: "required" },
       { kind: "input", field: "file", reason: "too_large" },
       { kind: "input", field: "summary", reason: "unreadable" },
+      { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
     ] as const;
 
     expect(failures).toEqual([
       { kind: "input", field: "title", reason: "required" },
       { kind: "input", field: "file", reason: "too_large" },
       { kind: "input", field: "summary", reason: "unreadable" },
+      { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
     ]);
   });
 

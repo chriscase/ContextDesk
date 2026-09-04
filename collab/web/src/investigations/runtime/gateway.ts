@@ -3,6 +3,9 @@ import {
   INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
   parseCase,
   parseCaseList,
   parseContribution,
@@ -13,6 +16,11 @@ import {
   parseInvestigationLifecycleActionRefused,
   parseInvestigationLifecycleActionSuccess,
   parseInvestigationLifecycleChanged,
+  parseInvestigationCoordination,
+  parseInvestigationCoordinationActionRefused,
+  parseInvestigationCoordinationActionRequest,
+  parseInvestigationCoordinationActionSuccess,
+  parseInvestigationCoordinationChanged,
   type ArtifactKind,
   type ArtifactV1,
   type CaseV1,
@@ -22,6 +30,9 @@ import {
   type InvestigationLifecycleActionSuccessV1,
   type InvestigationLifecycleExpectedV1,
   type InvestigationLifecycleV1,
+  type InvestigationCoordinationActionRequestV1,
+  type InvestigationCoordinationActionSuccessV1,
+  type InvestigationCoordinationV1,
   type LifecycleAction,
   type PrivacyClass,
 } from "@cd-collab/contracts/investigation-runtime";
@@ -59,6 +70,11 @@ export type GatewayResult<T> =
 export interface GatewayRequestOptions {
   /** Required so every caller makes cancellation and publication intentional. */
   readonly signal: AbortSignal;
+}
+
+export interface CoordinationGatewayRequestOptions extends GatewayRequestOptions {
+  /** Authenticated actor supplied by the shell, never serialized into the request body. */
+  readonly actorIdentityId: string;
 }
 
 export interface CreateInvestigationInput {
@@ -210,6 +226,24 @@ export interface ApplyLifecycleActionInput {
   readonly clientTime?: string;
 }
 
+export type ApplyCoordinationActionInput = Omit<
+  InvestigationCoordinationActionRequestV1,
+  "schemaId" | "investigationId"
+>;
+
+/** Optional coordination transport; reads and actions are upgraded together. */
+export interface InvestigationCoordinationGateway {
+  getCoordination(
+    investigationId: string,
+    options: CoordinationGatewayRequestOptions,
+  ): Promise<GatewayResult<InvestigationCoordinationV1>>;
+  applyCoordinationAction(
+    investigationId: string,
+    input: ApplyCoordinationActionInput,
+    options: CoordinationGatewayRequestOptions,
+  ): Promise<GatewayResult<InvestigationCoordinationActionSuccessV1>>;
+}
+
 /**
  * The Runtime V1.1 write seams, kept as their own contract.
  *
@@ -272,7 +306,8 @@ export interface InvestigationGateway
   extends
     Partial<InvestigationWriteGateway>,
     Partial<InvestigationAnnotationGateway>,
-    Partial<InvestigationCollectionQueryGateway>
+    Partial<InvestigationCollectionQueryGateway>,
+    Partial<InvestigationCoordinationGateway>
 {
   listInvestigations(
     options: GatewayRequestOptions,
@@ -521,6 +556,22 @@ function lifecycleActionBody(
   return body;
 }
 
+function coordinationActionBody(
+  investigationId: string,
+  input: ApplyCoordinationActionInput,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    schemaId: INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+    investigationId,
+    action: input.action,
+    expectedRevision: input.expectedRevision,
+    idempotencyKey: input.idempotencyKey,
+  };
+  if (input.targetIdentityId !== undefined) body.targetIdentityId = input.targetIdentityId;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  return body;
+}
+
 function isJsonResponse(response: Response): boolean {
   const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   return mediaType === "application/json"
@@ -620,6 +671,7 @@ function cancelBodyReader(reader: ReadableStreamDefaultReader<Uint8Array>): void
 async function readBoundedFailureBody(
   response: Response,
   signal: AbortSignal,
+  maxBytes = MAX_UPLOAD_FAILURE_BODY_BYTES,
 ): Promise<BoundedFailureBody> {
   if (signal.aborted) return { kind: "aborted" };
   if (response.body === null) return { kind: "invalid" };
@@ -645,7 +697,7 @@ async function readBoundedFailureBody(
       if (next.done) break;
       const chunk = next.value;
       if (chunk.byteLength === 0) continue;
-      if (chunk.byteLength > MAX_UPLOAD_FAILURE_BODY_BYTES - byteLength) {
+      if (chunk.byteLength > maxBytes - byteLength) {
         cancelBodyReader(reader);
         return { kind: "invalid" };
       }
@@ -1152,6 +1204,149 @@ async function parseLifecycleConflict(
   }
 }
 
+const MAX_COORDINATION_FAILURE_BODY_BYTES = 8_192;
+
+function coordinationIntentTarget(
+  request: InvestigationCoordinationActionRequestV1,
+): string | null {
+  return request.targetIdentityId ?? null;
+}
+
+function coordinationEnvelopeIdentity(
+  investigationId: string,
+  request: InvestigationCoordinationActionRequestV1,
+  response: {
+    readonly investigationId: string;
+    readonly action: InvestigationCoordinationActionRequestV1["action"];
+    readonly targetIdentityId: string | null;
+  },
+): boolean {
+  return request.investigationId === investigationId
+    && response.investigationId === investigationId
+    && response.action === request.action
+    && response.targetIdentityId === coordinationIntentTarget(request);
+}
+
+function coordinationSuccessIdentity(
+  investigationId: string,
+  request: InvestigationCoordinationActionRequestV1,
+  actorIdentityId: string,
+  response: InvestigationCoordinationActionSuccessV1,
+): boolean {
+  if (
+    actorIdentityId.length === 0
+    || !coordinationEnvelopeIdentity(investigationId, request, response)
+    || response.applied.updatedBy?.identityId !== actorIdentityId
+  ) return false;
+  if (request.action === "claim_self") {
+    return response.applied.coordinator?.identityId === actorIdentityId;
+  }
+  if (request.action === "release_self") {
+    return response.previousCoordinator?.identityId === actorIdentityId;
+  }
+  return true;
+}
+
+async function parseCoordinationConflict(
+  response: Response,
+  investigationId: string,
+  request: InvestigationCoordinationActionRequestV1,
+  actorIdentityId: string,
+  signal: AbortSignal,
+): Promise<GatewayResult<InvestigationCoordinationActionSuccessV1>> {
+  const genericConflict = (): GatewayResult<InvestigationCoordinationActionSuccessV1> =>
+    failed({ kind: "conflict", status: 409 });
+  if (!isJsonResponse(response)) return signal.aborted ? aborted() : genericConflict();
+  const bounded = await readBoundedFailureBody(
+    response,
+    signal,
+    MAX_COORDINATION_FAILURE_BODY_BYTES,
+  );
+  if (bounded.kind === "aborted") return aborted();
+  if (bounded.kind === "invalid") return genericConflict();
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(bounded.text);
+  } catch {
+    return genericConflict();
+  }
+  if (signal.aborted) return aborted();
+
+  let schemaId: unknown;
+  let error: unknown;
+  try {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return genericConflict();
+    }
+    const record = raw as Record<string, unknown>;
+    schemaId = record.schemaId;
+    error = record.error;
+  } catch {
+    return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+  }
+  const claimsChanged = schemaId === INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID
+    || error === "coordination_changed";
+  const claimsRefused = schemaId === INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID
+    || error === "coordination_refused";
+  if (!claimsChanged && !claimsRefused) return genericConflict();
+  if (claimsChanged && claimsRefused) return failed(protocolFailure("contract"));
+
+  try {
+    if (claimsChanged) {
+      const changed = parseInvestigationCoordinationChanged(raw);
+      if (!coordinationEnvelopeIdentity(investigationId, request, changed)) {
+        return failed(protocolFailure("identity"));
+      }
+      if (
+        changed.current.revision === request.expectedRevision
+        || (request.action === "release_self"
+          && changed.current.coordinator?.identityId !== actorIdentityId)
+      ) return failed(protocolFailure("identity"));
+      return failed(deepFreezeDto({
+        kind: "coordination_changed",
+        status: 409,
+        investigationId: changed.investigationId,
+        action: changed.action,
+        targetIdentityId: changed.targetIdentityId,
+        current: changed.current,
+      }));
+    }
+
+    const refusal = parseInvestigationCoordinationActionRefused(raw);
+    if (!coordinationEnvelopeIdentity(investigationId, request, refusal)) {
+      return failed(protocolFailure("identity"));
+    }
+    const holder = refusal.current.coordinator?.identityId ?? null;
+    if (
+      (request.action === "claim_self"
+        && refusal.reason === "already_coordinator"
+        && holder !== actorIdentityId)
+      || (request.action === "claim_self"
+        && refusal.reason === "occupied"
+        && (holder === null || holder === actorIdentityId))
+      || (request.action === "release_self"
+        && refusal.reason === "not_coordinator"
+        && holder === actorIdentityId)
+    ) return failed(protocolFailure("identity"));
+    return failed(deepFreezeDto({
+      kind: "coordination_refused",
+      status: 409,
+      investigationId: refusal.investigationId,
+      action: refusal.action,
+      targetIdentityId: refusal.targetIdentityId,
+      reason: refusal.reason,
+      detail: refusal.detail,
+      current: refusal.current,
+    }));
+  } catch (cause) {
+    if (signal.aborted) return aborted();
+    return cause instanceof ContractViolation
+      ? failed(protocolFailure("contract"))
+      : failed({ kind: "unexpected" });
+  }
+}
+
 /**
  * The answer every write seam gives when the transport does not implement it.
  *
@@ -1190,6 +1385,13 @@ const UNAVAILABLE_BULK_ANNOTATION_GATEWAY: InvestigationBulkAnnotationGateway = 
 const UNAVAILABLE_COLLECTION_QUERY_GATEWAY: InvestigationCollectionQueryGateway = Object.freeze({
   queryInvestigations: () =>
     Promise.resolve(failed<InvestigationCollectionPageV1>(QUERY_SEAM_UNAVAILABLE)),
+});
+
+const UNAVAILABLE_COORDINATION_GATEWAY: InvestigationCoordinationGateway = Object.freeze({
+  getCoordination: () =>
+    Promise.resolve(failed<InvestigationCoordinationV1>(WRITE_SEAM_UNAVAILABLE)),
+  applyCoordinationAction: () =>
+    Promise.resolve(failed<InvestigationCoordinationActionSuccessV1>(WRITE_SEAM_UNAVAILABLE)),
 });
 
 /**
@@ -1295,8 +1497,28 @@ export function investigationCollectionQueryGateway(
   return Object.freeze(resolved);
 }
 
+/** Resolve coordination only when both its read and action methods exist. */
+export function investigationCoordinationGateway(
+  gateway: InvestigationGateway,
+): InvestigationCoordinationGateway {
+  const { getCoordination, applyCoordinationAction } = gateway;
+  if (getCoordination === undefined || applyCoordinationAction === undefined) {
+    return UNAVAILABLE_COORDINATION_GATEWAY;
+  }
+  const resolved: InvestigationCoordinationGateway = {
+    getCoordination(investigationId, options) {
+      return getCoordination.call(gateway, investigationId, options);
+    },
+    applyCoordinationAction(investigationId, input, options) {
+      return applyCoordinationAction.call(gateway, investigationId, input, options);
+    },
+  };
+  return Object.freeze(resolved);
+}
+
 export const investigationGateway: InvestigationGatewayWithWrites
-  & InvestigationCollectionQueryGateway = {
+  & InvestigationCollectionQueryGateway
+  & InvestigationCoordinationGateway = {
   async listInvestigations({ signal }) {
     const result = await requestParsed(
       "/api/cases",
@@ -1653,6 +1875,83 @@ export const investigationGateway: InvestigationGatewayWithWrites
       signal,
       parseInvestigationLifecycleActionSuccess,
       (value) => value.investigationId === investigationId && value.action === input.action,
+    );
+  },
+
+  getCoordination(investigationId, { signal }) {
+    return requestParsed(
+      caseRoute(investigationId, "/coordination"),
+      {},
+      signal,
+      parseInvestigationCoordination,
+      (value) => value.investigationId === investigationId,
+    );
+  },
+
+  async applyCoordinationAction(
+    investigationId,
+    input,
+    { actorIdentityId, signal },
+  ) {
+    if (signal.aborted) return aborted();
+    let request: InvestigationCoordinationActionRequestV1;
+    try {
+      request = parseInvestigationCoordinationActionRequest(
+        coordinationActionBody(investigationId, input),
+      );
+    } catch (cause) {
+      return cause instanceof ContractViolation
+        ? failed(protocolFailure("contract"))
+        : failed({ kind: "unexpected" });
+    }
+    if (signal.aborted) return aborted();
+    const serialized = serializeMutationBody(signal, () => ({
+      schemaId: request.schemaId,
+      investigationId: request.investigationId,
+      action: request.action,
+      ...(request.targetIdentityId === undefined
+        ? {}
+        : { targetIdentityId: request.targetIdentityId }),
+      expectedRevision: request.expectedRevision,
+      idempotencyKey: request.idempotencyKey,
+      ...(request.clientTime === undefined ? {} : { clientTime: request.clientTime }),
+    }));
+    if (!serialized.ok) return failed(serialized.error);
+    const fetched = await fetchProtected(
+      caseRoute(investigationId, "/coordination"),
+      {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: serialized.value,
+      },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    if (fetched.response.status === 401 || fetched.response.status === 403) {
+      return failed(classifyHttpFailure(fetched.response.status));
+    }
+    if (fetched.response.status === 409) {
+      return parseCoordinationConflict(
+        fetched.response,
+        investigationId,
+        request,
+        actorIdentityId,
+        signal,
+      );
+    }
+    if (!fetched.response.ok) {
+      return parseCommitOutcomeUnknownFailure(fetched.response, signal);
+    }
+    return parseSuccessfulResponse(
+      fetched.response,
+      signal,
+      parseInvestigationCoordinationActionSuccess,
+      (value) => coordinationSuccessIdentity(
+        investigationId,
+        request,
+        actorIdentityId,
+        value,
+      ),
     );
   },
 };
