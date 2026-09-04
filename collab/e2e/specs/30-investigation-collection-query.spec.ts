@@ -168,6 +168,7 @@ test.describe("Investigation collection query qualification", () => {
           await route.continue();
           return;
         }
+        await new Promise((resolve) => setTimeout(resolve, 200));
         await route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -213,6 +214,9 @@ test.describe("Investigation collection query qualification", () => {
       await expect(next).toBeVisible();
       expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
       await next.click();
+      const loading = page.getByRole("button", { name: "Loading next page…" });
+      await expect(loading).toBeVisible();
+      await expect(loading).toBeFocused();
       await expect.poll(() => queryRequests.some((requestUrl) => requestUrl.searchParams.get("cursor") === "eyJwYWdlIjoyfQ")).toBe(true);
       await expect(rows).toHaveCount(2);
       await expect(rows.nth(0)).toContainText(firstTitle);
@@ -263,6 +267,7 @@ test.describe("Investigation collection query qualification", () => {
           await route.continue();
           return;
         }
+        await new Promise((resolve) => setTimeout(resolve, 200));
         await route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -299,6 +304,9 @@ test.describe("Investigation collection query qualification", () => {
           await expect(next).toBeVisible();
           expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
           await next.click();
+          const loading = page.getByRole("button", { name: "Loading next page…" });
+          await expect(loading).toBeVisible();
+          await expect(loading).toBeFocused();
           await expect.poll(() => queryRequests.some((requestUrl) => requestUrl.searchParams.get("cursor") === "eyJwYWdlIjoyfQ")).toBe(true);
           await expect(rows).toHaveCount(2);
           await expect(rows.nth(0)).toContainText(firstTitle);

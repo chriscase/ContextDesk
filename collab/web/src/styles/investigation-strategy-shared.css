@@ -131,7 +131,8 @@
   margin-top: 1rem;
 }
 
-.strategy-kit__pagination button:disabled {
+.strategy-kit__pagination button:disabled,
+.strategy-kit__pagination button[aria-disabled="true"] {
   cursor: wait;
 }
 

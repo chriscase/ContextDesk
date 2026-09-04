@@ -67,12 +67,24 @@ export function useInvestigationCollectionQuery(
     ? selectResourceView(runtime.resources.investigationCollection)
     : { availability: "idle" } as const;
   const continuationPendingRef = useRef(false);
+  const pendingInputKeyRef = useRef(inputKey);
+  const activeCursor = runtime.resources.investigationCollectionQuery?.cursor ?? null;
+  const collectionStatus = runtime.resources.investigationCollection.status;
 
   useEffect(() => {
-    if (view.availability !== "available" || view.refresh !== "loading") {
+    if (!enabled || pendingInputKeyRef.current !== inputKey) {
+      continuationPendingRef.current = false;
+      pendingInputKeyRef.current = inputKey;
+      return;
+    }
+    if (
+      continuationPendingRef.current
+      && activeCursor !== null
+      && (collectionStatus === "ready" || collectionStatus === "failed")
+    ) {
       continuationPendingRef.current = false;
     }
-  }, [view]);
+  }, [activeCursor, collectionStatus, enabled, inputKey]);
 
   const nextPage = useMemo(() => {
     if (!enabled || command === undefined || command === null) {

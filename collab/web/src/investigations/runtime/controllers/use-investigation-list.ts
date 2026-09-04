@@ -214,6 +214,9 @@ function accumulatedPage(
 ): InvestigationCollectionPageV1 {
   const items = [...previous.items, ...next.items];
   Object.freeze(items);
+  // Facets and the hidden-archive count are computed over the authorized
+  // collection, not the individual cursor page. Keep the newest server
+  // projection while accumulating only the ordered page items.
   return Object.freeze({
     ...next,
     items,

@@ -2,7 +2,7 @@ import {
   INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
   parseInvestigationCollectionPage,
 } from "@cd-collab/contracts/investigation-collection";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InvestigationRuntimeGatewayHarness,
@@ -14,6 +14,7 @@ import {
 import {
   InvestigationRuntimeProvider,
   useInvestigationRuntime,
+  type InvestigationCollectionPageV1,
 } from "../runtime/public.js";
 import {
   DEFAULT_COLLECTION_QUERY,
@@ -150,17 +151,27 @@ describe("investigation collection query shell adapter", () => {
   });
 
   it("continues with the runtime cursor without changing shell query state", async () => {
-    const queryInvestigations = vi.fn<QueryFn>(
-      async () => gatewayOk(pageFixtureWithCursor("eyJwYWdlIjoyfQ")),
-    );
+    let resolveContinuation: ((value: ReturnType<typeof gatewayOk<InvestigationCollectionPageV1>>) => void) | undefined;
+    const continuation = new Promise<ReturnType<typeof gatewayOk<InvestigationCollectionPageV1>>>((resolve) => {
+      resolveContinuation = resolve;
+    });
+    const queryInvestigations = vi.fn<QueryFn>(async (input) => input.cursor
+      ? continuation
+      : gatewayOk(pageFixtureWithCursor("eyJwYWdlIjoyfQ")));
     let nextPage: (() => void) | undefined;
+    let refresh: (() => void) | undefined;
     function ProbeWithNext() {
       const collection = useInvestigationCollectionQuery({
         ...DEFAULT_COLLECTION_QUERY,
         q: "checkout",
       });
       nextPage = collection.nextPage;
-      return <output data-testid="cursor-page">{collection.view.availability}</output>;
+      refresh = collection.refresh;
+      return <output data-testid="cursor-page">{
+        collection.view.availability === "available"
+          ? `${collection.view.refresh}:${collection.view.value.items.length}`
+          : collection.view.availability
+      }</output>;
     }
     render(
       <InvestigationRuntimeGatewayHarness gateway={createInvestigationGatewayDouble({ queryInvestigations })}>
@@ -180,13 +191,22 @@ describe("investigation collection query shell adapter", () => {
       </InvestigationRuntimeGatewayHarness>,
     );
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(document.querySelector("[data-testid=cursor-page]")?.textContent).toBe("available"));
+    await waitFor(() => expect(screen.getByTestId("cursor-page").textContent).toMatch(/^settled:/u));
     nextPage?.();
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    nextPage?.();
+    expect(queryInvestigations).toHaveBeenCalledTimes(2);
     expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({
       q: "checkout",
       cursor: "eyJwYWdlIjoyfQ",
     });
+    expect(screen.getByTestId("cursor-page").textContent).toMatch(/^loading:/u);
+
+    resolveContinuation?.(gatewayOk({ ...pageFixture(), items: [], nextCursor: null }));
+    await waitFor(() => expect(screen.getByTestId("cursor-page").textContent).toMatch(/^settled:/u));
+    refresh?.();
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(3));
+    expect(queryInvestigations.mock.calls[2]?.[0].cursor).toBeNull();
   });
 
   it("does not invoke or expose a query when the shell has no list query", async () => {

@@ -76,8 +76,11 @@ describe("shared investigation strategy presentation kit", () => {
         onNextPage={onNextPage}
       />,
     );
-    expect(screen.getByRole("button", { name: "Loading next page…" })).toHaveProperty("disabled", true);
-    expect(screen.getByRole("button", { name: "Loading next page…" })).toBe(document.activeElement);
+    const loadingButton = screen.getByRole("button", { name: "Loading next page…" });
+    expect(loadingButton.getAttribute("aria-disabled")).toBe("true");
+    expect(loadingButton).toBe(document.activeElement);
+    loadingButton.click();
+    expect(onNextPage).toHaveBeenCalledTimes(1);
 
     rerender(
       <CollectionPagination
@@ -109,6 +112,24 @@ describe("shared investigation strategy presentation kit", () => {
     const completion = screen.getByRole("status", { name: "" });
     await waitFor(() => expect(completion).toBe(document.activeElement));
     expect(completion.textContent).toContain("All loaded investigations are shown");
+
+    const unrelatedControl = document.createElement("button");
+    document.body.append(unrelatedControl);
+    unrelatedControl.focus();
+    rerender(
+      <CollectionPagination
+        view={{ availability: "available", value: { ...PAGE_WITH_CURSOR, nextCursor: null }, refresh: "loading" }}
+        onNextPage={onNextPage}
+      />,
+    );
+    rerender(
+      <CollectionPagination
+        view={{ availability: "available", value: { ...PAGE_WITH_CURSOR, nextCursor: null }, refresh: "settled" }}
+        onNextPage={onNextPage}
+      />,
+    );
+    expect(unrelatedControl).toBe(document.activeElement);
+    unrelatedControl.remove();
   });
 
   it("does not invent a continuation when the Runtime has no cursor", () => {
