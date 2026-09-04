@@ -215,6 +215,25 @@ export type {
   PrivacyClass,
 } from "./case.js";
 
+export {
+  INVESTIGATION_COLLECTION_FACET_FAMILIES,
+  INVESTIGATION_COLLECTION_LIMITS,
+  INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+  INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+  INVESTIGATION_COLLECTION_STATUSES,
+  parseInvestigationCollectionPage,
+  parseInvestigationCollectionQuery,
+} from "./investigation-collection-browser.js";
+export type {
+  InvestigationCollectionFacetBucketV1,
+  InvestigationCollectionFacetFamilyV1,
+  InvestigationCollectionFacetV1,
+  InvestigationCollectionFacetsV1,
+  InvestigationCollectionPageV1,
+  InvestigationCollectionQueryV1,
+  InvestigationCollectionStatusV1,
+} from "./investigation-collection-browser.js";
+
 export { TIMELINE_SCHEMA_ID, parseTimeline } from "./timeline.js";
 export type { TimelineEventV1, TimelineV1 } from "./timeline.js";
 
