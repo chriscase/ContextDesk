@@ -18,8 +18,59 @@
 }
 
 .keystone-strategy__filters {
-  grid-template-columns: minmax(14rem, 2fr) minmax(11rem, 1fr);
+  grid-template-columns: minmax(14rem, 2fr) minmax(11rem, 1fr) auto;
   margin-bottom: 1rem;
+}
+
+.keystone-strategy__checkbox {
+  display: flex;
+  align-items: end;
+  gap: 0.45rem;
+  min-height: 2.5rem;
+  padding-bottom: 0.62rem;
+  color: var(--fg);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.keystone-strategy__checkbox input {
+  width: 1rem;
+  min-height: 1rem;
+  accent-color: var(--accent);
+}
+
+.keystone-strategy__facets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: -0.25rem 0 1rem;
+}
+
+.keystone-strategy__facets button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-input);
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.keystone-strategy__facets button:hover,
+.keystone-strategy__facets button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.keystone-strategy__facets strong {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
 }
 
 .keystone-strategy__filters label,
