@@ -422,4 +422,49 @@ test.describe("Investigation collection query qualification", () => {
       page.removeAllListeners("request");
     }
   });
+
+  test("withholds both collection reads when every strategy is projected read-denied", async ({ page }) => {
+    test.setTimeout(120_000);
+    await loginAs(page, FIXTURE_USERS.dave);
+    const strategies = ["investigation-first", "keystone", "beacon"] as const;
+    const sessionResponse = await page.request.get("/api/auth/me");
+    expect(sessionResponse.ok(), await sessionResponse.text()).toBeTruthy();
+    const session = await sessionResponse.json() as Record<string, unknown>;
+    try {
+      for (const strategy of strategies) {
+        const previous = await setStrategyDefault(page, strategy);
+        try {
+          await loginAs(page, FIXTURE_USERS.carol);
+          await page.waitForLoadState("networkidle");
+          const caseReads: string[] = [];
+          const recordCaseRead = (request: import("@playwright/test").Request) => {
+            const requestUrl = new URL(request.url());
+            if (request.method() === "GET" && (requestUrl.pathname === "/api/cases" || requestUrl.pathname.startsWith("/api/cases/"))) {
+              caseReads.push(requestUrl.pathname);
+            }
+          };
+          await page.route("**/api/auth/me", async (route) => {
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({ ...session, capabilities: [] }),
+            });
+          });
+          page.on("request", recordCaseRead);
+          await page.goto("/investigations");
+          await expect(page.getByText(/no investigation data was requested/iu).first()).toBeVisible();
+          await expect.poll(() => caseReads).toEqual([]);
+          await expect(page.getByRole("button", { name: /Retry/iu })).toHaveCount(0);
+          page.off("request", recordCaseRead);
+          await page.unroute("**/api/auth/me");
+        } finally {
+          await page.unroute("**/api/auth/me");
+          await loginAs(page, FIXTURE_USERS.dave);
+          await restoreStrategyPolicy(page, previous);
+        }
+      }
+    } finally {
+      await page.unroute("**/api/auth/me");
+    }
+  });
 });
