@@ -19,8 +19,10 @@ export type {
 } from "./case.js";
 
 export {
+  CONTRIBUTION_KINDS,
   CONTRIBUTION_LIST_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
+  isContributionIdempotencyKey,
   parseContribution,
   parseContributionList,
 } from "./contribution.js";

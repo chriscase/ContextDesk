@@ -9,6 +9,7 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
+import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
@@ -587,7 +588,7 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
       {investigation.refresh === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(investigation.refreshError, "detail")}</p> : null}
       <div className="investigation-first__next" role="status"><strong>{missing ? `${missing} key ${missing === 1 ? "detail" : "details"} still to record` : "Core context is recorded"}</strong><span>{missing ? "Add detail when it is known; this sparse record is still valid." : "Use the evidence inventory or technical tools to continue."}</span></div>
       <div className="investigation-first__detail-grid"><article className="investigation-first__card investigation-first__card--wide"><h3>What is known</h3><dl className="investigation-first__facts"><div><dt>Observed problem</dt><dd>{display(selected.problemStatement)}</dd></div><div><dt>Affected people or systems</dt><dd>{display(selected.affectedParties)}</dd></div><div><dt>Impact</dt><dd>{display(selected.impact)}</dd></div><div><dt>Scope</dt><dd>{display(selected.scope)}</dd></div><div><dt>When it happened</dt><dd>{occurrenceLabel(selected)}</dd></div><div><dt>Recorded</dt><dd>{dateLabel(selected.createdAt)}</dd></div></dl></article><article className="investigation-first__card"><h3>Technical context</h3><dl className="investigation-first__facts">{CONTEXT_FIELDS.map(([field, label]) => <div key={field}><dt>{label}</dt><dd>{display(selected.investigationContext?.[field])}</dd></div>)}</dl></article><article className="investigation-first__card"><h3>Open questions</h3>{selected.openQuestions.length ? <ul>{selected.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul> : <p className="investigation-first__muted">No questions recorded.</p>}</article></div>
-      {renderEvidence()}<LifecycleControls investigation={selected} />
+      {renderEvidence()}<RuntimeHandoffPanel investigation={selected} /><LifecycleControls investigation={selected} />
     </section>;
   }
 

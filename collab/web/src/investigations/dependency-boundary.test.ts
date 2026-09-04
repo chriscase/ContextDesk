@@ -365,6 +365,7 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
   const contractModule = resolve(strategiesRoot, "contract");
   const sharedRoot = resolve(strategiesRoot, "shared");
   const sharedIndexModule = resolve(sharedRoot, "index");
+  const runtimeHandoffModule = resolve(strategiesRoot, "runtime-handoff");
 
   const relativeInvestigationPath = relative(INVESTIGATIONS_ROOT, path).split(sep).join("/");
   const inRuntime = relativeInvestigationPath.startsWith("runtime/");
@@ -423,6 +424,7 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
       const isPublicRuntime = sameModule(resolvedModule, publicModule);
       const isStrategyContract = sameModule(resolvedModule, contractModule);
       const isSharedIndex = sameModule(resolvedModule, sharedIndexModule);
+      const isRuntimeHandoffAdapter = sameModule(resolvedModule, runtimeHandoffModule);
 
       if (
         strategyId === "shared"
@@ -434,9 +436,15 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
         continue;
       }
 
-      if (!isOwnModule && !isPublicRuntime && !isStrategyContract && !isSharedIndex) {
+      if (
+        !isOwnModule
+        && !isPublicRuntime
+        && !isStrategyContract
+        && !isSharedIndex
+        && !isRuntimeHandoffAdapter
+      ) {
         violations.push(
-          `${location} imports investigation behavior outside runtime/public.ts, strategies/contract.ts, or the exact shared/index.ts presentation surface`,
+          `${location} imports investigation behavior outside runtime/public.ts, strategies/contract.ts, the exact shared/index.ts presentation surface, or the reviewed runtime-handoff adapter`,
         );
       }
     }
@@ -701,8 +709,9 @@ describe("Investigation Runtime V1 dependency boundary", () => {
         'import { useInvestigationRuntime } from "../../runtime/public.js";',
         'import type { InvestigationStrategyShellProps } from "../contract.js";',
         'import { StrategyPanel } from "../shared/index.js";',
+        'import { RuntimeHandoffPanel } from "../runtime-handoff.js";',
         'import { localModel } from "./model.js";',
-        "export const used = [useInvestigationRuntime, StrategyPanel, localModel];",
+        "export const used = [useInvestigationRuntime, StrategyPanel, RuntimeHandoffPanel, localModel];",
         "export type Props = InvestigationStrategyShellProps;",
       ].join("\n"),
     );
@@ -713,7 +722,7 @@ describe("Investigation Runtime V1 dependency boundary", () => {
       'import { StrategyPanel } from "../shared/presentation.js";\nexport { StrategyPanel };',
     );
     expect(investigationImportViolations(keystonePath, privateSharedImport)).toEqual([
-      "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.tsx:1 imports investigation behavior outside runtime/public.ts, strategies/contract.ts, or the exact shared/index.ts presentation surface",
+      "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.tsx:1 imports investigation behavior outside runtime/public.ts, strategies/contract.ts, the exact shared/index.ts presentation surface, or the reviewed runtime-handoff adapter",
     ]);
 
     const sharedPath = resolve(

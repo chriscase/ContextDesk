@@ -7,6 +7,7 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
+import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
@@ -357,6 +358,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
         ? "unavailable"
         : "loading";
     return (
+      <>
       <StrategyPanel
         title="Evidence grid"
         titleId="keystone-evidence-title"
@@ -515,6 +517,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
           />
         </div>
       </StrategyPanel>
+      <RuntimeHandoffPanel investigation={investigationValue} />
+      </>
     );
   }
 

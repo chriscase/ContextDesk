@@ -10,6 +10,7 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
+import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
@@ -52,6 +53,7 @@ function contributionLabel(contribution: ContributionV1): string {
   if (contribution.kind === "hypothesis") return "Hypothesis";
   if (contribution.kind === "action") return "Next action";
   if (contribution.kind === "message") return "Team update";
+  if (contribution.kind === "handoff") return "Handoff";
   if (contribution.kind === "upload") return "Evidence added";
   return "Observation";
 }
@@ -361,6 +363,7 @@ function Detail(props: InvestigationStrategyShellProps) {
             {entries.length > 0 ? <ol className="beacon__stream">{entries.map((entry) => <li key={entry.id}><div className="beacon__stream-marker" aria-hidden="true" /><article><header><StrategyBadge tone={entry.kind === "hypothesis" ? "warning" : entry.kind === "action" ? "accent" : "neutral"}>{contributionLabel(entry)}</StrategyBadge><time dateTime={entry.createdAt}>{dateLabel(entry.createdAt)}</time></header><p>{entry.tombstoned ? "This entry was removed from the active record." : recorded(entry.body)}</p><footer>Recorded by {entry.authorUsername || "unknown author"}{entry.hypothesisLinks?.length ? ` · ${entry.hypothesisLinks.length} cited source${entry.hypothesisLinks.length === 1 ? "" : "s"}` : ""}</footer></article></li>)}</ol> : null}
           </StrategyPanel>
           <EvidenceCard />
+          <RuntimeHandoffPanel investigation={selected} />
         </div>
         <aside className="beacon__side">
           <StrategyPanel title="Current Situation" titleId="beacon-situation-title"><dl className="beacon__facts"><div><dt>Observed problem</dt><dd>{recorded(selected.problemStatement)}</dd></div><div><dt>Affected</dt><dd>{recorded(selected.affectedParties)}</dd></div><div><dt>Impact</dt><dd>{recorded(selected.impact)}</dd></div><div><dt>Product / build</dt><dd>{[selected.investigationContext?.productName, selected.investigationContext?.build].filter(Boolean).join(" · ") || "Not recorded"}</dd></div></dl></StrategyPanel>

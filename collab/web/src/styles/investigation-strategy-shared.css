@@ -197,3 +197,153 @@
     transition-duration: 0s !important;
   }
 }
+
+.strategy-kit__handoff,
+.strategy-kit__handoff-grid,
+.strategy-kit__handoff-form,
+.strategy-kit__handoff-history,
+.strategy-kit__handoff-state,
+.strategy-kit__handoff-section {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+/* The reference War Room keeps its own stage layout. The bridge gives the
+   shared handoff card a quiet separation when it follows that surface. */
+.war-room-handoff-bridge {
+  margin-top: 1rem;
+}
+
+.strategy-kit__handoff-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+
+.strategy-kit__handoff-section,
+.strategy-kit__handoff-history,
+.strategy-kit__handoff-form {
+  padding: 0.8rem 0.85rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.strategy-kit__handoff-section h4,
+.strategy-kit__handoff-history h4,
+.strategy-kit__handoff-form h4,
+.strategy-kit__handoff-body,
+.strategy-kit__handoff-meta,
+.strategy-kit__handoff-state dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__handoff-meta,
+.strategy-kit__handoff-state dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.strategy-kit__handoff-body,
+.strategy-kit__handoff-state dd {
+  line-height: 1.45;
+}
+
+.strategy-kit__handoff-state {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem 1rem;
+}
+
+.strategy-kit__handoff-state div {
+  min-width: 0;
+}
+
+.strategy-kit__handoff-history ol {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+  padding-inline-start: 1.45rem;
+  list-style: decimal;
+}
+
+.strategy-kit__handoff-history li::marker {
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+.strategy-kit__handoff-form label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.strategy-kit__handoff-form textarea,
+.strategy-kit__handoff-form button {
+  min-width: 0;
+  min-height: 44px;
+  font: inherit;
+}
+
+.strategy-kit__handoff-form textarea {
+  width: 100%;
+  padding: 0.62rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  resize: vertical;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__handoff-form button {
+  padding: 0.55rem 0.85rem;
+}
+
+.strategy-kit__handoff :where(button, textarea):focus-visible {
+  outline: 0.18rem solid var(--accent);
+  outline-offset: 0.14rem;
+}
+
+@media (max-width: 860px) {
+  .strategy-kit__handoff-grid,
+  .strategy-kit__handoff-state {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .strategy-kit__handoff-form .strategy-kit__actions,
+  .strategy-kit__handoff-form button {
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .strategy-kit__handoff-section,
+  .strategy-kit__handoff-history,
+  .strategy-kit__handoff-form,
+  .strategy-kit__handoff-form textarea,
+  .strategy-kit__handoff-form button {
+    border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+
+  .strategy-kit__handoff :where(button, textarea):focus-visible {
+    outline-color: Highlight;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .strategy-kit__handoff,
+  .strategy-kit__handoff * {
+    animation-duration: 0s !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0s !important;
+  }
+}

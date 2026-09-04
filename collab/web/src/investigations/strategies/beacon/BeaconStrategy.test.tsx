@@ -1,3 +1,4 @@
+import type { ContributionV1 } from "@cd-collab/contracts/investigation-runtime";
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -5,12 +6,14 @@ import {
   type InvestigationRuntimeIdentity,
 } from "../../runtime/public.js";
 import {
+  createDeferred,
   createInvestigationGatewayDouble,
   gatewayOk,
   InvestigationRuntimeGatewayHarness,
   makeContributionList,
   makePopulatedCase,
   RUNTIME_FIXTURE_IDS,
+  type GatewayResult,
   type InvestigationGateway,
 } from "../../runtime/testkit/index.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
@@ -150,6 +153,68 @@ describe("Beacon rapid-intake strategy", () => {
       hypothesisLinks: [{ kind: "contribution", id: makeContributionList().contributions[0]!.id }],
     }));
     expect(gateway.applyLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  it("records a handoff through the shared panel without inventing workflow state", async () => {
+    const handoff = {
+      ...makeContributionList().contributions[0]!,
+      id: "beacon-handoff",
+      kind: "handoff" as const,
+      body: "Note: Overnight queue time remains high.\n\nNext action: Recheck the pool.",
+    };
+    const createContribution = vi.fn(async () => gatewayOk(handoff));
+    const gateway = createInvestigationGatewayDouble({ createContribution });
+    mount({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Handoff" });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Note" }), {
+      target: { value: "Overnight queue time remains high." },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Next action (optional)" }), {
+      target: { value: "Recheck the pool." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Record handoff" }));
+
+    await waitFor(() => expect(createContribution).toHaveBeenCalledTimes(1));
+    expect(createContribution).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      expect.objectContaining({
+        kind: "handoff",
+        body: "Note: Overnight queue time remains high.\n\nNext action: Recheck the pool.",
+        privacyClass: "share_safe",
+        idempotencyKey: expect.stringMatching(/^handoff-/u),
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(document.body.textContent).not.toMatch(/priority|SLA|assignment|progress/iu);
+  });
+
+  it("does not borrow another contribution's mutation status for handoff feedback", async () => {
+    const deferred = createDeferred<GatewayResult<ContributionV1>>();
+    const createContribution = vi.fn(() => deferred.promise);
+    const gateway = createInvestigationGatewayDouble({ createContribution });
+    mount({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    await screen.findByRole("heading", { name: "Handoff" });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Hypothesis" }), {
+      target: { value: "The rollout is correlated with the timeout increase." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Record hypothesis" }));
+    await waitFor(() => expect(createContribution).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Note" }), {
+      target: { value: "Handoff draft remains independent." },
+    });
+    const handoffButton = screen.getByRole("button", { name: "Record handoff" });
+    expect((handoffButton as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText("Recording the handoff once…")).toBeNull();
+
+    deferred.resolve(gatewayOk({
+      ...makeContributionList().contributions[0]!,
+      id: "beacon-hypothesis-pending",
+      kind: "hypothesis" as const,
+    }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Record hypothesis" })).toBeTruthy());
   });
 
   it("attaches a log through the shared evidence command", async () => {

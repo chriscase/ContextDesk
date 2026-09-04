@@ -8,6 +8,7 @@ export const CONTRIBUTION_KINDS = [
   "action",
   "upload",
   "external_run",
+  "handoff",
 ] as const;
 export type ContributionKind = (typeof CONTRIBUTION_KINDS)[number];
 
