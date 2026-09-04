@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { projectTimelineSource } from "./project.js";
 
 describe("investigation coordination activity projection", () => {
-  it("maps the recorded action to a factual investigation update", () => {
+  it.each([
+    ["claim_self", "claimed investigation coordination"],
+    ["release_self", "released their investigation coordination"],
+    ["assign_participant", "assigned investigation coordination"],
+    ["release_participant", "released investigation coordination"],
+  ])("maps %s to a factual investigation update", (action, summary) => {
     const projected = projectTimelineSource({
       installationId: "inst-syntheticnorth",
       source: {
@@ -17,13 +22,13 @@ describe("investigation coordination activity projection", () => {
           targetId: "11111111-1111-4111-8111-111111111111",
           clientTime: null,
           serverTime: "2026-09-04T20:00:00.000Z",
-          payload: JSON.stringify({ action: "assign_participant", revision: 2 }),
+          payload: JSON.stringify({ action, revision: 2 }),
         },
       },
     });
     expect(projected?.item).toMatchObject({
       activityKind: "investigation_updated",
-      summary: "assigned investigation coordination",
+      summary,
       provenanceClass: "human",
       revision: 2,
     });

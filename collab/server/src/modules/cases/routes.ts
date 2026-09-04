@@ -14,6 +14,7 @@ import {
   EVIDENCE_LIST_SCHEMA_ID,
   EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
+  INVESTIGATION_COORDINATION_ACTION_AUTHORITY,
   INVESTIGATION_COORDINATION_ACTIONS,
   INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   PRIVACY_CLASSES,
@@ -1140,9 +1141,6 @@ export async function registerCaseRoutes(
     if ("denied" in loaded) return loaded.denied;
     const ctx = loaded.ctx;
     const id = (request.params as { id: string }).id;
-    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
-      return ctx.has("investigation:read") ? { error: "not_found" } : authError("forbidden");
-    }
 
     // Only the closed action discriminator is inspected before the
     // action-specific capability. Full strict parsing deliberately follows
@@ -1152,9 +1150,7 @@ export async function registerCaseRoutes(
       void reply.code(400);
       return { error: "invalid", detail: "$.action: expected investigation coordination action" };
     }
-    const requiredCapability = action === "claim_self" || action === "release_self"
-      ? "investigation:write"
-      : "investigation:coordinate";
+    const requiredCapability = INVESTIGATION_COORDINATION_ACTION_AUTHORITY[action];
     if (!ctx.has(requiredCapability)) {
       await deps.audit.append({
         identity: ctx.actor.id,
@@ -1165,6 +1161,13 @@ export async function registerCaseRoutes(
       });
       void reply.code(403);
       return authError("forbidden");
+    }
+    if (!ctx.has("investigation:read")) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return { error: "not_found" };
     }
 
     try {

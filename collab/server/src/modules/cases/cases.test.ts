@@ -2011,13 +2011,30 @@ describe("investigation coordination HTTP", () => {
         archived: false,
       });
 
+      const getCaseBeforeAuthority = vi.spyOn(caseStore, "getCase");
+      const getCoordinationBeforeAuthority = vi.spyOn(
+        caseStore,
+        "getInvestigationCoordination",
+      );
+      const lockCaseBeforeAuthority = vi.spyOn(caseStore, "lockCase");
+      const atomicBeforeAuthority = vi.spyOn(caseStore, "withAtomic");
+      const expectNoCaseStoreAccess = () => {
+        expect(getCaseBeforeAuthority).not.toHaveBeenCalled();
+        expect(getCoordinationBeforeAuthority).not.toHaveBeenCalled();
+        expect(lockCaseBeforeAuthority).not.toHaveBeenCalled();
+        expect(atomicBeforeAuthority).not.toHaveBeenCalled();
+      };
       const concealed = await app.inject({
         method: "POST",
         url: `/api/cases/${created.id}/coordination`,
         headers: { cookie: carol },
-        payload: request(created.id, "claim_self", "coord-carol-01", 0),
+        payload: {
+          ...request(created.id, "claim_self", "coord-carol-01", 0),
+          surprise: true,
+        },
       });
-      expect(concealed.statusCode).toBe(404);
+      expect(concealed.statusCode).toBe(403);
+      expectNoCaseStoreAccess();
 
       // A recognized privileged action reaches its capability gate before
       // missing/extra request fields are disclosed by the strict parser.
@@ -2032,6 +2049,7 @@ describe("investigation coordination HTTP", () => {
         },
       });
       expect(privilegedBeforeStrictParse.statusCode).toBe(403);
+      expectNoCaseStoreAccess();
       const unknownAction = await app.inject({
         method: "POST",
         url: `/api/cases/${created.id}/coordination`,
@@ -2039,6 +2057,11 @@ describe("investigation coordination HTTP", () => {
         payload: { action: "take_over" },
       });
       expect(unknownAction.statusCode).toBe(400);
+      expectNoCaseStoreAccess();
+      getCaseBeforeAuthority.mockRestore();
+      getCoordinationBeforeAuthority.mockRestore();
+      lockCaseBeforeAuthority.mockRestore();
+      atomicBeforeAuthority.mockRestore();
       const wrongPathIdentity = await app.inject({
         method: "POST",
         url: `/api/cases/${created.id}/coordination`,
@@ -2217,10 +2240,92 @@ describe("investigation coordination HTTP", () => {
     });
   });
 
-  it("performs no case-store read when the live session lacks investigation read", async () => {
+  it("denies a member viewer at the action gate before case access", async () => {
+    await withApp(async ({ app, domain, caseStore }) => {
+      const alice = await login(app, "alice", ALICE);
+      const carol = await login(app, "carol", "fixture-carol-secret");
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Member viewer coordination" },
+      })).body));
+      await domain.addParticipant(
+        created.id,
+        users().get("alice")!.identity,
+        users().get("carol")!.identity,
+        "test",
+      );
+      const getCase = vi.spyOn(caseStore, "getCase");
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: carol },
+        payload: request(created.id, "claim_self", "coord-carol-member", 0),
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(getCase).not.toHaveBeenCalled();
+    });
+  });
+
+  it("re-authorizes exact replay after capability and membership changes", async () => {
     await withApp(async ({ app, caseStore, roleStore }) => {
       const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Replay authorization" },
+      })).body));
+      const payload = request(created.id, "claim_self", "coord-replay-auth", 0);
+      const success = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(success.statusCode).toBe(200);
+
+      const captured = caseStore.capture() as {
+        cases: [string, { participants: { identityId: string; username: string }[] }][];
+      };
+      const capturedCase = captured.cases.find(([id]) => id === created.id)?.[1];
+      expect(capturedCase).toBeDefined();
+      capturedCase!.participants = [];
+      caseStore.restore(captured);
+
+      const afterMembershipLoss = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: { ...payload, expectedRevision: 99 },
+      });
+      expect(afterMembershipLoss.statusCode).toBe(404);
+
       await roleStore.delete("cn=contributors,ou=groups,dc=example,dc=test");
+      const getCase = vi.spyOn(caseStore, "getCase");
+      const afterCapabilityLoss = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: { ...payload, expectedRevision: 100 },
+      });
+      expect(afterCapabilityLoss.statusCode).toBe(403);
+      expect(getCase).not.toHaveBeenCalled();
+    });
+  });
+
+  it("performs no case-store read when the live session lacks investigation read", async () => {
+    await withApp(async ({ app, caseStore, grants, roleStore }) => {
+      const alice = await login(app, "alice", ALICE);
+      await roleStore.delete("cn=contributors,ou=groups,dc=example,dc=test");
+      await grants.grant(
+        users().get("alice")!.identity.id,
+        "investigation:write",
+        users().get("dave")!.identity.id,
+      );
       const getCase = vi.spyOn(caseStore, "getCase");
       const getCoordination = vi.spyOn(caseStore, "getInvestigationCoordination");
       const lockCase = vi.spyOn(caseStore, "lockCase");

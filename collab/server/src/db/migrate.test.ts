@@ -89,6 +89,24 @@ describe("migration versions", () => {
       expect(sql).not.toMatch(/DELETE\s+FROM/i);
     }
   });
+
+  it("guards coordination rollback before dropping either persisted table", () => {
+    const migration = listMigrations().find(
+      (file) => file.version === "029_investigation_coordination",
+    );
+    expect(migration).toBeDefined();
+    const sql = readFileSync(migration!.downPath, "utf8");
+    const projectionGuard = sql.indexOf(
+      "IF EXISTS (SELECT 1 FROM investigation_coordination LIMIT 1)",
+    );
+    const intentGuard = sql.indexOf(
+      "OR EXISTS (SELECT 1 FROM investigation_coordination_success_intents LIMIT 1)",
+    );
+    const firstDrop = sql.indexOf("DROP TRIGGER");
+    expect(projectionGuard).toBeGreaterThanOrEqual(0);
+    expect(intentGuard).toBeGreaterThan(projectionGuard);
+    expect(firstDrop).toBeGreaterThan(intentGuard);
+  });
 });
 
 describe.skipIf(!adminUrl())("migrations", () => {
@@ -234,6 +252,43 @@ describe.skipIf(!adminUrl())("migrations", () => {
         "investigation_coordination",
         "investigation_coordination_success_intents",
       ]);
+
+      await client.query(`
+        INSERT INTO investigation_coordination (
+          case_id, coordinator_identity_id, coordinator_username, revision,
+          updated_at, updated_by_identity_id, updated_by_username
+        ) VALUES (
+          '11111111-1111-4111-8111-111111111111', NULL, NULL, 1,
+          CURRENT_TIMESTAMP, 'synthetic-actor', 'synthetic-actor'
+        )
+      `);
+      await expect(migrateDown(client)).rejects.toThrow(
+        /cannot roll back 029_investigation_coordination while coordination data exists/,
+      );
+      expect((await client.query(
+        `SELECT case_id FROM investigation_coordination`,
+      )).rows).toEqual([
+        { case_id: "11111111-1111-4111-8111-111111111111" },
+      ]);
+      await client.query(`TRUNCATE TABLE investigation_coordination`);
+
+      await client.query(`
+        INSERT INTO investigation_coordination_success_intents (
+          case_id, actor_id, idempotency_key, action, target_identity_id,
+          success_json, created_at
+        ) VALUES (
+          '11111111-1111-4111-8111-111111111111', 'synthetic-actor',
+          'coord-migration-intent', 'claim_self', NULL, '{}', CURRENT_TIMESTAMP
+        )
+      `);
+      await expect(migrateDown(client)).rejects.toThrow(
+        /cannot roll back 029_investigation_coordination while coordination data exists/,
+      );
+      expect((await client.query(
+        `SELECT success_json FROM investigation_coordination_success_intents`,
+      )).rows).toEqual([{ success_json: "{}" }]);
+      await client.query(`TRUNCATE TABLE investigation_coordination_success_intents`);
+
       expect((await migrateDown(client)).rolledBack).toBe("029_investigation_coordination");
       const coordinationTablesAfterRollback = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
