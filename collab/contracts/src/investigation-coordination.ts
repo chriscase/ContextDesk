@@ -738,10 +738,19 @@ export function evaluateInvestigationCoordination(
 
 /** Durable replay rules the future server/store implementation must preserve. */
 export const INVESTIGATION_COORDINATION_IDEMPOTENCY = Object.freeze({
-  lookupKey: ["investigationId", "actorIdentityId", "idempotencyKey"] as const,
-  intentFields: ["action", "targetIdentityId"] as const,
-  excludesFromIntent: ["expectedRevision", "clientTime"] as const,
-  replayBefore: ["archive", "holder_state", "eligibility", "cas"] as const,
+  lookupKey: Object.freeze([
+    "investigationId",
+    "actorIdentityId",
+    "idempotencyKey",
+  ] as const),
+  intentFields: Object.freeze(["action", "targetIdentityId"] as const),
+  excludesFromIntent: Object.freeze(["expectedRevision", "clientTime"] as const),
+  replayBefore: Object.freeze([
+    "archive",
+    "holder_state",
+    "eligibility",
+    "cas",
+  ] as const),
   persist: "successful_actions_only" as const,
   uncertainOutcome: "freeze_exact_payload_and_idempotency_key_before_retry" as const,
 });

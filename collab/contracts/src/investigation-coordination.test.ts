@@ -737,6 +737,18 @@ describe("durable idempotency and session parity", () => {
     ]);
     expect(INVESTIGATION_COORDINATION_IDEMPOTENCY.persist).toBe("successful_actions_only");
     expect(INVESTIGATION_COORDINATION_IDEMPOTENCY.uncertainOutcome).toContain("freeze_exact");
+    expect(Object.isFrozen(INVESTIGATION_COORDINATION_IDEMPOTENCY)).toBe(true);
+    for (const field of [
+      INVESTIGATION_COORDINATION_IDEMPOTENCY.lookupKey,
+      INVESTIGATION_COORDINATION_IDEMPOTENCY.intentFields,
+      INVESTIGATION_COORDINATION_IDEMPOTENCY.excludesFromIntent,
+      INVESTIGATION_COORDINATION_IDEMPOTENCY.replayBefore,
+    ]) {
+      const original = [...field];
+      expect(Object.isFrozen(field)).toBe(true);
+      expect(() => (field as unknown as string[]).push("tamper")).toThrow(TypeError);
+      expect(field).toEqual(original);
+    }
   });
 
   it("keeps the runtime session parser sourced from CAPABILITIES", () => {
