@@ -80,6 +80,7 @@ import {
 } from "./ui-strategy.js";
 import { useUiStrategyGovernance } from "./useUiStrategyGovernance.js";
 import { ActivityCenter } from "./overview/ActivityCenter.js";
+import { useWarRoomCollectionQuery } from "./investigations/war-room/useWarRoomCollectionQuery.js";
 
 interface SessionView {
   identityId: string;
@@ -133,6 +134,9 @@ const WarRoomStrategyContext = createContext<WarRoomStrategyBindings | null>(nul
 function WarRoomStrategy(props: InvestigationStrategyShellProps) {
   const bindings = useContext(WarRoomStrategyContext);
   const runtime = useInvestigationRuntime();
+  const collection = useWarRoomCollectionQuery(
+    props.focusCaseId === null ? props.collectionQuery : undefined,
+  );
   if (bindings === null) return null;
 
   return (
@@ -155,6 +159,14 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
         {...(props.onFocusedCaseTitle
           ? { onFocusedCaseTitle: props.onFocusedCaseTitle }
           : {})}
+        {...(props.collectionQuery === undefined
+          ? {}
+          : {
+              collectionPage: collection.view,
+              collectionQuery: props.collectionQuery,
+              onCollectionQueryChange: props.onCollectionQueryChange,
+              onCollectionRefresh: collection.refresh,
+            })}
         lifecycleBinding={{
           lifecycle: runtime.resources.lifecycle,
           lifecycleMutation: runtime.mutations.lifecycle,

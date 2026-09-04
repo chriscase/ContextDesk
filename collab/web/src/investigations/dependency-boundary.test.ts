@@ -31,7 +31,6 @@ const LEGACY_WAR_ROOM_RUNTIME_CALLS: Readonly<
   "collab/web/src/CaseBoardPanel.tsx": ["GET evidence"],
   "collab/web/src/CaseDiscussion.tsx": ["GET contributions", "POST contributions"],
   "collab/web/src/Cases.tsx": [
-    "GET cases",
     "POST cases",
     "GET contributions",
     "POST contributions",
@@ -39,6 +38,7 @@ const LEGACY_WAR_ROOM_RUNTIME_CALLS: Readonly<
   ],
   "collab/web/src/ExperimentLab.tsx": ["GET evidence"],
   "collab/web/src/TriageRunPanel.tsx": ["GET evidence"],
+  "collab/web/src/legacy-cases-fetch.ts": ["GET cases"],
 });
 
 const EXPECTED_COVERED_OPERATION_DEBT: Readonly<

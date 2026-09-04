@@ -7,6 +7,10 @@ import {
   INVESTIGATION_ACTIVITY_NOTICES,
   INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
 } from "@cd-collab/contracts/investigation-activity";
+import {
+  CASE_SCHEMA_ID,
+} from "@cd-collab/contracts";
+import { INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID } from "@cd-collab/contracts/investigation-collection";
 import type { InvestigationRuntimeProviderProps } from "./investigations/runtime/public.js";
 import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLocation } from "./app-location.js";
 
@@ -42,6 +46,54 @@ afterEach(() => {
 
 type FetchStub = ReturnType<typeof vi.fn>;
 
+function collectionPageResponse(cases: readonly unknown[]): Response {
+  const items = cases.map((value, index) => {
+    const row = (typeof value === "object" && value !== null
+      ? value
+      : {}) as Record<string, unknown>;
+    const status = row.status === "monitoring" || row.status === "resolved" || row.status === "archived"
+      ? row.status
+      : "open";
+    const severity = row.severity === "low" || row.severity === "high" || row.severity === "critical"
+      ? row.severity
+      : "medium";
+    return {
+      schemaId: CASE_SCHEMA_ID,
+      id: typeof row.id === "string" ? row.id : `fixture-${index}`,
+      title: typeof row.title === "string" ? row.title : "Untitled investigation",
+      problemStatement: typeof row.problemStatement === "string" ? row.problemStatement : "",
+      affectedParties: typeof row.affectedParties === "string" ? row.affectedParties : "",
+      impact: typeof row.impact === "string" ? row.impact : "",
+      scope: typeof row.scope === "string" ? row.scope : "",
+      openQuestions: Array.isArray(row.openQuestions) ? row.openQuestions : [],
+      situationVersion: typeof row.situationVersion === "number" ? row.situationVersion : 0,
+      investigationContext: row.investigationContext ?? null,
+      occurredAt: row.occurredAt ?? null,
+      occurredAtPrecision: row.occurredAtPrecision ?? "unknown",
+      occurredAtZone: row.occurredAtZone ?? "unspecified",
+      severity,
+      status,
+      legalHold: row.legalHold === true,
+      retentionClass: typeof row.retentionClass === "string" ? row.retentionClass : "standard",
+      participants: Array.isArray(row.participants) ? row.participants : [],
+      createdAt: typeof row.createdAt === "string" ? row.createdAt : "2026-01-01T00:00:00.000Z",
+      createdBy: typeof row.createdBy === "string" ? row.createdBy : "fixture",
+    };
+  });
+  return new Response(JSON.stringify({
+    schemaId: INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+    items,
+    nextCursor: null,
+    hiddenArchivedCount: 0,
+    facets: {
+      status: { top: [], otherCount: 0 },
+      entity: { top: [], otherCount: 0 },
+      impactIdentity: { top: [], otherCount: 0 },
+      contributor: { top: [], otherCount: 0 },
+    },
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
 function stubSignedOutFetch(): FetchStub {
   const stub = vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) });
   vi.stubGlobal("fetch", stub);
@@ -60,6 +112,17 @@ function stubSignedInFetch(
 ): FetchStub {
   const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
     const url = String(input);
+    if (url.startsWith("/api/cases?schemaId=")) {
+      // Production War Room uses the versioned collection seam. Reuse a
+      // test's legacy fixture callback only to shape equivalent page data;
+      // production never falls back after this request has spoken.
+      const legacy = await extra?.("/api/cases", init);
+      if (legacy) {
+        const body = (await legacy.json().catch(() => ({}))) as { cases?: unknown[] };
+        return collectionPageResponse(body.cases ?? []);
+      }
+      return collectionPageResponse([]);
+    }
     const handled = extra?.(url, init);
     if (handled) return handled;
     if (url === "/api/auth/me") {
