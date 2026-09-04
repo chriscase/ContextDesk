@@ -55,6 +55,16 @@ that authenticated actor to `applied.updatedBy`; self claim additionally binds
 the actor to `applied.coordinator`, while self release binds the actor to
 `previousCoordinator`. These are future route/controller checks because the
 standalone response parser intentionally has no authenticated actor context.
+The same contextual gate binds response, parsed request, and route/path
+investigation IDs; binds the echoed action and target to the request; and
+accepts `coordination_changed` only when `current.revision` differs from the
+request's expected revision. Under holder-before-CAS ordering, a
+`release_self` changed response must still name the authenticated actor as the
+current coordinator. Actor-aware refusal checks likewise distinguish a
+self-claim by the current holder (`already_coordinator`) from another holder
+(`occupied`), and require `release_self/not_coordinator` to name a different or
+absent holder. The standalone wire parser enforces only the subset knowable
+without trusting actor or request context.
 
 This is **accepted contract, not shipped behavior**. There is no coordination
 route, persistence, audit/timeline emission, queue filter, or UI in this slice.

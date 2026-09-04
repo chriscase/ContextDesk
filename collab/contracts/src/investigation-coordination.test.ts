@@ -659,10 +659,20 @@ describe("pure coordination evaluator", () => {
 describe("durable idempotency and session parity", () => {
   it("reserves authenticated actor and request binding for the future route", () => {
     expect(INVESTIGATION_COORDINATION_RESPONSE_CONTEXT).toEqual({
+      investigation:
+        "response_investigation_equals_request_investigation_equals_route_investigation",
+      requestIntent: "response_action_and_target_equal_parsed_request",
       everySuccess: "authenticated_actor_equals_applied_updatedBy",
       claimSelf: "authenticated_actor_equals_applied_coordinator",
       releaseSelf: "authenticated_actor_equals_previousCoordinator",
-      requestIntent: "response_action_and_target_equal_parsed_request",
+      changedRevision: "current_revision_differs_from_request_expectedRevision",
+      releaseSelfChanged: "current_coordinator_equals_authenticated_actor",
+      claimSelfAlreadyCoordinatorRefusal:
+        "current_coordinator_equals_authenticated_actor",
+      claimSelfOccupiedRefusal:
+        "current_coordinator_differs_from_authenticated_actor",
+      releaseSelfNotCoordinatorRefusal:
+        "current_coordinator_differs_from_authenticated_actor",
     });
     expect(Object.isFrozen(INVESTIGATION_COORDINATION_RESPONSE_CONTEXT)).toBe(true);
   });
