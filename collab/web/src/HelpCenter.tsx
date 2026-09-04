@@ -140,7 +140,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Read this first if the navigation is unfamiliar, or when you want to know which stage a task belongs to.",
         steps: [
           "Open Overview to see what changed most recently across investigations and the follow-up or handoff records collaborators explicitly saved.",
-          "Read Open threads to find recorded work that stopped short, disagreed across lanes, has not been read, or is waiting on a human decision — each entry links straight to the record.",
+          "Read Open threads to find recorded workstreams that stopped short, comparison disagreements or unknowns, and proposed or revised decisions — each entry links straight to the record.",
           "Select an investigation to focus it; the Situation stage opens first.",
           "Use the stage strip or the Situation page's work-area links to move between Capture, Analyze, Compare, and Decide.",
           "Use the breadcrumb to return to Investigations or the Overview at any time.",
@@ -148,7 +148,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Overview and Situation restate only recorded facts. Overview's activity feed and Open threads are both human-readable projections of the same durable timeline events; opening an item takes you to the relevant investigation stage. Neither infers urgency or correctness from model output.",
         limits:
-          "Counts and statuses reflect recorded state only — they never measure progress, completeness, or correctness, and no stage is ever marked \"done\" for you. Open threads is read from the most recent recorded events the page loaded, and says how many that was; older open work can sit outside that window.",
+          "Counts and statuses reflect recorded state only — they never measure progress, completeness, or correctness, and no stage is ever marked \"done\" for you. Open threads and handoffs are drawn from the activity window currently loaded; when a summary is capped, Overview states how many of the matching records it is showing. Older recorded work can sit outside that window.",
         actions: [
           { label: "Go to Overview", go: { area: "overview" } },
           { label: "Go to Investigations", go: { area: "investigations" } },
