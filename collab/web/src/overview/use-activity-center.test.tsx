@@ -3,8 +3,10 @@ import {
   INVESTIGATION_ACTIVITY_NOTICES,
   INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
   INVESTIGATION_RESOURCE_LOCATOR_SCHEMA_ID,
+  INVESTIGATION_RESOURCE_RESOLVE_SCHEMA_ID,
   type InvestigationActivityItemV1,
   type InvestigationActivityPageV1,
+  type InvestigationResourceResolveV1,
 } from "@cd-collab/contracts/investigation-activity";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -82,5 +84,62 @@ describe("useActivityCenter", () => {
     expect(result.current.activity).toEqual({ status: "loading" });
     await act(async () => second.resolve({ ok: true, value: page([item("b")], null) }));
     expect(result.current.activity).toEqual({ status: "ready", items: [item("b")] });
+  });
+
+  it("aborts continuation reads when its request scope changes", async () => {
+    const continuation = deferred<OverviewGatewayResult<InvestigationActivityPageV1>>();
+    let continuationSignal: AbortSignal | undefined;
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValueOnce({ ok: true, value: page([item("a")], "opaque_cursor") })
+      .mockImplementationOnce((_request, signal) => {
+        continuationSignal = signal;
+        return continuation.promise;
+      })
+      .mockResolvedValueOnce({ ok: true, value: page([item("b")], null) });
+    const sharedGateway = gateway(listActivity);
+    const { result, rerender } = renderHook(({ identityKey }) => useActivityCenter({
+      enabled: true, identityKey, authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+    }), { initialProps: { identityKey: "alice" } });
+    await waitFor(() => expect(result.current.activity.status).toBe("ready"));
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(continuationSignal).toBeDefined());
+
+    rerender({ identityKey: "bob" });
+
+    expect(continuationSignal?.aborted).toBe(true);
+    await act(async () => continuation.resolve({ ok: true, value: page([item("c")], null) }));
+    await waitFor(() => expect(result.current.activity).toEqual({ status: "ready", items: [item("b")] }));
+  });
+
+  it("aborts and suppresses a pending locator resolution after unmount", async () => {
+    const resolution = deferred<OverviewGatewayResult<InvestigationResourceResolveV1>>();
+    let resolveSignal: AbortSignal | undefined;
+    const sharedGateway = gateway(vi.fn<OverviewGateway["listActivity"]>(async () => ({ ok: true, value: page([], null) })));
+    sharedGateway.resolve = vi.fn((_locator, signal) => {
+      resolveSignal = signal;
+      return resolution.promise;
+    });
+    const { result, unmount } = renderHook(() => useActivityCenter({
+      enabled: true, identityKey: "alice", authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+    }));
+    await waitFor(() => expect(result.current.activity.status).toBe("ready"));
+    const pending = result.current.open(item("a").locator);
+
+    unmount();
+
+    expect(resolveSignal?.aborted).toBe(true);
+    resolution.resolve({
+      ok: true,
+      value: {
+        schemaId: INVESTIGATION_RESOURCE_RESOLVE_SCHEMA_ID,
+        locator: item("a").locator,
+        resourceKind: "investigation",
+        resourceLabel: "Gateway resets",
+        investigationTitle: "Gateway resets",
+        revision: null,
+        authorized: true,
+      },
+    });
+    await expect(pending).resolves.toBeNull();
   });
 });

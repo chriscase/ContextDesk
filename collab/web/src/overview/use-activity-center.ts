@@ -62,6 +62,7 @@ export function useActivityCenter(options: {
   }), [options.authorityKey, options.identityKey, filterKey]);
   const generation = useRef(0);
   const controller = useRef<AbortController | null>(null);
+  const resolveController = useRef<AbortController | null>(null);
   const publishedScope = useRef<string | null>(null);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [activity, setActivity] = useState<ActivityResource>({ status: "idle" });
@@ -119,7 +120,11 @@ export function useActivityCenter(options: {
         setInvestigationsFailed(true);
       }
     });
-    return () => request.abort();
+    return () => {
+      controller.current?.abort();
+      resolveController.current?.abort();
+      generation.current += 1;
+    };
   }, [gateway, options.enabled, refreshGeneration, scope, stableFilter]);
 
   const refresh = useCallback(() => setRefreshGeneration((value) => value + 1), []);
@@ -168,11 +173,13 @@ export function useActivityCenter(options: {
 
   const open = useCallback(async (locator: InvestigationResourceLocatorV1): Promise<string | null> => {
     if (!options.enabled) return null;
+    resolveController.current?.abort();
     const request = new AbortController();
+    resolveController.current = request;
     const requestGeneration = generation.current;
     setOpenFailure(null);
     const result = await gateway.resolve(locator, request.signal);
-    if (generation.current !== requestGeneration) return null;
+    if (generation.current !== requestGeneration || request.signal.aborted) return null;
     if (!result.ok) {
       setOpenFailure(result.error);
       return null;
