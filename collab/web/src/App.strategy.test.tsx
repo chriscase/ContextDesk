@@ -10,6 +10,10 @@ import {
   type CaseV1,
 } from "@cd-collab/contracts";
 import { App } from "./App.js";
+import {
+  INVESTIGATION_ACTIVITY_NOTICES,
+  INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
+} from "@cd-collab/contracts/investigation-activity";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -39,6 +43,14 @@ function investigation(
 }
 
 function runtimeReadResponse(url: string, cases: readonly CaseV1[]): Response | null {
+  if (url === "/api/investigation-activity?limit=30") {
+    return jsonResponse({
+      schemaId: INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
+      items: [],
+      nextCursor: null,
+      notices: [...INVESTIGATION_ACTIVITY_NOTICES],
+    });
+  }
   if (url === "/api/cases") {
     return jsonResponse({ schemaId: CASE_LIST_SCHEMA_ID, cases });
   }
@@ -180,7 +192,7 @@ describe("strategy selection in the shell", () => {
     render(<App />);
     expect(await screen.findByText("War Room")).toBeTruthy();
     await waitFor(() => {
-      expect(fetchStub.mock.calls.filter(([input]) => String(input) === "/api/cases")).toHaveLength(2);
+      expect(fetchStub.mock.calls.filter(([input]) => String(input) === "/api/cases")).toHaveLength(1);
     });
     const account = screen.getByRole("button", { name: /Alice/ });
     fireEvent.click(account);
@@ -197,7 +209,7 @@ describe("strategy selection in the shell", () => {
     expect(document.querySelector(".topbar__title-app")?.textContent).toBe("War Room");
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Create an investigation" })).toBeNull();
-    expect(document.title).toBe("ContextDesk War Room");
+    expect(document.title).toBe("Overview · ContextDesk War Room");
     expect(window.location.pathname).toBe("/");
     fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
     expect(document.querySelector(".topbar__title-app")?.textContent).toBe("Investigation First");

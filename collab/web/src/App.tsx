@@ -78,6 +78,7 @@ import {
   type UiStrategyId,
 } from "./ui-strategy.js";
 import { useUiStrategyGovernance } from "./useUiStrategyGovernance.js";
+import { ActivityCenter } from "./overview/ActivityCenter.js";
 
 interface SessionView {
   identityId: string;
@@ -937,7 +938,7 @@ export function App() {
   const canAdminSystem = !staticReadOnly && hasCapability(capabilities, "admin:system_config");
   const canAdmin = canAdminUsers || canAdminSystem;
   const work: WorkLocation = isWorkLocation(location) ? location : HOME;
-  const inCasesArea = work.area === "overview" || work.area === "investigations";
+  const inInvestigationsArea = work.area === "investigations";
   const unknown = isUnknownLocation(location);
   const currentArea = unknown ? null : work.area;
   const warRoomBindings: WarRoomStrategyBindings = {
@@ -1108,8 +1109,26 @@ export function App() {
           </section>
         ) : (
           <>
-            <section className="app__area" aria-label="Investigations" hidden={!inCasesArea}>
-              <InvestigationRuntimeProvider
+            <section className="app__area" aria-label="Overview" hidden={work.area !== "overview"}>
+              {work.area === "overview" ? (
+                <ActivityCenter
+                  canRead={canReadInvestigations}
+                  identityKey={session.identityId}
+                  authorityKey={investigationAuthorityKey(session, staticReadOnly)}
+                  onOpenInvestigations={() =>
+                    navigate({ area: "investigations", caseId: null, stage: "situation" })}
+                  onOpenRoute={(pathname) => {
+                    const url = new URL(pathname, window.location.origin);
+                    const destination = parsePathname(url.pathname, url.search, url.hash);
+                    if (isWorkLocation(destination) && destination.area === "investigations") {
+                      navigate(destination);
+                    }
+                  }}
+                />
+              ) : null}
+            </section>
+            <section className="app__area" aria-label="Investigations" hidden={!inInvestigationsArea}>
+              {inInvestigationsArea ? <InvestigationRuntimeProvider
                 identityKey={session.identityId}
                 // Descriptive only, and deliberately just these three already
                 // sanitized fields: roles and capabilities reach the runtime
@@ -1122,9 +1141,9 @@ export function App() {
                 authorityKey={investigationAuthorityKey(session, staticReadOnly)}
                 capabilities={capabilities}
                 readOnly={staticReadOnly}
-                active={inCasesArea}
-                focusCaseId={inCasesArea ? work.caseId : null}
-                isInvestigationLocation={inCasesArea}
+                active
+                focusCaseId={work.caseId}
+                isInvestigationLocation
                 onOpenCreated={openCreatedInvestigation}
               >
                 {!canReadInvestigations && surfaceStrategy.id === DEFAULT_UI_STRATEGY_ID ? (
@@ -1142,8 +1161,8 @@ export function App() {
                     <InvestigationStrategyRenderer
                       strategy={surfaceStrategy}
                       registrations={INVESTIGATION_STRATEGY_REGISTRATIONS}
-                      view={work.area === "investigations" ? "investigations" : "overview"}
-                      focusCaseId={inCasesArea ? work.caseId : null}
+                      view="investigations"
+                      focusCaseId={work.caseId}
                       stage={work.stage}
                       {...(work.focus ? { focus: work.focus } : {})}
                       startSignal={startSignal}
@@ -1176,7 +1195,7 @@ export function App() {
                     />
                   </WarRoomStrategyContext.Provider>
                 )}
-              </InvestigationRuntimeProvider>
+              </InvestigationRuntimeProvider> : null}
             </section>
             <section
               className="app__area"

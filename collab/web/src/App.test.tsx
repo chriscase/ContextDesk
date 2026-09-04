@@ -3,6 +3,10 @@ import { createElement, StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { USER_PROFILE_SCHEMA_ID, ADMIN_PEOPLE_LIST_SCHEMA_ID, DEFAULT_DIRECTORY_ATTRIBUTE_MAP, LDAP_PUBLIC_CONFIG_SCHEMA_ID } from "@cd-collab/contracts/admin";
 import { App } from "./App.js";
+import {
+  INVESTIGATION_ACTIVITY_NOTICES,
+  INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
+} from "@cd-collab/contracts/investigation-activity";
 import type { InvestigationRuntimeProviderProps } from "./investigations/runtime/public.js";
 import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLocation } from "./app-location.js";
 
@@ -77,6 +81,18 @@ function stubSignedInFetch(
     }
     if (url === "/api/cases") {
       return { ok: true, json: async () => ({ cases: [] }) };
+    }
+    if (url === "/api/investigation-activity?limit=30") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schemaId: INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
+          items: [],
+          nextCursor: null,
+          notices: [...INVESTIGATION_ACTIVITY_NOTICES],
+        }),
+      } as Response;
     }
     if (url === "/api/catalog/sources") {
       return { ok: true, json: async () => ({ sources: [] }) };
@@ -305,7 +321,7 @@ describe("auth boundary", () => {
       return null;
     });
     render(<App />);
-    expect(await screen.findByRole("button", { name: "Protected fixture investigation" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
 
     denyActivity({ ok: false, status: 401, json: async () => ({}) } as Response);
 
@@ -789,6 +805,7 @@ describe("authenticated application shell", () => {
       return null;
     });
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Investigations" }));
     fireEvent.click(await screen.findByRole("button", { name: "Checkout timeouts" }));
     expect(await screen.findByRole("heading", { name: "Situation" })).toBeTruthy();
     window.location.hash = "#triage-analyze";
@@ -809,6 +826,9 @@ describe("authenticated application shell", () => {
     });
     render(<App />);
     await screen.findByRole("heading", { name: "Operating picture" });
+    expect(runtimeMounts).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
+    await waitFor(() => expect(runtimeMounts.length).toBeGreaterThan(0));
 
     const mounted = runtimeMounts.at(-1);
     // The directory sent no id, so the shell's own username fallback is what
@@ -838,6 +858,9 @@ describe("authenticated application shell", () => {
     });
     render(<App />);
     await screen.findByRole("heading", { name: "Operating picture" });
+    expect(runtimeMounts).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
+    await waitFor(() => expect(runtimeMounts.length).toBeGreaterThan(0));
 
     const mounted = runtimeMounts.at(-1);
     expect(mounted?.identity).toEqual({
@@ -940,6 +963,7 @@ describe("help center in the shell", () => {
       return null;
     });
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Investigations" }));
     fireEvent.click(await screen.findByRole("button", { name: "Checkout timeouts" }));
     expect(await screen.findByRole("heading", { name: "Situation" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Help" }));
@@ -1616,6 +1640,7 @@ describe("pathname shell routing", () => {
       return null;
     });
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Investigations" }));
     fireEvent.click(await screen.findByRole("button", { name: "Synthetic timeout" }));
     expect(await screen.findByRole("heading", { name: "Situation" })).toBeTruthy();
     expect(window.location.pathname).toBe(`/investigations/${uuid}/situation`);
