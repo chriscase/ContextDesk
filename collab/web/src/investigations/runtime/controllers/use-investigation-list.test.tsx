@@ -541,6 +541,13 @@ describe("useInvestigationCollectionQuery", () => {
     const secondPage = collectionPage({
       items: [secondItem],
       nextCursor: null,
+      hiddenArchivedCount: 3,
+      facets: {
+        status: { top: [{ key: "monitoring", count: 7 }], otherCount: 2 },
+        entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 },
+        contributor: { top: [], otherCount: 0 },
+      },
     });
     const first = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
     const second = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
@@ -578,6 +585,12 @@ describe("useInvestigationCollectionQuery", () => {
     expect(result.current.page).toEqual({
       status: "ready",
       value: { ...secondPage, items: [firstItem, secondItem] },
+    });
+    if (result.current.page.status !== "ready") throw new Error("expected accumulated page");
+    expect(result.current.page.value.hiddenArchivedCount).toBe(3);
+    expect(result.current.page.value.facets.status).toEqual({
+      top: [{ key: "monitoring", count: 7 }],
+      otherCount: 2,
     });
     expect(result.current.query?.cursor).toBe(OPAQUE_COLLECTION_CURSOR);
   });

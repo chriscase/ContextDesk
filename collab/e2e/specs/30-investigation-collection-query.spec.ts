@@ -328,6 +328,12 @@ test.describe("Investigation collection query qualification", () => {
     await loginAs(page, FIXTURE_USERS.dave);
     const strategies = [
       {
+        id: "war-room",
+        name: "War Room",
+        row: ".case-card__open",
+        retry: "Retry",
+      },
+      {
         id: "investigation-first",
         name: "Investigation First",
         row: ".investigation-first__list-button",
@@ -395,6 +401,11 @@ test.describe("Investigation collection query qualification", () => {
     await loginAs(page, FIXTURE_USERS.dave);
     const strategies = [
       {
+        id: "war-room",
+        name: "War Room",
+        row: ".case-card__open",
+      },
+      {
         id: "investigation-first",
         name: "Investigation First",
         row: ".investigation-first__list-button",
@@ -454,7 +465,7 @@ test.describe("Investigation collection query qualification", () => {
   test("withholds both collection reads when every strategy is projected read-denied", async ({ page }) => {
     test.setTimeout(120_000);
     await loginAs(page, FIXTURE_USERS.dave);
-    const strategies = ["investigation-first", "keystone", "beacon"] as const;
+    const strategies = ["war-room", "investigation-first", "keystone", "beacon"] as const;
     const sessionResponse = await page.request.get("/api/auth/me");
     expect(sessionResponse.ok(), await sessionResponse.text()).toBeTruthy();
     const session = await sessionResponse.json() as Record<string, unknown>;
@@ -480,7 +491,7 @@ test.describe("Investigation collection query qualification", () => {
           });
           page.on("request", recordCaseRead);
           await page.goto("/investigations");
-          await expect(page.getByText(/no investigation data was requested/iu).first()).toBeVisible();
+          await expect(page.getByText(/no investigation(?: or evidence)? data was requested/iu).first()).toBeVisible();
           await expect.poll(() => caseReads).toEqual([]);
           await expect(page.getByRole("button", { name: /Retry/iu })).toHaveCount(0);
           page.off("request", recordCaseRead);
