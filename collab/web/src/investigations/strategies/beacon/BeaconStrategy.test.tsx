@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InvestigationRuntimeProvider,
+  type InvestigationCollectionPageV1,
   type InvestigationRuntimeIdentity,
 } from "../../runtime/public.js";
 import {
@@ -17,6 +18,7 @@ import {
   type InvestigationGateway,
 } from "../../runtime/testkit/index.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
+import { DEFAULT_COLLECTION_QUERY } from "../../../app-location.js";
 import {
   COMPONENT_SURFACE_REQUIREMENT_IDS,
   runComponentConformance,
@@ -78,6 +80,56 @@ function mount(options: {
 }
 
 describe("Beacon rapid-intake strategy", () => {
+  it("uses the public collection page for shell-owned browse filters and facets", async () => {
+    const selected = makePopulatedCase();
+    const page: InvestigationCollectionPageV1 = {
+      schemaId: "cd-collab.investigation_collection_page.v1",
+      items: [selected],
+      nextCursor: null,
+      hiddenArchivedCount: 3,
+      facets: {
+        status: { top: [{ key: "monitoring", count: 1 }], otherCount: 0 },
+        entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 },
+        contributor: { top: [], otherCount: 0 },
+      },
+    };
+    const queryInvestigations = vi.fn(async (..._args: unknown[]) => gatewayOk(page));
+    const onCollectionQueryChange = vi.fn();
+    mount({
+      gateway: createInvestigationGatewayDouble({ queryInvestigations }),
+      shell: {
+        collectionQuery: {
+          ...DEFAULT_COLLECTION_QUERY,
+          q: "checkout",
+          status: ["monitoring"],
+          includeArchived: true,
+        },
+        onCollectionQueryChange,
+      },
+    });
+
+    expect(await screen.findByRole("button", { name: /Checkout latency after 4\.8\.0 rollout/u })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Imported investigation/u })).toBeNull();
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({
+      q: "checkout",
+      status: ["monitoring"],
+      includeArchived: true,
+    });
+    expect(screen.getByText(/3 archived hidden/u)).toBeTruthy();
+    const facet = screen.getByRole("button", { name: /monitoring 1/u });
+    expect(facet.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.change(screen.getByRole("searchbox", { name: "Find an investigation" }), {
+      target: { value: "timeout" },
+    });
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ q: "timeout" }));
+    fireEvent.click(facet);
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ status: [] }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include archived" }));
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ includeArchived: false }));
+  });
+
   it("meets every strategy-neutral Runtime component requirement", async () => {
     const report = await runComponentConformance({
       label: "Beacon rapid intake",
