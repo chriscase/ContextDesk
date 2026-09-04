@@ -397,6 +397,183 @@ describe("useInvestigationCoordination", () => {
     expect(applyCoordinationAction).toHaveBeenCalledOnce();
   });
 
+  it("does not let an older delayed GET overwrite a newer POST projection", async () => {
+    const delayedGet = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["getCoordination"]
+    >>>();
+    const delayedPost = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >>>();
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: coordination(2) })
+      .mockImplementationOnce(() => delayedGet.promise);
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >()
+      .mockImplementationOnce(() => delayedPost.promise)
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } });
+    const transport = gateway({ getCoordination, applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 2 },
+    }));
+
+    let first!: ReturnType<typeof result.current.apply>;
+    act(() => {
+      first = result.current.apply({
+        action: "claim_self",
+        idempotencyKey: "coord-order-post-newer",
+      });
+      result.current.refresh();
+    });
+    await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      delayedPost.resolve({ ok: true, value: claimSuccess(2) });
+      await first;
+    });
+    expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 3 },
+    });
+
+    await act(async () => {
+      delayedGet.resolve({ ok: true, value: coordination(2) });
+      await delayedGet.promise;
+    });
+    expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 3 },
+    });
+
+    await act(async () => {
+      await result.current.apply({
+        action: "release_self",
+        idempotencyKey: "coord-order-after-post",
+      });
+    });
+    expect(applyCoordinationAction.mock.calls[1]?.[1]).toMatchObject({
+      expectedRevision: 3,
+    });
+  });
+
+  it("keeps a newer GET projection when an older successful POST finishes later", async () => {
+    const delayedPost = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >>>();
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: coordination(1) })
+      .mockResolvedValueOnce({ ok: true, value: coordination(3) });
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >()
+      .mockImplementationOnce(() => delayedPost.promise)
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } });
+    const transport = gateway({ getCoordination, applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 1 },
+    }));
+
+    let first!: ReturnType<typeof result.current.apply>;
+    act(() => {
+      first = result.current.apply({
+        action: "claim_self",
+        idempotencyKey: "coord-order-post-older",
+      });
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 3 },
+    }));
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+
+    const staleSuccess = claimSuccess(1);
+    let outcome!: Awaited<typeof first>;
+    await act(async () => {
+      delayedPost.resolve({ ok: true, value: staleSuccess });
+      outcome = await first;
+    });
+    expect(outcome).toEqual({ status: "succeeded", value: staleSuccess });
+    expect(result.current.state).toEqual({ status: "succeeded", value: staleSuccess });
+    expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 3 },
+    });
+
+    await act(async () => {
+      await result.current.apply({
+        action: "claim_self",
+        idempotencyKey: "coord-order-after-get",
+      });
+    });
+    expect(applyCoordinationAction.mock.calls[1]?.[1]).toMatchObject({
+      expectedRevision: 3,
+    });
+  });
+
+  it("keeps mutation conflict current truthful without regressing a newer GET", async () => {
+    const delayedPost = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >>>();
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: coordination(1) })
+      .mockResolvedValueOnce({ ok: true, value: coordination(3) });
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >()
+      .mockImplementationOnce(() => delayedPost.promise)
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } });
+    const transport = gateway({ getCoordination, applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+    let first!: ReturnType<typeof result.current.apply>;
+    act(() => {
+      first = result.current.apply({
+        action: "claim_self",
+        idempotencyKey: "coord-order-conflict-older",
+      });
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 3 },
+    }));
+
+    const staleConflict = {
+      kind: "coordination_changed" as const,
+      status: 409 as const,
+      investigationId: CASE_ID,
+      action: "claim_self" as const,
+      targetIdentityId: null,
+      current: coordination(2),
+    };
+    await act(async () => {
+      delayedPost.resolve({ ok: false, error: staleConflict });
+      await first;
+    });
+    expect(result.current.state).toEqual({ status: "failed", error: staleConflict });
+    expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 3 },
+    });
+
+    await act(async () => {
+      await result.current.apply({
+        action: "claim_self",
+        idempotencyKey: "coord-order-after-conflict",
+      });
+    });
+    expect(applyCoordinationAction.mock.calls[1]?.[1]).toMatchObject({
+      expectedRevision: 3,
+    });
+  });
+
   it.each([
     ["401", { kind: "auth_lost" as const, status: 401 as const }],
     ["403", { kind: "auth_lost" as const, status: 403 as const }],

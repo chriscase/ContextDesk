@@ -115,6 +115,37 @@ function frozenOutcome<T>(outcome: CommandOutcome<T>): CommandOutcome<T> {
   return deepFreezeDto(outcome);
 }
 
+function publishedCoordination(
+  state: ResourceState<InvestigationCoordinationV1>,
+): InvestigationCoordinationV1 | undefined {
+  switch (state.status) {
+    case "ready":
+      return state.value;
+    case "loading":
+    case "failed":
+      return state.previous;
+    case "idle":
+      return undefined;
+  }
+}
+
+/** Keep the resource lane monotonic while GET and POST requests overlap. */
+function publishAuthoritativeCoordination(
+  current: KeyedResourceState<string, InvestigationCoordinationV1>,
+  scopeKey: string,
+  candidate: InvestigationCoordinationV1,
+  settleLoading: boolean,
+): KeyedResourceState<string, InvestigationCoordinationV1> {
+  if (current.key !== scopeKey) return current;
+  const published = publishedCoordination(current.state);
+  if (published !== undefined && candidate.revision < published.revision) {
+    return settleLoading && current.state.status === "loading"
+      ? { key: scopeKey, state: { status: "ready", value: published } }
+      : current;
+  }
+  return succeedResourceLoad(current, scopeKey, candidate);
+}
+
 /** Owns the complete case-bound coordination read/action lane. */
 export function useInvestigationCoordination(
   options: UseInvestigationCoordinationOptions,
@@ -218,7 +249,7 @@ export function useInvestigationCoordination(
         latestRef.current.onScopeDenied(scope.investigationId, result.error);
       }
       setResource((current) => result.ok
-        ? succeedResourceLoad(current, scopeKey, result.value)
+        ? publishAuthoritativeCoordination(current, scopeKey, result.value, true)
         : failResourceLoad(current, scopeKey, result.error));
     }).catch(() => {
       if (!mountedRef.current || !readSlotRef.current.isCurrent(token)) return;
@@ -331,10 +362,11 @@ export function useInvestigationCoordination(
           || result.error.kind === "coordination_refused"
         ) {
           const currentCoordination = result.error.current;
-          setResource((current) => succeedResourceLoad(
+          setResource((current) => publishAuthoritativeCoordination(
             current,
             currentReadScopeKey,
             currentCoordination,
+            false,
           ));
           retainedRef.current = null;
         } else if (
@@ -357,10 +389,11 @@ export function useInvestigationCoordination(
         return frozenOutcome({ status: "failed", error: result.error });
       }
       retainedRef.current = null;
-      setResource((current) => succeedResourceLoad(
+      setResource((current) => publishAuthoritativeCoordination(
         current,
         currentReadScopeKey,
         result.value.applied,
+        false,
       ));
       setStoredMutation(scopedMutationState(currentActionScopeKey, {
         status: "succeeded",
