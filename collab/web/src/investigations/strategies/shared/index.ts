@@ -29,3 +29,6 @@ export type {
 
 export { HandoffPanel } from "./HandoffPanel.js";
 export type { HandoffPanelProps } from "./HandoffPanel.js";
+
+export { EvidenceAnnotationWorkspace } from "./EvidenceAnnotationWorkspace.js";
+export type { EvidenceAnnotationWorkspaceProps } from "./EvidenceAnnotationWorkspace.js";

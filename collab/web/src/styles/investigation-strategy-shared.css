@@ -347,3 +347,214 @@
     transition-duration: 0s !important;
   }
 }
+
+/* Shared evidence annotation workspace. It is deliberately presentation-only:
+   the Runtime owns authorization, idempotency, fencing, and durable outcomes. */
+.strategy-kit__annotation-workspace {
+  display: grid;
+  gap: 0.8rem;
+  min-width: 0;
+  margin-top: 0.85rem;
+  padding: 0.9rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.strategy-kit__annotation-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.strategy-kit__annotation-heading h4,
+.strategy-kit__annotation-heading p {
+  margin: 0;
+}
+
+.strategy-kit__annotation-heading h4 {
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__annotation-heading p:not(.strategy-kit__eyebrow) {
+  max-width: 54rem;
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.strategy-kit__annotation-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.strategy-kit__annotation-target {
+  max-width: 100%;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__annotation-form {
+  display: grid;
+  gap: 0.45rem;
+  max-width: 58rem;
+}
+
+.strategy-kit__annotation-form > label,
+.strategy-kit__annotation-form-row > label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.strategy-kit__annotation-form textarea,
+.strategy-kit__annotation-form select {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  padding: 0.55rem 0.65rem;
+  background: var(--surface-input);
+  color: var(--fg);
+  font: inherit;
+}
+
+.strategy-kit__annotation-form textarea {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.strategy-kit__annotation-form-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.strategy-kit__annotation-form-row select {
+  min-width: 8rem;
+}
+
+.strategy-kit__annotation-form-row button,
+.strategy-kit__annotation-selection-actions button {
+  min-height: 2.2rem;
+  padding: 0.45rem 0.7rem;
+}
+
+.strategy-kit__annotation-form-row button {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #10131a;
+  font-weight: 700;
+}
+
+.strategy-kit__annotation-form-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.strategy-kit__annotation-length {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.strategy-kit__annotation-selection-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.strategy-kit__annotation-selection-actions small {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__annotation-selection-actions button {
+  background: transparent;
+  color: var(--fg);
+}
+
+.strategy-kit__annotation-results {
+  display: grid;
+  gap: 0.45rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+.strategy-kit__annotation-results > strong {
+  font-size: 0.8rem;
+}
+
+.strategy-kit__annotation-results ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.strategy-kit__annotation-results li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.strategy-kit__annotation-results li > span:not(.strategy-kit__badge),
+.strategy-kit__annotation-results li > small {
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__annotation-results li > small {
+  flex-basis: 100%;
+  color: var(--muted);
+}
+
+@media (max-width: 560px) {
+  .strategy-kit__annotation-heading {
+    flex-direction: column;
+  }
+
+  .strategy-kit__annotation-form-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .strategy-kit__annotation-form-row select,
+  .strategy-kit__annotation-form-row button {
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .strategy-kit__annotation-workspace,
+  .strategy-kit__annotation-target,
+  .strategy-kit__annotation-form textarea,
+  .strategy-kit__annotation-form select,
+  .strategy-kit__annotation-form-row button,
+  .strategy-kit__annotation-selection-actions button {
+    border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .strategy-kit__annotation-workspace,
+  .strategy-kit__annotation-workspace * {
+    animation: none !important;
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}

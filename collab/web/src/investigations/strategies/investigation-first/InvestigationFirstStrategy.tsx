@@ -10,6 +10,7 @@ import {
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
+import { EvidenceAnnotationWorkspace } from "../shared/index.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
@@ -566,7 +567,21 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           })}
         </ul>
       ) : null}
-      <div className="investigation-first__bulk-actions"><span>{selectedEvidence.length} selected</span><button type="button" disabled aria-describedby="investigation-first-trash-description">Move selected to trash</button><button type="button" onClick={() => setSelectedEvidence([])} disabled={!selectedEvidence.length}>Clear selection</button><small id="investigation-first-trash-description">Bulk trash is reserved for a recoverable, audited lifecycle workflow; no file is deleted here.</small></div>
+      <EvidenceAnnotationWorkspace
+        scopeKey={`${props.focusCaseId ?? "none"}\u0000${runtime.identity.id}\u0000${runtime.identity.username}`}
+        evidence={inventory.availability === "available" ? inventory.value.map(({ evidence }) => evidence) : []}
+        selectedArtifactIds={selectedEvidence}
+        annotations={artifactAnnotationView}
+        canAnnotate={annotationCommand !== null && annotationHistoryReady}
+        canReadPrivate={runtime.capabilities.canReadPrivate}
+        readOnly={!runtime.capabilities.canContribute}
+        bulkCommand={runtime.commands.createArtifactAnnotations}
+        bulkMutation={runtime.mutations.createArtifactAnnotations}
+        bulkErrorCopy={runtime.mutations.createArtifactAnnotations.status === "failed" ? failureCopy(runtime.mutations.createArtifactAnnotations.error, "annotations") : null}
+        onRefresh={runtime.refresh.artifactAnnotations}
+        onClearSelection={() => setSelectedEvidence([])}
+        trashDescriptionId="investigation-first-trash-description"
+      />
       {upload.status === "failed" ? <p className="investigation-first__error" role="alert">{failureCopy(upload.error, "upload")}</p> : null}
       {uploadCommand !== null ? <form className="investigation-first__upload" onSubmit={(event) => void uploadEvidence(event)}><h4>Add evidence</h4><div className="investigation-first__upload-grid"><label>File<input name="file" type="file" /></label><label>Kind<select name="kind" defaultValue="attachment">{UPLOAD_KINDS.map((option) => <option key={option} value={option}>{option === "attachment" ? "Attachment" : option === "log" ? "Log" : "Email"}</option>)}</select></label><label>Privacy<select name="privacyClass" value={privacyClass} onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && runtime.capabilities.canReadPrivate ? "owner_only" : "share_safe")}>{(runtime.capabilities.canReadPrivate ? PRIVACY_CLASSES : SHARE_SAFE_PRIVACY_CLASSES).map((option) => <option key={option} value={option}>{option === "owner_only" ? "Owner only" : "Share safe"}</option>)}</select></label><label className="investigation-first__field--wide">Annotation<input name="summary" placeholder="What is this file and why does it matter?" /></label></div><button type="submit" disabled={upload.status === "running"}>{upload.status === "running" ? "Adding…" : "Add to evidence inventory"}</button></form> : null}
     </section>;
