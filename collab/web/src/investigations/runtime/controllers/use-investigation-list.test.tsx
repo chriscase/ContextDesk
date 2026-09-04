@@ -1,9 +1,16 @@
+import {
+  INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+  parseInvestigationCollectionPage,
+  type InvestigationCollectionPageV1,
+} from "@cd-collab/contracts/investigation-collection";
 import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
   GatewayResult,
+  InvestigationCollectionQueryGateway,
+  InvestigationCollectionQueryInput,
   InvestigationGateway,
 } from "../gateway.js";
 import {
@@ -12,7 +19,10 @@ import {
   makeSparseImportedCase,
 } from "../testkit/fixtures.js";
 import { createDeferred } from "../testkit/promises.js";
-import { useInvestigationList } from "./use-investigation-list.js";
+import {
+  useInvestigationCollectionQuery,
+  useInvestigationList,
+} from "./use-investigation-list.js";
 
 afterEach(cleanup);
 
@@ -327,5 +337,307 @@ describe("useInvestigationList", () => {
       status: "ready",
       value: [makeSparseImportedCase()],
     });
+  });
+});
+
+const OPAQUE_COLLECTION_CURSOR = "eyJzZXJ2ZXJPd25lZCI6dHJ1ZX0";
+
+function collectionPage(
+  overrides: Record<string, unknown> = {},
+): InvestigationCollectionPageV1 {
+  return parseInvestigationCollectionPage({
+    schemaId: INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+    items: makeCaseList().cases,
+    nextCursor: null,
+    hiddenArchivedCount: 0,
+    facets: {
+      status: { top: [], otherCount: 0 },
+      entity: { top: [], otherCount: 0 },
+      impactIdentity: { top: [], otherCount: 0 },
+      contributor: { top: [], otherCount: 0 },
+    },
+    ...overrides,
+  });
+}
+
+function queryGatewayWith(
+  queryInvestigations: InvestigationCollectionQueryGateway["queryInvestigations"],
+): InvestigationCollectionQueryGateway {
+  return { queryInvestigations };
+}
+
+describe("useInvestigationCollectionQuery", () => {
+  it("does not load while disabled or without a query", async () => {
+    const queryInvestigations = async () => ({
+      ok: true as const,
+      value: collectionPage(),
+    });
+    const gateway = queryGatewayWith(queryInvestigations);
+    const { result, rerender } = renderHook(
+      ({ enabled, query }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled,
+        identityKey: "alice",
+        authorityKey: "interactive:viewer",
+        query,
+      }),
+      { initialProps: { enabled: false, query: null as InvestigationCollectionQueryInput | null } },
+    );
+
+    expect(result.current.page).toEqual({ status: "idle" });
+    expect(result.current.query).toBeNull();
+
+    rerender({ enabled: true, query: null });
+    expect(result.current.page).toEqual({ status: "idle" });
+
+    rerender({ enabled: false, query: { q: "checkout" } });
+    expect(result.current.page).toEqual({ status: "idle" });
+  });
+
+  it("retains previous confirmed data while refreshing and stays failed after a failed refresh", async () => {
+    const first = collectionPage({ hiddenArchivedCount: 1 });
+    const refresh = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+    let requestCount = 0;
+    const gateway = queryGatewayWith(() => {
+      requestCount += 1;
+      return requestCount === 1 ? Promise.resolve({ ok: true, value: first }) : refresh.promise;
+    });
+    const { result } = renderHook(() => useInvestigationCollectionQuery({
+      gateway,
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "interactive:viewer",
+      query: { q: "checkout" },
+    }));
+
+    await waitFor(() => expect(result.current.page.status).toBe("ready"));
+    expect(result.current.page).toEqual({ status: "ready", value: first });
+    expect(result.current.query?.q).toBe("checkout");
+
+    act(() => result.current.refresh());
+    expect(result.current.page).toEqual({ status: "loading", previous: first });
+
+    await act(async () => {
+      refresh.resolve({ ok: false, error: { kind: "network" } });
+    });
+    expect(result.current.page).toEqual({
+      status: "failed",
+      error: { kind: "network" },
+      previous: first,
+    });
+    expect(result.current.page.status).not.toBe("ready");
+    expect(result.current.successfulSnapshotGeneration).toBe(1);
+  });
+
+  it("keeps a failed first page failed instead of looking empty", async () => {
+    const gateway = queryGatewayWith(async () => ({
+      ok: false,
+      error: { kind: "unavailable", status: 503 },
+    }));
+    const { result } = renderHook(() => useInvestigationCollectionQuery({
+      gateway,
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "interactive:viewer",
+      query: { q: "checkout" },
+    }));
+
+    await waitFor(() => expect(result.current.page).toEqual({
+      status: "failed",
+      error: { kind: "unavailable", status: 503 },
+    }));
+    expect(result.current.page).not.toEqual({ status: "ready", value: expect.anything() });
+    expect(result.current.query?.q).toBe("checkout");
+  });
+
+  it("does not publish a stale query response after a filter transition", async () => {
+    const first = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+    const second = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+    const requests: InvestigationCollectionQueryInput[] = [];
+    const pages = [first, second];
+    let requestIndex = 0;
+    const gateway = queryGatewayWith((query) => {
+      requests.push(query);
+      return pages[requestIndex++]!.promise;
+    });
+    const { result, rerender } = renderHook(
+      ({ query }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled: true,
+        identityKey: "alice",
+        authorityKey: "interactive:viewer",
+        query,
+      }),
+      { initialProps: { query: { q: "checkout" } as InvestigationCollectionQueryInput } },
+    );
+    await waitFor(() => expect(requests).toHaveLength(1));
+
+    rerender({ query: { q: "inventory" } });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(result.current.page).toEqual({ status: "loading" });
+
+    await act(async () => {
+      first.resolve({ ok: true, value: collectionPage({ hiddenArchivedCount: 4 }) });
+    });
+    expect(result.current.page).toEqual({ status: "loading" });
+    expect(result.current.query?.q).toBe("inventory");
+
+    const nextPage = collectionPage({
+      items: [makeSparseImportedCase()],
+      hiddenArchivedCount: 0,
+    });
+    await act(async () => {
+      second.resolve({ ok: true, value: nextPage });
+    });
+    expect(result.current.page).toEqual({ status: "ready", value: nextPage });
+    expect(result.current.query?.q).toBe("inventory");
+  });
+
+  it.each([
+    ["identity", { identityKey: "bob", authorityKey: "interactive:viewer" }],
+    ["authority", { identityKey: "alice", authorityKey: "static:viewer" }],
+  ] as const)("clears and aborts on a %s scope change", async (_label, nextScope) => {
+    const requests: Array<{
+      signal: AbortSignal;
+      deferred: ReturnType<typeof createDeferred<GatewayResult<InvestigationCollectionPageV1>>>;
+    }> = [];
+    const gateway = queryGatewayWith((_query, { signal }) => {
+      const deferred = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+      requests.push({ signal, deferred });
+      return deferred.promise;
+    });
+    const { result, rerender } = renderHook(
+      ({ identityKey, authorityKey }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled: true,
+        identityKey,
+        authorityKey,
+        query: { q: "checkout" },
+      }),
+      { initialProps: { identityKey: "alice", authorityKey: "interactive:viewer" } },
+    );
+    await waitFor(() => expect(requests).toHaveLength(1));
+    await act(async () => {
+      requests[0]!.deferred.resolve({ ok: true, value: collectionPage() });
+    });
+    expect(result.current.page.status).toBe("ready");
+
+    rerender(nextScope);
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]!.signal.aborted).toBe(true);
+    expect(result.current.page).toEqual({ status: "loading" });
+
+    const nextPage = collectionPage({ items: [makeSparseImportedCase()] });
+    await act(async () => {
+      requests[1]!.deferred.resolve({ ok: true, value: nextPage });
+    });
+    expect(result.current.page).toEqual({ status: "ready", value: nextPage });
+  });
+
+  it("treats cursor continuation as a new query key and does not publish the prior page", async () => {
+    const firstPage = collectionPage({ nextCursor: OPAQUE_COLLECTION_CURSOR });
+    const secondPage = collectionPage({
+      items: [makeSparseImportedCase()],
+      nextCursor: null,
+    });
+    const first = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+    const second = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+    const requests: InvestigationCollectionQueryInput[] = [];
+    const pages = [first, second];
+    let requestIndex = 0;
+    const gateway = queryGatewayWith((query) => {
+      requests.push(query);
+      return pages[requestIndex++]!.promise;
+    });
+    const { result, rerender } = renderHook(
+      ({ query }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled: true,
+        identityKey: "alice",
+        authorityKey: "interactive:viewer",
+        query,
+      }),
+      { initialProps: { query: { q: "checkout" } as InvestigationCollectionQueryInput } },
+    );
+    await waitFor(() => expect(requests).toHaveLength(1));
+    await act(async () => {
+      first.resolve({ ok: true, value: firstPage });
+    });
+    expect(result.current.page).toEqual({ status: "ready", value: firstPage });
+
+    rerender({ query: { q: "checkout", cursor: firstPage.nextCursor } });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1]?.cursor).toBe(OPAQUE_COLLECTION_CURSOR);
+    expect(result.current.page).toEqual({ status: "loading" });
+
+    await act(async () => {
+      second.resolve({ ok: true, value: secondPage });
+    });
+    expect(result.current.page).toEqual({ status: "ready", value: secondPage });
+    expect(result.current.query?.cursor).toBe(OPAQUE_COLLECTION_CURSOR);
+  });
+
+  it("fails a malformed query without calling the gateway", async () => {
+    let calls = 0;
+    const gateway = queryGatewayWith(async () => {
+      calls += 1;
+      return { ok: true, value: collectionPage() };
+    });
+    const { result } = renderHook(() => useInvestigationCollectionQuery({
+      gateway,
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "interactive:viewer",
+      query: { limit: 101 },
+    }));
+
+    await waitFor(() => expect(result.current.page).toEqual({
+      status: "failed",
+      error: { kind: "protocol", reason: "contract" },
+    }));
+    expect(calls).toBe(0);
+    expect(result.current.query).toBeNull();
+  });
+
+  it("aborts setup cleanly when a StrictMode tree is remounted", async () => {
+    const requests: Array<{
+      signal: AbortSignal;
+      deferred: ReturnType<typeof createDeferred<GatewayResult<InvestigationCollectionPageV1>>>;
+    }> = [];
+    const gateway = queryGatewayWith((_query, { signal }) => {
+      const deferred = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+      requests.push({ signal, deferred });
+      return deferred.promise;
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <StrictMode>{children}</StrictMode>
+    );
+    const firstMount = renderHook(() => useInvestigationCollectionQuery({
+      gateway,
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "interactive:viewer",
+      query: { q: "checkout" },
+    }), { wrapper });
+    await waitFor(() => expect(requests).toHaveLength(1));
+    firstMount.unmount();
+    expect(requests[0]!.signal.aborted).toBe(true);
+    const secondMount = renderHook(() => useInvestigationCollectionQuery({
+      gateway,
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "interactive:viewer",
+      query: { q: "checkout" },
+    }), { wrapper });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    await act(async () => {
+      requests[0]!.deferred.resolve({ ok: true, value: collectionPage() });
+    });
+    expect(secondMount.result.current.page).toEqual({ status: "loading" });
+    const nextPage = collectionPage({ items: [makeSparseImportedCase()] });
+    await act(async () => {
+      requests[1]!.deferred.resolve({ ok: true, value: nextPage });
+    });
+    expect(secondMount.result.current.page).toEqual({ status: "ready", value: nextPage });
   });
 });

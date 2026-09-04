@@ -5,6 +5,7 @@ import {
   INVESTIGATION_LIFECYCLE_SCHEMA_ID,
   type CaseV1,
 } from "@cd-collab/contracts/investigation-runtime";
+import { investigationCollectionQueryGateway } from "../gateway.js";
 import { describe, expect, it } from "vitest";
 import {
   READ_ONLY_CAPABILITY_FIXTURE,
@@ -116,6 +117,7 @@ describe("Runtime V1 deterministic testkit", () => {
     const { signal } = new AbortController();
     const gateway = createInvestigationGatewayDouble();
 
+    expect(gateway.queryInvestigations).toBeUndefined();
     await expect(gateway.listInvestigations({ signal })).resolves.toEqual(
       gatewayOk(makeCaseList().cases),
     );
@@ -144,6 +146,19 @@ describe("Runtime V1 deterministic testkit", () => {
     await expect(
       gateway.listEvidence(RUNTIME_FIXTURE_IDS.populatedCase, { signal }),
     ).resolves.toEqual(gatewayOk(makeEvidenceList().artifacts));
+  });
+
+  it("fails the missing collection-query seam closed without inventing a page", async () => {
+    const { signal } = new AbortController();
+    const gateway = createInvestigationGatewayDouble();
+    const resolved = investigationCollectionQueryGateway(gateway);
+
+    await expect(resolved.queryInvestigations({ q: "checkout" }, { signal })).resolves.toEqual(
+      gatewayUnavailable(),
+    );
+    await expect(gateway.listInvestigations({ signal })).resolves.toEqual(
+      gatewayOk(makeCaseList().cases),
+    );
   });
 
   it("models a late transport that ignores abort without using a clock", async () => {
