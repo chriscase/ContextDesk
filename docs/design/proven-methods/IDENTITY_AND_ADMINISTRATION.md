@@ -34,7 +34,7 @@ password verification does use fixed-length timing-safe comparison.
 | Capability | Status | Evidence | Residual |
 | --- | --- | --- | --- |
 | Canonical profile contract (mutable display profile split from immutable attribution identity) | Shipped | [`user-profile.ts`](../../../collab/contracts/src/user-profile.ts), [`user-profile.test.ts`](../../../collab/contracts/src/user-profile.test.ts) | Real Unicode confusable-skeleton/homoglyph detection is not attempted — only C0/DEL/zero-width/bidi-control/BOM code points are blocked |
-| Capability model (10 fine-grained capabilities, role-default matrix, additive local grants) | Shipped | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts) | None known |
+| Capability model v2 (11 fine-grained capabilities, role-default matrix, additive local grants) | **Partial**: contract accepted; ten earlier capabilities shipped | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts) | `investigation:coordinate` is reserved for the Operations Queue server/UI slice; no route accepts it yet |
 | Memory + PostgreSQL profile/grant stores with CAS, login-time sync, fail-closed identity collision | Shipped | [`store.ts`](../../../collab/server/src/modules/people/store.ts), [`store.contract-tests.ts`](../../../collab/server/src/modules/people/store.contract-tests.ts) run against both backends by [`store.test.ts`](../../../collab/server/src/modules/people/store.test.ts) and [`pg-store.test.ts`](../../../collab/server/src/modules/people/pg-store.test.ts) | None known |
 | Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | Directory-removal auto-disable remains a named residual in §16; browser mutation CSRF is now system-wide (see §10) |
 | Domain-wide session authorization and suspension fail-closed | Shipped | [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`authorization.adversarial.test.ts`](../../../collab/server/src/modules/authz/authorization.adversarial.test.ts), War Room domain/admin `routes.ts` files | None known |
@@ -241,7 +241,31 @@ gate: route handlers call `ctx.has("…")` on that result instead of
 re-deriving `canPerform(roles, …)` booleans. Only the People admin UI's
 inspection view calls the inspection function.
 
-### 6.3 Self-service update
+### 6.3 Reserved investigation coordination capability
+
+Capability model v2 adds `investigation:coordinate` immediately after
+`investigation:write`. Its default holders are `case-lead` and `admin`; a
+local grant may add it without assigning either role. The normal profile gate
+still removes it from suspended, disabled, and imported-historical identities.
+
+This is an **accepted contract and reserved permission only**. No server route,
+store, audit writer, queue, or UI uses it yet. A future coordination route must
+re-authorize the session and investigation membership for every request; a
+visible button or UI strategy may never stand in for that check.
+`claim_self` uses the existing `investigation:write` gate and requires
+current-participant eligibility. A route-authorized current holder may use
+`release_self` without a second eligibility refusal; if the holder can no
+longer authorize, privileged release is the cleanup path. The
+`assign_participant` and `release_participant` actions require case access plus
+`investigation:coordinate`. A single shared gate for all four actions is not
+permitted.
+
+Capability model v2 and the closed capability enum carried by `session.v1`
+are one coupled deployment unit. Mixed old/new contract and server deployments
+fail closed and must be rolled together; no caller may infer v2 support from a
+string that an older database constraint cannot store.
+
+### 6.4 Self-service update
 
 1. Parse and bound the request (`parseUserProfileUpdateRequest`).
 2. Load the current profile; `assertProfileUpdateAllowed` rejects the whole
@@ -500,14 +524,16 @@ commissioned to satisfy:
    company-directory qualification remains a named non-claim (§16).
    Bind secrets stay inside the auth module; this chapter does not
    claim employer Active Directory compatibility.
-3. **Authorization.** Shipped - versioned 10-capability model covering
+3. **Authorization.** Partial - versioned 11-capability model covering
    every named area (investigation read/write, private evidence, run
    strategies, accept decisions, exports, portable restore, user
    administration, system configuration, audit viewing), enforced on War
    Room domain and admin routes via `authorizeSession` →
    `usableCapabilities`. Local grants are honored without a role change.
    Suspend/disable/historical fail closed for fresh login and existing
-   sessions. §4, §5, §6.2.
+   sessions. Ten capabilities have shipped enforcement; the eleventh,
+   `investigation:coordinate`, is contract-reserved for Operations Queue and
+   has no route or UI yet. §4, §5, §6.2, §6.3.
 4. **Admin operations.** Shipped - list/search, effective roles/
    capabilities with source, activate/suspend, assign/revoke local grants,
    directory-mapping preview; admin-capability-gated, CSRF-guarded,

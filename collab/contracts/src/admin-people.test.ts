@@ -133,7 +133,7 @@ describe("buildEffectiveCapabilityRows", () => {
 
   it("includes every capability, held or not, so an admin UI can render a full toggle list", () => {
     const rows = buildEffectiveCapabilityRows(["viewer"], []);
-    expect(rows).toHaveLength(10);
+    expect(rows).toHaveLength(11);
   });
 });
 

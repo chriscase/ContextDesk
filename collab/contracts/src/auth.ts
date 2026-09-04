@@ -1,4 +1,4 @@
-import type { Capability } from "./capability.js";
+import { CAPABILITIES, type Capability } from "./capability.js";
 import { checkObject, f, type ObjectShape } from "./parse.js";
 
 export const APP_ROLES = ["viewer", "contributor", "case-lead", "admin"] as const;
@@ -32,18 +32,7 @@ const sessionShape: ObjectShape = {
   roles: f.req(f.arr(f.en(...APP_ROLES))),
   capabilities: f.req(
     f.arr(
-      f.en(
-        "investigation:read",
-        "investigation:write",
-        "evidence:private:read",
-        "run:strategies",
-        "decision:accept",
-        "export:create",
-        "portable:restore",
-        "admin:users",
-        "admin:system_config",
-        "audit:view",
-      ),
+      f.en(...CAPABILITIES),
     ),
   ),
 };

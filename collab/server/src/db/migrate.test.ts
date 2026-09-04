@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { adminUrl, withDisposableDb } from "../test/disposable-db.js";
 import { latestMigrationVersion, listMigrations, migrateDown, migrateUp } from "./migrate.js";
@@ -8,8 +9,8 @@ describe("migration versions", () => {
   // experiment row-lock privilege, the administrator model-use policy, the
   // investigation log workbench, structured context, UI strategy governance,
   // first-class artifact annotations, replay-safe singular writes, and one
-  // parent intent for each replay-safe bulk write.
-  it("pins the canonical PostgreSQL head at bulk annotation write intents", () => {
+  // parent intent for each replay-safe bulk write, and capability model v2.
+  it("pins the canonical PostgreSQL head at capability model v2", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -24,7 +25,8 @@ describe("migration versions", () => {
     expect(versions).toContain("025_artifact_annotations");
     expect(versions).toContain("026_artifact_annotation_write_intents");
     expect(versions).toContain("027_artifact_annotation_bulk_write_intents");
-    expect(latestMigrationVersion()).toBe("027_artifact_annotation_bulk_write_intents");
+    expect(versions).toContain("028_capability_model_v2");
+    expect(latestMigrationVersion()).toBe("028_capability_model_v2");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -33,14 +35,57 @@ describe("migration versions", () => {
     // localeCompare ordering is what the runner applies, so assert on it
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
-    expect(versions.slice(-6)).toEqual([
+    expect(versions.slice(-7)).toEqual([
       "022_software_impact",
       "023_investigation_context",
       "024_ui_strategy_governance",
       "025_artifact_annotations",
       "026_artifact_annotation_write_intents",
       "027_artifact_annotation_bulk_write_intents",
+      "028_capability_model_v2",
     ]);
+  });
+
+  it("replaces only the capability check with exact v2 and rollback enums", () => {
+    const migration = listMigrations().find(
+      (file) => file.version === "028_capability_model_v2",
+    );
+    expect(migration).toBeDefined();
+    const values = (path: string) =>
+      [...readFileSync(path, "utf8").matchAll(/'([^']+)'/g)].map(
+        (match) => match[1],
+      );
+    expect(values(migration!.upPath)).toEqual([
+      "investigation:read",
+      "investigation:write",
+      "investigation:coordinate",
+      "evidence:private:read",
+      "run:strategies",
+      "decision:accept",
+      "export:create",
+      "portable:restore",
+      "admin:users",
+      "admin:system_config",
+      "audit:view",
+    ]);
+    expect(values(migration!.downPath)).toEqual([
+      "investigation:read",
+      "investigation:write",
+      "evidence:private:read",
+      "run:strategies",
+      "decision:accept",
+      "export:create",
+      "portable:restore",
+      "admin:users",
+      "admin:system_config",
+      "audit:view",
+    ]);
+    for (const path of [migration!.upPath, migration!.downPath]) {
+      const sql = readFileSync(path, "utf8");
+      expect(sql.match(/DROP CONSTRAINT user_capability_grants_capability_check/g)).toHaveLength(1);
+      expect(sql.match(/ADD CONSTRAINT user_capability_grants_capability_check/g)).toHaveLength(1);
+      expect(sql).not.toMatch(/DELETE\s+FROM/i);
+    }
   });
 });
 
@@ -76,6 +121,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("025_artifact_annotations");
       expect(up.applied).toContain("026_artifact_annotation_write_intents");
       expect(up.applied).toContain("027_artifact_annotation_bulk_write_intents");
+      expect(up.applied).toContain("028_capability_model_v2");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -175,6 +221,38 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(bulkIntentTables.rows.map((row) => row.tablename)).toEqual([
         "artifact_annotation_bulk_write_intents",
       ]);
+      await client.query(`
+        INSERT INTO user_profiles (
+          id, username, display_name, status, provenance, directory_sync_status
+        ) VALUES (
+          'local:coordination-migration', 'coordination-migration',
+          'Coordination migration', 'active', 'local', 'not_synced'
+        )
+      `);
+      await client.query(`
+        INSERT INTO user_capability_grants (user_id, capability, granted_by)
+        VALUES ('local:coordination-migration', 'investigation:coordinate', 'local:root')
+      `);
+      await expect(migrateDown(client)).rejects.toThrow(
+        /user_capability_grants_capability_check/,
+      );
+      const preservedV2Grant = await client.query<{ capability: string }>(`
+        SELECT capability FROM user_capability_grants
+        WHERE user_id = 'local:coordination-migration'
+      `);
+      expect(preservedV2Grant.rows).toEqual([
+        { capability: "investigation:coordinate" },
+      ]);
+      await client.query(`
+        DELETE FROM user_capability_grants
+        WHERE user_id = 'local:coordination-migration'
+          AND capability = 'investigation:coordinate'
+      `);
+      expect((await migrateDown(client)).rolledBack).toBe("028_capability_model_v2");
+      await expect(client.query(`
+        INSERT INTO user_capability_grants (user_id, capability, granted_by)
+        VALUES ('local:coordination-migration', 'investigation:coordinate', 'local:root')
+      `)).rejects.toThrow(/user_capability_grants_capability_check/);
       expect((await migrateDown(client)).rolledBack).toBe("027_artifact_annotation_bulk_write_intents");
       const bulkIntentTablesAfterRollback = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
@@ -299,6 +377,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("025_artifact_annotations");
       expect(dry.pending).toContain("026_artifact_annotation_write_intents");
       expect(dry.pending).toContain("027_artifact_annotation_bulk_write_intents");
+      expect(dry.pending).toContain("028_capability_model_v2");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

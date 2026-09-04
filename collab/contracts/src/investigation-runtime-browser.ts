@@ -57,6 +57,31 @@ export {
   parseInvestigationLifecycleActionSuccess,
   parseInvestigationLifecycleChanged,
 } from "./investigation-lifecycle.js";
+
+export {
+  INVESTIGATION_COORDINATION_ACTIONS,
+  INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_REFUSALS,
+  INVESTIGATION_COORDINATION_SCHEMA_ID,
+  parseInvestigationCoordination,
+  parseInvestigationCoordinationActionRefused,
+  parseInvestigationCoordinationActionRequest,
+  parseInvestigationCoordinationActionSuccess,
+  parseInvestigationCoordinationChanged,
+} from "./investigation-coordination.js";
+export type {
+  InvestigationCoordinationAction,
+  InvestigationCoordinationActionRefusedV1,
+  InvestigationCoordinationActionRequestV1,
+  InvestigationCoordinationActionSuccessV1,
+  InvestigationCoordinationChangedV1,
+  InvestigationCoordinationRefusal,
+  InvestigationCoordinationV1,
+  InvestigationCoordinatorIdentityV1,
+} from "./investigation-coordination.js";
 export type {
   InvestigationLifecycleActionSuccessV1,
   InvestigationLifecycleExpectedV1,
