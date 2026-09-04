@@ -132,7 +132,7 @@ describe("shared evidence annotation workspace", () => {
 
   it("blocks an unknown outcome until history is refreshed", async () => {
     const onRefresh = vi.fn(async () => undefined);
-    const bulkCommand = vi.fn(async () => ({
+    const bulkCommand = vi.fn(async (_input: unknown) => ({
       status: "failed" as const,
       error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
     }));
@@ -141,9 +141,17 @@ describe("shared evidence annotation workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save one note to selected evidence" }));
 
     await waitFor(() => expect(screen.getByText(/Refresh annotation history before submitting/)).toBeTruthy());
+    const firstCall = bulkCommand.mock.calls[0]?.[0];
+    expect(firstCall).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Durable note for these files" }).getAttribute("disabled")).not.toBeNull();
+    expect(screen.getByRole("combobox", { name: "Privacy" }).getAttribute("disabled")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Save one note to selected evidence" }).getAttribute("disabled")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Refresh annotation history" }));
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Save one note to selected evidence" }));
+    await waitFor(() => expect(bulkCommand).toHaveBeenCalledTimes(2));
+    expect(bulkCommand.mock.calls[1]?.[0]).toEqual(firstCall);
   });
 
   it("keeps the workspace read-only when the Runtime removes write capability", () => {

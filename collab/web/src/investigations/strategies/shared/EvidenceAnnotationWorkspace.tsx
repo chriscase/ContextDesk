@@ -270,7 +270,7 @@ export function EvidenceAnnotationWorkspace({
               rows={3}
               placeholder="What do these files show, and why does it matter?"
               onChange={(event) => setBody(event.target.value)}
-              disabled={working || refreshing}
+              disabled={working || refreshing || retryBlocked}
             />
             <div className="strategy-kit__annotation-form-row">
               <label htmlFor={privacyId}>Privacy</label>
@@ -278,7 +278,7 @@ export function EvidenceAnnotationWorkspace({
                 id={privacyId}
                 value={privacyClass}
                 onChange={(event) => setPrivacyClass(event.target.value === "owner_only" && canReadPrivate ? "owner_only" : "share_safe")}
-                disabled={working || refreshing}
+                disabled={working || refreshing || retryBlocked}
               >
                 {canReadPrivate ? <option value="owner_only">Owner only</option> : null}
                 <option value="share_safe">Share safe</option>
