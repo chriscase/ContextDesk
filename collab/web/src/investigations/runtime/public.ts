@@ -33,6 +33,7 @@ export type {
 export { MAX_ARTIFACT_ANNOTATION_BULK_IDS } from "./annotation-contract.js";
 export {
   type EvidencePreviewValue,
+  type InvestigationCollectionQueryInput,
   type PreviewEvidenceInput,
 } from "./gateway.js";
 export {
@@ -62,3 +63,9 @@ export type {
   LifecycleAction,
   PrivacyClass,
 } from "@cd-collab/contracts/investigation-runtime";
+export type {
+  InvestigationCollectionFacetsV1,
+  InvestigationCollectionPageV1,
+  InvestigationCollectionQueryV1,
+  InvestigationCollectionStatusV1,
+} from "@cd-collab/contracts/investigation-collection";

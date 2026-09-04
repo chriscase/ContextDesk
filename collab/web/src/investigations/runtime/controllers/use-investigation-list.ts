@@ -1,6 +1,16 @@
+import type {
+  InvestigationCollectionPageV1,
+  InvestigationCollectionQueryV1,
+} from "@cd-collab/contracts/investigation-collection";
 import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { InvestigationGateway } from "../gateway.js";
+import {
+  investigationCollectionQueryKeyFromInput,
+  parseInvestigationCollectionQueryInput,
+  type InvestigationCollectionQueryGateway,
+  type InvestigationCollectionQueryInput,
+  type InvestigationGateway,
+} from "../gateway.js";
 import type { ResourceState } from "../types.js";
 import { RequestSlot } from "./request-slot.js";
 import {
@@ -167,6 +177,145 @@ export function useInvestigationList({
         ? successfulSnapshot.generation
         : 0,
     publishInvestigation,
+    refresh,
+  };
+}
+
+interface InvestigationCollectionQueryScope {
+  readonly identityKey: string;
+  readonly authorityKey: string;
+  readonly queryKey: string;
+}
+
+export interface UseInvestigationCollectionQueryOptions {
+  readonly gateway: InvestigationCollectionQueryGateway;
+  /** False when the current authority cannot read the investigation collection. */
+  readonly enabled: boolean;
+  readonly identityKey: string;
+  readonly authorityKey: string;
+  /** Null until a query is requested; the controller never invents filters. */
+  readonly query: InvestigationCollectionQueryInput | null;
+}
+
+export interface InvestigationCollectionQueryController {
+  readonly page: ResourceState<InvestigationCollectionPageV1>;
+  /** Canonical contract query for the active scope, or null when idle/invalid. */
+  readonly query: InvestigationCollectionQueryV1 | null;
+  readonly latestRequestGeneration: number;
+  readonly successfulSnapshotGeneration: number;
+  readonly refresh: () => void;
+}
+
+/**
+ * Owns the versioned collection-query request lane independently of the
+ * legacy unpaged list. State is keyed by canonical query + identity +
+ * authority so a late page, cursor continuation, or refresh cannot publish
+ * under a different request. This hook never mints a cursor or URL.
+ */
+export function useInvestigationCollectionQuery({
+  gateway,
+  enabled,
+  identityKey,
+  authorityKey,
+  query,
+}: UseInvestigationCollectionQueryOptions): InvestigationCollectionQueryController {
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  const queryKey = investigationCollectionQueryKeyFromInput(query);
+  const parsed = useMemo(() => {
+    const current = queryRef.current;
+    return current === null ? null : parseInvestigationCollectionQueryInput(current);
+  }, [queryKey]);
+  const canonicalQuery = parsed !== null && parsed.ok ? parsed.value : null;
+  const scope = useMemo<InvestigationCollectionQueryScope>(
+    () => Object.freeze({
+      identityKey,
+      authorityKey,
+      queryKey: queryKey ?? "",
+    }),
+    [authorityKey, identityKey, queryKey],
+  );
+  const requestSlot = useRef(new RequestSlot<InvestigationCollectionQueryScope>());
+  const [resource, setResource] = useState(() =>
+    createResourceState<InvestigationCollectionQueryScope, InvestigationCollectionPageV1>(),
+  );
+  const requestGenerationRef = useRef(0);
+  const [latestRequest, setLatestRequest] = useState<{
+    readonly key: InvestigationCollectionQueryScope | null;
+    readonly generation: number;
+  }>({ key: null, generation: 0 });
+  const [successfulSnapshot, setSuccessfulSnapshot] = useState<{
+    readonly key: InvestigationCollectionQueryScope | null;
+    readonly generation: number;
+  }>({ key: null, generation: 0 });
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
+
+  useEffect(() => {
+    if (!enabled || queryKey === null) {
+      requestSlot.current.invalidate();
+      setResource(createResourceState<
+        InvestigationCollectionQueryScope,
+        InvestigationCollectionPageV1
+      >());
+      return;
+    }
+
+    const token = requestSlot.current.begin(scope);
+    const requestGeneration = ++requestGenerationRef.current;
+    setLatestRequest({ key: scope, generation: requestGeneration });
+    setResource((current) => beginResourceLoad(current, scope));
+
+    if (parsed === null || !parsed.ok) {
+      const error = parsed === null ? { kind: "unexpected" as const } : parsed.error;
+      setResource((current) => failResourceLoad(current, scope, error));
+      return () => {
+        requestSlot.current.invalidate();
+      };
+    }
+
+    void gateway.queryInvestigations(parsed.value, { signal: token.signal })
+      .then((result) => {
+        if (!requestSlot.current.isCurrent(token)) return;
+        if (result.ok) {
+          setResource((current) => succeedResourceLoad(current, scope, result.value));
+          setSuccessfulSnapshot({
+            key: scope,
+            generation: requestGeneration,
+          });
+        } else {
+          setResource((current) => failResourceLoad(current, scope, result.error));
+        }
+      })
+      .catch(() => {
+        if (!requestSlot.current.isCurrent(token)) return;
+        setResource((current) => failResourceLoad(
+          current,
+          scope,
+          { kind: "unexpected" },
+        ));
+      });
+
+    return () => {
+      requestSlot.current.invalidate();
+    };
+  }, [enabled, gateway, parsed, queryKey, refreshGeneration, scope]);
+
+  const refresh = useCallback(() => {
+    setRefreshGeneration((current) => current + 1);
+  }, []);
+
+  const visible = enabled && queryKey !== null && resource.key === scope;
+  return {
+    page: visible ? resource.state : { status: "idle" },
+    query: visible && canonicalQuery !== null ? canonicalQuery : null,
+    latestRequestGeneration:
+      visible && latestRequest.key === scope
+        ? latestRequest.generation
+        : 0,
+    successfulSnapshotGeneration:
+      visible && successfulSnapshot.key === scope
+        ? successfulSnapshot.generation
+        : 0,
     refresh,
   };
 }
