@@ -42,3 +42,6 @@ export { deriveCaseBoard } from "./board.js";
 export type { AcceptedDecisionBoardInput, CaseBoardInput } from "./board.js";
 export { registerCaseRoutes } from "./routes.js";
 export type { CaseRouteDeps } from "./routes.js";
+export { MemoryInvestigationCollectionGraph } from "./collection-graph.js";
+export type { InvestigationCollectionGraph } from "./collection-graph.js";
+export { CollectionQueryError } from "./collection-query.js";

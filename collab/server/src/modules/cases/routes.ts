@@ -9,6 +9,7 @@ import {
   CASE_LIST_SCHEMA_ID,
   CASE_SEVERITIES,
   CASE_STATUSES,
+  parseInvestigationCollectionQuery,
   CONTRIBUTION_LIST_SCHEMA_ID,
   EVIDENCE_LIST_SCHEMA_ID,
   EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
@@ -53,6 +54,11 @@ import {
   type CaseService,
   type CaseSituationInput,
 } from "./service.js";
+import {
+  CollectionQueryError,
+  collectionQueryFromHttp,
+  requestsInvestigationCollectionPage,
+} from "./collection-query.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -758,6 +764,19 @@ export async function registerCaseRoutes(
     if (!ctx.has("investigation:read")) {
       void reply.code(403);
       return authError("forbidden");
+    }
+    const query = asRecord(request.query);
+    if (requestsInvestigationCollectionPage(query)) {
+      try {
+        const parsed = parseInvestigationCollectionQuery(collectionQueryFromHttp(query));
+        return await deps.domain.listCollectionPage(ctx.actor, ctx.isAdmin, parsed);
+      } catch (error) {
+        if (error instanceof CollectionQueryError) {
+          void reply.code(400);
+          return { error: error.code };
+        }
+        return domainError(reply, error);
+      }
     }
     return {
       schemaId: CASE_LIST_SCHEMA_ID,
