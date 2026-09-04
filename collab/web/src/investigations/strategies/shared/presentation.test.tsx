@@ -137,4 +137,33 @@ describe("shared investigation strategy presentation kit", () => {
     fireEvent.click(selected);
     expect(onQueryChange).toHaveBeenCalledWith({ entityId: null });
   });
+
+  it("supports contributor selection and clears both active facets together", () => {
+    const onQueryChange = vi.fn();
+    render(
+      <CollectionFacetFilters
+        query={{ entityId: "entity-northwind", contributorId: null }}
+        entity={{ top: [{ key: "entity-northwind", count: 2 }], otherCount: 0 }}
+        contributor={{ top: [{ key: "alice", count: 1 }], otherCount: 0 }}
+        onQueryChange={onQueryChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("More filters"));
+    fireEvent.click(screen.getByRole("button", { name: /alice\s+1/u }));
+    expect(onQueryChange).toHaveBeenLastCalledWith({ contributorId: "alice" });
+    fireEvent.click(screen.getByRole("button", { name: "Clear advanced filters" }));
+    expect(onQueryChange).toHaveBeenLastCalledWith({ entityId: null, contributorId: null });
+  });
+
+  it("uses singular copy for one omitted server bucket", () => {
+    render(
+      <CollectionFacetFilters
+        query={{ entityId: null, contributorId: null }}
+        entity={{ top: [], otherCount: 1 }}
+        onQueryChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("1 more entity value is outside the top results.")).toBeTruthy();
+  });
 });

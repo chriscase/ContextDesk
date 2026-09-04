@@ -48,7 +48,7 @@ function FacetGroup({ label, selected, facet, onSelect }: FacetGroupProps) {
       aria-pressed="true"
       onClick={() => onSelect(null)}
     >
-      {selected} <span>(selected)</span>
+      <span>{selected}</span> <span>(selected)</span>
     </button>
   ) : null;
   return (
