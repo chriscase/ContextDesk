@@ -123,6 +123,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
   const browseIncludeArchived = collectionEnabled && collectionQuery !== undefined
     ? collectionQuery.includeArchived
     : false;
+  const hasAdvancedFacetFilter = Boolean(collectionQuery?.entityId || collectionQuery?.contributorId);
   const browseCases = collectionEnabled ? collectionCases : cases;
   const filteredCases = useMemo(
     () => collectionEnabled ? browseCases : filterInvestigations(browseCases, query, status),
@@ -415,7 +416,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
             </StrategyStateNotice>
           ) : null}
           {listView.availability === "available" && filteredCases.length === 0 ? (
-            <StrategyStateNotice title={browseCases.length === 0 ? "No investigations recorded" : "No matching investigations"}>
+            <StrategyStateNotice title={browseCases.length === 0 && !hasAdvancedFacetFilter ? "No investigations recorded" : "No matching investigations"}>
               {browseCases.length === 0
                 ? collectionQuery?.entityId || collectionQuery?.contributorId
                   ? "The available collection has no investigations matching the selected recorded values."
