@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CollectionPagination,
@@ -56,7 +56,7 @@ describe("shared investigation strategy presentation kit", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 
-  it("renders a keyboard-accessible continuation and disables it during refresh", () => {
+  it("keeps focus recoverable through continuation loading and completion", async () => {
     const onNextPage = vi.fn();
     const { rerender } = render(
       <CollectionPagination
@@ -66,6 +66,7 @@ describe("shared investigation strategy presentation kit", () => {
     );
     const button = screen.getByRole("button", { name: "Load next page" });
     expect(screen.getByRole("navigation", { name: "Investigation pages" })).toBeTruthy();
+    button.focus();
     button.click();
     expect(onNextPage).toHaveBeenCalledTimes(1);
 
@@ -76,6 +77,38 @@ describe("shared investigation strategy presentation kit", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "Loading next page…" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Loading next page…" })).toBe(document.activeElement);
+
+    rerender(
+      <CollectionPagination
+        view={{
+          availability: "available",
+          value: PAGE_WITH_CURSOR,
+          refresh: "failed",
+        }}
+        onNextPage={onNextPage}
+      />,
+    );
+    const retryContinuation = screen.getByRole("button", { name: "Load next page" });
+    expect(retryContinuation).toBe(document.activeElement);
+    retryContinuation.click();
+
+    rerender(
+      <CollectionPagination
+        view={{ availability: "available", value: PAGE_WITH_CURSOR, refresh: "loading" }}
+        onNextPage={onNextPage}
+      />,
+    );
+
+    rerender(
+      <CollectionPagination
+        view={{ availability: "available", value: { ...PAGE_WITH_CURSOR, nextCursor: null }, refresh: "settled" }}
+        onNextPage={onNextPage}
+      />,
+    );
+    const completion = screen.getByRole("status", { name: "" });
+    await waitFor(() => expect(completion).toBe(document.activeElement));
+    expect(completion.textContent).toContain("All loaded investigations are shown");
   });
 
   it("does not invent a continuation when the Runtime has no cursor", () => {

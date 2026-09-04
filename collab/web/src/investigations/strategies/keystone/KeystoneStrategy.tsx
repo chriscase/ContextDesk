@@ -424,7 +424,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
               ))}
             </ol>
           ) : null}
-          {collectionEnabled ? <CollectionPagination view={collectionView} onNextPage={collection.nextPage} /> : null}
+          {collectionEnabled ? <CollectionPagination key={JSON.stringify(collection.input)} view={collectionView} onNextPage={collection.nextPage} /> : null}
         </StrategyPanel>
       </StrategySurface>
     );

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   selectResourceView,
   useInvestigationRuntime,
@@ -66,14 +66,22 @@ export function useInvestigationCollectionQuery(
   const view = enabled
     ? selectResourceView(runtime.resources.investigationCollection)
     : { availability: "idle" } as const;
+  const continuationPendingRef = useRef(false);
+
+  useEffect(() => {
+    if (view.availability !== "available" || view.refresh !== "loading") {
+      continuationPendingRef.current = false;
+    }
+  }, [view]);
 
   const nextPage = useMemo(() => {
     if (!enabled || command === undefined || command === null) {
       return () => undefined;
     }
     return () => {
-      if (view.availability !== "available" || view.value.nextCursor === null || view.refresh === "loading") return;
-      command(Object.freeze({ ...input, cursor: view.value.nextCursor }));
+      if (continuationPendingRef.current || view.availability !== "available" || view.value.nextCursor === null || view.refresh === "loading") return;
+      continuationPendingRef.current = true;
+      void command(Object.freeze({ ...input, cursor: view.value.nextCursor }));
     };
   }, [command, enabled, input, view]);
 
@@ -86,7 +94,16 @@ export function useInvestigationCollectionQuery(
     enabled,
     input,
     view,
-    refresh: runtime.refresh.investigationCollection,
+    refresh: enabled && command !== undefined && command !== null
+      ? () => {
+          if (view.availability === "available" && view.refresh === "loading") return;
+          if (runtime.resources.investigationCollectionQuery?.cursor) {
+            void command(input);
+          } else {
+            runtime.refresh.investigationCollection();
+          }
+        }
+      : () => undefined,
     nextPage,
   };
 }

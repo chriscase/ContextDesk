@@ -187,6 +187,39 @@ interface InvestigationCollectionQueryScope {
   readonly queryKey: string;
 }
 
+interface AccumulatedCollectionPage {
+  readonly identityKey: string;
+  readonly authorityKey: string;
+  readonly queryKey: string;
+  readonly page: InvestigationCollectionPageV1;
+}
+
+function collectionBaseQueryKey(query: InvestigationCollectionQueryV1): string {
+  return investigationCollectionQueryKeyFromInput({
+    q: query.q,
+    status: query.status,
+    includeArchived: query.includeArchived,
+    entityId: query.entityId,
+    impactIdentity: query.impactIdentity,
+    contributorId: query.contributorId,
+    recordedFrom: query.recordedFrom,
+    recordedTo: query.recordedTo,
+    limit: query.limit,
+  }) ?? "invalid";
+}
+
+function accumulatedPage(
+  previous: InvestigationCollectionPageV1,
+  next: InvestigationCollectionPageV1,
+): InvestigationCollectionPageV1 {
+  const items = [...previous.items, ...next.items];
+  Object.freeze(items);
+  return Object.freeze({
+    ...next,
+    items,
+  });
+}
+
 export interface UseInvestigationCollectionQueryOptions {
   readonly gateway: InvestigationCollectionQueryGateway;
   /** False when the current authority cannot read the investigation collection. */
@@ -236,6 +269,7 @@ export function useInvestigationCollectionQuery({
     [authorityKey, identityKey, queryKey],
   );
   const requestSlot = useRef(new RequestSlot<InvestigationCollectionQueryScope>());
+  const accumulatedPageRef = useRef<AccumulatedCollectionPage | null>(null);
   const [resource, setResource] = useState(() =>
     createResourceState<InvestigationCollectionQueryScope, InvestigationCollectionPageV1>(),
   );
@@ -253,6 +287,7 @@ export function useInvestigationCollectionQuery({
   useEffect(() => {
     if (!enabled || queryKey === null) {
       requestSlot.current.invalidate();
+      accumulatedPageRef.current = null;
       setResource(createResourceState<
         InvestigationCollectionQueryScope,
         InvestigationCollectionPageV1
@@ -262,8 +297,20 @@ export function useInvestigationCollectionQuery({
 
     const token = requestSlot.current.begin(scope);
     const requestGeneration = ++requestGenerationRef.current;
+    const baseQueryKey = parsed !== null && parsed.ok
+      ? collectionBaseQueryKey(parsed.value)
+      : "invalid";
+    const prior = accumulatedPageRef.current;
+    const previousPage = prior !== null
+      && prior.identityKey === identityKey
+      && prior.authorityKey === authorityKey
+      && prior.queryKey === baseQueryKey
+      ? prior.page
+      : undefined;
     setLatestRequest({ key: scope, generation: requestGeneration });
-    setResource((current) => beginResourceLoad(current, scope));
+    setResource((current) => previousPage === undefined
+      ? beginResourceLoad(current, scope)
+      : { key: scope, state: { status: "loading", previous: previousPage } });
 
     if (parsed === null || !parsed.ok) {
       const error = parsed === null ? { kind: "unexpected" as const } : parsed.error;
@@ -277,7 +324,16 @@ export function useInvestigationCollectionQuery({
       .then((result) => {
         if (!requestSlot.current.isCurrent(token)) return;
         if (result.ok) {
-          setResource((current) => succeedResourceLoad(current, scope, result.value));
+          const page = parsed.value.cursor !== null && previousPage !== undefined
+            ? accumulatedPage(previousPage, result.value)
+            : result.value;
+          accumulatedPageRef.current = {
+            identityKey,
+            authorityKey,
+            queryKey: baseQueryKey,
+            page,
+          };
+          setResource((current) => succeedResourceLoad(current, scope, page));
           setSuccessfulSnapshot({
             key: scope,
             generation: requestGeneration,
@@ -298,7 +354,7 @@ export function useInvestigationCollectionQuery({
     return () => {
       requestSlot.current.invalidate();
     };
-  }, [enabled, gateway, parsed, queryKey, refreshGeneration, scope]);
+  }, [authorityKey, enabled, gateway, identityKey, parsed, queryKey, refreshGeneration, scope]);
 
   const refresh = useCallback(() => {
     setRefreshGeneration((current) => current + 1);

@@ -4,6 +4,7 @@ import type {
   ResourceView,
 } from "../runtime/public.js";
 import type { CollectionQueryLocation } from "../../app-location.js";
+import { CollectionPagination } from "../strategies/shared/index.js";
 
 export interface WarRoomCollectionListProps {
   readonly page: ResourceView<InvestigationCollectionPageV1>;
@@ -208,17 +209,12 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
           ))}
         </ul>
       ) : null}
-      {page.availability === "available" && page.value.nextCursor !== null && props.onNextPage ? (
-        <nav className="case-list__pagination" aria-label="Investigation pages">
-          <button
-            type="button"
-            className="case-list__archived-reveal"
-            onClick={props.onNextPage}
-            disabled={page.refresh === "loading"}
-          >
-            {page.refresh === "loading" ? "Loading next page…" : "Load next page"}
-          </button>
-        </nav>
+      {props.onNextPage ? (
+        <CollectionPagination
+          key={JSON.stringify(props.query)}
+          view={page}
+          onNextPage={props.onNextPage}
+        />
       ) : null}
     </section>
   );
