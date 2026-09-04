@@ -3166,4 +3166,37 @@ describe("War Room collection-query browse", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
     expect(stub.mock.calls.map((call) => String(call[0]))).not.toContain("/api/cases");
   });
+
+  it("exposes a runtime-issued next page without putting the opaque cursor in shell controls", () => {
+    const stub = stubCaseFetch();
+    const nextPage = vi.fn();
+    const page: InvestigationCollectionPageV1 = {
+      schemaId: "cd-collab.investigation_collection_page.v1",
+      items: [],
+      nextCursor: "eyJwYWdlIjoyfQ",
+      hiddenArchivedCount: 0,
+      facets: {
+        status: { top: [], otherCount: 0 },
+        entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 },
+        contributor: { top: [], otherCount: 0 },
+      },
+    };
+    render(
+      <Cases
+        roles={["case-lead"]}
+        capabilities={["investigation:read"]}
+        view="investigations"
+        collectionPage={{ availability: "available", value: page, refresh: "settled" }}
+        collectionQuery={DEFAULT_COLLECTION_QUERY}
+        onCollectionNextPage={nextPage}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Load next page" });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(button);
+    expect(nextPage).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("eyJwYWdlIjoyfQ")).toBeNull();
+    expect(stub).toHaveBeenCalled();
+  });
 });

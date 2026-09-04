@@ -581,6 +581,17 @@
   outline-offset: 2px;
 }
 
+.case-list__pagination {
+  display: flex;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.case-list__pagination button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .case-list__archived-notice {
   margin: -0.5rem 0 1rem;
   font-size: 0.82rem;

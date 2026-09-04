@@ -62,6 +62,27 @@ async function setBeaconDefault(page: Page): Promise<StrategyPolicy> {
   return previous;
 }
 
+async function setWarRoomDefault(page: Page): Promise<StrategyPolicy> {
+  const previous = await strategyPolicy(page);
+  const update = await page.request.put("/api/admin/ui-strategies", {
+    headers: BROWSER_MUTATION_HEADERS,
+    data: {
+      schemaId: "cd-collab.ui_strategy_policy_update.v1",
+      expectedRevision: previous.revision,
+      instance: {
+        enabledIds: [...ALL_STRATEGIES],
+        visibleIds: [...ALL_STRATEGIES],
+        defaultId: "war-room",
+        selectionMode: "approved_subset",
+        approvedIds: [],
+      },
+      roleRules: [],
+    },
+  });
+  expect(update.ok(), await update.text()).toBeTruthy();
+  return previous;
+}
+
 async function restoreStrategyPolicy(page: Page, previous: StrategyPolicy): Promise<void> {
   const update = await page.request.put("/api/admin/ui-strategies", {
     headers: BROWSER_MUTATION_HEADERS,
@@ -144,6 +165,71 @@ test.describe("Investigation collection query qualification", () => {
       await expect(page.getByText("No investigations match this search.")).toBeVisible();
       await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
     } finally {
+      await restoreStrategyPolicy(page, previous);
+    }
+  });
+
+  test("keeps the opaque cursor runtime-owned while loading the next War Room page", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const previous = await setWarRoomDefault(page);
+    let sourcePage: InvestigationCollectionPage | null = null;
+    const queryRequests: URL[] = [];
+    await page.route("**/api/cases?**", async (route) => {
+      const requestUrl = new URL(route.request().url());
+      if (requestUrl.searchParams.get("schemaId") !== COLLECTION_QUERY_SCHEMA_ID) {
+        await route.continue();
+        return;
+      }
+      if (requestUrl.searchParams.has("cursor")) {
+        if (sourcePage === null) {
+          await route.continue();
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...sourcePage,
+            items: sourcePage.items.slice(1, 2),
+            nextCursor: null,
+          }),
+        });
+        return;
+      }
+      const response = await route.fetch();
+      sourcePage = await response.json() as InvestigationCollectionPage;
+      await route.fulfill({
+        response,
+        json: {
+          ...sourcePage,
+          items: sourcePage.items.slice(0, 1),
+          nextCursor: "eyJwYWdlIjoyfQ",
+        },
+      });
+    });
+    page.on("request", (request) => {
+      if (request.method() !== "GET") return;
+      const requestUrl = new URL(request.url());
+      if (requestUrl.pathname === "/api/cases" && requestUrl.searchParams.get("schemaId") === COLLECTION_QUERY_SCHEMA_ID) {
+        queryRequests.push(requestUrl);
+      }
+    });
+    try {
+      const token = `war-room-page-${Date.now()}`;
+      await createInvestigation(page, `${token} first`);
+      await createInvestigation(page, `${token} second`);
+      await page.goto(`/investigations?q=${encodeURIComponent(token)}`);
+      await expect(page.getByRole("heading", { name: "Investigations" })).toBeVisible();
+      await expect(page.locator(".case-card__open")).toHaveCount(1);
+      const next = page.getByRole("button", { name: "Load next page" });
+      await expect(next).toBeVisible();
+      expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+      await next.click();
+      await expect.poll(() => queryRequests.some((requestUrl) => requestUrl.searchParams.get("cursor") === "eyJwYWdlIjoyfQ")).toBe(true);
+      await expect(page.getByRole("button", { name: "Load next page" })).toHaveCount(0);
+      expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+    } finally {
+      await page.unroute("**/api/cases?**");
       await restoreStrategyPolicy(page, previous);
     }
   });

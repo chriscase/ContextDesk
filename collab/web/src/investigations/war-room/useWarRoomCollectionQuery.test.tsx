@@ -1,4 +1,4 @@
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InvestigationRuntimeGatewayHarness,
@@ -30,6 +30,10 @@ function page(): InvestigationCollectionPageV1 {
       contributor: { top: [], otherCount: 0 },
     },
   };
+}
+
+function pageWithCursor(nextCursor: string | null): InvestigationCollectionPageV1 {
+  return { ...page(), nextCursor };
 }
 
 function Probe({ query }: { readonly query?: CollectionQueryLocation }) {
@@ -85,5 +89,40 @@ describe("War Room collection query adapter", () => {
     const queryInvestigations = vi.fn();
     renderProbe(createInvestigationGatewayDouble({ queryInvestigations }));
     expect(queryInvestigations).not.toHaveBeenCalled();
+  });
+
+  it("continues with the runtime cursor without changing shell query state", async () => {
+    const queryInvestigations = vi.fn<NonNullable<InvestigationGateway["queryInvestigations"]>>(
+      async () => gatewayOk(pageWithCursor("eyJwYWdlIjoyfQ")),
+    );
+    let nextPage: (() => void) | undefined;
+    function ProbeWithNext() {
+      const collection = useWarRoomCollectionQuery(DEFAULT_COLLECTION_QUERY);
+      nextPage = collection.nextPage;
+      return <output data-testid="cursor-page">{collection.view.availability}</output>;
+    }
+    render(
+      <InvestigationRuntimeGatewayHarness gateway={createInvestigationGatewayDouble({ queryInvestigations })}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <ProbeWithNext />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>,
+    );
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("cursor-page").textContent).toBe("available"));
+    nextPage?.();
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({ cursor: "eyJwYWdlIjoyfQ" });
+    expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({ includeArchived: false });
   });
 });
