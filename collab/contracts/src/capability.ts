@@ -5,13 +5,14 @@
  * UI visibility is never authorization — every route that reads or writes
  * something capability-gated must call hasCapability itself.
  */
-import { APP_ROLES, type AppRole } from "./auth.js";
+import type { AppRole } from "./auth.js";
 
-export const CAPABILITY_MODEL_VERSION = 1 as const;
+export const CAPABILITY_MODEL_VERSION = 2 as const;
 
 export const CAPABILITIES = [
   "investigation:read",
   "investigation:write",
+  "investigation:coordinate",
   "evidence:private:read",
   "run:strategies",
   "decision:accept",
@@ -39,6 +40,7 @@ export const ROLE_CAPABILITIES: Readonly<Record<AppRole, readonly Capability[]>>
   "case-lead": [
     "investigation:read",
     "investigation:write",
+    "investigation:coordinate",
     "evidence:private:read",
     "run:strategies",
     "decision:accept",
@@ -47,12 +49,6 @@ export const ROLE_CAPABILITIES: Readonly<Record<AppRole, readonly Capability[]>>
   ],
   admin: [...CAPABILITIES],
 };
-
-for (const role of APP_ROLES) {
-  if (!(role in ROLE_CAPABILITIES)) {
-    throw new Error(`ROLE_CAPABILITIES is missing an entry for role ${role}`);
-  }
-}
 
 /** Capabilities granted by roles alone, in stable declaration order. */
 export function roleCapabilities(roles: readonly AppRole[]): Capability[] {

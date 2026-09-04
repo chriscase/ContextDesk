@@ -31,6 +31,7 @@
         "enum": [
           "investigation:read",
           "investigation:write",
+          "investigation:coordinate",
           "evidence:private:read",
           "run:strategies",
           "decision:accept",

@@ -902,3 +902,4 @@ export * from "./admin-people.js";
 export * from "./admin-audit.js";
 
 export * from "./investigation-lifecycle.js";
+export * from "./investigation-coordination.js";
