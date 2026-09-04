@@ -26,6 +26,7 @@ interface Scope {
 export interface ActivityCenterController {
   readonly activity: ActivityResource;
   readonly investigations: readonly CaseV1[];
+  readonly investigationsLoading: boolean;
   readonly investigationsFailed: boolean;
   readonly nextCursor: string | null;
   readonly loadingMore: boolean;
@@ -41,6 +42,12 @@ function mergeUnique(
 ): readonly InvestigationActivityItemV1[] {
   const seen = new Set(previous.map(({ activityId }) => activityId));
   return [...previous, ...next.filter(({ activityId }) => !seen.has(activityId))];
+}
+
+function retainedItems(resource: ActivityResource): readonly InvestigationActivityItemV1[] {
+  if (resource.status === "ready") return resource.items;
+  if ((resource.status === "loading" || resource.status === "failed") && resource.previous) return resource.previous;
+  return [];
 }
 
 export function useActivityCenter(options: {
@@ -60,6 +67,7 @@ export function useActivityCenter(options: {
     authorityKey: options.authorityKey,
     filterKey,
   }), [options.authorityKey, options.identityKey, filterKey]);
+  const requestScopeKey = `${scope.identityKey}\u0000${scope.authorityKey}\u0000${scope.filterKey}`;
   const generation = useRef(0);
   const controller = useRef<AbortController | null>(null);
   const resolveController = useRef<AbortController | null>(null);
@@ -67,6 +75,8 @@ export function useActivityCenter(options: {
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [activity, setActivity] = useState<ActivityResource>({ status: "idle" });
   const [investigations, setInvestigations] = useState<readonly CaseV1[]>([]);
+  const [investigationScopeKey, setInvestigationScopeKey] = useState<string | null>(null);
+  const [investigationsLoading, setInvestigationsLoading] = useState(false);
   const [investigationsFailed, setInvestigationsFailed] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -85,18 +95,24 @@ export function useActivityCenter(options: {
       publishedScope.current = null;
       setActivity({ status: "idle" });
       setInvestigations([]);
+      setInvestigationScopeKey(null);
+      setInvestigationsLoading(false);
       setInvestigationsFailed(false);
       return () => request.abort();
     }
-    const scopeKey = `${scope.identityKey}\u0000${scope.authorityKey}\u0000${scope.filterKey}`;
-    const sameScope = publishedScope.current === scopeKey;
-    publishedScope.current = scopeKey;
+    const sameScope = publishedScope.current === requestScopeKey;
+    publishedScope.current = requestScopeKey;
+    if (!sameScope) {
+      setInvestigations([]);
+      setInvestigationsFailed(false);
+    }
     setActivity((value) => {
       const previous = sameScope
-        ? value.status === "ready" ? value.items : value.status === "failed" ? value.previous : undefined
+        ? retainedItems(value)
         : undefined;
-      return previous ? { status: "loading", previous } : { status: "loading" };
+      return previous && previous.length > 0 ? { status: "loading", previous } : { status: "loading" };
     });
+    setInvestigationsLoading(true);
     void Promise.all([
       gateway.listActivity({ filter: stableFilter }, request.signal),
       gateway.listInvestigations(request.signal),
@@ -119,13 +135,15 @@ export function useActivityCenter(options: {
         setInvestigations([]);
         setInvestigationsFailed(true);
       }
+      setInvestigationScopeKey(requestScopeKey);
+      setInvestigationsLoading(false);
     });
     return () => {
       controller.current?.abort();
       resolveController.current?.abort();
       generation.current += 1;
     };
-  }, [gateway, options.enabled, refreshGeneration, scope, stableFilter]);
+  }, [gateway, options.enabled, refreshGeneration, requestScopeKey, scope, stableFilter]);
 
   const refresh = useCallback(() => setRefreshGeneration((value) => value + 1), []);
 
@@ -133,6 +151,7 @@ export function useActivityCenter(options: {
     if (!options.enabled || !nextCursor || loadingMore) return;
     const request = new AbortController();
     controller.current?.abort();
+    resolveController.current?.abort();
     controller.current = request;
     const requestGeneration = ++generation.current;
     setLoadingMore(true);
@@ -148,7 +167,7 @@ export function useActivityCenter(options: {
           } else {
             setActivity((value) => ({
               status: "failed", error: fresh.error,
-              ...(value.status === "ready" ? { previous: value.items } : {}),
+              ...(retainedItems(value).length > 0 ? { previous: retainedItems(value) } : {}),
             }));
           }
           return;
@@ -156,13 +175,13 @@ export function useActivityCenter(options: {
         if (result.ok) {
           setActivity((value) => ({
             status: "ready",
-            items: mergeUnique(value.status === "ready" ? value.items : [], result.value.items),
+            items: mergeUnique(retainedItems(value), result.value.items),
           }));
           setNextCursor(result.value.nextCursor);
         } else {
           setActivity((value) => ({
             status: "failed", error: result.error,
-            ...(value.status === "ready" ? { previous: value.items } : {}),
+            ...(retainedItems(value).length > 0 ? { previous: retainedItems(value) } : {}),
           }));
         }
       })
@@ -180,15 +199,20 @@ export function useActivityCenter(options: {
     setOpenFailure(null);
     const result = await gateway.resolve(locator, request.signal);
     if (generation.current !== requestGeneration || request.signal.aborted) return null;
-    if (!result.ok) {
-      setOpenFailure(result.error);
+    if (!result.ok || result.value.authorized !== true) {
+      if (result.ok) setOpenFailure({ kind: "protocol" });
+      else setOpenFailure(result.error);
       return null;
     }
     return result.value.locator.pathname;
   }, [gateway, options.enabled]);
 
   return {
-    activity, investigations, investigationsFailed, nextCursor, loadingMore,
+    activity,
+    investigations: investigationScopeKey === requestScopeKey ? investigations : [],
+    investigationsLoading: options.enabled && (investigationScopeKey !== requestScopeKey || investigationsLoading),
+    investigationsFailed: investigationScopeKey === requestScopeKey && investigationsFailed,
+    nextCursor, loadingMore,
     openFailure, refresh, loadMore, open,
   };
 }

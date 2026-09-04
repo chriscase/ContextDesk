@@ -3,6 +3,7 @@ import {
   INVESTIGATION_ACTIVITY_KINDS as SERVER_ACTIVITY_KINDS,
   INVESTIGATION_ACTIVITY_NOTICES as SERVER_ACTIVITY_NOTICES,
   INVESTIGATION_RESOURCE_KINDS as SERVER_RESOURCE_KINDS,
+  parseInvestigationActivityPage as parseServerPage,
 } from "./investigation-activity.js";
 import {
   INVESTIGATION_ACTIVITY_KINDS,
@@ -17,6 +18,14 @@ import {
 
 const CASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ARTIFACT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+type MutablePage = {
+  items: Array<{
+    actorLabel: string;
+    resolvedRoute: string;
+    secondaryContext?: { label: string; value: string };
+    locator: { kind: string; resourceId: string; pathname: string };
+  }>;
+};
 
 function page(nextCursor: string | null = null): unknown {
   const pathname = `/investigations/${CASE_ID}/analyze?section=triage-evidence-board&item=${ARTIFACT_ID}&kind=evidence#triage-evidence-board`;
@@ -77,5 +86,22 @@ describe("browser investigation activity contract", () => {
     const unknown = page() as Record<string, unknown>;
     unknown.extra = true;
     expect(() => parseInvestigationActivityPage(unknown)).toThrow();
+  });
+
+  it("matches server rejection of malformed locator identities and presentation text", () => {
+    const mutations: Array<(candidate: MutablePage) => void> = [
+      (candidate) => { candidate.items[0].locator.pathname = `/investigations/${CASE_ID}evil`; candidate.items[0].resolvedRoute = candidate.items[0].locator.pathname; },
+      (candidate) => { candidate.items[0].locator.pathname = `/investigations/${CASE_ID}/../administration`; candidate.items[0].resolvedRoute = candidate.items[0].locator.pathname; },
+      (candidate) => { candidate.items[0].locator.kind = "investigation"; candidate.items[0].locator.resourceId = ARTIFACT_ID; },
+      (candidate) => { candidate.items[0].locator.kind = "decision_revision"; },
+      (candidate) => { candidate.items[0].actorLabel = "Participant\u200bhidden"; },
+      (candidate) => { candidate.items[0].secondaryContext = { label: "stage\u202e", value: "capture" }; },
+    ];
+    for (const mutate of mutations) {
+      const candidate = structuredClone(page()) as MutablePage;
+      mutate(candidate);
+      expect(() => parseServerPage(candidate)).toThrow();
+      expect(() => parseInvestigationActivityPage(candidate)).toThrow();
+    }
   });
 });

@@ -74,6 +74,26 @@
   margin: 0;
 }
 
+.activity-center__refreshing,
+.overview__counts-status {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.activity-center__refreshing {
+  padding: 0.65rem 1rem 0;
+}
+
+.activity-center__threads {
+  padding: 1rem 1rem 0;
+}
+
+.activity-center__threads > h4,
+.activity-center__threads > p {
+  margin-top: 0;
+}
+
 .activity-center__handoffs {
   margin-top: 1.5rem;
   padding-top: 1.25rem;
@@ -132,19 +152,16 @@
   font-variant-numeric: tabular-nums;
 }
 
+.overview__counts-action {
+  display: flex;
+  align-items: center;
+}
+
 .overview__grid {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(17rem, 0.9fr);
   gap: 1rem;
   align-items: start;
-}
-
-/* Wide rooms show the feed beside both attention panels; narrower ones stack
-   the panels under the feed rather than squeezing three columns. */
-@media (min-width: 1180px) {
-  .overview__grid {
-    grid-template-columns: minmax(0, 1.6fr) minmax(16rem, 0.9fr) minmax(15rem, 0.75fr);
-  }
 }
 
 .overview__activity,
@@ -408,6 +425,47 @@
 @media (max-width: 760px) {
   .overview__grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 390px) {
+  .activity-center__filters,
+  .overview__activity,
+  .overview__attention {
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+  }
+
+  .overview__counts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .overview__count {
+    min-width: 0;
+  }
+
+  .activity-feed__open {
+    padding-inline: 0.75rem;
+  }
+}
+
+@media (forced-colors: active) {
+  .activity-center__filters,
+  .overview__count,
+  .overview__activity,
+  .overview__attention,
+  .activity-feed__stage,
+  .activity-feed__repeat,
+  .activity-feed__restricted,
+  .overview__thread-list a {
+    border-color: CanvasText;
+  }
+
+  .activity-feed__open:focus-visible,
+  .overview__thread-list a:focus-visible {
+    outline-color: Highlight;
   }
 }
 

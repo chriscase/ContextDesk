@@ -4,7 +4,7 @@ import {
   type InvestigationActivityFilterV1,
   type InvestigationActivityItemV1,
 } from "@cd-collab/contracts/investigation-activity";
-import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type MouseEvent } from "react";
 import { groupRepeatedActivity, repeatLabel } from "../activity-grouping.js";
 import { EmptyState } from "../graphics.js";
 import { statusCounts } from "../investigation-search.js";
@@ -22,7 +22,7 @@ export interface ActivityCenterProps {
   readonly identityKey: string;
   readonly authorityKey: string;
   readonly onOpenRoute: (pathname: string) => void;
-  readonly onOpenInvestigations: (status?: string) => void;
+  readonly onOpenInvestigations: () => void;
   readonly gateway?: OverviewGateway;
 }
 
@@ -71,7 +71,6 @@ export function ActivityCenter({
   const [draftTo, setDraftTo] = useState("");
   const [filter, setFilter] = useState<InvestigationActivityFilterV1>({});
   const [openingId, setOpeningId] = useState<string | null>(null);
-  const loadStatusRef = useRef<HTMLParagraphElement>(null);
   const controller = useActivityCenter({ enabled: canRead, identityKey, authorityKey, filter, ...(gateway ? { gateway } : {}) });
   const items = displayItems(controller.activity);
   const grouped = useMemo(() => groupRepeatedActivity(items), [items]);
@@ -138,7 +137,9 @@ export function ActivityCenter({
         <button type="button" onClick={controller.refresh}>Refresh</button>
       </header>
 
-      {controller.investigationsFailed ? (
+      {controller.investigationsLoading ? (
+        <p className="overview__counts-status" role="status">Loading recorded investigation counts…</p>
+      ) : controller.investigationsFailed ? (
         <p className="case-memory__error" role="status">
           Recorded status counts are temporarily unavailable. Activity remains independent.
         </p>
@@ -146,12 +147,13 @@ export function ActivityCenter({
         <dl className="overview__counts" aria-label="Investigations by recorded status">
           {counts.map(([status, count]) => (
             <div key={status} className="overview__count" data-status={status}>
-              <dt>
-                <button type="button" onClick={() => onOpenInvestigations(status)}>{status}</button>
-              </dt>
+              <dt>{status}</dt>
               <dd>{count}</dd>
             </div>
           ))}
+          <div className="overview__counts-action">
+            <button type="button" onClick={() => onOpenInvestigations()}>View investigations</button>
+          </div>
         </dl>
       )}
 
@@ -168,8 +170,8 @@ export function ActivityCenter({
             {INVESTIGATION_STAGES.map((stage) => <option key={stage} value={stage}>{titleCase(stage)}</option>)}
           </select>
         </label>
-        <label>From <input type="date" value={draftFrom} onChange={(event) => setDraftFrom(event.currentTarget.value)} /></label>
-        <label>Through <input type="date" value={draftTo} onChange={(event) => setDraftTo(event.currentTarget.value)} /></label>
+        <label>From (UTC) <input type="date" value={draftFrom} onChange={(event) => setDraftFrom(event.currentTarget.value)} /></label>
+        <label>Through (UTC) <input type="date" value={draftTo} onChange={(event) => setDraftTo(event.currentTarget.value)} /></label>
         <div className="activity-center__filter-actions">
           <button type="submit">Apply filters</button>
           <button type="button" onClick={clearFilters} disabled={!filtersActive && !draftKind && !draftStage && !draftFrom && !draftTo}>Clear</button>
@@ -194,12 +196,15 @@ export function ActivityCenter({
             <div><p className="overview__eyebrow">Across the War Room</p><h3 id="overview-activity-title">Latest activity</h3>
               <p>Newest recorded changes, with an authorized path back to their source.</p></div>
           </header>
+          {controller.activity.status === "loading" && items.length > 0 ? (
+            <p className="activity-center__refreshing" role="status">Refreshing recorded activity…</p>
+          ) : null}
           {controller.activity.status === "loading" && items.length === 0 ? (
             <p className="overview__empty" role="status">Loading recorded activity…</p>
           ) : grouped.length === 0 && controller.activity.status === "ready" ? (
             <EmptyState art="activity"><p>{filtersActive ? "No recorded activity matches these filters." : "No activity has been recorded yet."}</p></EmptyState>
-          ) : (
-            <ol className="activity-feed">
+          ) : grouped.length > 0 ? (
+            <ol className="activity-feed" role="list">
               {grouped.map((item) => (
                 <li key={item.activityId} className="activity-feed__item">
                   <a href={item.resolvedRoute} className="activity-feed__open" onClick={(event) => void openItem(event, item)} aria-busy={openingId === item.activityId}>
@@ -215,26 +220,32 @@ export function ActivityCenter({
                 </li>
               ))}
             </ol>
-          )}
+          ) : null}
           {controller.nextCursor ? (
             <div className="activity-center__load-more">
               <button type="button" onClick={controller.loadMore} disabled={controller.loadingMore}>{controller.loadingMore ? "Loading…" : "Load more activity"}</button>
-              <p ref={loadStatusRef} role="status">{controller.loadingMore ? "Loading the next recorded page." : ""}</p>
+              <p role="status">{controller.loadingMore ? "Loading the next recorded page." : ""}</p>
             </div>
           ) : null}
         </section>
 
-        <aside className="overview__attention" aria-labelledby="overview-open-title">
-          <header className="overview__section-head"><div><p className="overview__eyebrow">Recorded follow-up</p><h3 id="overview-open-title">Open threads</h3>
-            <p>Recent records that stopped, disagreed, or still await a person. This is not a priority score.</p></div></header>
+        <aside className="overview__attention" aria-labelledby="overview-follow-up-title">
+          <header className="overview__section-head"><div><p className="overview__eyebrow">Across the loaded window</p><h3 id="overview-follow-up-title">Recorded follow-up</h3>
+            <p>Explicitly recorded threads and handoffs. This is not a priority score or a completeness claim.</p></div></header>
+          <section className="activity-center__threads" aria-labelledby="overview-open-title">
+            <h4 id="overview-open-title">Open threads</h4>
+            <p>Recent records that stopped, disagreed, or still await a person.</p>
           {openThreads.length === 0 ? <p className="overview__empty">No open thread is recorded in this loaded activity window.</p> : (
-            <ul className="overview__thread-list">{openThreads.slice(0, 6).map((item) => <li key={item.activityId}><a href={item.resolvedRoute} onClick={(event) => void openItem(event, item)}><strong>{item.investigationTitle}</strong><span>{item.summary}</span></a></li>)}</ul>
+            <><ul className="overview__thread-list" role="list">{openThreads.slice(0, 6).map((item) => <li key={item.activityId}><a href={item.resolvedRoute} onClick={(event) => void openItem(event, item)}><strong>{item.investigationTitle}</strong><span>{item.summary}</span></a></li>)}</ul>
+            {openThreads.length > 6 ? <p className="overview__thread-more">Showing 6 of {openThreads.length} open threads in this loaded activity window.</p> : null}</>
           )}
+          </section>
           <section className="activity-center__handoffs" aria-labelledby="recorded-handoffs-title">
-            <h3 id="recorded-handoffs-title">Recorded handoffs</h3>
+            <h4 id="recorded-handoffs-title">Recorded handoffs</h4>
             <p>Shift notes explicitly saved by collaborators—never inferred from inactivity.</p>
             {handoffs.length === 0 ? <p className="overview__empty">No handoff is recorded in this loaded activity window.</p> : (
-              <ul className="overview__thread-list">{handoffs.slice(0, 5).map((item) => <li key={item.activityId}><a href={item.resolvedRoute} onClick={(event) => void openItem(event, item)}><strong>{item.investigationTitle}</strong><span>{item.summary}</span></a></li>)}</ul>
+              <><ul className="overview__thread-list" role="list">{handoffs.slice(0, 5).map((item) => <li key={item.activityId}><a href={item.resolvedRoute} onClick={(event) => void openItem(event, item)}><strong>{item.investigationTitle}</strong><span>{item.summary}</span></a></li>)}</ul>
+              {handoffs.length > 5 ? <p className="overview__thread-more">Showing 5 of {handoffs.length} handoffs in this loaded activity window.</p> : null}</>
             )}
           </section>
         </aside>

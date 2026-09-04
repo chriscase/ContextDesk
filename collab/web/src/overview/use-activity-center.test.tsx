@@ -10,6 +10,7 @@ import {
 } from "@cd-collab/contracts/investigation-activity";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CaseV1 } from "@cd-collab/contracts/investigation-runtime";
 import type { OverviewGateway, OverviewGatewayResult } from "./gateway.js";
 import { useActivityCenter } from "./use-activity-center.js";
 
@@ -141,5 +142,41 @@ describe("useActivityCenter", () => {
       },
     });
     await expect(pending).resolves.toBeNull();
+  });
+
+  it("clears investigation counts when identity changes before the new read settles", async () => {
+    const nextCases = deferred<OverviewGatewayResult<readonly CaseV1[]>>();
+    const sharedGateway = gateway(vi.fn<OverviewGateway["listActivity"]>(async () => ({ ok: true, value: page([], null) })));
+    sharedGateway.listInvestigations = vi.fn<OverviewGateway["listInvestigations"]>()
+      .mockResolvedValueOnce({ ok: true, value: [{ id: CASE_ID } as CaseV1] })
+      .mockImplementationOnce(() => nextCases.promise);
+    const { result, rerender } = renderHook(({ identityKey }) => useActivityCenter({
+      enabled: true, identityKey, authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+    }), { initialProps: { identityKey: "alice" } });
+    await waitFor(() => expect(result.current.investigations).toHaveLength(1));
+
+    rerender({ identityKey: "bob" });
+
+    expect(result.current.investigations).toEqual([]);
+    expect(result.current.investigationsLoading).toBe(true);
+    await act(async () => nextCases.resolve({ ok: true, value: [] }));
+  });
+
+  it("keeps page one when a failed continuation is retried successfully", async () => {
+    const listActivity = vi.fn<OverviewGateway["listActivity"]>()
+      .mockResolvedValueOnce({ ok: true, value: page([item("a")], "opaque_cursor") })
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } })
+      .mockResolvedValueOnce({ ok: true, value: page([item("b")], null) });
+    const sharedGateway = gateway(listActivity);
+    const { result } = renderHook(() => useActivityCenter({
+      enabled: true, identityKey: "alice", authorityKey: "viewer", filter: {}, gateway: sharedGateway,
+    }));
+    await waitFor(() => expect(result.current.activity.status).toBe("ready"));
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.activity.status).toBe("failed"));
+
+    act(() => result.current.loadMore());
+
+    await waitFor(() => expect(result.current.activity).toEqual({ status: "ready", items: [item("a"), item("b")] }));
   });
 });

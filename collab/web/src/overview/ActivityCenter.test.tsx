@@ -103,4 +103,46 @@ describe("ActivityCenter", () => {
       { filter: { activityKind: "handoff_recorded", stage: "situation" } }, expect.any(AbortSignal),
     ));
   });
+
+  it("does not present loading investigation counts as recorded zeroes or fake status filters", async () => {
+    const pendingCases = new Promise<never>(() => undefined);
+    const gateway = gatewayWith({
+      listInvestigations: vi.fn<OverviewGateway["listInvestigations"]>(() => pendingCases),
+    });
+    render(<ActivityCenter {...baseProps} gateway={gateway} />);
+    expect(screen.getByText("Loading recorded investigation counts…").getAttribute("role")).toBe("status");
+    expect(screen.queryByText(/^0$/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "open" })).toBeNull();
+  });
+
+  it("offers one honest investigations action after counts load", async () => {
+    const onOpenInvestigations = vi.fn();
+    render(<ActivityCenter {...baseProps} gateway={gatewayWith()} onOpenInvestigations={onOpenInvestigations} />);
+    const action = await screen.findByRole("button", { name: "View investigations" });
+    fireEvent.click(action);
+    expect(onOpenInvestigations).toHaveBeenCalledWith();
+  });
+
+  it("discloses capped open-thread and handoff summaries within the loaded window", async () => {
+    const openThreads = Array.from({ length: 7 }, (_, index) => activity({
+      activityId: index.toString(16).padStart(64, "0"),
+      activityKind: "workstream_failed",
+      summary: `recorded open thread ${index + 1}`,
+    }));
+    const handoffs = Array.from({ length: 6 }, (_, index) => activity({
+      activityId: (index + 20).toString(16).padStart(64, "0"),
+      summary: `recorded handoff ${index + 1}`,
+    }));
+    const gateway = gatewayWith({
+      listActivity: vi.fn(async () => ({ ok: true as const, value: {
+        schemaId: INVESTIGATION_ACTIVITY_PAGE_SCHEMA_ID,
+        items: [...openThreads, ...handoffs], nextCursor: null,
+        notices: [...INVESTIGATION_ACTIVITY_NOTICES],
+      } })),
+    });
+    render(<ActivityCenter {...baseProps} gateway={gateway} />);
+    expect(await screen.findByText("Showing 6 of 7 open threads in this loaded activity window.")).toBeTruthy();
+    expect(screen.getByText("Showing 5 of 6 handoffs in this loaded activity window.")).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Recorded follow-up" })).toBeTruthy();
+  });
 });

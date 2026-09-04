@@ -139,6 +139,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const OPAQUE_CURSOR_RE = /^[A-Za-z0-9_-]{8,4096}$/;
+const INSTALLATION_ID_RE = /^inst-[a-z0-9]{8,64}$/;
+const TIMELINE_EVENT_ID_RE = /^[1-9][0-9]{0,15}$/;
+const RESOURCE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const OPAQUE_EVENT_NAME_RE = /^[a-z][a-z0-9_]{2,64}$/;
 
 const locatorShape: ObjectShape = {
   schemaId: f.req(f.en(INVESTIGATION_RESOURCE_LOCATOR_SCHEMA_ID)), version: f.req(f.u64),
@@ -172,29 +176,117 @@ const errorShape: ObjectShape = {
   error: f.req(f.en(...INVESTIGATION_ACTIVITY_ERROR_CODES)),
 };
 
-function assertText(path: string, value: string): void {
-  let hasControl = false;
+function hasControlChars(value: string): boolean {
   for (const character of value) {
     const code = character.charCodeAt(0);
-    if (code <= 31 || (code >= 127 && code <= 159)) {
-      hasControl = true;
-      break;
-    }
+    if (code <= 31 || (code >= 127 && code <= 159)) return true;
+    if (code >= 0x200b && code <= 0x200f) return true;
+    if (code >= 0x2028 && code <= 0x202f) return true;
+    if (code >= 0x2060 && code <= 0x206f) return true;
+    if (code === 0xfeff) return true;
   }
-  if (!value.trim() || hasControl) {
+  return false;
+}
+
+function looksLikeOpaqueIdentifier(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || UUID_RE.test(trimmed) || SHA256_RE.test(trimmed.toLowerCase()) || INSTALLATION_ID_RE.test(trimmed)) return true;
+  if (/^(?:pkg|package|fp|fingerprint|hash|sha256)[-_:]/i.test(trimmed)) return true;
+  if (/^[0-9a-f]{32,}$/i.test(trimmed) || /^[0-9a-f]{8,}(?:\u2026|\.{3})?$/i.test(trimmed)) return true;
+  return OPAQUE_EVENT_NAME_RE.test(trimmed) && trimmed.includes("_");
+}
+
+function assertText(path: string, value: string): void {
+  if (hasControlChars(value) || looksLikeOpaqueIdentifier(value)) {
     throw new ContractViolation(path, "expected safe display text");
   }
 }
 
+function assertNoInjection(path: string, value: string): void {
+  if (hasControlChars(value) || value.includes("\\") || value.includes("..") ||
+      /%2[ef]/i.test(value) || value.includes("://") || value.includes("?") || value.includes("#")) {
+    throw new ContractViolation(path, "path traversal or URL injection is not allowed");
+  }
+}
+
+function resourceIdPattern(kind: InvestigationResourceKindV1): RegExp {
+  if (kind === "investigation_stage") return /^(?:situation|capture|analyze|compare|decide)$/;
+  if (kind === "timeline_event") return TIMELINE_EVENT_ID_RE;
+  if (kind === "investigation") return UUID_RE;
+  return RESOURCE_ID_RE;
+}
+
+function assertResourceId(kind: InvestigationResourceKindV1, resourceId: string): void {
+  assertNoInjection("$.locator.resourceId", resourceId);
+  if (resourceId.includes("/") || !resourceIdPattern(kind).test(resourceId)) {
+    throw new ContractViolation("$.locator.resourceId", `malformed resource identity for ${kind}`);
+  }
+}
+
+type RouteFocus = readonly [InvestigationStageV1, string | null, string | null, string | null, string | null];
+
+function routedFocus(kind: InvestigationResourceKindV1, resourceId: string): RouteFocus {
+  switch (kind) {
+    case "investigation": return ["situation", "stage-situation", null, null, null];
+    case "investigation_stage": return [resourceId as InvestigationStageV1, null, null, null, null];
+    case "evidence_item": return ["analyze", "triage-evidence-board", resourceId, "evidence", null];
+    case "intake_batch": return ["capture", "corpus-intake", resourceId, "intake-batch", null];
+    case "evidence_context": return ["analyze", "triage-evidence-board", resourceId, "snapshot", null];
+    case "imported_ai_run": return ["capture", "triage-capture", resourceId, "imported-run", null];
+    case "workstream":
+    case "workstream_attempt":
+    case "workstream_rerun":
+      return resourceId.includes(":")
+        ? ["analyze", "workstreams", resourceId, "workstream", resourceId]
+        : ["analyze", "triage-lane-runner", resourceId, "triage-run", null];
+    case "comparison_finding":
+    case "comparison_conflict":
+    case "helpfulness": return ["compare", "cross-exam-heading", resourceId, null, null];
+    case "interaction_trace":
+    case "experiment": return ["compare", "candidate-comparison-heading", resourceId, null, null];
+    case "discussion_message": return ["situation", "discussion", resourceId, "comment", null];
+    case "timeline_event": return ["capture", "triage-capture", resourceId, "timeline", null];
+    case "hypothesis":
+    case "action":
+    case "observation": return ["capture", "triage-capture", resourceId, "contribution", null];
+    case "decision_revision":
+    case "gold": return ["decide", "decision-heading", resourceId, null, null];
+    case "export_event":
+    case "portable_archive_event": return ["decide", "export-heading", resourceId, null, null];
+    case "log_workbench_view": return ["analyze", "triage-log-workbench", resourceId, "log-workbench-view", null];
+    case "log_workbench_bookmark": return ["analyze", "triage-log-workbench", resourceId, "log-workbench-bookmark", null];
+    case "log_workbench_line": return ["analyze", "triage-log-workbench", resourceId, "log-line", null];
+  }
+}
+
+function derivePathname(investigationId: string, kind: InvestigationResourceKindV1, resourceId: string): string {
+  assertResourceId(kind, resourceId);
+  const [stage, section, item, itemKind, lane] = routedFocus(kind, resourceId);
+  const base = `/investigations/${investigationId}/${stage}`;
+  if (!section) return base;
+  const params = new URLSearchParams({ section });
+  if (item) params.set("item", item);
+  if (itemKind) params.set("kind", itemKind);
+  if (lane) params.set("lane", lane);
+  return `${base}?${params.toString()}#${encodeURIComponent(section)}`;
+}
+
 function assertLocator(locator: InvestigationResourceLocatorV1): void {
-  if (locator.version !== 1 || !/^inst-[a-z0-9]{8,64}$/.test(locator.installationId)) {
+  if (locator.version !== 1 || !INSTALLATION_ID_RE.test(locator.installationId)) {
     throw new ContractViolation("$.locator", "invalid locator identity");
   }
-  if (!UUID_RE.test(locator.investigationId) || locator.resourceId.includes("..")) {
+  if (!UUID_RE.test(locator.investigationId)) {
     throw new ContractViolation("$.locator", "invalid resource identity");
   }
-  const prefix = `/investigations/${locator.investigationId}`;
-  if (!locator.pathname.startsWith(prefix) || locator.pathname.includes("\\") || locator.pathname.includes("//")) {
+  assertResourceId(locator.kind, locator.resourceId);
+  if (locator.kind === "decision_revision" && locator.revision === undefined) {
+    throw new ContractViolation("$.locator.revision", "revision is required for this resource kind");
+  }
+  if (locator.kind === "investigation" && locator.resourceId !== locator.investigationId) {
+    throw new ContractViolation("$.locator.resourceId", "investigation identity must match");
+  }
+  if (locator.pathname !== derivePathname(locator.investigationId, locator.kind, locator.resourceId) ||
+      locator.pathname.includes("..") || locator.pathname.includes("//")) {
     throw new ContractViolation("$.locator.pathname", "expected a canonical investigation route");
   }
 }
@@ -213,6 +305,10 @@ function assertItem(item: InvestigationActivityItemV1): void {
   assertText("$.actorLabel", item.actorLabel);
   assertText("$.investigationTitle", item.investigationTitle);
   assertText("$.summary", item.summary);
+  if (item.secondaryContext) {
+    assertText("$.secondaryContext.label", item.secondaryContext.label);
+    assertText("$.secondaryContext.value", item.secondaryContext.value);
+  }
   if (item.humanFinding && (item.provenanceClass === "ai_generated" || item.provenanceClass === "imported")) {
     throw new ContractViolation("$.humanFinding", "non-human output cannot be a human finding");
   }
