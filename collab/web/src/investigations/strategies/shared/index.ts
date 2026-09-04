@@ -32,3 +32,11 @@ export type { HandoffPanelProps } from "./HandoffPanel.js";
 
 export { CollectionPagination } from "./CollectionPagination.js";
 export type { CollectionPageView, CollectionPaginationProps } from "./CollectionPagination.js";
+
+export { CollectionFacetFilters } from "./CollectionFacetFilters.js";
+export type {
+  CollectionFacetBucket,
+  CollectionFacetFiltersProps,
+  CollectionFacetFiltersQuery,
+  CollectionFacetGroup,
+} from "./CollectionFacetFilters.js";

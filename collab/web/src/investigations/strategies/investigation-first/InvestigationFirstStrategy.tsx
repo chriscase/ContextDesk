@@ -12,7 +12,7 @@ import type { InvestigationStrategyShellProps } from "../contract.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
 import { useInvestigationCollectionQuery } from "../collection-query.js";
-import { CollectionPagination } from "../shared/index.js";
+import { CollectionFacetFilters, CollectionPagination } from "../shared/index.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
@@ -307,7 +307,13 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     return cases.filter((row) => (statusFilter === "all" || row.status === statusFilter) && (!normalized || [row.id, row.title, row.problemStatement, row.affectedParties, row.impact, row.investigationContext?.productName, row.investigationContext?.build].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalized)));
   }, [cases, collection.enabled, query, statusFilter]);
 
-  const updateCollectionQuery = (next: { q?: string; status?: string; includeArchived?: boolean }) => {
+  const updateCollectionQuery = (next: {
+    q?: string;
+    status?: string;
+    includeArchived?: boolean;
+    entityId?: string | null;
+    contributorId?: string | null;
+  }) => {
     if (props.onCollectionQueryChange && props.collectionQuery) {
       props.onCollectionQueryChange({
         ...props.collectionQuery,
@@ -316,6 +322,8 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
           status: next.status === "all" ? [] : [next.status as typeof props.collectionQuery.status[number]],
         }),
         ...(next.includeArchived === undefined ? {} : { includeArchived: next.includeArchived }),
+        ...(next.entityId === undefined ? {} : { entityId: next.entityId }),
+        ...(next.contributorId === undefined ? {} : { contributorId: next.contributorId }),
       });
       return;
     }
@@ -481,10 +489,17 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     const statusFacets = collection.enabled && collectionView.availability === "available"
       ? collectionView.value.facets.status.top
       : [];
+    const entityFacets = collection.enabled && collectionView.availability === "available"
+      ? collectionView.value.facets.entity
+      : undefined;
+    const contributorFacets = collection.enabled && collectionView.availability === "available"
+      ? collectionView.value.facets.contributor
+      : undefined;
     return <section className="investigation-first__browse" aria-labelledby="investigation-first-browse-title" aria-busy={busy}>
       <div className="investigation-first__section-heading"><div><p className="investigation-first__eyebrow">Browse work</p><h2 id="investigation-first-browse-title" ref={browseHeadingRef} tabIndex={-1}>Investigations</h2><p>Open a record to see what is known, what is missing, and what can happen next.</p></div><span className="investigation-first__count" aria-live="polite">{countLabel}</span></div>
       <div className="investigation-first__filters"><label><span>Search</span><input className="login__input" type="search" value={query} onChange={(event) => updateCollectionQuery({ q: event.target.value })} placeholder="Title, product, build, or problem" aria-label="Search investigations" /></label><label><span>Status</span><select className="login__input" value={statusFilter} onChange={(event) => updateCollectionQuery({ status: event.target.value })} aria-label="Filter investigations by status"><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label><label className="investigation-first__checkbox"><input type="checkbox" checked={includeArchived} onChange={(event) => updateCollectionQuery({ includeArchived: event.target.checked })} /> <span>Include archived</span></label></div>
       {statusFacets.length > 0 ? <div className="investigation-first__facets" aria-label="Investigation status counts">{statusFacets.map((facet) => <button key={facet.key} type="button" aria-pressed={statusFilter === facet.key} onClick={() => updateCollectionQuery({ status: statusFilter === facet.key ? "all" : facet.key })}>{facet.key} <strong>{facet.count}</strong></button>)}</div> : null}
+      {collection.enabled && collectionView.availability === "available" ? <CollectionFacetFilters query={{ entityId: props.collectionQuery?.entityId ?? null, contributorId: props.collectionQuery?.contributorId ?? null }} entity={entityFacets} contributor={contributorFacets} onQueryChange={updateCollectionQuery} /> : null}
       {denied ? <p className="investigation-first__empty" role="status">Your current access does not include reading investigations, so this list is unavailable. No investigation data was requested.</p> : null}
       {!denied && (listView.availability === "idle" || listView.availability === "loading") ? <p className="investigation-first__empty" role="status">Loading investigations…</p> : null}
       {listView.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(listView.error, "list")}</p><button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry loading investigations</button></div> : null}

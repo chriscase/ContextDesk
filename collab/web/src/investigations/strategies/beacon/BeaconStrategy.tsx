@@ -15,6 +15,7 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
+  CollectionFacetFilters,
   CollectionPagination,
   StrategyHero,
   StrategyPanel,
@@ -194,13 +195,21 @@ function Browse({
         ? "Count unavailable"
         : "Counting investigations…";
 
-  function updateQuery(next: { q?: string; status?: BrowseStatus; includeArchived?: boolean }) {
+  function updateQuery(next: {
+    q?: string;
+    status?: BrowseStatus;
+    includeArchived?: boolean;
+    entityId?: string | null;
+    contributorId?: string | null;
+  }) {
     if (collection.enabled && collectionQuery !== undefined && onCollectionQueryChange) {
       onCollectionQueryChange({
         ...collectionQuery,
         ...(next.q === undefined ? {} : { q: next.q }),
         ...(next.status === undefined ? {} : { status: next.status === "all" ? [] : [next.status] }),
         ...(next.includeArchived === undefined ? {} : { includeArchived: next.includeArchived }),
+        ...(next.entityId === undefined ? {} : { entityId: next.entityId }),
+        ...(next.contributorId === undefined ? {} : { contributorId: next.contributorId }),
       });
       return;
     }
@@ -219,6 +228,7 @@ function Browse({
         {collection.enabled ? <label className="beacon__checkbox"><input type="checkbox" checked={includeArchived} onChange={(event) => updateQuery({ includeArchived: event.target.checked })} /><span>Include archived</span></label> : null}
       </div>
       {statusFacets.length > 0 ? <div className="beacon__facets" aria-label="Recorded status counts">{statusFacets.map((facet) => <button key={facet.key} type="button" aria-pressed={status === facet.key} onClick={() => updateQuery({ status: status === facet.key ? "all" : facet.key as BrowseStatus })}><span>{facet.key}</span><strong>{facet.count}</strong></button>)}</div> : null}
+      {collection.enabled && collectionView.availability === "available" ? <CollectionFacetFilters query={{ entityId: collectionQuery?.entityId ?? null, contributorId: collectionQuery?.contributorId ?? null }} entity={collectionView.value.facets.entity} contributor={collectionView.value.facets.contributor} onQueryChange={updateQuery} /> : null}
       {view.availability === "idle" || view.availability === "loading" ? <StrategyStateNotice busy>Loading investigations…</StrategyStateNotice> : null}
       {view.availability === "unavailable" ? <StrategyStateNotice tone="danger" role="alert" title="Investigation list unavailable" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>{failureCopy(view.error, "The investigation list")}</StrategyStateNotice> : null}
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Refresh failed" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>The previously loaded list is still shown.</StrategyStateNotice> : null}

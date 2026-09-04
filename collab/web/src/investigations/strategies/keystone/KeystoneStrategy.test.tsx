@@ -106,9 +106,9 @@ describe("Keystone engineer strategy", () => {
       hiddenArchivedCount: 2,
       facets: {
         status: { top: [{ key: "monitoring", count: 1 }], otherCount: 0 },
-        entity: { top: [], otherCount: 0 },
+        entity: { top: [{ key: "entity-northwind", count: 1 }], otherCount: 0 },
         impactIdentity: { top: [], otherCount: 0 },
-        contributor: { top: [], otherCount: 0 },
+        contributor: { top: [{ key: "alice", count: 1 }], otherCount: 0 },
       },
     };
     const queryInvestigations = vi.fn(async (..._args: unknown[]) => gatewayOk(queryPage));
@@ -136,6 +136,9 @@ describe("Keystone engineer strategy", () => {
     });
     expect(screen.getByText(/2 archived hidden/u)).toBeTruthy();
     expect(screen.getByRole("button", { name: /monitoring 1/u }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByText("More filters"));
+    fireEvent.click(screen.getByRole("button", { name: /entity-northwind\s+1/u }));
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ entityId: "entity-northwind" }));
 
     fireEvent.change(screen.getByRole("searchbox", { name: "Search investigations" }), {
       target: { value: "gateway" },

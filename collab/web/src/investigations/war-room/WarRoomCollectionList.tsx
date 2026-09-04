@@ -4,6 +4,7 @@ import type {
   ResourceView,
 } from "../runtime/public.js";
 import type { CollectionQueryLocation } from "../../app-location.js";
+import { CollectionFacetFilters } from "../strategies/shared/index.js";
 
 export interface WarRoomCollectionListProps {
   readonly page: ResourceView<InvestigationCollectionPageV1>;
@@ -113,6 +114,14 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
             </button>
           ))}
         </div>
+      ) : null}
+      {page.availability === "available" ? (
+        <CollectionFacetFilters
+          query={{ entityId: props.query.entityId, contributorId: props.query.contributorId }}
+          entity={page.value.facets.entity}
+          contributor={page.value.facets.contributor}
+          onQueryChange={(next) => updateQuery(props.query, props.onQueryChange, next)}
+        />
       ) : null}
       {hiddenArchivedCount > 0 ? (
         <p className="case-list__archived-notice" role="status">

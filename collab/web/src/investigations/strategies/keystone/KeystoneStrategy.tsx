@@ -12,6 +12,7 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
+  CollectionFacetFilters,
   CollectionPagination,
   StrategyHero,
   StrategyPanel,
@@ -250,6 +251,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     q?: string;
     status?: KeystoneStatusFilter;
     includeArchived?: boolean;
+    entityId?: string | null;
+    contributorId?: string | null;
   }) {
     if (collectionEnabled && collectionQuery !== undefined && props.onCollectionQueryChange) {
       props.onCollectionQueryChange({
@@ -259,6 +262,8 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
           status: next.status === "all" ? [] : [next.status],
         }),
         ...(next.includeArchived === undefined ? {} : { includeArchived: next.includeArchived }),
+        ...(next.entityId === undefined ? {} : { entityId: next.entityId }),
+        ...(next.contributorId === undefined ? {} : { contributorId: next.contributorId }),
       });
       return;
     }
@@ -285,6 +290,12 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
     const statusFacets = collectionEnabled && collectionView.availability === "available"
       ? collectionView.value.facets.status.top
       : [];
+    const entityFacets = collectionEnabled && collectionView.availability === "available"
+      ? collectionView.value.facets.entity
+      : undefined;
+    const contributorFacets = collectionEnabled && collectionView.availability === "available"
+      ? collectionView.value.facets.contributor
+      : undefined;
     const hiddenArchivedCount = collectionEnabled && collectionView.availability === "available"
       ? collectionView.value.hiddenArchivedCount
       : 0;
@@ -363,6 +374,14 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
                 </button>
               ))}
             </div>
+          ) : null}
+          {collectionEnabled && collectionView.availability === "available" ? (
+            <CollectionFacetFilters
+              query={{ entityId: collectionQuery?.entityId ?? null, contributorId: collectionQuery?.contributorId ?? null }}
+              entity={entityFacets}
+              contributor={contributorFacets}
+              onQueryChange={updateCollectionQuery}
+            />
           ) : null}
           {denied ? (
             <StrategyStateNotice title="Investigation reading unavailable">

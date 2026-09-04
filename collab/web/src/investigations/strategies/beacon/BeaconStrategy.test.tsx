@@ -89,9 +89,9 @@ describe("Beacon rapid-intake strategy", () => {
       hiddenArchivedCount: 3,
       facets: {
         status: { top: [{ key: "monitoring", count: 1 }], otherCount: 0 },
-        entity: { top: [], otherCount: 0 },
+        entity: { top: [{ key: "entity-northwind", count: 1 }], otherCount: 0 },
         impactIdentity: { top: [], otherCount: 0 },
-        contributor: { top: [], otherCount: 0 },
+        contributor: { top: [{ key: "alice", count: 1 }], otherCount: 0 },
       },
     };
     const queryInvestigations = vi.fn(async (..._args: unknown[]) => gatewayOk(page));
@@ -120,6 +120,9 @@ describe("Beacon rapid-intake strategy", () => {
     expect(screen.getByText(/3 archived hidden/u)).toBeTruthy();
     const facet = screen.getByRole("button", { name: /monitoring 1/u });
     expect(facet.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByText("More filters"));
+    fireEvent.click(screen.getByRole("button", { name: /entity-northwind\s+1/u }));
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ entityId: "entity-northwind" }));
     fireEvent.change(screen.getByRole("searchbox", { name: "Find an investigation" }), {
       target: { value: "timeout" },
     });

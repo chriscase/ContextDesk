@@ -1,7 +1,8 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CollectionPagination,
+  CollectionFacetFilters,
   StrategyActionRow,
   StrategyBadge,
   StrategyHero,
@@ -87,5 +88,53 @@ describe("shared investigation strategy presentation kit", () => {
       />,
     );
     expect(screen.queryByRole("navigation", { name: "Investigation pages" })).toBeNull();
+  });
+
+  it("exposes server-owned entity and contributor facets without inventing values", () => {
+    const onQueryChange = vi.fn();
+    const { rerender } = render(
+      <CollectionFacetFilters
+        query={{ entityId: null, contributorId: null }}
+        entity={{ top: [{ key: "payments-api", count: 4 }], otherCount: 2 }}
+        contributor={{ top: [{ key: "alice", count: 3 }], otherCount: 0 }}
+        onQueryChange={onQueryChange}
+      />,
+    );
+
+    expect(screen.getByText("More filters")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Entity" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Contributor" })).toBeTruthy();
+    expect(screen.getByText("2 more entity values are outside the top results.")).toBeTruthy();
+
+    const entity = screen.getByRole("button", { name: /payments-api\s+4/u });
+    expect(entity.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(entity);
+    expect(onQueryChange).toHaveBeenLastCalledWith({ entityId: "payments-api" });
+    rerender(
+      <CollectionFacetFilters
+        query={{ entityId: "payments-api", contributorId: null }}
+        entity={{ top: [{ key: "payments-api", count: 4 }], otherCount: 2 }}
+        contributor={{ top: [{ key: "alice", count: 3 }], otherCount: 0 }}
+        onQueryChange={onQueryChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /payments-api\s+4/u }));
+    expect(onQueryChange).toHaveBeenLastCalledWith({ entityId: null });
+  });
+
+  it("keeps a selected value clearable when the server no longer returns its bucket", () => {
+    const onQueryChange = vi.fn();
+    render(
+      <CollectionFacetFilters
+        query={{ entityId: "retired-service", contributorId: null }}
+        entity={{ top: [], otherCount: 0 }}
+        onQueryChange={onQueryChange}
+      />,
+    );
+
+    const selected = screen.getByRole("button", { name: /retired-service.*selected/u });
+    expect(selected.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(selected);
+    expect(onQueryChange).toHaveBeenCalledWith({ entityId: null });
   });
 });

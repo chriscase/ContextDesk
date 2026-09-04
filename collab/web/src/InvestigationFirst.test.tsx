@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationFirst } from "./InvestigationFirst.js";
 import {
   InvestigationRuntimeProvider,
+  type InvestigationCollectionPageV1,
   type InvestigationRuntimeIdentity,
   type ArtifactAnnotationV1,
 } from "./investigations/runtime/public.js";
@@ -34,6 +35,7 @@ import {
   type InvestigationGateway,
 } from "./investigations/runtime/testkit/index.js";
 import type { InvestigationStrategyShellProps } from "./investigations/strategies/contract.js";
+import { DEFAULT_COLLECTION_QUERY } from "./app-location.js";
 
 const FULL_CAPABILITIES = [
   "investigation:read",
@@ -130,6 +132,35 @@ function renderStrategy(options: {
 afterEach(() => cleanup());
 
 describe("Investigation First Runtime V1 presentation", () => {
+  it("renders server-owned entity and contributor facets through the shell query", async () => {
+    const page: InvestigationCollectionPageV1 = {
+      schemaId: "cd-collab.investigation_collection_page.v1",
+      items: [],
+      nextCursor: null,
+      hiddenArchivedCount: 0,
+      facets: {
+        status: { top: [], otherCount: 0 },
+        entity: { top: [{ key: "entity-northwind", count: 2 }], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 },
+        contributor: { top: [{ key: "alice", count: 2 }], otherCount: 0 },
+      },
+    };
+    const queryInvestigations = vi.fn(async () => gatewayOk(page));
+    const onCollectionQueryChange = vi.fn();
+    renderStrategy({
+      gateway: createInvestigationGatewayDouble({ queryInvestigations }),
+      shell: {
+        collectionQuery: { ...DEFAULT_COLLECTION_QUERY },
+        onCollectionQueryChange,
+      },
+    });
+
+    await screen.findByRole("heading", { name: "Investigations" });
+    fireEvent.click(screen.getByText("More filters"));
+    fireEvent.click(screen.getByRole("button", { name: /entity-northwind\s+2/u }));
+    expect(onCollectionQueryChange).toHaveBeenLastCalledWith(expect.objectContaining({ entityId: "entity-northwind" }));
+  });
+
   it("keeps fast capture above browse and distinguishes existing from new combo values", async () => {
     renderStrategy();
     const create = await screen.findByRole("heading", { name: "Create an investigation" });

@@ -135,6 +135,104 @@
   cursor: wait;
 }
 
+.strategy-kit__facet-filters {
+  margin: -0.35rem 0 1rem;
+  padding: 0.65rem 0.75rem 0.75rem;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-deep);
+}
+
+.strategy-kit__facet-filters summary {
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.strategy-kit__facet-filter-count {
+  margin-inline-start: 0.45rem;
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-weight: 650;
+}
+
+.strategy-kit__facet-filter-help,
+.strategy-kit__facet-filter-more {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.strategy-kit__facet-filters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.7rem;
+  margin-top: 0.7rem;
+}
+
+.strategy-kit__facet-filter-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.strategy-kit__facet-filter-group legend {
+  margin-bottom: 0.35rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.strategy-kit__facet-filter-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.strategy-kit__facet-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: 100%;
+  min-height: 2rem;
+  padding: 0.32rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+}
+
+.strategy-kit__facet-filter-chip span:first-child {
+  overflow-wrap: anywhere;
+}
+
+.strategy-kit__facet-filter-chip strong {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.strategy-kit__facet-filter-chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.strategy-kit__facet-filter-clear {
+  margin-top: 0.75rem;
+}
+
+@media (forced-colors: active) {
+  .strategy-kit__facet-filters {
+    border-color: CanvasText;
+  }
+
+  .strategy-kit__facet-filter-chip[aria-pressed="true"] {
+    border-color: Highlight;
+  }
+}
+
 .strategy-kit button,
 .strategy-kit input,
 .strategy-kit select {
