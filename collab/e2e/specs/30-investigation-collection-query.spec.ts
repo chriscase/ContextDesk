@@ -295,4 +295,71 @@ test.describe("Investigation collection query qualification", () => {
       await page.unroute("**/api/cases?**");
     }
   });
+
+  test("keeps collection failures explicit and never falls back to the legacy list", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const strategies = [
+      {
+        id: "investigation-first",
+        name: "Investigation First",
+        row: ".investigation-first__list-button",
+        retry: "Retry loading investigations",
+      },
+      {
+        id: "keystone",
+        name: "Keystone",
+        row: ".keystone-strategy__collection-list button",
+        retry: "Retry loading investigations",
+      },
+      {
+        id: "beacon",
+        name: "Beacon",
+        row: ".beacon__case-list button",
+        retry: "Retry",
+      },
+    ] as const;
+    const collectionRequests: string[] = [];
+    await page.route("**/api/cases?**", async (route) => {
+      const request = route.request();
+      const requestUrl = new URL(request.url());
+      if (request.method() !== "GET" || requestUrl.searchParams.get("schemaId") !== COLLECTION_QUERY_SCHEMA_ID) {
+        await route.continue();
+        return;
+      }
+      collectionRequests.push(request.url());
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "temporary qualification outage" }),
+      });
+    });
+    try {
+      for (const strategy of strategies) {
+        const previous = await setStrategyDefault(page, strategy.id);
+        try {
+          const token = `${strategy.id}-failure-${Date.now()}`;
+          const title = `${token} should stay hidden`;
+          await createInvestigation(page, title);
+          collectionRequests.length = 0;
+          await page.goto(`/investigations?q=${encodeURIComponent(token)}`);
+          await expect(page.locator(".topbar__title-app")).toHaveText(strategy.name);
+          await expect.poll(() => collectionRequests.length).toBe(1);
+          await expect(page.getByRole("alert").first()).toBeVisible();
+          await expect(page.getByRole("alert").first()).toContainText(/could not|unavailable|loaded/iu);
+          await expect(page.locator(strategy.row)).toHaveCount(0);
+          expect(new URL(page.url()).searchParams.get("q")).toBe(token);
+          expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+
+          await page.getByRole("button", { name: strategy.retry }).click();
+          await expect.poll(() => collectionRequests.length).toBe(2);
+          await expect(page.locator(strategy.row)).toHaveCount(0);
+          await expect(page.getByRole("alert").first()).toBeVisible();
+        } finally {
+          await restoreStrategyPolicy(page, previous);
+        }
+      }
+    } finally {
+      await page.unroute("**/api/cases?**");
+    }
+  });
 });
