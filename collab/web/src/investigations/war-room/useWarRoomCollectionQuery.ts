@@ -28,6 +28,18 @@ function inputForLocation(query: CollectionQueryLocation): InvestigationCollecti
   });
 }
 
+function collectionBaseKey(input: InvestigationCollectionQueryInput): string {
+  return JSON.stringify({
+    q: input.q ?? "",
+    status: input.status ?? [],
+    includeArchived: input.includeArchived ?? false,
+    entityId: input.entityId ?? null,
+    contributorId: input.contributorId ?? null,
+    recordedFrom: input.recordedFrom ?? null,
+    recordedTo: input.recordedTo ?? null,
+  });
+}
+
 /**
  * War Room's deliberately small bridge to the public collection seam.
  *
@@ -56,15 +68,7 @@ export function useWarRoomCollectionQuery(
     locationQuery?.recordedTo,
     locationQuery?.status,
   ]);
-  const inputKey = useMemo(() => JSON.stringify({
-    q: input.q ?? "",
-    status: input.status ?? [],
-    includeArchived: input.includeArchived ?? false,
-    entityId: input.entityId ?? null,
-    contributorId: input.contributorId ?? null,
-    recordedFrom: input.recordedFrom ?? null,
-    recordedTo: input.recordedTo ?? null,
-  }), [input]);
+  const inputKey = useMemo(() => collectionBaseKey(input), [input]);
   const command = runtime.commands.queryInvestigations;
   const enabled = locationQuery !== undefined && command !== null && command !== undefined;
   const view = enabled
@@ -74,6 +78,8 @@ export function useWarRoomCollectionQuery(
   const pendingInputKeyRef = useRef(inputKey);
   const activeCursor = runtime.resources.investigationCollectionQuery?.cursor ?? null;
   const collectionStatus = runtime.resources.investigationCollection.status;
+  const activeQueryRef = useRef(runtime.resources.investigationCollectionQuery);
+  activeQueryRef.current = runtime.resources.investigationCollectionQuery;
 
   useEffect(() => {
     if (!enabled || pendingInputKeyRef.current !== inputKey) {
@@ -103,8 +109,17 @@ export function useWarRoomCollectionQuery(
 
   useEffect(() => {
     if (!enabled || !command) return;
+    const activeQuery = activeQueryRef.current;
+    if (
+      activeQuery !== null
+      && activeQuery.cursor === null
+      && collectionBaseKey(activeQuery) === inputKey
+    ) {
+      runtime.refresh.investigationCollection();
+      return;
+    }
     void command(input);
-  }, [command, enabled, input, inputKey]);
+  }, [command, enabled, input, inputKey, runtime.refresh.investigationCollection]);
 
   return {
     input,

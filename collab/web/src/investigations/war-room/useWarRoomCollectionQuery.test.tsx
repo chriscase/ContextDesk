@@ -91,6 +91,54 @@ describe("War Room collection query adapter", () => {
     expect(queryInvestigations).not.toHaveBeenCalled();
   });
 
+  it("re-reads the same canonical query after returning from investigation detail", async () => {
+    const queryInvestigations = vi.fn<NonNullable<InvestigationGateway["queryInvestigations"]>>(
+      async () => gatewayOk(page()),
+    );
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    const rendered = renderProbe(gateway, DEFAULT_COLLECTION_QUERY);
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+
+    rendered.rerender(
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId="case-1"
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <Probe />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>,
+    );
+    expect(queryInvestigations).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <Probe query={DEFAULT_COLLECTION_QUERY} />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>,
+    );
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[1]?.[0]).toEqual(queryInvestigations.mock.calls[0]?.[0]);
+  });
+
   it("continues with the runtime cursor without changing shell query state", async () => {
     let resolveContinuation: ((value: ReturnType<typeof gatewayOk<InvestigationCollectionPageV1>>) => void) | undefined;
     const continuation = new Promise<ReturnType<typeof gatewayOk<InvestigationCollectionPageV1>>>((resolve) => {
