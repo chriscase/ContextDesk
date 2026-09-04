@@ -8,6 +8,7 @@ export {
   useInvestigationRuntime,
   type InvestigationContributionCommand,
   type InvestigationArtifactAnnotationCommand,
+  type InvestigationArtifactAnnotationsBulkCommand,
   type InvestigationCreateInput,
   type InvestigationEvidenceUploadCommand,
   type InvestigationEvidencePreviewCommand,
@@ -22,9 +23,14 @@ export {
   type InvestigationSituationCommand,
 } from "./InvestigationRuntimeProvider.js";
 export type {
+  ArtifactAnnotationBulkItemV1,
+  ArtifactAnnotationBulkOutcome,
+  ArtifactAnnotationBulkRequestV1,
+  ArtifactAnnotationBulkResultV1,
   ArtifactAnnotationListV1,
   ArtifactAnnotationV1,
 } from "./annotation-contract.js";
+export { MAX_ARTIFACT_ANNOTATION_BULK_IDS } from "./annotation-contract.js";
 export {
   type EvidencePreviewValue,
   type PreviewEvidenceInput,

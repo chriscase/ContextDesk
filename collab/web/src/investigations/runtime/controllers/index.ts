@@ -57,11 +57,16 @@ export {
 export {
   useArtifactAnnotations,
   useCreateArtifactAnnotation,
+  useCreateArtifactAnnotationsBulk,
+  useCreateArtifactAnnotationBulk,
   type ArtifactAnnotationsController,
   type CreateArtifactAnnotationCommand,
   type CreateArtifactAnnotationController,
+  type CreateArtifactAnnotationsBulkCommand,
+  type CreateArtifactAnnotationsBulkController,
   type UseArtifactAnnotationsOptions,
   type UseCreateArtifactAnnotationOptions,
+  type UseCreateArtifactAnnotationsBulkOptions,
 } from "./use-artifact-annotations.js";
 export {
   useUploadEvidence,

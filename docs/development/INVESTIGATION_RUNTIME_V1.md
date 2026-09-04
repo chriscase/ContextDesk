@@ -209,6 +209,13 @@ behavior:
   the server binds that key to the actor, case, artifact, privacy, source, and
   body digest inside the same transaction, so a lost acknowledgement can be
   retried without duplicating a note or accepting a changed payload;
+- submit a bounded artifact target set through the optional Runtime V1.1 bulk
+  annotation seam. The runtime sends one `POST
+  /api/cases/:id/evidence/annotations` with the authoritative bulk schema,
+  validates that every `created`, `replayed`, or `not_found` item covers exactly
+  the requested set, and publishes only case- and artifact-bound annotations.
+  Older gateways that do not implement this optional method fail closed as
+  unavailable; the runtime never fans a set out into N singular writes.
 - update the active investigation's Situation using its parsed
   `situationVersion` as the required optimistic-concurrency token;
 - inspect and invoke archive/restore through the shared lifecycle authority.

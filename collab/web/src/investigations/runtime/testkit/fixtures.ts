@@ -3,6 +3,17 @@ import {
   type Capability,
 } from "@cd-collab/contracts/admin";
 import {
+  ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
+  ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
+  ARTIFACT_ANNOTATION_SCHEMA_ID,
+  parseArtifactAnnotation,
+  parseArtifactAnnotationBulkRequest,
+  parseArtifactAnnotationBulkResult,
+  type ArtifactAnnotationBulkRequestV1,
+  type ArtifactAnnotationBulkResultV1,
+  type ArtifactAnnotationV1,
+} from "@cd-collab/contracts/evidence-annotations";
+import {
   ARTIFACT_SCHEMA_ID,
   CASE_LIST_SCHEMA_ID,
   CASE_SCHEMA_ID,
@@ -187,6 +198,74 @@ export function makeContributionList(): ContributionListV1 {
         sourceId: "source-human-note",
       },
     ],
+  });
+}
+
+/** UUID-shaped identities used by the atomic annotation contract fixtures. */
+export const RUNTIME_BULK_ANNOTATION_FIXTURE_IDS = Object.freeze({
+  caseId: "30000000-0000-4000-8000-000000000001",
+  firstArtifact: "10000000-0000-4000-8000-000000000001",
+  secondArtifact: "10000000-0000-4000-8000-000000000002",
+  firstAnnotation: "40000000-0000-4000-8000-000000000001",
+  secondAnnotation: "40000000-0000-4000-8000-000000000002",
+});
+
+export function makeArtifactAnnotation(
+  overrides: Partial<ArtifactAnnotationV1> = {},
+): ArtifactAnnotationV1 {
+  return parseArtifactAnnotation({
+    schemaId: ARTIFACT_ANNOTATION_SCHEMA_ID,
+    id: RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.firstAnnotation,
+    caseId: RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.caseId,
+    artifactId: RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.firstArtifact,
+    body: "The first selected artifact records the same timeout window.",
+    contentHash: "a".repeat(64),
+    privacyClass: "share_safe",
+    authorId: "identity-alice",
+    authorUsername: "alice",
+    createdAt: "2026-09-04T10:00:00.000Z",
+    sourceId: "source-runtime-fixture",
+    ...overrides,
+  });
+}
+
+export function makeArtifactAnnotationBulkRequest(
+  overrides: Partial<ArtifactAnnotationBulkRequestV1> = {},
+): ArtifactAnnotationBulkRequestV1 {
+  return parseArtifactAnnotationBulkRequest({
+    schemaId: ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
+    artifactIds: [
+      RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.firstArtifact,
+      RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.secondArtifact,
+    ],
+    body: "The selected artifacts share the same timeout window.",
+    idempotencyKey: "runtime-bulk-annotation-0001",
+    ...overrides,
+  });
+}
+
+export function makeArtifactAnnotationBulkResult(
+  overrides: Partial<ArtifactAnnotationBulkResultV1> = {},
+): ArtifactAnnotationBulkResultV1 {
+  return parseArtifactAnnotationBulkResult({
+    schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
+    caseId: RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.caseId,
+    items: [
+      {
+        artifactId: RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.firstArtifact,
+        outcome: "created",
+        annotation: makeArtifactAnnotation(),
+      },
+      {
+        artifactId: RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.secondArtifact,
+        outcome: "replayed",
+        annotation: makeArtifactAnnotation({
+          id: RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.secondAnnotation,
+          artifactId: RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.secondArtifact,
+        }),
+      },
+    ],
+    ...overrides,
   });
 }
 

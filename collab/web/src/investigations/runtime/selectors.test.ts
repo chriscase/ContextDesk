@@ -67,6 +67,7 @@ type Evidence = {
 type Annotation = {
   id: string;
   body: string;
+  artifactId?: string;
 };
 
 const evidence: readonly Evidence[] = [
@@ -96,6 +97,25 @@ describe("evidence inventory selector", () => {
       availability: "available",
       refresh: "settled",
       value: annotations,
+    });
+  });
+
+  it("joins artifact annotations by evidence identity while retaining legacy summaries", () => {
+    const artifactNote: Annotation = {
+      id: "annotation-a",
+      artifactId: "evidence-a",
+      body: "Artifact note",
+    };
+    const selected = selectEvidenceInventory<Evidence, Annotation>(
+      { status: "ready", value: evidence },
+      { status: "ready", value: [artifactNote] },
+    );
+    expect(selected.inventory).toMatchObject({
+      availability: "available",
+      value: [
+        { evidence: evidence[0], annotation: artifactNote },
+        { evidence: evidence[1], annotation: null },
+      ],
     });
   });
 

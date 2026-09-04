@@ -28,12 +28,14 @@ import {
   useEvidencePreview,
   useArtifactAnnotations,
   useCreateArtifactAnnotation,
+  useCreateArtifactAnnotationsBulk,
   useInvestigationList,
   useLifecycleAction,
   useUpdateSituation,
   useUploadEvidence,
   type CreateContributionCommand,
   type CreateArtifactAnnotationCommand,
+  type CreateArtifactAnnotationsBulkCommand,
   type PreviewEvidenceCommand,
   type UpdateSituationCommand,
   type UploadEvidenceCommand,
@@ -41,12 +43,16 @@ import {
 import {
   investigationGateway,
   investigationAnnotationGateway,
+  investigationBulkAnnotationGateway,
   investigationWriteGateway,
   type CreateInvestigationInput,
   type InvestigationGateway,
   type EvidencePreviewValue,
 } from "./gateway.js";
-import type { ArtifactAnnotationV1 } from "./annotation-contract.js";
+import type {
+  ArtifactAnnotationBulkResultV1,
+  ArtifactAnnotationV1,
+} from "./annotation-contract.js";
 import { deepFreezeDto } from "./deep-freeze.js";
 import type {
   CommandOutcome,
@@ -59,6 +65,7 @@ export type InvestigationEvidenceUploadCommand = UploadEvidenceCommand;
 export type InvestigationEvidencePreviewCommand = PreviewEvidenceCommand;
 export type InvestigationContributionCommand = CreateContributionCommand;
 export type InvestigationArtifactAnnotationCommand = CreateArtifactAnnotationCommand;
+export type InvestigationArtifactAnnotationsBulkCommand = CreateArtifactAnnotationsBulkCommand;
 export type InvestigationSituationCommand = UpdateSituationCommand;
 
 export interface InvestigationRuntimeResources {
@@ -77,6 +84,7 @@ export interface InvestigationRuntimeMutations {
   readonly updateSituation: MutationState<CaseV1>;
   readonly lifecycle: MutationState<InvestigationLifecycleActionSuccessV1>;
   readonly createArtifactAnnotation: MutationState<ArtifactAnnotationV1>;
+  readonly createArtifactAnnotations: MutationState<ArtifactAnnotationBulkResultV1>;
 }
 
 export interface InvestigationRuntimeRefresh {
@@ -108,6 +116,9 @@ export interface InvestigationRuntimeCommands {
   readonly createArtifactAnnotation: ((
     command: InvestigationArtifactAnnotationCommand,
   ) => Promise<CommandOutcome<ArtifactAnnotationV1>>) | null;
+  readonly createArtifactAnnotations: ((
+    command: InvestigationArtifactAnnotationsBulkCommand,
+  ) => Promise<CommandOutcome<ArtifactAnnotationBulkResultV1>>) | null;
 }
 
 /** Read-only evidence inspection keeps its bounded command separate from writes. */
@@ -228,6 +239,10 @@ export function InvestigationRuntimeProvider({
   // of appearing to succeed.
   const writeGateway = useMemo(() => investigationWriteGateway(gateway), [gateway]);
   const annotationGateway = useMemo(() => investigationAnnotationGateway(gateway), [gateway]);
+  const bulkAnnotationGateway = useMemo(
+    () => investigationBulkAnnotationGateway(gateway),
+    [gateway],
+  );
   const projected = projectInvestigationCapabilities(rawCapabilities, readOnly);
   const capabilities = useMemo<InvestigationRuntimeCapabilities>(() => Object.freeze({
     canRead: projected.canRead,
@@ -396,6 +411,26 @@ export function InvestigationRuntimeProvider({
     onRefresh: refreshArtifactAnnotationsFor,
     onScopeDenied: activeInvestigation.denyScope,
   });
+  const artifactAnnotationsBulkController = useCreateArtifactAnnotationsBulk({
+    gateway: bulkAnnotationGateway,
+    identityKey,
+    authorityKey,
+    investigationId: activeReadyCaseId,
+    canAnnotate: canContribute && !activeScopeUnavailable,
+    readOnly,
+    onCreated: (result) => {
+      // A bulk acknowledgement is one transport operation. Publishing its
+      // confirmed rows locally may iterate the bounded result, but it never
+      // schedules one request per target.
+      for (const item of result.items) {
+        if (item.outcome !== "not_found") {
+          artifactAnnotationsController.publish(item.annotation);
+        }
+      }
+    },
+    onRefresh: refreshArtifactAnnotationsFor,
+    onScopeDenied: activeInvestigation.denyScope,
+  });
   const refreshAll = useCallback(() => {
     activeInvestigation.refreshAll();
     artifactAnnotationsController.refresh();
@@ -509,6 +544,7 @@ export function InvestigationRuntimeProvider({
       updateSituation: situationController.state,
       lifecycle: lifecycleController.state,
       createArtifactAnnotation: artifactAnnotationController.state,
+      createArtifactAnnotations: artifactAnnotationsBulkController.state,
     },
     evidencePreview: {
       state: previewController.state,
@@ -557,6 +593,11 @@ export function InvestigationRuntimeProvider({
         && !activeScopeUnavailable
         ? artifactAnnotationController.create
         : null,
+      createArtifactAnnotations: canContribute
+        && activeReadyCaseId !== null
+        && !activeScopeUnavailable
+        ? artifactAnnotationsBulkController.create
+        : null,
     },
   }), [
     activeReadyCaseId,
@@ -588,6 +629,8 @@ export function InvestigationRuntimeProvider({
     createController.state,
     artifactAnnotationController.create,
     artifactAnnotationController.state,
+    artifactAnnotationsBulkController.create,
+    artifactAnnotationsBulkController.state,
     identity,
     investigationList.investigations,
     investigationList.refresh,

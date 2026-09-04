@@ -1,13 +1,17 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
   ARTIFACT_ANNOTATION_SCHEMA_ID,
+  type ArtifactAnnotationBulkResultV1,
   type ArtifactAnnotationV1,
 } from "../annotation-contract.js";
 import type {
   CreateArtifactAnnotationInput,
+  CreateArtifactAnnotationsBulkInput,
   GatewayResult,
   InvestigationAnnotationGateway,
+  InvestigationBulkAnnotationGateway,
 } from "../gateway.js";
 import { RUNTIME_FIXTURE_IDS } from "../testkit/fixtures.js";
 import { createDeferred } from "../testkit/promises.js";
@@ -16,6 +20,8 @@ import {
   useCreateArtifactAnnotation,
   type UseArtifactAnnotationsOptions,
   type UseCreateArtifactAnnotationOptions,
+  type UseCreateArtifactAnnotationsBulkOptions,
+  useCreateArtifactAnnotationsBulk,
 } from "./use-artifact-annotations.js";
 
 afterEach(() => cleanup());
@@ -82,6 +88,51 @@ function createOptions(
 ): UseCreateArtifactAnnotationOptions {
   return {
     gateway: annotationGateway(),
+    identityKey: "alice",
+    authorityKey: "alice-authority-v1",
+    investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
+    canAnnotate: true,
+    readOnly: false,
+    onCreated: vi.fn(),
+    onRefresh: vi.fn(),
+    onScopeDenied: vi.fn(),
+    ...overrides,
+  };
+}
+
+function bulkGateway(
+  overrides: Partial<InvestigationBulkAnnotationGateway> = {},
+): InvestigationBulkAnnotationGateway {
+  return {
+    createArtifactAnnotationsBulk: vi.fn(async (
+      caseId: string,
+      input: CreateArtifactAnnotationsBulkInput,
+    ) => ({
+      ok: true as const,
+      value: {
+        schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
+        caseId,
+        items: input.artifactIds.map((artifactId, index) => ({
+          artifactId,
+          outcome: index === 0 ? "created" as const : "replayed" as const,
+          annotation: annotation({
+            id: `annotation-${index + 1}`,
+            caseId,
+            artifactId,
+            body: input.body,
+          }),
+        })),
+      },
+    })),
+    ...overrides,
+  };
+}
+
+function bulkOptions(
+  overrides: Partial<UseCreateArtifactAnnotationsBulkOptions> = {},
+): UseCreateArtifactAnnotationsBulkOptions {
+  return {
+    gateway: bulkGateway(),
     identityKey: "alice",
     authorityKey: "alice-authority-v1",
     investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
@@ -393,5 +444,141 @@ describe("useCreateArtifactAnnotation", () => {
       reason: "not_ready",
     });
     expect(createArtifactAnnotation).not.toHaveBeenCalled();
+  });
+});
+
+describe("useCreateArtifactAnnotationsBulk", () => {
+  const targetIds = [RUNTIME_FIXTURE_IDS.evidence, "evidence-second"] as const;
+
+  it("submits one bounded target set and publishes replayed rows", async () => {
+    const createArtifactAnnotationsBulk = vi.fn(
+      bulkGateway().createArtifactAnnotationsBulk,
+    );
+    const onCreated = vi.fn();
+    const onRefresh = vi.fn();
+    const gateway = bulkGateway({ createArtifactAnnotationsBulk });
+    const { result } = renderHook(() => useCreateArtifactAnnotationsBulk(
+      bulkOptions({ gateway, onCreated, onRefresh }),
+    ));
+
+    await act(async () => {
+      await expect(result.current.create({
+        artifactIds: targetIds,
+        body: "Shared observation.",
+        privacyClass: "share_safe",
+        idempotencyKey: "bulk-runtime-0001",
+      })).resolves.toMatchObject({ status: "succeeded" });
+    });
+    expect(createArtifactAnnotationsBulk).toHaveBeenCalledTimes(1);
+    expect(createArtifactAnnotationsBulk).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        artifactIds: [...targetIds],
+        body: "Shared observation.",
+        privacyClass: "share_safe",
+        idempotencyKey: "bulk-runtime-0001",
+      },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onRefresh).toHaveBeenCalledWith(RUNTIME_FIXTURE_IDS.populatedCase);
+    expect(result.current.state.status).toBe("succeeded");
+  });
+
+  it("honors contribution/read-only gates without calling the bulk transport", async () => {
+    const createArtifactAnnotationsBulk = vi.fn();
+    const base = bulkOptions({
+      gateway: bulkGateway({ createArtifactAnnotationsBulk }),
+      canAnnotate: false,
+    });
+    const { result, rerender } = renderHook(
+      ({ value }: { value: UseCreateArtifactAnnotationsBulkOptions }) =>
+        useCreateArtifactAnnotationsBulk(value),
+      { initialProps: { value: base } },
+    );
+    const command = { artifactIds: targetIds, body: "Denied.", idempotencyKey: "bulk-runtime-0002" };
+    await expect(result.current.create(command)).resolves.toEqual({
+      status: "ignored",
+      reason: "not_ready",
+    });
+    rerender({ value: { ...base, canAnnotate: true, readOnly: true } });
+    await expect(result.current.create(command)).resolves.toEqual({
+      status: "ignored",
+      reason: "not_ready",
+    });
+    expect(createArtifactAnnotationsBulk).not.toHaveBeenCalled();
+  });
+
+  it("rejects an acknowledgement whose item set or annotation identity drifts", async () => {
+    const onCreated = vi.fn();
+    const gateway = bulkGateway({
+      createArtifactAnnotationsBulk: vi.fn(async (): Promise<GatewayResult<ArtifactAnnotationBulkResultV1>> => ({
+        ok: true,
+        value: {
+          schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
+          caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+          items: [{
+            artifactId: targetIds[0],
+            outcome: "created",
+            annotation: annotation({ artifactId: "wrong-artifact" }),
+          }],
+        },
+      })),
+    });
+    const { result } = renderHook(() => useCreateArtifactAnnotationsBulk(
+      bulkOptions({ gateway, onCreated }),
+    ));
+    await act(async () => {
+      await expect(result.current.create({
+        artifactIds: targetIds,
+        body: "Mismatched.",
+        idempotencyKey: "bulk-runtime-0003",
+      })).resolves.toEqual({
+        status: "failed",
+        error: { kind: "protocol", reason: "identity" },
+      });
+    });
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  it("fences a late acknowledgement after identity or case changes", async () => {
+    const deferred = createDeferred<GatewayResult<ArtifactAnnotationBulkResultV1>>();
+    const gateway = bulkGateway({
+      createArtifactAnnotationsBulk: vi.fn(() => deferred.promise),
+    });
+    const initial = bulkOptions({ gateway });
+    const { result, rerender } = renderHook(
+      ({ value }: { value: UseCreateArtifactAnnotationsBulkOptions }) =>
+        useCreateArtifactAnnotationsBulk(value),
+      { initialProps: { value: initial } },
+    );
+    let pending!: ReturnType<typeof result.current.create>;
+    await act(async () => {
+      pending = result.current.create({
+        artifactIds: targetIds,
+        body: "Late response.",
+        idempotencyKey: "bulk-runtime-0004",
+      });
+      await Promise.resolve();
+    });
+    rerender({ value: { ...initial, investigationId: "case-b" } });
+    deferred.resolve({
+      ok: true,
+      value: {
+        schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
+        caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+        items: targetIds.map((artifactId, index) => ({
+          artifactId,
+          outcome: "replayed" as const,
+          annotation: annotation({
+            id: `late-${index}`,
+            artifactId,
+          }),
+        })),
+      },
+    });
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ status: "ignored", reason: "stale" });
+    });
   });
 });

@@ -15,11 +15,13 @@ import { AUTH_LOST_EVENT } from "../../protected-api.js";
 import {
   investigationGateway,
   investigationAnnotationGateway,
+  investigationBulkAnnotationGateway,
   investigationWriteGateway,
   type InvestigationGateway,
   type InvestigationWriteGateway,
 } from "./gateway.js";
 import {
+  ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
   ARTIFACT_ANNOTATION_LIST_SCHEMA_ID,
   ARTIFACT_ANNOTATION_SCHEMA_ID,
   type ArtifactAnnotationV1,
@@ -27,8 +29,10 @@ import {
 import { createInvestigationGatewayDouble } from "./testkit/gateway-double.js";
 import {
   RUNTIME_FIXTURE_IDS,
+  RUNTIME_BULK_ANNOTATION_FIXTURE_IDS,
   makeArchiveAllowedLifecycle,
   makeArchiveRefusedLifecycle,
+  makeArtifactAnnotationBulkResult,
   makeCaseList,
   makeContributionList,
   makeEvidenceList,
@@ -50,6 +54,19 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function options(controller = new AbortController()) {
   return { signal: controller.signal };
+}
+
+const RUNTIME_BULK_CASE_ID = RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.caseId;
+
+function bulkAnnotationInput() {
+  return {
+    artifactIds: [
+      RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.firstArtifact,
+      RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.secondArtifact,
+    ],
+    body: "A bounded bulk annotation.",
+    idempotencyKey: "bulk-runtime-0005",
+  };
 }
 
 function archivedCase(): CaseV1 {
@@ -1829,6 +1846,132 @@ describe("artifact annotation runtime seam", () => {
     });
   });
 
+  it("creates a target set with exactly one protected bulk POST", async () => {
+    const bulk = makeArtifactAnnotationBulkResult();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(bulk));
+    const artifactIds = bulk.items.map((item) => item.artifactId);
+    const result = await investigationGateway.createArtifactAnnotationsBulk!(
+      bulk.caseId,
+      {
+        artifactIds,
+        body: "The selected files share a timeout window.",
+        privacyClass: "share_safe",
+        clientTime: "2026-09-04T10:00:00.000Z",
+        idempotencyKey: "bulk-runtime-0001",
+      },
+      options(),
+    );
+    expect(result).toEqual({ ok: true, value: bulk });
+    if (result.ok) {
+      expect(Object.isFrozen(result.value)).toBe(true);
+      expect(Object.isFrozen(result.value.items)).toBe(true);
+      expect(Object.isFrozen(result.value.items[0])).toBe(true);
+      expect(
+        result.value.items[0]?.outcome === "not_found"
+          || Object.isFrozen(result.value.items[0]?.annotation),
+      ).toBe(true);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [route, init] = fetchMock.mock.calls[0] ?? [];
+    expect(route).toBe(`/api/cases/${bulk.caseId}/evidence/annotations`);
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      schemaId: ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
+      artifactIds,
+      body: "The selected files share a timeout window.",
+      privacyClass: "share_safe",
+      clientTime: "2026-09-04T10:00:00.000Z",
+      idempotencyKey: "bulk-runtime-0001",
+    });
+  });
+
+  it.each([
+    ["wrong case", { caseId: "40000000-0000-4000-8000-000000000001" }, "contract"],
+    ["omitted target", { items: [makeArtifactAnnotationBulkResult().items[0]] }, "identity"],
+    ["duplicate target", {
+      items: [
+        makeArtifactAnnotationBulkResult().items[0],
+        makeArtifactAnnotationBulkResult().items[0],
+      ],
+    }, "contract"],
+    ["annotation bound to another target", {
+      items: [{
+        ...makeArtifactAnnotationBulkResult().items[0]!,
+        annotation: {
+          ...(makeArtifactAnnotationBulkResult().items[0] as { annotation: object }).annotation,
+          artifactId: "10000000-0000-4000-8000-000000000099",
+        },
+      }, makeArtifactAnnotationBulkResult().items[1]],
+    }, "contract"],
+  ] as const)("rejects a bulk acknowledgement with %s", async (_label, overrides, reason) => {
+    const body = { ...makeArtifactAnnotationBulkResult(), ...overrides };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(body));
+    await expect(investigationGateway.createArtifactAnnotationsBulk!(
+      makeArtifactAnnotationBulkResult().caseId,
+      {
+        artifactIds: makeArtifactAnnotationBulkResult().items.map((item) => item.artifactId),
+        body: "Bulk identity test",
+        idempotencyKey: "bulk-runtime-0002",
+      },
+      options(),
+    )).resolves.toEqual({
+      ok: false,
+      error: { kind: "protocol", reason },
+    });
+  });
+
+  it("classifies a bulk replayable unknown commit without exposing its body", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ error: "commit_outcome_unknown", private: "must-not-escape" }, 503),
+    );
+    await expect(investigationGateway.createArtifactAnnotationsBulk!(
+      makeArtifactAnnotationBulkResult().caseId,
+      {
+        artifactIds: makeArtifactAnnotationBulkResult().items.map((item) => item.artifactId),
+        body: "Unknown bulk commit",
+        idempotencyKey: "bulk-runtime-0003",
+      },
+      options(),
+    )).resolves.toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    });
+  });
+
+  it.each([401, 403] as const)(
+    "preserves protected auth-loss semantics for bulk annotation writes (%i)",
+    async (status) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({ error: "forbidden" }, status),
+      );
+      const listener = vi.fn();
+      window.addEventListener(AUTH_LOST_EVENT, listener);
+      try {
+        await expect(investigationGateway.createArtifactAnnotationsBulk!(
+          RUNTIME_BULK_CASE_ID,
+          bulkAnnotationInput(),
+          options(),
+        )).resolves.toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener(AUTH_LOST_EVENT, listener);
+      }
+    },
+  );
+
+  it("keeps a bulk annotation conflict bounded", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ error: "idempotency_conflict", private: "must-not-escape" }, 409),
+    );
+    await expect(investigationGateway.createArtifactAnnotationsBulk!(
+      RUNTIME_BULK_CASE_ID,
+      bulkAnnotationInput(),
+      options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "conflict", status: 409 } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("preserves an annotation commit-outcome-unknown response without exposing its body", async () => {
     const response = jsonResponse({ error: "commit_outcome_unknown", private: "must-not-escape" }, 503);
     vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
@@ -1878,6 +2021,21 @@ describe("artifact annotation runtime seam", () => {
     const resolved = investigationAnnotationGateway(partial);
     expect(await resolved.listArtifactAnnotations(
       RUNTIME_FIXTURE_IDS.populatedCase,
+      options(),
+    )).toEqual({ ok: false, error: { kind: "unavailable", status: 503 } });
+  });
+
+  it("fails the optional bulk method closed for a pre-bulk double", async () => {
+    const resolved = investigationBulkAnnotationGateway(
+      createInvestigationGatewayDouble(),
+    );
+    expect(await resolved.createArtifactAnnotationsBulk(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        artifactIds: [RUNTIME_FIXTURE_IDS.evidence],
+        body: "Bulk method is not installed.",
+        idempotencyKey: "bulk-runtime-0004",
+      },
       options(),
     )).toEqual({ ok: false, error: { kind: "unavailable", status: 503 } });
   });

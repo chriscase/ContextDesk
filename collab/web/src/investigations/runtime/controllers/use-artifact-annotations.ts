@@ -1,5 +1,12 @@
-import type { ArtifactAnnotationV1 } from "../annotation-contract.js";
-import type { InvestigationAnnotationGateway } from "../gateway.js";
+import type {
+  ArtifactAnnotationBulkResultV1,
+  ArtifactAnnotationV1,
+} from "../annotation-contract.js";
+import type {
+  CreateArtifactAnnotationsBulkInput,
+  InvestigationAnnotationGateway,
+  InvestigationBulkAnnotationGateway,
+} from "../gateway.js";
 import type { RuntimeFailure } from "../errors.js";
 import type {
   CommandOutcome,
@@ -377,3 +384,250 @@ export function useCreateArtifactAnnotation(
     create,
   };
 }
+
+export interface CreateArtifactAnnotationsBulkCommand {
+  /** The target set is submitted as one atomic server operation. */
+  readonly artifactIds: readonly string[];
+  readonly body: string;
+  readonly privacyClass?: "owner_only" | "share_safe";
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+  /** Required to safely replay a response whose commit outcome is unknown. */
+  readonly idempotencyKey: string;
+}
+
+export interface UseCreateArtifactAnnotationsBulkOptions {
+  readonly gateway: InvestigationBulkAnnotationGateway;
+  readonly identityKey: string;
+  readonly authorityKey: string;
+  readonly investigationId: string | null;
+  readonly canAnnotate: boolean;
+  readonly readOnly: boolean;
+  /** Publish the complete server-confirmed result exactly once. */
+  readonly onCreated: (result: ArtifactAnnotationBulkResultV1) => void;
+  /** Refresh the one case collection after the set operation settles. */
+  readonly onRefresh: (investigationId: string) => void;
+  readonly onScopeDenied: (investigationId: string, error: RuntimeFailure) => void;
+}
+
+export interface CreateArtifactAnnotationsBulkController {
+  readonly state: MutationState<ArtifactAnnotationBulkResultV1>;
+  readonly create: (
+    command: CreateArtifactAnnotationsBulkCommand,
+  ) => Promise<CommandOutcome<ArtifactAnnotationBulkResultV1>>;
+}
+
+interface BulkAnnotationScope {
+  readonly identityKey: string;
+  readonly authorityKey: string;
+  readonly investigationId: string;
+}
+
+function bulkAnnotationResultMatches(
+  investigationId: string,
+  artifactIds: readonly string[],
+  result: ArtifactAnnotationBulkResultV1,
+): boolean {
+  const requested = new Set<string>();
+  for (const artifactId of artifactIds) {
+    if (
+      typeof artifactId !== "string"
+      || artifactId.length === 0
+      || requested.has(artifactId)
+    ) return false;
+    requested.add(artifactId);
+  }
+  if (result.caseId !== investigationId || result.items.length !== requested.size) return false;
+  const returned = new Set<string>();
+  for (const item of result.items) {
+    if (
+      typeof item.artifactId !== "string"
+      || !requested.has(item.artifactId)
+      || returned.has(item.artifactId)
+    ) return false;
+    returned.add(item.artifactId);
+    if (item.outcome === "not_found") continue;
+    if (
+      item.annotation.caseId !== investigationId
+      || item.annotation.artifactId !== item.artifactId
+      || item.annotation.id.length === 0
+    ) return false;
+  }
+  return returned.size === requested.size;
+}
+
+/**
+ * Submits one bounded target set through the bulk transport. This controller
+ * intentionally has no loop over the singular annotation method: a set is a
+ * single audited/idempotent server operation, including partial not_found
+ * outcomes and replay acknowledgements.
+ */
+export function useCreateArtifactAnnotationsBulk(
+  options: UseCreateArtifactAnnotationsBulkOptions,
+): CreateArtifactAnnotationsBulkController {
+  const [stored, setStored] = useState<ScopedMutationState<ArtifactAnnotationBulkResultV1>>(
+    () => emptyScopedMutationState(),
+  );
+  const slotRef = useRef(new RequestSlot<BulkAnnotationScope>());
+  const activeRef = useRef<RequestToken<BulkAnnotationScope> | null>(null);
+  const mountedRef = useRef(true);
+  const latestRef = useRef(options);
+  latestRef.current = options;
+
+  const invalidate = useCallback(() => {
+    slotRef.current.invalidate();
+    activeRef.current = null;
+    if (mountedRef.current) setStored(emptyScopedMutationState());
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      slotRef.current.dispose();
+      activeRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    invalidate();
+    return invalidate;
+  }, [
+    invalidate,
+    options.authorityKey,
+    options.canAnnotate,
+    options.identityKey,
+    options.investigationId,
+    options.readOnly,
+  ]);
+
+  const create = useCallback(async (
+    command: CreateArtifactAnnotationsBulkCommand,
+  ): Promise<CommandOutcome<ArtifactAnnotationBulkResultV1>> => {
+    if (activeRef.current !== null) return { status: "ignored", reason: "busy" };
+    const start = latestRef.current;
+    let artifactIds: string[];
+    let body: string;
+    let privacyClass: "owner_only" | "share_safe" | undefined;
+    let clientTime: string | undefined;
+    let sourceId: string | undefined;
+    let idempotencyKey: string;
+    try {
+      artifactIds = Array.from(command.artifactIds, (artifactId) => artifactId);
+      body = command.body;
+      privacyClass = command.privacyClass;
+      clientTime = command.clientTime;
+      sourceId = command.sourceId;
+      idempotencyKey = command.idempotencyKey;
+      if (
+        start.readOnly
+        || !start.canAnnotate
+        || start.investigationId === null
+        || artifactIds.length === 0
+        || artifactIds.some((artifactId) => typeof artifactId !== "string" || artifactId.trim() === "")
+        || new Set(artifactIds).size !== artifactIds.length
+        || typeof body !== "string"
+        || body.trim() === ""
+        || typeof idempotencyKey !== "string"
+        || idempotencyKey.trim() === ""
+      ) {
+        return { status: "ignored", reason: "not_ready" };
+      }
+    } catch {
+      return { status: "ignored", reason: "not_ready" };
+    }
+
+    const scope: BulkAnnotationScope = {
+      identityKey: start.identityKey,
+      authorityKey: start.authorityKey,
+      investigationId: start.investigationId,
+    };
+    const scopeKey = mutationScopeKey([
+      scope.identityKey,
+      scope.authorityKey,
+      scope.investigationId,
+    ]);
+    const token = slotRef.current.begin(scope);
+    activeRef.current = token;
+    setStored(scopedMutationState(scopeKey, { status: "running" }));
+    const isCurrent = (): boolean => {
+      const latest = latestRef.current;
+      return mountedRef.current
+        && activeRef.current === token
+        && slotRef.current.isCurrent(token)
+        && latest.identityKey === scope.identityKey
+        && latest.authorityKey === scope.authorityKey
+        && latest.investigationId === scope.investigationId
+        && latest.canAnnotate
+        && !latest.readOnly;
+    };
+
+    try {
+      const input: CreateArtifactAnnotationsBulkInput = {
+        artifactIds,
+        body,
+        ...(privacyClass === undefined ? {} : { privacyClass }),
+        ...(clientTime === undefined ? {} : { clientTime }),
+        ...(sourceId === undefined ? {} : { sourceId }),
+        idempotencyKey,
+      };
+      const result = await start.gateway.createArtifactAnnotationsBulk(
+        scope.investigationId,
+        input,
+        { signal: token.signal },
+      );
+      if (!isCurrent()) return { status: "ignored", reason: "stale" };
+      if (!result.ok) {
+        if (result.error.kind === "not_found" || result.error.kind === "auth_lost") {
+          latestRef.current.onScopeDenied(scope.investigationId, result.error);
+        }
+        if (!isCurrent()) return { status: "ignored", reason: "stale" };
+        setStored(scopedMutationState(scopeKey, { status: "failed", error: result.error }));
+        return { status: "failed", error: result.error };
+      }
+      let identityMatches = false;
+      try {
+        identityMatches = bulkAnnotationResultMatches(
+          scope.investigationId,
+          artifactIds,
+          result.value,
+        );
+      } catch {
+        identityMatches = false;
+      }
+      if (!identityMatches) {
+        const error: RuntimeFailure = { kind: "protocol", reason: "identity" };
+        setStored(scopedMutationState(scopeKey, { status: "failed", error }));
+        return { status: "failed", error };
+      }
+      latestRef.current.onCreated(result.value);
+      if (!isCurrent()) return { status: "ignored", reason: "stale" };
+      latestRef.current.onRefresh(scope.investigationId);
+      if (!isCurrent()) return { status: "ignored", reason: "stale" };
+      setStored(scopedMutationState(scopeKey, { status: "succeeded", value: result.value }));
+      return { status: "succeeded", value: result.value };
+    } catch {
+      if (!isCurrent()) return { status: "ignored", reason: "stale" };
+      const error: RuntimeFailure = token.signal.aborted
+        ? { kind: "aborted" }
+        : { kind: "unexpected" };
+      setStored(scopedMutationState(scopeKey, { status: "failed", error }));
+      return { status: "failed", error };
+    } finally {
+      if (activeRef.current === token) activeRef.current = null;
+    }
+  }, []);
+
+  const currentScopeKey = options.readOnly
+    || !options.canAnnotate
+    || options.investigationId === null
+    ? null
+    : mutationScopeKey([options.identityKey, options.authorityKey, options.investigationId]);
+  return {
+    state: visibleMutationState(stored, currentScopeKey),
+    create,
+  };
+}
+
+/** Naming alias for callers that put the operation name before its scope. */
+export const useCreateArtifactAnnotationBulk = useCreateArtifactAnnotationsBulk;

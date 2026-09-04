@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { InvestigationRuntimeProviderProps } from "./public.js";
+import type {
+  ArtifactAnnotationBulkResultV1,
+  InvestigationArtifactAnnotationsBulkCommand,
+  InvestigationRuntime,
+} from "./public.js";
+import { MAX_ARTIFACT_ANNOTATION_BULK_IDS } from "./public.js";
 import * as publicRuntime from "./public.js";
 
 const STRATEGY_FACING_PROPS: InvestigationRuntimeProviderProps = {
@@ -18,6 +24,7 @@ describe("investigation runtime public surface", () => {
   it("does not expose transport or protected-fetch internals at runtime", () => {
     expect(Object.keys(publicRuntime).sort()).toEqual([
       "InvestigationRuntimeProvider",
+      "MAX_ARTIFACT_ANNOTATION_BULK_IDS",
       "MAX_EVIDENCE_UPLOAD_BYTES",
       "selectEvidenceInventory",
       "selectResourceView",
@@ -32,5 +39,30 @@ describe("investigation runtime public surface", () => {
     // @ts-expect-error Runtime V1 accepts no transport from a strategy.
     const smuggled: InvestigationRuntimeProviderProps = { ...STRATEGY_FACING_PROPS, gateway: {} };
     expect(smuggled.capabilities).toEqual(["investigation:read"]);
+  });
+
+  it("exposes the bulk annotation command and result only through the public seam", () => {
+    const command: InvestigationArtifactAnnotationsBulkCommand = {
+      artifactIds: ["evidence-a", "evidence-b"],
+      body: "A shared observation.",
+      idempotencyKey: "bulk-runtime-0001",
+    };
+    const result: ArtifactAnnotationBulkResultV1 | null = null;
+    const runtime: Pick<InvestigationRuntime, "commands"> = {
+      commands: {
+        createInvestigation: null,
+        uploadEvidence: null,
+        createContribution: null,
+        updateSituation: null,
+        applyLifecycle: null,
+        createArtifactAnnotation: null,
+        createArtifactAnnotations: null,
+      },
+    };
+    expect(command.artifactIds).toHaveLength(2);
+    expect(MAX_ARTIFACT_ANNOTATION_BULK_IDS).toBe(64);
+    expect(publicRuntime.MAX_ARTIFACT_ANNOTATION_BULK_IDS).toBe(64);
+    expect(result).toBeNull();
+    expect(runtime.commands.createArtifactAnnotations).toBeNull();
   });
 });
