@@ -32,6 +32,18 @@ function inputForLocation(query: CollectionQueryLocation): InvestigationCollecti
   });
 }
 
+function collectionBaseKey(input: InvestigationCollectionQueryInput): string {
+  return JSON.stringify({
+    q: input.q ?? "",
+    status: input.status ?? [],
+    includeArchived: input.includeArchived ?? false,
+    entityId: input.entityId ?? null,
+    contributorId: input.contributorId ?? null,
+    recordedFrom: input.recordedFrom ?? null,
+    recordedTo: input.recordedTo ?? null,
+  });
+}
+
 /**
  * Binds shell-owned list query state to the additive public Runtime V1 seam.
  * Strategies decide how to render the returned page and may fall back to the
@@ -68,8 +80,12 @@ export function useInvestigationCollectionQuery(
     : { availability: "idle" } as const;
   const continuationPendingRef = useRef(false);
   const pendingInputKeyRef = useRef(inputKey);
+  const requestedInputKeyRef = useRef<string | null>(null);
+  const inactiveRef = useRef(!enabled);
   const activeCursor = runtime.resources.investigationCollectionQuery?.cursor ?? null;
   const collectionStatus = runtime.resources.investigationCollection.status;
+  const activeQueryRef = useRef(runtime.resources.investigationCollectionQuery);
+  activeQueryRef.current = runtime.resources.investigationCollectionQuery;
 
   useEffect(() => {
     if (!enabled || pendingInputKeyRef.current !== inputKey) {
@@ -93,14 +109,42 @@ export function useInvestigationCollectionQuery(
     return () => {
       if (continuationPendingRef.current || view.availability !== "available" || view.value.nextCursor === null || view.refresh === "loading") return;
       continuationPendingRef.current = true;
+      const activeQuery = activeQueryRef.current;
+      if (
+        view.refresh === "failed"
+        && activeQuery !== null
+        && activeQuery.cursor === view.value.nextCursor
+        && collectionBaseKey(activeQuery) === inputKey
+      ) {
+        runtime.refresh.investigationCollection();
+        return;
+      }
       void command(Object.freeze({ ...input, cursor: view.value.nextCursor }));
     };
-  }, [command, enabled, input, view]);
+  }, [command, enabled, input, inputKey, runtime.refresh.investigationCollection, view]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || command === undefined || command === null) {
+      requestedInputKeyRef.current = null;
+      inactiveRef.current = true;
+      return;
+    }
+    if (requestedInputKeyRef.current === inputKey) return;
+    requestedInputKeyRef.current = inputKey;
+    const reentering = inactiveRef.current;
+    inactiveRef.current = false;
+    const activeQuery = activeQueryRef.current;
+    if (
+      reentering
+      && activeQuery !== null
+      && activeQuery.cursor === null
+      && collectionBaseKey(activeQuery) === inputKey
+    ) {
+      runtime.refresh.investigationCollection();
+      return;
+    }
     command(input);
-  }, [command, enabled, input, inputKey]);
+  }, [command, enabled, input, inputKey, runtime.refresh.investigationCollection]);
 
   return {
     enabled,
@@ -109,7 +153,15 @@ export function useInvestigationCollectionQuery(
     refresh: enabled && command !== undefined && command !== null
       ? () => {
           if (view.availability === "available" && view.refresh === "loading") return;
-          if (runtime.resources.investigationCollectionQuery?.cursor) {
+          const activeQuery = runtime.resources.investigationCollectionQuery;
+          if (
+            view.availability === "available"
+            && view.refresh === "failed"
+            && activeQuery?.cursor === view.value.nextCursor
+            && collectionBaseKey(activeQuery) === inputKey
+          ) {
+            runtime.refresh.investigationCollection();
+          } else if (activeQuery?.cursor) {
             void command(input);
           } else {
             runtime.refresh.investigationCollection();

@@ -194,4 +194,62 @@ describe("War Room collection query adapter", () => {
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(3));
     expect(queryInvestigations.mock.calls[2]?.[0].cursor).toBeNull();
   });
+
+  it("retries a failed continuation only after another click and appends its page", async () => {
+    const [firstItem, secondItem] = makeCaseList().cases;
+    let continuationAttempts = 0;
+    const queryInvestigations = vi.fn<NonNullable<InvestigationGateway["queryInvestigations"]>>(
+      async (input) => {
+        if (!input.cursor) {
+          return gatewayOk({
+            ...page(),
+            items: [firstItem!],
+            nextCursor: "eyJwYWdlIjoyfQ",
+          });
+        }
+        continuationAttempts += 1;
+        return continuationAttempts === 1
+          ? { ok: false, error: { kind: "network" } }
+          : gatewayOk({ ...page(), items: [secondItem!], nextCursor: null });
+      },
+    );
+    let nextPage: (() => void) | undefined;
+    function RetryProbe() {
+      const collection = useWarRoomCollectionQuery(DEFAULT_COLLECTION_QUERY);
+      nextPage = collection.nextPage;
+      return <output data-testid="retry-page">{
+        collection.view.availability === "available"
+          ? `${collection.view.refresh}:${collection.view.value.items.length}`
+          : collection.view.availability
+      }</output>;
+    }
+    render(
+      <InvestigationRuntimeGatewayHarness gateway={createInvestigationGatewayDouble({ queryInvestigations })}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <RetryProbe />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("retry-page").textContent).toBe("settled:1"));
+    nextPage?.();
+    await waitFor(() => expect(screen.getByTestId("retry-page").textContent).toBe("failed:1"));
+    expect(queryInvestigations).toHaveBeenCalledTimes(2);
+
+    nextPage?.();
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByTestId("retry-page").textContent).toBe("settled:2"));
+    expect(queryInvestigations.mock.calls[1]?.[0].cursor).toBe("eyJwYWdlIjoyfQ");
+    expect(queryInvestigations.mock.calls[2]?.[0]).toEqual(queryInvestigations.mock.calls[1]?.[0]);
+  });
 });

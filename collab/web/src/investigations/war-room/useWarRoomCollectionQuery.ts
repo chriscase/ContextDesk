@@ -76,6 +76,8 @@ export function useWarRoomCollectionQuery(
     : { availability: "idle" } as const;
   const continuationPendingRef = useRef(false);
   const pendingInputKeyRef = useRef(inputKey);
+  const requestedInputKeyRef = useRef<string | null>(null);
+  const inactiveRef = useRef(!enabled);
   const activeCursor = runtime.resources.investigationCollectionQuery?.cursor ?? null;
   const collectionStatus = runtime.resources.investigationCollection.status;
   const activeQueryRef = useRef(runtime.resources.investigationCollectionQuery);
@@ -103,15 +105,34 @@ export function useWarRoomCollectionQuery(
     return () => {
       if (continuationPendingRef.current || view.availability !== "available" || view.value.nextCursor === null || view.refresh === "loading") return;
       continuationPendingRef.current = true;
+      const activeQuery = activeQueryRef.current;
+      if (
+        view.refresh === "failed"
+        && activeQuery !== null
+        && activeQuery.cursor === view.value.nextCursor
+        && collectionBaseKey(activeQuery) === inputKey
+      ) {
+        runtime.refresh.investigationCollection();
+        return;
+      }
       void command(Object.freeze({ ...input, cursor: view.value.nextCursor }));
     };
-  }, [command, enabled, input, view]);
+  }, [command, enabled, input, inputKey, runtime.refresh.investigationCollection, view]);
 
   useEffect(() => {
-    if (!enabled || !command) return;
+    if (!enabled || !command) {
+      requestedInputKeyRef.current = null;
+      inactiveRef.current = true;
+      return;
+    }
+    if (requestedInputKeyRef.current === inputKey) return;
+    requestedInputKeyRef.current = inputKey;
+    const reentering = inactiveRef.current;
+    inactiveRef.current = false;
     const activeQuery = activeQueryRef.current;
     if (
-      activeQuery !== null
+      reentering
+      && activeQuery !== null
       && activeQuery.cursor === null
       && collectionBaseKey(activeQuery) === inputKey
     ) {
@@ -127,7 +148,15 @@ export function useWarRoomCollectionQuery(
     refresh: enabled && command !== null && command !== undefined
       ? () => {
           if (view.availability === "available" && view.refresh === "loading") return;
-          if (runtime.resources.investigationCollectionQuery?.cursor) {
+          const activeQuery = runtime.resources.investigationCollectionQuery;
+          if (
+            view.availability === "available"
+            && view.refresh === "failed"
+            && activeQuery?.cursor === view.value.nextCursor
+            && collectionBaseKey(activeQuery) === inputKey
+          ) {
+            runtime.refresh.investigationCollection();
+          } else if (activeQuery?.cursor) {
             void command(input);
           } else {
             runtime.refresh.investigationCollection();

@@ -150,6 +150,54 @@ describe("investigation collection query shell adapter", () => {
     });
   });
 
+  it("re-reads the same canonical query after returning from investigation detail", async () => {
+    const queryInvestigations = vi.fn<QueryFn>(
+      async () => gatewayOk(pageFixture()),
+    );
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    const rendered = renderProbe(gateway, DEFAULT_COLLECTION_QUERY);
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+
+    rendered.rerender(
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId="case-1"
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <Probe />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>,
+    );
+    expect(queryInvestigations).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <Probe query={DEFAULT_COLLECTION_QUERY} />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>,
+    );
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[1]?.[0]).toEqual(queryInvestigations.mock.calls[0]?.[0]);
+  });
+
   it("continues with the runtime cursor without changing shell query state", async () => {
     let resolveContinuation: ((value: ReturnType<typeof gatewayOk<InvestigationCollectionPageV1>>) => void) | undefined;
     const continuation = new Promise<ReturnType<typeof gatewayOk<InvestigationCollectionPageV1>>>((resolve) => {
@@ -207,6 +255,65 @@ describe("investigation collection query shell adapter", () => {
     refresh?.();
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(3));
     expect(queryInvestigations.mock.calls[2]?.[0].cursor).toBeNull();
+  });
+
+  it("retries a failed continuation only after another click and appends its page", async () => {
+    const [firstItem, secondItem] = makeCaseList().cases;
+    let continuationAttempts = 0;
+    const queryInvestigations = vi.fn<QueryFn>(async (input) => {
+      if (!input.cursor) {
+        return gatewayOk({
+          ...pageFixture(),
+          items: [firstItem!],
+          nextCursor: "eyJwYWdlIjoyfQ",
+        });
+      }
+      continuationAttempts += 1;
+      return continuationAttempts === 1
+        ? { ok: false, error: { kind: "network" } }
+        : gatewayOk({ ...pageFixture(), items: [secondItem!], nextCursor: null });
+    });
+    let nextPage: (() => void) | undefined;
+    function RetryProbe() {
+      const collection = useInvestigationCollectionQuery({
+        ...DEFAULT_COLLECTION_QUERY,
+        q: "checkout",
+      });
+      nextPage = collection.nextPage;
+      return <output data-testid="retry-page">{
+        collection.view.availability === "available"
+          ? `${collection.view.refresh}:${collection.view.value.items.length}`
+          : collection.view.availability
+      }</output>;
+    }
+    render(
+      <InvestigationRuntimeGatewayHarness gateway={createInvestigationGatewayDouble({ queryInvestigations })}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          <RetryProbe />
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("retry-page").textContent).toBe("settled:1"));
+    nextPage?.();
+    await waitFor(() => expect(screen.getByTestId("retry-page").textContent).toBe("failed:1"));
+    expect(queryInvestigations).toHaveBeenCalledTimes(2);
+
+    nextPage?.();
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByTestId("retry-page").textContent).toBe("settled:2"));
+    expect(queryInvestigations.mock.calls[1]?.[0].cursor).toBe("eyJwYWdlIjoyfQ");
+    expect(queryInvestigations.mock.calls[2]?.[0]).toEqual(queryInvestigations.mock.calls[1]?.[0]);
   });
 
   it("does not invoke or expose a query when the shell has no list query", async () => {
