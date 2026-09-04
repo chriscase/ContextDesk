@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
   UI_STRATEGY_PREFERENCE_UPDATE_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+  parseInvestigationCoordinationActionSuccess,
 } from "@cd-collab/contracts";
 import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../evidence/store.js";
 import { CatalogService } from "../modules/catalog/index.js";
@@ -21,6 +23,116 @@ const EXPERIMENT_SUMMARY = JSON.parse(
 ) as unknown;
 
 describe("SQLite local runtime", () => {
+  it("persists coordination projection and exact success replay across reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-coordination-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const first = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const cases = new CaseService(
+        evidence,
+        first.audit,
+        first.cases,
+        new CatalogService(first.catalog, first.audit),
+      );
+      const created = await cases.createCase(actor, { title: "SQLite coordination" }, "test");
+      const input = {
+        schemaId: INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+        investigationId: created.id,
+        action: "claim_self" as const,
+        expectedRevision: 0,
+        idempotencyKey: "sqlite-coord-01",
+      };
+      const originalJson = await cases.coordinateInvestigation(
+        created.id,
+        actor,
+        false,
+        input,
+        "test",
+      );
+      expect(parseInvestigationCoordinationActionSuccess(JSON.parse(originalJson)).applied.revision)
+        .toBe(1);
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      const reopenedCases = new CaseService(
+        evidence,
+        second.audit,
+        second.cases,
+        new CatalogService(second.catalog, second.audit),
+      );
+      expect((await second.cases.getInvestigationCoordination(created.id))?.revision).toBe(1);
+      const replayJson = await reopenedCases.coordinateInvestigation(
+        created.id,
+        actor,
+        false,
+        { ...input, expectedRevision: 99, clientTime: "2026-09-04T20:00:00Z" },
+        "test",
+      );
+      expect(replayJson).toBe(originalJson);
+      expect((await second.cases.listTimeline(created.id)).filter(
+        (event) => event.kind === "investigation_coordination_changed",
+      )).toHaveLength(1);
+      second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls coordination projection and success intent back across SQLite reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-coordination-rollback-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const first = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const cases = new CaseService(
+        evidence,
+        first.audit,
+        first.cases,
+        new CatalogService(first.catalog, first.audit),
+      );
+      const created = await cases.createCase(actor, { title: "SQLite coordination rollback" }, "test");
+      const originalAppend = first.audit.append.bind(first.audit);
+      first.audit.append = async (record) => {
+        if (record.action === "investigation_coordination_changed") {
+          throw new Error("synthetic coordination audit failure");
+        }
+        return originalAppend(record);
+      };
+      await expect(cases.coordinateInvestigation(
+        created.id,
+        actor,
+        false,
+        {
+          schemaId: INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+          investigationId: created.id,
+          action: "claim_self",
+          expectedRevision: 0,
+          idempotencyKey: "sqlite-coord-rollback",
+        },
+        "test",
+      )).rejects.toThrow("synthetic coordination audit failure");
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      expect(await second.cases.getInvestigationCoordination(created.id)).toBeNull();
+      expect(await second.cases.getInvestigationCoordinationSuccessIntent(
+        created.id,
+        actor.id,
+        "sqlite-coord-rollback",
+      )).toBeNull();
+      expect((await second.cases.listTimeline(created.id)).filter(
+        (event) => event.kind === "investigation_coordination_changed",
+      )).toHaveLength(0);
+      expect(await second.audit.list({ action: "investigation_coordination_changed" })).toEqual([]);
+      second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("persists strategy policy, preference, and audit atomically across reopen", async () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-strategy-"));
     const path = join(root, "collab.sqlite");

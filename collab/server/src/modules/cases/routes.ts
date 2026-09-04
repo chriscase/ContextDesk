@@ -14,6 +14,7 @@ import {
   EVIDENCE_LIST_SCHEMA_ID,
   EVIDENCE_UPLOAD_SUCCESS_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
+  INVESTIGATION_COORDINATION_ACTIONS,
   INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   PRIVACY_CLASSES,
   PROVENANCE_SCHEMA_ID,
@@ -22,11 +23,13 @@ import {
   isContributionIdempotencyKey,
   isRfc4122Uuid,
   parseInvestigationLifecycleActionRequest,
+  parseInvestigationCoordinationActionRequest,
   type ArtifactKind,
   type AuthErrorV1,
   type CaseSeverity,
   type CaseStatus,
   type HypothesisStatus,
+  type InvestigationCoordinationAction,
   type PrivacyClass,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -44,6 +47,8 @@ import {
   CaseStoreCommitOutcomeUnknownError,
   ContributionConflictError,
   ArtifactAnnotationConflictError,
+  InvestigationCoordinationChangedError,
+  InvestigationCoordinationRefusedError,
   LifecycleActionRequiredError,
   LifecycleChangedError,
   LifecycleRefusedError,
@@ -72,6 +77,15 @@ function asRecord(body: unknown): Record<string, unknown> {
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+function recognizedCoordinationAction(raw: unknown): InvestigationCoordinationAction | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const action = (raw as Record<string, unknown>).action;
+  return typeof action === "string"
+    && (INVESTIGATION_COORDINATION_ACTIONS as readonly string[]).includes(action)
+    ? action as InvestigationCoordinationAction
+    : null;
 }
 
 function clientTimeInput(body: Record<string, unknown>):
@@ -195,6 +209,14 @@ function domainError(
   if (err instanceof ArtifactAnnotationConflictError) {
     void reply.code(409);
     return { error: "artifact_annotation_conflict" };
+  }
+  if (err instanceof InvestigationCoordinationChangedError) {
+    void reply.code(409);
+    return err.conflict;
+  }
+  if (err instanceof InvestigationCoordinationRefusedError) {
+    void reply.code(409);
+    return err.refusal;
   }
   if (err instanceof CaseStoreCommitOutcomeUnknownError) {
     void reply.code(503);
@@ -1091,6 +1113,79 @@ export async function registerCaseRoutes(
       caseId: id,
       events: await deps.domain.listTimeline(id),
     };
+  });
+
+  app.get("/api/cases/:id/coordination", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return ctx.has("investigation:read") ? { error: "not_found" } : authError("forbidden");
+    }
+    const coordination = await deps.domain.getInvestigationCoordination(
+      id,
+      ctx.actor,
+      ctx.isAdmin,
+    );
+    if (!coordination) {
+      void reply.code(404);
+      return { error: "not_found" };
+    }
+    return coordination;
+  });
+
+  app.post("/api/cases/:id/coordination", async (request, reply) => {
+    const loaded = await sessionOf(request, reply);
+    if ("denied" in loaded) return loaded.denied;
+    const ctx = loaded.ctx;
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return ctx.has("investigation:read") ? { error: "not_found" } : authError("forbidden");
+    }
+
+    // Only the closed action discriminator is inspected before the
+    // action-specific capability. Full strict parsing deliberately follows
+    // that authorization decision.
+    const action = recognizedCoordinationAction(request.body);
+    if (!action) {
+      void reply.code(400);
+      return { error: "invalid", detail: "$.action: expected investigation coordination action" };
+    }
+    const requiredCapability = action === "claim_self" || action === "release_self"
+      ? "investigation:write"
+      : "investigation:coordinate";
+    if (!ctx.has(requiredCapability)) {
+      await deps.audit.append({
+        identity: ctx.actor.id,
+        action: "investigation_coordination_changed",
+        target: "forbidden",
+        origin: request.ip,
+        outcome: "denied",
+      });
+      void reply.code(403);
+      return authError("forbidden");
+    }
+
+    try {
+      const input = parseInvestigationCoordinationActionRequest(request.body);
+      if (input.investigationId !== id) {
+        throw new ContractViolation(
+          "$.investigationId",
+          "must match the route investigation id",
+        );
+      }
+      const successJson = await deps.domain.coordinateInvestigation(
+        id,
+        ctx.actor,
+        ctx.isAdmin,
+        input,
+        request.ip,
+      );
+      return reply.type("application/json").send(successJson);
+    } catch (error) {
+      return domainError(reply, error);
+    }
   });
 
   app.get("/api/cases/:id/snapshots", async (request, reply) => {

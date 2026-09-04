@@ -241,15 +241,16 @@ gate: route handlers call `ctx.has("…")` on that result instead of
 re-deriving `canPerform(roles, …)` booleans. Only the People admin UI's
 inspection view calls the inspection function.
 
-### 6.3 Reserved investigation coordination capability
+### 6.3 Investigation coordination capability
 
 Capability model v2 adds `investigation:coordinate` immediately after
 `investigation:write`. Its default holders are `case-lead` and `admin`; a
 local grant may add it without assigning either role. The normal profile gate
 still removes it from suspended, disabled, and imported-historical identities.
 
-This is an **accepted contract and reserved permission only**. No server route,
-store, audit writer, queue, or UI uses it yet. A future coordination route must
+This is an **accepted contract with a local server integration**. The
+coordination route and store use the permission for action-specific
+authorization; no queue query or UI uses it yet. Every coordination request must
 re-authorize the session and investigation membership for every request; a
 visible button or UI strategy may never stand in for that check.
 `claim_self` uses the existing `investigation:write` gate and requires

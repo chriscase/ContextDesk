@@ -61,6 +61,37 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
           )
         `);
         await app.query(
+          `INSERT INTO investigation_coordination (
+             case_id, coordinator_identity_id, coordinator_username, revision,
+             updated_at, updated_by_identity_id, updated_by_username
+           ) VALUES ($1, $2, 'alice', 1, CURRENT_TIMESTAMP, $2, 'alice')`,
+          ["11111111-1111-1111-1111-111111111111", "uid=alice,ou=people,dc=example,dc=test"],
+        );
+        await app.query(
+          `UPDATE investigation_coordination
+           SET coordinator_identity_id = NULL, coordinator_username = NULL, revision = 2
+           WHERE case_id = $1`,
+          ["11111111-1111-1111-1111-111111111111"],
+        );
+        await app.query(
+          `INSERT INTO investigation_coordination_success_intents (
+             case_id, actor_id, idempotency_key, action, target_identity_id,
+             success_json, created_at
+           ) VALUES ($1, $2, 'coord-grant-01', 'claim_self', NULL, '{}', CURRENT_TIMESTAMP)`,
+          ["11111111-1111-1111-1111-111111111111", "uid=alice,ou=people,dc=example,dc=test"],
+        );
+        expect((await app.query(
+          `SELECT success_json FROM investigation_coordination_success_intents
+           WHERE case_id = $1`,
+          ["11111111-1111-1111-1111-111111111111"],
+        )).rows).toEqual([{ success_json: "{}" }]);
+        await expect(app.query(
+          `UPDATE investigation_coordination_success_intents SET success_json = '{"tampered":true}'`,
+        )).rejects.toThrow(/insert-only|permission denied/);
+        await expect(app.query(
+          `DELETE FROM investigation_coordination_success_intents`,
+        )).rejects.toThrow(/insert-only|permission denied/);
+        await app.query(
           `INSERT INTO timeline_events (case_id, seq, kind, actor_id, actor_username, payload)
            VALUES ($1, 1, 'case_created', $2, 'alice', '{}'::jsonb)`,
           ["11111111-1111-1111-1111-111111111111", "uid=alice,ou=people,dc=example,dc=test"],

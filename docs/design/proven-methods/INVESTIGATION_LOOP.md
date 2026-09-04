@@ -20,9 +20,9 @@ collaboration database with privacy filtering and replay-safe write intents.
 The browser receives only versioned, server-confirmed metadata and never gains
 storage, authorization, or audit authority.
 
-### Operations Queue coordination foundation (accepted contract)
+### Operations Queue coordination foundation (local server integration)
 
-The accepted `InvestigationCoordinationV1` contract records zero or one
+The `InvestigationCoordinationV1` contract and server integration record zero or one
 coordinator for an investigation, a monotonic coordination revision, and
 paired server-recorded update metadata. Four explicit actions distinguish a
 person claiming or releasing their own coordination from a privileged
@@ -38,9 +38,9 @@ fact. Later suspension or membership change may therefore leave a truthful
 stale coordinator until a privileged release cleans it up; no read-time
 process silently clears it.
 
-The contract reserves optimistic concurrency, bounded action-specific
+The server applies the contract's optimistic concurrency, bounded action-specific
 refusals, response echoes that bind action plus target intent, and durable
-idempotency. After session authorization and case-access checks, a future store
+idempotency. After session authorization and case-access checks, the case store
 looks up successful retries by `(investigationId, actorIdentityId,
 idempotencyKey)` before fresh archive, holder, eligibility, and revision
 checks. Replay bypasses only those fresh state checks, never authorization or
@@ -53,7 +53,7 @@ parsed request and authenticated actor to the parsed response for self-action
 identity checks. Every successful action, self-service or privileged, must bind
 that authenticated actor to `applied.updatedBy`; self claim additionally binds
 the actor to `applied.coordinator`, while self release binds the actor to
-`previousCoordinator`. These are future route/controller checks because the
+`previousCoordinator`. These are route/controller checks because the
 standalone response parser intentionally has no authenticated actor context.
 The same contextual gate binds response, parsed request, and route/path
 investigation IDs; binds the echoed action and target to the request; and
@@ -66,12 +66,14 @@ self-claim by the current holder (`already_coordinator`) from another holder
 absent holder. The standalone wire parser enforces only the subset knowable
 without trusting actor or request context.
 
-This is **accepted contract, not shipped behavior**. There is no coordination
-route, persistence, audit/timeline emission, queue filter, or UI in this slice.
-The future server owns membership, capability, archive, eligibility, locking,
-and writes. UI strategies remain presentation-only. Priority, SLA, due dates,
-ranking, leases, presence locks, automatic assignment/membership, and automatic
-status changes are explicit non-goals.
+This is a **local server integration**. `GET` and action-specific `POST` on
+`/api/cases/:id/coordination` use live session capabilities, concealed case
+access, a case-row lock, a materialized projection, insert-only successful
+idempotency envelopes, and atomic timeline/audit writes. Generic activity maps
+the event to a factual investigation update. Queue collection scope and UI are
+not part of this slice. UI strategies remain presentation-only. Priority, SLA,
+due dates, ranking, leases, presence locks, automatic assignment/membership,
+and automatic status changes remain explicit non-goals.
 
 ## 1. Problem
 

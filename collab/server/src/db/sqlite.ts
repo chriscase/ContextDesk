@@ -58,6 +58,8 @@ export const CASE_SQLITE_MUTATORS: ReadonlySet<string> = new Set([
   "appendTimeline",
   "insertRevision",
   "insertArtifact",
+  "saveInvestigationCoordination",
+  "insertInvestigationCoordinationSuccessIntent",
   "insertIntakeBatch",
   "insertContributionIdempotency",
   "insertSnapshot",

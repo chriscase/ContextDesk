@@ -9,8 +9,9 @@ describe("migration versions", () => {
   // experiment row-lock privilege, the administrator model-use policy, the
   // investigation log workbench, structured context, UI strategy governance,
   // first-class artifact annotations, replay-safe singular writes, and one
-  // parent intent for each replay-safe bulk write, and capability model v2.
-  it("pins the canonical PostgreSQL head at capability model v2", () => {
+  // parent intent for each replay-safe bulk write, capability model v2, and
+  // the case-row-serialized investigation coordination projection.
+  it("pins the canonical PostgreSQL head at investigation coordination", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -26,7 +27,8 @@ describe("migration versions", () => {
     expect(versions).toContain("026_artifact_annotation_write_intents");
     expect(versions).toContain("027_artifact_annotation_bulk_write_intents");
     expect(versions).toContain("028_capability_model_v2");
-    expect(latestMigrationVersion()).toBe("028_capability_model_v2");
+    expect(versions).toContain("029_investigation_coordination");
+    expect(latestMigrationVersion()).toBe("029_investigation_coordination");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -36,13 +38,13 @@ describe("migration versions", () => {
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
     expect(versions.slice(-7)).toEqual([
-      "022_software_impact",
       "023_investigation_context",
       "024_ui_strategy_governance",
       "025_artifact_annotations",
       "026_artifact_annotation_write_intents",
       "027_artifact_annotation_bulk_write_intents",
       "028_capability_model_v2",
+      "029_investigation_coordination",
     ]);
   });
 
@@ -122,6 +124,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("026_artifact_annotation_write_intents");
       expect(up.applied).toContain("027_artifact_annotation_bulk_write_intents");
       expect(up.applied).toContain("028_capability_model_v2");
+      expect(up.applied).toContain("029_investigation_coordination");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -221,6 +224,22 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(bulkIntentTables.rows.map((row) => row.tablename)).toEqual([
         "artifact_annotation_bulk_write_intents",
       ]);
+      const coordinationTables = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename IN ('investigation_coordination',
+                             'investigation_coordination_success_intents')
+         ORDER BY tablename`,
+      );
+      expect(coordinationTables.rows.map((row) => row.tablename)).toEqual([
+        "investigation_coordination",
+        "investigation_coordination_success_intents",
+      ]);
+      expect((await migrateDown(client)).rolledBack).toBe("029_investigation_coordination");
+      const coordinationTablesAfterRollback = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename LIKE 'investigation_coordination%'`,
+      );
+      expect(coordinationTablesAfterRollback.rows).toHaveLength(0);
       await client.query(`
         INSERT INTO user_profiles (
           id, username, display_name, status, provenance, directory_sync_status
@@ -378,6 +397,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("026_artifact_annotation_write_intents");
       expect(dry.pending).toContain("027_artifact_annotation_bulk_write_intents");
       expect(dry.pending).toContain("028_capability_model_v2");
+      expect(dry.pending).toContain("029_investigation_coordination");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,
