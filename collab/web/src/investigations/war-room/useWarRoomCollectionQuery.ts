@@ -16,6 +16,8 @@ export interface WarRoomCollectionQueryPresentation {
   readonly nextPage: () => void;
 }
 
+const CONTRACT_DEFAULT_COLLECTION_LIMIT = 50;
+
 function inputForLocation(query: CollectionQueryLocation): InvestigationCollectionQueryInput {
   return Object.freeze({
     q: query.q,
@@ -28,15 +30,29 @@ function inputForLocation(query: CollectionQueryLocation): InvestigationCollecti
   });
 }
 
-function collectionBaseKey(input: InvestigationCollectionQueryInput): string {
+/** Mirrors the Runtime contract's canonical query key with only cursor removed. */
+function canonicalCollectionBaseKey(input: InvestigationCollectionQueryInput): string {
+  const impactIdentity = input.impactIdentity ?? null;
   return JSON.stringify({
-    q: input.q ?? "",
-    status: input.status ?? [],
+    q: (input.q ?? "").trim(),
+    status: [...(input.status ?? [])].sort(),
     includeArchived: input.includeArchived ?? false,
     entityId: input.entityId ?? null,
+    impactIdentity: impactIdentity === null
+      ? null
+      : {
+          productName: impactIdentity.productName.trim(),
+          version: impactIdentity.version.trim(),
+          build: impactIdentity.build.trim(),
+          component: impactIdentity.component.trim(),
+          environment: impactIdentity.environment.trim(),
+        },
     contributorId: input.contributorId ?? null,
     recordedFrom: input.recordedFrom ?? null,
     recordedTo: input.recordedTo ?? null,
+    limit: input.limit === undefined || input.limit === 0
+      ? CONTRACT_DEFAULT_COLLECTION_LIMIT
+      : input.limit,
   });
 }
 
@@ -68,7 +84,7 @@ export function useWarRoomCollectionQuery(
     locationQuery?.recordedTo,
     locationQuery?.status,
   ]);
-  const inputKey = useMemo(() => collectionBaseKey(input), [input]);
+  const inputKey = useMemo(() => canonicalCollectionBaseKey(input), [input]);
   const command = runtime.commands.queryInvestigations;
   const enabled = locationQuery !== undefined && command !== null && command !== undefined;
   const view = enabled
@@ -110,7 +126,7 @@ export function useWarRoomCollectionQuery(
         view.refresh === "failed"
         && activeQuery !== null
         && activeQuery.cursor === view.value.nextCursor
-        && collectionBaseKey(activeQuery) === inputKey
+        && canonicalCollectionBaseKey(activeQuery) === inputKey
       ) {
         runtime.refresh.investigationCollection();
         return;
@@ -134,7 +150,7 @@ export function useWarRoomCollectionQuery(
       reentering
       && activeQuery !== null
       && activeQuery.cursor === null
-      && collectionBaseKey(activeQuery) === inputKey
+      && canonicalCollectionBaseKey(activeQuery) === inputKey
     ) {
       runtime.refresh.investigationCollection();
       return;
@@ -153,7 +169,7 @@ export function useWarRoomCollectionQuery(
             view.availability === "available"
             && view.refresh === "failed"
             && activeQuery?.cursor === view.value.nextCursor
-            && collectionBaseKey(activeQuery) === inputKey
+            && canonicalCollectionBaseKey(activeQuery) === inputKey
           ) {
             runtime.refresh.investigationCollection();
           } else if (activeQuery?.cursor) {

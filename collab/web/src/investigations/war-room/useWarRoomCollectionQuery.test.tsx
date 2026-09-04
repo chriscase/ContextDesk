@@ -1,4 +1,5 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InvestigationRuntimeGatewayHarness,
@@ -92,11 +93,20 @@ describe("War Room collection query adapter", () => {
   });
 
   it("re-reads the same canonical query after returning from investigation detail", async () => {
+    const query: CollectionQueryLocation = {
+      ...DEFAULT_COLLECTION_QUERY,
+      q: "Investigation First ",
+      status: ["open", "resolved"],
+    };
+    const reorderedQuery: CollectionQueryLocation = {
+      ...query,
+      status: ["resolved", "open"],
+    };
     const queryInvestigations = vi.fn<NonNullable<InvestigationGateway["queryInvestigations"]>>(
       async () => gatewayOk(page()),
     );
     const gateway = createInvestigationGatewayDouble({ queryInvestigations });
-    const rendered = renderProbe(gateway, DEFAULT_COLLECTION_QUERY);
+    const rendered = renderProbe(gateway, query);
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
 
     rendered.rerender(
@@ -131,12 +141,71 @@ describe("War Room collection query adapter", () => {
           isInvestigationLocation
           onOpenCreated={vi.fn()}
         >
-          <Probe query={DEFAULT_COLLECTION_QUERY} />
+          <Probe query={reorderedQuery} />
         </InvestigationRuntimeProvider>
       </InvestigationRuntimeGatewayHarness>,
     );
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
     expect(queryInvestigations.mock.calls[1]?.[0]).toEqual(queryInvestigations.mock.calls[0]?.[0]);
+    expect(queryInvestigations.mock.calls[1]?.[0].q).toBe("Investigation First");
+  });
+
+  it("does not refresh an active query with hidden dimensions on list re-entry", async () => {
+    type QueryFn = NonNullable<InvestigationGateway["queryInvestigations"]>;
+    const queryInvestigations = vi.fn<QueryFn>(async () => gatewayOk(page()));
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    let seedQuery: ((input: Parameters<QueryFn>[0]) => void) | null | undefined;
+    function FenceProbe({ query }: { readonly query?: CollectionQueryLocation }) {
+      const collection = useWarRoomCollectionQuery(query);
+      const runtime = useInvestigationRuntime();
+      seedQuery = runtime.commands.queryInvestigations;
+      return <output data-testid="fence-state">{
+        `${collection.view.availability}:${runtime.resources.investigationCollection.status}`
+      }</output>;
+    }
+    const provider = (child: ReactNode) => (
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          {child}
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>
+    );
+    const rendered = render(provider(<FenceProbe />));
+
+    act(() => seedQuery?.({
+      q: "checkout",
+      impactIdentity: {
+        productName: "ContextDesk",
+        version: "1",
+        build: "",
+        component: "web",
+        environment: "test",
+      },
+      limit: 25,
+    }));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("fence-state").textContent).toBe("idle:ready"));
+
+    rendered.rerender(provider(<FenceProbe query={{ ...DEFAULT_COLLECTION_QUERY, q: "checkout" }} />));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({
+      impactIdentity: { productName: "ContextDesk" },
+      limit: 25,
+    });
+    expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({
+      impactIdentity: null,
+      limit: 50,
+    });
   });
 
   it("continues with the runtime cursor without changing shell query state", async () => {
@@ -215,7 +284,10 @@ describe("War Room collection query adapter", () => {
     );
     let nextPage: (() => void) | undefined;
     function RetryProbe() {
-      const collection = useWarRoomCollectionQuery(DEFAULT_COLLECTION_QUERY);
+      const collection = useWarRoomCollectionQuery({
+        ...DEFAULT_COLLECTION_QUERY,
+        q: "checkout ",
+      });
       nextPage = collection.nextPage;
       return <output data-testid="retry-page">{
         collection.view.availability === "available"
@@ -251,5 +323,6 @@ describe("War Room collection query adapter", () => {
     await waitFor(() => expect(screen.getByTestId("retry-page").textContent).toBe("settled:2"));
     expect(queryInvestigations.mock.calls[1]?.[0].cursor).toBe("eyJwYWdlIjoyfQ");
     expect(queryInvestigations.mock.calls[2]?.[0]).toEqual(queryInvestigations.mock.calls[1]?.[0]);
+    expect(queryInvestigations.mock.calls[2]?.[0].q).toBe("checkout");
   });
 });

@@ -2,7 +2,8 @@ import {
   INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
   parseInvestigationCollectionPage,
 } from "@cd-collab/contracts/investigation-collection";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InvestigationRuntimeGatewayHarness,
@@ -151,11 +152,20 @@ describe("investigation collection query shell adapter", () => {
   });
 
   it("re-reads the same canonical query after returning from investigation detail", async () => {
+    const query: CollectionQueryLocation = {
+      ...DEFAULT_COLLECTION_QUERY,
+      q: "Investigation First ",
+      status: ["open", "resolved"],
+    };
+    const reorderedQuery: CollectionQueryLocation = {
+      ...query,
+      status: ["resolved", "open"],
+    };
     const queryInvestigations = vi.fn<QueryFn>(
       async () => gatewayOk(pageFixture()),
     );
     const gateway = createInvestigationGatewayDouble({ queryInvestigations });
-    const rendered = renderProbe(gateway, DEFAULT_COLLECTION_QUERY);
+    const rendered = renderProbe(gateway, query);
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
 
     rendered.rerender(
@@ -190,12 +200,72 @@ describe("investigation collection query shell adapter", () => {
           isInvestigationLocation
           onOpenCreated={vi.fn()}
         >
-          <Probe query={DEFAULT_COLLECTION_QUERY} />
+          <Probe query={reorderedQuery} />
         </InvestigationRuntimeProvider>
       </InvestigationRuntimeGatewayHarness>,
     );
     await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
     expect(queryInvestigations.mock.calls[1]?.[0]).toEqual(queryInvestigations.mock.calls[0]?.[0]);
+    expect(queryInvestigations.mock.calls[1]?.[0].q).toBe("Investigation First");
+  });
+
+  it("does not refresh an active query with hidden dimensions on list re-entry", async () => {
+    const queryInvestigations = vi.fn<QueryFn>(
+      async () => gatewayOk(pageFixture()),
+    );
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    let seedQuery: ((input: Parameters<QueryFn>[0]) => void) | null | undefined;
+    function FenceProbe({ query }: { readonly query?: CollectionQueryLocation }) {
+      const collection = useInvestigationCollectionQuery(query);
+      const runtime = useInvestigationRuntime();
+      seedQuery = runtime.commands.queryInvestigations;
+      return <output data-testid="fence-state">{
+        `${collection.enabled}:${runtime.resources.investigationCollection.status}`
+      }</output>;
+    }
+    const provider = (child: ReactNode) => (
+      <InvestigationRuntimeGatewayHarness gateway={gateway}>
+        <InvestigationRuntimeProvider
+          identityKey="alice"
+          identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+          authorityKey="authority-v1"
+          capabilities={["investigation:read"]}
+          readOnly={false}
+          active
+          focusCaseId={null}
+          isInvestigationLocation
+          onOpenCreated={vi.fn()}
+        >
+          {child}
+        </InvestigationRuntimeProvider>
+      </InvestigationRuntimeGatewayHarness>
+    );
+    const rendered = render(provider(<FenceProbe />));
+
+    act(() => seedQuery?.({
+      q: "checkout",
+      impactIdentity: {
+        productName: "ContextDesk",
+        version: "1",
+        build: "",
+        component: "web",
+        environment: "test",
+      },
+      limit: 25,
+    }));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("fence-state").textContent).toBe("false:ready"));
+
+    rendered.rerender(provider(<FenceProbe query={{ ...DEFAULT_COLLECTION_QUERY, q: "checkout" }} />));
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(2));
+    expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({
+      impactIdentity: { productName: "ContextDesk" },
+      limit: 25,
+    });
+    expect(queryInvestigations.mock.calls[1]?.[0]).toMatchObject({
+      impactIdentity: null,
+      limit: 50,
+    });
   });
 
   it("continues with the runtime cursor without changing shell query state", async () => {
@@ -211,7 +281,7 @@ describe("investigation collection query shell adapter", () => {
     function ProbeWithNext() {
       const collection = useInvestigationCollectionQuery({
         ...DEFAULT_COLLECTION_QUERY,
-        q: "checkout",
+        q: "checkout ",
       });
       nextPage = collection.nextPage;
       refresh = collection.refresh;
@@ -314,6 +384,7 @@ describe("investigation collection query shell adapter", () => {
     await waitFor(() => expect(screen.getByTestId("retry-page").textContent).toBe("settled:2"));
     expect(queryInvestigations.mock.calls[1]?.[0].cursor).toBe("eyJwYWdlIjoyfQ");
     expect(queryInvestigations.mock.calls[2]?.[0]).toEqual(queryInvestigations.mock.calls[1]?.[0]);
+    expect(queryInvestigations.mock.calls[2]?.[0].q).toBe("checkout");
   });
 
   it("does not invoke or expose a query when the shell has no list query", async () => {
