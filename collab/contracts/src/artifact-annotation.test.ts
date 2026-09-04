@@ -129,7 +129,7 @@ describe("artifact annotation contracts", () => {
     expect(() => parseArtifactAnnotationBulkRequest({ ...request, extra: true })).toThrow(/unknown key/);
   });
 
-  it("keeps runtime and JSON Schema rejection aligned for malformed and duplicate ids", () => {
+  it("keeps runtime and JSON Schema aligned for valid payloads and malformed UUIDs", () => {
     const ajv = new (Ajv2020 as new (options?: object) => {
       addSchema(schema: object): void;
       compile(schema: object): (value: unknown) => boolean;
@@ -137,25 +137,57 @@ describe("artifact annotation contracts", () => {
     ajv.addSchema(loadSchema("artifact-annotation.v1.json"));
     const validateRequest = ajv.compile(loadSchema("artifact-annotation-bulk-request.v1.json"));
     const validateResult = ajv.compile(loadSchema("artifact-annotation-bulk-result.v1.json"));
-    const request = {
+    const validRequest = {
       schemaId: ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
-      artifactIds: [ARTIFACT_A, ARTIFACT_A],
-      body: "Duplicate target",
+      artifactIds: [ARTIFACT_A, ARTIFACT_B],
+      body: "Valid target set",
       idempotencyKey: "bulk-request-0002",
     };
-    expect(validateRequest(request)).toBe(false);
-    expect(() => parseArtifactAnnotationBulkRequest(request)).toThrow(/unique/);
+    expect(validateRequest(validRequest)).toBe(true);
+    expect(parseArtifactAnnotationBulkRequest(validRequest)).toEqual(validRequest);
+    const malformedRequest = { ...validRequest, artifactIds: [ARTIFACT_A, "not-a-uuid"] };
+    expect(validateRequest(malformedRequest)).toBe(false);
+    expect(() => parseArtifactAnnotationBulkRequest(malformedRequest)).toThrow(/RFC 4122/);
 
-    const item = {
+    const validResult = {
+      schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
+      caseId: CASE_ID,
+      items: [{ artifactId: ARTIFACT_A, outcome: "not_found" }],
+    } as const;
+    expect(validateResult(validResult)).toBe(true);
+    expect(parseArtifactAnnotationBulkResult(validResult)).toEqual(validResult);
+    const malformedResult = {
+      ...validResult,
+      items: [{ artifactId: "not-a-uuid", outcome: "not_found" }],
+    } as const;
+    expect(validateResult(malformedResult)).toBe(false);
+    expect(() => parseArtifactAnnotationBulkResult(malformedResult)).toThrow(/RFC 4122/);
+  });
+
+  it("documents whole-object schema uniqueness and enforces unique artifactId in the parser", () => {
+    const ajv = new (Ajv2020 as new (options?: object) => {
+      addSchema(schema: object): void;
+      compile(schema: object): (value: unknown) => boolean;
+    })({ strict: true });
+    ajv.addSchema(loadSchema("artifact-annotation.v1.json"));
+    const validateResult = ajv.compile(loadSchema("artifact-annotation-bulk-result.v1.json"));
+    const missingItem = {
       artifactId: ARTIFACT_A,
       outcome: "not_found",
+    } as const;
+    const createdItem = {
+      artifactId: ARTIFACT_A,
+      outcome: "created",
+      annotation: annotation({ caseId: CASE_ID, artifactId: ARTIFACT_A }),
     } as const;
     const result = {
       schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
       caseId: CASE_ID,
-      items: [item, item],
+      items: [missingItem, createdItem],
     };
-    expect(validateResult(result)).toBe(false);
+    // Draft 2020-12 `uniqueItems` compares complete values. It cannot express
+    // uniqueness by one object property without a non-portable extension.
+    expect(validateResult(result)).toBe(true);
     expect(() => parseArtifactAnnotationBulkResult(result)).toThrow(/unique/);
   });
 

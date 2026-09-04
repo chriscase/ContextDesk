@@ -103,6 +103,22 @@ function users() {
 const roleMap =
   "cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin";
 
+class UnknownOnceAfterCommitCaseStore extends MemoryCaseStore {
+  failAfterNextCommit = false;
+
+  override async withAtomic<T>(
+    operation: () => Promise<T>,
+    audit?: Parameters<MemoryCaseStore["withAtomic"]>[1],
+  ): Promise<T> {
+    const result = await super.withAtomic(operation, audit);
+    if (this.failAfterNextCommit) {
+      this.failAfterNextCommit = false;
+      throw new CaseStoreCommitOutcomeUnknownError();
+    }
+    return result;
+  }
+}
+
 async function withApp(
   fn: (ctx: {
     app: Awaited<ReturnType<typeof buildApp>>;
@@ -114,12 +130,12 @@ async function withApp(
     grants: MemoryLocalGrantStore;
     roles: MutableGroupRoleMap;
   }) => Promise<void>,
+  caseStore: MemoryCaseStore = new MemoryCaseStore(),
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-cases-"));
   const store = new FilesystemEvidenceStore({ rootDir: root });
   const audit = new MemoryAuditStore();
   const catalog = new CatalogService(undefined, audit);
-  const caseStore = new MemoryCaseStore();
   const grants = new MemoryLocalGrantStore();
   const domain = new CaseService(store, audit, caseStore, catalog);
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(roleMap));
@@ -447,6 +463,9 @@ describe("cases timeline evidence provenance", () => {
       ]);
       expect(first.items.filter((item) => item.outcome === "created").every((item) => item.annotation.body === body))
         .toBe(true);
+      expect((await caseStore.listTimeline(created.id))
+        .filter((event) => event.kind === "artifact_annotation_created")).toHaveLength(2);
+      expect(await audit.list({ action: "artifact_annotation_bulk_create" })).toHaveLength(1);
 
       const annotationsBefore = await caseStore.listArtifactAnnotationsByCase(created.id);
       const timelineBefore = await caseStore.listTimeline(created.id);
@@ -578,6 +597,19 @@ describe("cases timeline evidence provenance", () => {
       expect(otherActor.items[0]?.outcome).toBe("created");
       expect(otherActor.items[0]?.outcome === "created" && otherActor.items[0].annotation.id)
         .not.toBe(firstIds.get(firstArtifact.id));
+
+      const singularSameKey = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/${secondArtifact.id}/annotations`,
+        headers: { cookie: alice },
+        payload: {
+          body: "The singular retry namespace is independent.",
+          idempotencyKey: key,
+        },
+      });
+      expect(singularSameKey.statusCode).toBe(200);
+      expect(parseArtifactAnnotation(JSON.parse(singularSameKey.body)).artifactId)
+        .toBe(secondArtifact.id);
     });
   });
 
@@ -685,8 +717,9 @@ describe("cases timeline evidence provenance", () => {
     });
   });
 
-  it("maps an unknown bulk annotation COMMIT outcome to a retryable 503", async () => {
-    await withApp(async ({ app, domain }) => {
+  it("replays a real bulk commit after its acknowledgement outcome was unknown", async () => {
+    const caseStore = new UnknownOnceAfterCommitCaseStore();
+    await withApp(async ({ app, audit }) => {
       const alice = await login(app, "alice", ALICE);
       const created = parseCase(JSON.parse((await app.inject({
         method: "POST",
@@ -694,23 +727,65 @@ describe("cases timeline evidence provenance", () => {
         headers: { cookie: alice },
         payload: { title: "Unknown bulk annotation commit" },
       })).body));
-      domain.addArtifactAnnotationsBulk = vi.fn(async () => {
-        throw new CaseStoreCommitOutcomeUnknownError();
-      });
+      const uploaded = parseEvidenceUploadSuccess(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence`,
+        headers: { cookie: alice },
+        payload: {
+          kind: "attachment",
+          filename: "unknown-commit.txt",
+          mediaType: "text/plain",
+          contentBase64: Buffer.from("unknown commit evidence").toString("base64"),
+          summary: "Unknown commit evidence",
+        },
+      })).body)).artifact;
+      const request = {
+        schemaId: ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
+        artifactIds: [uploaded.id],
+        body: "Unknown commit",
+        idempotencyKey: "bulk-unknown-0001",
+      };
+      caseStore.failAfterNextCommit = true;
       const response = await app.inject({
         method: "POST",
         url: `/api/cases/${created.id}/evidence/annotations`,
         headers: { cookie: alice },
-        payload: {
-          schemaId: ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
-          artifactIds: [MISSING_ARTIFACT_ID],
-          body: "Unknown commit",
-          idempotencyKey: "bulk-unknown-0001",
-        },
+        payload: request,
       });
       expect(response.statusCode).toBe(503);
       expect(JSON.parse(response.body)).toEqual({ error: "commit_outcome_unknown" });
-    });
+      const committedAnnotations = await caseStore.listArtifactAnnotationsByCase(created.id);
+      expect(committedAnnotations).toHaveLength(1);
+      expect((await caseStore.listTimeline(created.id))
+        .filter((event) => event.kind === "artifact_annotation_created")).toHaveLength(1);
+      expect(await audit.list({ action: "artifact_annotation_bulk_create" })).toHaveLength(1);
+      const committedIntent = await caseStore.getArtifactAnnotationBulkIdempotency(
+        created.id,
+        users().get("alice")!.identity.id,
+        request.idempotencyKey,
+      );
+      expect(committedIntent).not.toBeNull();
+      const captured = caseStore.capture() as {
+        artifactAnnotationBulkIntents: [string, unknown][];
+      };
+      expect(captured.artifactAnnotationBulkIntents).toHaveLength(1);
+
+      const retry = parseArtifactAnnotationBulkResult(JSON.parse((await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/evidence/annotations`,
+        headers: { cookie: alice },
+        payload: request,
+      })).body));
+      expect(retry.items[0]?.outcome).toBe("replayed");
+      expect(retry.items[0]?.outcome === "replayed" && retry.items[0].annotation.id)
+        .toBe(committedAnnotations[0]?.id);
+      expect(await caseStore.listArtifactAnnotationsByCase(created.id)).toEqual(committedAnnotations);
+      expect((await caseStore.listTimeline(created.id))
+        .filter((event) => event.kind === "artifact_annotation_created")).toHaveLength(1);
+      expect(await audit.list({ action: "artifact_annotation_bulk_create" })).toHaveLength(1);
+      expect((caseStore.capture() as { artifactAnnotationBulkIntents: unknown[] })
+        .artifactAnnotationBulkIntents).toHaveLength(1);
+    }, caseStore);
   });
 
   it("reports an unknown evidence COMMIT outcome without exposing driver details", async () => {
