@@ -50,7 +50,11 @@ must retain the exact payload and key before retrying. Only successes are
 replay records; refusals are re-evaluated from current state. Because response
 envelopes do not carry actor identity, the route/controller must bind the
 parsed request and authenticated actor to the parsed response for self-action
-identity checks.
+identity checks. Every successful action, self-service or privileged, must bind
+that authenticated actor to `applied.updatedBy`; self claim additionally binds
+the actor to `applied.coordinator`, while self release binds the actor to
+`previousCoordinator`. These are future route/controller checks because the
+standalone response parser intentionally has no authenticated actor context.
 
 This is **accepted contract, not shipped behavior**. There is no coordination
 route, persistence, audit/timeline emission, queue filter, or UI in this slice.

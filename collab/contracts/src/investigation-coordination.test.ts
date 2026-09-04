@@ -14,6 +14,7 @@ import {
   INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
   INVESTIGATION_COORDINATION_IDEMPOTENCY,
   INVESTIGATION_COORDINATION_REFUSALS,
+  INVESTIGATION_COORDINATION_RESPONSE_CONTEXT,
   INVESTIGATION_COORDINATION_SCHEMA_ID,
   evaluateInvestigationCoordination,
   parseInvestigationCoordination,
@@ -656,6 +657,16 @@ describe("pure coordination evaluator", () => {
 });
 
 describe("durable idempotency and session parity", () => {
+  it("reserves authenticated actor and request binding for the future route", () => {
+    expect(INVESTIGATION_COORDINATION_RESPONSE_CONTEXT).toEqual({
+      everySuccess: "authenticated_actor_equals_applied_updatedBy",
+      claimSelf: "authenticated_actor_equals_applied_coordinator",
+      releaseSelf: "authenticated_actor_equals_previousCoordinator",
+      requestIntent: "response_action_and_target_equal_parsed_request",
+    });
+    expect(Object.isFrozen(INVESTIGATION_COORDINATION_RESPONSE_CONTEXT)).toBe(true);
+  });
+
   it("keeps every wire parser available from the browser-safe leaf", () => {
     const request = {
       schemaId: INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,

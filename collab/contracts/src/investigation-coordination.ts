@@ -47,6 +47,19 @@ export const INVESTIGATION_COORDINATION_ACTION_AUTHORITY = Object.freeze({
   release_participant: "investigation:coordinate",
 } as const);
 
+/**
+ * Context the future route/controller must bind around a parsed response.
+ * Authenticated actor identity is intentionally not accepted from the wire.
+ * The standalone response parser proves every invariant available inside the
+ * envelope; these contextual comparisons complete the trust boundary.
+ */
+export const INVESTIGATION_COORDINATION_RESPONSE_CONTEXT = Object.freeze({
+  everySuccess: "authenticated_actor_equals_applied_updatedBy",
+  claimSelf: "authenticated_actor_equals_applied_coordinator",
+  releaseSelf: "authenticated_actor_equals_previousCoordinator",
+  requestIntent: "response_action_and_target_equal_parsed_request",
+} as const);
+
 export const INVESTIGATION_COORDINATION_REFUSALS = [
   "investigation_archived",
   "occupied",
@@ -428,7 +441,12 @@ function sameIdentity(
   return left !== null && right !== null && left.identityId === right.identityId;
 }
 
-/** Parse a completed action and reject projections that describe a no-op or another case. */
+/**
+ * Parse a completed action and reject projections that describe a no-op or
+ * another case. The future route/controller must additionally apply
+ * INVESTIGATION_COORDINATION_RESPONSE_CONTEXT with its authenticated actor
+ * and parsed request; neither is trusted from this response body.
+ */
 export function parseInvestigationCoordinationActionSuccess(
   raw: unknown,
 ): InvestigationCoordinationActionSuccessV1 {
