@@ -532,10 +532,10 @@ commissioned to satisfy:
    Room domain and admin routes via `authorizeSession` →
    `usableCapabilities`. Local grants are honored without a role change.
    Suspend/disable/historical fail closed for fresh login and existing
-   sessions. All eleven capabilities have shipped server enforcement;
-   `investigation:coordinate` protects privileged actions on the singular
-   coordination route. The queue query and UI remain absent. §4, §5, §6.2,
-   §6.3.
+   sessions. Ten capabilities have shipped server enforcement;
+   `investigation:coordinate` has a local server integration protecting
+   privileged actions on the singular coordination route. The queue query and
+   UI remain absent. §4, §5, §6.2, §6.3.
 4. **Admin operations.** Shipped - list/search, effective roles/
    capabilities with source, activate/suspend, assign/revoke local grants,
    directory-mapping preview; admin-capability-gated, CSRF-guarded,

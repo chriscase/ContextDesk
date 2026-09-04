@@ -117,6 +117,35 @@ describe("migration versions", () => {
     expect(firstDrop).toBeGreaterThan(intentGuard);
   });
 
+  it("matches rollback locks to the coordination writer's first table access", () => {
+    const migration = listMigrations().find(
+      (file) => file.version === "029_investigation_coordination",
+    );
+    expect(migration).toBeDefined();
+    const downSql = readFileSync(migration!.downPath, "utf8");
+    const serviceSource = readFileSync(
+      new URL("../modules/cases/service.ts", import.meta.url),
+      "utf8",
+    );
+    const methodStart = serviceSource.indexOf("async coordinateInvestigation(");
+    const methodEnd = serviceSource.indexOf("\n  async createCase(", methodStart);
+    expect(methodStart).toBeGreaterThanOrEqual(0);
+    expect(methodEnd).toBeGreaterThan(methodStart);
+    const method = serviceSource.slice(methodStart, methodEnd);
+    const intentLookup = method.indexOf("getInvestigationCoordinationSuccessIntent(");
+    const projectionLookup = method.indexOf("getInvestigationCoordination(");
+    expect(intentLookup).toBeGreaterThanOrEqual(0);
+    expect(projectionLookup).toBeGreaterThan(intentLookup);
+    expect(downSql.indexOf(
+      "LOCK TABLE investigation_coordination_success_intents IN ACCESS EXCLUSIVE MODE",
+    )).toBeLessThan(downSql.indexOf(
+      "LOCK TABLE investigation_coordination IN ACCESS EXCLUSIVE MODE",
+    ));
+    // Existing writers make rollback wait before it holds the projection
+    // lock; new writers cannot pass their first coordination-table access.
+    // The shared intent-first order therefore removes the two-table cycle.
+  });
+
   it("runs down migration SQL and version bookkeeping in one explicit transaction", async () => {
     const queries: string[] = [];
     const client = {
@@ -313,6 +342,34 @@ describe.skipIf(!adminUrl())("migrations", () => {
         "investigation_coordination",
         "investigation_coordination_success_intents",
       ]);
+
+      await expect(client.query(`
+        INSERT INTO investigation_coordination (
+          case_id, coordinator_identity_id, coordinator_username, revision,
+          updated_at, updated_by_identity_id, updated_by_username
+        ) VALUES (
+          '11111111-1111-4111-8111-111111111111', 'synthetic-holder', NULL, 1,
+          CURRENT_TIMESTAMP, 'synthetic-actor', 'synthetic-actor'
+        )
+      `)).rejects.toThrow(/investigation_coordination_coordinator_pair_check/);
+      await expect(client.query(`
+        INSERT INTO investigation_coordination (
+          case_id, coordinator_identity_id, coordinator_username, revision,
+          updated_at, updated_by_identity_id, updated_by_username
+        ) VALUES (
+          '11111111-1111-4111-8111-111111111111', NULL, 'synthetic-holder', 1,
+          CURRENT_TIMESTAMP, 'synthetic-actor', 'synthetic-actor'
+        )
+      `)).rejects.toThrow(/investigation_coordination_coordinator_pair_check/);
+      await expect(client.query(`
+        INSERT INTO investigation_coordination (
+          case_id, coordinator_identity_id, coordinator_username, revision,
+          updated_at, updated_by_identity_id, updated_by_username
+        ) VALUES (
+          '11111111-1111-4111-8111-111111111111', NULL, NULL, 0,
+          CURRENT_TIMESTAMP, 'synthetic-actor', 'synthetic-actor'
+        )
+      `)).rejects.toThrow(/investigation_coordination_revision_check/);
 
       await client.query(`
         INSERT INTO investigation_coordination (

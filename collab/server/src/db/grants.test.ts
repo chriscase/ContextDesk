@@ -73,6 +73,10 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
            WHERE case_id = $1`,
           ["11111111-1111-1111-1111-111111111111"],
         );
+        await expect(app.query(
+          `DELETE FROM investigation_coordination WHERE case_id = $1`,
+          ["11111111-1111-1111-1111-111111111111"],
+        )).rejects.toThrow(/permission denied/);
         await app.query(
           `INSERT INTO investigation_coordination_success_intents (
              case_id, actor_id, idempotency_key, action, target_identity_id,
