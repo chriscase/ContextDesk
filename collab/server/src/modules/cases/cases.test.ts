@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
+  AUTH_ERROR_SCHEMA_ID,
   parseArtifactAnnotation,
   parseArtifactAnnotationBulkResult,
   parseArtifactAnnotationList,
@@ -36,6 +37,7 @@ import {
 import { MemoryCaseStore } from "./store.js";
 
 const ALICE = "fixture-alice-secret";
+const MISSING_CASE_ID = "30000000-0000-4000-8000-000000000003";
 const MISSING_ARTIFACT_ID = "10000000-0000-4000-8000-000000000001";
 const MISSING_CONTRIBUTION_ID = "20000000-0000-4000-8000-000000000002";
 const LOG = "2026-08-15T00:00:00Z mailer timeout id=syn-1\n";
@@ -705,6 +707,17 @@ describe("cases timeline evidence provenance", () => {
         payload: { ...request, artifactIds: [MISSING_ARTIFACT_ID] },
       });
       expect(malformedCase.statusCode).toBe(400);
+      const missingCase = await app.inject({
+        method: "POST",
+        url: `/api/cases/${MISSING_CASE_ID}/evidence/annotations`,
+        headers: { cookie: alice },
+        payload: { ...request, artifactIds: [MISSING_ARTIFACT_ID] },
+      });
+      expect(missingCase.statusCode).toBe(404);
+      expect(JSON.parse(missingCase.body)).toEqual({
+        schemaId: AUTH_ERROR_SCHEMA_ID,
+        error: "forbidden",
+      });
       expect(await caseStore.listArtifactAnnotationsByCase(created.id)).toEqual([]);
       expect(await caseStore.getArtifactAnnotationBulkIdempotency(
         created.id,
