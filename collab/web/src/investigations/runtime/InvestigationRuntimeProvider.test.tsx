@@ -9,9 +9,11 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayResult, InvestigationGateway } from "./gateway.js";
 import {
+  ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
   ARTIFACT_ANNOTATION_SCHEMA_ID,
   type ArtifactAnnotationV1,
 } from "./annotation-contract.js";
+import type { ArtifactAnnotationBulkResultV1 } from "./annotation-contract.js";
 import {
   InvestigationRuntimeGatewayHarness,
   InvestigationRuntimeProvider,
@@ -322,6 +324,7 @@ describe("InvestigationRuntimeProvider", () => {
       updateSituation: null,
       applyLifecycle: null,
       createArtifactAnnotation: null,
+      createArtifactAnnotations: null,
     });
     expect(gateway.listInvestigations).not.toHaveBeenCalled();
     expect(gateway.getInvestigation).not.toHaveBeenCalled();
@@ -370,6 +373,7 @@ describe("InvestigationRuntimeProvider", () => {
       updateSituation: null,
       applyLifecycle: null,
       createArtifactAnnotation: null,
+      createArtifactAnnotations: null,
     });
     expect(gateway.createInvestigation).not.toHaveBeenCalled();
     expect(gateway.uploadEvidence).not.toHaveBeenCalled();
@@ -1003,6 +1007,63 @@ describe("InvestigationRuntimeProvider", () => {
     expect(createArtifactAnnotation).not.toHaveBeenCalled();
   });
 
+  it("submits a target set through one bulk annotation command", async () => {
+    const first = artifactAnnotation({ id: "annotation-bulk-first" });
+    const second = artifactAnnotation({
+      id: "annotation-bulk-second",
+      artifactId: "evidence-second",
+    });
+    const result: ArtifactAnnotationBulkResultV1 = {
+      schemaId: ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
+      caseId: RUNTIME_FIXTURE_IDS.populatedCase,
+      items: [
+        { artifactId: RUNTIME_FIXTURE_IDS.evidence, outcome: "created", annotation: first },
+        { artifactId: "evidence-second", outcome: "replayed", annotation: second },
+      ],
+    };
+    const createArtifactAnnotationsBulk = vi.fn(async () => succeeded(result));
+    const gateway = makeGateway({ createArtifactAnnotationsBulk });
+    render(
+      <ProviderUnderTest
+        identityKey="lead"
+        authorityKey="lead-authority-v1"
+        capabilities={FULL_CAPABILITIES}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    const command = currentRuntime().commands.createArtifactAnnotations;
+    expect(command).not.toBeNull();
+    await act(async () => {
+      await expect(command?.({
+        artifactIds: [RUNTIME_FIXTURE_IDS.evidence, "evidence-second"],
+        body: "A shared observation.",
+        idempotencyKey: "bulk-runtime-0001",
+      })).resolves.toEqual({ status: "succeeded", value: result });
+    });
+    expect(createArtifactAnnotationsBulk).toHaveBeenCalledTimes(1);
+    expect(createArtifactAnnotationsBulk).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      {
+        artifactIds: [RUNTIME_FIXTURE_IDS.evidence, "evidence-second"],
+        body: "A shared observation.",
+        idempotencyKey: "bulk-runtime-0001",
+      },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(currentRuntime().mutations.createArtifactAnnotations).toEqual({
+      status: "succeeded",
+      value: result,
+    });
+  });
+
   it("does not read or expose annotation writes without read authority", async () => {
     const listArtifactAnnotations = vi.fn();
     const createArtifactAnnotation = vi.fn();
@@ -1593,6 +1654,7 @@ describe("InvestigationRuntimeProvider", () => {
       updateSituation: null,
       applyLifecycle: null,
       createArtifactAnnotation: null,
+      createArtifactAnnotations: null,
     });
     await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
     // One initial read, one freshness read for the case transition, and one
@@ -1749,6 +1811,7 @@ describe("InvestigationRuntimeProvider", () => {
         updateSituation: null,
         applyLifecycle: null,
         createArtifactAnnotation: null,
+        createArtifactAnnotations: null,
       });
     });
 
@@ -1920,6 +1983,7 @@ describe("InvestigationRuntimeProvider", () => {
         updateSituation: null,
         applyLifecycle: null,
         createArtifactAnnotation: null,
+        createArtifactAnnotations: null,
       });
     });
 

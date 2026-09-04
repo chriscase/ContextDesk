@@ -63,11 +63,14 @@ export interface EvidenceInventoryView<TEvidence, TAnnotation> {
 }
 
 interface EvidenceAnnotationLink {
+  id: string;
   summaryContributionId?: string | null;
 }
 
 interface AnnotationIdentity {
   id: string;
+  /** Artifact annotations bind directly to evidence; legacy summaries bind by id. */
+  artifactId?: string;
 }
 
 function availableValue<T>(view: ResourceView<T>): T | undefined {
@@ -97,11 +100,19 @@ export function selectEvidenceInventory<
   const annotationById = new Map(
     (availableValue(annotations) ?? []).map((annotation) => [annotation.id, annotation]),
   );
+  const annotationByArtifactId = new Map(
+    (availableValue(annotations) ?? []).flatMap((annotation) =>
+      annotation.artifactId === undefined
+        ? []
+        : [[annotation.artifactId, annotation] as const]),
+  );
   const value = evidence.value.map((item) => ({
     evidence: item,
-    annotation: item.summaryContributionId
-      ? annotationById.get(item.summaryContributionId) ?? null
-      : null,
+    annotation: annotationByArtifactId.get(item.id)
+      ?? (item.summaryContributionId
+        ? annotationById.get(item.summaryContributionId)
+        : undefined)
+      ?? null,
   }));
 
   if (evidence.refresh === "failed") {

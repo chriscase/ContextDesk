@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   READ_ONLY_CAPABILITY_FIXTURE,
   RUNTIME_FIXTURE_IDS,
+  RUNTIME_BULK_ANNOTATION_FIXTURE_IDS,
   VIEWER_CAPABILITY_FIXTURE,
   createAbortIgnoringDeferred,
   createInvestigationGatewayDouble,
@@ -16,6 +17,8 @@ import {
   gatewayUnavailable,
   makeArchiveAllowedLifecycle,
   makeArchiveRefusedLifecycle,
+  makeArtifactAnnotationBulkRequest,
+  makeArtifactAnnotationBulkResult,
   makeCaseList,
   makeContributionList,
   makeEvidenceList,
@@ -59,6 +62,20 @@ describe("Runtime V1 deterministic testkit", () => {
     expect(upload.artifact).toEqual(evidence.artifacts[0]);
     expect(upload.artifact.summaryContributionId).toBe(upload.summary.id);
     expect(contributions.contributions.map(({ id }) => id)).toContain(upload.summary.id);
+  });
+
+  it("provides contract-normalized bulk annotation fixtures with set identities", () => {
+    const request = makeArtifactAnnotationBulkRequest();
+    const result = makeArtifactAnnotationBulkResult();
+    expect(request.artifactIds).toEqual([
+      RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.firstArtifact,
+      RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.secondArtifact,
+    ]);
+    expect(result.items.map((item) => item.artifactId)).toEqual(request.artifactIds);
+    expect(result.items.every((item) =>
+      item.outcome === "not_found"
+      || (item.annotation.caseId === result.caseId && item.annotation.artifactId === item.artifactId),
+    )).toBe(true);
   });
 
   it("provides semantically valid allowed and refused lifecycle views", () => {

@@ -26,10 +26,15 @@ import {
   type PrivacyClass,
 } from "@cd-collab/contracts/investigation-runtime";
 import {
+  ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
   parseArtifactAnnotation,
+  parseArtifactAnnotationBulkResult,
   parseArtifactAnnotationList,
 } from "./annotation-contract.js";
-import type { ArtifactAnnotationV1 } from "./annotation-contract.js";
+import type {
+  ArtifactAnnotationBulkResultV1,
+  ArtifactAnnotationV1,
+} from "./annotation-contract.js";
 import { protectedApiFetch } from "../../protected-api.js";
 import {
   classifyHttpFailure,
@@ -151,6 +156,17 @@ export interface CreateArtifactAnnotationInput {
   readonly idempotencyKey?: string;
 }
 
+/** Transport-ready input for one atomic, bounded annotation target set. */
+export interface CreateArtifactAnnotationsBulkInput {
+  readonly artifactIds: readonly string[];
+  readonly body: string;
+  readonly privacyClass?: PrivacyClass;
+  readonly clientTime?: string;
+  readonly sourceId?: string;
+  /** Required so an uncertain commit can be replayed safely. */
+  readonly idempotencyKey: string;
+}
+
 /** The optional annotation transport is resolved as one fail-closed seam. */
 export interface InvestigationAnnotationGateway {
   listArtifactAnnotations(
@@ -163,6 +179,21 @@ export interface InvestigationAnnotationGateway {
     input: CreateArtifactAnnotationInput,
     options: GatewayRequestOptions,
   ): Promise<GatewayResult<ArtifactAnnotationV1>>;
+  /** Optional V1.1 bulk seam; old doubles may omit it and fail closed. */
+  createArtifactAnnotationsBulk?(
+    investigationId: string,
+    input: CreateArtifactAnnotationsBulkInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<ArtifactAnnotationBulkResultV1>>;
+}
+
+/** Resolved atomic annotation set transport. */
+export interface InvestigationBulkAnnotationGateway {
+  createArtifactAnnotationsBulk(
+    investigationId: string,
+    input: CreateArtifactAnnotationsBulkInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<ArtifactAnnotationBulkResultV1>>;
 }
 
 export interface ApplyLifecycleActionInput {
@@ -383,6 +414,22 @@ function createArtifactAnnotationBody(
   if (input.clientTime !== undefined) body.clientTime = input.clientTime;
   if (input.sourceId !== undefined) body.sourceId = input.sourceId;
   if (input.idempotencyKey !== undefined) body.idempotencyKey = input.idempotencyKey;
+  return body;
+}
+
+function createArtifactAnnotationsBulkBody(
+  artifactIds: readonly string[],
+  input: CreateArtifactAnnotationsBulkInput,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    schemaId: ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
+    artifactIds: Array.from(artifactIds, (artifactId) => artifactId),
+    body: input.body,
+    idempotencyKey: input.idempotencyKey,
+  };
+  if (input.privacyClass !== undefined) body.privacyClass = input.privacyClass;
+  if (input.clientTime !== undefined) body.clientTime = input.clientTime;
+  if (input.sourceId !== undefined) body.sourceId = input.sourceId;
   return body;
 }
 
@@ -797,6 +844,44 @@ function annotationCollectionIdentity(
   return true;
 }
 
+/**
+ * Bind a bulk acknowledgement to exactly the set the caller submitted.
+ * Contract parsing validates each row, while this check prevents a valid
+ * annotation from another target (or an omitted target) crossing the runtime
+ * boundary.
+ */
+function annotationBulkIdentity(
+  investigationId: string,
+  artifactIds: readonly string[],
+  result: ArtifactAnnotationBulkResultV1,
+): boolean {
+  const requested = new Set<string>();
+  for (const artifactId of artifactIds) {
+    if (typeof artifactId !== "string" || artifactId.length === 0 || requested.has(artifactId)) {
+      return false;
+    }
+    requested.add(artifactId);
+  }
+  if (result.caseId !== investigationId || result.items.length !== requested.size) return false;
+
+  const returned = new Set<string>();
+  for (const item of result.items) {
+    if (
+      typeof item.artifactId !== "string"
+      || !requested.has(item.artifactId)
+      || returned.has(item.artifactId)
+    ) return false;
+    returned.add(item.artifactId);
+    if (item.outcome === "not_found") continue;
+    if (
+      item.annotation.caseId !== investigationId
+      || item.annotation.artifactId !== item.artifactId
+      || item.annotation.id.length === 0
+    ) return false;
+  }
+  return returned.size === requested.size;
+}
+
 function caseRoute(investigationId: string, suffix = ""): string {
   return `/api/cases/${encodeURIComponent(investigationId)}${suffix}`;
 }
@@ -904,6 +989,11 @@ const UNAVAILABLE_ANNOTATION_GATEWAY: InvestigationAnnotationGateway = Object.fr
     Promise.resolve(failed<ArtifactAnnotationV1>(WRITE_SEAM_UNAVAILABLE)),
 });
 
+const UNAVAILABLE_BULK_ANNOTATION_GATEWAY: InvestigationBulkAnnotationGateway = Object.freeze({
+  createArtifactAnnotationsBulk: () =>
+    Promise.resolve(failed<ArtifactAnnotationBulkResultV1>(WRITE_SEAM_UNAVAILABLE)),
+});
+
 /**
  * Resolve the write seams a gateway actually implements.
  *
@@ -955,6 +1045,35 @@ export function investigationAnnotationGateway(
         input,
         options,
       );
+    },
+  };
+  resolved.createArtifactAnnotationsBulk = gateway.createArtifactAnnotationsBulk === undefined
+    ? UNAVAILABLE_BULK_ANNOTATION_GATEWAY.createArtifactAnnotationsBulk
+    : function createArtifactAnnotationsBulk(investigationId, input, options) {
+        return gateway.createArtifactAnnotationsBulk!.call(
+          gateway,
+          investigationId,
+          input,
+          options,
+        );
+      };
+  return Object.freeze(resolved);
+}
+
+/**
+ * Resolve the optional atomic set method independently of the legacy
+ * per-artifact pair. Older test doubles remain valid, but any attempt to use
+ * the bulk command against one is reported as unavailable rather than
+ * fanning out through the singular method.
+ */
+export function investigationBulkAnnotationGateway(
+  gateway: InvestigationGateway,
+): InvestigationBulkAnnotationGateway {
+  const createArtifactAnnotationsBulk = gateway.createArtifactAnnotationsBulk;
+  if (createArtifactAnnotationsBulk === undefined) return UNAVAILABLE_BULK_ANNOTATION_GATEWAY;
+  const resolved: InvestigationBulkAnnotationGateway = {
+    createArtifactAnnotationsBulk(investigationId, input, options) {
+      return createArtifactAnnotationsBulk.call(gateway, investigationId, input, options);
     },
   };
   return Object.freeze(resolved);
@@ -1026,6 +1145,45 @@ export const investigationGateway: InvestigationGatewayWithWrites = {
     return result.ok
       ? { ok: true, value: deepFreezeDto([...result.value.annotations]) }
       : result;
+  },
+
+  async createArtifactAnnotationsBulk(investigationId, input, { signal }) {
+    let artifactIds: readonly string[];
+    try {
+      // Snapshot the target set before serialization and before the request
+      // starts. A caller cannot mutate the identity we validate while fetch
+      // is in flight.
+      artifactIds = Object.freeze(Array.from(input.artifactIds, (artifactId) => artifactId));
+    } catch {
+      return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+    }
+    const serialized = serializeMutationBody(
+      signal,
+      () => createArtifactAnnotationsBulkBody(artifactIds, input),
+    );
+    if (!serialized.ok) return failed(serialized.error);
+    const fetched = await fetchProtected(
+      caseRoute(investigationId, "/evidence/annotations"),
+      {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: serialized.value,
+      },
+      signal,
+    );
+    if (!fetched.ok) return failed(fetched.error);
+    if (!fetched.response.ok) {
+      return parseCommitOutcomeUnknownFailure<ArtifactAnnotationBulkResultV1>(
+        fetched.response,
+        signal,
+      );
+    }
+    return parseSuccessfulResponse(
+      fetched.response,
+      signal,
+      parseArtifactAnnotationBulkResult,
+      (value) => annotationBulkIdentity(investigationId, artifactIds, value),
+    );
   },
 
   async previewEvidence(investigationId, artifactId, input, { signal }) {
