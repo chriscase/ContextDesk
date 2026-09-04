@@ -12,6 +12,7 @@ import type { InvestigationStrategyShellProps } from "../contract.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import { EvidenceAnnotationWorkspace } from "../shared/index.js";
 import { ArtifactAnnotationPanel, type ArtifactAnnotationDraft } from "./ArtifactAnnotationPanel.js";
+import { useInvestigationCollectionQuery } from "../collection-query.js";
 
 type InvestigationContext = NonNullable<CaseV1["investigationContext"]>;
 type RuntimeFailure = Extract<ResourceState<never>, { status: "failed" }>["error"];
@@ -212,6 +213,10 @@ function LifecycleControls({ investigation }: { investigation: CaseV1 }) {
 export function InvestigationFirstStrategy(props: InvestigationStrategyShellProps) {
   const runtime = useInvestigationRuntime();
   const investigations = selectResourceView(runtime.resources.investigations);
+  const collection = useInvestigationCollectionQuery(
+    props.focusCaseId === null ? props.collectionQuery : undefined,
+  );
+  const collectionView = collection.view;
   const investigation = selectResourceView(runtime.resources.investigation);
   const evidenceInventory = selectEvidenceInventory(runtime.resources.evidence, runtime.resources.contributions);
   const artifactAnnotationView = selectResourceView(runtime.resources.artifactAnnotations);
@@ -227,8 +232,9 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     }
     return byEvidence;
   }, [artifactAnnotations]);
-  const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [localQuery, setLocalQuery] = useState("");
+  const [localStatusFilter, setLocalStatusFilter] = useState("all");
+  const [localIncludeArchived, setLocalIncludeArchived] = useState(false);
   const [selectedEvidence, setSelectedEvidence] = useState<readonly string[]>([]);
   const [previewArtifactId, setPreviewArtifactId] = useState<string | null>(null);
   const [annotationArtifactId, setAnnotationArtifactId] = useState<string | null>(null);
@@ -250,7 +256,15 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
   const focusedArrival = useRef<string | null>(null);
   const draftOwnerKey = `${runtime.identity.id}\u0000${runtime.identity.username}`;
   const priorDraftOwnerKey = useRef(draftOwnerKey);
-  const cases = investigations.availability === "available" ? investigations.value : [];
+  const legacyCases = investigations.availability === "available" ? investigations.value : [];
+  const cases = collection.enabled
+    ? collectionView.availability === "available" ? collectionView.value.items : []
+    : legacyCases;
+  const query = props.collectionQuery?.q ?? localQuery;
+  const statusFilter = props.collectionQuery
+    ? props.collectionQuery.status[0] ?? "all"
+    : localStatusFilter;
+  const includeArchived = props.collectionQuery?.includeArchived ?? localIncludeArchived;
   const focusedTitle = props.focusCaseId !== null
     && investigation.availability === "available"
     && investigation.value.id === props.focusCaseId
@@ -273,8 +287,9 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
         : investigation.availability === "available" && investigation.value.id === props.focusCaseId
           ? `available:${props.focusCaseId}`
           : null;
+  const listView = collection.enabled ? collectionView : investigations;
   const catalog: CatalogState = investigations.availability === "available"
-    ? cases.length > 0 ? "available" : "empty"
+    ? legacyCases.length > 0 ? "available" : "empty"
     : investigations.availability === "unavailable"
       ? "unavailable"
       : "loading";
@@ -283,13 +298,31 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     : "";
   const contextOptions = useMemo(() => {
     const result: Record<keyof InvestigationContext, string[]> = { productName: [], version: [], build: [], component: [], environment: [], organization: [] };
-    for (const row of cases) for (const [field] of CONTEXT_FIELDS) { const value = text(row.investigationContext?.[field]); if (value && !result[field].includes(value)) result[field].push(value); }
+    for (const row of legacyCases) for (const [field] of CONTEXT_FIELDS) { const value = text(row.investigationContext?.[field]); if (value && !result[field].includes(value)) result[field].push(value); }
     return result;
-  }, [cases]);
+  }, [legacyCases]);
   const filteredCases = useMemo(() => {
+    if (collection.enabled) return cases;
     const normalized = query.trim().toLocaleLowerCase();
     return cases.filter((row) => (statusFilter === "all" || row.status === statusFilter) && (!normalized || [row.id, row.title, row.problemStatement, row.affectedParties, row.impact, row.investigationContext?.productName, row.investigationContext?.build].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalized)));
-  }, [cases, query, statusFilter]);
+  }, [cases, collection.enabled, query, statusFilter]);
+
+  const updateCollectionQuery = (next: { q?: string; status?: string; includeArchived?: boolean }) => {
+    if (props.onCollectionQueryChange && props.collectionQuery) {
+      props.onCollectionQueryChange({
+        ...props.collectionQuery,
+        ...(next.q === undefined ? {} : { q: next.q }),
+        ...(next.status === undefined ? {} : {
+          status: next.status === "all" ? [] : [next.status as typeof props.collectionQuery.status[number]],
+        }),
+        ...(next.includeArchived === undefined ? {} : { includeArchived: next.includeArchived }),
+      });
+      return;
+    }
+    if (next.q !== undefined) setLocalQuery(next.q);
+    if (next.status !== undefined) setLocalStatusFilter(next.status);
+    if (next.includeArchived !== undefined) setLocalIncludeArchived(next.includeArchived);
+  };
 
   useEffect(() => {
     if (!props.startSignal) return;
@@ -437,21 +470,27 @@ export function InvestigationFirstStrategy(props: InvestigationStrategyShellProp
     // stays idle. Reporting that as loading would promise an arrival that the
     // shared permission boundary has already refused.
     const denied = !runtime.capabilities.canRead;
-    const busy = !denied && (investigations.availability === "loading" || (investigations.availability === "available" && investigations.refresh === "loading"));
-    const countLabel = investigations.availability === "available"
-      ? `${filteredCases.length} shown · ${cases.length} total`
-      : denied || investigations.availability === "unavailable"
+    const busy = !denied && (listView.availability === "loading" || (listView.availability === "available" && listView.refresh === "loading"));
+    const countLabel = listView.availability === "available"
+      ? collection.enabled
+        ? `${filteredCases.length} shown${collectionView.availability === "available" && collectionView.value.hiddenArchivedCount ? ` · ${collectionView.value.hiddenArchivedCount} archived hidden` : ""}`
+        : `${filteredCases.length} shown · ${cases.length} total`
+      : denied || listView.availability === "unavailable"
         ? "Count unavailable"
         : "Counting investigations…";
+    const statusFacets = collection.enabled && collectionView.availability === "available"
+      ? collectionView.value.facets.status.top
+      : [];
     return <section className="investigation-first__browse" aria-labelledby="investigation-first-browse-title" aria-busy={busy}>
       <div className="investigation-first__section-heading"><div><p className="investigation-first__eyebrow">Browse work</p><h2 id="investigation-first-browse-title" ref={browseHeadingRef} tabIndex={-1}>Investigations</h2><p>Open a record to see what is known, what is missing, and what can happen next.</p></div><span className="investigation-first__count" aria-live="polite">{countLabel}</span></div>
-      <div className="investigation-first__filters"><label><span>Search</span><input className="login__input" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Title, product, build, or problem" aria-label="Search investigations" /></label><label><span>Status</span><select className="login__input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter investigations by status"><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label></div>
+      <div className="investigation-first__filters"><label><span>Search</span><input className="login__input" type="search" value={query} onChange={(event) => updateCollectionQuery({ q: event.target.value })} placeholder="Title, product, build, or problem" aria-label="Search investigations" /></label><label><span>Status</span><select className="login__input" value={statusFilter} onChange={(event) => updateCollectionQuery({ status: event.target.value })} aria-label="Filter investigations by status"><option value="all">All statuses</option><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option><option value="archived">Archived</option></select></label><label className="investigation-first__checkbox"><input type="checkbox" checked={includeArchived} onChange={(event) => updateCollectionQuery({ includeArchived: event.target.checked })} /> <span>Include archived</span></label></div>
+      {statusFacets.length > 0 ? <div className="investigation-first__facets" aria-label="Investigation status counts">{statusFacets.map((facet) => <button key={facet.key} type="button" aria-pressed={statusFilter === facet.key} onClick={() => updateCollectionQuery({ status: statusFilter === facet.key ? "all" : facet.key })}>{facet.key} <strong>{facet.count}</strong></button>)}</div> : null}
       {denied ? <p className="investigation-first__empty" role="status">Your current access does not include reading investigations, so this list is unavailable. No investigation data was requested.</p> : null}
-      {!denied && (investigations.availability === "idle" || investigations.availability === "loading") ? <p className="investigation-first__empty" role="status">Loading investigations…</p> : null}
-      {investigations.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(investigations.error, "list")}</p><button type="button" onClick={runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
-      {investigations.availability === "available" && investigations.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(investigations.refreshError, "list")}</p><button type="button" onClick={runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
-      {investigations.availability === "available" && filteredCases.length === 0 ? <p className="investigation-first__empty">{runtime.capabilities.canCreate ? "No investigations match this view. Try a different search or create a new one." : "No investigations match this view. Try a different search."}</p> : null}
-      {investigations.availability === "available" ? <ul className="investigation-first__list">{filteredCases.map((row) => { const missing = [row.problemStatement, row.affectedParties, row.impact].filter((value) => !text(value)).length; return <li key={row.id} className="investigation-first__list-item"><button type="button" className="investigation-first__list-button" onClick={() => props.onOpenCase(row.id)}><span className="investigation-first__list-title">{row.title || "Untitled investigation"}</span><span className="investigation-first__list-meta"><span className={`status-pill status-pill--${row.status}`}>{row.status}</span><span>{row.severity}</span>{row.investigationContext?.productName ? <span>{row.investigationContext.productName}{row.investigationContext.build ? ` · ${row.investigationContext.build}` : ""}</span> : null}</span><span className="investigation-first__list-hint">{missing ? `${missing} key ${missing === 1 ? "field" : "fields"} not recorded` : "Core context recorded"}</span></button></li>; })}</ul> : null}
+      {!denied && (listView.availability === "idle" || listView.availability === "loading") ? <p className="investigation-first__empty" role="status">Loading investigations…</p> : null}
+      {listView.availability === "unavailable" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(listView.error, "list")}</p><button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
+      {listView.availability === "available" && listView.refresh === "failed" ? <div className="investigation-first__error" role="alert"><p>{failureCopy(listView.refreshError, "list")}</p><button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry loading investigations</button></div> : null}
+      {listView.availability === "available" && filteredCases.length === 0 ? <p className="investigation-first__empty">{runtime.capabilities.canCreate ? "No investigations match this view. Try a different search or create a new one." : "No investigations match this view. Try a different search."}</p> : null}
+      {listView.availability === "available" ? <ul className="investigation-first__list">{filteredCases.map((row) => { const missing = [row.problemStatement, row.affectedParties, row.impact].filter((value) => !text(value)).length; return <li key={row.id} className="investigation-first__list-item"><button type="button" className="investigation-first__list-button" onClick={() => props.onOpenCase(row.id)}><span className="investigation-first__list-title">{row.title || "Untitled investigation"}</span><span className="investigation-first__list-meta"><span className={`status-pill status-pill--${row.status}`}>{row.status}</span><span>{row.severity}</span>{row.investigationContext?.productName ? <span>{row.investigationContext.productName}{row.investigationContext.build ? ` · ${row.investigationContext.build}` : ""}</span> : null}</span><span className="investigation-first__list-hint">{missing ? `${missing} key ${missing === 1 ? "field" : "fields"} not recorded` : "Core context recorded"}</span></button></li>; })}</ul> : null}
     </section>;
   }
 

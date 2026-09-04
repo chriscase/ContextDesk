@@ -1,5 +1,9 @@
 import type { ComponentType } from "react";
-import type { StageId, WorkFocus } from "../../app-location.js";
+import type {
+  CollectionQueryLocation,
+  StageId,
+  WorkFocus,
+} from "../../app-location.js";
 import {
   DEFAULT_UI_STRATEGY_ID,
   type UiStrategyId,
@@ -37,6 +41,10 @@ export interface InvestigationStrategyShellProps {
   readonly onOpenCase: (caseId: string) => void;
   readonly onNavigateInvestigation: (target: InvestigationStrategyNavigation) => void;
   readonly onExitFocus: () => void;
+  /** List-route query state owned by the shell; omitted on focused records. */
+  readonly collectionQuery?: CollectionQueryLocation;
+  /** Requests a canonical list query change; the strategy never writes history. */
+  readonly onCollectionQueryChange?: (query: CollectionQueryLocation) => void;
   readonly onOpenAdvancedTools?: (caseId: string, stage: StageId) => void;
   readonly onFocusedCaseTitle?: (title: string | null) => void;
 }

@@ -16,6 +16,7 @@ import {
 } from "@cd-collab/contracts/admin";
 import {
   ADMINISTRATION,
+  DEFAULT_COLLECTION_QUERY,
   EVIDENCE_STORAGE_ADMIN,
   HOME,
   LDAP_ADMIN,
@@ -1180,6 +1181,18 @@ export function App() {
                       onExitFocus={() =>
                         navigate({ area: "investigations", caseId: null, stage: "situation" })
                       }
+                      {...(work.caseId === null
+                        ? {
+                            collectionQuery: work.collectionQuery ?? DEFAULT_COLLECTION_QUERY,
+                            onCollectionQueryChange: (collectionQuery) =>
+                              navigate({
+                                area: "investigations",
+                                caseId: null,
+                                stage: "situation",
+                                collectionQuery,
+                              }, "replace"),
+                          }
+                        : {})}
                       onOpenAdvancedTools={(caseId, stage) => {
                         // Specialist tools remain in the reference War Room. The
                         // switch is explicit in the button label and preserves the

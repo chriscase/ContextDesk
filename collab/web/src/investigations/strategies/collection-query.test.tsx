@@ -1,0 +1,138 @@
+import {
+  INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+  parseInvestigationCollectionPage,
+} from "@cd-collab/contracts/investigation-collection";
+import { cleanup, render, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  InvestigationRuntimeGatewayHarness,
+  createInvestigationGatewayDouble,
+  gatewayOk,
+  makeCaseList,
+  type InvestigationGateway,
+} from "../runtime/testkit/index.js";
+import {
+  InvestigationRuntimeProvider,
+  useInvestigationRuntime,
+} from "../runtime/public.js";
+import {
+  DEFAULT_COLLECTION_QUERY,
+  parsePathname,
+  pathFor,
+  sameLocation,
+  type CollectionQueryLocation,
+} from "../../app-location.js";
+import { useInvestigationCollectionQuery } from "./collection-query.js";
+
+afterEach(() => cleanup());
+type QueryFn = NonNullable<InvestigationGateway["queryInvestigations"]>;
+
+function emptyFacets() {
+  return {
+    status: { top: [], otherCount: 0 },
+    entity: { top: [], otherCount: 0 },
+    impactIdentity: { top: [], otherCount: 0 },
+    contributor: { top: [], otherCount: 0 },
+  };
+}
+
+function pageFixture() {
+  return parseInvestigationCollectionPage({
+    schemaId: INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+    items: makeCaseList().cases,
+    nextCursor: null,
+    hiddenArchivedCount: 0,
+    facets: emptyFacets(),
+  });
+}
+
+function Probe({ query }: { readonly query?: CollectionQueryLocation }) {
+  const collection = useInvestigationCollectionQuery(query);
+  const runtime = useInvestigationRuntime();
+  return <output data-testid="query-state">{`${collection.enabled}:${runtime.resources.investigationCollectionQuery?.q ?? "idle"}`}</output>;
+}
+
+function renderProbe(gateway: InvestigationGateway, query?: CollectionQueryLocation) {
+  return render(
+    <InvestigationRuntimeGatewayHarness gateway={gateway}>
+      <InvestigationRuntimeProvider
+        identityKey="alice"
+        identity={{ id: "alice", username: "alice", displayName: "Alice" }}
+        authorityKey="authority-v1"
+        capabilities={["investigation:read"]}
+        readOnly={false}
+        active
+        focusCaseId={null}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+      >
+        <Probe {...(query ? { query } : {})} />
+      </InvestigationRuntimeProvider>
+    </InvestigationRuntimeGatewayHarness>,
+  );
+}
+
+describe("investigation collection query shell adapter", () => {
+  it("round-trips approved list filters and omits runtime cursor details", () => {
+    const location = parsePathname(
+      "/investigations",
+      "?q=checkout&status=resolved&status=open&includeArchived=true&entityId=service:checkout&contributorId=alice&recordedFrom=2026-02-01T00:00:00.000Z",
+    );
+    expect(location).toMatchObject({ area: "investigations", caseId: null });
+    expect((location as { collectionQuery?: CollectionQueryLocation }).collectionQuery?.status).toEqual([
+      "open",
+      "resolved",
+    ]);
+    const url = pathFor(location);
+    expect(url).toContain("q=checkout");
+    expect(url).toContain("status=open");
+    expect(url).toContain("status=resolved");
+    expect(url).not.toContain("cursor");
+    expect(url).not.toContain("schemaId");
+    const reparsed = new URL(url, "https://contextdesk.invalid");
+    expect(parsePathname(reparsed.pathname, reparsed.search)).toEqual(location);
+  });
+
+  it("treats omitted and explicit defaults as the same list location", () => {
+    const omitted = parsePathname("/investigations");
+    const explicit = {
+      ...omitted,
+      collectionQuery: DEFAULT_COLLECTION_QUERY,
+    };
+    expect(sameLocation(omitted, explicit)).toBe(true);
+    expect(pathFor(explicit)).toBe("/investigations");
+  });
+
+  it("fails closed for malformed filters and leaves a canonical bare list route", () => {
+    const location = parsePathname("/investigations", "?status=unknown&includeArchived=yes");
+    expect(location).toEqual({ area: "investigations", caseId: null, stage: "situation" });
+    expect(pathFor(location)).toBe("/investigations");
+  });
+
+  it("invokes the additive runtime command with normalized shell filters", async () => {
+    const queryInvestigations = vi.fn<QueryFn>(
+      async (_input, _options) => gatewayOk(pageFixture()),
+    );
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    renderProbe(gateway, {
+      ...DEFAULT_COLLECTION_QUERY,
+      q: "checkout",
+      status: ["monitoring"],
+    });
+    await waitFor(() => expect(queryInvestigations).toHaveBeenCalledTimes(1));
+    expect(queryInvestigations.mock.calls[0]?.[0]).toMatchObject({
+      q: "checkout",
+      status: ["monitoring"],
+      includeArchived: false,
+    });
+  });
+
+  it("does not invoke or expose a query when the shell has no list query", async () => {
+    const queryInvestigations = vi.fn<QueryFn>();
+    const gateway = createInvestigationGatewayDouble({ queryInvestigations });
+    renderProbe(gateway);
+    await waitFor(() => expect(document.querySelector("[data-testid=query-state]")?.textContent).toBe("false:idle"));
+    expect(queryInvestigations).not.toHaveBeenCalled();
+    expect(gateway.listInvestigations).toHaveBeenCalled();
+  });
+});
