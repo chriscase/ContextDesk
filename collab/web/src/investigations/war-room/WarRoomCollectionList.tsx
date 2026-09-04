@@ -143,7 +143,9 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
       ) : null}
       {page.availability === "available" && items.length === 0 ? (
         <p className="case-list__empty" role="status">
-          {props.query.q || status !== "all" ? "No investigations match the current search or filter." : "No investigations have been recorded yet."}
+          {props.query.q || status !== "all" || props.query.entityId || props.query.contributorId
+            ? "No investigations match the current search or filter."
+            : "No investigations have been recorded yet."}
         </p>
       ) : null}
       {page.availability === "available" && items.length > 0 ? (

@@ -417,7 +417,9 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
           {listView.availability === "available" && filteredCases.length === 0 ? (
             <StrategyStateNotice title={browseCases.length === 0 ? "No investigations recorded" : "No matching investigations"}>
               {browseCases.length === 0
-                ? "The available collection is empty."
+                ? collectionQuery?.entityId || collectionQuery?.contributorId
+                  ? "The available collection has no investigations matching the selected recorded values."
+                  : "The available collection is empty."
                 : "Try a different search or recorded status."}
             </StrategyStateNotice>
           ) : null}
