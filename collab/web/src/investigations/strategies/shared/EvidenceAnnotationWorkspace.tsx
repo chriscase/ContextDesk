@@ -159,8 +159,8 @@ export function EvidenceAnnotationWorkspace({
   }, [scopeKey, selectionKey]);
 
   useEffect(() => {
-    if (!canReadPrivate && privacyClass === "owner_only") setPrivacyClass("share_safe");
-  }, [canReadPrivate, privacyClass]);
+    if (!retryBlocked && !canReadPrivate && privacyClass === "owner_only") setPrivacyClass("share_safe");
+  }, [canReadPrivate, privacyClass, retryBlocked]);
 
   useEffect(() => {
     if (bulkMutation.status !== "failed") return;

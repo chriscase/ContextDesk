@@ -66,8 +66,8 @@ function mount(overrides: Partial<EvidenceAnnotationWorkspaceProps> = {}) {
     onClearSelection: vi.fn(),
     ...overrides,
   };
-  render(<EvidenceAnnotationWorkspace {...props} />);
-  return { props, bulkCommand };
+  const view = render(<EvidenceAnnotationWorkspace {...props} />);
+  return { props, bulkCommand, rerender: view.rerender };
 }
 
 afterEach(() => cleanup());
@@ -136,7 +136,7 @@ describe("shared evidence annotation workspace", () => {
       status: "failed" as const,
       error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
     }));
-    mount({ selectedArtifactIds: ["artifact-a", "artifact-b"], bulkCommand, onRefresh });
+    const { rerender, props } = mount({ selectedArtifactIds: ["artifact-a", "artifact-b"], bulkCommand, onRefresh });
     fireEvent.change(screen.getByRole("textbox", { name: "Durable note for these files" }), { target: { value: "Review before retry." } });
     fireEvent.click(screen.getByRole("button", { name: "Save one note to selected evidence" }));
 
@@ -146,6 +146,20 @@ describe("shared evidence annotation workspace", () => {
     expect(screen.getByRole("textbox", { name: "Durable note for these files" }).getAttribute("disabled")).not.toBeNull();
     expect(screen.getByRole("combobox", { name: "Privacy" }).getAttribute("disabled")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Save one note to selected evidence" }).getAttribute("disabled")).not.toBeNull();
+    rerender(<EvidenceAnnotationWorkspace
+      scopeKey={props.scopeKey}
+      evidence={[artifact("artifact-a"), artifact("artifact-b"), artifact("artifact-c")]}
+      selectedArtifactIds={["artifact-a", "artifact-b"]}
+      annotations={{ availability: "available", value: [], refresh: "settled" }}
+      canAnnotate
+      canReadPrivate={false}
+      readOnly={false}
+      bulkCommand={bulkCommand}
+      bulkMutation={{ status: "idle" }}
+      bulkErrorCopy={null}
+      onRefresh={onRefresh}
+      onClearSelection={vi.fn()}
+    />);
     fireEvent.click(screen.getByRole("button", { name: "Refresh annotation history" }));
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
 

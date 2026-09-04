@@ -548,12 +548,15 @@
 @media (forced-colors: active) {
   .strategy-kit__annotation-workspace,
   .strategy-kit__annotation-target,
-  .strategy-kit__annotation-form textarea,
   .strategy-kit__annotation-form select,
   .strategy-kit__annotation-form-row button,
   .strategy-kit__annotation-selection-actions button {
     border-color: CanvasText;
     forced-color-adjust: auto;
+  }
+
+  .strategy-kit__annotation-workspace :is(textarea, select, button):focus-visible {
+    outline-color: Highlight;
   }
 }
 
