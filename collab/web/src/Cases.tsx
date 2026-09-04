@@ -17,7 +17,13 @@ import {
   type SourceOption,
   type TimelineEvent,
 } from "./TriageWorkspace.js";
-import { isDiscussionSection, isWorkLocation, parsePathname, type WorkFocus } from "./app-location.js";
+import {
+  isDiscussionSection,
+  isWorkLocation,
+  parsePathname,
+  type CollectionQueryLocation,
+  type WorkFocus,
+} from "./app-location.js";
 import { EmptyState, StageFlowDiagram, StageIcon } from "./graphics.js";
 import { ArtifactExcerpt } from "./evidence-excerpt.js";
 import { focusArrivalCopy } from "./route-focus-copy.js";
@@ -33,6 +39,9 @@ import { LifecyclePanel, type LifecyclePanelProps } from "./LifecyclePanel.js";
 import { ResolutionForm } from "./ResolutionForm.js";
 import { groupRepeatedActivity, repeatLabel } from "./activity-grouping.js";
 import { loadEntities, type EntityRow } from "./Entities.js";
+import type { InvestigationCollectionPageV1, ResourceView } from "./investigations/runtime/public.js";
+import { WarRoomCollectionList } from "./investigations/war-room/WarRoomCollectionList.js";
+import { fetchLegacyCaseList } from "./legacy-cases-fetch.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
 
@@ -758,6 +767,11 @@ export function Cases(props: {
   onExitFocus?: (target: "overview" | "investigations") => void;
   onFocusedCaseTitle?: (title: string | null) => void;
   lifecycleBinding?: Omit<LifecyclePanelProps, "onChanged">;
+  /** Optional shell/runtime-owned collection page for the production War Room. */
+  collectionPage?: ResourceView<InvestigationCollectionPageV1>;
+  collectionQuery?: CollectionQueryLocation;
+  onCollectionQueryChange?: (query: CollectionQueryLocation) => void;
+  onCollectionRefresh?: () => void;
 }) {
   const roles = props.roles ?? [];
   const readOnly = props.readOnly === true;
@@ -774,9 +788,13 @@ export function Cases(props: {
   const canWrite = !readOnly && (capabilitySet
     ? capabilitySet.has("investigation:write")
     : canLead || roles.includes("contributor"));
+  const canRead = capabilitySet
+    ? capabilitySet.has("investigation:read")
+    : roles.includes("case-lead") || roles.includes("admin") || roles.includes("contributor");
   const canReadPrivate = capabilitySet
     ? capabilitySet.has("evidence:private:read")
     : roles.includes("case-lead") || roles.includes("admin");
+  const collectionMode = props.collectionPage !== undefined;
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [casesLoaded, setCasesLoaded] = useState(false);
   const [activities, setActivities] = useState<ActivityItem[]>([]);
@@ -864,23 +882,25 @@ export function Cases(props: {
   }
 
   const refresh = useCallback(async () => {
+    if (collectionMode) {
+      props.onCollectionRefresh?.();
+      return;
+    }
     const generation = ++casesRefreshGeneration.current;
-    const res = await protectedApiFetch("/api/cases");
+    const response = await fetchLegacyCaseList();
     if (generation !== casesRefreshGeneration.current) return;
-    if (!res.ok) {
+    if (!response.ok) {
       // Authorization loss must not leave previously cached case metadata on
       // screen. Transient availability failures keep the last confirmed view.
-      if (res.status === 401 || res.status === 403) {
+      if (response.status === 401 || response.status === 403) {
         setCases([]);
         setCasesLoaded(true);
       }
       return;
     }
-    const body = (await res.json()) as { cases?: CaseRow[] };
-    if (generation !== casesRefreshGeneration.current) return;
-    setCases(body.cases ?? []);
+    setCases((response.cases ?? []) as CaseRow[]);
     setCasesLoaded(true);
-  }, []);
+  }, [collectionMode, props.onCollectionRefresh]);
 
   /**
    * Entity labels and the involvement index behind the list filter. Both fail
@@ -962,12 +982,12 @@ export function Cases(props: {
   }, []);
 
   useEffect(() => {
-    void refresh();
+    if (!collectionMode) void refresh();
     void refreshSources();
     const refreshCatalog = () => void refreshSources();
     window.addEventListener("contextdesk:source-catalog-changed", refreshCatalog);
     return () => window.removeEventListener("contextdesk:source-catalog-changed", refreshCatalog);
-  }, [refresh, refreshSources]);
+  }, [collectionMode, refresh, refreshSources]);
 
   // Work recorded elsewhere in the room — a workstream that finished, failed,
   // or was canceled in Analyze — never passed through this component, so the
@@ -1474,7 +1494,7 @@ export function Cases(props: {
     </form>
   ) : null;
 
-  const investigationList = (
+  const legacyInvestigationList = (
     <section className="case-list" aria-label="Investigations">
       <div className="case-list__controls">
         <label className="case-list__search">
@@ -1635,6 +1655,25 @@ export function Cases(props: {
       {createForm}
     </section>
   );
+
+  const investigationList = collectionMode && props.collectionQuery
+    ? (
+      <>
+        <WarRoomCollectionList
+          page={props.collectionPage!}
+          query={props.collectionQuery}
+          canRead={capabilitySet ? capabilitySet.has("investigation:read") : canRead}
+          readOnly={readOnly}
+          {...(props.onCollectionQueryChange
+            ? { onQueryChange: props.onCollectionQueryChange }
+            : {})}
+          onRefresh={props.onCollectionRefresh ?? (() => undefined)}
+          onOpenCase={openCase}
+        />
+        {createForm}
+      </>
+    )
+    : legacyInvestigationList;
 
   if (!current && focusCaseId) {
     return (
