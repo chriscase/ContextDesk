@@ -785,12 +785,15 @@ export class CaseService {
   ): Promise<InvestigationCollectionPageV1> {
     const rows = await this.store.listCases();
     const authorized = rows.filter((row) => isAdmin || this.isMember(row, actor.id));
+    const graph = this.collectionGraph
+      ? await this.collectionGraph.snapshot(authorized.map((row) => row.id))
+      : null;
     return buildInvestigationCollectionPage({
       authorized,
       query,
       actor,
       isAdmin,
-      graph: this.collectionGraph,
+      graph,
       toCase: (row) => this.toCase(row),
     });
   }

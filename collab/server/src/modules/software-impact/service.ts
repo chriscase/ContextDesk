@@ -123,6 +123,27 @@ export class SoftwareImpactService {
     };
   }
 
+  /**
+   * Canonical identities recorded for a membership-authorized investigation
+   * set. Status, notes, authors, and lifecycle metadata remain outside the
+   * collection-query graph.
+   */
+  async collectionIdentities(
+    visibleCaseIds: readonly string[],
+  ): Promise<Array<{ caseId: string } & SoftwareImpactIdentityV1>> {
+    const allowed = new Set(visibleCaseIds);
+    return (await this.store.listAll())
+      .filter((row) => allowed.has(row.caseId))
+      .map((row) => ({
+        caseId: row.caseId,
+        productName: row.productName,
+        version: row.version,
+        build: row.build,
+        component: row.component,
+        environment: row.environment,
+      }));
+  }
+
   async record(
     caseId: string,
     actor: Actor,

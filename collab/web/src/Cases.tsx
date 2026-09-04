@@ -928,6 +928,11 @@ export function Cases(props: {
     }
   }, []);
 
+  const refreshRecordGraph = useCallback(async () => {
+    await refreshRecordIndex();
+    props.onCollectionRefresh?.();
+  }, [props.onCollectionRefresh, refreshRecordIndex]);
+
   const refreshActivity = useCallback(async () => {
     const res = await protectedApiFetch("/api/investigation-activity?limit=30");
     if (!res.ok) {
@@ -1664,6 +1669,9 @@ export function Cases(props: {
           query={props.collectionQuery}
           canRead={capabilitySet ? capabilitySet.has("investigation:read") : canRead}
           readOnly={readOnly}
+          entityOptions={entityOptions}
+          occurredFrom={occurredFrom}
+          onOccurredFromChange={setOccurredFrom}
           {...(props.onCollectionQueryChange
             ? { onQueryChange: props.onCollectionQueryChange }
             : {})}
@@ -2538,7 +2546,7 @@ export function Cases(props: {
             onOccurrenceSaved={async () => {
               await Promise.all([refresh(), refreshActivity()]);
             }}
-            onInvolvementChanged={refreshRecordIndex}
+            onInvolvementChanged={refreshRecordGraph}
             onOpenInvestigation={(id) => openCase(id)}
           />
           <section className="situation__activity" aria-label="Recorded activity">

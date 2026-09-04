@@ -156,6 +156,7 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
         onDeepNavigate={bindings.onDeepNavigate}
         onActivityOpen={bindings.onActivityOpen}
         onExitFocus={bindings.onExitFocus}
+        onCollectionRefresh={collection.refresh}
         {...(props.onFocusedCaseTitle
           ? { onFocusedCaseTitle: props.onFocusedCaseTitle }
           : {})}
@@ -165,7 +166,6 @@ function WarRoomStrategy(props: InvestigationStrategyShellProps) {
               collectionPage: collection.view,
               collectionQuery: props.collectionQuery,
               onCollectionQueryChange: props.onCollectionQueryChange,
-              onCollectionRefresh: collection.refresh,
             })}
         lifecycleBinding={{
           lifecycle: runtime.resources.lifecycle,

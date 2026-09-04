@@ -26,7 +26,7 @@ import {
   mintInvestigationCollectionCursor,
   parseInvestigationCollectionCursor,
 } from "./collection-cursor.js";
-import type { InvestigationCollectionGraph } from "./collection-graph.js";
+import type { InvestigationCollectionGraphSnapshot } from "./collection-graph.js";
 import type { Actor, CaseRow } from "./store.js";
 
 export class CollectionQueryError extends Error {
@@ -196,7 +196,7 @@ function hasContributor(row: CaseRow, contributorId: string): boolean {
 function hasEntity(
   caseId: string,
   entityId: string,
-  graph: InvestigationCollectionGraph | null,
+  graph: InvestigationCollectionGraphSnapshot | null,
 ): boolean {
   if (!graph) return false;
   return graph.entitiesFor(caseId).some((link) => link.entityId === entityId);
@@ -205,7 +205,7 @@ function hasEntity(
 function hasImpact(
   caseId: string,
   identity: SoftwareImpactIdentityV1,
-  graph: InvestigationCollectionGraph | null,
+  graph: InvestigationCollectionGraphSnapshot | null,
 ): boolean {
   if (!graph) return false;
   const wanted = softwareImpactIdentityKey(identity);
@@ -215,7 +215,7 @@ function hasImpact(
 function matchesFilters(
   row: CaseRow,
   query: InvestigationCollectionQueryV1,
-  graph: InvestigationCollectionGraph | null,
+  graph: InvestigationCollectionGraphSnapshot | null,
   options: { ignoreArchivedVisibility: boolean },
 ): boolean {
   if (query.status.length > 0 && !query.status.includes(row.status)) return false;
@@ -268,7 +268,7 @@ function topBuckets(
 
 function authorizedFacets(
   authorized: readonly CaseRow[],
-  graph: InvestigationCollectionGraph | null,
+  graph: InvestigationCollectionGraphSnapshot | null,
 ): InvestigationCollectionFacetsV1 {
   const statusCounts = new Map<string, number>(CASE_STATUSES.map((status) => [status, 0]));
   const entityCounts = new Map<string, number>();
@@ -342,7 +342,7 @@ export function buildInvestigationCollectionPage(input: {
   query: InvestigationCollectionQueryV1;
   actor: Actor;
   isAdmin: boolean;
-  graph: InvestigationCollectionGraph | null;
+  graph: InvestigationCollectionGraphSnapshot | null;
   toCase: (row: CaseRow) => CaseV1;
 }): InvestigationCollectionPageV1 {
   const { authorized, query, actor, isAdmin, graph, toCase } = input;

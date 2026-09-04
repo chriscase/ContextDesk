@@ -19,7 +19,11 @@ import {
 } from "./modules/auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "./modules/authz/index.js";
 import { CatalogService, MemoryCatalogStore } from "./modules/catalog/index.js";
-import { CaseService, MemoryCaseStore } from "./modules/cases/index.js";
+import {
+  CaseService,
+  createInvestigationCollectionGraph,
+  MemoryCaseStore,
+} from "./modules/cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "./modules/experiments/index.js";
 import { EntityService } from "./modules/entities/index.js";
 import { SoftwareImpactService } from "./modules/software-impact/index.js";
@@ -921,6 +925,10 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   resolutions.bindInvestigations(investigations);
   const entities = new EntityService({ audit, investigations });
   const softwareImpact = new SoftwareImpactService({ audit, investigations });
+  cases.bindCollectionGraph(createInvestigationCollectionGraph({
+    loadEntities: (caseIds) => entities.collectionLinks(caseIds),
+    loadImpacts: (caseIds) => softwareImpact.collectionIdentities(caseIds),
+  }));
   const references = new ReferenceService({ audit, investigations });
   evidence.addReferencedContentHashSource(() => caseStore.listReferencedContentHashes());
   evidence.addReferencedContentHashSource(() => runStore.listReferencedContentHashes());

@@ -3132,6 +3132,79 @@ describe("War Room collection-query browse", () => {
     });
   });
 
+  it("uses server entity facets and keeps observed-date filtering local to the loaded page", async () => {
+    const onQueryChange = vi.fn();
+    const stub = stubCaseFetch({
+      onRequest: (url) => url === "/api/entities"
+        ? Promise.resolve({
+            ok: true,
+            json: async () => ({ entities: [{ id: "entity-checkout", label: "Checkout API" }] }),
+          })
+        : null,
+    });
+    const first = {
+      ...makePopulatedCase(),
+      id: "11111111-1111-4111-8111-111111111111",
+      title: "Server first",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+    };
+    const second = {
+      ...makePopulatedCase(),
+      id: "22222222-2222-4222-8222-222222222222",
+      title: "Server second",
+      occurredAt: "2026-03-01T00:00:00.000Z",
+    };
+    const collectionPage: ResourceView<InvestigationCollectionPageV1> = {
+      availability: "available",
+      value: {
+        schemaId: "cd-collab.investigation_collection_page.v1",
+        items: [first, second],
+        nextCursor: null,
+        hiddenArchivedCount: 0,
+        facets: {
+          status: { top: [{ key: "open", count: 2 }], otherCount: 0 },
+          entity: { top: [{ key: "entity-checkout", count: 2 }], otherCount: 0 },
+          impactIdentity: { top: [], otherCount: 0 },
+          contributor: { top: [], otherCount: 0 },
+        },
+      },
+      refresh: "settled",
+    };
+    render(
+      <Cases
+        roles={["case-lead"]}
+        capabilities={["investigation:read"]}
+        view="investigations"
+        collectionPage={collectionPage}
+        collectionQuery={DEFAULT_COLLECTION_QUERY}
+        onCollectionQueryChange={onQueryChange}
+      />,
+    );
+
+    const entity = await screen.findByRole("combobox", {
+      name: "Filter investigations by involved entity",
+    });
+    expect(within(entity).getByRole("option", { name: "Checkout API (2)" })).toBeTruthy();
+    fireEvent.change(entity, { target: { value: "entity-checkout" } });
+    expect(onQueryChange).toHaveBeenCalledWith({
+      ...DEFAULT_COLLECTION_QUERY,
+      entityId: "entity-checkout",
+    });
+
+    const observed = screen.getByLabelText("Filter investigations by observed date");
+    fireEvent.change(observed, { target: { value: "2026-02-01" } });
+    expect(screen.queryByRole("button", { name: "Server first" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Server second" })).toBeTruthy();
+    expect(screen.getByText(/loaded on this page/u)).toBeTruthy();
+    expect(onQueryChange).toHaveBeenCalledTimes(1);
+    fireEvent.change(observed, { target: { value: "" } });
+    expect(screen.getAllByRole("button", { name: /Server (first|second)/u }).map((button) => button.textContent)).toEqual([
+      "Server first",
+      "Server second",
+    ]);
+    expect(stub.mock.calls.map((call) => String(call[0]))).not.toContain("/api/cases");
+  });
+
   it("shows an honest denied state without retry or transport", () => {
     const stub = stubCaseFetch();
     render(

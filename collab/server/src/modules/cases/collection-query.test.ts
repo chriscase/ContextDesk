@@ -11,11 +11,14 @@ import {
   parseInvestigationCollectionQuery,
   type CaseV1,
 } from "@cd-collab/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
-import { MemoryInvestigationCollectionGraph } from "./collection-graph.js";
+import {
+  createInvestigationCollectionGraph,
+  MemoryInvestigationCollectionGraph,
+} from "./collection-graph.js";
 import {
   CollectionQueryError,
   buildInvestigationCollectionPage,
@@ -120,6 +123,20 @@ async function withService(
 }
 
 describe("collection query HTTP adapter", () => {
+  it("materializes graph data only for the membership-authorized investigation set", async () => {
+    const loadEntities = vi.fn(async () => [
+      { caseId: CASE_A, entityId: "ent-visible", label: "Visible service" },
+      { caseId: CASE_B, entityId: "ent-hidden", label: "Hidden service" },
+    ]);
+    const provider = createInvestigationCollectionGraph({ loadEntities });
+    const snapshot = await provider.snapshot([CASE_A]);
+    expect(loadEntities).toHaveBeenCalledWith([CASE_A]);
+    expect(snapshot.entitiesFor(CASE_A)).toEqual([
+      { entityId: "ent-visible", label: "Visible service" },
+    ]);
+    expect(snapshot.entitiesFor(CASE_B)).toEqual([]);
+  });
+
   it("coerces a GET query into the frozen parser without casts", () => {
     const parsed = parseInvestigationCollectionQuery(
       collectionQueryFromHttp({

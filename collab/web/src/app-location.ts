@@ -502,7 +502,10 @@ function queryLocationEqual(
 ): boolean {
   const a = left ?? DEFAULT_COLLECTION_QUERY;
   const b = right ?? DEFAULT_COLLECTION_QUERY;
-  return a.q.trim() === b.q.trim()
+  // Keep the live shell value exact while someone types. Treating a trailing
+  // space as equal makes a controlled search input snap back and joins the
+  // next word to the previous one. URL serialization remains canonical below.
+  return a.q === b.q
     && a.includeArchived === b.includeArchived
     && a.entityId === b.entityId
     && a.contributorId === b.contributorId

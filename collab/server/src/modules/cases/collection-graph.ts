@@ -14,12 +14,65 @@ export interface InvestigationCollectionEntityLink {
   label: string;
 }
 
-export interface InvestigationCollectionGraph {
+export interface InvestigationCollectionEntityRecord extends InvestigationCollectionEntityLink {
+  caseId: string;
+}
+
+export interface InvestigationCollectionImpactRecord extends SoftwareImpactIdentityV1 {
+  caseId: string;
+}
+
+export interface InvestigationCollectionGraphSnapshot {
   entitiesFor(caseId: string): readonly InvestigationCollectionEntityLink[];
   impactsFor(caseId: string): readonly SoftwareImpactIdentityV1[];
 }
 
-export class MemoryInvestigationCollectionGraph implements InvestigationCollectionGraph {
+export interface InvestigationCollectionGraph {
+  snapshot(caseIds: readonly string[]): Promise<InvestigationCollectionGraphSnapshot>;
+}
+
+export function createInvestigationCollectionGraph(input: {
+  loadEntities: (
+    caseIds: readonly string[],
+  ) => Promise<readonly InvestigationCollectionEntityRecord[]>;
+  loadImpacts?: (
+    caseIds: readonly string[],
+  ) => Promise<readonly InvestigationCollectionImpactRecord[]>;
+}): InvestigationCollectionGraph {
+  return {
+    async snapshot(caseIds) {
+      const allowed = new Set(caseIds);
+      const entityRows = await input.loadEntities(caseIds);
+      const impactRows = input.loadImpacts ? await input.loadImpacts(caseIds) : [];
+      const entities = new Map<string, InvestigationCollectionEntityLink[]>();
+      const impacts = new Map<string, SoftwareImpactIdentityV1[]>();
+      for (const row of entityRows) {
+        if (!allowed.has(row.caseId)) continue;
+        const list = entities.get(row.caseId) ?? [];
+        if (!list.some((candidate) => candidate.entityId === row.entityId)) {
+          list.push({ entityId: row.entityId, label: row.label });
+          entities.set(row.caseId, list);
+        }
+      }
+      for (const { caseId, ...identity } of impactRows) {
+        if (!allowed.has(caseId)) continue;
+        const list = impacts.get(caseId) ?? [];
+        const key = softwareImpactIdentityKey(identity);
+        if (!list.some((candidate) => softwareImpactIdentityKey(candidate) === key)) {
+          list.push(identity);
+          impacts.set(caseId, list);
+        }
+      }
+      return {
+        entitiesFor: (caseId) => entities.get(caseId) ?? [],
+        impactsFor: (caseId) => impacts.get(caseId) ?? [],
+      };
+    },
+  };
+}
+
+export class MemoryInvestigationCollectionGraph
+implements InvestigationCollectionGraph, InvestigationCollectionGraphSnapshot {
   private readonly entities = new Map<string, InvestigationCollectionEntityLink[]>();
   private readonly impacts = new Map<string, SoftwareImpactIdentityV1[]>();
 
@@ -46,5 +99,23 @@ export class MemoryInvestigationCollectionGraph implements InvestigationCollecti
 
   impactsFor(caseId: string): readonly SoftwareImpactIdentityV1[] {
     return this.impacts.get(caseId) ?? [];
+  }
+
+  async snapshot(caseIds: readonly string[]): Promise<InvestigationCollectionGraphSnapshot> {
+    const allowed = new Set(caseIds);
+    const entities = new Map(
+      [...this.entities.entries()]
+        .filter(([caseId]) => allowed.has(caseId))
+        .map(([caseId, rows]) => [caseId, rows.map((row) => ({ ...row }))]),
+    );
+    const impacts = new Map(
+      [...this.impacts.entries()]
+        .filter(([caseId]) => allowed.has(caseId))
+        .map(([caseId, rows]) => [caseId, rows.map((row) => ({ ...row }))]),
+    );
+    return {
+      entitiesFor: (caseId) => entities.get(caseId) ?? [],
+      impactsFor: (caseId) => impacts.get(caseId) ?? [],
+    };
   }
 }

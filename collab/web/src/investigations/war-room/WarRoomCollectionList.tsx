@@ -10,6 +10,9 @@ export interface WarRoomCollectionListProps {
   readonly query: CollectionQueryLocation;
   readonly canRead: boolean;
   readonly readOnly: boolean;
+  readonly entityOptions?: readonly { id: string; label: string }[];
+  readonly occurredFrom?: string;
+  readonly onOccurredFromChange?: (value: string) => void;
   readonly onQueryChange?: (query: CollectionQueryLocation) => void;
   readonly onRefresh: () => void;
   readonly onOpenCase: (id: string) => void;
@@ -46,11 +49,24 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
   }
 
   const status = props.query.status[0] ?? "all";
-  const items = page.availability === "available" ? page.value.items : [];
+  const authoritativeItems = page.availability === "available" ? page.value.items : [];
+  // `recordedFrom` is case creation time, not the investigation's observed
+  // occurrence. Preserve the legacy control as an explicitly page-local,
+  // stable subsequence until the public query contract gains occurredAt.
+  const occurredFrom = props.occurredFrom ?? "";
+  const items = occurredFrom
+    ? authoritativeItems.filter((item) => (item.occurredAt ?? "") >= occurredFrom)
+    : authoritativeItems;
   const hiddenArchivedCount = page.availability === "available"
     ? page.value.hiddenArchivedCount
     : 0;
   const statusFacets = page.availability === "available" ? page.value.facets.status.top : [];
+  const entityFacets = page.availability === "available" ? page.value.facets.entity.top : [];
+  const entityLabels = new Map((props.entityOptions ?? []).map((entity) => [entity.id, entity.label]));
+  const selectedEntity = props.query.entityId;
+  const selectableEntityFacets = selectedEntity && !entityFacets.some((facet) => facet.key === selectedEntity)
+    ? [...entityFacets, { key: selectedEntity, count: null }]
+    : entityFacets;
   const isLoading = page.availability === "idle" || page.availability === "loading";
 
   return (
@@ -66,6 +82,38 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
             placeholder="Title, problem, product, or build"
             aria-label="Search investigations by title, situation text, context, or ID"
           />
+        </label>
+        {selectableEntityFacets.length > 0 ? (
+          <label className="case-list__filter">
+            <span className="case-list__control-label">Entity</span>
+            <select
+              className="login__input"
+              aria-label="Filter investigations by involved entity"
+              value={selectedEntity ?? "all"}
+              onChange={(event) => updateQuery(props.query, props.onQueryChange, {
+                entityId: event.target.value === "all" ? null : event.target.value,
+              })}
+            >
+              <option value="all">All entities</option>
+              {selectableEntityFacets.map((facet) => (
+                <option key={facet.key} value={facet.key}>
+                  {entityLabels.get(facet.key) ?? facet.key}
+                  {facet.count === null ? "" : ` (${facet.count})`}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <label className="case-list__filter">
+          <span className="case-list__control-label">Observed from</span>
+          <input
+            className="login__input"
+            type="date"
+            aria-label="Filter investigations by observed date"
+            value={occurredFrom}
+            onChange={(event) => props.onOccurredFromChange?.(event.target.value)}
+          />
+          <span className="case-list__filter-note">Filters the investigations loaded on this page.</span>
         </label>
         <label className="case-list__filter">
           <span className="case-list__control-label">Status</span>
@@ -133,7 +181,9 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
       ) : null}
       {page.availability === "available" && items.length === 0 ? (
         <p className="case-list__empty" role="status">
-          {props.query.q || status !== "all" ? "No investigations match the current search or filter." : "No investigations have been recorded yet."}
+          {props.query.q || status !== "all" || selectedEntity || occurredFrom
+            ? `No investigations match the current search or filter${occurredFrom ? " on this loaded page" : ""}.`
+            : "No investigations have been recorded yet."}
         </p>
       ) : null}
       {page.availability === "available" && items.length > 0 ? (

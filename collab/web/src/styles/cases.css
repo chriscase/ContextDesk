@@ -527,6 +527,12 @@
   font-size: 0.78rem;
 }
 
+.case-list__filter-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
 .case-list__filter select {
   width: 100%;
 }

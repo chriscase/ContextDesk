@@ -103,6 +103,21 @@ describe("investigation collection query shell adapter", () => {
     expect(pathFor(explicit)).toBe("/investigations");
   });
 
+  it("keeps trailing search whitespace distinct while a controlled input is being edited", () => {
+    const base = {
+      area: "investigations" as const,
+      caseId: null,
+      stage: "situation" as const,
+      collectionQuery: { ...DEFAULT_COLLECTION_QUERY, q: "Investigation First" },
+    };
+    const editing = {
+      ...base,
+      collectionQuery: { ...DEFAULT_COLLECTION_QUERY, q: "Investigation First " },
+    };
+    expect(sameLocation(base, editing)).toBe(false);
+    expect(pathFor(editing)).toBe("/investigations?q=Investigation+First");
+  });
+
   it("fails closed for malformed filters and leaves a canonical bare list route", () => {
     const location = parsePathname("/investigations", "?status=unknown&includeArchived=yes");
     expect(location).toEqual({ area: "investigations", caseId: null, stage: "situation" });
