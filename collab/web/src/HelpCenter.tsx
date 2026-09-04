@@ -135,11 +135,11 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "A shared workspace where a team records investigations and moves each one through Capture, Analyze, Compare, and Decide.",
         keywords: ["overview", "workflow", "stages", "orientation", "introduction"],
         what:
-          "The War Room is the web workspace for ContextDesk investigations. Overview is the command center: recorded status counts, the latest cross-investigation activity, Open threads (recorded work that stopped, disagreed, is still unread, or is waiting on a decision), and high-impact active work — each with direct links to the work itself. Every activity row names the stage it belongs to, who or what produced it, and whether the record behind it is restricted. Investigations is the searchable case inventory and creation entry point. Opening an investigation focuses it and offers five stages: Situation (the shared picture), Capture (notes and imports), Analyze (evidence and AI lanes), Compare (lanes side by side), and Decide (the human call and export).",
+          "The War Room is the web workspace for ContextDesk investigations. Overview is the recorded operating picture: status counts, the latest cross-investigation activity, explicitly recorded open threads, and saved shift handoffs. It does not infer urgency, priority, or completeness. Every activity row identifies its investigation, provenance, and recorded time and opens through a fresh access check. Investigations is the searchable case inventory and creation entry point. Opening an investigation focuses it and offers five stages: Situation (the shared picture), Capture (notes and imports), Analyze (evidence and AI lanes), Compare (lanes side by side), and Decide (the human call and export).",
         when:
           "Read this first if the navigation is unfamiliar, or when you want to know which stage a task belongs to.",
         steps: [
-          "Open Overview to see what changed most recently across investigations, and what nothing has carried further yet.",
+          "Open Overview to see what changed most recently across investigations and the follow-up or handoff records collaborators explicitly saved.",
           "Read Open threads to find recorded work that stopped short, disagreed across lanes, has not been read, or is waiting on a human decision — each entry links straight to the record.",
           "Select an investigation to focus it; the Situation stage opens first.",
           "Use the stage strip or the Situation page's work-area links to move between Capture, Analyze, Compare, and Decide.",

@@ -123,11 +123,19 @@
   }
 }
 
+.overview__counts-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1.25rem;
+}
+
 .overview__counts {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
-  margin: 0 0 1.25rem;
+  margin: 0;
 }
 
 .overview__count {
@@ -155,6 +163,13 @@
 .overview__counts-action {
   display: flex;
   align-items: center;
+}
+
+.activity-center button:focus-visible,
+.activity-center select:focus-visible,
+.activity-center input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .overview__grid {
@@ -437,6 +452,11 @@
     border-radius: 0;
   }
 
+  .overview__counts-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .overview__counts {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -463,8 +483,16 @@
     border-color: CanvasText;
   }
 
+  .activity-feed__item + .activity-feed__item,
+  .activity-center__handoffs {
+    border-color: CanvasText;
+  }
+
   .activity-feed__open:focus-visible,
-  .overview__thread-list a:focus-visible {
+  .overview__thread-list a:focus-visible,
+  .activity-center button:focus-visible,
+  .activity-center select:focus-visible,
+  .activity-center input:focus-visible {
     outline-color: Highlight;
   }
 }

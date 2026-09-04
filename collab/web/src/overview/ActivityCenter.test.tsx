@@ -88,6 +88,8 @@ describe("ActivityCenter", () => {
     render(<ActivityCenter {...baseProps} gateway={gatewayWith({ listActivity })} />);
     expect((await screen.findByRole("alert")).textContent).toMatch(/could not be refreshed/i);
     expect(screen.queryByText(/No activity has been recorded yet/i)).toBeNull();
+    expect(screen.queryByText(/No open thread is recorded/i)).toBeNull();
+    expect(screen.queryByText(/No handoff is recorded/i)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("No activity has been recorded yet.")).toBeTruthy();
   });
@@ -113,6 +115,8 @@ describe("ActivityCenter", () => {
     expect(screen.getByText("Loading recorded investigation counts…").getAttribute("role")).toBe("status");
     expect(screen.queryByText(/^0$/)).toBeNull();
     expect(screen.queryByRole("button", { name: "open" })).toBeNull();
+    expect(screen.getByText("Open threads will appear after recorded activity is available.")).toBeTruthy();
+    expect(screen.getByText("Handoffs will appear after recorded activity is available.")).toBeTruthy();
   });
 
   it("offers one honest investigations action after counts load", async () => {

@@ -79,6 +79,7 @@ export function ActivityCenter({
     provenanceClass !== "historical_restored" && OPEN_THREAD_KINDS.has(activityKind));
   const counts = statusCounts(controller.investigations, STATUS_ORDER);
   const filtersActive = Object.keys(filter).length > 0;
+  const hasLoadedActivityWindow = controller.activity.status === "ready" || items.length > 0;
 
   useEffect(() => {
     const refreshRecordedActivity = () => controller.refresh();
@@ -144,17 +145,19 @@ export function ActivityCenter({
           Recorded status counts are temporarily unavailable. Activity remains independent.
         </p>
       ) : (
-        <dl className="overview__counts" aria-label="Investigations by recorded status">
-          {counts.map(([status, count]) => (
-            <div key={status} className="overview__count" data-status={status}>
-              <dt>{status}</dt>
-              <dd>{count}</dd>
-            </div>
-          ))}
+        <div className="overview__counts-row">
+          <dl className="overview__counts" aria-label="Investigations by recorded status">
+            {counts.map(([status, count]) => (
+              <div key={status} className="overview__count" data-status={status}>
+                <dt>{status}</dt>
+                <dd>{count}</dd>
+              </div>
+            ))}
+          </dl>
           <div className="overview__counts-action">
             <button type="button" onClick={() => onOpenInvestigations()}>View investigations</button>
           </div>
-        </dl>
+        </div>
       )}
 
       <form className="activity-center__filters" aria-label="Filter recorded activity" onSubmit={applyFilters}>
@@ -235,7 +238,7 @@ export function ActivityCenter({
           <section className="activity-center__threads" aria-labelledby="overview-open-title">
             <h4 id="overview-open-title">Open threads</h4>
             <p>Recent records that stopped, disagreed, or still await a person.</p>
-          {openThreads.length === 0 ? <p className="overview__empty">No open thread is recorded in this loaded activity window.</p> : (
+          {!hasLoadedActivityWindow ? <p className="overview__empty" role="status">Open threads will appear after recorded activity is available.</p> : openThreads.length === 0 ? <p className="overview__empty">No open thread is recorded in this loaded activity window.</p> : (
             <><ul className="overview__thread-list" role="list">{openThreads.slice(0, 6).map((item) => <li key={item.activityId}><a href={item.resolvedRoute} onClick={(event) => void openItem(event, item)}><strong>{item.investigationTitle}</strong><span>{item.summary}</span></a></li>)}</ul>
             {openThreads.length > 6 ? <p className="overview__thread-more">Showing 6 of {openThreads.length} open threads in this loaded activity window.</p> : null}</>
           )}
@@ -243,7 +246,7 @@ export function ActivityCenter({
           <section className="activity-center__handoffs" aria-labelledby="recorded-handoffs-title">
             <h4 id="recorded-handoffs-title">Recorded handoffs</h4>
             <p>Shift notes explicitly saved by collaborators—never inferred from inactivity.</p>
-            {handoffs.length === 0 ? <p className="overview__empty">No handoff is recorded in this loaded activity window.</p> : (
+            {!hasLoadedActivityWindow ? <p className="overview__empty" role="status">Handoffs will appear after recorded activity is available.</p> : handoffs.length === 0 ? <p className="overview__empty">No handoff is recorded in this loaded activity window.</p> : (
               <><ul className="overview__thread-list" role="list">{handoffs.slice(0, 5).map((item) => <li key={item.activityId}><a href={item.resolvedRoute} onClick={(event) => void openItem(event, item)}><strong>{item.investigationTitle}</strong><span>{item.summary}</span></a></li>)}</ul>
               {handoffs.length > 5 ? <p className="overview__thread-more">Showing 5 of {handoffs.length} handoffs in this loaded activity window.</p> : null}</>
             )}
