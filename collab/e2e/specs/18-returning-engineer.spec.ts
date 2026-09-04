@@ -259,12 +259,12 @@ test.describe("a returning engineer re-forms the picture", () => {
     await expect(analyze.getByRole("link", { name: "Back to all workstreams" })).toBeVisible();
   });
 
-  test("the operating picture names stage, provenance, and what is still open", async ({
+  test("the Activity Center restates recorded work without inventing follow-up and opens its canonical source", async ({
     page,
   }) => {
     const title = uniqueTitle("Operating picture");
     await loginAs(page, dave);
-    await seedInvestigation(page, title);
+    const caseId = await seedInvestigation(page, title);
     await runLanes(page);
 
     await page
@@ -272,21 +272,38 @@ test.describe("a returning engineer re-forms the picture", () => {
       .getByRole("button", { name: "Overview", exact: true })
       .click();
 
-    const feed = page.locator(".activity-feed");
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.getByRole("heading", { name: "Operating picture" })).toBeVisible();
+    const feed = page.getByRole("region", { name: "Latest activity" });
     await expect(feed).toBeVisible();
     // Work recorded in Analyze reaches the picture without a manual reload.
-    await expect(feed).toContainText("completed a workstream");
-    await expect(feed).toContainText("Stage: Analyze");
+    const completed = feed
+      .getByRole("link")
+      .filter({ hasText: "completed a workstream" })
+      .first();
+    await expect(completed).toContainText(title);
+    await expect(completed).toContainText("Stage: Analyze");
+    await expect(completed).toContainText("Recorded by the system");
     // Provenance is explicit for human and for model-assisted work alike.
-    await expect(feed.getByText("human-authored").first()).toBeVisible();
-    await expect(feed.getByText(/not a human finding/).first()).toBeVisible();
+    await expect(feed.getByText("Human-authored").first()).toBeVisible();
+    await expect(feed.getByText("AI-assisted · not a human finding").first()).toBeVisible();
 
-    // Imported output nobody has read is called out, with a path to it.
-    const threads = page.getByRole("complementary", { name: "Open threads" });
-    await expect(threads).toContainText("Imported or AI output not yet read");
-    await expect(threads).toContainText("most recent recorded events");
-    await threads.getByRole("link").first().click();
-    await expect(page).toHaveURL(new RegExp("/investigations/"));
+    // Successful work and an import do not fabricate an open thread or handoff.
+    const followUp = page.getByRole("complementary", { name: "Recorded follow-up" });
+    await expect(followUp).toContainText("Explicitly recorded threads and handoffs");
+    await expect(followUp).toContainText("No open thread is recorded in this loaded activity window.");
+    await expect(followUp).toContainText("No handoff is recorded in this loaded activity window.");
+
+    const destination = await completed.getAttribute("href");
+    expect(destination).toMatch(
+      new RegExp(`^/investigations/${caseId}/analyze\\?section=triage-lane-runner&item=[^&]+&kind=triage-run#triage-lane-runner$`),
+    );
+    await Promise.all([
+      page.waitForResponse((response) =>
+        response.url().includes("/api/investigation-resources/resolve") && response.ok()),
+      completed.click(),
+    ]);
+    await expect(page).toHaveURL(destination!);
   });
 
   test("stays readable and operable by keyboard on a narrow viewport", async ({ page }) => {

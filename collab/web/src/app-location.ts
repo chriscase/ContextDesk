@@ -567,6 +567,9 @@ export function titleFor(
   if (location.area === "investigations") {
     return `Investigations · ${shellTitle}`;
   }
+  if (location.area === "overview") {
+    return `Overview · ${shellTitle}`;
+  }
   return shellTitle;
 }
 

@@ -408,7 +408,7 @@ describe("help for behavior this build ships", () => {
     renderHelp();
     fireEvent.click(screen.getByRole("button", { name: "What the War Room is" }));
     expect(screen.getAllByText(/Open threads/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/older open work can sit outside that window/)).toBeTruthy();
+    expect(screen.getByText(/older recorded work can sit outside that window/i)).toBeTruthy();
   });
 
   it("distinguishes War Room streaming upload limits from Investigation First's 1 MB path", () => {

@@ -174,10 +174,15 @@ function coveredOperationDebt(sources: readonly SourceUnderReview[]): Record<
   CoveredRuntimeOperation[]
 > {
   const gatewayModule = resolve(INVESTIGATIONS_ROOT, "runtime/gateway");
+  // Overview is a shell-owned product surface, not an investigation strategy.
+  // Its reviewed gateway is the only other transport boundary allowed to read
+  // the collection; keeping the exemption to this exact module prevents a
+  // presentation component from becoming another data-access path.
+  const overviewGatewayModule = resolve(WEB_SRC, "overview/gateway");
   const observed: Record<string, CoveredRuntimeOperation[]> = {};
 
   for (const { path, source } of sources) {
-    if (sameModule(path, gatewayModule)) continue;
+    if (sameModule(path, gatewayModule) || sameModule(path, overviewGatewayModule)) continue;
     const fetchNames = protectedFetchNames(source);
     const calls: CoveredRuntimeOperation[] = [];
     visit(source, (node) => {

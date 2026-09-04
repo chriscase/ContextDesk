@@ -44,6 +44,10 @@
       "types": "./dist/investigation-runtime-browser.d.ts",
       "import": "./dist/investigation-runtime-browser.js"
     },
+    "./investigation-activity": {
+      "types": "./dist/investigation-activity-browser.d.ts",
+      "import": "./dist/investigation-activity-browser.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

@@ -8,11 +8,134 @@
   margin-bottom: 1rem;
 }
 
+.activity-center__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.activity-center__head > div {
+  min-width: 0;
+}
+
+.activity-center__filters {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1.5fr) repeat(3, minmax(9rem, 1fr)) auto;
+  gap: 0.75rem;
+  align-items: end;
+  margin: 1.25rem 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+.activity-center__filters label {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.activity-center__filters select,
+.activity-center__filters input {
+  width: 100%;
+  min-width: 0;
+}
+
+.activity-center__filter-actions,
+.activity-center__failure {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.activity-center__failure {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.activity-center__failure p {
+  margin: 0;
+}
+
+.activity-center__load-more {
+  display: grid;
+  justify-items: start;
+  gap: 0.4rem;
+  margin: 1rem;
+}
+
+.activity-center__load-more p {
+  min-height: 1.25rem;
+  margin: 0;
+}
+
+.activity-center__refreshing,
+.overview__counts-status {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.activity-center__refreshing {
+  padding: 0.65rem 1rem 0;
+}
+
+.activity-center__threads {
+  padding: 1rem 1rem 0;
+}
+
+.activity-center__threads > h4,
+.activity-center__threads > p {
+  margin-top: 0;
+}
+
+.activity-center__handoffs {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.activity-center__handoffs > h3,
+.activity-center__handoffs > p {
+  margin-top: 0;
+}
+
+@media (max-width: 900px) {
+  .activity-center__filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .activity-center__head,
+  .activity-center__failure {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .activity-center__filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.overview__counts-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1.25rem;
+}
+
 .overview__counts {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
-  margin: 0 0 1.25rem;
+  margin: 0;
 }
 
 .overview__count {
@@ -37,19 +160,23 @@
   font-variant-numeric: tabular-nums;
 }
 
+.overview__counts-action {
+  display: flex;
+  align-items: center;
+}
+
+.activity-center button:focus-visible,
+.activity-center select:focus-visible,
+.activity-center input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .overview__grid {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(17rem, 0.9fr);
   gap: 1rem;
   align-items: start;
-}
-
-/* Wide rooms show the feed beside both attention panels; narrower ones stack
-   the panels under the feed rather than squeezing three columns. */
-@media (min-width: 1180px) {
-  .overview__grid {
-    grid-template-columns: minmax(0, 1.6fr) minmax(16rem, 0.9fr) minmax(15rem, 0.75fr);
-  }
 }
 
 .overview__activity,
@@ -313,6 +440,60 @@
 @media (max-width: 760px) {
   .overview__grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 390px) {
+  .activity-center__filters,
+  .overview__activity,
+  .overview__attention {
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+  }
+
+  .overview__counts-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .overview__counts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .overview__count {
+    min-width: 0;
+  }
+
+  .activity-feed__open {
+    padding-inline: 0.75rem;
+  }
+}
+
+@media (forced-colors: active) {
+  .activity-center__filters,
+  .overview__count,
+  .overview__activity,
+  .overview__attention,
+  .activity-feed__stage,
+  .activity-feed__repeat,
+  .activity-feed__restricted,
+  .overview__thread-list a {
+    border-color: CanvasText;
+  }
+
+  .activity-feed__item + .activity-feed__item,
+  .activity-center__handoffs {
+    border-color: CanvasText;
+  }
+
+  .activity-feed__open:focus-visible,
+  .overview__thread-list a:focus-visible,
+  .activity-center button:focus-visible,
+  .activity-center select:focus-visible,
+  .activity-center input:focus-visible {
+    outline-color: Highlight;
   }
 }
 
