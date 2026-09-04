@@ -3205,7 +3205,7 @@ describe("War Room collection-query browse", () => {
     expect(stub.mock.calls.map((call) => String(call[0]))).not.toContain("/api/cases");
   });
 
-  it("shows an honest denied state without retry or transport", () => {
+  it("shows an honest denied state without retry or transport", async () => {
     const stub = stubCaseFetch();
     render(
       <Cases
@@ -3218,7 +3218,13 @@ describe("War Room collection-query browse", () => {
     );
     expect(screen.getByRole("status").textContent).toMatch(/cannot read investigations/u);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expect(stub.mock.calls.map((call) => String(call[0]))).not.toContain("/api/cases");
+    await waitFor(() => {
+      expect(stub.mock.calls.map((call) => String(call[0]))).toContain("/api/catalog/sources");
+    });
+    const requested = stub.mock.calls.map((call) => String(call[0]));
+    expect(requested.filter((url) => url === "/api/cases")).toHaveLength(0);
+    expect(requested.filter((url) => url === "/api/entities")).toHaveLength(0);
+    expect(requested.filter((url) => url === "/api/involvement/index")).toHaveLength(0);
   });
 
   it("does not fall back to the legacy transport after a collection failure", () => {

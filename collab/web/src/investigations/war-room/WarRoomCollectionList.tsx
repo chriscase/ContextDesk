@@ -12,7 +12,7 @@ export interface WarRoomCollectionListProps {
   readonly readOnly: boolean;
   readonly entityOptions?: readonly { id: string; label: string }[];
   readonly occurredFrom?: string;
-  readonly onOccurredFromChange?: (value: string) => void;
+  readonly onOccurredFromChange: (value: string) => void;
   readonly onQueryChange?: (query: CollectionQueryLocation) => void;
   readonly onRefresh: () => void;
   readonly onOpenCase: (id: string) => void;
@@ -111,7 +111,7 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
             type="date"
             aria-label="Filter investigations by observed date"
             value={occurredFrom}
-            onChange={(event) => props.onOccurredFromChange?.(event.target.value)}
+            onChange={(event) => props.onOccurredFromChange(event.target.value)}
           />
           <span className="case-list__filter-note">Filters the investigations loaded on this page.</span>
         </label>

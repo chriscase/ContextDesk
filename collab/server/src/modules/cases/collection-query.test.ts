@@ -123,6 +123,22 @@ async function withService(
 }
 
 describe("collection query HTTP adapter", () => {
+  it("returns an immutable empty graph snapshot without invoking loaders", async () => {
+    const loadEntities = vi.fn(async () => []);
+    const loadImpacts = vi.fn(async () => []);
+    const provider = createInvestigationCollectionGraph({ loadEntities, loadImpacts });
+
+    const snapshot = await provider.snapshot([]);
+
+    expect(loadEntities).not.toHaveBeenCalled();
+    expect(loadImpacts).not.toHaveBeenCalled();
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(snapshot.entitiesFor(CASE_A)).toEqual([]);
+    expect(snapshot.impactsFor(CASE_A)).toEqual([]);
+    expect(Object.isFrozen(snapshot.entitiesFor(CASE_A))).toBe(true);
+    expect(Object.isFrozen(snapshot.impactsFor(CASE_A))).toBe(true);
+  });
+
   it("materializes graph data only for the membership-authorized investigation set", async () => {
     const loadEntities = vi.fn(async () => [
       { caseId: CASE_A, entityId: "ent-visible", label: "Visible service" },

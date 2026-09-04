@@ -31,6 +31,13 @@ export interface InvestigationCollectionGraph {
   snapshot(caseIds: readonly string[]): Promise<InvestigationCollectionGraphSnapshot>;
 }
 
+const EMPTY_ENTITY_LINKS: readonly InvestigationCollectionEntityLink[] = Object.freeze([]);
+const EMPTY_IMPACTS: readonly SoftwareImpactIdentityV1[] = Object.freeze([]);
+const EMPTY_SNAPSHOT: InvestigationCollectionGraphSnapshot = Object.freeze({
+  entitiesFor: () => EMPTY_ENTITY_LINKS,
+  impactsFor: () => EMPTY_IMPACTS,
+});
+
 export function createInvestigationCollectionGraph(input: {
   loadEntities: (
     caseIds: readonly string[],
@@ -41,6 +48,7 @@ export function createInvestigationCollectionGraph(input: {
 }): InvestigationCollectionGraph {
   return {
     async snapshot(caseIds) {
+      if (caseIds.length === 0) return EMPTY_SNAPSHOT;
       const allowed = new Set(caseIds);
       const entityRows = await input.loadEntities(caseIds);
       const impactRows = input.loadImpacts ? await input.loadImpacts(caseIds) : [];
@@ -102,6 +110,7 @@ implements InvestigationCollectionGraph, InvestigationCollectionGraphSnapshot {
   }
 
   async snapshot(caseIds: readonly string[]): Promise<InvestigationCollectionGraphSnapshot> {
+    if (caseIds.length === 0) return EMPTY_SNAPSHOT;
     const allowed = new Set(caseIds);
     const entities = new Map(
       [...this.entities.entries()]

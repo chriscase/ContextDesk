@@ -9,8 +9,10 @@
  * Every identity, label, and body is synthetic.
  */
 import {
+  INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_REQUEST_SCHEMA_ID,
   parseCase,
+  parseInvestigationCollectionPage,
   parseInvestigationEntity,
   parseInvestigationEntityList,
   parseInvestigationInvolvement,
@@ -34,6 +36,108 @@ import {
   login,
   withRecordApp,
 } from "./test/investigation-record-harness.js";
+
+function collectionUrl(): string {
+  const query = new URLSearchParams({ schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID });
+  return `/api/cases?${query.toString()}`;
+}
+
+describe("production investigation collection graph", () => {
+  it("isolates real entity and impact facets and reloads involvement changes", async () => {
+    await withRecordApp(async ({ app }) => {
+      const alice = await login(app, "alice");
+      const bob = await login(app, "bob");
+      const aliceCase = parseCase(
+        await createInvestigation(app, alice, { title: "Synthetic Alice collection" }),
+      );
+      const bobCase = parseCase(
+        await createInvestigation(app, bob, { title: "Synthetic Bob collection" }),
+      );
+      const visibleEntity = parseInvestigationEntity(
+        await createEntity(app, alice, { kind: "service", label: "Synthetic visible queue" }),
+      );
+      const hiddenEntity = parseInvestigationEntity(
+        await createEntity(app, bob, { kind: "service", label: "Synthetic hidden mailer" }),
+      );
+
+      for (const [session, investigationId, entityId] of [
+        [alice, aliceCase.id, visibleEntity.id],
+        [bob, bobCase.id, hiddenEntity.id],
+      ]) {
+        const linked = await app.inject({
+          method: "POST",
+          url: `/api/cases/${investigationId}/involvement`,
+          headers: { cookie: session },
+          payload: { entityId, relationship: "affected" },
+        });
+        expect(linked.statusCode).toBe(201);
+      }
+      for (const [session, investigationId, productName] of [
+        [alice, aliceCase.id, "Synthetic Visible Desk"],
+        [bob, bobCase.id, "Synthetic Hidden Desk"],
+      ]) {
+        const recorded = await app.inject({
+          method: "POST",
+          url: `/api/cases/${investigationId}/software-impact`,
+          headers: { cookie: session },
+          payload: { productName, version: "1.0", status: "confirmed" },
+        });
+        expect(recorded.statusCode).toBe(201);
+      }
+
+      const first = parseInvestigationCollectionPage(
+        body(
+          await app.inject({
+            method: "GET",
+            url: collectionUrl(),
+            headers: { cookie: alice },
+          }),
+        ),
+      );
+      expect(first.items.map((item) => item.id)).toEqual([aliceCase.id]);
+      expect(first.facets.entity.top).toEqual([{ key: visibleEntity.id, count: 1 }]);
+      expect(first.facets.impactIdentity.top).toMatchObject([
+        {
+          count: 1,
+          identity: {
+            productName: "Synthetic Visible Desk",
+            version: "1.0",
+            build: "",
+            component: "",
+            environment: "",
+          },
+        },
+      ]);
+      expect(JSON.stringify(first)).not.toContain(bobCase.id);
+      expect(JSON.stringify(first)).not.toContain(hiddenEntity.id);
+      expect(JSON.stringify(first)).not.toContain("Synthetic Hidden Desk");
+
+      const addedEntity = parseInvestigationEntity(
+        await createEntity(app, alice, { kind: "system", label: "Synthetic live addition" }),
+      );
+      const added = await app.inject({
+        method: "POST",
+        url: `/api/cases/${aliceCase.id}/involvement`,
+        headers: { cookie: alice },
+        payload: { entityId: addedEntity.id, relationship: "affected" },
+      });
+      expect(added.statusCode).toBe(201);
+
+      const refreshed = parseInvestigationCollectionPage(
+        body(
+          await app.inject({
+            method: "GET",
+            url: collectionUrl(),
+            headers: { cookie: alice },
+          }),
+        ),
+      );
+      expect(refreshed.facets.entity.top.map((bucket) => bucket.key).sort()).toEqual(
+        [visibleEntity.id, addedEntity.id].sort(),
+      );
+    });
+  });
+});
 
 describe("occurred-at versus recorded-at on an investigation", () => {
   it("opens a case for work that happened two years ago without touching the audit clock", async () => {

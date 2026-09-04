@@ -849,6 +849,7 @@ export function Cases(props: {
   const activeCaseRef = useRef<string | null>(null);
   const loadGeneration = useRef(0);
   const casesRefreshGeneration = useRef(0);
+  const recordIndexGeneration = useRef(0);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const discussionToggleRef = useRef<HTMLButtonElement>(null);
   const previousStage = useRef<StageId | null>(null);
@@ -908,13 +909,23 @@ export function Cases(props: {
    * rather than an error where the investigation list should be.
    */
   const refreshRecordIndex = useCallback(async () => {
+    const generation = ++recordIndexGeneration.current;
+    if (!canRead) {
+      setEntityOptions([]);
+      setInvolvementIndex([]);
+      return;
+    }
     try {
-      setEntityOptions(await loadEntities());
+      const entities = await loadEntities();
+      if (generation !== recordIndexGeneration.current) return;
+      setEntityOptions(entities);
     } catch {
+      if (generation !== recordIndexGeneration.current) return;
       setEntityOptions([]);
     }
     try {
       const response = await protectedApiFetch("/api/involvement/index");
+      if (generation !== recordIndexGeneration.current) return;
       if (!response.ok) {
         setInvolvementIndex([]);
         return;
@@ -922,11 +933,13 @@ export function Cases(props: {
       const parsed = (await response.json()) as {
         entries?: { investigationId: string; entityId: string }[];
       };
+      if (generation !== recordIndexGeneration.current) return;
       setInvolvementIndex(parsed.entries ?? []);
     } catch {
+      if (generation !== recordIndexGeneration.current) return;
       setInvolvementIndex([]);
     }
-  }, []);
+  }, [canRead]);
 
   const refreshRecordGraph = useCallback(async () => {
     await refreshRecordIndex();
