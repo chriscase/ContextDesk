@@ -646,6 +646,15 @@ describe("pure coordination evaluator", () => {
 
   it("allows only holders to self-release and privileged release to clean inactive holders", () => {
     expect(evaluate("release_self", subject({ coordinator: ALICE }))).toMatchObject({ allowed: true, nextCoordinatorIdentityId: null });
+    expect(
+      evaluate(
+        "release_self",
+        subject({
+          coordinator: ALICE,
+          actor: { identityId: ALICE.identityId, eligibleParticipant: false },
+        }),
+      ),
+    ).toMatchObject({ allowed: true, nextCoordinatorIdentityId: null });
     expect(evaluate("release_self", subject({ coordinator: BOB }))).toMatchObject({ reason: "not_coordinator" });
     expect(evaluate("release_participant", subject({ coordinator: BOB, target: { identityId: BOB.identityId, eligibleParticipant: false } }))).toMatchObject({ allowed: true, nextCoordinatorIdentityId: null });
     expect(evaluate("release_participant", subject({ coordinator: ALICE }))).toMatchObject({ reason: "target_not_coordinator" });
