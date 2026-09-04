@@ -362,4 +362,64 @@ test.describe("Investigation collection query qualification", () => {
       await page.unroute("**/api/cases?**");
     }
   });
+
+  test("uses server-owned status facets for canonical filters in every strategy", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const strategies = [
+      {
+        id: "investigation-first",
+        name: "Investigation First",
+        row: ".investigation-first__list-button",
+      },
+      {
+        id: "keystone",
+        name: "Keystone",
+        row: ".keystone-strategy__collection-list button",
+      },
+      {
+        id: "beacon",
+        name: "Beacon",
+        row: ".beacon__case-list button",
+      },
+    ] as const;
+    try {
+      for (const strategy of strategies) {
+        const previous = await setStrategyDefault(page, strategy.id);
+        try {
+          const token = `${strategy.id}-facet-${Date.now()}`;
+          await createInvestigation(page, `${token} open record`);
+          const queryRequests: URL[] = [];
+          page.on("request", (request) => {
+            if (request.method() !== "GET") return;
+            const requestUrl = new URL(request.url());
+            if (requestUrl.pathname === "/api/cases" && requestUrl.searchParams.get("schemaId") === COLLECTION_QUERY_SCHEMA_ID) {
+              queryRequests.push(requestUrl);
+            }
+          });
+
+          await page.goto(`/investigations?q=${encodeURIComponent(token)}`);
+          await expect(page.locator(".topbar__title-app")).toHaveText(strategy.name);
+          await expect(page.locator(strategy.row)).toHaveCount(1);
+          await expect.poll(() => queryRequests.length).toBeGreaterThan(0);
+          const openFacet = page.getByRole("button", { name: /^open\b/iu });
+          await expect(openFacet).toBeVisible();
+          expect(new URL(page.url()).searchParams.has("status")).toBe(false);
+
+          await openFacet.click();
+          await expect.poll(() => new URL(page.url()).searchParams.get("status")).toBe("open");
+          await expect.poll(() => queryRequests.some((requestUrl) => (
+            requestUrl.searchParams.get("q") === token
+            && requestUrl.searchParams.get("status") === "open"
+          ))).toBe(true);
+          await expect(page.locator(strategy.row)).toHaveCount(1);
+          expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+        } finally {
+          page.removeAllListeners("request");
+          await restoreStrategyPolicy(page, previous);
+        }
+      }
+    } finally {
+      page.removeAllListeners("request");
+    }
+  });
 });
