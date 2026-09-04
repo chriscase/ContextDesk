@@ -10,6 +10,7 @@
  */
 import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import { isIsoInstant } from "./temporal.js";
+import { hasDangerousUnicode } from "./user-profile.js";
 
 export const INVESTIGATION_COORDINATION_SCHEMA_ID =
   "cd-collab.investigation_coordination.v1" as const;
@@ -33,9 +34,11 @@ export type InvestigationCoordinationAction =
 
 /**
  * Authorization split reserved for the future route implementation.
- * Self-service remains available to an eligible current participant with the
- * existing write capability; changing somebody else's assignment is the
- * privileged operation protected by capability model v2.
+ * A claim requires an eligible current participant with the existing write
+ * capability. A route-authorized current holder may release their own claim;
+ * privileged release is the cleanup path when that holder can no longer
+ * authorize. Changing somebody else's assignment is protected by capability
+ * model v2.
  */
 export const INVESTIGATION_COORDINATION_ACTION_AUTHORITY = Object.freeze({
   claim_self: "investigation:write",
@@ -60,6 +63,8 @@ export type InvestigationCoordinationRefusal =
 export const INVESTIGATION_COORDINATION_REFUSAL_DETAIL_MAX_LENGTH = 600;
 export const INVESTIGATION_COORDINATION_IDEMPOTENCY_KEY_MIN_LENGTH = 8;
 export const INVESTIGATION_COORDINATION_IDEMPOTENCY_KEY_MAX_LENGTH = 128;
+export const INVESTIGATION_COORDINATION_ID_MAX_LENGTH = 512;
+export const INVESTIGATION_COORDINATION_USERNAME_MAX_LENGTH = 128;
 
 const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$/;
 
@@ -96,6 +101,8 @@ export interface InvestigationCoordinationActionSuccessV1 {
   schemaId: typeof INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID;
   investigationId: string;
   action: InvestigationCoordinationAction;
+  /** Echoes the parsed request intent: null for self actions. */
+  targetIdentityId: string | null;
   previousRevision: number;
   previousCoordinator: InvestigationCoordinatorIdentityV1 | null;
   /** The projection produced by this action, not a claim of later freshness. */
@@ -107,6 +114,8 @@ export interface InvestigationCoordinationChangedV1 {
   error: "coordination_changed";
   investigationId: string;
   action: InvestigationCoordinationAction;
+  /** Echoes the parsed request intent so callers can bind the response. */
+  targetIdentityId: string | null;
   current: InvestigationCoordinationV1;
 }
 
@@ -115,6 +124,8 @@ export interface InvestigationCoordinationActionRefusedV1 {
   error: "coordination_refused";
   investigationId: string;
   action: InvestigationCoordinationAction;
+  /** Echoes the parsed request intent so callers can bind the response. */
+  targetIdentityId: string | null;
   reason: InvestigationCoordinationRefusal;
   detail: string;
   current: InvestigationCoordinationV1;
@@ -149,6 +160,7 @@ const actionSuccessEnvelopeShape: ObjectShape = {
   schemaId: f.req(f.en(INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID)),
   investigationId: f.req(f.nstr),
   action: f.req(f.en(...INVESTIGATION_COORDINATION_ACTIONS)),
+  targetIdentityId: f.nul(f.nstr),
   previousRevision: f.req(f.u64),
   previousCoordinator: f.nul(f.str),
   applied: f.req(f.str),
@@ -159,6 +171,7 @@ const changedEnvelopeShape: ObjectShape = {
   error: f.req(f.en("coordination_changed")),
   investigationId: f.req(f.nstr),
   action: f.req(f.en(...INVESTIGATION_COORDINATION_ACTIONS)),
+  targetIdentityId: f.nul(f.nstr),
   current: f.req(f.str),
 };
 
@@ -167,6 +180,7 @@ const refusedEnvelopeShape: ObjectShape = {
   error: f.req(f.en("coordination_refused")),
   investigationId: f.req(f.nstr),
   action: f.req(f.en(...INVESTIGATION_COORDINATION_ACTIONS)),
+  targetIdentityId: f.nul(f.nstr),
   reason: f.req(f.en(...INVESTIGATION_COORDINATION_REFUSALS)),
   detail: f.req(f.nstr),
   current: f.req(f.str),
@@ -196,9 +210,52 @@ function checkEnvelope(
   return record;
 }
 
-function nonEmpty(value: unknown, path: string): string {
-  if (typeof value === "string" && value.length > 0) return value;
-  throw new ContractViolation(path, "expected non-empty string");
+function normalizedSafeText(
+  value: unknown,
+  path: string,
+  maxLength: number,
+): string {
+  if (typeof value !== "string") {
+    throw new ContractViolation(path, "expected string");
+  }
+  const normalized = value.normalize("NFKC").trim();
+  if (normalized.length === 0) {
+    throw new ContractViolation(path, "expected non-empty text");
+  }
+  if (normalized.length > maxLength) {
+    throw new ContractViolation(path, `expected at most ${maxLength} normalized characters`);
+  }
+  if (hasDangerousUnicode(normalized)) {
+    throw new ContractViolation(
+      path,
+      "control characters or invisible/bidi-override formatting characters are not allowed",
+    );
+  }
+  return normalized;
+}
+
+function idValue(value: unknown, path: string): string {
+  return normalizedSafeText(value, path, INVESTIGATION_COORDINATION_ID_MAX_LENGTH);
+}
+
+function usernameValue(value: unknown, path: string): string {
+  return normalizedSafeText(value, path, INVESTIGATION_COORDINATION_USERNAME_MAX_LENGTH);
+}
+
+function targetForAction(
+  raw: unknown,
+  action: InvestigationCoordinationAction,
+  path: string,
+): string | null {
+  const targetIdentityId = raw === null ? null : idValue(raw, path);
+  const requiresTarget = action === "assign_participant" || action === "release_participant";
+  if (requiresTarget !== (targetIdentityId !== null)) {
+    throw new ContractViolation(
+      path,
+      requiresTarget ? "is required for participant actions" : "must be null for self actions",
+    );
+  }
+  return targetIdentityId;
 }
 
 function actionValue(value: unknown, path: string): InvestigationCoordinationAction {
@@ -230,8 +287,8 @@ function parseIdentity(
   checkObject(path, identityShape, raw);
   const record = recordAt(raw, path);
   return {
-    identityId: nonEmpty(record.identityId, `${path}.identityId`),
-    username: nonEmpty(record.username, `${path}.username`),
+    identityId: idValue(record.identityId, `${path}.identityId`),
+    username: usernameValue(record.username, `${path}.username`),
   };
 }
 
@@ -259,7 +316,7 @@ export function parseInvestigationCoordination(
   const updatedBy = parseNullableIdentity(record.updatedBy, `${path}.updatedBy`);
   const updatedAt = record.updatedAt === null
     ? null
-    : nonEmpty(record.updatedAt, `${path}.updatedAt`);
+    : normalizedSafeText(record.updatedAt, `${path}.updatedAt`, 64);
 
   if (revision === 0) {
     if (coordinator !== null || updatedAt !== null || updatedBy !== null) {
@@ -280,7 +337,7 @@ export function parseInvestigationCoordination(
 
   return {
     schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
-    investigationId: nonEmpty(record.investigationId, `${path}.investigationId`),
+    investigationId: idValue(record.investigationId, `${path}.investigationId`),
     coordinator,
     revision,
     updatedAt,
@@ -297,7 +354,7 @@ export function parseInvestigationCoordinationActionRequest(
   const record = recordAt(raw, "$");
   const action = actionValue(record.action, "$.action");
   const targetIdentityId = typeof record.targetIdentityId === "string"
-    ? nonEmpty(record.targetIdentityId, "$.targetIdentityId")
+    ? idValue(record.targetIdentityId, "$.targetIdentityId")
     : undefined;
   const requiresTarget = action === "assign_participant" || action === "release_participant";
   if (requiresTarget !== (targetIdentityId !== undefined)) {
@@ -306,17 +363,20 @@ export function parseInvestigationCoordinationActionRequest(
       requiresTarget ? "is required for participant actions" : "is forbidden for self actions",
     );
   }
-  const idempotencyKey = nonEmpty(record.idempotencyKey, "$.idempotencyKey");
+  if (typeof record.idempotencyKey !== "string") {
+    throw new ContractViolation("$.idempotencyKey", "expected string");
+  }
+  const idempotencyKey = record.idempotencyKey;
   if (!IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
     throw new ContractViolation("$.idempotencyKey", "must be 8..128 safe characters");
   }
   const clientTime = typeof record.clientTime === "string"
-    ? nonEmpty(record.clientTime, "$.clientTime")
+    ? normalizedSafeText(record.clientTime, "$.clientTime", 64)
     : undefined;
   if (clientTime !== undefined) assertExplicitOffset(clientTime, "$.clientTime");
   return {
     schemaId: INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
-    investigationId: nonEmpty(record.investigationId, "$.investigationId"),
+    investigationId: idValue(record.investigationId, "$.investigationId"),
     action,
     ...(targetIdentityId === undefined ? {} : { targetIdentityId }),
     expectedRevision: record.expectedRevision as number,
@@ -337,8 +397,9 @@ export function parseInvestigationCoordinationActionSuccess(
   raw: unknown,
 ): InvestigationCoordinationActionSuccessV1 {
   const record = checkEnvelope(raw, "$", actionSuccessEnvelopeShape, ["previousCoordinator", "applied"]);
-  const investigationId = nonEmpty(record.investigationId, "$.investigationId");
+  const investigationId = idValue(record.investigationId, "$.investigationId");
   const action = actionValue(record.action, "$.action");
+  const targetIdentityId = targetForAction(record.targetIdentityId, action, "$.targetIdentityId");
   const previousRevision = record.previousRevision as number;
   const previousCoordinator = parseNullableIdentity(record.previousCoordinator, "$.previousCoordinator");
   const applied = parseInvestigationCoordination(record.applied, "$.applied");
@@ -375,13 +436,19 @@ export function parseInvestigationCoordinationActionSuccess(
     if (applied.coordinator === null || sameIdentity(previousCoordinator, applied.coordinator)) {
       throw new ContractViolation("$.applied.coordinator", "assign_participant must change the coordinator");
     }
+    if (applied.coordinator.identityId !== targetIdentityId) {
+      throw new ContractViolation("$.applied.coordinator", "must match targetIdentityId");
+    }
   } else if (previousCoordinator === null || applied.coordinator !== null) {
     throw new ContractViolation("$.applied.coordinator", "release_participant must release the named coordinator");
+  } else if (previousCoordinator.identityId !== targetIdentityId) {
+    throw new ContractViolation("$.previousCoordinator", "must match targetIdentityId");
   }
   return {
     schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
     investigationId,
     action,
+    targetIdentityId,
     previousRevision,
     previousCoordinator,
     applied,
@@ -393,16 +460,40 @@ export function parseInvestigationCoordinationChanged(
   raw: unknown,
 ): InvestigationCoordinationChangedV1 {
   const record = checkEnvelope(raw, "$", changedEnvelopeShape, ["current"]);
-  const investigationId = nonEmpty(record.investigationId, "$.investigationId");
+  const investigationId = idValue(record.investigationId, "$.investigationId");
+  const action = actionValue(record.action, "$.action");
+  const targetIdentityId = targetForAction(record.targetIdentityId, action, "$.targetIdentityId");
   const current = parseInvestigationCoordination(record.current, "$.current");
   if (current.investigationId !== investigationId) {
     throw new ContractViolation("$.current.investigationId", "must match root investigationId");
+  }
+  if (current.archived) {
+    throw new ContractViolation("$.current.archived", "archive refusal must precede a changed response");
+  }
+  if (action === "claim_self" && current.coordinator !== null) {
+    throw new ContractViolation("$.current.coordinator", "claim_self holder state must refuse before CAS");
+  }
+  if (action === "release_self" && current.coordinator === null) {
+    throw new ContractViolation("$.current.coordinator", "release_self requires a potentially matching holder");
+  }
+  if (
+    action === "assign_participant" &&
+    current.coordinator?.identityId === targetIdentityId
+  ) {
+    throw new ContractViolation("$.current.coordinator", "same-target assignment must refuse before CAS");
+  }
+  if (
+    action === "release_participant" &&
+    current.coordinator?.identityId !== targetIdentityId
+  ) {
+    throw new ContractViolation("$.current.coordinator", "target mismatch must refuse before CAS");
   }
   return {
     schemaId: INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
     error: "coordination_changed",
     investigationId,
-    action: actionValue(record.action, "$.action"),
+    action,
+    targetIdentityId,
     current,
   };
 }
@@ -423,8 +514,9 @@ export function parseInvestigationCoordinationActionRefused(
   raw: unknown,
 ): InvestigationCoordinationActionRefusedV1 {
   const record = checkEnvelope(raw, "$", refusedEnvelopeShape, ["current"]);
-  const investigationId = nonEmpty(record.investigationId, "$.investigationId");
+  const investigationId = idValue(record.investigationId, "$.investigationId");
   const action = actionValue(record.action, "$.action");
+  const targetIdentityId = targetForAction(record.targetIdentityId, action, "$.targetIdentityId");
   const reason = refusalValue(record.reason, "$.reason");
   const current = parseInvestigationCoordination(record.current, "$.current");
   if (current.investigationId !== investigationId) {
@@ -443,19 +535,47 @@ export function parseInvestigationCoordinationActionRefused(
   ) {
     throw new ContractViolation("$.current.archived", "fresh refusal reason requires a working investigation");
   }
-  const rawDetail = nonEmpty(record.detail, "$.detail");
-  const detail = rawDetail.trim();
-  if (detail.length === 0) {
-    throw new ContractViolation("$.detail", "expected non-empty actionable detail");
+  if (
+    (reason === "occupied" || reason === "already_coordinator") &&
+    current.coordinator === null
+  ) {
+    throw new ContractViolation("$.current.coordinator", `${reason} requires an occupied investigation`);
   }
-  if (rawDetail.length > INVESTIGATION_COORDINATION_REFUSAL_DETAIL_MAX_LENGTH) {
-    throw new ContractViolation("$.detail", "detail exceeds 600 characters");
+  if (
+    action === "assign_participant" &&
+    reason === "already_coordinator" &&
+    current.coordinator?.identityId !== targetIdentityId
+  ) {
+    throw new ContractViolation("$.current.coordinator", "must match targetIdentityId");
   }
+  if (reason === "actor_not_eligible" && current.coordinator !== null) {
+    throw new ContractViolation("$.current.coordinator", "holder state must refuse before eligibility");
+  }
+  if (
+    action === "assign_participant" &&
+    reason === "target_not_eligible" &&
+    current.coordinator?.identityId === targetIdentityId
+  ) {
+    throw new ContractViolation("$.current.coordinator", "same-target assignment must refuse before eligibility");
+  }
+  if (
+    action === "release_participant" &&
+    reason === "target_not_coordinator" &&
+    current.coordinator?.identityId === targetIdentityId
+  ) {
+    throw new ContractViolation("$.current.coordinator", "target holder cannot be refused as not coordinator");
+  }
+  const detail = normalizedSafeText(
+    record.detail,
+    "$.detail",
+    INVESTIGATION_COORDINATION_REFUSAL_DETAIL_MAX_LENGTH,
+  );
   return {
     schemaId: INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
     error: "coordination_refused",
     investigationId,
     action,
+    targetIdentityId,
     reason,
     detail,
     current,

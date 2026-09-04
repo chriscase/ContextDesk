@@ -29,21 +29,28 @@ person claiming or releasing their own coordination from a privileged
 participant assignment or release. They do not change investigation status or
 membership.
 
-Self claim/release is reserved for an eligible current participant holding
-`investigation:write`; assignment/release of another participant requires case
-access and `investigation:coordinate`. Eligibility is checked when a claim or
-assignment is made, not projected as an enduring fact. Later suspension or
-membership change may therefore leave a truthful stale coordinator until a
-privileged release cleans it up; no read-time process silently clears it.
+Self claim is reserved for an eligible current participant holding
+`investigation:write`. A route-authorized current holder may self-release
+without a second eligibility refusal; assignment/release of another
+participant requires case access and `investigation:coordinate`. Eligibility
+is checked when a claim or assignment is made, not projected as an enduring
+fact. Later suspension or membership change may therefore leave a truthful
+stale coordinator until a privileged release cleans it up; no read-time
+process silently clears it.
 
 The contract reserves optimistic concurrency, bounded action-specific
-refusals, and durable idempotency. A future store looks up successful retries
-by `(investigationId, actorIdentityId, idempotencyKey)` before fresh archive,
-holder, eligibility, and revision checks. The intent is only action plus
-target; a different intent with the same key is refused. A generic 503 has an
-unknown commit outcome, so a client must retain the exact payload and key
-before retrying. Only successes are replay records; refusals are re-evaluated
-from current state.
+refusals, response echoes that bind action plus target intent, and durable
+idempotency. After session authorization and case-access checks, a future store
+looks up successful retries by `(investigationId, actorIdentityId,
+idempotencyKey)` before fresh archive, holder, eligibility, and revision
+checks. Replay bypasses only those fresh state checks, never authorization or
+case access. The intent is only action plus target; a different intent with the
+same key is refused. A generic 503 has an unknown commit outcome, so a client
+must retain the exact payload and key before retrying. Only successes are
+replay records; refusals are re-evaluated from current state. Because response
+envelopes do not carry actor identity, the route/controller must bind the
+parsed request and authenticated actor to the parsed response for self-action
+identity checks.
 
 This is **accepted contract, not shipped behavior**. There is no coordination
 route, persistence, audit/timeline emission, queue filter, or UI in this slice.

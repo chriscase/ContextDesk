@@ -252,11 +252,18 @@ This is an **accepted contract and reserved permission only**. No server route,
 store, audit writer, queue, or UI uses it yet. A future coordination route must
 re-authorize the session and investigation membership for every request; a
 visible button or UI strategy may never stand in for that check.
-`claim_self` and `release_self` use the existing `investigation:write` gate and
-require current-participant eligibility. The privileged
+`claim_self` uses the existing `investigation:write` gate and requires
+current-participant eligibility. A route-authorized current holder may use
+`release_self` without a second eligibility refusal; if the holder can no
+longer authorize, privileged release is the cleanup path. The
 `assign_participant` and `release_participant` actions require case access plus
 `investigation:coordinate`. A single shared gate for all four actions is not
 permitted.
+
+Capability model v2 and the closed capability enum carried by `session.v1`
+are one coupled deployment unit. Mixed old/new contract and server deployments
+fail closed and must be rolled together; no caller may infer v2 support from a
+string that an older database constraint cannot store.
 
 ### 6.4 Self-service update
 
