@@ -41,7 +41,7 @@ async function strategyPolicy(page: Page): Promise<StrategyPolicy> {
   return await response.json() as StrategyPolicy;
 }
 
-async function setBeaconDefault(page: Page): Promise<StrategyPolicy> {
+async function setStrategyDefault(page: Page, defaultId: string): Promise<StrategyPolicy> {
   const previous = await strategyPolicy(page);
   const update = await page.request.put("/api/admin/ui-strategies", {
     headers: BROWSER_MUTATION_HEADERS,
@@ -51,7 +51,7 @@ async function setBeaconDefault(page: Page): Promise<StrategyPolicy> {
       instance: {
         enabledIds: [...ALL_STRATEGIES],
         visibleIds: [...ALL_STRATEGIES],
-        defaultId: "beacon",
+        defaultId,
         selectionMode: "approved_subset",
         approvedIds: [],
       },
@@ -63,24 +63,7 @@ async function setBeaconDefault(page: Page): Promise<StrategyPolicy> {
 }
 
 async function setWarRoomDefault(page: Page): Promise<StrategyPolicy> {
-  const previous = await strategyPolicy(page);
-  const update = await page.request.put("/api/admin/ui-strategies", {
-    headers: BROWSER_MUTATION_HEADERS,
-    data: {
-      schemaId: "cd-collab.ui_strategy_policy_update.v1",
-      expectedRevision: previous.revision,
-      instance: {
-        enabledIds: [...ALL_STRATEGIES],
-        visibleIds: [...ALL_STRATEGIES],
-        defaultId: "war-room",
-        selectionMode: "approved_subset",
-        approvedIds: [],
-      },
-      roleRules: [],
-    },
-  });
-  expect(update.ok(), await update.text()).toBeTruthy();
-  return previous;
+  return setStrategyDefault(page, "war-room");
 }
 
 async function restoreStrategyPolicy(page: Page, previous: StrategyPolicy): Promise<void> {
@@ -137,7 +120,7 @@ test.describe("Investigation collection query qualification", () => {
 
   test("drives Beacon from the canonical query URL and keeps an empty result explicit", async ({ page }) => {
     await loginAs(page, FIXTURE_USERS.dave);
-    const previous = await setBeaconDefault(page);
+    const previous = await setStrategyDefault(page, "beacon");
     try {
       const token = `beacon-${Date.now()}`;
       const title = `Beacon query ${token}`;
@@ -231,6 +214,85 @@ test.describe("Investigation collection query qualification", () => {
     } finally {
       await page.unroute("**/api/cases?**");
       await restoreStrategyPolicy(page, previous);
+    }
+  });
+
+  test("keeps cursor continuation consistent across every registered strategy", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const strategies = [
+      {
+        id: "investigation-first",
+        name: "Investigation First",
+        row: ".investigation-first__list-button",
+        title: "Make the next useful action obvious.",
+      },
+      {
+        id: "keystone",
+        name: "Keystone",
+        row: ".keystone-strategy__collection-list button",
+        title: "Investigations",
+      },
+      {
+        id: "beacon",
+        name: "Beacon",
+        row: ".beacon__case-list button",
+        title: "Capture the signal. Keep the trail.",
+      },
+    ] as const;
+    let sourcePage: InvestigationCollectionPage | null = null;
+    const queryRequests: URL[] = [];
+    await page.route("**/api/cases?**", async (route) => {
+      const requestUrl = new URL(route.request().url());
+      if (requestUrl.searchParams.get("schemaId") !== COLLECTION_QUERY_SCHEMA_ID) {
+        await route.continue();
+        return;
+      }
+      queryRequests.push(requestUrl);
+      if (requestUrl.searchParams.has("cursor")) {
+        if (sourcePage === null) {
+          await route.continue();
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ ...sourcePage, items: sourcePage.items.slice(1, 2), nextCursor: null }),
+        });
+        return;
+      }
+      const response = await route.fetch();
+      sourcePage = await response.json() as InvestigationCollectionPage;
+      await route.fulfill({
+        response,
+        json: { ...sourcePage, items: sourcePage.items.slice(0, 1), nextCursor: "eyJwYWdlIjoyfQ" },
+      });
+    });
+    try {
+      for (const strategy of strategies) {
+        const previous = await setStrategyDefault(page, strategy.id);
+        sourcePage = null;
+        queryRequests.length = 0;
+        try {
+          const token = `${strategy.id}-page-${Date.now()}`;
+          await createInvestigation(page, `${token} first`);
+          await createInvestigation(page, `${token} second`);
+          await page.goto(`/investigations?q=${encodeURIComponent(token)}`);
+          await expect(page.locator(".topbar__title-app")).toHaveText(strategy.name);
+          await expect(page.getByRole("heading", { name: strategy.title })).toBeVisible();
+          await expect(page.locator(strategy.row)).toHaveCount(1);
+          const next = page.getByRole("button", { name: "Load next page" });
+          await expect(next).toBeVisible();
+          expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+          await next.click();
+          await expect.poll(() => queryRequests.some((requestUrl) => requestUrl.searchParams.get("cursor") === "eyJwYWdlIjoyfQ")).toBe(true);
+          await expect(page.getByRole("button", { name: "Load next page" })).toHaveCount(0);
+          expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+        } finally {
+          await restoreStrategyPolicy(page, previous);
+        }
+      }
+    } finally {
+      await page.unroute("**/api/cases?**");
     }
   });
 });
