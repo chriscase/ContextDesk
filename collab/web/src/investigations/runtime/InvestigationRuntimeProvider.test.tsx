@@ -194,6 +194,9 @@ describe("InvestigationRuntimeProvider", () => {
     expect(Object.isFrozen(currentRuntime().resources.coordination)).toBe(true);
     expect(Object.isFrozen(currentRuntime().commands.applyCoordinationAction)).toBe(true);
 
+    act(() => currentRuntime().refresh.activeInvestigation());
+    await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+
     await act(async () => {
       await expect(currentRuntime().commands.applyCoordinationAction!({
         action: "claim_self",
@@ -266,6 +269,107 @@ describe("InvestigationRuntimeProvider", () => {
       RUNTIME_FIXTURE_IDS.populatedCase,
       { actorIdentityId: "", signal: expect.any(AbortSignal) },
     );
+    expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it("does not read coordination without case-read authority", async () => {
+    const getCoordination = vi.fn(async () => succeeded(coordination()));
+    const gateway = makeGateway({
+      getCoordination,
+      applyCoordinationAction: vi.fn(async () => succeeded(coordinationSuccess())),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="viewer-session"
+        identity={{ id: "identity-viewer", username: "viewer", displayName: "Viewer" }}
+        authorityKey="viewer-authority-v1"
+        capabilities={[]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.coordination).toEqual({
+      status: "idle",
+    }));
+    expect(getCoordination).not.toHaveBeenCalled();
+    expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it("keeps coordination readable in static read-only mode without exposing its command", async () => {
+    const getCoordination = vi.fn(async () => succeeded(coordination()));
+    const gateway = makeGateway({
+      getCoordination,
+      applyCoordinationAction: vi.fn(async () => succeeded(coordinationSuccess())),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead-session"
+        identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+        authorityKey="lead-authority-read-only"
+        capabilities={[
+          "investigation:read",
+          "investigation:write",
+          "investigation:coordinate",
+        ]}
+        readOnly
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.coordination.status).toBe("ready"));
+    expect(getCoordination).toHaveBeenCalledOnce();
+    expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it.each([
+    ["401", { kind: "auth_lost" as const, status: 401 as const }],
+    ["403", { kind: "auth_lost" as const, status: 403 as const }],
+    ["404", { kind: "not_found" as const, status: 404 as const }],
+  ])("denies the active parent scope after coordination apply %s", async (_status, error) => {
+    const gateway = makeGateway({
+      getCoordination: vi.fn(async () => succeeded(coordination())),
+      applyCoordinationAction: vi.fn(async () => ({ ok: false as const, error })),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead-session"
+        identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+        authorityKey="lead-authority-v1"
+        capabilities={["investigation:read", "investigation:write"]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().commands.applyCoordinationAction).not.toBeNull());
+    await act(async () => {
+      await currentRuntime().commands.applyCoordinationAction!({
+        action: "claim_self",
+        idempotencyKey: `coord-provider-terminal-${_status}`,
+      });
+    });
+    await waitFor(() => expect(currentRuntime().resources.investigation).toEqual({
+      status: "failed",
+      error,
+    }));
+    expect(currentRuntime().resources.evidence).toEqual({ status: "failed", error });
+    expect(currentRuntime().resources.contributions).toEqual({ status: "failed", error });
     expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
   });
 

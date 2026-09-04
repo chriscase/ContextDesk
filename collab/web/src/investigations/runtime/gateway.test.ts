@@ -99,6 +99,16 @@ describe("investigation coordination transport", () => {
     const allOrNothing = investigationCoordinationGateway(half);
     expect(allOrNothing).toBe(resolved);
     expect(half.getCoordination).not.toHaveBeenCalled();
+
+    const reverseHalf = {
+      ...legacy,
+      applyCoordinationAction: vi.fn(async () => ({
+        ok: false,
+        error: { kind: "unexpected" },
+      } as const)),
+    };
+    expect(investigationCoordinationGateway(reverseHalf)).toBe(resolved);
+    expect(reverseHalf.applyCoordinationAction).not.toHaveBeenCalled();
   });
 
   it("GETs a route-bound deeply frozen coordination projection", async () => {
@@ -208,6 +218,26 @@ describe("investigation coordination transport", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({
       targetIdentityId: other.identityId,
     });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId,
+      action: "release_participant",
+      targetIdentityId: other.identityId,
+      previousRevision: 1,
+      previousCoordinator: other,
+      applied: { ...coordination(2), updatedBy: actor },
+    }));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "release_participant",
+        targetIdentityId: other.identityId,
+        expectedRevision: 1,
+        idempotencyKey: "coord-action-release-participant-0001",
+      },
+      coordinationOptions(),
+    )).resolves.toMatchObject({ ok: true });
   });
 
   it("strict-parses and context-binds recognized changed/refused conflicts", async () => {
@@ -327,6 +357,43 @@ describe("investigation coordination transport", () => {
         action: "release_self",
         expectedRevision: 2,
         idempotencyKey: "coord-action-actor-0002",
+      },
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+      error: "coordination_changed",
+      investigationId,
+      action: "release_self",
+      targetIdentityId: null,
+      current: coordination(3, other),
+    }, 409));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "release_self",
+        expectedRevision: 2,
+        idempotencyKey: "coord-action-actor-0003",
+      },
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId,
+      action: "release_self",
+      targetIdentityId: null,
+      previousRevision: 2,
+      previousCoordinator: other,
+      applied: { ...coordination(3), updatedBy: other },
+    }));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "release_self",
+        expectedRevision: 2,
+        idempotencyKey: "coord-action-actor-0004",
       },
       coordinationOptions(),
     )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });

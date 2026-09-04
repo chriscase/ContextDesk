@@ -14,6 +14,13 @@ import type {
 import type { CommandOutcome, MutationState, ResourceState } from "../types.js";
 import { RequestSlot, type RequestToken } from "./request-slot.js";
 import {
+  beginResourceLoad,
+  createResourceState,
+  failResourceLoad,
+  succeedResourceLoad,
+  type KeyedResourceState,
+} from "./resource-state.js";
+import {
   emptyScopedMutationState,
   mutationScopeKey,
   scopedMutationState,
@@ -104,6 +111,10 @@ function normalizedTarget(command: InvestigationCoordinationCommand): string | n
 
 const ACTION_SET: ReadonlySet<string> = new Set(INVESTIGATION_COORDINATION_ACTIONS);
 
+function frozenOutcome<T>(outcome: CommandOutcome<T>): CommandOutcome<T> {
+  return deepFreezeDto(outcome);
+}
+
 /** Owns the complete case-bound coordination read/action lane. */
 export function useInvestigationCoordination(
   options: UseInvestigationCoordinationOptions,
@@ -116,10 +127,9 @@ export function useInvestigationCoordination(
   const activeActionRef = useRef<RequestToken<CoordinationScope> | null>(null);
   const retainedRef = useRef<RetainedIntent | null>(null);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
-  const [resource, setResource] = useState<{
-    readonly scopeKey: string | null;
-    readonly state: ResourceState<InvestigationCoordinationV1>;
-  }>({ scopeKey: null, state: { status: "idle" } });
+  const [resource, setResource] = useState<
+    KeyedResourceState<string, InvestigationCoordinationV1>
+  >(() => createResourceState());
   const [storedMutation, setStoredMutation] = useState(() =>
     emptyScopedMutationState<InvestigationCoordinationActionSuccessV1>()
   );
@@ -194,16 +204,11 @@ export function useInvestigationCoordination(
   useEffect(() => {
     if (scope === null || scopeKey === null) {
       readSlotRef.current.invalidate();
-      setResource({ scopeKey: null, state: { status: "idle" } });
+      setResource(createResourceState());
       return;
     }
     const token = readSlotRef.current.begin(scope);
-    setResource((current) => ({
-      scopeKey,
-      state: current.scopeKey === scopeKey && current.state.status === "ready"
-        ? { status: "loading", previous: current.state.value }
-        : { status: "loading" },
-    }));
+    setResource((current) => beginResourceLoad(current, scopeKey));
     void options.gateway.getCoordination(scope.investigationId, {
       actorIdentityId: scope.actorIdentityId,
       signal: token.signal,
@@ -212,23 +217,16 @@ export function useInvestigationCoordination(
       if (!result.ok && (result.error.kind === "auth_lost" || result.error.kind === "not_found")) {
         latestRef.current.onScopeDenied(scope.investigationId, result.error);
       }
-      setResource((current) => {
-        if (current.scopeKey !== scopeKey) return current;
-        const previous = current.state.status === "loading"
-          ? current.state.previous
-          : undefined;
-        return {
-          scopeKey,
-          state: result.ok
-            ? { status: "ready", value: result.value }
-            : previous === undefined
-            ? { status: "failed", error: result.error }
-            : { status: "failed", error: result.error, previous },
-        };
-      });
+      setResource((current) => result.ok
+        ? succeedResourceLoad(current, scopeKey, result.value)
+        : failResourceLoad(current, scopeKey, result.error));
     }).catch(() => {
       if (!mountedRef.current || !readSlotRef.current.isCurrent(token)) return;
-      setResource({ scopeKey, state: { status: "failed", error: { kind: "unexpected" } } });
+      setResource((current) => failResourceLoad(
+        current,
+        scopeKey,
+        { kind: "unexpected" },
+      ));
     });
     return () => readSlotRef.current.invalidate();
   }, [options.gateway, refreshGeneration, scope, scopeKey]);
@@ -238,15 +236,19 @@ export function useInvestigationCoordination(
   const apply = useCallback(async (
     command: InvestigationCoordinationCommand,
   ): Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>> => {
-    if (activeActionRef.current !== null) return { status: "ignored", reason: "busy" };
+    if (activeActionRef.current !== null) {
+      return frozenOutcome({ status: "ignored", reason: "busy" });
+    }
     const start = latestRef.current;
-    if (!ACTION_SET.has(command.action)) return { status: "ignored", reason: "not_ready" };
+    if (!ACTION_SET.has(command.action)) {
+      return frozenOutcome({ status: "ignored", reason: "not_ready" });
+    }
     const current = currentRef.current;
     const currentScope = current.scope;
     const currentReadScopeKey = current.scopeKey;
     const currentActionScopeKey = current.actionScopeKey;
     const currentResource: ResourceState<InvestigationCoordinationV1> =
-      current.resource.scopeKey === currentReadScopeKey
+      current.resource.key === currentReadScopeKey
         ? current.resource.state
         : { status: "idle" };
     if (
@@ -258,13 +260,13 @@ export function useInvestigationCoordination(
       || currentResource.status !== "ready"
       || currentResource.value.investigationId !== currentScope.investigationId
       || !mayApply(command.action, start.canCoordinateSelf, start.canCoordinateParticipants)
-    ) return { status: "ignored", reason: "not_ready" };
+    ) return frozenOutcome({ status: "ignored", reason: "not_ready" });
 
     let targetIdentityId: string | null;
     try {
       targetIdentityId = normalizedTarget(command);
     } catch {
-      return { status: "failed", error: { kind: "unexpected" } };
+      return frozenOutcome({ status: "failed", error: { kind: "unexpected" } });
     }
     const retained = retainedRef.current;
     let request: ApplyCoordinationActionInput;
@@ -282,7 +284,7 @@ export function useInvestigationCoordination(
           status: "failed",
           error,
         }));
-        return { status: "failed", error };
+        return frozenOutcome({ status: "failed", error });
       }
       request = retained.request;
     } else {
@@ -320,7 +322,7 @@ export function useInvestigationCoordination(
         request,
         { actorIdentityId: currentScope.actorIdentityId, signal: token.signal },
       );
-      if (!isCurrent()) return { status: "ignored", reason: "stale" };
+      if (!isCurrent()) return frozenOutcome({ status: "ignored", reason: "stale" });
       if (!result.ok) {
         if (result.error.kind === "auth_lost" || result.error.kind === "not_found") {
           latestRef.current.onScopeDenied(currentScope.investigationId, result.error);
@@ -328,10 +330,12 @@ export function useInvestigationCoordination(
           result.error.kind === "coordination_changed"
           || result.error.kind === "coordination_refused"
         ) {
-          setResource({ scopeKey: currentReadScopeKey, state: {
-            status: "ready",
-            value: result.error.current,
-          } });
+          const currentCoordination = result.error.current;
+          setResource((current) => succeedResourceLoad(
+            current,
+            currentReadScopeKey,
+            currentCoordination,
+          ));
           retainedRef.current = null;
         } else if (
           result.error.kind === "unavailable"
@@ -345,38 +349,39 @@ export function useInvestigationCoordination(
             request,
           });
         }
-        if (!isCurrent()) return { status: "ignored", reason: "stale" };
+        if (!isCurrent()) return frozenOutcome({ status: "ignored", reason: "stale" });
         setStoredMutation(scopedMutationState(currentActionScopeKey, {
           status: "failed",
           error: result.error,
         }));
-        return { status: "failed", error: result.error };
+        return frozenOutcome({ status: "failed", error: result.error });
       }
       retainedRef.current = null;
-      setResource({ scopeKey: currentReadScopeKey, state: {
-        status: "ready",
-        value: result.value.applied,
-      } });
+      setResource((current) => succeedResourceLoad(
+        current,
+        currentReadScopeKey,
+        result.value.applied,
+      ));
       setStoredMutation(scopedMutationState(currentActionScopeKey, {
         status: "succeeded",
         value: result.value,
       }));
-      return { status: "succeeded", value: result.value };
+      return frozenOutcome({ status: "succeeded", value: result.value });
     } catch {
-      if (!isCurrent()) return { status: "ignored", reason: "stale" };
+      if (!isCurrent()) return frozenOutcome({ status: "ignored", reason: "stale" });
       const error = deepFreezeDto({ kind: "unexpected" as const });
       setStoredMutation(scopedMutationState(currentActionScopeKey, {
         status: "failed",
         error,
       }));
-      return { status: "failed", error };
+      return frozenOutcome({ status: "failed", error });
     } finally {
       if (activeActionRef.current === token) activeActionRef.current = null;
     }
   }, []);
 
   return {
-    coordination: scopeKey !== null && resource.scopeKey === scopeKey
+    coordination: scopeKey !== null && resource.key === scopeKey
       ? resource.state
       : { status: "idle" },
     state: visibleMutationState(storedMutation, actionScopeKey),

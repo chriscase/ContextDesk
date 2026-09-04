@@ -485,11 +485,6 @@ export function InvestigationRuntimeProvider({
     onRefresh: refreshArtifactAnnotationsFor,
     onScopeDenied: activeInvestigation.denyScope,
   });
-  const refreshAll = useCallback(() => {
-    activeInvestigation.refreshAll();
-    artifactAnnotationsController.refresh();
-  }, [activeInvestigation.refreshAll, artifactAnnotationsController.refresh]);
-
   const createController = useCreateInvestigation({
     gateway,
     identityKey,
@@ -582,6 +577,15 @@ export function InvestigationRuntimeProvider({
     readOnly,
     onScopeDenied: activeInvestigation.denyScope,
   });
+  const refreshAll = useCallback(() => {
+    activeInvestigation.refreshAll();
+    coordinationController.refresh();
+    artifactAnnotationsController.refresh();
+  }, [
+    activeInvestigation.refreshAll,
+    artifactAnnotationsController.refresh,
+    coordinationController.refresh,
+  ]);
 
   const value = useMemo<InvestigationRuntime>(() => deepFreezeDto({
     identity,

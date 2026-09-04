@@ -10,6 +10,7 @@ import type { InvestigationCoordinationGateway } from "../gateway.js";
 import { createDeferred } from "../testkit/promises.js";
 import {
   useInvestigationCoordination,
+  type InvestigationCoordinationCommand,
   type UseInvestigationCoordinationOptions,
 } from "./use-investigation-coordination.js";
 
@@ -89,12 +90,19 @@ describe("useInvestigationCoordination", () => {
       idempotencyKey: "coord-controller-0001",
       clientTime: "2026-02-03T20:01:00.000Z",
     };
+    let outcome!: Awaited<ReturnType<typeof result.current.apply>>;
     await act(async () => {
-      await expect(result.current.apply(command)).resolves.toEqual({
-        status: "succeeded",
-        value: claimSuccess(),
-      });
+      outcome = await result.current.apply(command);
     });
+    expect(outcome).toEqual({ status: "succeeded", value: claimSuccess() });
+    expect(Object.isFrozen(outcome)).toBe(true);
+    if (outcome.status !== "succeeded") throw new Error("expected success");
+    expect(Object.isFrozen(outcome.value)).toBe(true);
+    const applied = outcome.value.applied;
+    expect(Object.isFrozen(applied)).toBe(true);
+    expect(() => {
+      (applied as { revision: number }).revision = 99;
+    }).toThrow(TypeError);
     expect(transport.applyCoordinationAction).toHaveBeenCalledOnce();
     expect(transport.applyCoordinationAction).toHaveBeenCalledWith(
       CASE_ID,
@@ -116,10 +124,12 @@ describe("useInvestigationCoordination", () => {
       { initialProps: { value: base } },
     );
     await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
-    await expect(result.current.apply({
+    const ignored = await result.current.apply({
       action: "claim_self",
       idempotencyKey: "coord-controller-0002",
-    })).resolves.toEqual({ status: "ignored", reason: "not_ready" });
+    });
+    expect(ignored).toEqual({ status: "ignored", reason: "not_ready" });
+    expect(Object.isFrozen(ignored)).toBe(true);
 
     rerender({ value: { ...base, canCoordinateSelf: true, canCoordinateParticipants: false } });
     await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
@@ -129,6 +139,41 @@ describe("useInvestigationCoordination", () => {
       idempotencyKey: "coord-controller-0003",
     })).resolves.toEqual({ status: "ignored", reason: "not_ready" });
     expect(transport.applyCoordinationAction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["claim_self", { action: "claim_self", idempotencyKey: "coord-matrix-claim" }, true, false],
+    ["release_self", { action: "release_self", idempotencyKey: "coord-matrix-release" }, true, false],
+    ["assign_participant", {
+      action: "assign_participant",
+      targetIdentityId: "identity-bob",
+      idempotencyKey: "coord-matrix-assign",
+    }, false, true],
+    ["release_participant", {
+      action: "release_participant",
+      targetIdentityId: "identity-bob",
+      idempotencyKey: "coord-matrix-release-participant",
+    }, false, true],
+  ] as const)("sends the %s action through its exact capability lane", async (
+    _action,
+    command,
+    canCoordinateSelf,
+    canCoordinateParticipants,
+  ) => {
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >(async () => ({ ok: false, error: { kind: "network" } }));
+    const transport = gateway({ applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport, {
+      canCoordinateSelf,
+      canCoordinateParticipants,
+    })));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+    await act(async () => {
+      await result.current.apply(command as InvestigationCoordinationCommand);
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+    expect(applyCoordinationAction.mock.calls[0]?.[1]).toMatchObject(command);
   });
 
   it("retains an unknown intent privately and only retries its exact payload explicitly", async () => {
@@ -152,10 +197,18 @@ describe("useInvestigationCoordination", () => {
       idempotencyKey: "coord-controller-0004",
       clientTime: "2026-02-03T20:02:00.000Z",
     };
+    let unavailable!: Awaited<ReturnType<typeof result.current.apply>>;
     await act(async () => {
-      await result.current.apply(command);
+      unavailable = await result.current.apply(command);
     });
     expect(apply).toHaveBeenCalledOnce();
+    expect(Object.isFrozen(unavailable)).toBe(true);
+    if (unavailable.status !== "failed") throw new Error("expected failure");
+    const unavailableError = unavailable.error;
+    expect(Object.isFrozen(unavailableError)).toBe(true);
+    expect(() => {
+      (unavailableError as { reason?: string }).reason = "rewritten";
+    }).toThrow(TypeError);
     expect(Object.isFrozen(apply.mock.calls[0]?.[1])).toBe(true);
     expect(JSON.stringify(result.current.state)).not.toContain("expectedRevision");
     expect(JSON.stringify(result.current.state)).not.toContain(command.idempotencyKey);
@@ -208,6 +261,7 @@ describe("useInvestigationCoordination", () => {
       status: "failed",
       error: { kind: "input", field: "idempotencyKey", reason: "intent_mismatch" },
     });
+    expect(Object.isFrozen(outcome)).toBe(true);
     expect(Object.isFrozen((outcome as unknown as { error: object }).error)).toBe(true);
     expect(apply).toHaveBeenCalledOnce();
   });
@@ -259,23 +313,217 @@ describe("useInvestigationCoordination", () => {
     });
   });
 
-  it("denies the parent case scope when a coordination read conceals access loss", async () => {
+  it.each([
+    ["changed", {
+      kind: "coordination_changed" as const,
+      status: 409 as const,
+      investigationId: CASE_ID,
+      action: "claim_self" as const,
+      targetIdentityId: null,
+      current: coordination(7),
+    }],
+    ["refused", {
+      kind: "coordination_refused" as const,
+      status: 409 as const,
+      investigationId: CASE_ID,
+      action: "claim_self" as const,
+      targetIdentityId: null,
+      reason: "actor_not_eligible" as const,
+      detail: "The actor is no longer eligible.",
+      current: coordination(7),
+    }],
+  ])("publishes trusted coordination_%s current and derives the next revision", async (
+    _kind,
+    error,
+  ) => {
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >()
+      .mockResolvedValueOnce({ ok: false, error })
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } });
+    const transport = gateway({ applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+    await act(async () => {
+      await result.current.apply({
+        action: "claim_self",
+        idempotencyKey: `coord-current-${_kind}-1`,
+      });
+    });
+    expect(result.current.coordination).toEqual({
+      status: "ready",
+      value: error.current,
+    });
+    expect(result.current.state).toEqual({ status: "failed", error });
+
+    await act(async () => {
+      await result.current.apply({
+        action: "claim_self",
+        idempotencyKey: `coord-current-${_kind}-2`,
+      });
+    });
+    expect(applyCoordinationAction.mock.calls[1]?.[1]).toMatchObject({ expectedRevision: 7 });
+  });
+
+  it("allows only one transport action while an apply is busy", async () => {
+    const pending = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >>>();
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >(() => pending.promise);
+    const transport = gateway({ applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+    let first!: ReturnType<typeof result.current.apply>;
+    act(() => {
+      first = result.current.apply({
+        action: "claim_self",
+        idempotencyKey: "coord-busy-first",
+      });
+    });
+    const busy = await result.current.apply({
+      action: "claim_self",
+      idempotencyKey: "coord-busy-second",
+    });
+    expect(busy).toEqual({ status: "ignored", reason: "busy" });
+    expect(Object.isFrozen(busy)).toBe(true);
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+
+    pending.resolve({ ok: true, value: claimSuccess() });
+    await act(async () => first);
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["401", { kind: "auth_lost" as const, status: 401 as const }],
+    ["403", { kind: "auth_lost" as const, status: 403 as const }],
+    ["404", { kind: "not_found" as const, status: 404 as const }],
+  ])("denies parent scope on apply %s without retaining an unknown intent", async (
+    _status,
+    error,
+  ) => {
     const onScopeDenied = vi.fn();
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >(async () => ({ ok: false, error }));
+    const transport = gateway({ applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport, {
+      canCoordinateParticipants: true,
+      onScopeDenied,
+    })));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+    let firstOutcome!: Awaited<ReturnType<typeof result.current.apply>>;
+    await act(async () => {
+      firstOutcome = await result.current.apply({
+        action: "claim_self",
+        idempotencyKey: `coord-terminal-${_status}`,
+      });
+    });
+    expect(firstOutcome).toEqual({ status: "failed", error });
+    expect(onScopeDenied).toHaveBeenCalledWith(CASE_ID, error);
+
+    let secondOutcome!: Awaited<ReturnType<typeof result.current.apply>>;
+    await act(async () => {
+      secondOutcome = await result.current.apply({
+        action: "assign_participant",
+        targetIdentityId: "identity-bob",
+        idempotencyKey: `coord-terminal-${_status}`,
+      });
+    });
+    expect(secondOutcome).toEqual({ status: "failed", error });
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves the ready value through a refresh failure and subsequent retry", async () => {
+    const retry = createDeferred<Awaited<ReturnType<InvestigationCoordinationGateway["getCoordination"]>>>();
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: coordination(2) })
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } })
+      .mockImplementationOnce(() => retry.promise);
     const transport = gateway({
-      getCoordination: vi.fn(async () => ({
-        ok: false as const,
-        error: { kind: "not_found" as const, status: 404 as const },
-      })),
+      getCoordination,
+    });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination).toEqual({
+      status: "ready",
+      value: coordination(2),
+    }));
+
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.coordination).toEqual({
+      status: "failed",
+      error: { kind: "network" },
+      previous: coordination(2),
+    }));
+    act(() => result.current.refresh());
+    expect(result.current.coordination).toEqual({
+      status: "loading",
+      previous: coordination(2),
+    });
+    retry.resolve({ ok: true, value: coordination(3) });
+    await waitFor(() => expect(result.current.coordination).toEqual({
+      status: "ready",
+      value: coordination(3),
+    }));
+  });
+
+  it("preserves the ready value when refresh rejects and carries it into retry", async () => {
+    const retry = createDeferred<Awaited<ReturnType<InvestigationCoordinationGateway["getCoordination"]>>>();
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: coordination(2) })
+      .mockRejectedValueOnce(new Error("transport detail must stay bounded"))
+      .mockImplementationOnce(() => retry.promise);
+    const transport = gateway({
+      getCoordination,
+    });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.coordination).toEqual({
+      status: "failed",
+      error: { kind: "unexpected" },
+      previous: coordination(2),
+    }));
+    act(() => result.current.refresh());
+    expect(result.current.coordination).toEqual({
+      status: "loading",
+      previous: coordination(2),
+    });
+    retry.resolve({ ok: true, value: coordination(4) });
+    await waitFor(() => expect(result.current.coordination).toEqual({
+      status: "ready",
+      value: coordination(4),
+    }));
+  });
+
+  it.each([
+    ["401", { kind: "auth_lost" as const, status: 401 as const }],
+    ["403", { kind: "auth_lost" as const, status: 403 as const }],
+    ["404", { kind: "not_found" as const, status: 404 as const }],
+  ])("drops the ready value when a terminal %s refresh denies scope", async (_status, error) => {
+    const onScopeDenied = vi.fn();
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: coordination(2) })
+      .mockResolvedValueOnce({ ok: false, error });
+    const transport = gateway({
+      getCoordination,
     });
     const { result } = renderHook(() => useInvestigationCoordination(options(transport, {
       onScopeDenied,
     })));
-    await waitFor(() => expect(result.current.coordination.status).toBe("failed"));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.coordination).toEqual({
+      status: "failed",
+      error,
+    }));
     expect(onScopeDenied).toHaveBeenCalledOnce();
-    expect(onScopeDenied).toHaveBeenCalledWith(
-      CASE_ID,
-      { kind: "not_found", status: 404 },
-    );
+    expect(onScopeDenied).toHaveBeenCalledWith(CASE_ID, error);
   });
 
   it.each([
@@ -338,6 +586,7 @@ describe("useInvestigationCoordination", () => {
       outcome = await action;
     });
     expect(outcome).toEqual({ status: "ignored", reason: "stale" });
+    expect(Object.isFrozen(outcome)).toBe(true);
     expect(result.current.state).toEqual({ status: "idle" });
   });
 
@@ -364,6 +613,8 @@ describe("useInvestigationCoordination", () => {
     unmount();
     expect(signal?.aborted).toBe(true);
     pending.resolve({ ok: true, value: claimSuccess() });
-    await expect(action).resolves.toEqual({ status: "ignored", reason: "stale" });
+    const outcome = await action;
+    expect(outcome).toEqual({ status: "ignored", reason: "stale" });
+    expect(Object.isFrozen(outcome)).toBe(true);
   });
 });
