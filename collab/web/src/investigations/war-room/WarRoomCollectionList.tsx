@@ -4,6 +4,7 @@ import type {
   ResourceView,
 } from "../runtime/public.js";
 import type { CollectionQueryLocation } from "../../app-location.js";
+import { CollectionPagination } from "../strategies/shared/index.js";
 
 export interface WarRoomCollectionListProps {
   readonly page: ResourceView<InvestigationCollectionPageV1>;
@@ -15,6 +16,7 @@ export interface WarRoomCollectionListProps {
   readonly onOccurredFromChange: (value: string) => void;
   readonly onQueryChange?: (query: CollectionQueryLocation) => void;
   readonly onRefresh: () => void;
+  readonly onNextPage?: () => void;
   readonly onOpenCase: (id: string) => void;
 }
 
@@ -206,6 +208,13 @@ export function WarRoomCollectionList(props: WarRoomCollectionListProps) {
             </li>
           ))}
         </ul>
+      ) : null}
+      {props.onNextPage ? (
+        <CollectionPagination
+          key={JSON.stringify(props.query)}
+          view={page}
+          onNextPage={props.onNextPage}
+        />
       ) : null}
     </section>
   );

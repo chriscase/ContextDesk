@@ -534,11 +534,20 @@ describe("useInvestigationCollectionQuery", () => {
     expect(result.current.page).toEqual({ status: "ready", value: nextPage });
   });
 
-  it("treats cursor continuation as a new query key and does not publish the prior page", async () => {
-    const firstPage = collectionPage({ nextCursor: OPAQUE_COLLECTION_CURSOR });
+  it("accumulates cursor continuation in server order and keeps the prior page recoverable", async () => {
+    const firstItem = makePopulatedCase();
+    const secondItem = makeSparseImportedCase();
+    const firstPage = collectionPage({ items: [firstItem], nextCursor: OPAQUE_COLLECTION_CURSOR });
     const secondPage = collectionPage({
-      items: [makeSparseImportedCase()],
+      items: [secondItem],
       nextCursor: null,
+      hiddenArchivedCount: 3,
+      facets: {
+        status: { top: [{ key: "monitoring", count: 7 }], otherCount: 2 },
+        entity: { top: [], otherCount: 0 },
+        impactIdentity: { top: [], otherCount: 0 },
+        contributor: { top: [], otherCount: 0 },
+      },
     });
     const first = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
     const second = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
@@ -568,13 +577,47 @@ describe("useInvestigationCollectionQuery", () => {
     rerender({ query: { q: "checkout", cursor: firstPage.nextCursor } });
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[1]?.cursor).toBe(OPAQUE_COLLECTION_CURSOR);
-    expect(result.current.page).toEqual({ status: "loading" });
+    expect(result.current.page).toEqual({ status: "loading", previous: firstPage });
 
     await act(async () => {
       second.resolve({ ok: true, value: secondPage });
     });
-    expect(result.current.page).toEqual({ status: "ready", value: secondPage });
+    expect(result.current.page).toEqual({
+      status: "ready",
+      value: { ...secondPage, items: [firstItem, secondItem] },
+    });
+    if (result.current.page.status !== "ready") throw new Error("expected accumulated page");
+    expect(result.current.page.value.hiddenArchivedCount).toBe(3);
+    expect(result.current.page.value.facets.status).toEqual({
+      top: [{ key: "monitoring", count: 7 }],
+      otherCount: 2,
+    });
     expect(result.current.query?.cursor).toBe(OPAQUE_COLLECTION_CURSOR);
+  });
+
+  it("retains the accumulated page when cursor continuation fails", async () => {
+    const firstPage = collectionPage({ items: [makePopulatedCase()], nextCursor: OPAQUE_COLLECTION_CURSOR });
+    const gateway = queryGatewayWith(async (query) => query.cursor === null || query.cursor === undefined
+      ? { ok: true, value: firstPage }
+      : { ok: false, error: { kind: "unavailable", status: 503 } });
+    const { result, rerender } = renderHook(
+      ({ query }) => useInvestigationCollectionQuery({
+        gateway,
+        enabled: true,
+        identityKey: "alice",
+        authorityKey: "interactive:viewer",
+        query,
+      }),
+      { initialProps: { query: { q: "checkout" } as InvestigationCollectionQueryInput } },
+    );
+    await waitFor(() => expect(result.current.page).toEqual({ status: "ready", value: firstPage }));
+
+    rerender({ query: { q: "checkout", cursor: OPAQUE_COLLECTION_CURSOR } });
+    await waitFor(() => expect(result.current.page).toEqual({
+      status: "failed",
+      error: { kind: "unavailable", status: 503 },
+      previous: firstPage,
+    }));
   });
 
   it("fails a malformed query without calling the gateway", async () => {

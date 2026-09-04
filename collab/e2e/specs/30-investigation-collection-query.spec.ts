@@ -41,7 +41,7 @@ async function strategyPolicy(page: Page): Promise<StrategyPolicy> {
   return await response.json() as StrategyPolicy;
 }
 
-async function setBeaconDefault(page: Page): Promise<StrategyPolicy> {
+async function setStrategyDefault(page: Page, defaultId: string): Promise<StrategyPolicy> {
   const previous = await strategyPolicy(page);
   const update = await page.request.put("/api/admin/ui-strategies", {
     headers: BROWSER_MUTATION_HEADERS,
@@ -51,7 +51,7 @@ async function setBeaconDefault(page: Page): Promise<StrategyPolicy> {
       instance: {
         enabledIds: [...ALL_STRATEGIES],
         visibleIds: [...ALL_STRATEGIES],
-        defaultId: "beacon",
+        defaultId,
         selectionMode: "approved_subset",
         approvedIds: [],
       },
@@ -60,6 +60,10 @@ async function setBeaconDefault(page: Page): Promise<StrategyPolicy> {
   });
   expect(update.ok(), await update.text()).toBeTruthy();
   return previous;
+}
+
+async function setWarRoomDefault(page: Page): Promise<StrategyPolicy> {
+  return setStrategyDefault(page, "war-room");
 }
 
 async function restoreStrategyPolicy(page: Page, previous: StrategyPolicy): Promise<void> {
@@ -116,7 +120,7 @@ test.describe("Investigation collection query qualification", () => {
 
   test("drives Beacon from the canonical query URL and keeps an empty result explicit", async ({ page }) => {
     await loginAs(page, FIXTURE_USERS.dave);
-    const previous = await setBeaconDefault(page);
+    const previous = await setStrategyDefault(page, "beacon");
     try {
       const token = `beacon-${Date.now()}`;
       const title = `Beacon query ${token}`;
@@ -145,6 +149,361 @@ test.describe("Investigation collection query qualification", () => {
       await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
     } finally {
       await restoreStrategyPolicy(page, previous);
+    }
+  });
+
+  test("keeps the opaque cursor runtime-owned while loading the next War Room page", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const previous = await setWarRoomDefault(page);
+    let sourcePage: InvestigationCollectionPage | null = null;
+    const queryRequests: URL[] = [];
+    await page.route("**/api/cases?**", async (route) => {
+      const requestUrl = new URL(route.request().url());
+      if (requestUrl.searchParams.get("schemaId") !== COLLECTION_QUERY_SCHEMA_ID) {
+        await route.continue();
+        return;
+      }
+      if (requestUrl.searchParams.has("cursor")) {
+        if (sourcePage === null) {
+          await route.continue();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...sourcePage,
+            items: sourcePage.items.slice(1, 2),
+            nextCursor: null,
+          }),
+        });
+        return;
+      }
+      const response = await route.fetch();
+      sourcePage = await response.json() as InvestigationCollectionPage;
+      await route.fulfill({
+        response,
+        json: {
+          ...sourcePage,
+          items: sourcePage.items.slice(0, 1),
+          nextCursor: "eyJwYWdlIjoyfQ",
+        },
+      });
+    });
+    page.on("request", (request) => {
+      if (request.method() !== "GET") return;
+      const requestUrl = new URL(request.url());
+      if (requestUrl.pathname === "/api/cases" && requestUrl.searchParams.get("schemaId") === COLLECTION_QUERY_SCHEMA_ID) {
+        queryRequests.push(requestUrl);
+      }
+    });
+    try {
+      const token = `war-room-page-${Date.now()}`;
+      await createInvestigation(page, `${token} first`);
+      await createInvestigation(page, `${token} second`);
+      await page.goto(`/investigations?q=${encodeURIComponent(token)}`);
+      await expect(page.getByRole("heading", { name: "Investigations" })).toBeVisible();
+      const rows = page.locator(".case-card__open");
+      await expect(rows).toHaveCount(1);
+      await expect.poll(() => sourcePage?.items.length ?? 0).toBeGreaterThanOrEqual(2);
+      const firstTitle = sourcePage!.items[0]!.title;
+      const secondTitle = sourcePage!.items[1]!.title;
+      await expect(rows.nth(0)).toContainText(firstTitle);
+      const next = page.getByRole("button", { name: "Load next page" });
+      await expect(next).toBeVisible();
+      expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+      await next.click();
+      const loading = page.getByRole("button", { name: "Loading next page…" });
+      await expect(loading).toBeVisible();
+      await expect(loading).toBeFocused();
+      await expect.poll(() => queryRequests.some((requestUrl) => requestUrl.searchParams.get("cursor") === "eyJwYWdlIjoyfQ")).toBe(true);
+      await expect(rows).toHaveCount(2);
+      await expect(rows.nth(0)).toContainText(firstTitle);
+      await expect(rows.nth(1)).toContainText(secondTitle);
+      const completion = page.getByRole("navigation", { name: "Investigation pages" }).getByRole("status");
+      await expect(completion).toHaveText("All loaded investigations are shown.");
+      await expect(completion).toBeFocused();
+      expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+    } finally {
+      await page.unroute("**/api/cases?**");
+      await restoreStrategyPolicy(page, previous);
+    }
+  });
+
+  test("keeps cursor continuation consistent across every registered strategy", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const strategies = [
+      {
+        id: "investigation-first",
+        name: "Investigation First",
+        row: ".investigation-first__list-button",
+        title: "Make the next useful action obvious.",
+      },
+      {
+        id: "keystone",
+        name: "Keystone",
+        row: ".keystone-strategy__collection-list button",
+        title: "Investigations",
+      },
+      {
+        id: "beacon",
+        name: "Beacon",
+        row: ".beacon__case-list button",
+        title: "Capture the signal. Keep the trail.",
+      },
+    ] as const;
+    let sourcePage: InvestigationCollectionPage | null = null;
+    const queryRequests: URL[] = [];
+    await page.route("**/api/cases?**", async (route) => {
+      const requestUrl = new URL(route.request().url());
+      if (requestUrl.searchParams.get("schemaId") !== COLLECTION_QUERY_SCHEMA_ID) {
+        await route.continue();
+        return;
+      }
+      queryRequests.push(requestUrl);
+      if (requestUrl.searchParams.has("cursor")) {
+        if (sourcePage === null) {
+          await route.continue();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ ...sourcePage, items: sourcePage.items.slice(1, 2), nextCursor: null }),
+        });
+        return;
+      }
+      const response = await route.fetch();
+      sourcePage = await response.json() as InvestigationCollectionPage;
+      await route.fulfill({
+        response,
+        json: { ...sourcePage, items: sourcePage.items.slice(0, 1), nextCursor: "eyJwYWdlIjoyfQ" },
+      });
+    });
+    try {
+      for (const strategy of strategies) {
+        const previous = await setStrategyDefault(page, strategy.id);
+        sourcePage = null;
+        queryRequests.length = 0;
+        try {
+          const token = `${strategy.id}-page-${Date.now()}`;
+          await createInvestigation(page, `${token} first`);
+          await createInvestigation(page, `${token} second`);
+          await page.goto(`/investigations?q=${encodeURIComponent(token)}`);
+          await expect(page.locator(".topbar__title-app")).toHaveText(strategy.name);
+          await expect(page.getByRole("heading", { name: strategy.title })).toBeVisible();
+          const rows = page.locator(strategy.row);
+          await expect(rows).toHaveCount(1);
+          await expect.poll(() => sourcePage?.items.length ?? 0).toBeGreaterThanOrEqual(2);
+          const firstTitle = sourcePage!.items[0]!.title;
+          const secondTitle = sourcePage!.items[1]!.title;
+          await expect(rows.nth(0)).toContainText(firstTitle);
+          const next = page.getByRole("button", { name: "Load next page" });
+          await expect(next).toBeVisible();
+          expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+          await next.click();
+          const loading = page.getByRole("button", { name: "Loading next page…" });
+          await expect(loading).toBeVisible();
+          await expect(loading).toBeFocused();
+          await expect.poll(() => queryRequests.some((requestUrl) => requestUrl.searchParams.get("cursor") === "eyJwYWdlIjoyfQ")).toBe(true);
+          await expect(rows).toHaveCount(2);
+          await expect(rows.nth(0)).toContainText(firstTitle);
+          await expect(rows.nth(1)).toContainText(secondTitle);
+          const completion = page.getByRole("navigation", { name: "Investigation pages" }).getByRole("status");
+          await expect(completion).toHaveText("All loaded investigations are shown.");
+          await expect(completion).toBeFocused();
+          expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+        } finally {
+          await restoreStrategyPolicy(page, previous);
+        }
+      }
+    } finally {
+      await page.unroute("**/api/cases?**");
+    }
+  });
+
+  test("keeps collection failures explicit and never falls back to the legacy list", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const strategies = [
+      {
+        id: "war-room",
+        name: "War Room",
+        row: ".case-card__open",
+        retry: "Retry",
+      },
+      {
+        id: "investigation-first",
+        name: "Investigation First",
+        row: ".investigation-first__list-button",
+        retry: "Retry loading investigations",
+      },
+      {
+        id: "keystone",
+        name: "Keystone",
+        row: ".keystone-strategy__collection-list button",
+        retry: "Retry loading investigations",
+      },
+      {
+        id: "beacon",
+        name: "Beacon",
+        row: ".beacon__case-list button",
+        retry: "Retry",
+      },
+    ] as const;
+    const collectionRequests: string[] = [];
+    await page.route("**/api/cases?**", async (route) => {
+      const request = route.request();
+      const requestUrl = new URL(request.url());
+      if (request.method() !== "GET" || requestUrl.searchParams.get("schemaId") !== COLLECTION_QUERY_SCHEMA_ID) {
+        await route.continue();
+        return;
+      }
+      collectionRequests.push(request.url());
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "temporary qualification outage" }),
+      });
+    });
+    try {
+      for (const strategy of strategies) {
+        const previous = await setStrategyDefault(page, strategy.id);
+        try {
+          const token = `${strategy.id}-failure-${Date.now()}`;
+          const title = `${token} should stay hidden`;
+          await createInvestigation(page, title);
+          collectionRequests.length = 0;
+          await page.goto(`/investigations?q=${encodeURIComponent(token)}`);
+          await expect(page.locator(".topbar__title-app")).toHaveText(strategy.name);
+          await expect.poll(() => collectionRequests.length).toBe(1);
+          await expect(page.getByRole("alert").first()).toBeVisible();
+          await expect(page.getByRole("alert").first()).toContainText(/could not|unavailable|loaded/iu);
+          await expect(page.locator(strategy.row)).toHaveCount(0);
+          expect(new URL(page.url()).searchParams.get("q")).toBe(token);
+          expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+
+          await page.getByRole("button", { name: strategy.retry }).click();
+          await expect.poll(() => collectionRequests.length).toBe(2);
+          await expect(page.locator(strategy.row)).toHaveCount(0);
+          await expect(page.getByRole("alert").first()).toBeVisible();
+        } finally {
+          await restoreStrategyPolicy(page, previous);
+        }
+      }
+    } finally {
+      await page.unroute("**/api/cases?**");
+    }
+  });
+
+  test("uses server-owned status facets for canonical filters in every strategy", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const strategies = [
+      {
+        id: "war-room",
+        name: "War Room",
+        row: ".case-card__open",
+      },
+      {
+        id: "investigation-first",
+        name: "Investigation First",
+        row: ".investigation-first__list-button",
+      },
+      {
+        id: "keystone",
+        name: "Keystone",
+        row: ".keystone-strategy__collection-list button",
+      },
+      {
+        id: "beacon",
+        name: "Beacon",
+        row: ".beacon__case-list button",
+      },
+    ] as const;
+    try {
+      for (const strategy of strategies) {
+        const previous = await setStrategyDefault(page, strategy.id);
+        try {
+          const token = `${strategy.id}-facet-${Date.now()}`;
+          await createInvestigation(page, `${token} open record`);
+          const queryRequests: URL[] = [];
+          page.on("request", (request) => {
+            if (request.method() !== "GET") return;
+            const requestUrl = new URL(request.url());
+            if (requestUrl.pathname === "/api/cases" && requestUrl.searchParams.get("schemaId") === COLLECTION_QUERY_SCHEMA_ID) {
+              queryRequests.push(requestUrl);
+            }
+          });
+
+          await page.goto(`/investigations?q=${encodeURIComponent(token)}`);
+          await expect(page.locator(".topbar__title-app")).toHaveText(strategy.name);
+          await expect(page.locator(strategy.row)).toHaveCount(1);
+          await expect.poll(() => queryRequests.length).toBeGreaterThan(0);
+          const openFacet = page.getByRole("button", { name: /^open\b/iu });
+          await expect(openFacet).toBeVisible();
+          expect(new URL(page.url()).searchParams.has("status")).toBe(false);
+
+          await openFacet.click();
+          await expect.poll(() => new URL(page.url()).searchParams.get("status")).toBe("open");
+          await expect.poll(() => queryRequests.some((requestUrl) => (
+            requestUrl.searchParams.get("q") === token
+            && requestUrl.searchParams.get("status") === "open"
+          ))).toBe(true);
+          await expect(page.locator(strategy.row)).toHaveCount(1);
+          expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+        } finally {
+          page.removeAllListeners("request");
+          await restoreStrategyPolicy(page, previous);
+        }
+      }
+    } finally {
+      page.removeAllListeners("request");
+    }
+  });
+
+  test("withholds both collection reads when every strategy is projected read-denied", async ({ page }) => {
+    test.setTimeout(120_000);
+    await loginAs(page, FIXTURE_USERS.dave);
+    const strategies = ["war-room", "investigation-first", "keystone", "beacon"] as const;
+    const sessionResponse = await page.request.get("/api/auth/me");
+    expect(sessionResponse.ok(), await sessionResponse.text()).toBeTruthy();
+    const session = await sessionResponse.json() as Record<string, unknown>;
+    try {
+      for (const strategy of strategies) {
+        const previous = await setStrategyDefault(page, strategy);
+        try {
+          await loginAs(page, FIXTURE_USERS.carol);
+          await page.waitForLoadState("networkidle");
+          const caseReads: string[] = [];
+          const recordCaseRead = (request: import("@playwright/test").Request) => {
+            const requestUrl = new URL(request.url());
+            if (request.method() === "GET" && (requestUrl.pathname === "/api/cases" || requestUrl.pathname.startsWith("/api/cases/"))) {
+              caseReads.push(requestUrl.pathname);
+            }
+          };
+          await page.route("**/api/auth/me", async (route) => {
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({ ...session, capabilities: [] }),
+            });
+          });
+          page.on("request", recordCaseRead);
+          await page.goto("/investigations");
+          await expect(page.getByText(/no investigation(?: or evidence)? data was requested/iu).first()).toBeVisible();
+          await expect.poll(() => caseReads).toEqual([]);
+          await expect(page.getByRole("button", { name: /Retry/iu })).toHaveCount(0);
+          page.off("request", recordCaseRead);
+          await page.unroute("**/api/auth/me");
+        } finally {
+          await page.unroute("**/api/auth/me");
+          await loginAs(page, FIXTURE_USERS.dave);
+          await restoreStrategyPolicy(page, previous);
+        }
+      }
+    } finally {
+      await page.unroute("**/api/auth/me");
     }
   });
 });

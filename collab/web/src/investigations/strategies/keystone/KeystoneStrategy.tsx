@@ -12,6 +12,7 @@ import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
+  CollectionPagination,
   StrategyHero,
   StrategyPanel,
   StrategyStateNotice,
@@ -423,6 +424,7 @@ export function KeystoneStrategy(props: InvestigationStrategyShellProps) {
               ))}
             </ol>
           ) : null}
+          {collectionEnabled ? <CollectionPagination key={JSON.stringify(collection.input)} view={collectionView} onNextPage={collection.nextPage} /> : null}
         </StrategyPanel>
       </StrategySurface>
     );

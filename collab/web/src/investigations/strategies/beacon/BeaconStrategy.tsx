@@ -10,11 +10,15 @@ import {
   type ResourceState,
 } from "../../runtime/public.js";
 import type { InvestigationStrategyShellProps } from "../contract.js";
-import { useInvestigationCollectionQuery } from "../collection-query.js";
+import {
+  useInvestigationCollectionQuery,
+  type InvestigationCollectionQueryPresentation,
+} from "../collection-query.js";
 import { RuntimeHandoffPanel } from "../runtime-handoff.js";
 import {
   StrategyActionRow,
   StrategyBadge,
+  CollectionPagination,
   StrategyHero,
   StrategyPanel,
   StrategyStateNotice,
@@ -160,10 +164,13 @@ function Browse({
   focusRef,
   collectionQuery,
   onCollectionQueryChange,
-}: Pick<InvestigationStrategyShellProps, "onOpenCase" | "collectionQuery" | "onCollectionQueryChange"> & { readonly focusRef: Ref<HTMLInputElement> }) {
+  collection,
+}: Pick<InvestigationStrategyShellProps, "onOpenCase" | "collectionQuery" | "onCollectionQueryChange"> & {
+  readonly focusRef: Ref<HTMLInputElement>;
+  readonly collection: InvestigationCollectionQueryPresentation;
+}) {
   const runtime = useInvestigationRuntime();
   const legacyView = selectResourceView(runtime.resources.investigations);
-  const collection = useInvestigationCollectionQuery(collectionQuery);
   const collectionView = collection.view;
   const view = collection.enabled ? collection.view : legacyView;
   const [localQuery, setLocalQuery] = useState("");
@@ -223,6 +230,7 @@ function Browse({
       {view.availability === "available" && view.refresh === "failed" ? <StrategyStateNotice tone="warning" role="alert" title="Refresh failed" action={<button type="button" onClick={collection.enabled ? collection.refresh : runtime.refresh.investigations}>Retry</button>}>The previously loaded list is still shown.</StrategyStateNotice> : null}
       {view.availability === "available" && filtered.length === 0 ? <StrategyStateNotice>{normalized ? "No investigations match this search." : "No investigations have been recorded yet."}</StrategyStateNotice> : null}
       {view.availability === "available" && filtered.length > 0 ? <ul className="beacon__case-list">{filtered.map((item) => <li key={item.id}><button type="button" onClick={() => onOpenCase(item.id)}><span><strong>{titleOf(item)}</strong><small>{recorded(item.problemStatement)}</small></span><span className="beacon__case-state"><StrategyBadge tone={item.status === "resolved" ? "success" : item.status === "open" ? "accent" : "neutral"}>{item.status}</StrategyBadge><small>{dateLabel(item.createdAt)}</small></span></button></li>)}</ul> : null}
+      {collection.enabled ? <CollectionPagination key={JSON.stringify(collection.input)} view={collectionView} onNextPage={collection.nextPage} /> : null}
     </StrategyPanel>
   );
 }
@@ -428,6 +436,9 @@ function Detail(props: InvestigationStrategyShellProps) {
 function BeaconStrategyForIdentity(props: InvestigationStrategyShellProps) {
   const browseFocusRef = useRef<HTMLInputElement>(null);
   const priorFocusId = useRef<string | null>(props.focusCaseId);
+  const collection = useInvestigationCollectionQuery(
+    props.focusCaseId === null ? props.collectionQuery : undefined,
+  );
   useEffect(() => {
     const previous = priorFocusId.current;
     priorFocusId.current = props.focusCaseId;
@@ -437,7 +448,7 @@ function BeaconStrategyForIdentity(props: InvestigationStrategyShellProps) {
     <StrategySurface className="beacon" labelledBy={props.focusCaseId ? "beacon-detail-title" : "beacon-page-title"}>
       {props.focusCaseId ? <Detail {...props} /> : <>
         <StrategyHero eyebrow="Beacon · Rapid Intake" title="Capture the signal. Keep the trail." titleId="beacon-page-title" description="A calm, append-first workspace for fast triage intake and clear handoff. Every promotion is explicit; the shared record remains authoritative." />
-        <div className="beacon__browse-grid"><CreateCard {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })} /><Browse onOpenCase={props.onOpenCase} focusRef={browseFocusRef} {...(props.collectionQuery === undefined ? {} : { collectionQuery: props.collectionQuery })} {...(props.onCollectionQueryChange === undefined ? {} : { onCollectionQueryChange: props.onCollectionQueryChange })} /></div>
+        <div className="beacon__browse-grid"><CreateCard {...(props.startSignal === undefined ? {} : { startSignal: props.startSignal })} /><Browse collection={collection} onOpenCase={props.onOpenCase} focusRef={browseFocusRef} {...(props.collectionQuery === undefined ? {} : { collectionQuery: props.collectionQuery })} {...(props.onCollectionQueryChange === undefined ? {} : { onCollectionQueryChange: props.onCollectionQueryChange })} /></div>
       </>}
     </StrategySurface>
   );
