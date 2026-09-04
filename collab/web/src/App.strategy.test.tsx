@@ -268,7 +268,7 @@ describe("strategy selection in the shell", () => {
     render(<App />);
     const account = await screen.findByRole("button", { name: "Signed in as Alice" });
     fireEvent.click(account);
-    fireEvent.click(screen.getByRole("radio", { name: /Investigation First/u }));
+    fireEvent.click(await screen.findByRole("radio", { name: /Investigation First/u }));
     fireEvent.click(screen.getByRole("button", { name: "Use selected experience" }));
 
     expect((await screen.findByRole("alert")).textContent).toMatch(/preference was not confirmed/u);
