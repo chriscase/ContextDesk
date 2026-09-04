@@ -29,6 +29,7 @@ import {
 import { createInvestigationGatewayDouble } from "./testkit/gateway-double.js";
 import {
   RUNTIME_FIXTURE_IDS,
+  RUNTIME_BULK_ANNOTATION_FIXTURE_IDS,
   makeArchiveAllowedLifecycle,
   makeArchiveRefusedLifecycle,
   makeArtifactAnnotationBulkResult,
@@ -53,6 +54,19 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function options(controller = new AbortController()) {
   return { signal: controller.signal };
+}
+
+const RUNTIME_BULK_CASE_ID = RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.caseId;
+
+function bulkAnnotationInput() {
+  return {
+    artifactIds: [
+      RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.firstArtifact,
+      RUNTIME_BULK_ANNOTATION_FIXTURE_IDS.secondArtifact,
+    ],
+    body: "A bounded bulk annotation.",
+    idempotencyKey: "bulk-runtime-0005",
+  };
 }
 
 function archivedCase(): CaseV1 {
@@ -1848,6 +1862,15 @@ describe("artifact annotation runtime seam", () => {
       options(),
     );
     expect(result).toEqual({ ok: true, value: bulk });
+    if (result.ok) {
+      expect(Object.isFrozen(result.value)).toBe(true);
+      expect(Object.isFrozen(result.value.items)).toBe(true);
+      expect(Object.isFrozen(result.value.items[0])).toBe(true);
+      expect(
+        result.value.items[0]?.outcome === "not_found"
+          || Object.isFrozen(result.value.items[0]?.annotation),
+      ).toBe(true);
+    }
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [route, init] = fetchMock.mock.calls[0] ?? [];
     expect(route).toBe(`/api/cases/${bulk.caseId}/evidence/annotations`);
@@ -1913,6 +1936,40 @@ describe("artifact annotation runtime seam", () => {
       ok: false,
       error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
     });
+  });
+
+  it.each([401, 403] as const)(
+    "preserves protected auth-loss semantics for bulk annotation writes (%i)",
+    async (status) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({ error: "forbidden" }, status),
+      );
+      const listener = vi.fn();
+      window.addEventListener(AUTH_LOST_EVENT, listener);
+      try {
+        await expect(investigationGateway.createArtifactAnnotationsBulk!(
+          RUNTIME_BULK_CASE_ID,
+          bulkAnnotationInput(),
+          options(),
+        )).resolves.toEqual({ ok: false, error: { kind: "auth_lost", status } });
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener(AUTH_LOST_EVENT, listener);
+      }
+    },
+  );
+
+  it("keeps a bulk annotation conflict bounded", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ error: "idempotency_conflict", private: "must-not-escape" }, 409),
+    );
+    await expect(investigationGateway.createArtifactAnnotationsBulk!(
+      RUNTIME_BULK_CASE_ID,
+      bulkAnnotationInput(),
+      options(),
+    )).resolves.toEqual({ ok: false, error: { kind: "conflict", status: 409 } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("preserves an annotation commit-outcome-unknown response without exposing its body", async () => {

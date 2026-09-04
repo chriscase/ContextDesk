@@ -5,6 +5,7 @@ import type {
   InvestigationArtifactAnnotationsBulkCommand,
   InvestigationRuntime,
 } from "./public.js";
+import { MAX_ARTIFACT_ANNOTATION_BULK_IDS } from "./public.js";
 import * as publicRuntime from "./public.js";
 
 const STRATEGY_FACING_PROPS: InvestigationRuntimeProviderProps = {
@@ -23,6 +24,7 @@ describe("investigation runtime public surface", () => {
   it("does not expose transport or protected-fetch internals at runtime", () => {
     expect(Object.keys(publicRuntime).sort()).toEqual([
       "InvestigationRuntimeProvider",
+      "MAX_ARTIFACT_ANNOTATION_BULK_IDS",
       "MAX_EVIDENCE_UPLOAD_BYTES",
       "selectEvidenceInventory",
       "selectResourceView",
@@ -58,6 +60,8 @@ describe("investigation runtime public surface", () => {
       },
     };
     expect(command.artifactIds).toHaveLength(2);
+    expect(MAX_ARTIFACT_ANNOTATION_BULK_IDS).toBe(64);
+    expect(publicRuntime.MAX_ARTIFACT_ANNOTATION_BULK_IDS).toBe(64);
     expect(result).toBeNull();
     expect(runtime.commands.createArtifactAnnotations).toBeNull();
   });

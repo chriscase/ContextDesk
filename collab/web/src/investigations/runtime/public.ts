@@ -30,6 +30,7 @@ export type {
   ArtifactAnnotationListV1,
   ArtifactAnnotationV1,
 } from "./annotation-contract.js";
+export { MAX_ARTIFACT_ANNOTATION_BULK_IDS } from "./annotation-contract.js";
 export {
   type EvidencePreviewValue,
   type PreviewEvidenceInput,
