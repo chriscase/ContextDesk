@@ -230,6 +230,42 @@ describe("useInvestigationOperationsQueue", () => {
     }));
   });
 
+  it("never republishes accumulated rows after a concealed not-found response", async () => {
+    const page = makeOperationsQueuePage();
+    const retry = createDeferred<GatewayResult<InvestigationOperationsQueuePageV1>>();
+    const responses: Array<
+      GatewayResult<InvestigationOperationsQueuePageV1>
+      | Promise<GatewayResult<InvestigationOperationsQueuePageV1>>
+    > = [
+      { ok: true, value: page },
+      { ok: false, error: { kind: "not_found", status: 404 } },
+      retry.promise,
+    ];
+    const gateway = gatewayWith(async () => responses.shift()!);
+    const { result } = renderHook(() => useInvestigationOperationsQueue({
+      gateway,
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "viewer:v1",
+      query: { coordinationScope: "mine" },
+    }));
+    await waitFor(() => expect(result.current.page).toEqual({ status: "ready", value: page }));
+
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.page).toEqual({
+      status: "failed",
+      error: { kind: "not_found", status: 404 },
+    }));
+
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.page).toEqual({ status: "loading" }));
+    act(() => retry.resolve({ ok: false, error: { kind: "network" } }));
+    await waitFor(() => expect(result.current.page).toEqual({
+      status: "failed",
+      error: { kind: "network" },
+    }));
+  });
+
   it("aborts StrictMode work on unmount and never publishes the late completion", async () => {
     const requests: Array<{
       signal: AbortSignal;

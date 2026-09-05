@@ -160,7 +160,12 @@ export function useInvestigationOperationsQueue({
           setResource((current) => succeedResourceLoad(current, scope, page));
           setSuccessfulSnapshot({ key: scope, generation: requestGeneration });
         } else {
-          if (result.error.kind === "auth_lost") accumulatedPageRef.current = null;
+          // A concealed resource must also evict the private accumulated-page
+          // cache. Otherwise a later retry could republish rows that the
+          // current request is no longer allowed to reveal.
+          if (result.error.kind === "not_found" || result.error.kind === "auth_lost") {
+            accumulatedPageRef.current = null;
+          }
           setResource((current) => failResourceLoad(current, scope, result.error));
         }
       })
