@@ -298,6 +298,47 @@ function storedIntent(overrides: Partial<ExternalRunImportSuccessIntent> = {}): 
   };
 }
 
+function storedDbRun(evidenceArtifactIds: unknown[]): Record<string, unknown> {
+  const row = storedRun({
+    importMode: "manual",
+    sourceRevision: 1,
+    evidenceArtifactIds: evidenceArtifactIds as string[],
+  });
+  return {
+    id: row.id,
+    case_id: row.caseId,
+    contribution_id: row.contributionId,
+    source_id: row.sourceId,
+    output_hash: row.outputHash,
+    output_text: row.outputText,
+    prompt_hash: row.promptHash,
+    prompt_text: row.promptText,
+    prompt_completeness: row.promptCompleteness,
+    output_completeness: row.outputCompleteness,
+    workflow_completeness: row.workflowCompleteness,
+    evidence_visibility: row.evidenceVisibility,
+    snapshot_binding: row.snapshotBinding,
+    visibility_note: row.visibilityNote,
+    importer_id: row.importerId,
+    importer_username: row.importerUsername,
+    operator_id: row.operatorId,
+    operator_username: row.operatorUsername,
+    provider: row.provider,
+    model: row.model,
+    version: row.version,
+    claimed_traces: row.claimedTraces,
+    uncertainty: row.uncertainty,
+    timing: row.timing,
+    cost: row.cost,
+    redacted: row.redacted,
+    privacy_class: row.privacyClass,
+    created_at: row.createdAt,
+    import_mode: row.importMode,
+    source_revision: row.sourceRevision,
+    evidence_artifact_ids: evidenceArtifactIds,
+  };
+}
+
 describe("external-run durable store", () => {
   it("preserves legacy rows and isolates strict marker arrays", async () => {
     const store = new MemoryRunStore();
@@ -337,6 +378,35 @@ describe("external-run durable store", () => {
     await expect(store.insertImportSuccessIntent(intent)).rejects.toThrow(
       /success intent already exists/,
     );
+  });
+
+  it("rejects malformed, duplicate, and non-canonical strict evidence identities", async () => {
+    const artifactA = "44444444-4444-4444-8444-444444444444";
+    const artifactB = "55555555-5555-4555-8555-555555555555";
+    const malformedLists: unknown[][] = [
+      ["not-a-uuid"],
+      [artifactA, artifactA],
+      [artifactB, artifactA],
+      ["AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"],
+      [42],
+    ];
+
+    for (const evidenceArtifactIds of malformedLists) {
+      const memory = new MemoryRunStore();
+      await expect(memory.insert(storedRun({
+        importMode: "manual",
+        sourceRevision: 1,
+        evidenceArtifactIds: evidenceArtifactIds as string[],
+      }))).rejects.toThrow(/evidence artifact id/);
+
+      const postgres = new PgRunStore({
+        async query() {
+          return { rows: [storedDbRun(evidenceArtifactIds)] };
+        },
+      } as never);
+      await expect(postgres.get("33333333-3333-4333-8333-333333333333"))
+        .rejects.toThrow(/evidence artifact id/);
+    }
   });
 
   it("captures and restores strict rows and replay intents", async () => {

@@ -80,6 +80,14 @@ function strictStoredIntent(
   };
 }
 
+function legacyStoredRun(caseId: string, id: string): StoredRun {
+  const row = strictStoredRun(caseId, id);
+  delete row.importMode;
+  delete row.sourceRevision;
+  delete row.evidenceArtifactIds;
+  return row;
+}
+
 describe("SQLite local runtime", () => {
   it("persists coordination projection and exact success replay across reopen", async () => {
     const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-coordination-"));
@@ -258,6 +266,39 @@ describe("SQLite local runtime", () => {
         rolledBackIntent.idempotencyKey,
       )).toBeNull();
       third.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reopens a pre-Phase-A encoded run store with no replay-intent map", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-legacy-run-"));
+    const path = join(root, "collab.sqlite");
+    const caseId = "11111111-1111-4111-8111-111111111111";
+    const run = legacyStoredRun(caseId, "33333333-3333-4333-8333-333333333333");
+    const encodedMap = (entries: unknown[][]) => ({
+      __cd_collab_state_type: "map",
+      entries,
+    });
+    try {
+      const seed = createSqliteRuntime(path);
+      const legacyPayload = {
+        runs: encodedMap([[run.id, run]]),
+        events: encodedMap([[run.id, []]]),
+      };
+      seed.state.db.prepare(
+        `INSERT INTO collab_state (key, payload, updated_at) VALUES (?, ?, ?)`,
+      ).run("runs", JSON.stringify(legacyPayload), "2026-09-05T12:00:00.000Z");
+      seed.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      expect(await reopened.runs.get(run.id)).toEqual(run);
+      expect(await reopened.runs.lockImportSuccessIntent(
+        caseId,
+        "local:lead",
+        "legacy-import-01",
+      )).toBeNull();
+      reopened.state.close();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -4,6 +4,7 @@ import type {
   EvidenceVisibility,
   ExternalRunImportMode,
 } from "@cd-collab/contracts";
+import { SOURCE_UUID_RE } from "@cd-collab/contracts";
 import { activeCaseQueryable } from "../cases/index.js";
 
 export interface FrozenRunRow {
@@ -207,6 +208,7 @@ export class PgRunStore implements RunStore {
   }
 
   async insert(row: FrozenRunRow): Promise<void> {
+    assertStrictRunMarkers(row);
     const db = row.importMode === undefined ? this.db : this.mutationDb;
     await db.query(
       `INSERT INTO imported_runs (
@@ -377,9 +379,26 @@ function assertStrictRunMarkers(row: FrozenRunRow): void {
   if (!Number.isSafeInteger(row.sourceRevision) || row.sourceRevision! < 1) {
     throw new Error("invalid imported run source revision");
   }
-  if (!Array.isArray(row.evidenceArtifactIds) || row.evidenceArtifactIds.length > 64) {
+  assertEvidenceArtifactIds(row.evidenceArtifactIds);
+}
+
+function assertEvidenceArtifactIds(value: unknown): asserts value is string[] {
+  if (!Array.isArray(value) || value.length > 64) {
     throw new Error("invalid imported run evidence artifact ids");
   }
+  const seen = new Set<string>();
+  let previous: string | undefined;
+  value.forEach((id) => {
+    if (typeof id !== "string" || !SOURCE_UUID_RE.test(id)) {
+      throw new Error("invalid imported run evidence artifact id");
+    }
+    if (seen.has(id)) throw new Error("duplicate imported run evidence artifact id");
+    if (previous !== undefined && id < previous) {
+      throw new Error("imported run evidence artifact ids must be in canonical lexical order");
+    }
+    seen.add(id);
+    previous = id;
+  });
 }
 
 function importIntentKey(caseId: string, actorId: string, idempotencyKey: string): string {
