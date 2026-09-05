@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/source-retire-request.v1.json",
+  "title": "cd-collab Source Retire Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "sourceId", "expectedRevision", "idempotencyKey"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.source_retire_request.v1" },
+    "sourceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "expectedRevision": { "type": "integer", "minimum": 1 },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    }
+  }
+}

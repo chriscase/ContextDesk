@@ -1,26 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cd-collab.local/schemas/source.v1.json",
-  "title": "cd-collab Source v1",
+  "$id": "https://cd-collab.local/schemas/source-create-request.v1.json",
+  "title": "cd-collab Source Create Request v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schemaId",
-    "id",
     "name",
     "kind",
     "description",
-    "lifecycle",
     "identityId",
-    "createdAt",
-    "createdBy"
+    "expectedRevision",
+    "idempotencyKey"
   ],
   "properties": {
-    "schemaId": { "type": "string", "const": "cd-collab.source.v1" },
-    "id": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-    },
+    "schemaId": { "type": "string", "const": "cd-collab.source_create_request.v1" },
     "name": { "type": "string", "minLength": 1, "maxLength": 200 },
     "kind": {
       "type": "string",
@@ -31,14 +25,15 @@
       "minLength": 1,
       "maxLength": 400
     },
-    "lifecycle": { "type": "string", "enum": ["active", "retired"] },
     "identityId": {
       "type": ["string", "null"],
       "minLength": 1,
       "maxLength": 512
     },
-    "createdAt": { "type": "string", "format": "date-time", "minLength": 1 },
-    "createdBy": { "type": "string", "minLength": 1, "maxLength": 512 },
-    "revision": { "type": "integer", "minimum": 1 }
+    "expectedRevision": { "type": "integer", "const": 0 },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    }
   }
 }
