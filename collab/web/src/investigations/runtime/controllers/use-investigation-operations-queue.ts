@@ -102,7 +102,12 @@ export function useInvestigationOperationsQueue({
   const [resource, setResource] = useState(() =>
     createResourceState<OperationsQueueScope, InvestigationOperationsQueuePageV1>(),
   );
-  const requestGenerationRef = useRef(0);
+  const requestGenerationRef = useRef<{
+    readonly identityKey: string;
+    readonly authorityKey: string;
+    readonly queryKey: string;
+    readonly generation: number;
+  } | null>(null);
   const [latestRequest, setLatestRequest] = useState<{
     readonly key: OperationsQueueScope | null;
     readonly generation: number;
@@ -116,16 +121,29 @@ export function useInvestigationOperationsQueue({
   useEffect(() => {
     if (!enabled || queryKey === null) {
       requestSlot.current.invalidate();
+      requestGenerationRef.current = null;
       accumulatedPageRef.current = null;
       setResource(createResourceState<OperationsQueueScope, InvestigationOperationsQueuePageV1>());
       return;
     }
 
-    const token = requestSlot.current.begin(scope);
-    const requestGeneration = ++requestGenerationRef.current;
     const currentBaseQueryKey = parsed !== null && parsed.ok
       ? baseQueryKey(parsed.value)
-      : "invalid";
+      : queryKey;
+    const token = requestSlot.current.begin(scope);
+    const previousGeneration = requestGenerationRef.current;
+    const requestGeneration = previousGeneration !== null
+        && previousGeneration.identityKey === identityKey
+        && previousGeneration.authorityKey === authorityKey
+        && previousGeneration.queryKey === currentBaseQueryKey
+      ? previousGeneration.generation + 1
+      : 1;
+    requestGenerationRef.current = {
+      identityKey,
+      authorityKey,
+      queryKey: currentBaseQueryKey,
+      generation: requestGeneration,
+    };
     const prior = accumulatedPageRef.current;
     const previousPage = prior !== null
       && prior.identityKey === identityKey

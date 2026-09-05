@@ -711,6 +711,7 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().resources.investigationCollectionQuery).toBeNull();
     expect(currentRuntime().resources.operationsQueue).toEqual({ status: "idle" });
     expect(currentRuntime().resources.operationsQueueQuery).toBeNull();
+    expect(currentRuntime().resources.operationsQueueRequestGeneration).toBe(0);
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
       uploadEvidence: null,
@@ -2624,6 +2625,7 @@ describe("InvestigationRuntimeProvider", () => {
         status: "failed",
         error: { kind: "unavailable", status: 503 },
       }));
+      expect(currentRuntime().resources.operationsQueueRequestGeneration).toBe(1);
       expect(listInvestigations).not.toHaveBeenCalled();
       expect(queryInvestigations).not.toHaveBeenCalled();
       expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
@@ -2722,6 +2724,7 @@ describe("InvestigationRuntimeProvider", () => {
       act(() => currentRuntime().commands.queryOperationsQueue?.({ coordinationScope: "mine" }));
       await waitFor(() => expect(requests).toHaveLength(2));
       expect(currentRuntime().resources.operationsQueueQuery?.cursor).toBeNull();
+      expect(currentRuntime().resources.operationsQueueRequestGeneration).toBe(1);
 
       await act(async () => requests[1]!.deferred.resolve({
         ok: false,
