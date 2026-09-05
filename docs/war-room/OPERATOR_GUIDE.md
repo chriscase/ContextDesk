@@ -36,6 +36,9 @@ After sign-in, the primary navigation separates the major jobs:
 
 - **Overview** surfaces recent recorded activity and active investigations.
 - **Investigations** is the searchable and filterable case inventory.
+- **Operations** is the read-only, server-ordered coordination queue. Its All
+  visible, Mine, and Unassigned counts are recorded server projections, not
+  priority or workload measures; changes still happen inside an investigation.
 - **Entities** stores reusable labels for who or what an investigation concerns.
 - **Attribution** maintains source labels reused during intake.
 - **Administration** is visible only to administrators and manages destination

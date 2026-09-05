@@ -22,6 +22,13 @@ read-only text preview. These additions keep provider credentials, byte
 integrity, authorization, and audit history on the server; the preview is an
 optional read seam so older strategy/test doubles remain valid.
 
+The Operations Queue UI is a **local integration** on the additive queue
+runtime seam. `/operations` mounts the same public provider used by
+Investigations with `active=false`, `focusCaseId=null`, and
+`isInvestigationLocation=false`. It issues an explicit read-only queue command
+and consumes the runtime resource; it adds no gateway, controller, contract, or
+strategy registration.
+
 Runtime V1 is the shared browser-side boundary that lets ContextDesk ship more
 than one investigation presentation without creating competing authorities for
 case data, evidence, permissions, lifecycle, audit history, or navigation.
@@ -44,6 +51,8 @@ The runtime owns browser-side orchestration only:
 - parsing successful wire payloads into typed values;
 - projecting capabilities into presentation-safe affordances;
 - loading collection, detail, evidence, and lifecycle state;
+- requesting and preserving a server-ordered Operations Queue projection,
+  including server scope counts and opaque-cursor continuation;
 - invoking investigation create, evidence upload, contribution create,
   Situation update, archive, and restore commands;
 - requesting a bounded, text-only evidence preview with range and ETag
@@ -133,6 +142,15 @@ mounted when the user changes presentation. The web shell continues to own the
 canonical location. Strategies receive the resolved location and typed
 navigation callbacks; they never construct canonical URLs themselves.
 
+The shell also mounts that existing public provider for Operations. On that
+location the provider is inactive for investigation focus, receives no case
+identity, and is explicitly told the location is not an investigation
+location. Operations is a sibling shell surface, not a strategy, and its
+canonical URL state is separate from investigation collection query state.
+Only search, status, archive inclusion, and coordination scope are shareable;
+the default `all_visible` scope is omitted and the server cursor never enters
+history.
+
 Changing strategy must:
 
 - issue no mutation request;
@@ -197,6 +215,10 @@ The first version covers the operations needed to preserve Investigation First
 behavior:
 
 - list visible investigations;
+- explicitly query the read-only Operations Queue through its optional public
+  command, preserving server order, scope counts, archive visibility, prior
+  rows during refresh/continuation failure, and a server-issued continuation
+  cursor that is never placed in the URL;
 - load one investigation;
 - create an investigation and return its authoritative identifier;
 - list evidence and contribution annotations;

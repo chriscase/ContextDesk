@@ -11,6 +11,7 @@ import {
   CASE_SCHEMA_ID,
 } from "@cd-collab/contracts";
 import { INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID } from "@cd-collab/contracts/investigation-collection";
+import { INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID } from "@cd-collab/contracts/investigation-operations-queue";
 import type { InvestigationRuntimeProviderProps } from "./investigations/runtime/public.js";
 import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLocation } from "./app-location.js";
 
@@ -94,6 +95,58 @@ function collectionPageResponse(cases: readonly unknown[]): Response {
   }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
+function operationsQueuePageResponse(
+  id = "00000000-0000-4000-8000-000000000099",
+  title = "Checkout coordination review",
+): Response {
+  const investigation = {
+    schemaId: CASE_SCHEMA_ID,
+    id,
+    title,
+    problemStatement: "",
+    affectedParties: "",
+    impact: "",
+    scope: "",
+    openQuestions: [],
+    situationVersion: 0,
+    investigationContext: null,
+    occurredAt: null,
+    occurredAtPrecision: "unknown",
+    occurredAtZone: "unspecified",
+    severity: "medium",
+    status: "open",
+    legalHold: false,
+    retentionClass: "standard",
+    participants: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    createdBy: "identity-alice",
+  };
+  return new Response(JSON.stringify({
+    schemaId: INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+    items: [{
+      investigation,
+      coordination: {
+        schemaId: "cd-collab.investigation_coordination.v1",
+        investigationId: id,
+        coordinator: { identityId: "identity-alice", username: "alice" },
+        revision: 1,
+        updatedAt: "2026-01-01T01:00:00.000Z",
+        updatedBy: { identityId: "identity-alice", username: "alice" },
+        archived: false,
+      },
+    }],
+    nextCursor: null,
+    hiddenArchivedCount: 0,
+    facets: {
+      status: { top: [{ key: "open", count: 1 }], otherCount: 0 },
+      entity: { top: [], otherCount: 0 },
+      impactIdentity: { top: [], otherCount: 0 },
+      contributor: { top: [], otherCount: 0 },
+    },
+    coordinationScopeCounts: { allVisible: 1, mine: 1, unassigned: 0 },
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
 function stubSignedOutFetch(): FetchStub {
   const stub = vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) });
   vi.stubGlobal("fetch", stub);
@@ -113,6 +166,10 @@ function stubSignedInFetch(
   const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
     const url = String(input);
     if (url.startsWith("/api/cases?schemaId=")) {
+      if (url.includes("investigation_operations_queue_query")) {
+        const operations = await extra?.(url, init);
+        return operations ?? operationsQueuePageResponse();
+      }
       // Production War Room uses the versioned collection seam. Reuse a
       // test's legacy fixture callback only to shape equivalent page data;
       // production never falls back after this request has spoken.
@@ -454,7 +511,7 @@ describe("authenticated application shell", () => {
       await screen.findByRole("heading", { level: 1, name: "ContextDesk War Room" }),
     ).toBeTruthy();
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    for (const label of ["Overview", "Investigations", "Attribution", "Help"]) {
+    for (const label of ["Overview", "Investigations", "Operations", "Attribution", "Help"]) {
       expect(within_nav(nav, label)).toBeTruthy();
     }
     expect(within_nav(nav, "How it works")).toBeNull();
@@ -466,6 +523,112 @@ describe("authenticated application shell", () => {
         .querySelector('[aria-current="page"]')?.textContent,
     ).toBe("Overview");
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
+  });
+
+  it("mounts Operations as a canonical read-only runtime area with native queue links", async () => {
+    const caseId = "00000000-0000-4000-8000-000000000099";
+    window.history.replaceState(
+      { uiStrategyId: "investigation-first" },
+      "",
+      "/operations?q=checkout&status=open&includeArchived=true&coordinationScope=mine&cursor=leak",
+    );
+    const fetchStub = stubSignedInFetch({
+      username: "alice",
+      id: "identity-alice",
+      displayName: "Alice",
+      roles: ["contributor"],
+      capabilities: ["investigation:read"],
+    }, (url) => {
+      if (url.includes("investigation_operations_queue_query")) {
+        return Promise.resolve(operationsQueuePageResponse(caseId));
+      }
+      return null;
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Operations Queue" })).toBeTruthy();
+    expect(document.title).toBe("Operations · ContextDesk War Room");
+    expect(window.location.pathname).toBe("/operations");
+    expect(window.location.search).toBe(
+      "?q=checkout&status=open&includeArchived=true&coordinationScope=mine",
+    );
+    expect(window.history.state).not.toHaveProperty("uiStrategyId");
+    const navLabels = within(screen.getByRole("navigation", { name: "Primary" }))
+      .getAllByRole("button")
+      .map((button) => button.textContent);
+    expect(navLabels.indexOf("Operations")).toBe(navLabels.indexOf("Investigations") + 1);
+
+    await waitFor(() => expect(screen.getByText("Checkout coordination review")).toBeTruthy());
+    const caseReads = fetchStub.mock.calls
+      .filter(([, init]) => (init?.method ?? "GET") === "GET")
+      .map(([input]) => String(input))
+      .filter((url) => url.startsWith("/api/cases"));
+    expect(caseReads).toHaveLength(1);
+    expect(caseReads[0]).toContain("investigation_operations_queue_query");
+    expect(caseReads).not.toContain("/api/cases");
+    expect(caseReads.some((url) => url.includes("investigation_collection_query"))).toBe(false);
+    const operationsMount = [...runtimeMounts].reverse().find((props) => props.active === false);
+    expect(operationsMount).toMatchObject({
+      active: false,
+      focusCaseId: null,
+      isInvestigationLocation: false,
+    });
+    const mine = screen.getByRole("link", { name: /Mine 1/u });
+    expect(mine.getAttribute("href")).toBe(
+      "/operations?q=checkout&status=open&includeArchived=true&coordinationScope=mine",
+    );
+    const row = screen.getByRole("link", { name: /Checkout coordination review/u });
+    expect(row.getAttribute("href")).toBe(`/investigations/${caseId}/situation`);
+    fireEvent.click(row);
+    expect(window.location.pathname).toBe(`/investigations/${caseId}/situation`);
+    expect(window.history.state).not.toHaveProperty("uiStrategyId");
+    expect(fetchStub.mock.calls.some(([input, init]) =>
+      String(input) === "/api/ui-strategies/preference" && init?.method === "PUT"))
+      .toBe(false);
+  });
+
+  it("keeps denied Operations request-free and offers no retry", async () => {
+    window.history.replaceState(null, "", "/operations");
+    const fetchStub = stubSignedInFetch({
+      username: "no-read",
+      roles: [],
+      capabilities: [],
+    });
+    render(<App />);
+
+    expect(await screen.findByText(/no queue data was requested/u)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
+    const caseReads = fetchStub.mock.calls
+      .filter(([, init]) => (init?.method ?? "GET") === "GET")
+      .map(([input]) => String(input))
+      .filter((url) => url === "/api/cases" || url.startsWith("/api/cases?") || url.startsWith("/api/cases/"));
+    expect(caseReads).toEqual([]);
+  });
+
+  it("reports a queue 503 without substituting the investigation list", async () => {
+    window.history.replaceState(null, "", "/operations");
+    const fetchStub = stubSignedInFetch({
+      username: "alice",
+      roles: ["viewer"],
+      capabilities: ["investigation:read"],
+    }, (url) => url.includes("investigation_operations_queue_query")
+      ? Promise.resolve(new Response(JSON.stringify({ error: "unavailable" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        }))
+      : null);
+    render(<App />);
+
+    expect(await screen.findByText("Operations Queue service is unavailable")).toBeTruthy();
+    expect(screen.getByText(/No legacy investigation list was substituted/u)).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Operations queue investigations" })).toBeNull();
+    const caseReads = fetchStub.mock.calls
+      .filter(([, init]) => (init?.method ?? "GET") === "GET")
+      .map(([input]) => String(input))
+      .filter((url) => url === "/api/cases" || url.startsWith("/api/cases?") || url.startsWith("/api/cases/"));
+    expect(caseReads).toHaveLength(1);
+    expect(caseReads[0]).toContain("investigation_operations_queue_query");
   });
 
   it("separates user administration from system policy and fetches neither without authority", async () => {

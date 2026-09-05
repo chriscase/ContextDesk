@@ -97,6 +97,8 @@ export interface InvestigationRuntimeResources {
   readonly investigationCollectionQuery: InvestigationCollectionQueryV1 | null;
   readonly operationsQueue: ResourceState<InvestigationOperationsQueuePageV1>;
   readonly operationsQueueQuery: InvestigationOperationsQueueQueryV1 | null;
+  /** Monotonic request start signal for the currently visible queue scope. */
+  readonly operationsQueueRequestGeneration: number;
   readonly investigation: ResourceState<CaseV1>;
   readonly evidence: ResourceState<readonly ArtifactV1[]>;
   readonly contributions: ResourceState<readonly ContributionV1[]>;
@@ -685,6 +687,7 @@ export function InvestigationRuntimeProvider({
       investigationCollectionQuery: investigationCollection.query,
       operationsQueue: operationsQueue.page,
       operationsQueueQuery: operationsQueue.query,
+      operationsQueueRequestGeneration: operationsQueue.latestRequestGeneration,
       investigation: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : activeInvestigation.investigation,
@@ -819,6 +822,7 @@ export function InvestigationRuntimeProvider({
     investigationCollection.refresh,
     operationsQueue.page,
     operationsQueue.query,
+    operationsQueue.latestRequestGeneration,
     operationsQueue.refresh,
     investigationList.investigations,
     investigationList.refresh,

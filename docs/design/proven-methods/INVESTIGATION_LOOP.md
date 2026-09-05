@@ -66,12 +66,28 @@ self-claim by the current holder (`already_coordinator`) from another holder
 absent holder. The standalone wire parser enforces only the subset knowable
 without trusting actor or request context.
 
-This is a **local server integration**. `GET` and action-specific `POST` on
+The coordination writer foundation is a **local server integration**. `GET` and action-specific `POST` on
 `/api/cases/:id/coordination` use live session capabilities, concealed case
 access, a case-row lock, a materialized projection, insert-only successful
 idempotency envelopes, and atomic timeline/audit writes. Generic activity maps
-the event to a factual investigation update. Queue collection scope and UI are
-not part of this slice. UI strategies remain presentation-only. Priority, SLA,
+the event to a factual investigation update.
+
+The subsequent **local Operations Queue integration** adds a joined,
+server-ordered read query and a first-class `/operations` shell area. It uses
+the existing public Investigation Runtime provider with investigation activity
+disabled, and it keeps only `q`, recorded status, archive inclusion, and the
+coordination scope in the canonical URL. `all_visible` is the omitted default;
+page size, schema identity, actor, entity, impact, contributor, dates, and the
+opaque continuation cursor remain runtime/server details. All visible, Mine,
+and Unassigned counts come directly from the server. Rows retain server order
+through refresh and continuation failure and link natively to the canonical
+Situation address. The Operations module has a static dependency boundary that
+permits only React, shell location, the public runtime surface, and its own
+modules/CSS; contracts, private runtime controllers/gateway/provider,
+protected transport, and raw API routes are rejected.
+
+Operations is read-only. UI strategies remain investigation presentations and
+do not own this shell area. Priority, SLA,
 due dates, ranking, leases, presence locks, automatic assignment/membership,
 and automatic status changes remain explicit non-goals.
 
@@ -109,6 +125,7 @@ view state.
 | Explicit Apply and Restore prior view                | **Partial** | [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx) contains the core/UI path                                                                           | Native responsive/restart matrix remains                 |
 | Linked-chat `log_nav` proposal                       | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs), [`logNav.ts`](../../../desktop/src/lib/logExplorer/logNav.ts)                                         | It is navigation intent, not a durable finding proposal  |
 | Model/detector proposal review queue (findings + report sections) | **Partial** | [`proposed.rs`](../../../crates/cd-core/src/investigations/proposed.rs) and [`report.rs`](../../../crates/cd-core/src/investigations/report.rs)                                       | Ranking, walkthrough, and deeper-analysis requests remain #646 |
+| Read-only Operations Queue shell area | **Local integration** | `/operations`, `operations-queue/`, the public Runtime V1 queue command/resource, server-owned scope counts/order/cursor, canonical Operations-only URL query, and bundled Help article | Coordination mutations remain server APIs only; the UI intentionally offers no claim/release/assign controls and no priority/SLA/ranking/workload semantics |
 | Accepted-state report projection + Markdown export   | **Partial** | [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) `assemble_investigation_report`                                                                                  | Fuller #532 vocabulary, patches/undo, claim detection, HTML/PDF, evidence appendix |
 | War Room Log workbench saved views, bookmarks, and share-safe locators | **Local integration** | Contract `investigation-workbench.ts` (`cd-collab.log_workbench_view.v1`, `cd-collab.log_workbench_bookmark.v1`, `cd-collab.log_workbench_share_safe_locator.v1`), server `collab/server/src/modules/workbench/`, Analyze UI `LogWorkbench.tsx`. Saved views are records, not authorization tokens, and applying one restores filters, time window, sort, grouping, and display. Locators reauthorize on resolve; unauthorized and missing tokens are indistinguishable and disclose no path. Stale bookmarks explain rather than silently retarget. Chronology pins are insert-only (`pinned` vs recorded `human_ground_truth`). Resource kinds `log_workbench_view`, `log_workbench_bookmark`, and `log_workbench_line` route to Analyze `triage-log-workbench`. | Desktop Explorer saved-view recipes remain a separate path. Heuristic text similarity is labeled and cannot be recorded as ground truth. |
 | War Room investigation-scoped file/ZIP/directory intake | **Local integration** | Collab contract `investigation-corpus-intake.ts`, module `collab/server/src/modules/corpus-intake/`, Capture UI `CorpusIntakePanel.tsx`. Concurrent distinct-key commits sharing a digest reclassify `duplicateDigest` after the per-digest lock from live artifacts. ZIP names consult language bit `0x0800`: valid UTF-8 with the bit is accepted, unmarked non-ASCII and invalid UTF-8 are rejected as `invalid_encoding`, local/central encoding-bit disagreement is malformed, and Info-ZIP Unicode Path extra `0x7075` is the canonical name when present (CRC-checked, fatal UTF-8; traversal or local/central extra disagreement fail closed). | Parallel portable-investigation restore lane is out of scope here. PostgreSQL `withAtomic` now binds store queries to the transaction via async-local storage. In-process post-promote timeline/audit failure rolls back staged blobs. A process crash after promote and before COMMIT leaves a durable pending-write journal; recovery reclaims those hashes when no artifact, snapshot, or imported-run row references them, and keeps them when a later retry or successful COMMIT does. |

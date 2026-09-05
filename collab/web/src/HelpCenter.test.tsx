@@ -207,6 +207,22 @@ describe("help search", () => {
     expect(screen.getByText(/global source catalog is not the path for investigation uploads/)).toBeTruthy();
   });
 
+  it("finds the read-only Operations Queue, states its limits, and opens Operations", () => {
+    const { onOpenArea } = renderHelp();
+    searchFor("operations queue");
+    const result = within(resultsList()).getByRole("button", {
+      name: /Review the read-only Operations Queue/u,
+    });
+    fireEvent.click(result);
+
+    expect(screen.getByText(/shows the returned investigations in exactly that order/u)).toBeTruthy();
+    expect(screen.getByText(/no claim, release, or assignment controls/u)).toBeTruthy();
+    expect(screen.getByText(/does not calculate priority, rank, urgency, SLA, workload, leases, presence, or automatic assignment/u)).toBeTruthy();
+    expect(screen.getByText(/never includes the server cursor/u)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Go to Operations" }));
+    expect(onOpenArea).toHaveBeenCalledWith("operations");
+  });
+
   it("explains the supported portable restore boundary", () => {
     renderHelp();
     searchFor("restore");
