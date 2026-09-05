@@ -89,6 +89,8 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const [continuationAttempt, setContinuationAttempt] = useState(0);
   const [unavailableRetry, setUnavailableRetry] = useState<{
     readonly error: unknown;
+    readonly observedLoading: boolean;
+    readonly scopeToken: object;
   } | null>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const completionRef = useRef<HTMLParagraphElement>(null);
@@ -107,7 +109,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     continuationInitiatorRef.current = null;
     unavailableRetryInitiatorRef.current = null;
     setUnavailableRetry(null);
-  }, [queryKey]);
+  }, [queryKey, queue.scopeToken]);
 
   const available = queue.view.availability === "available";
   const refreshState = available ? queue.view.refresh : null;
@@ -137,8 +139,24 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   }, [available, hasNextPage, queue.continuationFailed, queue.continuationOutcome, queue.view.availability, refreshState]);
 
   useEffect(() => {
-    if (unavailableRetry === null || queue.view.availability === "idle" || queue.view.availability === "loading") return;
-    if (queue.view.availability === "unavailable" && queue.view.error === unavailableRetry.error) return;
+    if (unavailableRetry === null) return;
+    if (unavailableRetry.scopeToken !== queue.scopeToken) {
+      unavailableRetryInitiatorRef.current = null;
+      setUnavailableRetry(null);
+      return;
+    }
+    if (queue.view.availability === "idle") return;
+    if (queue.view.availability === "loading") {
+      if (!unavailableRetry.observedLoading) {
+        setUnavailableRetry({ ...unavailableRetry, observedLoading: true });
+      }
+      return;
+    }
+    if (
+      queue.view.availability === "unavailable"
+      && queue.view.error === unavailableRetry.error
+      && !unavailableRetry.observedLoading
+    ) return;
     const activeElement = document.activeElement;
     const shouldRecoverFocus = activeElement === document.body
       || activeElement === unavailableRetryInitiatorRef.current;
@@ -147,7 +165,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     if (!shouldRecoverFocus) return;
     if (queue.view.availability === "unavailable") unavailableRef.current?.focus();
     else titleRef.current?.focus();
-  }, [queue.view, unavailableRetry]);
+  }, [queue.scopeToken, queue.view, unavailableRetry]);
 
   const requestNextPage = (event: MouseEvent<HTMLButtonElement>) => {
     if (paginationDisabled) return;
@@ -161,6 +179,8 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     unavailableRetryInitiatorRef.current = event.currentTarget;
     setUnavailableRetry({
       error: queue.view.error,
+      observedLoading: false,
+      scopeToken: queue.scopeToken,
     });
     queue.refresh();
   };

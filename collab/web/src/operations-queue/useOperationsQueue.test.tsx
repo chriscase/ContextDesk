@@ -131,7 +131,14 @@ describe("Operations Queue public-runtime adapter", () => {
       .toBe("available:available:settled:1"));
   });
 
-  it("requests page one for a new authority and ignores the late prior response", async () => {
+  it.each([
+    ["identity", "identity-bob", "authority-v1"],
+    ["authority", "identity-alice", "authority-v2"],
+  ] as const)("requests page one after a %s change and ignores the late prior response", async (
+    _dimension,
+    nextIdentityKey,
+    nextAuthorityKey,
+  ) => {
     const oldPage = makeOperationsQueuePage();
     const newPage = makeOperationsQueuePage({ items: [oldPage.items[1]!] });
     let calls = 0;
@@ -162,8 +169,8 @@ describe("Operations Queue public-runtime adapter", () => {
       gateway,
       DEFAULT_OPERATIONS_QUEUE_QUERY,
       ["investigation:read"],
-      "identity-bob",
-      "authority-v2",
+      nextIdentityKey,
+      nextAuthorityKey,
     ));
 
     await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(2));

@@ -11,6 +11,8 @@ vi.mock("./useOperationsQueue.js", () => ({
 
 import { OperationsQueue } from "./OperationsQueue.js";
 
+const TEST_SCOPE_TOKEN = Object.freeze({});
+
 afterEach(() => {
   cleanup();
   hook.current.mockReset();
@@ -18,6 +20,7 @@ afterEach(() => {
 
 function settled(overrides: Partial<OperationsQueuePresentation> = {}): OperationsQueuePresentation {
   return {
+    scopeToken: TEST_SCOPE_TOKEN,
     commandAvailability: "available",
     view: { availability: "available", value: makeOperationsQueuePage(), refresh: "settled" },
     continuationFailed: false,
@@ -409,6 +412,56 @@ describe("Operations Queue presentation", () => {
     await waitFor(() => expect(document.activeElement).toBe(
       screen.getByRole("heading", { name: "Operations Queue" }),
     ));
+  });
+
+  it("returns focus to the updated alert after repeated first-page retry failure", async () => {
+    const refresh = vi.fn();
+    const repeatedError = Object.freeze({ kind: "unavailable" as const, status: 503 as const });
+    const rendered = renderQueue(settled({
+      view: { availability: "unavailable", error: repeatedError },
+      refresh,
+    }));
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      hook.current.mockReturnValue(settled({ view: { availability: "loading" }, refresh }));
+      rendered.rerender(
+        <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+      );
+      hook.current.mockReturnValue(settled({
+        view: { availability: "unavailable", error: repeatedError },
+        refresh,
+      }));
+      rendered.rerender(
+        <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+      );
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("alert")));
+    }
+
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears pagination intent when the Runtime authority scope changes", async () => {
+    const page = makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" });
+    const rendered = renderQueue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+
+    hook.current.mockReturnValue(settled({
+      scopeToken: Object.freeze({}),
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({ nextCursor: null }),
+        refresh: "settled",
+      },
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(screen.queryByText("All operations are shown.")).toBeNull());
+    expect(document.activeElement).not.toBe(screen.queryByText("All operations are shown."));
   });
 
   it("does not steal focus when the user moves away during continuation", async () => {

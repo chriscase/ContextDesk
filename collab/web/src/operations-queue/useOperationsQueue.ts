@@ -11,6 +11,8 @@ import {
 export type OperationsQueueCommandAvailability = "available" | "absent" | "denied";
 
 export interface OperationsQueuePresentation {
+  /** Opaque adapter scope; changes with Runtime identity/authority command identity. */
+  readonly scopeToken: object;
   readonly commandAvailability: OperationsQueueCommandAvailability;
   readonly view: ResourceView<InvestigationOperationsQueuePageV1>;
   readonly continuationFailed: boolean;
@@ -76,6 +78,7 @@ export function useOperationsQueue(
     : command === null
       ? "denied"
       : "available";
+  const scopeToken = useMemo(() => Object.freeze({}), [command]);
   const input = useMemo(() => inputForLocation(locationQuery), [
     locationQuery.coordinationScope,
     locationQuery.includeArchived,
@@ -162,11 +165,12 @@ export function useOperationsQueue(
   }, [command, commandAvailability, input, inputKey, runtime.refresh.operationsQueue]);
 
   return {
+    scopeToken,
     commandAvailability,
     view,
     continuationFailed,
-    continuationInFlight,
-    continuationOutcome,
+    continuationInFlight: requestedCommandRef.current === command && continuationInFlight,
+    continuationOutcome: requestedCommandRef.current === command ? continuationOutcome : 0,
     refresh: commandAvailability === "available" && typeof command === "function"
       ? () => {
           if (continuationPendingRef.current) return;
