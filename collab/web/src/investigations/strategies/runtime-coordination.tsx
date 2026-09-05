@@ -91,6 +91,7 @@ export function RuntimeCoordinationControl({ investigation }: { readonly investi
   return (
     <CoordinationControl
       key={[
+        runtime.presentationScopeKey,
         investigation.id,
         investigation.status,
         runtime.identity.id,

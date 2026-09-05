@@ -317,6 +317,48 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
   });
 
+  it.each([
+    ["identity", { identityKey: "alice-session-v2" }],
+    ["authority", { authorityKey: "alice-authority-v2" }],
+  ] as const)(
+    "drops an unknown coordination retry when only the %s epoch changes",
+    async (_epoch, runtimeUpdate) => {
+      const current = makePopulatedCase();
+      const getCoordination = vi.fn(async () => gatewayOk(makeCoordination(current)));
+      const applyCoordinationAction = vi.fn<NonNullable<InvestigationGateway["applyCoordinationAction"]>>(async () => ({
+        ok: false as const,
+        error: {
+          kind: "unavailable" as const,
+          status: 503 as const,
+          reason: "commit_outcome_unknown" as const,
+        },
+      }));
+      const view = renderStrategy({
+        gateway: createInvestigationGatewayDouble({
+          getCoordination,
+          applyCoordinationAction,
+        }),
+        shell: { focusCaseId: current.id },
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Claim coordination" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm claim coordination" }));
+      expect(await screen.findByText(/may have been recorded/iu)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Retry exact action" })).toBeTruthy();
+      expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+
+      view.rerender({}, runtimeUpdate);
+      expect(screen.queryByText(/may have been recorded/iu)).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry exact action" })).toBeNull();
+      expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+      await screen.findByRole("button", { name: "Claim coordination" });
+      expect(screen.queryByText(/may have been recorded/iu)).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry exact action" })).toBeNull();
+      expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each(["coordination_changed", "coordination_refused"] as const)(
     "maps %s into current-record review copy without leaking refusal detail",
     async (kind) => {
