@@ -89,6 +89,7 @@ export function useOperationsQueue(
   const activeQueryRef = useRef(runtime.resources.operationsQueueQuery);
   activeQueryRef.current = runtime.resources.operationsQueueQuery;
   const requestedKeyRef = useRef<string | null>(null);
+  const requestedCommandRef = useRef(command);
   const continuationPendingRef = useRef(false);
   const continuationAttemptRef = useRef(0);
   const pendingContinuationAttemptRef = useRef<ContinuationAttempt | null>(null);
@@ -109,7 +110,11 @@ export function useOperationsQueue(
     && activeQuery.cursor !== null;
 
   useEffect(() => {
-    if (requestedKeyRef.current !== inputKey || commandAvailability !== "available") {
+    if (
+      requestedKeyRef.current !== inputKey
+      || requestedCommandRef.current !== command
+      || commandAvailability !== "available"
+    ) {
       continuationPendingRef.current = false;
       pendingContinuationAttemptRef.current = null;
       setContinuationInFlight(false);
@@ -133,19 +138,21 @@ export function useOperationsQueue(
       setContinuationInFlight(false);
       setContinuationOutcome(settledAttempt);
     }
-  }, [activeQuery, activeQueryMatches, commandAvailability, inputKey, view]);
+  }, [activeQuery, activeQueryMatches, command, commandAvailability, inputKey, view]);
 
   useEffect(() => {
     if (commandAvailability !== "available" || typeof command !== "function") {
       requestedKeyRef.current = null;
+      requestedCommandRef.current = command;
       continuationPendingRef.current = false;
       pendingContinuationAttemptRef.current = null;
       setContinuationInFlight(false);
       setContinuationOutcome(0);
       return;
     }
-    if (requestedKeyRef.current === inputKey) return;
+    if (requestedKeyRef.current === inputKey && requestedCommandRef.current === command) return;
     requestedKeyRef.current = inputKey;
+    requestedCommandRef.current = command;
     const current = activeQueryRef.current;
     if (current !== null && current.cursor === null && baseKey(current) === inputKey) {
       runtime.refresh.operationsQueue();

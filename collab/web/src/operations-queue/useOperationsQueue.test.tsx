@@ -41,13 +41,15 @@ function probeTree(
   gateway: InvestigationGateway,
   query: OperationsQueueLocationQuery,
   capabilities: readonly string[] = ["investigation:read"],
+  identityKey = "identity-alice",
+  authorityKey = "authority-v1",
 ) {
   return (
     <InvestigationRuntimeGatewayHarness gateway={gateway}>
       <InvestigationRuntimeProvider
-        identityKey="identity-alice"
-        identity={{ id: "identity-alice", username: "alice", displayName: "Alice" }}
-        authorityKey="authority-v1"
+        identityKey={identityKey}
+        identity={{ id: identityKey, username: identityKey, displayName: identityKey }}
+        authorityKey={authorityKey}
         capabilities={capabilities}
         readOnly
         active={false}
@@ -127,6 +129,55 @@ describe("Operations Queue public-runtime adapter", () => {
     act(() => resolveSecond?.(gatewayOk(second)));
     await waitFor(() => expect(screen.getByTestId("queue-state").textContent)
       .toBe("available:available:settled:1"));
+  });
+
+  it("requests page one for a new authority and ignores the late prior response", async () => {
+    const oldPage = makeOperationsQueuePage();
+    const newPage = makeOperationsQueuePage({ items: [oldPage.items[1]!] });
+    let calls = 0;
+    let resolveOld: ((value: ReturnType<typeof gatewayOk<InvestigationOperationsQueuePageV1>>) => void) | null = null;
+    const queryOperationsQueue = vi.fn<NonNullable<InvestigationGateway["queryOperationsQueue"]>>(
+      (_input, options) => {
+        calls += 1;
+        return calls === 1
+          ? new Promise((resolve) => {
+            resolveOld = resolve;
+            options.signal.addEventListener("abort", () => undefined, { once: true });
+          })
+          : Promise.resolve(gatewayOk(newPage));
+      },
+    );
+    const gateway = createInvestigationGatewayDouble({ queryOperationsQueue });
+    const rendered = render(probeTree(
+      gateway,
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      ["investigation:read"],
+      "identity-alice",
+      "authority-v1",
+    ));
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(1));
+    const oldSignal = queryOperationsQueue.mock.calls[0]?.[1].signal;
+
+    rendered.rerender(probeTree(
+      gateway,
+      DEFAULT_OPERATIONS_QUEUE_QUERY,
+      ["investigation:read"],
+      "identity-bob",
+      "authority-v2",
+    ));
+
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(2));
+    expect(oldSignal?.aborted).toBe(true);
+    expect(queryOperationsQueue.mock.calls[1]?.[0].cursor).toBeNull();
+    await waitFor(() => expect(presentation?.view.availability === "available"
+      ? presentation.view.value.items.map((row) => row.investigation.id)
+      : []).toEqual([newPage.items[0]?.investigation.id]));
+
+    act(() => resolveOld?.(gatewayOk(oldPage)));
+    await waitFor(() => expect(presentation?.view.availability === "available"
+      ? presentation.view.value.items.map((row) => row.investigation.id)
+      : []).toEqual([newPage.items[0]?.investigation.id]));
+    expect(queryOperationsQueue).toHaveBeenCalledTimes(2);
   });
 
   it("publishes distinct outcomes for a failed continuation and its successful retry", async () => {

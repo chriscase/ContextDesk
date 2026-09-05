@@ -89,6 +89,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const [continuationAttempt, setContinuationAttempt] = useState(0);
   const completionRef = useRef<HTMLParagraphElement>(null);
   const continuationFailureRef = useRef<HTMLDivElement>(null);
+  const unavailableRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLButtonElement>(null);
   const continuationInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const focusedOutcomeRef = useRef(0);
@@ -114,6 +115,10 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
       || activeElement === continuationInitiatorRef.current;
     focusedOutcomeRef.current = queue.continuationOutcome;
     if (!shouldRecoverFocus) return;
+    if (queue.view.availability === "unavailable") {
+      unavailableRef.current?.focus();
+      return;
+    }
     if (queue.continuationFailed) {
       continuationFailureRef.current?.focus();
       return;
@@ -122,7 +127,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
       if (hasNextPage) loadMoreRef.current?.focus();
       else completionRef.current?.focus();
     }
-  }, [available, hasNextPage, queue.continuationFailed, queue.continuationOutcome, refreshState]);
+  }, [available, hasNextPage, queue.continuationFailed, queue.continuationOutcome, queue.view.availability, refreshState]);
 
   const requestNextPage = (event: MouseEvent<HTMLButtonElement>) => {
     if (paginationDisabled) return;
@@ -246,13 +251,13 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
             </p>
           ) : null}
           {queue.view.availability === "unavailable" && queue.view.error.kind === "auth_lost" ? (
-            <div className="operations-queue__message" role="alert">
+            <div className="operations-queue__message" role="alert" tabIndex={-1} ref={unavailableRef}>
               <h3>Operations Queue access ended</h3>
               <p>Your session or investigation access changed. Sign in again to continue.</p>
             </div>
           ) : null}
           {queue.view.availability === "unavailable" && queue.view.error.kind !== "auth_lost" ? (
-            <div className="operations-queue__message" role="alert">
+            <div className="operations-queue__message" role="alert" tabIndex={-1} ref={unavailableRef}>
               <h3>{queue.view.error.kind === "unavailable"
                 ? "Operations Queue service is unavailable"
                 : "Operations Queue could not be loaded"}</h3>
@@ -310,7 +315,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
               <button type="button" onClick={requestNextPage}>Try loading more</button>
             </div>
           ) : null}
-          {available && hasNextPage ? (
+          {available && hasNextPage && !queue.continuationFailed ? (
             <nav className="operations-queue__pagination" aria-label="Operations Queue pages">
               <button
                 type="button"

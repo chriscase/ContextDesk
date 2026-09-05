@@ -360,6 +360,28 @@ describe("Operations Queue presentation", () => {
     expect(screen.queryByText("All operations are shown.")).toBeNull();
   });
 
+  it("focuses the single recovery surface when a continuation becomes unavailable", async () => {
+    const page = makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" });
+    const rendered = renderQueue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+
+    hook.current.mockReturnValue(settled({
+      continuationOutcome: 1,
+      view: { availability: "unavailable", error: { kind: "not_found", status: 404 } },
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+
+    const alert = screen.getByRole("alert");
+    await waitFor(() => expect(document.activeElement).toBe(alert));
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load more operations" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try loading more" })).toBeNull();
+  });
+
   it("does not steal focus when the user moves away during continuation", async () => {
     const page = makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" });
     const rendered = renderQueue(settled({

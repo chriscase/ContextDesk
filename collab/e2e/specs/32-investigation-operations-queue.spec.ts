@@ -188,7 +188,59 @@ test.describe("Investigation Operations Queue", () => {
         .filter((url) => url.searchParams.has("cursor"))
         .map((url) => url.searchParams.get("cursor")))
         .toEqual(["eyJwYWdlIjoyfQ", "eyJwYWdlIjoyfQ", "eyJwYWdlIjozfQ"]);
+      expect(queueRequests).toHaveLength(4);
+      expect(queueRequests.filter((url) => !url.searchParams.has("cursor"))).toHaveLength(1);
+      for (const requestUrl of queueRequests) {
+        expect(requestUrl.searchParams.get("q")).toBe(token);
+        expect(requestUrl.searchParams.get("coordinationScope")).toBe("unassigned");
+      }
       expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+    } finally {
+      await page.unroute("**/api/cases?**");
+    }
+  });
+
+  test("recovers focus and restarts at page one after a concealed continuation failure", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    const token = `operations-concealed-${Date.now()}`;
+    await createInvestigation(page, token);
+    let cursorRequests = 0;
+    let baseRequests = 0;
+
+    await page.route("**/api/cases?**", async (route) => {
+      const requestUrl = new URL(route.request().url());
+      if (!isQueueRequest(requestUrl)) {
+        await route.continue();
+        return;
+      }
+      if (requestUrl.searchParams.has("cursor")) {
+        cursorRequests += 1;
+        await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+        return;
+      }
+      baseRequests += 1;
+      const response = await route.fetch();
+      const source = await response.json() as QueuePage;
+      await route.fulfill({
+        response,
+        json: { ...source, items: source.items.slice(0, 1), nextCursor: "eyJwYWdlIjoyfQ" },
+      });
+    });
+
+    try {
+      await page.goto(`/operations?q=${encodeURIComponent(token)}&coordinationScope=unassigned`);
+      const loadMore = page.getByRole("button", { name: "Load more operations" });
+      await loadMore.focus();
+      await loadMore.press("Enter");
+
+      const unavailable = page.getByRole("alert");
+      await expect(unavailable).toContainText("No legacy investigation list was substituted");
+      await expect(unavailable).toBeFocused();
+      await expect(page.getByRole("button", { name: "Try loading more" })).toHaveCount(0);
+      await unavailable.getByRole("button", { name: "Try again" }).press("Enter");
+      await expect(page.getByRole("button", { name: "Load more operations" })).toBeVisible();
+      expect(cursorRequests).toBe(1);
+      expect(baseRequests).toBe(2);
     } finally {
       await page.unroute("**/api/cases?**");
     }
