@@ -309,11 +309,40 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
             "77777777-7777-4777-8777-777777777777",
           ],
         );
+        const allowedCatalogUpdate = await app.query<{
+          name: string;
+          description: string | null;
+          lifecycle: string;
+          revision: string;
+        }>(
+          `UPDATE catalog_sources
+           SET name = 'Grant probe updated',
+               description = 'allowed metadata update',
+               lifecycle = 'retired',
+               revision = 2
+           WHERE id = $1
+           RETURNING name, description, lifecycle, revision::text`,
+          ["77777777-7777-4777-8777-777777777777"],
+        );
+        expect(allowedCatalogUpdate.rows).toEqual([
+          {
+            name: "Grant probe updated",
+            description: "allowed metadata update",
+            lifecycle: "retired",
+            revision: "2",
+          },
+        ]);
         await expect(
           app.query(`UPDATE catalog_sources SET id = '88888888-8888-4888-8888-888888888888'`),
         ).rejects.toThrow(/permission denied/);
         await expect(
           app.query(`UPDATE catalog_sources SET kind = 'human'`),
+        ).rejects.toThrow(/permission denied/);
+        await expect(
+          app.query(`UPDATE catalog_sources SET created_by = 'tampered'`),
+        ).rejects.toThrow(/permission denied/);
+        await expect(
+          app.query(`UPDATE catalog_sources SET identity_id = 'tampered'`),
         ).rejects.toThrow(/permission denied/);
         await expect(
           app.query(`UPDATE source_catalog_success_intents SET success_json = '{}'`),
