@@ -782,6 +782,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("refuses catalog rollback when an immutable success intent exists without deleting it", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       await client.query(`
         INSERT INTO catalog_sources (
           id, name, kind, description, lifecycle, created_by, revision
@@ -815,6 +816,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("excludes concurrent writers from both coordination tables during the rollback guard", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);
+      expect((await migrateDown(client)).rolledBack).toBe("031_external_run_import_atomic");
       const catalogRollback = await migrateDown(client);
       expect(catalogRollback.rolledBack).toBe("030_source_catalog_mutations");
       await client.query(`
