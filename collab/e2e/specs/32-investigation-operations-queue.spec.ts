@@ -183,7 +183,10 @@ test.describe("Investigation Operations Queue", () => {
       await search.focus();
       await search.pressSequentially("x");
       await expect(search).toBeFocused();
-      expect(queueRequests.filter((url) => url.searchParams.has("cursor"))).toHaveLength(3);
+      expect(queueRequests
+        .filter((url) => url.searchParams.has("cursor"))
+        .map((url) => url.searchParams.get("cursor")))
+        .toEqual(["eyJwYWdlIjoyfQ", "eyJwYWdlIjoyfQ", "eyJwYWdlIjozfQ"]);
       expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
     } finally {
       await page.unroute("**/api/cases?**");

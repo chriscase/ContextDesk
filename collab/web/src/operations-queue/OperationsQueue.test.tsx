@@ -355,6 +355,47 @@ describe("Operations Queue presentation", () => {
     expect(screen.queryByText("All operations are shown.")).toBeNull();
   });
 
+  it("does not steal focus when the user moves away during continuation", async () => {
+    const page = makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" });
+    const rendered = renderQueue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+    hook.current.mockReturnValue(settled({
+      continuationInFlight: true,
+      view: { availability: "available", value: page, refresh: "loading" },
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    const search = screen.getByRole("searchbox", { name: "Search" });
+    search.focus();
+    hook.current.mockReturnValue(settled({
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({ nextCursor: null }),
+        refresh: "settled",
+      },
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByText("All operations are shown.")).toBeTruthy());
+    expect(document.activeElement).toBe(search);
+  });
+
+  it("marks pagination unavailable during a header refresh", () => {
+    renderQueue(settled({
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" }),
+        refresh: "loading",
+      },
+    }));
+    expect(screen.getByRole("button", { name: "Load more operations" }).getAttribute("aria-disabled"))
+      .toBe("true");
+  });
+
   it("uses distinct true-empty, filtered-empty, and scope-empty copy", () => {
     const emptyPage = makeOperationsQueuePage({
       items: [],

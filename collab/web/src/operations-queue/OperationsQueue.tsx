@@ -90,6 +90,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const completionRef = useRef<HTMLParagraphElement>(null);
   const continuationFailureRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLButtonElement>(null);
+  const continuationInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const observedInFlightAttemptRef = useRef(0);
   const focusedOutcomeAttemptRef = useRef(0);
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
@@ -99,12 +100,14 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     setContinuationAttempt(0);
     observedInFlightAttemptRef.current = 0;
     focusedOutcomeAttemptRef.current = 0;
+    continuationInitiatorRef.current = null;
   }, [queryKey]);
 
   const available = queue.view.availability === "available";
   const refreshState = available ? queue.view.refresh : null;
   const hasNextPage = available && queue.view.value.nextCursor !== null;
   const continuationLoading = queue.continuationInFlight;
+  const paginationDisabled = continuationLoading || refreshState === "loading";
 
   useEffect(() => {
     if (continuationAttempt === 0) return;
@@ -116,20 +119,24 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
       observedInFlightAttemptRef.current !== continuationAttempt
       || focusedOutcomeAttemptRef.current === continuationAttempt
     ) return;
+    const activeElement = document.activeElement;
+    const shouldRecoverFocus = activeElement === document.body
+      || activeElement === continuationInitiatorRef.current;
+    focusedOutcomeAttemptRef.current = continuationAttempt;
+    if (!shouldRecoverFocus) return;
     if (queue.continuationFailed) {
-      focusedOutcomeAttemptRef.current = continuationAttempt;
       continuationFailureRef.current?.focus();
       return;
     }
     if (available && refreshState === "settled") {
-      focusedOutcomeAttemptRef.current = continuationAttempt;
       if (hasNextPage) loadMoreRef.current?.focus();
       else completionRef.current?.focus();
     }
   }, [available, continuationAttempt, continuationLoading, hasNextPage, queue.continuationFailed, refreshState]);
 
-  const requestNextPage = () => {
-    if (continuationLoading) return;
+  const requestNextPage = (event: MouseEvent<HTMLButtonElement>) => {
+    if (paginationDisabled) return;
+    continuationInitiatorRef.current = event.currentTarget;
     setContinuationAttempt((current) => current + 1);
     queue.nextPage();
   };
@@ -317,7 +324,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
             <nav className="operations-queue__pagination" aria-label="Operations Queue pages">
               <button
                 type="button"
-                aria-disabled={continuationLoading}
+                aria-disabled={paginationDisabled}
                 ref={loadMoreRef}
                 onClick={requestNextPage}
               >
@@ -335,7 +342,9 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
               All operations are shown.
             </p>
           ) : null}
-          {available && queue.view.refresh === "settled" ? (
+          {available
+          && queue.view.refresh === "settled"
+          && !(continuationAttempt > 0 && !hasNextPage) ? (
             <span className="sr-only" role="status" aria-live="polite">
               {items.length} {items.length === 1 ? "operation" : "operations"} shown.
             </span>
