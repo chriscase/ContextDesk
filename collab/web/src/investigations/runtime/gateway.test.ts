@@ -2929,6 +2929,7 @@ describe("operations queue query seam", () => {
           error: { kind: "auth_lost", status },
         });
         expect(json).not.toHaveBeenCalled();
+        expect(response.bodyUsed).toBe(false);
         expect(listener).toHaveBeenCalledTimes(1);
         expect((listener.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({ status });
       } finally {
