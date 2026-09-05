@@ -19,6 +19,8 @@ export interface OperationsQueuePresentation {
   readonly continuationInFlight: boolean;
   /** Monotonic within the current location query; changes only when a continuation settles. */
   readonly continuationOutcome: number;
+  /** Scope-local Runtime request generation used only to settle explicit UI attempts. */
+  readonly requestGeneration: number;
   readonly refresh: () => void;
   readonly nextPage: () => void;
 }
@@ -155,6 +157,7 @@ export function useOperationsQueue(
     continuationFailed,
     continuationInFlight: requestedCommandRef.current === command && continuationInFlight,
     continuationOutcome: requestedCommandRef.current === command ? continuationOutcome : 0,
+    requestGeneration,
     refresh: commandAvailability === "available" && typeof command === "function"
       ? () => {
           if (continuationPendingRef.current) return;

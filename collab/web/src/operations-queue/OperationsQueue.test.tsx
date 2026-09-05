@@ -26,6 +26,7 @@ function settled(overrides: Partial<OperationsQueuePresentation> = {}): Operatio
     continuationFailed: false,
     continuationInFlight: false,
     continuationOutcome: 0,
+    requestGeneration: 1,
     refresh: vi.fn(),
     nextPage: vi.fn(),
     ...overrides,
@@ -439,6 +440,151 @@ describe("Operations Queue presentation", () => {
     }
 
     expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns focus after slow and fast retained-page refresh retries", async () => {
+    const refresh = vi.fn();
+    const page = makeOperationsQueuePage();
+    const failedView = Object.freeze({
+      availability: "available" as const,
+      value: page,
+      refresh: "failed" as const,
+      refreshError: Object.freeze({ kind: "network" as const }),
+    });
+    const rendered = renderQueue(settled({
+      view: failedView,
+      requestGeneration: 3,
+      refresh,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "loading" },
+      requestGeneration: 4,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      requestGeneration: 4,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "Operations Queue" }),
+    ));
+
+    hook.current.mockReturnValue(settled({
+      view: failedView,
+      requestGeneration: 5,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      requestGeneration: 6,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "Operations Queue" }),
+    ));
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns focus to the remounted alert after repeated retained-page retry failure", async () => {
+    const refresh = vi.fn();
+    const page = makeOperationsQueuePage();
+    const repeatedView = Object.freeze({
+      availability: "available" as const,
+      value: page,
+      refresh: "failed" as const,
+      refreshError: Object.freeze({ kind: "network" as const }),
+    });
+    const rendered = renderQueue(settled({
+      view: repeatedView,
+      requestGeneration: 8,
+      refresh,
+    }));
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      hook.current.mockReturnValue(settled({
+        view: { availability: "available", value: page, refresh: "loading" },
+        requestGeneration: 8 + attempt,
+        refresh,
+      }));
+      rendered.rerender(
+        <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+      );
+      hook.current.mockReturnValue(settled({
+        view: repeatedView,
+        requestGeneration: 8 + attempt,
+        refresh,
+      }));
+      rendered.rerender(
+        <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+      );
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("alert")));
+    }
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not steal retained-refresh focus after user or authority-scope movement", async () => {
+    const refresh = vi.fn();
+    const page = makeOperationsQueuePage();
+    const failedView = {
+      availability: "available" as const,
+      value: page,
+      refresh: "failed" as const,
+      refreshError: { kind: "network" as const },
+    };
+    const rendered = renderQueue(settled({ view: failedView, requestGeneration: 2, refresh }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "loading" },
+      requestGeneration: 3,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    const search = screen.getByRole("searchbox", { name: "Search" });
+    search.focus();
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      requestGeneration: 3,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(search));
+
+    hook.current.mockReturnValue(settled({ view: failedView, requestGeneration: 4, refresh }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    hook.current.mockReturnValue(settled({
+      scopeToken: Object.freeze({}),
+      view: { availability: "available", value: page, refresh: "settled" },
+      requestGeneration: 1,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(search));
   });
 
   it("clears pagination intent when the Runtime authority scope changes", async () => {

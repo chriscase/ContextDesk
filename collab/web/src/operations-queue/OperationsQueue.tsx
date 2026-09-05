@@ -93,11 +93,19 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     readonly queryKey: string;
     readonly scopeToken: object;
   } | null>(null);
+  const [refreshRetry, setRefreshRetry] = useState<{
+    readonly baselineRequestGeneration: number;
+    readonly observedLoading: boolean;
+    readonly queryKey: string;
+    readonly scopeToken: object;
+  } | null>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const completionRef = useRef<HTMLParagraphElement>(null);
   const continuationFailureRef = useRef<HTMLDivElement>(null);
+  const refreshFailureRef = useRef<HTMLDivElement>(null);
   const unavailableRef = useRef<HTMLDivElement>(null);
   const unavailableRetryInitiatorRef = useRef<HTMLButtonElement | null>(null);
+  const refreshRetryInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const loadMoreRef = useRef<HTMLButtonElement>(null);
   const continuationInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const focusedOutcomeRef = useRef(0);
@@ -109,7 +117,9 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     focusedOutcomeRef.current = 0;
     continuationInitiatorRef.current = null;
     unavailableRetryInitiatorRef.current = null;
+    refreshRetryInitiatorRef.current = null;
     setUnavailableRetry(null);
+    setRefreshRetry(null);
   }, [queryKey, queue.scopeToken]);
 
   const available = queue.view.availability === "available";
@@ -168,6 +178,36 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     else titleRef.current?.focus();
   }, [queryKey, queue.scopeToken, queue.view, unavailableRetry]);
 
+  useEffect(() => {
+    if (refreshRetry === null) return;
+    if (refreshRetry.scopeToken !== queue.scopeToken || refreshRetry.queryKey !== queryKey) {
+      refreshRetryInitiatorRef.current = null;
+      setRefreshRetry(null);
+      return;
+    }
+    if (queue.view.availability === "idle") return;
+    if (queue.view.availability === "loading"
+      || (queue.view.availability === "available" && queue.view.refresh === "loading")) {
+      if (!refreshRetry.observedLoading) {
+        setRefreshRetry({ ...refreshRetry, observedLoading: true });
+      }
+      return;
+    }
+    if (
+      !refreshRetry.observedLoading
+      && queue.requestGeneration <= refreshRetry.baselineRequestGeneration
+    ) return;
+    const activeElement = document.activeElement;
+    const shouldRecoverFocus = activeElement === document.body
+      || activeElement === refreshRetryInitiatorRef.current;
+    refreshRetryInitiatorRef.current = null;
+    setRefreshRetry(null);
+    if (!shouldRecoverFocus) return;
+    if (queue.view.availability === "unavailable") unavailableRef.current?.focus();
+    else if (queue.view.refresh === "failed") refreshFailureRef.current?.focus();
+    else titleRef.current?.focus();
+  }, [queryKey, queue.requestGeneration, queue.scopeToken, queue.view, refreshRetry]);
+
   const requestNextPage = (event: MouseEvent<HTMLButtonElement>) => {
     if (paginationDisabled) return;
     continuationInitiatorRef.current = event.currentTarget;
@@ -180,6 +220,18 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     unavailableRetryInitiatorRef.current = event.currentTarget;
     setUnavailableRetry({
       error: queue.view.error,
+      observedLoading: false,
+      queryKey,
+      scopeToken: queue.scopeToken,
+    });
+    queue.refresh();
+  };
+
+  const retryRefresh = (event: MouseEvent<HTMLButtonElement>) => {
+    if (queue.view.availability !== "available" || queue.view.refresh !== "failed") return;
+    refreshRetryInitiatorRef.current = event.currentTarget;
+    setRefreshRetry({
+      baselineRequestGeneration: queue.requestGeneration,
       observedLoading: false,
       queryKey,
       scopeToken: queue.scopeToken,
@@ -322,9 +374,14 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
           ) : null}
 
           {available && queue.view.refresh === "failed" && !queue.continuationFailed ? (
-            <div className="operations-queue__message operations-queue__message--inline" role="alert">
+            <div
+              className="operations-queue__message operations-queue__message--inline"
+              role="alert"
+              tabIndex={-1}
+              ref={refreshFailureRef}
+            >
               <p>The latest refresh failed. The previously loaded queue is still shown in server order.</p>
-              <button type="button" onClick={queue.refresh}>Try again</button>
+              <button type="button" onClick={retryRefresh}>Try again</button>
             </div>
           ) : null}
           {available && queue.view.value.hiddenArchivedCount > 0 && !query.includeArchived ? (
