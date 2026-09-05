@@ -7,7 +7,7 @@
  */
 import type { AppRole } from "./auth.js";
 
-export const CAPABILITY_MODEL_VERSION = 2 as const;
+export const CAPABILITY_MODEL_VERSION = 3 as const;
 
 export const CAPABILITIES = [
   "investigation:read",
@@ -18,6 +18,7 @@ export const CAPABILITIES = [
   "decision:accept",
   "export:create",
   "portable:restore",
+  "catalog:write",
   "admin:users",
   "admin:system_config",
   "audit:view",
@@ -46,6 +47,7 @@ export const ROLE_CAPABILITIES: Readonly<Record<AppRole, readonly Capability[]>>
     "decision:accept",
     "export:create",
     "portable:restore",
+    "catalog:write",
   ],
   admin: [...CAPABILITIES],
 };

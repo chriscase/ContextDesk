@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import { ContractViolation } from "./parse.js";
 import {
   PERMANENT_UNKNOWN_SOURCE_ID,
+  SOURCE_CATALOG_ACTION_AUTHORITY,
+  SOURCE_CATALOG_IDEMPOTENCY,
   SOURCE_CATALOG_RESPONSE_CONTEXT,
   SOURCE_CREATE_REQUEST_SCHEMA_ID,
   SOURCE_IDEMPOTENCY_KEY_RE,
@@ -174,6 +176,84 @@ describe("source catalog constants", () => {
     expect(SOURCE_LIST_SCHEMA_ID).toBe("cd-collab.source_list.v1");
     expect(PERMANENT_UNKNOWN_SOURCE_ID).toBe("00000000-0000-0000-0000-000000000001");
     expect([...SOURCE_MUTATION_ACTIONS]).toEqual(["create", "retire", "restore"]);
+    expect([...SOURCE_MUTATION_REFUSALS]).toEqual([
+      "source_not_found",
+      "already_retired",
+      "not_retired",
+      "permanent_unknown_protected",
+      "expected_revision_mismatch",
+      "source_revision_unavailable",
+      "identity_already_bound",
+      "idempotency_intent_mismatch",
+    ]);
+  });
+
+  it("maps every catalog mutation to catalog:write and freezes that authority", () => {
+    expect(SOURCE_CATALOG_ACTION_AUTHORITY).toEqual({
+      create: "catalog:write",
+      retire: "catalog:write",
+      restore: "catalog:write",
+    });
+    expect(Object.keys(SOURCE_CATALOG_ACTION_AUTHORITY)).toEqual([...SOURCE_MUTATION_ACTIONS]);
+    expect(Object.isFrozen(SOURCE_CATALOG_ACTION_AUTHORITY)).toBe(true);
+    expect(() => {
+      (SOURCE_CATALOG_ACTION_AUTHORITY as { create: string }).create = "run:strategies";
+    }).toThrow(TypeError);
+    expect(SOURCE_CATALOG_ACTION_AUTHORITY.create).toBe("catalog:write");
+    expect(Object.values(SOURCE_CATALOG_ACTION_AUTHORITY)).not.toContain("run:strategies");
+    expect(Object.values(SOURCE_CATALOG_ACTION_AUTHORITY)).not.toContain("admin:users");
+    expect(Object.values(SOURCE_CATALOG_ACTION_AUTHORITY)).not.toContain("investigation:read");
+    expect(Object.values(SOURCE_CATALOG_ACTION_AUTHORITY)).not.toContain("investigation:write");
+  });
+
+  it("freezes catalog idempotency lookup, per-action intent, and replay order", () => {
+    expect(SOURCE_CATALOG_IDEMPOTENCY.lookupKey).toEqual(["actorIdentityId", "idempotencyKey"]);
+    expect(SOURCE_CATALOG_IDEMPOTENCY.lookupKey).not.toContain("action");
+    expect(SOURCE_CATALOG_IDEMPOTENCY.intentFields).toEqual({
+      create: ["action", "name", "kind", "description", "identityId"],
+      retire: ["action", "sourceId"],
+      restore: ["action", "sourceId"],
+    });
+    expect(SOURCE_CATALOG_IDEMPOTENCY.excludesFromIntent).toEqual(["expectedRevision"]);
+    expect(SOURCE_CATALOG_IDEMPOTENCY.beforeLookup).toEqual(["authorization", "active_profile"]);
+    expect(SOURCE_CATALOG_IDEMPOTENCY.replayBefore).toEqual([
+      "source_lookup",
+      "permanent_unknown",
+      "lifecycle",
+      "identity_uniqueness",
+      "cas",
+    ]);
+    expect(SOURCE_CATALOG_IDEMPOTENCY.persist).toBe("successful_actions_only");
+    expect(SOURCE_CATALOG_IDEMPOTENCY.replay).toBe("original_applied_success_and_revision_tuple");
+    expect(SOURCE_CATALOG_IDEMPOTENCY.uncertainOutcome).toBe(
+      "freeze_exact_payload_and_idempotency_key_before_retry",
+    );
+    expect(Object.isFrozen(SOURCE_CATALOG_IDEMPOTENCY)).toBe(true);
+    expect(Object.isFrozen(SOURCE_CATALOG_IDEMPOTENCY.intentFields)).toBe(true);
+    for (const field of [
+      SOURCE_CATALOG_IDEMPOTENCY.lookupKey,
+      SOURCE_CATALOG_IDEMPOTENCY.intentFields.create,
+      SOURCE_CATALOG_IDEMPOTENCY.intentFields.retire,
+      SOURCE_CATALOG_IDEMPOTENCY.intentFields.restore,
+      SOURCE_CATALOG_IDEMPOTENCY.excludesFromIntent,
+      SOURCE_CATALOG_IDEMPOTENCY.beforeLookup,
+      SOURCE_CATALOG_IDEMPOTENCY.replayBefore,
+    ]) {
+      const original = [...field];
+      expect(Object.isFrozen(field)).toBe(true);
+      expect(() => (field as unknown as string[]).push("tamper")).toThrow(TypeError);
+      expect(field).toEqual(original);
+    }
+    expect(() => {
+      (SOURCE_CATALOG_IDEMPOTENCY.intentFields as { create: string[] }).create = ["tamper"];
+    }).toThrow(TypeError);
+    expect(SOURCE_CATALOG_IDEMPOTENCY.intentFields.create).toEqual([
+      "action",
+      "name",
+      "kind",
+      "description",
+      "identityId",
+    ]);
   });
 
   it("freezes the server-only response context map", () => {
@@ -449,6 +529,7 @@ describe("source mutation refusal pairings", () => {
     not_retired: ["restore"],
     permanent_unknown_protected: ["retire", "restore"],
     expected_revision_mismatch: ["retire", "restore"],
+    source_revision_unavailable: ["retire", "restore"],
     identity_already_bound: ["create"],
     idempotency_intent_mismatch: SOURCE_MUTATION_ACTIONS,
   };
@@ -480,6 +561,9 @@ describe("source mutation refusal pairings", () => {
     }
     if (reason === "expected_revision_mismatch") {
       return { sourceId: TOOL_ID, current: source({ revision: 4 }), expectedRevision };
+    }
+    if (reason === "source_revision_unavailable") {
+      return { sourceId: TOOL_ID, current: legacySource(), expectedRevision };
     }
     if (reason === "identity_already_bound") {
       return {
@@ -543,6 +627,102 @@ describe("source mutation refusal pairings", () => {
         }),
       ),
     ).toThrow(/versioned current source/);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("retire", "expected_revision_mismatch", {
+          current: source({ revision: 4 }),
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("retire", "expected_revision_mismatch", {
+          current: legacySource(),
+        }),
+      ),
+    ).toBe(false);
+    expect(parseSourceMutationRefused(refusal("retire", "source_revision_unavailable", {
+      current: legacySource(),
+    })).reason).toBe("source_revision_unavailable");
+    expect(parseSourceMutationRefused(refusal("restore", "source_revision_unavailable", {
+      current: legacySource(),
+    })).reason).toBe("source_revision_unavailable");
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("retire", "source_revision_unavailable", { current: legacySource() }),
+      ),
+    ).toBe(true);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("restore", "source_revision_unavailable", { current: legacySource() }),
+      ),
+    ).toBe(true);
+    expect(() =>
+      parseSourceMutationRefused(
+        refusal("create", "source_revision_unavailable", {
+          sourceId: TOOL_ID,
+          current: legacySource(),
+        }),
+      ),
+    ).toThrow(/cannot refuse/);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("create", "source_revision_unavailable", {
+          sourceId: TOOL_ID,
+          current: legacySource(),
+        }),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseSourceMutationRefused(refusal("retire", "source_revision_unavailable", { current: null })),
+    ).toThrow(/requires current/);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("retire", "source_revision_unavailable", { current: null }),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseSourceMutationRefused(
+        refusal("retire", "source_revision_unavailable", {
+          sourceId: HUMAN_ID,
+          current: legacySource(),
+        }),
+      ),
+    ).toThrow(/must match sourceId/);
+    expect(() =>
+      parseSourceMutationRefused(
+        refusal("retire", "source_revision_unavailable", { current: source({ revision: 2 }) }),
+      ),
+    ).toThrow(/unversioned current source/);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("retire", "source_revision_unavailable", { current: source({ revision: 2 }) }),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseSourceMutationRefused(
+        refusal("retire", "source_revision_unavailable", {
+          sourceId: PERMANENT_UNKNOWN_SOURCE_ID,
+          current: (() => {
+            const row = permanentUnknown();
+            delete row.revision;
+            return row;
+          })(),
+        }),
+      ),
+    ).toThrow(/permanent_unknown_protected/);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("retire", "source_revision_unavailable", {
+          sourceId: PERMANENT_UNKNOWN_SOURCE_ID,
+          current: (() => {
+            const row = permanentUnknown();
+            delete row.revision;
+            return row;
+          })(),
+        }),
+      ),
+    ).toBe(false);
     expect(() =>
       parseSourceMutationRefused(
         refusal("create", "identity_already_bound", {

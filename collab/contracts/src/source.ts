@@ -1,3 +1,4 @@
+import type { Capability } from "./capability.js";
 import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import { isIsoInstant } from "./temporal.js";
 import { hasDangerousUnicode } from "./user-profile.js";
@@ -33,6 +34,7 @@ export const SOURCE_MUTATION_REFUSALS = [
   "not_retired",
   "permanent_unknown_protected",
   "expected_revision_mismatch",
+  "source_revision_unavailable",
   "identity_already_bound",
   "idempotency_intent_mismatch",
 ] as const;
@@ -49,6 +51,47 @@ export const SOURCE_IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 export const SOURCE_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const SOURCE_IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+
+/**
+ * Catalog mutation authority is the dedicated `catalog:write` capability.
+ * `run:strategies`, `admin:users`, `investigation:read`, `investigation:write`,
+ * and admin-role checks are not catalog mutation authority.
+ */
+export const SOURCE_CATALOG_ACTION_AUTHORITY: Readonly<
+  Record<SourceMutationAction, Capability>
+> = Object.freeze({
+  create: "catalog:write",
+  retire: "catalog:write",
+  restore: "catalog:write",
+});
+
+/**
+ * Durable replay rules the future catalog CAS implementation must preserve.
+ * Lookup is actor identity plus idempotency key; action belongs to intent, so
+ * key reuse across actions is an intent mismatch. expectedRevision is excluded
+ * from intent (CAS-replay), but an uncertain-outcome retry must resend the
+ * exact original payload and idempotency key.
+ */
+export const SOURCE_CATALOG_IDEMPOTENCY = Object.freeze({
+  lookupKey: Object.freeze(["actorIdentityId", "idempotencyKey"] as const),
+  intentFields: Object.freeze({
+    create: Object.freeze(["action", "name", "kind", "description", "identityId"] as const),
+    retire: Object.freeze(["action", "sourceId"] as const),
+    restore: Object.freeze(["action", "sourceId"] as const),
+  }),
+  excludesFromIntent: Object.freeze(["expectedRevision"] as const),
+  beforeLookup: Object.freeze(["authorization", "active_profile"] as const),
+  replayBefore: Object.freeze([
+    "source_lookup",
+    "permanent_unknown",
+    "lifecycle",
+    "identity_uniqueness",
+    "cas",
+  ] as const),
+  persist: "successful_actions_only" as const,
+  replay: "original_applied_success_and_revision_tuple" as const,
+  uncertainOutcome: "freeze_exact_payload_and_idempotency_key_before_retry" as const,
+});
 
 /**
  * Server-only invariants the standalone parsers cannot prove from a wire body.
@@ -209,6 +252,7 @@ const REFUSAL_ACTIONS: Readonly<
   not_retired: ["restore"],
   permanent_unknown_protected: ["retire", "restore"],
   expected_revision_mismatch: ["retire", "restore"],
+  source_revision_unavailable: ["retire", "restore"],
   identity_already_bound: ["create"],
   idempotency_intent_mismatch: SOURCE_MUTATION_ACTIONS,
 };
@@ -616,6 +660,18 @@ export function parseSourceMutationRefused(raw: unknown): SourceMutationRefusedV
       throw new ContractViolation(
         "$.current.revision",
         "expected_revision_mismatch requires current.revision to differ",
+      );
+    }
+  }
+
+  if (reason === "source_revision_unavailable") {
+    if (current === null) {
+      throw new ContractViolation("$.current", "source_revision_unavailable requires current");
+    }
+    if (current.revision !== undefined) {
+      throw new ContractViolation(
+        "$.current.revision",
+        "source_revision_unavailable requires an unversioned current source",
       );
     }
   }

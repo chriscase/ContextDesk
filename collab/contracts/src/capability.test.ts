@@ -14,8 +14,8 @@ import {
 } from "./capability.js";
 
 describe("capability model", () => {
-  it("publishes capability model v2 in stable declaration order", () => {
-    expect(CAPABILITY_MODEL_VERSION).toBe(2);
+  it("publishes capability model v3 in stable declaration order", () => {
+    expect(CAPABILITY_MODEL_VERSION).toBe(3);
     expect(CAPABILITIES).toEqual([
       "investigation:read",
       "investigation:write",
@@ -25,6 +25,7 @@ describe("capability model", () => {
       "decision:accept",
       "export:create",
       "portable:restore",
+      "catalog:write",
       "admin:users",
       "admin:system_config",
       "audit:view",
@@ -69,8 +70,40 @@ describe("capability model", () => {
       "decision:accept",
       "export:create",
       "portable:restore",
+      "catalog:write",
     ]);
     expect(ROLE_CAPABILITIES.admin).toEqual([...CAPABILITIES]);
+  });
+
+  it("grants catalog:write to current catalog writers without changing viewer or contributor", () => {
+    expect(ROLE_CAPABILITIES.viewer).toEqual(["investigation:read"]);
+    expect(ROLE_CAPABILITIES.contributor).toEqual([
+      "investigation:read",
+      "investigation:write",
+    ]);
+    expect(ROLE_CAPABILITIES.viewer).not.toContain("catalog:write");
+    expect(ROLE_CAPABILITIES.contributor).not.toContain("catalog:write");
+    expect(ROLE_CAPABILITIES["case-lead"]).toContain("catalog:write");
+    expect(ROLE_CAPABILITIES.admin).toContain("catalog:write");
+    expect(roleCapabilities(["case-lead"])).toEqual(ROLE_CAPABILITIES["case-lead"]);
+    expect(roleCapabilities(["admin"])).toEqual([...CAPABILITIES]);
+    expect(isCapability("catalog:write")).toBe(true);
+  });
+
+  it("does not treat run:strategies, admin:users, or investigation read/write as catalog mutation authority", () => {
+    const viewerWithRun = resolveCapabilities(["viewer"], ["run:strategies"]);
+    expect(viewerWithRun).toEqual(["investigation:read", "run:strategies"]);
+    expect(hasCapability(viewerWithRun, "catalog:write")).toBe(false);
+
+    const viewerWithAdminUsers = resolveCapabilities(["viewer"], ["admin:users"]);
+    expect(viewerWithAdminUsers).toEqual(["investigation:read", "admin:users"]);
+    expect(hasCapability(viewerWithAdminUsers, "catalog:write")).toBe(false);
+
+    const contributor = resolveCapabilities(["contributor"]);
+    expect(contributor).toEqual(["investigation:read", "investigation:write"]);
+    expect(hasCapability(contributor, "catalog:write")).toBe(false);
+    expect(hasCapability(contributor, "investigation:read")).toBe(true);
+    expect(hasCapability(contributor, "investigation:write")).toBe(true);
   });
 
   it("resolves capabilities from roles alone in stable declaration order", () => {
@@ -90,6 +123,18 @@ describe("capability model", () => {
     expect(resolveCapabilities(["viewer"], ["investigation:coordinate"])).toEqual([
       "investigation:read",
       "investigation:coordinate",
+    ]);
+  });
+
+  it("permits an additive catalog:write grant without granting a role", () => {
+    expect(resolveCapabilities(["viewer"], ["catalog:write"])).toEqual([
+      "investigation:read",
+      "catalog:write",
+    ]);
+    expect(resolveCapabilities(["contributor"], ["catalog:write"])).toEqual([
+      "investigation:read",
+      "investigation:write",
+      "catalog:write",
     ]);
   });
 
@@ -124,5 +169,28 @@ describe("capability model", () => {
     expect(
       canUse({ status: "active", provenance: "local" }, ["viewer"], ["investigation:write"], "investigation:write"),
     ).toBe(true);
+    expect(
+      canUse({ status: "active", provenance: "local" }, ["case-lead"], [], "catalog:write"),
+    ).toBe(true);
+    expect(
+      canUse({ status: "active", provenance: "local" }, ["admin"], [], "catalog:write"),
+    ).toBe(true);
+    expect(
+      canUse({ status: "active", provenance: "local" }, ["viewer"], ["catalog:write"], "catalog:write"),
+    ).toBe(true);
+    expect(
+      canUse({ status: "suspended", provenance: "local" }, ["admin"], ["catalog:write"], "catalog:write"),
+    ).toBe(false);
+    expect(
+      canUse({ status: "disabled", provenance: "local" }, ["case-lead"], [], "catalog:write"),
+    ).toBe(false);
+    expect(
+      canUse(
+        { status: "active", provenance: "imported_historical" },
+        ["admin"],
+        ["catalog:write"],
+        "catalog:write",
+      ),
+    ).toBe(false);
   });
 });

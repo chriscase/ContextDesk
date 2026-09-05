@@ -31,6 +31,7 @@
         "not_retired",
         "permanent_unknown_protected",
         "expected_revision_mismatch",
+        "source_revision_unavailable",
         "identity_already_bound",
         "idempotency_intent_mismatch"
       ]
@@ -76,6 +77,33 @@
             "allOf": [
               { "$ref": "#/$defs/source" },
               { "type": "object", "required": ["revision"] }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "reason": { "const": "source_revision_unavailable" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": {
+          "action": { "type": "string", "enum": ["retire", "restore"] },
+          "sourceId": { "type": "string" },
+          "current": {
+            "allOf": [
+              { "$ref": "#/$defs/source" },
+              { "not": { "type": "object", "required": ["revision"] } },
+              {
+                "not": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "const": "00000000-0000-0000-0000-000000000001" }
+                  },
+                  "required": ["id"]
+                }
+              }
             ]
           }
         }
