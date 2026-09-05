@@ -146,6 +146,23 @@ function publishAuthoritativeCoordination(
   return succeedResourceLoad(current, scopeKey, candidate);
 }
 
+function failAuthoritativeCoordinationLoad(
+  current: KeyedResourceState<string, InvestigationCoordinationV1>,
+  scopeKey: string,
+  baselineRevision: number | null,
+  error: RuntimeFailure,
+): KeyedResourceState<string, InvestigationCoordinationV1> {
+  if (current.key !== scopeKey) return current;
+  if (error.kind !== "auth_lost" && error.kind !== "not_found") {
+    const published = publishedCoordination(current.state);
+    if (
+      published !== undefined
+      && (baselineRevision === null || published.revision > baselineRevision)
+    ) return current;
+  }
+  return failResourceLoad(current, scopeKey, error);
+}
+
 /** Owns the complete case-bound coordination read/action lane. */
 export function useInvestigationCoordination(
   options: UseInvestigationCoordinationOptions,
@@ -239,6 +256,10 @@ export function useInvestigationCoordination(
       return;
     }
     const token = readSlotRef.current.begin(scope);
+    const resourceAtStart = currentRef.current.resource;
+    const baselineRevision = resourceAtStart.key === scopeKey
+      ? publishedCoordination(resourceAtStart.state)?.revision ?? null
+      : null;
     setResource((current) => beginResourceLoad(current, scopeKey));
     void options.gateway.getCoordination(scope.investigationId, {
       actorIdentityId: scope.actorIdentityId,
@@ -250,12 +271,18 @@ export function useInvestigationCoordination(
       }
       setResource((current) => result.ok
         ? publishAuthoritativeCoordination(current, scopeKey, result.value, true)
-        : failResourceLoad(current, scopeKey, result.error));
+        : failAuthoritativeCoordinationLoad(
+            current,
+            scopeKey,
+            baselineRevision,
+            result.error,
+          ));
     }).catch(() => {
       if (!mountedRef.current || !readSlotRef.current.isCurrent(token)) return;
-      setResource((current) => failResourceLoad(
+      setResource((current) => failAuthoritativeCoordinationLoad(
         current,
         scopeKey,
+        baselineRevision,
         { kind: "unexpected" },
       ));
     });

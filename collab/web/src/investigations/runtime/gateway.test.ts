@@ -120,6 +120,7 @@ describe("investigation coordination transport", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       `/api/cases/${encodeURIComponent(investigationId)}/coordination`,
     );
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(Object.isFrozen(result.value)).toBe(true);
@@ -154,6 +155,11 @@ describe("investigation coordination transport", () => {
     );
     expect(result.ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({
+      "content-type": "application/json",
+      [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
+    });
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
       schemaId: "cd-collab.investigation_coordination_action_request.v1",
       investigationId,
@@ -454,6 +460,34 @@ describe("investigation coordination transport", () => {
       input,
       coordinationOptions(),
     )).resolves.toEqual({ ok: false, error: { kind: "conflict", status: 409 } });
+  });
+
+  it.each([
+    [401, { kind: "auth_lost" as const, status: 401 as const }],
+    [403, { kind: "auth_lost" as const, status: 403 as const }],
+    [404, { kind: "not_found" as const, status: 404 as const }],
+  ] as const)("classifies coordination POST %i without reading its response body", async (
+    status,
+    error,
+  ) => {
+    const response = jsonResponse({
+      error: "commit_outcome_unknown",
+      private: "must-not-be-read",
+    }, status);
+    const json = vi.spyOn(response, "json");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "claim_self",
+        expectedRevision: 0,
+        idempotencyKey: `coord-status-no-read-${status}`,
+      },
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error });
+    expect(json).not.toHaveBeenCalled();
+    expect(response.bodyUsed).toBe(false);
   });
 });
 

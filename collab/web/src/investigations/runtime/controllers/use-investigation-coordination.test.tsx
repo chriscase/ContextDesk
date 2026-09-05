@@ -459,6 +459,127 @@ describe("useInvestigationCoordination", () => {
     });
   });
 
+  it.each(["network", "unexpected"] as const)(
+    "ignores a delayed stale %s GET failure after a newer POST projection",
+    async (failureKind) => {
+      const delayedGet = createDeferred<Awaited<ReturnType<
+        InvestigationCoordinationGateway["getCoordination"]
+      >>>();
+      const delayedPost = createDeferred<Awaited<ReturnType<
+        InvestigationCoordinationGateway["applyCoordinationAction"]
+      >>>();
+      const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+        .mockResolvedValueOnce({ ok: true, value: coordination(2) })
+        .mockImplementationOnce(() => delayedGet.promise);
+      const applyCoordinationAction = vi.fn<
+        InvestigationCoordinationGateway["applyCoordinationAction"]
+      >()
+        .mockImplementationOnce(() => delayedPost.promise)
+        .mockResolvedValueOnce({ ok: false, error: { kind: "network" } });
+      const transport = gateway({ getCoordination, applyCoordinationAction });
+      const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+      await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+      let first!: ReturnType<typeof result.current.apply>;
+      act(() => {
+        first = result.current.apply({
+          action: "claim_self",
+          idempotencyKey: `coord-stale-${failureKind}-post`,
+        });
+        result.current.refresh();
+      });
+      await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+      await act(async () => {
+        delayedPost.resolve({ ok: true, value: claimSuccess(2) });
+        await first;
+      });
+      expect(result.current.coordination).toMatchObject({
+        status: "ready",
+        value: { revision: 3 },
+      });
+
+      await act(async () => {
+        if (failureKind === "network") {
+          delayedGet.resolve({ ok: false, error: { kind: "network" } });
+          await delayedGet.promise;
+        } else {
+          delayedGet.reject(new Error("stale transport rejection"));
+          await delayedGet.promise.catch(() => undefined);
+        }
+      });
+      expect(result.current.coordination).toMatchObject({
+        status: "ready",
+        value: { revision: 3 },
+      });
+
+      await act(async () => {
+        await result.current.apply({
+          action: "release_self",
+          idempotencyKey: `coord-stale-${failureKind}-next`,
+        });
+      });
+      expect(applyCoordinationAction.mock.calls[1]?.[1]).toMatchObject({
+        expectedRevision: 3,
+      });
+    },
+  );
+
+  it.each([
+    ["401", { kind: "auth_lost" as const, status: 401 as const }],
+    ["403", { kind: "auth_lost" as const, status: 403 as const }],
+    ["404", { kind: "not_found" as const, status: 404 as const }],
+  ])("honors delayed terminal GET %s after a newer POST projection", async (_status, error) => {
+    const delayedGet = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["getCoordination"]
+    >>>();
+    const delayedPost = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >>>();
+    const onScopeDenied = vi.fn();
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: coordination(2) })
+      .mockImplementationOnce(() => delayedGet.promise);
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >(() => delayedPost.promise);
+    const transport = gateway({ getCoordination, applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport, {
+      onScopeDenied,
+    })));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+    let first!: ReturnType<typeof result.current.apply>;
+    act(() => {
+      first = result.current.apply({
+        action: "claim_self",
+        idempotencyKey: `coord-terminal-delayed-${_status}`,
+      });
+      result.current.refresh();
+    });
+    await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      delayedPost.resolve({ ok: true, value: claimSuccess(2) });
+      await first;
+    });
+    expect(result.current.coordination).toMatchObject({
+      status: "ready",
+      value: { revision: 3 },
+    });
+
+    await act(async () => {
+      delayedGet.resolve({ ok: false, error });
+      await delayedGet.promise;
+    });
+    expect(onScopeDenied).toHaveBeenCalledWith(CASE_ID, error);
+    expect(result.current.coordination).toEqual({ status: "failed", error });
+    const afterTerminal = await result.current.apply({
+      action: "release_self",
+      idempotencyKey: `coord-terminal-after-${_status}`,
+    });
+    expect(afterTerminal).toEqual({ status: "ignored", reason: "not_ready" });
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+  });
+
   it("keeps a newer GET projection when an older successful POST finishes later", async () => {
     const delayedPost = createDeferred<Awaited<ReturnType<
       InvestigationCoordinationGateway["applyCoordinationAction"]
@@ -678,6 +799,57 @@ describe("useInvestigationCoordination", () => {
     }));
   });
 
+  it("settles a stale refresh to its higher loading previous value", async () => {
+    const initial = coordination(3);
+    const stale = coordination(2);
+    const refresh = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["getCoordination"]
+    >>>();
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: initial })
+      .mockImplementationOnce(() => refresh.promise);
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >();
+    const transport = gateway({ getCoordination, applyCoordinationAction });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination).toEqual({
+      status: "ready",
+      value: initial,
+    }));
+
+    act(() => result.current.refresh());
+    expect(result.current.coordination).toEqual({ status: "loading", previous: initial });
+    await act(async () => {
+      refresh.resolve({ ok: true, value: stale });
+      await refresh.promise;
+    });
+    expect(result.current.coordination).toEqual({ status: "ready", value: initial });
+    expect(applyCoordinationAction).not.toHaveBeenCalled();
+  });
+
+  it("accepts an equal-revision authoritative refresh candidate", async () => {
+    const initial = coordination(3);
+    const equal = {
+      ...coordination(3),
+      updatedAt: "2026-02-03T21:00:00.000Z",
+    };
+    const getCoordination = vi.fn<InvestigationCoordinationGateway["getCoordination"]>()
+      .mockResolvedValueOnce({ ok: true, value: initial })
+      .mockResolvedValueOnce({ ok: true, value: equal });
+    const transport = gateway({ getCoordination });
+    const { result } = renderHook(() => useInvestigationCoordination(options(transport)));
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+    act(() => result.current.refresh());
+    await waitFor(() => {
+      expect(result.current.coordination.status).toBe("ready");
+      if (result.current.coordination.status === "ready") {
+        expect(result.current.coordination.value).toBe(equal);
+      }
+    });
+  });
+
   it.each([
     ["401", { kind: "auth_lost" as const, status: 401 as const }],
     ["403", { kind: "auth_lost" as const, status: 403 as const }],
@@ -732,6 +904,10 @@ describe("useInvestigationCoordination", () => {
       ...value,
       active: false,
     })],
+    ["read authority", (value: UseInvestigationCoordinationOptions) => ({
+      ...value,
+      canRead: false,
+    })],
   ])("aborts and suppresses stale action publication across a %s change", async (_label, rotate) => {
     const pending = createDeferred<Awaited<ReturnType<InvestigationCoordinationGateway["applyCoordinationAction"]>>>();
     let signal: AbortSignal | undefined;
@@ -759,12 +935,71 @@ describe("useInvestigationCoordination", () => {
     expect(signal?.aborted).toBe(true);
     let outcome;
     await act(async () => {
-      pending.resolve({ ok: true, value: claimSuccess() });
+      pending.resolve({
+        ok: false,
+        error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+      });
       outcome = await action;
     });
     expect(outcome).toEqual({ status: "ignored", reason: "stale" });
     expect(Object.isFrozen(outcome)).toBe(true);
     expect(result.current.state).toEqual({ status: "idle" });
+  });
+
+  it("does not retain an unknown intent from an action made stale by read-authority loss", async () => {
+    const pending = createDeferred<Awaited<ReturnType<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >>>();
+    let signal: AbortSignal | undefined;
+    const applyCoordinationAction = vi.fn<
+      InvestigationCoordinationGateway["applyCoordinationAction"]
+    >()
+      .mockImplementationOnce((_id, _input, request) => {
+        signal = request.signal;
+        return pending.promise;
+      })
+      .mockResolvedValueOnce({ ok: false, error: { kind: "network" } });
+    const transport = gateway({ applyCoordinationAction });
+    const firstOptions = options(transport, { canCoordinateParticipants: true });
+    const { result, rerender } = renderHook(
+      ({ value }: { value: UseInvestigationCoordinationOptions }) =>
+        useInvestigationCoordination(value),
+      { initialProps: { value: firstOptions } },
+    );
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+
+    const key = "coord-read-loss-unknown";
+    let first!: ReturnType<typeof result.current.apply>;
+    act(() => {
+      first = result.current.apply({ action: "claim_self", idempotencyKey: key });
+    });
+    rerender({ value: { ...firstOptions, canRead: false } });
+    expect(signal?.aborted).toBe(true);
+    const whileDenied = await result.current.apply({
+      action: "claim_self",
+      idempotencyKey: "coord-read-loss-denied",
+    });
+    expect(whileDenied).toEqual({ status: "ignored", reason: "not_ready" });
+    expect(Object.isFrozen(whileDenied)).toBe(true);
+
+    pending.resolve({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    });
+    await expect(first).resolves.toEqual({ status: "ignored", reason: "stale" });
+
+    rerender({ value: firstOptions });
+    await waitFor(() => expect(result.current.coordination.status).toBe("ready"));
+    let retry!: Awaited<ReturnType<typeof result.current.apply>>;
+    await act(async () => {
+      retry = await result.current.apply({
+        action: "assign_participant",
+        targetIdentityId: "identity-bob",
+        idempotencyKey: key,
+      });
+    });
+    expect(retry).toEqual({ status: "failed", error: { kind: "network" } });
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(2);
   });
 
   it("aborts and suppresses action publication after unmount", async () => {
@@ -789,7 +1024,10 @@ describe("useInvestigationCoordination", () => {
     });
     unmount();
     expect(signal?.aborted).toBe(true);
-    pending.resolve({ ok: true, value: claimSuccess() });
+    pending.resolve({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    });
     const outcome = await action;
     expect(outcome).toEqual({ status: "ignored", reason: "stale" });
     expect(Object.isFrozen(outcome)).toBe(true);
