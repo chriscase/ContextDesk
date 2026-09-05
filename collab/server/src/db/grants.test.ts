@@ -266,6 +266,9 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
           kind_update: boolean;
           created_by_update: boolean;
           identity_update: boolean;
+          name_update: boolean;
+          description_update: boolean;
+          lifecycle_update: boolean;
           revision_update: boolean;
         }>(`
           SELECT
@@ -274,6 +277,9 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
             has_column_privilege(current_user, 'catalog_sources', 'kind', 'UPDATE') AS kind_update,
             has_column_privilege(current_user, 'catalog_sources', 'created_by', 'UPDATE') AS created_by_update,
             has_column_privilege(current_user, 'catalog_sources', 'identity_id', 'UPDATE') AS identity_update,
+            has_column_privilege(current_user, 'catalog_sources', 'name', 'UPDATE') AS name_update,
+            has_column_privilege(current_user, 'catalog_sources', 'description', 'UPDATE') AS description_update,
+            has_column_privilege(current_user, 'catalog_sources', 'lifecycle', 'UPDATE') AS lifecycle_update,
             has_column_privilege(current_user, 'catalog_sources', 'revision', 'UPDATE') AS revision_update
         `);
         expect(catalogPrivileges.rows[0]).toEqual({
@@ -282,8 +288,30 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
           kind_update: false,
           created_by_update: false,
           identity_update: false,
+          name_update: true,
+          description_update: true,
+          lifecycle_update: true,
           revision_update: true,
         });
+        await app.query(
+          `INSERT INTO catalog_sources (
+             id, name, kind, description, lifecycle, identity_id, created_by, revision
+           ) VALUES ($1, 'Grant probe', 'external-tool', NULL, 'active', NULL, $2, 1)`,
+          ["77777777-7777-4777-8777-777777777777", "uid=alice,ou=people,dc=example,dc=test"],
+        );
+        await app.query(
+          `INSERT INTO source_catalog_success_intents (
+             actor_id, idempotency_key, action, request_digest, source_id, success_json, created_at
+           ) VALUES ($1, 'catalog-grant-01', 'create', $2, $3, '{}', CURRENT_TIMESTAMP)`,
+          [
+            "uid=alice,ou=people,dc=example,dc=test",
+            "a".repeat(64),
+            "77777777-7777-4777-8777-777777777777",
+          ],
+        );
+        await expect(
+          app.query(`UPDATE catalog_sources SET id = '88888888-8888-4888-8888-888888888888'`),
+        ).rejects.toThrow(/permission denied/);
         await expect(
           app.query(`UPDATE catalog_sources SET kind = 'human'`),
         ).rejects.toThrow(/permission denied/);

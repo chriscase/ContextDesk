@@ -116,10 +116,10 @@ never receives one (see §10).
 
 ### Capability (`Capability`)
 
-Ten values: `investigation:read`, `investigation:write`,
-`evidence:private:read`, `run:strategies`, `decision:accept`,
-`export:create`, `portable:restore`, `admin:users`, `admin:system_config`,
-`audit:view`. Full default role matrix in §5 and
+Twelve values: `investigation:read`, `investigation:write`,
+`investigation:coordinate`, `evidence:private:read`, `run:strategies`,
+`decision:accept`, `export:create`, `portable:restore`, `admin:users`,
+`admin:system_config`, `audit:view`, `catalog:write`. Full default role matrix in §5 and
 [`capability.ts`](../../../collab/contracts/src/capability.ts).
 
 ### Directory attribute map (`DirectoryAttributeMapV1`)
@@ -527,19 +527,22 @@ commissioned to satisfy:
    company-directory qualification remains a named non-claim (§16).
    Bind secrets stay inside the auth module; this chapter does not
    claim employer Active Directory compatibility.
-3. **Authorization.** Partial - versioned 11-capability model covering
-   every named area (investigation read/write, private evidence, run
-   strategies, accept decisions, exports, portable restore, user
-   administration, system configuration, audit viewing), enforced on War
+3. **Authorization.** Partial - versioned 12-capability model covering
+   every named area (investigation read/write/coordination, private evidence,
+   run strategies, accept decisions, exports, portable restore, user
+   administration, system configuration, audit viewing, and catalog
+   mutation), enforced on War
    Room domain and admin routes via `authorizeSession` →
    `usableCapabilities`. Local grants are honored without a role change.
    Suspend/disable/historical fail closed for fresh login and existing
-   sessions. Ten capabilities have shipped server enforcement;
+   sessions. The original ten capabilities have shipped server enforcement;
    `investigation:coordinate` has a local server integration protecting
    privileged actions on the singular coordination route. The read-only queue
    query and `/operations` UI are a local integration using
-   `investigation:read`; they do not expose those privileged actions. §4, §5,
-   §6.2, §6.3.
+   `investigation:read`; they do not expose those privileged actions.
+   `catalog:write` has a local server integration protecting strict source
+   catalog mutations before request parsing or store access. §4, §5, §6.2,
+   §6.3.
 4. **Admin operations.** Shipped - list/search, effective roles/
    capabilities with source, activate/suspend, assign/revoke local grants,
    directory-mapping preview; admin-capability-gated, CSRF-guarded,

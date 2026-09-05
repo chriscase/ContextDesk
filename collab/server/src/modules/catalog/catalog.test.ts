@@ -624,6 +624,20 @@ describe("source catalog strict mutations", () => {
         payload: { schemaId: "cd-collab.source_create_request.v2", name: "nope" },
       });
       expect(unknownSchema.statusCode).toBe(403);
+      const retireDenied = await app.inject({
+        method: "POST",
+        url: "/api/catalog/sources/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/retire",
+        headers: { cookie: alice },
+        payload: {
+          schemaId: SOURCE_RETIRE_REQUEST_SCHEMA_ID,
+          sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          expectedRevision: 1,
+          idempotencyKey: "src-denied-retire",
+        },
+      });
+      expect(retireDenied.statusCode).toBe(403);
+      expect(retireDenied.body).not.toContain("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+      expect(retireDenied.body).not.toContain("src-denied-retire");
       const restoreDenied = await app.inject({
         method: "POST",
         url: "/api/catalog/sources/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/restore",
@@ -701,6 +715,8 @@ describe("source catalog strict mutations", () => {
         payload: createBody({ idempotencyKey: "src-inactive" }),
       });
       expect(inactive.statusCode).toBe(401);
+      expect(inactive.body).not.toContain("src-inactive");
+      expect(inactive.body).not.toContain("Web assistant");
     });
   });
 
@@ -730,6 +746,7 @@ describe("source catalog strict mutations", () => {
           idempotencyKey: "src-cas-missing",
         },
       });
+      expect(missing.statusCode).toBe(409);
       expect(parseSourceMutationRefused(JSON.parse(missing.body)).reason).toBe("source_not_found");
 
       const unknown = await app.inject({
@@ -743,6 +760,7 @@ describe("source catalog strict mutations", () => {
           idempotencyKey: "src-cas-unknown",
         },
       });
+      expect(unknown.statusCode).toBe(409);
       expect(parseSourceMutationRefused(JSON.parse(unknown.body)).reason).toBe(
         "permanent_unknown_protected",
       );
@@ -758,6 +776,7 @@ describe("source catalog strict mutations", () => {
           idempotencyKey: "src-cas-stale",
         },
       });
+      expect(stale.statusCode).toBe(409);
       expect(parseSourceMutationRefused(JSON.parse(stale.body)).reason).toBe(
         "expected_revision_mismatch",
       );
@@ -808,6 +827,7 @@ describe("source catalog strict mutations", () => {
           idempotencyKey: "src-cas-already",
         },
       });
+      expect(already.statusCode).toBe(409);
       expect(parseSourceMutationRefused(JSON.parse(already.body)).reason).toBe("already_retired");
 
       const restored = parseSourceMutationSuccess(
@@ -841,6 +861,7 @@ describe("source catalog strict mutations", () => {
           idempotencyKey: "src-cas-not-retired",
         },
       });
+      expect(notRetired.statusCode).toBe(409);
       expect(parseSourceMutationRefused(JSON.parse(notRetired.body)).reason).toBe("not_retired");
 
       const legacy = await catalog.create(
@@ -860,6 +881,7 @@ describe("source catalog strict mutations", () => {
           idempotencyKey: "src-cas-unversioned",
         },
       });
+      expect(unavailable.statusCode).toBe(409);
       expect(parseSourceMutationRefused(JSON.parse(unavailable.body)).reason).toBe(
         "source_revision_unavailable",
       );
