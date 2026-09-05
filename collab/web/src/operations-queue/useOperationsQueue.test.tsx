@@ -129,16 +129,21 @@ describe("Operations Queue public-runtime adapter", () => {
       .toBe("available:available:settled:1"));
   });
 
-  it("passes only the server cursor for continuation and preserves previous rows on failure", async () => {
+  it("publishes distinct outcomes for a failed continuation and its successful retry", async () => {
     const first = makeOperationsQueuePage({
       items: [makeOperationsQueuePage().items[0]],
       nextCursor: "eyJwYWdlIjoyfQ",
       coordinationScopeCounts: { allVisible: 2, mine: 1, unassigned: 1 },
     });
+    let continuationCalls = 0;
     const queryOperationsQueue = vi.fn<NonNullable<InvestigationGateway["queryOperationsQueue"]>>(
-      async (input) => input.cursor
-        ? { ok: false as const, error: { kind: "network" as const } }
-        : gatewayOk(first),
+      async (input) => {
+        if (!input.cursor) return gatewayOk(first);
+        continuationCalls += 1;
+        return continuationCalls === 1
+          ? { ok: false as const, error: { kind: "network" as const } }
+          : gatewayOk(makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjozfQ" }));
+      },
     );
     renderProbe(createInvestigationGatewayDouble({ queryOperationsQueue }));
     await waitFor(() => expect(screen.getByTestId("queue-state").textContent).toBe("available:available:settled:1"));
@@ -152,6 +157,11 @@ describe("Operations Queue public-runtime adapter", () => {
     await waitFor(() => expect(screen.getByTestId("queue-state").textContent).toBe("available:available:failed:1"));
     expect(presentation?.continuationFailed).toBe(true);
     await waitFor(() => expect(presentation?.continuationOutcome).toBe(1));
+
+    act(() => presentation?.nextPage());
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(presentation?.continuationOutcome).toBe(2));
+    expect(presentation?.continuationFailed).toBe(false);
   });
 
   it("appends a successful continuation in exact server sequence", async () => {

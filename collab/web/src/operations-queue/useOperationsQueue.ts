@@ -21,6 +21,28 @@ export interface OperationsQueuePresentation {
   readonly nextPage: () => void;
 }
 
+interface ContinuationAttempt {
+  readonly id: number;
+  readonly view: ResourceView<InvestigationOperationsQueuePageV1>;
+}
+
+function continuationViewChanged(
+  baseline: ResourceView<InvestigationOperationsQueuePageV1>,
+  current: ResourceView<InvestigationOperationsQueuePageV1>,
+): boolean {
+  if (baseline.availability !== current.availability) return true;
+  if (baseline.availability === "available" && current.availability === "available") {
+    if (baseline.value !== current.value || baseline.refresh !== current.refresh) return true;
+    return baseline.refresh === "failed"
+      && current.refresh === "failed"
+      && baseline.refreshError !== current.refreshError;
+  }
+  if (baseline.availability === "unavailable" && current.availability === "unavailable") {
+    return baseline.error !== current.error;
+  }
+  return false;
+}
+
 function inputForLocation(query: OperationsQueueLocationQuery): InvestigationOperationsQueueQueryInput {
   return Object.freeze({
     q: query.q,
@@ -69,7 +91,7 @@ export function useOperationsQueue(
   const requestedKeyRef = useRef<string | null>(null);
   const continuationPendingRef = useRef(false);
   const continuationAttemptRef = useRef(0);
-  const pendingContinuationAttemptRef = useRef(0);
+  const pendingContinuationAttemptRef = useRef<ContinuationAttempt | null>(null);
   const [continuationInFlight, setContinuationInFlight] = useState(false);
   const [continuationOutcome, setContinuationOutcome] = useState(0);
   const activeQuery = runtime.resources.operationsQueueQuery;
@@ -89,7 +111,7 @@ export function useOperationsQueue(
   useEffect(() => {
     if (requestedKeyRef.current !== inputKey || commandAvailability !== "available") {
       continuationPendingRef.current = false;
-      pendingContinuationAttemptRef.current = 0;
+      pendingContinuationAttemptRef.current = null;
       setContinuationInFlight(false);
       setContinuationOutcome(0);
       return;
@@ -98,14 +120,16 @@ export function useOperationsQueue(
       continuationPendingRef.current
       && activeQueryMatches
       && activeQuery.cursor !== null
+      && pendingContinuationAttemptRef.current !== null
+      && continuationViewChanged(pendingContinuationAttemptRef.current.view, view)
       && (
         view.availability === "unavailable"
         || (view.availability === "available" && view.refresh !== "loading")
       )
     ) {
       continuationPendingRef.current = false;
-      const settledAttempt = pendingContinuationAttemptRef.current;
-      pendingContinuationAttemptRef.current = 0;
+      const settledAttempt = pendingContinuationAttemptRef.current.id;
+      pendingContinuationAttemptRef.current = null;
       setContinuationInFlight(false);
       setContinuationOutcome(settledAttempt);
     }
@@ -115,7 +139,7 @@ export function useOperationsQueue(
     if (commandAvailability !== "available" || typeof command !== "function") {
       requestedKeyRef.current = null;
       continuationPendingRef.current = false;
-      pendingContinuationAttemptRef.current = 0;
+      pendingContinuationAttemptRef.current = null;
       setContinuationInFlight(false);
       setContinuationOutcome(0);
       return;
@@ -161,13 +185,19 @@ export function useOperationsQueue(
             && baseKey(current) === inputKey
           ) {
             continuationPendingRef.current = true;
-            pendingContinuationAttemptRef.current = ++continuationAttemptRef.current;
+            pendingContinuationAttemptRef.current = {
+              id: ++continuationAttemptRef.current,
+              view,
+            };
             setContinuationInFlight(true);
             runtime.refresh.operationsQueue();
             return;
           }
           continuationPendingRef.current = true;
-          pendingContinuationAttemptRef.current = ++continuationAttemptRef.current;
+          pendingContinuationAttemptRef.current = {
+            id: ++continuationAttemptRef.current,
+            view,
+          };
           setContinuationInFlight(true);
           command(Object.freeze({ ...input, cursor }));
         }
