@@ -513,6 +513,58 @@ function strategyRouteViolations(path: string, source: ts.SourceFile): string[] 
   return violations;
 }
 
+function operationsImportViolations(path: string, source: ts.SourceFile): string[] {
+  const violations: string[] = [];
+  const operationsRoot = resolve(WEB_SRC, "operations-queue");
+  const appLocationModule = resolve(WEB_SRC, "app-location");
+  const publicRuntimeModule = resolve(INVESTIGATIONS_ROOT, "runtime/public");
+  const operationsCssModule = resolve(WEB_SRC, "styles/operations.css");
+
+  for (const imported of importsOf(source)) {
+    const location = `${repositoryPath(path)}:${imported.line}`;
+    const resolvedModule = modulePath(path, imported.module);
+    if (!imported.module.startsWith(".") && imported.module !== "react") {
+      violations.push(`${location} imports ${imported.module}, which is not an approved Operations dependency`);
+      continue;
+    }
+    if (resolvedModule === null) continue;
+    const ownModule = resolvedModule === operationsRoot
+      || resolvedModule.startsWith(`${operationsRoot}${sep}`);
+    const approved = ownModule
+      || sameModule(resolvedModule, appLocationModule)
+      || sameModule(resolvedModule, publicRuntimeModule)
+      || resolvedModule === operationsCssModule;
+    if (!approved) {
+      violations.push(
+        `${location} imports Operations behavior outside its own modules, app-location.ts, runtime/public.ts, or operations.css`,
+      );
+    }
+  }
+
+  visit(source, (node) => {
+    const reservedTransport = reservedBrowserTransportReference(node);
+    if (reservedTransport) {
+      const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+      violations.push(
+        `${repositoryPath(path)}:${line} references reserved browser transport ${reservedTransport} from Operations`,
+      );
+    }
+    if (
+      (ts.isStringLiteralLike(node) || ts.isTemplateExpression(node))
+      && /\/api\//.test(normalizedRoute(node) ?? "")
+    ) {
+      const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+      violations.push(`${repositoryPath(path)}:${line} contains a raw API route in Operations`);
+    }
+  });
+  for (const reference of dynamicModuleReferences(source)) {
+    violations.push(
+      `${repositoryPath(path)}:${reference.line} resolves a module through ${reference.form}, which the Operations boundary cannot review`,
+    );
+  }
+  return violations;
+}
+
 describe("Investigation Runtime V1 dependency boundary", () => {
   it("keeps runtime and strategies on the public one-way dependency path", () => {
     const violations: string[] = [];
@@ -537,6 +589,33 @@ describe("Investigation Runtime V1 dependency boundary", () => {
     }
 
     expect(violations, violations.join("\n")).toEqual([]);
+  });
+
+  it("keeps Operations on the public read-only runtime boundary", () => {
+    const operationsRoot = resolve(WEB_SRC, "operations-queue");
+    const violations = sourceFiles(operationsRoot)
+      .filter((path) => !isTestOnly(path))
+      .flatMap((path) => operationsImportViolations(path, parseSource(path)));
+
+    expect(violations, violations.join("\n")).toEqual([]);
+  });
+
+  it("rejects private runtime, contract, transport, and raw-route imports from Operations", () => {
+    const path = resolve(WEB_SRC, "operations-queue/Bypass.tsx");
+    const source = parseSourceText(path, [
+      'import { useInvestigationRuntime } from "../investigations/runtime/InvestigationRuntimeProvider.js";',
+      'import { parseInvestigationOperationsQueuePage } from "@cd-collab/contracts/investigation-operations-queue";',
+      'import { protectedApiFetch } from "../protected-api.js";',
+      'export const direct = () => fetch("/api/investigation-operations-queue");',
+      'export const used = [useInvestigationRuntime, parseInvestigationOperationsQueuePage, protectedApiFetch];',
+    ].join("\n"));
+    expect(operationsImportViolations(path, source)).toEqual([
+      "collab/web/src/operations-queue/Bypass.tsx:1 imports Operations behavior outside its own modules, app-location.ts, runtime/public.ts, or operations.css",
+      "collab/web/src/operations-queue/Bypass.tsx:2 imports @cd-collab/contracts/investigation-operations-queue, which is not an approved Operations dependency",
+      "collab/web/src/operations-queue/Bypass.tsx:3 imports Operations behavior outside its own modules, app-location.ts, runtime/public.ts, or operations.css",
+      "collab/web/src/operations-queue/Bypass.tsx:4 references reserved browser transport fetch from Operations",
+      "collab/web/src/operations-queue/Bypass.tsx:4 contains a raw API route in Operations",
+    ]);
   });
 
   it("holds every covered endpoint outside the gateway to its exact migration debt", () => {

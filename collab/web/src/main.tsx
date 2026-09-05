@@ -17,6 +17,7 @@ import "./styles/self-profile.css";
 import "./styles/polish.css";
 import "./styles/investigation-first.css";
 import "./styles/investigation-strategy-shared.css";
+import "./styles/operations.css";
 import "./styles/keystone.css";
 import "./styles/beacon.css";
 

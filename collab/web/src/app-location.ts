@@ -4,10 +4,16 @@ import {
   parseInvestigationCollectionQuery,
   type InvestigationCollectionQueryV1,
 } from "@cd-collab/contracts/investigation-collection";
+import {
+  INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+  parseInvestigationOperationsQueueQuery,
+  type InvestigationOperationsQueueCoordinationScopeV1,
+} from "@cd-collab/contracts/investigation-operations-queue";
 
 export const AREA_IDS = [
   "overview",
   "investigations",
+  "operations",
   // The reusable registry of what investigations are about. Deliberately its
   // own area rather than a tab inside Attribution: Attribution answers where
   // information came from, Entities answers who or what the work concerns, and
@@ -85,12 +91,28 @@ export const DEFAULT_COLLECTION_QUERY: CollectionQueryLocation = Object.freeze({
   recordedTo: null,
 });
 
+/** The only shareable fields on the Operations Queue location. */
+export type OperationsQueueLocationQuery = Readonly<{
+  q: string;
+  status: readonly InvestigationCollectionQueryV1["status"][number][];
+  includeArchived: boolean;
+  coordinationScope: InvestigationOperationsQueueCoordinationScopeV1;
+}>;
+
+export const DEFAULT_OPERATIONS_QUEUE_QUERY: OperationsQueueLocationQuery = Object.freeze({
+  q: "",
+  status: Object.freeze([]) as readonly InvestigationCollectionQueryV1["status"][number][],
+  includeArchived: false,
+  coordinationScope: "all_visible",
+});
+
 export type WorkLocation = {
   area: AreaId;
   caseId: string | null;
   stage: StageId;
   focus?: WorkFocus;
   collectionQuery?: CollectionQueryLocation;
+  operationsQueueQuery?: OperationsQueueLocationQuery;
 };
 
 export type SignInLocation = { kind: "sign-in" };
@@ -335,6 +357,23 @@ export function isWorkLocation(value: unknown): value is WorkLocation {
       return false;
     }
   }
+  if (candidate.operationsQueueQuery !== undefined) {
+    if (candidate.area !== "operations" || candidate.caseId !== null) return false;
+    const query = candidate.operationsQueueQuery;
+    if (!query || typeof query !== "object" || Array.isArray(query)) return false;
+    try {
+      const record = query as Record<string, unknown>;
+      parseInvestigationOperationsQueueQuery({
+        schemaId: INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+        q: record.q,
+        status: record.status,
+        includeArchived: record.includeArchived,
+        coordinationScope: record.coordinationScope,
+      });
+    } catch {
+      return false;
+    }
+  }
   return isStageId(String(candidate.stage ?? ""));
 }
 
@@ -379,7 +418,8 @@ export function sameLocation(a: ShellLocation, b: ShellLocation): boolean {
     (a.focus?.lane ?? null) === (b.focus?.lane ?? null) &&
     (a.focus?.experiment ?? null) === (b.focus?.experiment ?? null) &&
     (a.focus?.navigation ?? null) === (b.focus?.navigation ?? null) &&
-    queryLocationEqual(a.collectionQuery, b.collectionQuery);
+    queryLocationEqual(a.collectionQuery, b.collectionQuery) &&
+    operationsQueryLocationEqual(a.operationsQueueQuery, b.operationsQueueQuery);
 }
 
 export function normalizePathname(pathname: string): string {
@@ -529,6 +569,88 @@ function collectionQueryPath(query: CollectionQueryLocation | undefined): string
   return encoded ? `?${encoded}` : "";
 }
 
+const OPERATIONS_QUERY_PARAMS = new Set([
+  "q",
+  "status",
+  "includeArchived",
+  "coordinationScope",
+]);
+
+function parseOperationsField(
+  field: "q" | "status" | "includeArchived" | "coordinationScope",
+  value: unknown,
+): unknown {
+  try {
+    return parseInvestigationOperationsQueueQuery({
+      schemaId: INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+      [field]: value,
+    })[field];
+  } catch {
+    return DEFAULT_OPERATIONS_QUEUE_QUERY[field];
+  }
+}
+
+function parseOperationsQueueQuery(search: string): OperationsQueueLocationQuery | undefined {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  if (![...params.keys()].some((key) => OPERATIONS_QUERY_PARAMS.has(key))) return undefined;
+  const q = params.has("q")
+    ? parseOperationsField("q", params.get("q") ?? "") as string
+    : DEFAULT_OPERATIONS_QUEUE_QUERY.q;
+  const status = params.has("status")
+    ? parseOperationsField("status", params.getAll("status")) as InvestigationCollectionQueryV1["status"]
+    : DEFAULT_OPERATIONS_QUEUE_QUERY.status;
+  const includeArchivedValue = params.get("includeArchived");
+  const includeArchived = params.has("includeArchived")
+    ? parseOperationsField(
+        "includeArchived",
+        includeArchivedValue === "true"
+          ? true
+          : includeArchivedValue === "false"
+            ? false
+            : includeArchivedValue,
+      ) as boolean
+    : DEFAULT_OPERATIONS_QUEUE_QUERY.includeArchived;
+  const coordinationScope = params.has("coordinationScope")
+    ? parseOperationsField(
+        "coordinationScope",
+        params.get("coordinationScope"),
+      ) as InvestigationOperationsQueueCoordinationScopeV1
+    : DEFAULT_OPERATIONS_QUEUE_QUERY.coordinationScope;
+  const query = Object.freeze({
+    q,
+    status: Object.freeze(orderedStatuses(status)),
+    includeArchived,
+    coordinationScope,
+  });
+  return operationsQueryLocationEqual(query, undefined) ? undefined : query;
+}
+
+function operationsQueryLocationEqual(
+  left: OperationsQueueLocationQuery | undefined,
+  right: OperationsQueueLocationQuery | undefined,
+): boolean {
+  const a = left ?? DEFAULT_OPERATIONS_QUEUE_QUERY;
+  const b = right ?? DEFAULT_OPERATIONS_QUEUE_QUERY;
+  return a.q === b.q
+    && a.includeArchived === b.includeArchived
+    && a.coordinationScope === b.coordinationScope
+    && orderedStatuses(a.status).join("\u0000") === orderedStatuses(b.status).join("\u0000");
+}
+
+function operationsQueueQueryPath(query: OperationsQueueLocationQuery | undefined): string {
+  if (operationsQueryLocationEqual(query, undefined)) return "";
+  const value = query ?? DEFAULT_OPERATIONS_QUEUE_QUERY;
+  const params = new URLSearchParams();
+  if (value.q.trim()) params.set("q", value.q.trim());
+  for (const status of orderedStatuses(value.status)) params.append("status", status);
+  if (value.includeArchived) params.set("includeArchived", "true");
+  if (value.coordinationScope !== "all_visible") {
+    params.set("coordinationScope", value.coordinationScope);
+  }
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
 export function parsePathname(pathname: string, search = "", hash = ""): ShellLocation {
   const path = normalizePathname(pathname);
   if (path === "/not-found") {
@@ -547,6 +669,15 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
       caseId: null,
       stage: "situation",
       ...(collectionQuery ? { collectionQuery } : {}),
+    };
+  }
+  if (path === "/operations") {
+    const operationsQueueQuery = parseOperationsQueueQuery(search);
+    return {
+      area: "operations",
+      caseId: null,
+      stage: "situation",
+      ...(operationsQueueQuery ? { operationsQueueQuery } : {}),
     };
   }
   if (path === "/entities") {
@@ -607,6 +738,9 @@ export function areaPathFor(location: WorkLocation): string {
   if (location.area === "entities") {
     return "/entities";
   }
+  if (location.area === "operations") {
+    return "/operations";
+  }
   if (location.area === "sources") {
     return "/sources";
   }
@@ -647,6 +781,9 @@ export function pathFor(location: ShellLocation): string {
   if (location.area === "investigations" && location.caseId === null) {
     return `/investigations${collectionQueryPath(location.collectionQuery)}`;
   }
+  if (location.area === "operations") {
+    return `/operations${operationsQueueQueryPath(location.operationsQueueQuery)}`;
+  }
   return areaPathFor(location);
 }
 
@@ -681,6 +818,9 @@ export function titleFor(
   }
   if (location.area === "entities") {
     return `Entities · ${shellTitle}`;
+  }
+  if (location.area === "operations") {
+    return `Operations · ${shellTitle}`;
   }
   if (location.area === "sources") {
     return `Attribution · ${shellTitle}`;

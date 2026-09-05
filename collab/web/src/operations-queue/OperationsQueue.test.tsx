@@ -1,0 +1,254 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_OPERATIONS_QUEUE_QUERY, type OperationsQueueLocationQuery } from "../app-location.js";
+import { makeOperationsQueuePage } from "../investigations/runtime/testkit/index.js";
+import type { OperationsQueuePresentation } from "./useOperationsQueue.js";
+
+const hook = vi.hoisted(() => ({ current: vi.fn() }));
+vi.mock("./useOperationsQueue.js", () => ({
+  useOperationsQueue: hook.current,
+}));
+
+import { OperationsQueue } from "./OperationsQueue.js";
+
+afterEach(() => {
+  cleanup();
+  hook.current.mockReset();
+});
+
+function settled(overrides: Partial<OperationsQueuePresentation> = {}): OperationsQueuePresentation {
+  return {
+    commandAvailability: "available",
+    view: { availability: "available", value: makeOperationsQueuePage(), refresh: "settled" },
+    continuationFailed: false,
+    refresh: vi.fn(),
+    nextPage: vi.fn(),
+    ...overrides,
+  };
+}
+
+function renderQueue(
+  state: OperationsQueuePresentation,
+  query: OperationsQueueLocationQuery = DEFAULT_OPERATIONS_QUEUE_QUERY,
+) {
+  hook.current.mockReturnValue(state);
+  const onQueryChange = vi.fn();
+  const onOpenInvestigation = vi.fn();
+  const rendered = render(
+    <OperationsQueue
+      query={query}
+      onQueryChange={onQueryChange}
+      onOpenInvestigation={onOpenInvestigation}
+    />,
+  );
+  return { ...rendered, onQueryChange, onOpenInvestigation };
+}
+
+describe("Operations Queue presentation", () => {
+  it("renders server rows, counts, and recorded coordination facts without recounting", () => {
+    const page = makeOperationsQueuePage({
+      coordinationScopeCounts: { allVisible: 17, mine: 6, unassigned: 3 },
+    });
+    renderQueue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+    }));
+
+    const rows = within(screen.getByRole("list", { name: "Operations queue investigations" }))
+      .getAllByRole("listitem");
+    expect(rows.map((row) => row.querySelector(".operations-queue__row-title")?.textContent))
+      .toEqual(page.items.map((row) => row.investigation.title));
+    expect(screen.getByRole("link", { name: /Checkout latency/u }).getAttribute("href"))
+      .toBe(`/investigations/${page.items[0]?.investigation.id}/situation`);
+    expect(screen.getByText("Coordinator: alice")).toBeTruthy();
+    expect(screen.getByText("Coordinator: Not recorded")).toBeTruthy();
+    expect(screen.getByRole("link", { name: /All visible 17/u })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Mine 6/u })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Unassigned 3/u })).toBeTruthy();
+  });
+
+  it("keeps scope and row links native while intercepting only normal shell navigation", () => {
+    const query: OperationsQueueLocationQuery = {
+      q: "checkout",
+      status: ["open"],
+      includeArchived: true,
+      coordinationScope: "all_visible",
+    };
+    const { onQueryChange, onOpenInvestigation } = renderQueue(settled(), query);
+    const mine = screen.getByRole("link", { name: /Mine/u });
+    mine.addEventListener("click", (event) => event.preventDefault());
+    expect(mine.getAttribute("href")).toBe(
+      "/operations?q=checkout&status=open&includeArchived=true&coordinationScope=mine",
+    );
+    fireEvent.click(mine, { ctrlKey: true });
+    expect(onQueryChange).not.toHaveBeenCalled();
+    fireEvent.click(mine);
+    expect(onQueryChange).toHaveBeenCalledWith({ ...query, coordinationScope: "mine" });
+
+    const row = screen.getByRole("link", { name: /Checkout latency/u });
+    row.addEventListener("click", (event) => event.preventDefault());
+    fireEvent.click(row, { metaKey: true });
+    expect(onOpenInvestigation).not.toHaveBeenCalled();
+    fireEvent.click(row);
+    expect(onOpenInvestigation).toHaveBeenCalledWith(makeOperationsQueuePage().items[0]?.investigation.id);
+  });
+
+  it("distinguishes an absent command, denied authority, idle, and first loading", () => {
+    const absent = renderQueue(settled({
+      commandAvailability: "absent",
+      view: { availability: "idle" },
+    }));
+    expect(screen.getByText("Operations Queue is not available in this build")).toBeTruthy();
+    absent.unmount();
+
+    hook.current.mockReturnValue(settled({
+      commandAvailability: "denied",
+      view: { availability: "idle" },
+    }));
+    const denied = render(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    expect(screen.getByText(/no queue data was requested/u)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
+    denied.unmount();
+
+    hook.current.mockReturnValue(settled({ view: { availability: "idle" } }));
+    const idle = render(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    expect(screen.getByText("Queue request has not started.")).toBeTruthy();
+    idle.unmount();
+
+    hook.current.mockReturnValue(settled({ view: { availability: "loading" } }));
+    render(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    expect(screen.getByText("Loading operations queue…")).toBeTruthy();
+  });
+
+  it("distinguishes gateway unavailability and auth loss without a legacy fallback", () => {
+    const retry = vi.fn();
+    const unavailable = renderQueue(settled({
+      view: { availability: "unavailable", error: { kind: "unavailable", status: 503 } },
+      refresh: retry,
+    }));
+    expect(screen.getByText("Operations Queue service is unavailable")).toBeTruthy();
+    expect(screen.getByText(/No legacy investigation list was substituted/u)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    unavailable.unmount();
+
+    hook.current.mockReturnValue(settled({
+      view: { availability: "unavailable", error: { kind: "auth_lost", status: 401 } },
+    }));
+    render(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    expect(screen.getByText("Operations Queue access ended")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
+  });
+
+  it("keeps previous rows visible through refresh and continuation failures", async () => {
+    const retry = vi.fn();
+    const page = makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" });
+    const refreshFailure = renderQueue(settled({
+      view: {
+        availability: "available",
+        value: page,
+        refresh: "failed",
+        refreshError: { kind: "network" },
+      },
+      refresh: retry,
+    }));
+    expect(screen.getAllByRole("listitem")).toHaveLength(page.items.length);
+    expect(screen.getByText(/latest refresh failed/u)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    refreshFailure.unmount();
+
+    const nextPage = vi.fn();
+    const failed = settled({
+      view: {
+        availability: "available",
+        value: page,
+        refresh: "failed",
+        refreshError: { kind: "network" },
+      },
+      continuationFailed: true,
+      nextPage,
+    });
+    const continuation = renderQueue(failed);
+    fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+    continuation.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    await waitFor(() => expect(document.activeElement).toBe(alert));
+    expect(screen.getAllByRole("listitem")).toHaveLength(page.items.length);
+    expect(screen.getByText(/Previously loaded rows remain in server order/u)).toBeTruthy();
+  });
+
+  it("focuses truthful completion after continuation and reports hidden archives", async () => {
+    const first = settled({
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({
+          nextCursor: "eyJwYWdlIjoyfQ",
+          hiddenArchivedCount: 4,
+        }),
+        refresh: "settled",
+      },
+    });
+    const rendered = renderQueue(first);
+    expect(screen.getByText("4 archived investigations are hidden. Include archived to show them.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+
+    hook.current.mockReturnValue(settled({
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({ nextCursor: null, hiddenArchivedCount: 4 }),
+        refresh: "settled",
+      },
+    }));
+    rendered.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    const completion = screen.getByText("All operations are shown.");
+    await waitFor(() => expect(document.activeElement).toBe(completion));
+  });
+
+  it("uses distinct true-empty, filtered-empty, and scope-empty copy", () => {
+    const emptyPage = makeOperationsQueuePage({
+      items: [],
+      coordinationScopeCounts: { allVisible: 0, mine: 0, unassigned: 0 },
+    });
+    const state = settled({ view: { availability: "available", value: emptyPage, refresh: "settled" } });
+    const rendered = renderQueue(state);
+    expect(screen.getByText("No investigations are visible in Operations.")).toBeTruthy();
+
+    rendered.rerender(
+      <OperationsQueue
+        query={{ ...DEFAULT_OPERATIONS_QUEUE_QUERY, q: "checkout" }}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("No operations match the current search or status filter.")).toBeTruthy();
+
+    rendered.rerender(
+      <OperationsQueue
+        query={{ ...DEFAULT_OPERATIONS_QUEUE_QUERY, coordinationScope: "unassigned" }}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("No visible investigations are unassigned.")).toBeTruthy();
+  });
+});
