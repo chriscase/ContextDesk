@@ -151,6 +151,7 @@ describe("Operations Queue public-runtime adapter", () => {
     expect(queryOperationsQueue.mock.calls[1]?.[0].cursor).toBe("eyJwYWdlIjoyfQ");
     await waitFor(() => expect(screen.getByTestId("queue-state").textContent).toBe("available:available:failed:1"));
     expect(presentation?.continuationFailed).toBe(true);
+    await waitFor(() => expect(presentation?.continuationOutcome).toBe(1));
   });
 
   it("appends a successful continuation in exact server sequence", async () => {
@@ -176,6 +177,7 @@ describe("Operations Queue public-runtime adapter", () => {
     expect(presentation?.view.availability === "available"
       ? presentation.view.value.items.map((row) => row.investigation.id)
       : []).toEqual([first.items[0]?.investigation.id, second.items[0]?.investigation.id]);
+    await waitFor(() => expect(presentation?.continuationOutcome).toBe(1));
   });
 
   it("recovers a concealed continuation failure with an explicit first-page retry", async () => {

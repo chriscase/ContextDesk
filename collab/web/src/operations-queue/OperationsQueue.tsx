@@ -91,15 +91,13 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const continuationFailureRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLButtonElement>(null);
   const continuationInitiatorRef = useRef<HTMLButtonElement | null>(null);
-  const observedInFlightAttemptRef = useRef(0);
-  const focusedOutcomeAttemptRef = useRef(0);
+  const focusedOutcomeRef = useRef(0);
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
 
   useEffect(() => setSearchDraft(query.q), [query.q]);
   useEffect(() => {
     setContinuationAttempt(0);
-    observedInFlightAttemptRef.current = 0;
-    focusedOutcomeAttemptRef.current = 0;
+    focusedOutcomeRef.current = 0;
     continuationInitiatorRef.current = null;
   }, [queryKey]);
 
@@ -110,19 +108,11 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const paginationDisabled = continuationLoading || refreshState === "loading";
 
   useEffect(() => {
-    if (continuationAttempt === 0) return;
-    if (continuationLoading) {
-      observedInFlightAttemptRef.current = continuationAttempt;
-      return;
-    }
-    if (
-      observedInFlightAttemptRef.current !== continuationAttempt
-      || focusedOutcomeAttemptRef.current === continuationAttempt
-    ) return;
+    if (queue.continuationOutcome === 0 || focusedOutcomeRef.current === queue.continuationOutcome) return;
     const activeElement = document.activeElement;
     const shouldRecoverFocus = activeElement === document.body
       || activeElement === continuationInitiatorRef.current;
-    focusedOutcomeAttemptRef.current = continuationAttempt;
+    focusedOutcomeRef.current = queue.continuationOutcome;
     if (!shouldRecoverFocus) return;
     if (queue.continuationFailed) {
       continuationFailureRef.current?.focus();
@@ -132,7 +122,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
       if (hasNextPage) loadMoreRef.current?.focus();
       else completionRef.current?.focus();
     }
-  }, [available, continuationAttempt, continuationLoading, hasNextPage, queue.continuationFailed, refreshState]);
+  }, [available, hasNextPage, queue.continuationFailed, queue.continuationOutcome, refreshState]);
 
   const requestNextPage = (event: MouseEvent<HTMLButtonElement>) => {
     if (paginationDisabled) return;

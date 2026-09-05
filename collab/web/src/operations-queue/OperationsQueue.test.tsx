@@ -22,6 +22,7 @@ function settled(overrides: Partial<OperationsQueuePresentation> = {}): Operatio
     view: { availability: "available", value: makeOperationsQueuePage(), refresh: "settled" },
     continuationFailed: false,
     continuationInFlight: false,
+    continuationOutcome: 0,
     refresh: vi.fn(),
     nextPage: vi.fn(),
     ...overrides,
@@ -201,6 +202,7 @@ describe("Operations Queue presentation", () => {
       />,
     );
     hook.current.mockReturnValue(settled({
+      continuationOutcome: 1,
       view: {
         availability: "available",
         value: page,
@@ -255,6 +257,7 @@ describe("Operations Queue presentation", () => {
     );
 
     hook.current.mockReturnValue(settled({
+      continuationOutcome: 1,
       view: {
         availability: "available",
         value: makeOperationsQueuePage({ nextCursor: null, hiddenArchivedCount: 4 }),
@@ -316,6 +319,7 @@ describe("Operations Queue presentation", () => {
 
     hook.current.mockReturnValue(settled({
       continuationFailed: true,
+      continuationOutcome: 1,
       view: {
         availability: "available",
         value: page,
@@ -339,6 +343,7 @@ describe("Operations Queue presentation", () => {
       <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
     );
     hook.current.mockReturnValue(settled({
+      continuationOutcome: 2,
       view: {
         availability: "available",
         value: makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjozfQ" }),
@@ -371,6 +376,7 @@ describe("Operations Queue presentation", () => {
     const search = screen.getByRole("searchbox", { name: "Search" });
     search.focus();
     hook.current.mockReturnValue(settled({
+      continuationOutcome: 1,
       view: {
         availability: "available",
         value: makeOperationsQueuePage({ nextCursor: null }),

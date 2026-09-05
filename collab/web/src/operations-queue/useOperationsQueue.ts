@@ -15,6 +15,8 @@ export interface OperationsQueuePresentation {
   readonly view: ResourceView<InvestigationOperationsQueuePageV1>;
   readonly continuationFailed: boolean;
   readonly continuationInFlight: boolean;
+  /** Monotonic within the current location query; changes only when a continuation settles. */
+  readonly continuationOutcome: number;
   readonly refresh: () => void;
   readonly nextPage: () => void;
 }
@@ -66,7 +68,10 @@ export function useOperationsQueue(
   activeQueryRef.current = runtime.resources.operationsQueueQuery;
   const requestedKeyRef = useRef<string | null>(null);
   const continuationPendingRef = useRef(false);
+  const continuationAttemptRef = useRef(0);
+  const pendingContinuationAttemptRef = useRef(0);
   const [continuationInFlight, setContinuationInFlight] = useState(false);
+  const [continuationOutcome, setContinuationOutcome] = useState(0);
   const activeQuery = runtime.resources.operationsQueueQuery;
   const activeQueryMatches = activeQuery !== null && baseKey(activeQuery) === inputKey;
   // A location change is authoritative immediately. Never publish rows or
@@ -84,7 +89,9 @@ export function useOperationsQueue(
   useEffect(() => {
     if (requestedKeyRef.current !== inputKey || commandAvailability !== "available") {
       continuationPendingRef.current = false;
+      pendingContinuationAttemptRef.current = 0;
       setContinuationInFlight(false);
+      setContinuationOutcome(0);
       return;
     }
     if (
@@ -97,7 +104,10 @@ export function useOperationsQueue(
       )
     ) {
       continuationPendingRef.current = false;
+      const settledAttempt = pendingContinuationAttemptRef.current;
+      pendingContinuationAttemptRef.current = 0;
       setContinuationInFlight(false);
+      setContinuationOutcome(settledAttempt);
     }
   }, [activeQuery, activeQueryMatches, commandAvailability, inputKey, view]);
 
@@ -105,7 +115,9 @@ export function useOperationsQueue(
     if (commandAvailability !== "available" || typeof command !== "function") {
       requestedKeyRef.current = null;
       continuationPendingRef.current = false;
+      pendingContinuationAttemptRef.current = 0;
       setContinuationInFlight(false);
+      setContinuationOutcome(0);
       return;
     }
     if (requestedKeyRef.current === inputKey) return;
@@ -123,6 +135,7 @@ export function useOperationsQueue(
     view,
     continuationFailed,
     continuationInFlight,
+    continuationOutcome,
     refresh: commandAvailability === "available" && typeof command === "function"
       ? () => {
           if (continuationPendingRef.current) return;
@@ -148,11 +161,13 @@ export function useOperationsQueue(
             && baseKey(current) === inputKey
           ) {
             continuationPendingRef.current = true;
+            pendingContinuationAttemptRef.current = ++continuationAttemptRef.current;
             setContinuationInFlight(true);
             runtime.refresh.operationsQueue();
             return;
           }
           continuationPendingRef.current = true;
+          pendingContinuationAttemptRef.current = ++continuationAttemptRef.current;
           setContinuationInFlight(true);
           command(Object.freeze({ ...input, cursor }));
         }
