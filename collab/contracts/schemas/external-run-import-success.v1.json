@@ -1,75 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cd-collab.local/schemas/external-run.v1.json",
-  "title": "cd-collab External Run v1",
+  "$id": "https://cd-collab.local/schemas/external-run-import-success.v1.json",
+  "title": "cd-collab External Run Import Success v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schemaId", "id", "caseId", "contributionId", "sourceId", "outputHash", "outputText",
-    "promptHash", "promptText", "promptCompleteness", "outputCompleteness", "workflowCompleteness",
-    "evidenceVisibility", "snapshotBinding", "visibilityNote", "importerId", "importerUsername",
-    "operatorId", "operatorUsername", "provider", "model", "version", "claimedTraces",
-    "uncertainty", "timing", "cost", "redacted", "privacyClass", "corroborationState", "createdAt"
+    "schemaId",
+    "importMode",
+    "caseId",
+    "sourceId",
+    "expectedSourceRevision",
+    "replayed",
+    "applied",
+    "contribution"
   ],
-  "dependentRequired": {
-    "importMode": ["sourceRevision", "evidenceArtifactIds"],
-    "sourceRevision": ["importMode", "evidenceArtifactIds"],
-    "evidenceArtifactIds": ["importMode", "sourceRevision"]
-  },
   "properties": {
-    "schemaId": { "type": "string", "const": "cd-collab.external_run.v1" },
-    "id": { "type": "string" },
-    "caseId": { "type": "string" },
-    "contributionId": { "type": "string" },
-    "sourceId": { "type": "string" },
-    "outputHash": { "type": "string" },
-    "outputText": { "type": "string" },
-    "promptHash": { "type": ["string", "null"] },
-    "promptText": { "type": ["string", "null"] },
-    "promptCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
-    "outputCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
-    "workflowCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
-    "evidenceVisibility": { "type": "string", "enum": ["unknown", "importer_described"] },
-    "snapshotBinding": { "type": ["string", "null"] },
-    "visibilityNote": { "type": ["string", "null"] },
-    "importerId": { "type": "string" },
-    "importerUsername": { "type": "string" },
-    "operatorId": { "type": "string" },
-    "operatorUsername": { "type": "string" },
-    "provider": { "type": ["string", "null"] },
-    "model": { "type": ["string", "null"] },
-    "version": { "type": ["string", "null"] },
-    "claimedTraces": { "type": "array", "items": { "type": "string" } },
-    "uncertainty": { "type": ["string", "null"] },
-    "timing": { "type": ["string", "null"] },
-    "cost": { "type": ["string", "null"] },
-    "redacted": { "type": "boolean" },
-    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
-    "corroborationState": { "type": "string", "enum": ["unverified", "corroborated", "contradicted"] },
-    "createdAt": { "type": "string" },
+    "schemaId": { "type": "string", "const": "cd-collab.external_run_import_success.v1" },
     "importMode": { "type": "string", "const": "manual" },
-    "sourceRevision": { "type": "integer", "minimum": 1 },
-    "evidenceArtifactIds": {
-      "type": "array",
-      "maxItems": 64,
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/uuid" }
-    }
+    "caseId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sourceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "expectedSourceRevision": { "type": "integer", "minimum": 1 },
+    "replayed": { "type": "boolean" },
+    "applied": { "$ref": "#/$defs/appliedRun" },
+    "contribution": { "$ref": "#/$defs/contribution" }
   },
-  "allOf": [
-    {
-      "if": {
-        "type": "object",
-        "properties": {
-          "importMode": true,
-          "sourceRevision": true,
-          "evidenceArtifactIds": true
-        },
-        "required": ["importMode", "sourceRevision", "evidenceArtifactIds"]
-      },
-      "then": { "$ref": "#/$defs/markedDurableManualImport" }
-    }
-  ],
   "$defs": {
     "uuid": {
       "type": "string",
@@ -79,7 +39,7 @@
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
     },
-    "markedDurableManualImport": {
+    "appliedRun": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -204,6 +164,46 @@
           }
         }
       ]
+    },
+    "contribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "id",
+        "caseId",
+        "kind",
+        "revision",
+        "predecessorRevision",
+        "body",
+        "contentHash",
+        "privacyClass",
+        "tombstoned",
+        "authorId",
+        "authorUsername",
+        "createdAt",
+        "hypothesisStatus",
+        "hypothesisLinks",
+        "sourceId"
+      ],
+      "properties": {
+        "schemaId": { "type": "string", "const": "cd-collab.contribution.v1" },
+        "id": { "$ref": "#/$defs/uuid" },
+        "caseId": { "$ref": "#/$defs/uuid" },
+        "kind": { "type": "string", "const": "external_run" },
+        "revision": { "type": "integer", "const": 1 },
+        "predecessorRevision": { "type": "null" },
+        "body": { "type": ["string", "null"] },
+        "contentHash": { "type": "string", "minLength": 1 },
+        "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+        "tombstoned": { "type": "boolean", "const": false },
+        "authorId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "authorUsername": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time", "minLength": 1 },
+        "hypothesisStatus": { "type": "null" },
+        "hypothesisLinks": { "type": "null" },
+        "sourceId": { "$ref": "#/$defs/uuid" }
+      }
     }
   }
 }
