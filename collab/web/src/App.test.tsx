@@ -560,6 +560,14 @@ describe("authenticated application shell", () => {
     expect(navLabels.indexOf("Operations")).toBe(navLabels.indexOf("Investigations") + 1);
 
     await waitFor(() => expect(screen.getByText("Checkout coordination review")).toBeTruthy());
+    const caseReads = fetchStub.mock.calls
+      .filter(([, init]) => (init?.method ?? "GET") === "GET")
+      .map(([input]) => String(input))
+      .filter((url) => url.startsWith("/api/cases"));
+    expect(caseReads).toHaveLength(1);
+    expect(caseReads[0]).toContain("investigation_operations_queue_query");
+    expect(caseReads).not.toContain("/api/cases");
+    expect(caseReads.some((url) => url.includes("investigation_collection_query"))).toBe(false);
     const operationsMount = [...runtimeMounts].reverse().find((props) => props.active === false);
     expect(operationsMount).toMatchObject({
       active: false,

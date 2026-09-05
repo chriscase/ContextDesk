@@ -41,10 +41,18 @@ test.describe("Investigation Operations Queue", () => {
     await loginAs(page, FIXTURE_USERS.dave);
     const title = uniqueTitle("Operations native queue row");
     const caseId = await createInvestigation(page, title);
+    // Finish the Overview activity request before attributing collection reads
+    // to the Operations navigation below.
+    await page.waitForLoadState("networkidle");
     const preferenceWrites: string[] = [];
+    const caseReads: URL[] = [];
     page.on("request", (request) => {
-      if (request.method() === "PUT" && new URL(request.url()).pathname === "/api/ui-strategies/preference") {
+      const requestUrl = new URL(request.url());
+      if (request.method() === "PUT" && requestUrl.pathname === "/api/ui-strategies/preference") {
         preferenceWrites.push(request.url());
+      }
+      if (request.method() === "GET" && requestUrl.pathname === "/api/cases") {
+        caseReads.push(requestUrl);
       }
     });
 
@@ -70,6 +78,8 @@ test.describe("Investigation Operations Queue", () => {
     const row = page.getByRole("link", { name: new RegExp(title, "u") });
     await expect(row).toHaveAttribute("href", `/investigations/${caseId}/situation`);
     await expect(row).toContainText("Coordinator: Not recorded");
+    expect(caseReads).toHaveLength(1);
+    expect(isQueueRequest(caseReads[0]!)).toBe(true);
     const allVisible = page.getByRole("link", { name: /All visible/u });
     const expectedBase = new URLSearchParams({ q: title, status: "open" }).toString();
     await expect(allVisible).toHaveAttribute(
