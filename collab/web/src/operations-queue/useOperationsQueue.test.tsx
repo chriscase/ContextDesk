@@ -177,4 +177,28 @@ describe("Operations Queue public-runtime adapter", () => {
       ? presentation.view.value.items.map((row) => row.investigation.id)
       : []).toEqual([first.items[0]?.investigation.id, second.items[0]?.investigation.id]);
   });
+
+  it("recovers a concealed continuation failure with an explicit first-page retry", async () => {
+    const first = makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" });
+    let call = 0;
+    const queryOperationsQueue = vi.fn<NonNullable<InvestigationGateway["queryOperationsQueue"]>>(
+      async () => {
+        call += 1;
+        if (call === 2) return { ok: false as const, error: { kind: "not_found" as const, status: 404 } };
+        return gatewayOk(first);
+      },
+    );
+    renderProbe(createInvestigationGatewayDouble({ queryOperationsQueue }));
+    await waitFor(() => expect(screen.getByTestId("queue-state").textContent)
+      .toBe("available:available:settled:2"));
+
+    act(() => presentation?.nextPage());
+    await waitFor(() => expect(screen.getByTestId("queue-state").textContent)
+      .toBe("available:unavailable"));
+    await waitFor(() => expect(presentation?.continuationInFlight).toBe(false));
+
+    act(() => presentation?.refresh());
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(3));
+    expect(queryOperationsQueue.mock.calls[2]?.[0].cursor).toBeNull();
+  });
 });

@@ -91,8 +91,10 @@ export function useOperationsQueue(
       continuationPendingRef.current
       && activeQueryMatches
       && activeQuery.cursor !== null
-      && view.availability === "available"
-      && view.refresh !== "loading"
+      && (
+        view.availability === "unavailable"
+        || (view.availability === "available" && view.refresh !== "loading")
+      )
     ) {
       continuationPendingRef.current = false;
       setContinuationInFlight(false);
