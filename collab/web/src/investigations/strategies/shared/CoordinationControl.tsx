@@ -125,6 +125,7 @@ export function CoordinationControl(props: CoordinationControlProps) {
   const titleId = useId();
   const confirmationId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const confirmationButtonRef = useRef<HTMLButtonElement>(null);
   const selectedTriggerRef = useRef<HTMLButtonElement | null>(null);
   const operationTriggerRef = useRef<HTMLButtonElement | null>(null);
   const operationHadFocusRef = useRef(false);
@@ -156,7 +157,6 @@ export function CoordinationControl(props: CoordinationControlProps) {
     props.identity.username,
     props.canCoordinateSelf ? "self" : "",
     props.canCoordinateParticipants ? "participants" : "",
-    props.applyAction === null ? "no-command" : "command",
   ].join("\u0000");
 
   useEffect(() => {
@@ -173,6 +173,10 @@ export function CoordinationControl(props: CoordinationControlProps) {
     setSelectedParticipant(props.participants[0]?.identityId ?? "");
     setConfirmation(null);
   }, [participantIds, props.participants, selectedParticipant]);
+
+  useEffect(() => {
+    if (confirmation !== null) confirmationButtonRef.current?.focus();
+  }, [confirmation]);
 
   useEffect(() => {
     if (busy || !operationHadFocusRef.current) return;
@@ -419,8 +423,10 @@ export function CoordinationControl(props: CoordinationControlProps) {
         <div className="strategy-kit__coordination-confirm" role="group" aria-labelledby={confirmationId}>
           <p id={confirmationId}>{intentLabel(confirmation, props.participants)}</p>
           <button
+            ref={confirmationButtonRef}
             type="button"
             disabled={busy}
+            aria-describedby={confirmationId}
             onClick={(event) => void execute({ ...confirmation, idempotencyKey: createCoordinationIdempotencyKey() }, event.currentTarget)}
           >
             {confirmationButtonLabel(confirmation.action)}

@@ -115,6 +115,13 @@ describe("shared coordination control", () => {
     const trigger = screen.getByRole("button", { name: "Claim coordination" });
     fireEvent.click(trigger);
     expect(claim).not.toHaveBeenCalled();
+    const confirmClaim = screen.getByRole("button", { name: "Confirm claim coordination" });
+    expect(document.activeElement).toBe(confirmClaim);
+    const descriptionId = confirmClaim.getAttribute("aria-describedby");
+    expect(descriptionId).not.toBeNull();
+    expect(document.getElementById(descriptionId!)?.textContent).toBe(
+      "Claim coordination for yourself?",
+    );
     const cancel = screen.getByRole("button", { name: "Cancel" });
     fireEvent.click(cancel);
     expect(document.activeElement).toBe(trigger);
@@ -164,7 +171,12 @@ describe("shared coordination control", () => {
     expect(screen.getAllByRole("option")).toHaveLength(2);
     fireEvent.change(screen.getByRole("combobox", { name: "Participant" }), { target: { value: CAROL.identityId } });
     fireEvent.click(screen.getByRole("button", { name: "Review participant assignment" }));
-    confirm("Confirm participant assignment");
+    const confirmAssignment = screen.getByRole("button", { name: "Confirm participant assignment" });
+    expect(document.activeElement).toBe(confirmAssignment);
+    expect(
+      document.getElementById(confirmAssignment.getAttribute("aria-describedby")!)?.textContent,
+    ).toContain("Record carol (identity-carol) as coordinator?");
+    fireEvent.click(confirmAssignment);
     await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
     expect(calls(command)[1]).toMatchObject({ action: "assign_participant", targetIdentityId: CAROL.identityId });
   });
@@ -173,10 +185,13 @@ describe("shared coordination control", () => {
     const archived = mount({
       investigationStatus: "archived",
       resource: { status: "ready", value: record(ALICE, { archived: true }) },
+      canCoordinateParticipants: true,
     });
     expect(screen.getByText("alice")).toBeTruthy();
     expect(screen.getByText("Coordination cannot change while this investigation is archived.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /coordination/iu })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Release recorded coordinator" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /confirm/iu })).toBeNull();
 
     archived.rerender(<CoordinationControl
       {...archived.props}
@@ -191,9 +206,11 @@ describe("shared coordination control", () => {
       investigationStatus="monitoring"
       resource={{ status: "ready", value: record(ALICE) }}
       canCoordinateSelf={false}
-      applyAction={null}
+      canCoordinateParticipants={false}
     />);
     expect(screen.getByText(/changes are unavailable with your current access/iu)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Release recorded coordinator" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /confirm/iu })).toBeNull();
   });
 
   it("retries only an explicit unknown outcome with the exact key and payload", async () => {
@@ -270,7 +287,7 @@ describe("shared coordination control", () => {
     view.rerender(<CoordinationControl {...view.props} {...update} />);
     await act(async () => pending.resolve({ status: "failed", error: "outcome_unknown" }));
     expect(screen.queryByRole("button", { name: "Retry exact action" })).toBeNull();
-    expect(screen.queryByText(/outcome unknown/iu)).toBeNull();
+    expect(screen.queryByText(/may have been recorded/iu)).toBeNull();
   });
 
   it("makes no command call while the resource is denied or otherwise not ready", () => {

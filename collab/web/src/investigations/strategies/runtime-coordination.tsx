@@ -97,7 +97,6 @@ export function RuntimeCoordinationControl({ investigation }: { readonly investi
         runtime.identity.username,
         runtime.capabilities.canCoordinateSelf ? "self" : "",
         runtime.capabilities.canCoordinateParticipants ? "participants" : "",
-        runtimeCommand === null ? "no-command" : "command",
       ].join(":")}
       investigationId={investigation.id}
       investigationStatus={investigation.status}

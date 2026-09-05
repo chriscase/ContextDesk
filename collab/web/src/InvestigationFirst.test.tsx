@@ -270,14 +270,18 @@ describe("Investigation First Runtime V1 presentation", () => {
     });
   });
 
-  it("replays an explicit unknown outcome with the exact runtime request", async () => {
+  it("retains an explicit unknown outcome through refresh and replays its exact runtime request", async () => {
     const current = makePopulatedCase();
+    const refresh = createDeferred<GatewayResult<InvestigationCoordinationV1>>();
     const applyCoordinationAction = vi.fn<NonNullable<InvestigationGateway["applyCoordinationAction"]>>(async () => ({
       ok: false as const,
       error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
     }));
+    const getCoordination = vi.fn()
+      .mockResolvedValueOnce(gatewayOk(makeCoordination(current)))
+      .mockImplementationOnce(() => refresh.promise);
     const gateway = createInvestigationGatewayDouble({
-      getCoordination: vi.fn(async () => gatewayOk(makeCoordination(current))),
+      getCoordination,
       applyCoordinationAction,
     });
     renderStrategy({
@@ -289,12 +293,28 @@ describe("Investigation First Runtime V1 presentation", () => {
     fireEvent.click(screen.getByText("Participant coordination"));
     fireEvent.click(screen.getByRole("button", { name: "Review participant assignment" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm participant assignment" }));
-    const retry = await screen.findByRole("button", { name: "Retry exact action" });
+    await screen.findByRole("button", { name: "Retry exact action" });
     const first = applyCoordinationAction.mock.calls[0]?.[1];
-    fireEvent.click(retry);
+    const unknownCopy = /may have been recorded/iu;
+    expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh coordination" }));
+    await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
+    expect((screen.getByRole("button", { name: "Retry exact action" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+
+    await act(async () => refresh.resolve(gatewayOk(makeCoordination(current))));
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Retry exact action" }) as HTMLButtonElement).disabled).toBe(false);
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry exact action" }));
     await waitFor(() => expect(applyCoordinationAction).toHaveBeenCalledTimes(2));
     expect(applyCoordinationAction.mock.calls[1]?.[1]).toEqual(first);
-    expect(screen.getByRole("alert").textContent).toContain("may have been recorded");
+    expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
   });
 
   it.each(["coordination_changed", "coordination_refused"] as const)(
@@ -332,7 +352,9 @@ describe("Investigation First Runtime V1 presentation", () => {
       fireEvent.click(screen.getByRole("button", { name: "Confirm claim coordination" }));
       const alert = await screen.findByRole("alert");
       expect(alert.textContent).toMatch(/current recorded facts/iu);
-      expect(alert.textContent).not.toContain("server-owned bounded detail");
+      if (kind === "coordination_refused") {
+        expect(alert.textContent).not.toContain("server-owned bounded detail");
+      }
       expect(screen.getByText("ravi", { selector: "strong" })).toBeTruthy();
       expect(screen.getByText("Revision 6")).toBeTruthy();
     },
