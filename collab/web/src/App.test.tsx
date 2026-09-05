@@ -1035,7 +1035,7 @@ describe("authenticated application shell", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Attribution labels" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Add attribution label" })).toBeNull();
-    expect(screen.getByRole("note").textContent).toMatch(/requires catalog write access/);
+    expect((await screen.findByRole("note")).textContent).toMatch(/requires catalog write access/);
     cleanup();
 
     window.history.replaceState(null, "", "/sources");
