@@ -1,4 +1,4 @@
-import { chmod, link, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, link, mkdtemp, readFile, rm, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -12,7 +12,11 @@ const ALICE_DN = "CN=Alice Fixture,OU=People,DC=example,DC=test";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, link: vi.fn(actual.link) };
+  return {
+    ...actual,
+    link: vi.fn(actual.link),
+    unlink: vi.fn(actual.unlink),
+  };
 });
 
 function deferred() {
@@ -138,9 +142,58 @@ describe("public identity projection", () => {
 
       expect(publicationAttempts).toBe(2);
       expect(second.publicId(ALICE_DN)).toBe(first.publicId(ALICE_DN));
-      expect(await readFile(join(root, "public-identity-key"))).toHaveLength(32);
+      const keyPath = join(root, "public-identity-key");
+      expect(await readFile(keyPath)).toHaveLength(32);
+      if (process.platform !== "win32") {
+        expect((await stat(keyPath)).mode & 0o777).toBe(0o600);
+      }
     } finally {
       vi.mocked(link).mockImplementation(actual.link);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores ENOENT when the staged key was already removed during cleanup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-public-identity-cleanup-"));
+    const actual = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    vi.mocked(unlink).mockClear();
+    vi.mocked(unlink).mockImplementationOnce(async (path) => {
+      await actual.unlink(path);
+      throw Object.assign(new Error("already removed"), { code: "ENOENT" });
+    });
+
+    try {
+      const codec = await loadPublicIdentityCodec(root);
+      expect(codec.publicId(ALICE_DN)).toMatch(/^usr-[a-f0-9]{32}$/);
+      expect(await readFile(join(root, "public-identity-key"))).toHaveLength(32);
+      expect(unlink).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(unlink).mockImplementation(actual.unlink);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a publication error when staged-key cleanup also fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-public-identity-errors-"));
+    const actual = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const publicationError = Object.assign(new Error("publication failed"), { code: "EIO" });
+    const cleanupError = Object.assign(new Error("cleanup failed"), { code: "EPERM" });
+    vi.mocked(link).mockClear();
+    vi.mocked(unlink).mockClear();
+    vi.mocked(link).mockRejectedValueOnce(publicationError);
+    vi.mocked(unlink).mockRejectedValueOnce(cleanupError);
+
+    try {
+      await expect(loadPublicIdentityCodec(root)).rejects.toBe(publicationError);
+      expect(link).toHaveBeenCalledTimes(1);
+      expect(unlink).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(link).mockImplementation(actual.link);
+      vi.mocked(unlink).mockImplementation(actual.unlink);
       await rm(root, { recursive: true, force: true });
     }
   });

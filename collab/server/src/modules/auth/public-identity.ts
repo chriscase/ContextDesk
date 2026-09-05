@@ -179,14 +179,26 @@ async function readPrivateKey(path: string): Promise<Buffer> {
   return readFile(path);
 }
 
+type AsyncAttempt = { ok: true } | { ok: false; error: unknown };
+
+async function attempt(operation: () => Promise<unknown>): Promise<AsyncAttempt> {
+  try {
+    await operation();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
 async function syncDirectory(path: string): Promise<void> {
+  // Node cannot open a directory handle for fsync on Windows. The staged file
+  // is still flushed before publication; POSIX directory-sync failures fail closed.
   if (process.platform === "win32") return;
   const directory = await open(path, "r");
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
-  }
+  const synced = await attempt(() => directory.sync());
+  const closed = await attempt(() => directory.close());
+  if (!synced.ok) throw synced.error;
+  if (!closed.ok) throw closed.error;
 }
 
 /** Load the durable installation-local key used only for public user ids. */
@@ -211,23 +223,36 @@ export async function loadPublicIdentityCodec(
   );
   const temporary = await open(temporaryPath, "wx", 0o600);
   let published = false;
-  try {
-    try {
-      await temporary.writeFile(generated);
-      await temporary.sync();
-    } finally {
-      await temporary.close();
-    }
-    try {
-      await link(temporaryPath, path);
-      published = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-  } finally {
-    await unlink(temporaryPath);
+  let observedExisting = false;
+  const staged = await attempt(async () => {
+    await temporary.writeFile(generated);
+    await temporary.sync();
+  });
+  const closed = await attempt(() => temporary.close());
+  let publication: AsyncAttempt = { ok: true };
+  if (staged.ok && closed.ok) {
+    publication = await attempt(async () => {
+      try {
+        await link(temporaryPath, path);
+        published = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        observedExisting = true;
+      }
+    });
   }
-  await syncDirectory(evidenceRoot);
+  const cleanup = await attempt(() => unlink(temporaryPath));
+  let durability: AsyncAttempt = { ok: true };
+  if (published || observedExisting) {
+    durability = await attempt(() => syncDirectory(evidenceRoot));
+  }
+  if (!staged.ok) throw staged.error;
+  if (!publication.ok) throw publication.error;
+  if (!durability.ok) throw durability.error;
+  if (!closed.ok) throw closed.error;
+  if (!cleanup.ok && (cleanup.error as NodeJS.ErrnoException).code !== "ENOENT") {
+    throw cleanup.error;
+  }
   return published
     ? new HmacPublicIdentityCodec(generated)
     : new HmacPublicIdentityCodec(await readPrivateKey(path));
