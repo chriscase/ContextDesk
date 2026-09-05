@@ -384,12 +384,16 @@ export function createSqliteRuntime(
       "withAtomic",
     ]),
   );
+  // Runs participate in the case transaction so a future strict import can
+  // commit its case graph, immutable run, and replay intent as one unit.
+  const rawRuns = new MemoryRunStore();
   const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
     state.transaction(
       [
         { key: "audit", store: rawAudit },
         { key: "cases", store: rawCases },
         { key: "catalog", store: rawCatalog },
+        { key: "runs", store: rawRuns },
       ],
       operation,
     ));
@@ -399,12 +403,11 @@ export function createSqliteRuntime(
     rawCases,
     CASE_SQLITE_MUTATORS,
   );
-  const rawRuns = new MemoryRunStore();
   const runs = persistentMemoryStore(
     state,
     "runs",
     rawRuns,
-    new Set(["insert", "appendCorroboration", "restore"]),
+    new Set(["insert", "appendCorroboration", "insertImportSuccessIntent", "restore"]),
   );
   const rawExperiments = new MemoryExperimentStore();
   const experiments = persistentMemoryStore(

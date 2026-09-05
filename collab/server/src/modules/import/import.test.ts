@@ -34,9 +34,11 @@ import {
   CaseService,
   CaseStoreCommitOutcomeUnknownError,
   MemoryCaseStore,
+  runWithCaseQueryable,
 } from "../cases/index.js";
-import { ImportService, MemoryRunStore } from "./index.js";
+import { ImportService, MemoryRunStore, PgRunStore } from "./index.js";
 import { initialCorroborationState } from "./model.js";
+import type { ExternalRunImportSuccessIntent, FrozenRunRow } from "./store.js";
 
 const ALICE = "fixture-alice-secret";
 const TRANSCRIPT = "The mailer pool is exhausted; workers time out after 30s.";
@@ -248,6 +250,157 @@ async function login(app: Awaited<ReturnType<typeof buildApp>>, username: string
   expect(res.statusCode).toBe(200);
   return cookie(res);
 }
+
+function storedRun(overrides: Partial<FrozenRunRow> = {}): FrozenRunRow {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    caseId: "11111111-1111-4111-8111-111111111111",
+    contributionId: "22222222-2222-4222-8222-222222222222",
+    sourceId: "00000000-0000-0000-0000-000000000001",
+    outputHash: "a".repeat(64),
+    outputText: "stored output",
+    promptHash: null,
+    promptText: null,
+    promptCompleteness: "unknown",
+    outputCompleteness: "exact",
+    workflowCompleteness: "unknown",
+    evidenceVisibility: "unknown",
+    snapshotBinding: null,
+    visibilityNote: null,
+    importerId: "local:alice",
+    importerUsername: "alice",
+    operatorId: "local:alice",
+    operatorUsername: "alice",
+    provider: null,
+    model: null,
+    version: null,
+    claimedTraces: [],
+    uncertainty: null,
+    timing: null,
+    cost: null,
+    redacted: false,
+    privacyClass: "owner_only",
+    createdAt: "2026-09-05T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function storedIntent(overrides: Partial<ExternalRunImportSuccessIntent> = {}): ExternalRunImportSuccessIntent {
+  return {
+    caseId: "11111111-1111-4111-8111-111111111111",
+    actorId: "local:alice",
+    idempotencyKey: "import-memory-01",
+    requestDigest: "b".repeat(64),
+    runId: "33333333-3333-4333-8333-333333333333",
+    successJson: "{\"schemaId\":\"cd-collab.external_run_import_success.v1\"}",
+    createdAt: "2026-09-05T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("external-run durable store", () => {
+  it("preserves legacy rows and isolates strict marker arrays", async () => {
+    const store = new MemoryRunStore();
+    await store.insert(storedRun());
+    const evidenceArtifactIds = ["44444444-4444-4444-8444-444444444444"];
+    await store.insert(storedRun({
+      id: "55555555-5555-4555-8555-555555555555",
+      importMode: "manual",
+      sourceRevision: 7,
+      evidenceArtifactIds,
+    }));
+    evidenceArtifactIds.push("66666666-6666-4666-8666-666666666666");
+
+    expect(await store.get("33333333-3333-4333-8333-333333333333")).not.toHaveProperty(
+      "importMode",
+    );
+    const strict = await store.get("55555555-5555-4555-8555-555555555555");
+    expect(strict?.evidenceArtifactIds).toEqual([
+      "44444444-4444-4444-8444-444444444444",
+    ]);
+    strict!.evidenceArtifactIds!.push("77777777-7777-4777-8777-777777777777");
+    expect((await store.get(strict!.id))?.evidenceArtifactIds).toHaveLength(1);
+  });
+
+  it("rejects partial strict markers and duplicate replay intents", async () => {
+    const store = new MemoryRunStore();
+    await expect(store.insert(storedRun({ importMode: "manual" }))).rejects.toThrow(
+      /markers must be present together/,
+    );
+    await expect(store.insert(storedRun({
+      importMode: "manual",
+      sourceRevision: 1,
+      evidenceArtifactIds: Array.from({ length: 65 }, (_, index) => `artifact-${index}`),
+    }))).rejects.toThrow(/evidence artifact ids/);
+    const intent = storedIntent();
+    await store.insertImportSuccessIntent(intent);
+    await expect(store.insertImportSuccessIntent(intent)).rejects.toThrow(
+      /success intent already exists/,
+    );
+  });
+
+  it("captures and restores strict rows and replay intents", async () => {
+    const store = new MemoryRunStore();
+    const run = storedRun({
+      importMode: "manual",
+      sourceRevision: 4,
+      evidenceArtifactIds: [],
+    });
+    const intent = storedIntent();
+    await store.insert(run);
+    await store.insertImportSuccessIntent(intent);
+    const snapshot = store.capture();
+    await store.insert(storedRun({ id: "88888888-8888-4888-8888-888888888888" }));
+    store.restore(snapshot);
+
+    expect(await store.get(run.id)).toMatchObject({ importMode: "manual", sourceRevision: 4 });
+    expect(await store.get("88888888-8888-4888-8888-888888888888")).toBeNull();
+    expect(await store.lockImportSuccessIntent(
+      intent.caseId,
+      intent.actorId,
+      intent.idempotencyKey,
+    )).toEqual(intent);
+  });
+
+  it("requires the active case transaction for strict PostgreSQL writes and intent locks", async () => {
+    const queries: string[] = [];
+    const queryable = {
+      async query(sql: string) {
+        queries.push(sql);
+        return { rows: [] };
+      },
+    };
+    const store = new PgRunStore(queryable as never);
+    const strict = storedRun({
+      importMode: "manual",
+      sourceRevision: 1,
+      evidenceArtifactIds: [],
+    });
+    const intent = storedIntent();
+
+    await expect(store.insert(strict)).rejects.toThrow(/atomic case boundary/);
+    await expect(store.lockImportSuccessIntent(
+      intent.caseId,
+      intent.actorId,
+      intent.idempotencyKey,
+    )).rejects.toThrow(/atomic case boundary/);
+    await expect(store.insertImportSuccessIntent(intent)).rejects.toThrow(/atomic case boundary/);
+    expect(queries).toEqual([]);
+
+    await runWithCaseQueryable(queryable as never, async () => {
+      await store.insert(strict);
+      expect(await store.lockImportSuccessIntent(
+        intent.caseId,
+        intent.actorId,
+        intent.idempotencyKey,
+      )).toBeNull();
+      await store.insertImportSuccessIntent(intent);
+    });
+    expect(queries.some((sql) => sql.includes("INSERT INTO imported_runs"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("FOR UPDATE"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("external_run_import_success_intents"))).toBe(true);
+  });
+});
 
 describe("external-run import", () => {
   it("imports a pasted transcript with hash round-trip, unknown fields, and distinct identities", async () => {

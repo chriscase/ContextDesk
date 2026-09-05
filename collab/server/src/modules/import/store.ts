@@ -1,5 +1,9 @@
 import type { Pool } from "pg";
-import type { Completeness, EvidenceVisibility } from "@cd-collab/contracts";
+import type {
+  Completeness,
+  EvidenceVisibility,
+  ExternalRunImportMode,
+} from "@cd-collab/contracts";
 import { activeCaseQueryable } from "../cases/index.js";
 
 export interface FrozenRunRow {
@@ -31,6 +35,23 @@ export interface FrozenRunRow {
   redacted: boolean;
   privacyClass: "owner_only" | "share_safe";
   createdAt: string;
+  /** Present together on strict manual imports; absent on legacy rows. */
+  importMode?: ExternalRunImportMode;
+  /** Present together on strict manual imports; absent on legacy rows. */
+  sourceRevision?: number;
+  /** Present together on strict manual imports; absent on legacy rows. */
+  evidenceArtifactIds?: string[];
+}
+
+/** Insert-only successful manual-import intent used for exact retry replay. */
+export interface ExternalRunImportSuccessIntent {
+  caseId: string;
+  actorId: string;
+  idempotencyKey: string;
+  requestDigest: string;
+  runId: string;
+  successJson: string;
+  createdAt: string;
 }
 
 export interface CorroborationRow {
@@ -50,6 +71,13 @@ export interface RunStore {
   listReferencedContentHashes(): Promise<ReadonlySet<string>>;
   listCorroborations(runId: string): Promise<CorroborationRow[]>;
   appendCorroboration(row: Omit<CorroborationRow, "seq" | "createdAt">): Promise<CorroborationRow>;
+  /** Caller must already hold the case row lock inside the case transaction. */
+  lockImportSuccessIntent(
+    caseId: string,
+    actorId: string,
+    idempotencyKey: string,
+  ): Promise<ExternalRunImportSuccessIntent | null>;
+  insertImportSuccessIntent(row: ExternalRunImportSuccessIntent): Promise<void>;
   /**
    * Returns the subset of `ids` that already key a row here. Host-owned and
    * batched: cost follows the probed id count, never the corpus size.
@@ -62,11 +90,13 @@ export type Queryable = Pick<Pool, "query">;
 export class MemoryRunStore implements RunStore {
   private readonly runs = new Map<string, FrozenRunRow>();
   private readonly events = new Map<string, CorroborationRow[]>();
+  private readonly importSuccessIntents = new Map<string, ExternalRunImportSuccessIntent>();
 
   capture(): unknown {
     return structuredClone({
       runs: [...this.runs.entries()],
       events: [...this.events.entries()],
+      importSuccessIntents: [...this.importSuccessIntents.entries()],
     });
   }
 
@@ -74,15 +104,20 @@ export class MemoryRunStore implements RunStore {
     const row = structuredClone(snapshot) as {
       runs: [string, FrozenRunRow][];
       events: [string, CorroborationRow[]][];
+      importSuccessIntents?: [string, ExternalRunImportSuccessIntent][];
     };
     this.runs.clear();
     this.events.clear();
+    this.importSuccessIntents.clear();
     for (const [id, value] of row.runs) this.runs.set(id, value);
     for (const [id, value] of row.events) this.events.set(id, value);
+    for (const [key, value] of row.importSuccessIntents ?? []) {
+      this.importSuccessIntents.set(key, value);
+    }
   }
 
   async insert(row: FrozenRunRow): Promise<void> {
-    this.runs.set(row.id, Object.freeze({ ...row, claimedTraces: [...row.claimedTraces] }));
+    this.runs.set(row.id, Object.freeze(cloneRun(row)));
     this.events.set(row.id, []);
   }
 
@@ -94,13 +129,13 @@ export class MemoryRunStore implements RunStore {
 
   async get(id: string): Promise<FrozenRunRow | null> {
     const row = this.runs.get(id);
-    return row ? { ...row, claimedTraces: [...row.claimedTraces] } : null;
+    return row ? cloneRun(row) : null;
   }
 
   async listByCase(caseId: string): Promise<FrozenRunRow[]> {
     return [...this.runs.values()]
       .filter((row) => row.caseId === caseId)
-      .map((row) => ({ ...row, claimedTraces: [...row.claimedTraces] }));
+      .map(cloneRun);
   }
 
   async listReferencedContentHashes(): Promise<ReadonlySet<string>> {
@@ -130,6 +165,23 @@ export class MemoryRunStore implements RunStore {
     this.events.set(row.runId, list);
     return next;
   }
+
+  async lockImportSuccessIntent(
+    caseId: string,
+    actorId: string,
+    idempotencyKey: string,
+  ): Promise<ExternalRunImportSuccessIntent | null> {
+    const row = this.importSuccessIntents.get(importIntentKey(caseId, actorId, idempotencyKey));
+    return row ? { ...row } : null;
+  }
+
+  async insertImportSuccessIntent(row: ExternalRunImportSuccessIntent): Promise<void> {
+    const key = importIntentKey(row.caseId, row.actorId, row.idempotencyKey);
+    if (this.importSuccessIntents.has(key)) {
+      throw new Error("external run import success intent already exists");
+    }
+    this.importSuccessIntents.set(key, Object.freeze({ ...row }));
+  }
 }
 
 export class PgRunStore implements RunStore {
@@ -137,6 +189,12 @@ export class PgRunStore implements RunStore {
 
   private get db(): Queryable {
     return activeCaseQueryable() ?? this.pool;
+  }
+
+  private get mutationDb(): Queryable {
+    const transaction = activeCaseQueryable();
+    if (!transaction) throw new Error("strict external run import requires an atomic case boundary");
+    return transaction;
   }
 
   async probeExistingIds(ids: readonly string[]): Promise<string[]> {
@@ -149,17 +207,20 @@ export class PgRunStore implements RunStore {
   }
 
   async insert(row: FrozenRunRow): Promise<void> {
-    await this.db.query(
+    const db = row.importMode === undefined ? this.db : this.mutationDb;
+    await db.query(
       `INSERT INTO imported_runs (
          id, case_id, contribution_id, source_id, output_hash, output_text,
          prompt_hash, prompt_text, prompt_completeness, output_completeness,
          workflow_completeness, evidence_visibility, snapshot_binding, visibility_note,
          importer_id, importer_username, operator_id, operator_username,
          provider, model, version, claimed_traces, uncertainty, timing, cost,
-         redacted, privacy_class, created_at
+         redacted, privacy_class, created_at, import_mode, source_revision,
+         evidence_artifact_ids
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-         $15, $16, $17, $18, $19, $20, $21, $22::jsonb, $23, $24, $25, $26, $27, $28
+         $15, $16, $17, $18, $19, $20, $21, $22::jsonb, $23, $24, $25, $26, $27, $28,
+         $29, $30, $31::jsonb
        )`,
       [
         row.id,
@@ -190,6 +251,9 @@ export class PgRunStore implements RunStore {
         row.redacted,
         row.privacyClass,
         row.createdAt,
+        row.importMode ?? null,
+        row.sourceRevision ?? null,
+        row.evidenceArtifactIds === undefined ? null : JSON.stringify(row.evidenceArtifactIds),
       ],
     );
   }
@@ -257,11 +321,96 @@ export class PgRunStore implements RunStore {
     );
     return { ...row, seq, createdAt };
   }
+
+  async lockImportSuccessIntent(
+    caseId: string,
+    actorId: string,
+    idempotencyKey: string,
+  ): Promise<ExternalRunImportSuccessIntent | null> {
+    const result = await this.mutationDb.query(
+      `SELECT * FROM external_run_import_success_intents
+       WHERE case_id = $1 AND actor_id = $2 AND idempotency_key = $3
+       FOR UPDATE`,
+      [caseId, actorId, idempotencyKey],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asImportSuccessIntent(row) : null;
+  }
+
+  async insertImportSuccessIntent(row: ExternalRunImportSuccessIntent): Promise<void> {
+    await this.mutationDb.query(
+      `INSERT INTO external_run_import_success_intents (
+         case_id, actor_id, idempotency_key, request_digest, run_id, success_json, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        row.caseId,
+        row.actorId,
+        row.idempotencyKey,
+        row.requestDigest,
+        row.runId,
+        row.successJson,
+        row.createdAt,
+      ],
+    );
+  }
+}
+
+function cloneRun(row: FrozenRunRow): FrozenRunRow {
+  assertStrictRunMarkers(row);
+  return {
+    ...row,
+    claimedTraces: [...row.claimedTraces],
+    ...(row.evidenceArtifactIds === undefined
+      ? {}
+      : { evidenceArtifactIds: [...row.evidenceArtifactIds] }),
+  };
+}
+
+function assertStrictRunMarkers(row: FrozenRunRow): void {
+  const markerCount = [row.importMode, row.sourceRevision, row.evidenceArtifactIds]
+    .filter((value) => value !== undefined).length;
+  if (markerCount !== 0 && markerCount !== 3) {
+    throw new Error("strict imported run markers must be present together");
+  }
+  if (markerCount === 0) return;
+  if (row.importMode !== "manual") throw new Error("invalid imported run mode");
+  if (!Number.isSafeInteger(row.sourceRevision) || row.sourceRevision! < 1) {
+    throw new Error("invalid imported run source revision");
+  }
+  if (!Array.isArray(row.evidenceArtifactIds) || row.evidenceArtifactIds.length > 64) {
+    throw new Error("invalid imported run evidence artifact ids");
+  }
+}
+
+function importIntentKey(caseId: string, actorId: string, idempotencyKey: string): string {
+  return `${caseId}\u0000${actorId}\u0000${idempotencyKey}`;
 }
 
 function asRun(row: Record<string, unknown>): FrozenRunRow {
   const traces = row.claimed_traces;
-  return {
+  const markerCount = [row.import_mode, row.source_revision, row.evidence_artifact_ids]
+    .filter((value) => value !== null && value !== undefined).length;
+  if (markerCount !== 0 && markerCount !== 3) {
+    throw new Error("strict imported run markers must be present together");
+  }
+  const evidenceArtifactIds = row.evidence_artifact_ids;
+  const sourceRevision = row.source_revision === null || row.source_revision === undefined
+    ? undefined
+    : Number(row.source_revision);
+  if (
+    sourceRevision !== undefined
+    && (!Number.isSafeInteger(sourceRevision) || sourceRevision < 1)
+  ) {
+    throw new Error("invalid imported run source revision");
+  }
+  if (
+    evidenceArtifactIds !== null
+    && evidenceArtifactIds !== undefined
+    && !Array.isArray(evidenceArtifactIds)
+  ) {
+    throw new Error("invalid imported run evidence artifact ids");
+  }
+  const result: FrozenRunRow = {
     id: String(row.id),
     caseId: String(row.case_id),
     contributionId: String(row.contribution_id),
@@ -296,6 +445,27 @@ function asRun(row: Record<string, unknown>): FrozenRunRow {
     cost: row.cost === null || row.cost === undefined ? null : String(row.cost),
     redacted: Boolean(row.redacted),
     privacyClass: row.privacy_class as "owner_only" | "share_safe",
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    ...(markerCount === 3
+      ? {
+          importMode: row.import_mode as ExternalRunImportMode,
+          sourceRevision: sourceRevision!,
+          evidenceArtifactIds: (evidenceArtifactIds as unknown[]).map((item) => String(item)),
+        }
+      : {}),
+  };
+  assertStrictRunMarkers(result);
+  return result;
+}
+
+function asImportSuccessIntent(row: Record<string, unknown>): ExternalRunImportSuccessIntent {
+  return {
+    caseId: String(row.case_id),
+    actorId: String(row.actor_id),
+    idempotencyKey: String(row.idempotency_key),
+    requestDigest: String(row.request_digest),
+    runId: String(row.run_id),
+    successJson: String(row.success_json),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
   };
 }
