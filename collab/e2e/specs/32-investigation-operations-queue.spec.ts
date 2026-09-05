@@ -60,7 +60,7 @@ test.describe("Investigation Operations Queue", () => {
       `/operations?q=${encodeURIComponent(title)}&status=open&coordinationScope=unassigned`
         + "&cursor=must-not-survive&limit=1&entityId=hidden&unexpected=yes",
     );
-    await expect(page.getByRole("heading", { name: "Operations Queue" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Operations Queue", exact: true })).toBeVisible();
     await expect(page).toHaveTitle("Operations · ContextDesk War Room");
     const canonical = new URL(page.url());
     expect(canonical.pathname).toBe("/operations");
@@ -80,6 +80,7 @@ test.describe("Investigation Operations Queue", () => {
     await expect(row).toContainText("Coordinator: Not recorded");
     expect(caseReads).toHaveLength(1);
     expect(isQueueRequest(caseReads[0]!)).toBe(true);
+    expect(caseReads[0]!.searchParams.has("cursor")).toBe(false);
     const allVisible = page.getByRole("link", { name: /All visible/u });
     const expectedBase = new URLSearchParams({ q: title, status: "open" }).toString();
     await expect(allVisible).toHaveAttribute(
@@ -97,7 +98,7 @@ test.describe("Investigation Operations Queue", () => {
     expect(await page.evaluate(() => Object.prototype.hasOwnProperty.call(history.state ?? {}, "uiStrategyId")))
       .toBe(false);
     await page.goBack();
-    await expect(page.getByRole("heading", { name: "Operations Queue" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Operations Queue", exact: true })).toBeVisible();
     await page.reload();
     await expect(page.getByRole("link", { name: new RegExp(title, "u") })).toBeVisible();
     expect(preferenceWrites).toEqual([]);
@@ -214,12 +215,15 @@ test.describe("Investigation Operations Queue", () => {
       }
     };
     page.on("request", recordDeniedReads);
-    await page.goto("/operations");
-    await expect(page.getByText(/no queue data was requested/u)).toBeVisible();
-    await expect(page.getByRole("button", { name: /Try again/u })).toHaveCount(0);
-    expect(deniedReads).toEqual([]);
-    page.off("request", recordDeniedReads);
-    await page.unroute("**/api/auth/me");
+    try {
+      await page.goto("/operations");
+      await expect(page.getByText(/no queue data was requested/u)).toBeVisible();
+      await expect(page.getByRole("button", { name: /retry|try again/iu })).toHaveCount(0);
+      expect(deniedReads).toEqual([]);
+    } finally {
+      page.off("request", recordDeniedReads);
+      await page.unroute("**/api/auth/me");
+    }
 
     await loginAs(page, FIXTURE_USERS.dave);
     await page.waitForLoadState("networkidle");
@@ -246,6 +250,8 @@ test.describe("Investigation Operations Queue", () => {
       await page.getByRole("button", { name: "Try again" }).click();
       await expect.poll(() => failedReads.length).toBe(2);
       expect(failedReads.every(isQueueRequest)).toBe(true);
+      await expect(page.getByText(/No legacy investigation list was substituted/u)).toBeVisible();
+      await expect(page.getByRole("list", { name: "Operations queue investigations" })).toHaveCount(0);
     } finally {
       page.off("request", recordFailedReads);
       await page.unroute("**/api/cases?**");
@@ -292,13 +298,15 @@ test.describe("Investigation Operations Queue", () => {
     await page.setViewportSize({ width: 320, height: 720 });
     try {
       await page.goto(`/operations?q=${encodeURIComponent(title)}`);
-      await expect(page.getByRole("heading", { name: "Operations Queue" })).toBeVisible();
-      await expect(page.getByText(`Coordinator: ${longCoordinator}`)).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Operations Queue", exact: true })).toBeVisible();
+      const coordinatorFact = page.getByText(`Coordinator: ${longCoordinator}`);
+      await expect(coordinatorFact).toBeVisible();
       const dimensions = await page.evaluate(() => ({
         documentWidth: document.documentElement.scrollWidth,
         viewportWidth: document.documentElement.clientWidth,
       }));
       expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
+      expect(await coordinatorFact.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 
       const scope = page.getByRole("link", { name: /All visible/u });
       await scope.focus();
@@ -317,6 +325,9 @@ test.describe("Investigation Operations Queue", () => {
       expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
       const transitionDuration = await scope.evaluate((element) => getComputedStyle(element).transitionDuration);
       expect(transitionDuration.split(",").every((value) => value.trim() === "0s")).toBe(true);
+      const row = page.getByRole("link", { name: new RegExp(title, "u") });
+      const rowTransitionDuration = await row.evaluate((element) => getComputedStyle(element).transitionDuration);
+      expect(rowTransitionDuration.split(",").every((value) => value.trim() === "0s")).toBe(true);
     } finally {
       await page.unroute("**/api/cases?**");
     }
