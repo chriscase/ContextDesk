@@ -14,7 +14,7 @@ import {
   type InvestigationCoordinationV1,
 } from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { startTransition, Suspense, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   parseInvestigationCollectionQueryInput,
@@ -231,6 +231,61 @@ describe("InvestigationRuntimeProvider", () => {
     expect(authorityScope).not.toBe(identityScope);
     expect(authorityScope).not.toContain(UPDATED_AUTHORITY_KEY);
     expect(JSON.stringify(currentRuntime())).not.toContain(UPDATED_AUTHORITY_KEY);
+  });
+
+  it("does not rotate the committed presentation scope for an abandoned concurrent epoch", async () => {
+    const AUTHORITY_KEY = "committed-authority-epoch";
+    const neverSettles = new Promise<never>(() => undefined);
+    let suspendedRenders = 0;
+
+    function ScopeKeyProbe() {
+      const runtime = useInvestigationRuntime();
+      return <output data-testid="presentation-scope">{runtime.presentationScopeKey}</output>;
+    }
+
+    function SuspendChangedEpoch({ suspended }: { readonly suspended: boolean }) {
+      if (suspended) {
+        suspendedRenders += 1;
+        throw neverSettles;
+      }
+      return null;
+    }
+
+    function tree(authorityKey: string, suspended: boolean) {
+      return (
+        <Suspense fallback={<p>Suspended epoch fallback</p>}>
+          <ProviderUnderTest
+            identityKey="stable-identity-epoch"
+            identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+            authorityKey={authorityKey}
+            capabilities={FULL_CAPABILITIES}
+            readOnly={false}
+            active
+            focusCaseId={null}
+            isInvestigationLocation
+            onOpenCreated={vi.fn()}
+            gateway={makeGateway()}
+          >
+            <ScopeKeyProbe />
+            <SuspendChangedEpoch suspended={suspended} />
+          </ProviderUnderTest>
+        </Suspense>
+      );
+    }
+
+    const view = render(tree(AUTHORITY_KEY, false));
+    const initialScope = screen.getByTestId("presentation-scope").textContent;
+    expect(initialScope).not.toBe("");
+
+    act(() => {
+      startTransition(() => view.rerender(tree("abandoned-authority-epoch", true)));
+    });
+    await waitFor(() => expect(suspendedRenders).toBeGreaterThan(0));
+    expect(screen.queryByText("Suspended epoch fallback")).toBeNull();
+    expect(screen.getByTestId("presentation-scope").textContent).toBe(initialScope);
+
+    view.rerender(tree(AUTHORITY_KEY, false));
+    expect(screen.getByTestId("presentation-scope").textContent).toBe(initialScope);
   });
 
   it("publishes and applies the frozen coordination seam only for an authenticated ready case", async () => {

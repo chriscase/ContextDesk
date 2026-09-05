@@ -18,6 +18,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -275,23 +276,33 @@ export function InvestigationRuntimeProvider({
   children,
 }: InvestigationRuntimeProviderProps) {
   const gateway = useContext(InjectedGatewayContext) ?? investigationGateway;
-  const presentationScopeRef = useRef<{
+  const [committedPresentationScope, setCommittedPresentationScope] = useState<{
     readonly identityKey: string;
     readonly authorityKey: string;
     readonly publicKey: string;
-  } | null>(null);
-  if (
-    presentationScopeRef.current === null
-    || presentationScopeRef.current.identityKey !== identityKey
-    || presentationScopeRef.current.authorityKey !== authorityKey
-  ) {
-    presentationScopeRef.current = {
+  }>(() => ({
+    identityKey,
+    authorityKey,
+    publicKey: createPresentationScopeKey(),
+  }));
+  const presentationScopeChanged =
+    committedPresentationScope.identityKey !== identityKey
+    || committedPresentationScope.authorityKey !== authorityKey;
+  // A committed epoch-change render must reset presentation state before any
+  // effects can use it, while an abandoned concurrent render must not mutate
+  // the last committed scope. The transitional key contains only the existing
+  // opaque key; the new opaque epoch is committed in the layout phase.
+  const presentationScopeKey = presentationScopeChanged
+    ? `${committedPresentationScope.publicKey}:transition`
+    : committedPresentationScope.publicKey;
+  useLayoutEffect(() => {
+    if (!presentationScopeChanged) return;
+    setCommittedPresentationScope({
       identityKey,
       authorityKey,
       publicKey: createPresentationScopeKey(),
-    };
-  }
-  const presentationScopeKey = presentationScopeRef.current.publicKey;
+    });
+  }, [authorityKey, identityKey, presentationScopeChanged]);
   // Production binds the concrete POST/PATCH methods. A transport without them
   // resolves to the fail-closed seam, so a write reports `unavailable` instead
   // of appearing to succeed.
