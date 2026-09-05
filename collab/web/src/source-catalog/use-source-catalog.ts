@@ -500,7 +500,12 @@ export function useSourceCatalog(options: UseSourceCatalogOptions): SourceCatalo
     try {
       idempotencyKey = current.keyFactory();
     } catch {
-      return frozen({ status: "failed", error: unexpectedFailure() });
+      const error = unexpectedFailure();
+      setStoredMutation({
+        scopeKey: current.scopeKey,
+        value: frozen({ status: "failed", action: "create", error }),
+      });
+      return frozen({ status: "failed", error });
     }
     let attempt: MutationAttempt | null;
     try {
@@ -562,7 +567,12 @@ export function useSourceCatalog(options: UseSourceCatalogOptions): SourceCatalo
     try {
       idempotencyKey = current.keyFactory();
     } catch {
-      return frozen({ status: "failed", error: unexpectedFailure() });
+      const error = unexpectedFailure();
+      setStoredMutation({
+        scopeKey: current.scopeKey,
+        value: frozen({ status: "failed", action, error }),
+      });
+      return frozen({ status: "failed", error });
     }
     const request = action === "retire"
       ? {

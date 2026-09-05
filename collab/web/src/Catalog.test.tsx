@@ -132,6 +132,23 @@ describe("Source Catalog Console", () => {
     expect(gateway.restore).not.toHaveBeenCalled();
   });
 
+  it("shows an initial load failure without an empty catalog and recovers on retry", async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce(fail({ kind: "internal", status: 500 }))
+      .mockResolvedValueOnce(ok({ schemaId: SOURCE_LIST_SCHEMA_ID, sources: [source()] }));
+    renderCatalog(gatewayWith({ list }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/could not be loaded or validated/);
+    expect(screen.getByRole("region", { name: "Attribution labels" }).getAttribute("aria-busy")).toBe("false");
+    expect(screen.queryByRole("heading", { name: "No attribution labels are registered yet" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Add attribution label" })).toBeNull();
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Try loading the catalog again" }));
+    expect(await screen.findByText("Synthetic assistant")).toBeTruthy();
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
   it("shows compact counts, filters in server order, and protects legacy and permanent rows", async () => {
     const legacy = source({ id: LEGACY_ID, name: "Legacy person", kind: "human" });
     delete legacy.revision;
@@ -153,13 +170,21 @@ describe("Source Catalog Console", () => {
     expect(screen.getByText("Permanent · protected")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Legacy person/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Unknown origin/ })).toBeNull();
+    const recordedAt = list.querySelector("time");
+    expect(recordedAt?.getAttribute("datetime")).toBe("2026-09-05T12:00:00.000Z");
 
+    const retire = screen.getByRole("button", { name: "Retire Assistant one…" });
+    retire.focus();
+    fireEvent.click(retire);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep active" })));
     fireEvent.change(screen.getByRole("combobox", { name: "Kind" }), { target: { value: "internal-system" } });
+    expect(screen.queryByRole("button", { name: "Keep active" })).toBeNull();
     expect(screen.getByText("Retired monitor")).toBeTruthy();
     expect(screen.queryByText("Assistant one")).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Lifecycle" }), { target: { value: "active" } });
     expect(screen.getByRole("heading", { name: "No labels match these filters" })).toBeTruthy();
     fireEvent.change(screen.getByRole("combobox", { name: "Kind" }), { target: { value: "all" } });
+    expect(screen.getByRole("button", { name: "Retire Assistant one…" })).toBeTruthy();
     fireEvent.change(screen.getByRole("searchbox", { name: "Search" }), { target: { value: "person" } });
     expect(screen.getByText("Legacy person")).toBeTruthy();
     expect(screen.getByText("1 of 4 labels shown.")).toBeTruthy();
@@ -263,6 +288,71 @@ describe("Source Catalog Console", () => {
     },
   );
 
+  it("refocuses a repeated unknown-outcome alert while preserving the exact attempt", async () => {
+    let rows: SourceV1[] = [];
+    const created = source({ name: "Eventually confirmed", revision: 1 });
+    const attempts: unknown[] = [];
+    const create = vi.fn(async (request) => {
+      attempts.push(request);
+      if (attempts.length < 3) {
+        return fail<SourceMutationSuccessV1>({ kind: "commit_outcome_unknown", status: 503 });
+      }
+      rows = [created];
+      return ok(success("create", created as SourceV1 & { revision: number }, true));
+    });
+    renderCatalog(gatewayWith({
+      list: vi.fn(async () => ok({ schemaId: SOURCE_LIST_SCHEMA_ID, sources: rows })),
+      create,
+    }), { keyFactory: () => "source-repeated-unknown-0001" });
+    await screen.findByRole("heading", { name: "No attribution labels are registered yet" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Eventually confirmed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add label" }));
+
+    let alert = await screen.findByRole("alert");
+    expect(document.activeElement).toBe(alert);
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry the same request" }));
+    alert = await screen.findByRole("alert");
+    await waitFor(() => expect(document.activeElement).toBe(alert));
+    expect(attempts[1]).toBe(attempts[0]);
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry the same request" }));
+    expect(await screen.findByText("Added Eventually confirmed.")).toBeTruthy();
+    expect(attempts[2]).toBe(attempts[0]);
+  });
+
+  it("focuses successive create outcomes and returns Dismiss to the preserved form", async () => {
+    let rows: SourceV1[] = [];
+    let creation = 0;
+    const create = vi.fn(async (request: { name: string }) => {
+      creation += 1;
+      const created = source({
+        id: creation === 1 ? SOURCE_ID : RETIRED_ID,
+        name: request.name,
+        revision: 1,
+      });
+      rows = [created, ...rows];
+      return ok(success("create", created as SourceV1 & { revision: number }));
+    });
+    renderCatalog(gatewayWith({
+      list: vi.fn(async () => ok({ schemaId: SOURCE_LIST_SCHEMA_ID, sources: rows })),
+      create,
+    }), { keyFactory: () => `source-success-000${creation + 1}` });
+    await screen.findByRole("heading", { name: "No attribution labels are registered yet" });
+    const name = screen.getByRole("textbox", { name: "Name" });
+
+    fireEvent.change(name, { target: { value: "First label" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add label" }));
+    const firstNotice = (await screen.findByText("Added First label.")).parentElement;
+    await waitFor(() => expect(document.activeElement).toBe(firstNotice));
+    fireEvent.click(within(firstNotice as HTMLElement).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(document.activeElement).toBe(name));
+
+    fireEvent.change(name, { target: { value: "Second label" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add label" }));
+    const secondNotice = (await screen.findByText("Added Second label.")).parentElement;
+    await waitFor(() => expect(document.activeElement).toBe(secondNotice));
+  });
+
   it("requires confirmation to retire, supports restore, and announces both outcomes", async () => {
     let current = source();
     const retire = vi.fn(async () => {
@@ -280,16 +370,24 @@ describe("Source Catalog Console", () => {
     });
     let key = 0;
     renderCatalog(gateway, { keyFactory: () => `source-key-000${++key}` });
-    fireEvent.click(await screen.findByRole("button", { name: "Retire Synthetic assistant…" }));
+    const retireTrigger = await screen.findByRole("button", { name: "Retire Synthetic assistant…" });
+    retireTrigger.focus();
+    fireEvent.click(retireTrigger);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep active" })));
     expect(retire).not.toHaveBeenCalled();
     expect(screen.getByText(/Past attribution is preserved/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Keep active" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retire Synthetic assistant…" })));
     expect(retire).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Retire Synthetic assistant…" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm retire Synthetic assistant" }));
-    expect(await screen.findByText("Retired Synthetic assistant.")).toBeTruthy();
+    const retiredNotice = (await screen.findByText("Retired Synthetic assistant.")).parentElement;
+    fireEvent.click(within(retiredNotice as HTMLElement).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Restore Synthetic assistant" })));
     fireEvent.click(screen.getByRole("button", { name: "Restore Synthetic assistant" }));
-    expect(await screen.findByText("Restored Synthetic assistant.")).toBeTruthy();
+    const restoredNotice = (await screen.findByText("Restored Synthetic assistant.")).parentElement;
+    fireEvent.click(within(restoredNotice as HTMLElement).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retire Synthetic assistant…" })));
     expect(retire).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 1 }), expect.any(AbortSignal));
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 2 }), expect.any(AbortSignal));
   });
@@ -310,12 +408,16 @@ describe("Source Catalog Console", () => {
       retire,
     });
     renderCatalog(gateway);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Lifecycle" }), { target: { value: "active" } });
     fireEvent.click(await screen.findByRole("button", { name: "Retire Synthetic assistant…" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm retire Synthetic assistant" }));
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/changed before the action/);
+    expect(alert.textContent).toMatch(/may be hidden by the current filters/);
     expect(document.activeElement).toBe(alert);
+    expect(screen.queryByRole("button", { name: "Restore Synthetic assistant" })).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Lifecycle" }), { target: { value: "all" } });
     expect(screen.getByRole("button", { name: "Restore Synthetic assistant" })).toBeTruthy();
     expect(retire).toHaveBeenCalledTimes(1);
   });

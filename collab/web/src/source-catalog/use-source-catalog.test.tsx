@@ -668,6 +668,40 @@ describe("useSourceCatalog", () => {
     expect(result.current.mutation).toEqual({ status: "idle" });
   });
 
+  it("publishes bounded create and lifecycle failures when request-key generation throws", async () => {
+    const gateway = gatewayWith();
+    const { result } = renderHook(() => useSourceCatalog(options(gateway, {
+      keyFactory: () => {
+        throw new Error("private key source failure");
+      },
+    })));
+    await waitFor(() => expect(result.current.resource.status).toBe("ready"));
+
+    await expect(act(async () => result.current.actions.create({
+      name: "Assistant",
+      kind: "external-tool",
+    }))).resolves.toEqual({ status: "failed", error: { kind: "unexpected" } });
+    await waitFor(() => expect(result.current.mutation).toEqual({
+      status: "failed",
+      action: "create",
+      error: { kind: "unexpected" },
+    }));
+    act(() => result.current.actions.dismissMutation());
+
+    await expect(act(async () => result.current.actions.retire(SOURCE_ID))).resolves.toEqual({
+      status: "failed",
+      error: { kind: "unexpected" },
+    });
+    await waitFor(() => expect(result.current.mutation).toEqual({
+      status: "failed",
+      action: "retire",
+      error: { kind: "unexpected" },
+    }));
+    expect(gateway.create).not.toHaveBeenCalled();
+    expect(gateway.retire).not.toHaveBeenCalled();
+    expect(JSON.stringify(result.current.mutation)).not.toContain("private key source failure");
+  });
+
   it("contains hostile create getters without transport", async () => {
     const gateway = gatewayWith();
     const { result } = renderHook(() => useSourceCatalog(options(gateway)));

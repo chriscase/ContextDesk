@@ -89,13 +89,13 @@ function actionVerb(action: SourceMutationAction): string {
 function refusalCopy(reason: SourceMutationRefusal): string {
   switch (reason) {
     case "expected_revision_mismatch":
-      return "This label changed before the action was applied. The latest confirmed record is shown; review it before trying a new action.";
+      return "This label changed before the action was applied. The catalog was reconciled to the latest confirmed record; it may be hidden by the current filters. Review it before trying a new action.";
     case "source_revision_unavailable":
       return "This legacy label has no managed revision and remains read-only.";
     case "already_retired":
-      return "This label is already retired. The latest confirmed record is shown.";
+      return "This label is already retired. The catalog was reconciled to the latest confirmed record; it may be hidden by the current filters.";
     case "not_retired":
-      return "This label is already active. The latest confirmed record is shown.";
+      return "This label is already active. The catalog was reconciled to the latest confirmed record; it may be hidden by the current filters.";
     case "permanent_unknown_protected":
       return "Unknown origin is a permanent safety label and cannot be retired or restored.";
     case "source_not_found":
@@ -206,6 +206,17 @@ export function Catalog(props: CatalogProps) {
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState<SourceKind>(DEFAULT_KIND);
   const mutationNoticeRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const keepActiveRef = useRef<HTMLButtonElement>(null);
+  const rowActionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const retireReturnFocusIdRef = useRef<string | null>(null);
+  const lastMutationOriginRef = useRef<
+    { readonly kind: "create" } | { readonly kind: "source"; readonly sourceId: string } | null
+  >(null);
+  const dismissReturnFocusRef = useRef<
+    { readonly kind: "create" } | { readonly kind: "source"; readonly sourceId: string } | null
+  >(null);
   const lastFocusedMutationRef = useRef<string | null>(null);
 
   const rows = sourceRows(controller.resource);
@@ -229,12 +240,45 @@ export function Catalog(props: CatalogProps) {
 
   const mutationTokenValue = mutationToken(controller.mutation);
   useEffect(() => {
-    if (mutationTokenValue === null || mutationTokenValue === lastFocusedMutationRef.current) return;
+    if (mutationTokenValue === null) {
+      lastFocusedMutationRef.current = null;
+      return;
+    }
+    if (mutationTokenValue === lastFocusedMutationRef.current) return;
     lastFocusedMutationRef.current = mutationTokenValue;
     mutationNoticeRef.current?.focus();
   }, [mutationTokenValue]);
   useEffect(() => {
-    if (!props.canWrite) setConfirmRetireId(null);
+    if (confirmRetireId !== null) {
+      keepActiveRef.current?.focus();
+      return;
+    }
+    const sourceId = retireReturnFocusIdRef.current;
+    if (sourceId === null) return;
+    retireReturnFocusIdRef.current = null;
+    rowActionRefs.current.get(sourceId)?.focus();
+  }, [confirmRetireId]);
+  useEffect(() => {
+    if (confirmRetireId !== null && !filtered.some(({ id }) => id === confirmRetireId)) {
+      setConfirmRetireId(null);
+    }
+  }, [confirmRetireId, filtered]);
+  useEffect(() => {
+    if (controller.mutation.status !== "idle") return;
+    const target = dismissReturnFocusRef.current;
+    if (target === null) return;
+    dismissReturnFocusRef.current = null;
+    if (target.kind === "create") {
+      nameInputRef.current?.focus();
+      return;
+    }
+    (rowActionRefs.current.get(target.sourceId) ?? titleRef.current)?.focus();
+  }, [controller.mutation.status]);
+  useEffect(() => {
+    if (!props.canWrite) {
+      retireReturnFocusIdRef.current = null;
+      setConfirmRetireId(null);
+    }
   }, [props.canWrite]);
 
   const writeLocked = controller.mutation.status === "running"
@@ -245,12 +289,34 @@ export function Catalog(props: CatalogProps) {
 
   async function createSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    lastMutationOriginRef.current = { kind: "create" };
     const outcome = await controller.actions.create({ name, kind, description });
     if (outcome.status === "succeeded") {
       setName("");
       setDescription("");
       setKind(DEFAULT_KIND);
     }
+  }
+
+  function cancelRetire(sourceId: string) {
+    retireReturnFocusIdRef.current = sourceId;
+    setConfirmRetireId(null);
+  }
+
+  function retireSource(sourceId: string) {
+    lastMutationOriginRef.current = { kind: "source", sourceId };
+    setConfirmRetireId(null);
+    void controller.actions.retire(sourceId);
+  }
+
+  function restoreSource(sourceId: string) {
+    lastMutationOriginRef.current = { kind: "source", sourceId };
+    void controller.actions.restore(sourceId);
+  }
+
+  function dismissMutation() {
+    dismissReturnFocusRef.current = lastMutationOriginRef.current;
+    controller.actions.dismissMutation();
   }
 
   const denied = !props.canRead;
@@ -263,7 +329,7 @@ export function Catalog(props: CatalogProps) {
       <header className="source-catalog__header">
         <div>
           <p className="source-catalog__eyebrow">Attribution</p>
-          <h2 id="source-catalog-title">Attribution labels</h2>
+          <h2 id="source-catalog-title" ref={titleRef} tabIndex={-1}>Attribution labels</h2>
           <p>
             Reusable labels record who or what supplied notes, files, and imported answers.
             Evidence stays in its investigation; labels create no account, credential, or connection.
@@ -297,7 +363,7 @@ export function Catalog(props: CatalogProps) {
           mutation={controller.mutation}
           noticeRef={mutationNoticeRef}
           onRetryUnknown={() => void controller.actions.retryUnknown()}
-          onDismiss={controller.actions.dismissMutation}
+          onDismiss={dismissMutation}
         />
       ) : null}
 
@@ -358,7 +424,7 @@ export function Catalog(props: CatalogProps) {
                         {permanent ? <span className="source-catalog__policy">Permanent · protected</span> : null}
                       </div>
                       <p className={source.description ? undefined : "source-catalog__muted"}>{source.description || "No description recorded."}</p>
-                      <small>Added {source.createdAt.slice(0, 10)}</small>
+                      <small><time dateTime={source.createdAt}>Added {source.createdAt.slice(0, 10)}</time></small>
                     </div>
                     {canChange ? (
                       <div className="source-catalog__row-actions">
@@ -370,20 +436,40 @@ export function Catalog(props: CatalogProps) {
                                 className="source-catalog__danger"
                                 disabled={writeLocked}
                                 aria-describedby={`retire-note-${source.id}`}
-                                onClick={() => { setConfirmRetireId(null); void controller.actions.retire(source.id); }}
+                                onClick={() => retireSource(source.id)}
                               >
                                 Confirm retire {source.name}
                               </button>
-                              <button type="button" disabled={writeLocked} onClick={() => setConfirmRetireId(null)}>Keep active</button>
+                              <button ref={keepActiveRef} type="button" disabled={writeLocked} onClick={() => cancelRetire(source.id)}>Keep active</button>
                               <span id={`retire-note-${source.id}`} className="source-catalog__action-note">
                                 Retirement hides this label from new intake. Past attribution is preserved.
                               </span>
                             </>
                           ) : (
-                            <button type="button" disabled={writeLocked} onClick={() => setConfirmRetireId(source.id)}>Retire {source.name}…</button>
+                            <button
+                              ref={(node) => {
+                                if (node) rowActionRefs.current.set(source.id, node);
+                                else rowActionRefs.current.delete(source.id);
+                              }}
+                              type="button"
+                              disabled={writeLocked}
+                              onClick={() => setConfirmRetireId(source.id)}
+                            >
+                              Retire {source.name}…
+                            </button>
                           )
                         ) : (
-                          <button type="button" disabled={writeLocked} onClick={() => void controller.actions.restore(source.id)}>Restore {source.name}</button>
+                          <button
+                            ref={(node) => {
+                              if (node) rowActionRefs.current.set(source.id, node);
+                              else rowActionRefs.current.delete(source.id);
+                            }}
+                            type="button"
+                            disabled={writeLocked}
+                            onClick={() => restoreSource(source.id)}
+                          >
+                            Restore {source.name}
+                          </button>
                         )}
                       </div>
                     ) : null}
@@ -405,7 +491,7 @@ export function Catalog(props: CatalogProps) {
                 </label>
                 <label className="source-catalog__add-name">
                   <span>Name</span>
-                  <input value={name} onChange={(event) => setName(event.target.value)} maxLength={SOURCE_NAME_MAX_LENGTH} placeholder={KIND_META[kind].placeholder} disabled={writeLocked} required />
+                  <input ref={nameInputRef} value={name} onChange={(event) => setName(event.target.value)} maxLength={SOURCE_NAME_MAX_LENGTH} placeholder={KIND_META[kind].placeholder} disabled={writeLocked} required />
                 </label>
                 <label className="source-catalog__add-description">
                   <span>Description <em>(optional)</em></span>
