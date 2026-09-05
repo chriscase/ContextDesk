@@ -12,7 +12,7 @@ describe("migration versions", () => {
   // first-class artifact annotations, replay-safe singular writes, and one
   // parent intent for each replay-safe bulk write, capability model v2, and
   // the case-row-serialized investigation coordination projection.
-  it("pins the canonical PostgreSQL head at investigation coordination", () => {
+  it("pins the canonical PostgreSQL head at source catalog mutations", () => {
     const versions = listMigrations().map((file) => file.version);
     expect(versions).toContain("015_user_profiles");
     expect(versions).toContain("016_contribution_write_intents");
@@ -29,7 +29,8 @@ describe("migration versions", () => {
     expect(versions).toContain("027_artifact_annotation_bulk_write_intents");
     expect(versions).toContain("028_capability_model_v2");
     expect(versions).toContain("029_investigation_coordination");
-    expect(latestMigrationVersion()).toBe("029_investigation_coordination");
+    expect(versions).toContain("030_source_catalog_mutations");
+    expect(latestMigrationVersion()).toBe("030_source_catalog_mutations");
   });
 
   it("keeps every migration version unique and consecutively ordered from the record graph", () => {
@@ -38,7 +39,7 @@ describe("migration versions", () => {
     // localeCompare ordering is what the runner applies, so assert on it
     // directly rather than on the filenames' numeric prefixes.
     expect([...versions].sort((a, b) => a.localeCompare(b))).toEqual(versions);
-    expect(versions.slice(-7)).toEqual([
+    expect(versions.slice(-8)).toEqual([
       "023_investigation_context",
       "024_ui_strategy_governance",
       "025_artifact_annotations",
@@ -46,6 +47,7 @@ describe("migration versions", () => {
       "027_artifact_annotation_bulk_write_intents",
       "028_capability_model_v2",
       "029_investigation_coordination",
+      "030_source_catalog_mutations",
     ]);
   });
 
@@ -146,6 +148,37 @@ describe("migration versions", () => {
     // The shared intent-first order therefore removes the two-table cycle.
   });
 
+  it("caps catalog revision at MAX_SAFE_INTEGER and withholds immutable column UPDATE grants", () => {
+    const migration = listMigrations().find(
+      (file) => file.version === "030_source_catalog_mutations",
+    );
+    expect(migration).toBeDefined();
+    const sql = readFileSync(migration!.upPath, "utf8");
+    expect(sql).toContain("9007199254740991");
+    expect(sql).toMatch(/GRANT UPDATE \(name, description, lifecycle, revision\) ON TABLE catalog_sources/);
+    expect(sql).not.toMatch(/GRANT UPDATE \(id,/);
+    expect(sql).not.toMatch(/GRANT UPDATE \(.*kind.*\) ON TABLE catalog_sources/);
+    expect(sql).not.toMatch(/GRANT UPDATE ON TABLE catalog_sources TO collab_app/);
+    expect(sql).toMatch(/REVOKE UPDATE ON TABLE catalog_sources FROM collab_app/);
+    const downSql = readFileSync(migration!.downPath, "utf8");
+    const intentLock = downSql.indexOf(
+      "LOCK TABLE source_catalog_success_intents IN ACCESS EXCLUSIVE MODE",
+    );
+    const sourceLock = downSql.indexOf("LOCK TABLE catalog_sources IN ACCESS EXCLUSIVE MODE");
+    const grantLock = downSql.indexOf(
+      "LOCK TABLE user_capability_grants IN ACCESS EXCLUSIVE MODE",
+    );
+    const guard = downSql.indexOf("IF EXISTS (SELECT 1 FROM catalog_sources WHERE revision IS NOT NULL)");
+    const drop = downSql.indexOf("DROP TRIGGER IF EXISTS source_catalog_success_intents_no_update");
+    expect(intentLock).toBeGreaterThanOrEqual(0);
+    expect(sourceLock).toBeGreaterThan(intentLock);
+    expect(grantLock).toBeGreaterThan(sourceLock);
+    expect(guard).toBeGreaterThan(grantLock);
+    expect(drop).toBeGreaterThan(guard);
+    expect(downSql).toMatch(/cannot roll back 030_source_catalog_mutations/);
+    expect(downSql).toMatch(/GRANT UPDATE ON TABLE catalog_sources TO collab_app/);
+  });
+
   it("runs down migration SQL and version bookkeeping in one explicit transaction", async () => {
     const queries: string[] = [];
     const client = {
@@ -233,6 +266,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("027_artifact_annotation_bulk_write_intents");
       expect(up.applied).toContain("028_capability_model_v2");
       expect(up.applied).toContain("029_investigation_coordination");
+      expect(up.applied).toContain("030_source_catalog_mutations");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -342,6 +376,60 @@ describe.skipIf(!adminUrl())("migrations", () => {
         "investigation_coordination",
         "investigation_coordination_success_intents",
       ]);
+      const catalogIntentTables = await client.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+           AND tablename = 'source_catalog_success_intents'`,
+      );
+      expect(catalogIntentTables.rows.map((row) => row.tablename)).toEqual([
+        "source_catalog_success_intents",
+      ]);
+      const catalogRevision = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'catalog_sources'
+           AND column_name = 'revision'`,
+      );
+      expect(catalogRevision.rows).toEqual([{ column_name: "revision" }]);
+
+      await client.query(`
+        UPDATE catalog_sources
+        SET revision = 1
+        WHERE id = '00000000-0000-0000-0000-000000000001'
+      `);
+      await expect(migrateDown(client)).rejects.toThrow(
+        /cannot roll back 030_source_catalog_mutations while versioned catalog data, success intents, or catalog:write grants exist/,
+      );
+      await client.query(`
+        UPDATE catalog_sources
+        SET revision = NULL
+        WHERE id = '00000000-0000-0000-0000-000000000001'
+      `);
+      await client.query(`
+        INSERT INTO user_profiles (
+          id, username, display_name, status, provenance, directory_sync_status
+        ) VALUES (
+          'local:catalog-write-migration', 'catalog-write-migration',
+          'Catalog write migration', 'active', 'local', 'not_synced'
+        )
+      `);
+      await client.query(`
+        INSERT INTO user_capability_grants (user_id, capability, granted_by)
+        VALUES ('local:catalog-write-migration', 'catalog:write', 'local:root')
+      `);
+      await expect(migrateDown(client)).rejects.toThrow(
+        /cannot roll back 030_source_catalog_mutations while versioned catalog data, success intents, or catalog:write grants exist/,
+      );
+      expect((await client.query(
+        `SELECT capability FROM user_capability_grants WHERE user_id = 'local:catalog-write-migration'`,
+      )).rows).toEqual([{ capability: "catalog:write" }]);
+      await client.query(`
+        DELETE FROM user_capability_grants
+        WHERE user_id = 'local:catalog-write-migration' AND capability = 'catalog:write'
+      `);
+      expect((await migrateDown(client)).rolledBack).toBe("030_source_catalog_mutations");
+      await expect(client.query(`
+        INSERT INTO user_capability_grants (user_id, capability, granted_by)
+        VALUES ('local:catalog-write-migration', 'catalog:write', 'local:root')
+      `)).rejects.toThrow(/user_capability_grants_capability_check/);
 
       await expect(client.query(`
         INSERT INTO investigation_coordination (
@@ -538,6 +626,39 @@ describe.skipIf(!adminUrl())("migrations", () => {
     });
   });
 
+  it("refuses catalog rollback when an immutable success intent exists without deleting it", async () => {
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      await client.query(`
+        INSERT INTO catalog_sources (
+          id, name, kind, description, lifecycle, created_by, revision
+        ) VALUES (
+          'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'rollback-holder', 'external-tool',
+          NULL, 'active', 'synthetic-actor', NULL
+        )
+      `);
+      await client.query(`
+        INSERT INTO source_catalog_success_intents (
+          actor_id, idempotency_key, action, request_digest, source_id, success_json, created_at
+        ) VALUES (
+          'synthetic-actor', 'src-mig-intent', 'create',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '{}', CURRENT_TIMESTAMP
+        )
+      `);
+
+      await expect(migrateDown(client)).rejects.toThrow(
+        /cannot roll back 030_source_catalog_mutations while versioned catalog data, success intents, or catalog:write grants exist/,
+      );
+      expect((await client.query(
+        `SELECT success_json FROM source_catalog_success_intents`,
+      )).rows).toEqual([{ success_json: "{}" }]);
+      await expect(
+        client.query(`DELETE FROM source_catalog_success_intents`),
+      ).rejects.toThrow(/insert-only/);
+    });
+  });
+
   it("excludes concurrent writers from both coordination tables during the rollback guard", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);
@@ -641,6 +762,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("027_artifact_annotation_bulk_write_intents");
       expect(dry.pending).toContain("028_capability_model_v2");
       expect(dry.pending).toContain("029_investigation_coordination");
+      expect(dry.pending).toContain("030_source_catalog_mutations");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

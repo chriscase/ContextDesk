@@ -7,7 +7,10 @@ import {
   UI_STRATEGY_POLICY_UPDATE_SCHEMA_ID,
   UI_STRATEGY_PREFERENCE_UPDATE_SCHEMA_ID,
   INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+  SOURCE_CREATE_REQUEST_SCHEMA_ID,
+  SOURCE_RETIRE_REQUEST_SCHEMA_ID,
   parseInvestigationCoordinationActionSuccess,
+  parseSourceMutationSuccess,
 } from "@cd-collab/contracts";
 import { FilesystemEvidenceStore, abandonWriteBatchForCrashTest, sha256Hex } from "../evidence/store.js";
 import { CatalogService } from "../modules/catalog/index.js";
@@ -1083,6 +1086,143 @@ describe("SQLite local runtime", () => {
       const reopenedCatalog = new CatalogService(reopened.catalog, reopened.audit);
       expect((await reopenedCatalog.list()).some((source) => source.identityId === actor.id)).toBe(false);
       expect((await reopened.cases.listTimeline(created.id)).some((event) => event.kind === "evidence_registered")).toBe(false);
+      expect(await reopened.audit.list({ action: "catalog_create" })).toEqual([]);
+      reopened.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists source revision, success intent, and exact replay across reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-catalog-cas-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    const request = {
+      schemaId: SOURCE_CREATE_REQUEST_SCHEMA_ID,
+      name: "SQLite assistant",
+      kind: "external-tool" as const,
+      description: null,
+      identityId: null,
+      expectedRevision: 0 as const,
+      idempotencyKey: "src-sqlite-create",
+    };
+    try {
+      const first = createSqliteRuntime(path);
+      const catalog = new CatalogService(first.catalog, first.audit);
+      const created = parseSourceMutationSuccess(await catalog.applyCreate(actor, request, "test"));
+      expect(created.applied.revision).toBe(1);
+      const retired = parseSourceMutationSuccess(
+        await catalog.applyRetire(
+          actor,
+          {
+            schemaId: SOURCE_RETIRE_REQUEST_SCHEMA_ID,
+            sourceId: created.sourceId,
+            expectedRevision: 1,
+            idempotencyKey: "src-sqlite-retire",
+          },
+          "test",
+        ),
+      );
+      expect(retired.appliedRevision).toBe(2);
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      const reopened = new CatalogService(second.catalog, second.audit);
+      const stored = await reopened.get(created.sourceId);
+      expect(stored?.revision).toBe(2);
+      expect(stored?.lifecycle).toBe("retired");
+      const replay = parseSourceMutationSuccess(await reopened.applyCreate(actor, request, "test"));
+      expect(replay.replayed).toBe(true);
+      expect(replay.sourceId).toBe(created.sourceId);
+      expect(replay.applied.revision).toBe(1);
+      expect((await second.audit.list({ action: "catalog_create" })).filter((row) => row.target === created.sourceId)).toHaveLength(1);
+      expect((await second.audit.list({ action: "catalog_retire" })).filter((row) => row.target === created.sourceId)).toHaveLength(1);
+      second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls source revision, success intent, and audit back across SQLite reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-catalog-cas-rollback-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const first = createSqliteRuntime(path);
+      first.catalog.insertSuccessIntent = async () => {
+        throw new Error("synthetic catalog intent failure");
+      };
+      const catalog = new CatalogService(first.catalog, first.audit);
+      await expect(
+        catalog.applyCreate(
+          actor,
+          {
+            schemaId: SOURCE_CREATE_REQUEST_SCHEMA_ID,
+            name: "SQLite boom",
+            kind: "external-tool",
+            description: null,
+            identityId: null,
+            expectedRevision: 0,
+            idempotencyKey: "src-sqlite-rollback",
+          },
+          "test",
+        ),
+      ).rejects.toThrow("synthetic catalog intent failure");
+      first.state.close();
+
+      const second = createSqliteRuntime(path);
+      const reopened = new CatalogService(second.catalog, second.audit);
+      expect((await reopened.list()).some((source) => source.name === "SQLite boom")).toBe(false);
+      expect(await second.catalog.getSuccessIntent(actor.id, "src-sqlite-rollback")).toBeNull();
+      expect(await second.audit.list({ action: "catalog_create" })).toEqual([]);
+      second.state.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("joins a nested catalog mutation into the SQLite case transaction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-sqlite-catalog-nested-"));
+    const path = join(root, "collab.sqlite");
+    const actor = { id: "local:lead", username: "lead" };
+    try {
+      const runtime = createSqliteRuntime(path);
+      const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
+      const catalog = new CatalogService(runtime.catalog, runtime.audit);
+      const cases = new CaseService(evidence, runtime.audit, runtime.cases, catalog);
+      const created = await cases.createCase(actor, { title: "SQLite nested catalog" }, "test");
+      await expect(
+        cases.withAtomic(async () => {
+          await catalog.applyCreate(
+            actor,
+            {
+              schemaId: SOURCE_CREATE_REQUEST_SCHEMA_ID,
+              name: "Nested sqlite source",
+              kind: "external-tool",
+              description: null,
+              identityId: null,
+              expectedRevision: 0,
+              idempotencyKey: "src-sqlite-nested",
+            },
+            "test",
+          );
+          throw new Error("injected nested case transaction failure");
+        }),
+      ).rejects.toThrow(/injected nested case transaction failure/);
+      expect((await catalog.list()).some((source) => source.name === "Nested sqlite source")).toBe(
+        false,
+      );
+      expect(await runtime.catalog.getSuccessIntent(actor.id, "src-sqlite-nested")).toBeNull();
+      expect(await runtime.audit.list({ action: "catalog_create" })).toEqual([]);
+      expect(await cases.getCase(created.id, actor, true)).not.toBeNull();
+      runtime.state.close();
+
+      const reopened = createSqliteRuntime(path);
+      const reopenedCatalog = new CatalogService(reopened.catalog, reopened.audit);
+      expect(
+        (await reopenedCatalog.list()).some((source) => source.name === "Nested sqlite source"),
+      ).toBe(false);
+      expect(await reopened.catalog.getSuccessIntent(actor.id, "src-sqlite-nested")).toBeNull();
       expect(await reopened.audit.list({ action: "catalog_create" })).toEqual([]);
       reopened.state.close();
     } finally {

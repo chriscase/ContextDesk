@@ -260,6 +260,36 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
         await expect(
           app.query(`UPDATE experiment_traces SET fingerprint = 'tamper'`),
         ).rejects.toThrow(/insert-only|permission denied/);
+        const catalogPrivileges = await app.query<{
+          table_update: boolean;
+          id_update: boolean;
+          kind_update: boolean;
+          created_by_update: boolean;
+          identity_update: boolean;
+          revision_update: boolean;
+        }>(`
+          SELECT
+            has_table_privilege(current_user, 'catalog_sources', 'UPDATE') AS table_update,
+            has_column_privilege(current_user, 'catalog_sources', 'id', 'UPDATE') AS id_update,
+            has_column_privilege(current_user, 'catalog_sources', 'kind', 'UPDATE') AS kind_update,
+            has_column_privilege(current_user, 'catalog_sources', 'created_by', 'UPDATE') AS created_by_update,
+            has_column_privilege(current_user, 'catalog_sources', 'identity_id', 'UPDATE') AS identity_update,
+            has_column_privilege(current_user, 'catalog_sources', 'revision', 'UPDATE') AS revision_update
+        `);
+        expect(catalogPrivileges.rows[0]).toEqual({
+          table_update: false,
+          id_update: false,
+          kind_update: false,
+          created_by_update: false,
+          identity_update: false,
+          revision_update: true,
+        });
+        await expect(
+          app.query(`UPDATE catalog_sources SET kind = 'human'`),
+        ).rejects.toThrow(/permission denied/);
+        await expect(
+          app.query(`UPDATE source_catalog_success_intents SET success_json = '{}'`),
+        ).rejects.toThrow(/insert-only|permission denied/);
         await expect(app.query(`CREATE TABLE collab_app_should_not (id int)`)).rejects.toThrow(
           /permission denied/,
         );

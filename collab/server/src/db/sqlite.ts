@@ -147,6 +147,7 @@ export class SqliteState {
   readonly db: DatabaseSync;
   private serializedTail: Promise<void> = Promise.resolve();
   private readonly serializedScope = new AsyncLocalStorage<boolean>();
+  private readonly sqlTx = new AsyncLocalStorage<boolean>();
 
   constructor(readonly path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -211,9 +212,21 @@ export class SqliteState {
   ): Promise<T> {
     return this.serialized(async () => {
       const snapshots = stores.map(({ store }) => decode(encode(storeState(store))));
+      if (this.sqlTx.getStore()) {
+        try {
+          const result = await operation();
+          if (shouldPersist(result)) {
+            for (const { key, store } of stores) this.write(key, storeState(store));
+          }
+          return result;
+        } catch (error) {
+          stores.forEach(({ store }, index) => restoreStore(store, snapshots[index]));
+          throw error;
+        }
+      }
       this.db.exec("BEGIN IMMEDIATE");
       try {
-        const result = await operation();
+        const result = await this.sqlTx.run(true, operation);
         if (shouldPersist(result)) {
           for (const { key, store } of stores) this.write(key, storeState(store));
         }
@@ -348,18 +361,35 @@ export function createSqliteRuntime(
     rawStrategyGovernance,
     new Set(["savePolicy", "savePreference", "restore"]),
   );
-  const rawCatalog = new MemoryCatalogStore();
+  const rawCatalog: MemoryCatalogStore = new MemoryCatalogStore((operation) =>
+    state.transaction(
+      [
+        { key: "audit", store: rawAudit },
+        { key: "catalog", store: rawCatalog },
+      ],
+      operation,
+    ));
   const catalog = persistentMemoryStore(
     state,
     "catalog",
     rawCatalog,
-    new Set(["insert", "remove", "updateMeta", "setLifecycle", "restore"]),
+    new Set([
+      "insert",
+      "remove",
+      "updateMeta",
+      "setLifecycle",
+      "saveLifecycle",
+      "insertSuccessIntent",
+      "restore",
+      "withAtomic",
+    ]),
   );
   const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
     state.transaction(
       [
         { key: "audit", store: rawAudit },
         { key: "cases", store: rawCases },
+        { key: "catalog", store: rawCatalog },
       ],
       operation,
     ));
