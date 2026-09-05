@@ -238,6 +238,12 @@ export function parseInvestigationOperationsQueuePage(
   if (!Array.isArray(record.items)) {
     throw new ContractViolation("$.items", "expected array");
   }
+  if (record.items.length > INVESTIGATION_OPERATIONS_QUEUE_LIMITS.maxLimit) {
+    throw new ContractViolation(
+      "$.items",
+      `expected at most ${INVESTIGATION_OPERATIONS_QUEUE_LIMITS.maxLimit} items`,
+    );
+  }
   checkObject("$", pageShape, {
     ...record,
     items: record.items.map(() => ({})),
@@ -263,6 +269,16 @@ export function parseInvestigationOperationsQueuePage(
     throw new ContractViolation(
       "$.coordinationScopeCounts.allVisible",
       "must cover every visible row in the page",
+    );
+  }
+  const returnedUnassignedCount = items.reduce(
+    (count, item) => count + (item.coordination.coordinator === null ? 1 : 0),
+    0,
+  );
+  if (returnedUnassignedCount > coordinationScopeCounts.unassigned) {
+    throw new ContractViolation(
+      "$.coordinationScopeCounts.unassigned",
+      "must cover every returned unassigned row",
     );
   }
 

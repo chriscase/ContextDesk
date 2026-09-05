@@ -296,6 +296,11 @@ describe("investigation operations queue page", () => {
     ).toThrow(/cover every visible row/);
     expect(() =>
       parseInvestigationOperationsQueuePage(
+        page({ coordinationScopeCounts: { allVisible: 1, mine: 0, unassigned: 0 } }),
+      ),
+    ).toThrow(/cover every returned unassigned row/);
+    expect(() =>
+      parseInvestigationOperationsQueuePage(
         page({ coordinationScopeCounts: { allVisible: 5, mine: -1, unassigned: 2 } }),
       ),
     ).toThrow(/unsigned safe integer/);
@@ -342,6 +347,47 @@ describe("investigation operations queue page", () => {
         }),
       ),
     ).toThrow(/at most/);
+  });
+
+  it("rejects an oversized page before parsing any nested row", () => {
+    const malformedItems = Array.from(
+      { length: INVESTIGATION_COLLECTION_LIMITS.maxLimit + 1 },
+      () => null,
+    );
+    try {
+      parseInvestigationOperationsQueuePage(
+        page({
+          items: malformedItems,
+          coordinationScopeCounts: {
+            allVisible: malformedItems.length,
+            mine: 0,
+            unassigned: malformedItems.length,
+          },
+        }),
+      );
+      throw new Error("expected the oversized page to be rejected");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ContractViolation);
+      expect(error).toMatchObject({ path: "$.items" });
+      expect((error as ContractViolation).detail).toMatch(/at most/);
+    }
+  });
+
+  it("does not count an assigned returned row as unassigned", () => {
+    const assigned = coordination(CASE_A, {
+      coordinator: { identityId: "identity-alice", username: "alice" },
+      revision: 1,
+      updatedAt: "2026-09-04T08:30:00-05:00",
+      updatedBy: { identityId: "identity-alice", username: "alice" },
+    });
+    const parsed = parseInvestigationOperationsQueuePage(
+      page({
+        items: [{ investigation: caseRow(), coordination: assigned }],
+        coordinationScopeCounts: { allVisible: 1, mine: 1, unassigned: 0 },
+      }),
+    );
+    expect(parsed.coordinationScopeCounts.unassigned).toBe(0);
+    expect(parsed.items[0]?.coordination.coordinator?.identityId).toBe("identity-alice");
   });
 
   it("returns detached, deeply frozen normalized values", () => {
