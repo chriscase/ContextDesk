@@ -4,6 +4,9 @@ import type {
   ArtifactAnnotationBulkResultV1,
   InvestigationCoordinationActionCommand,
   InvestigationArtifactAnnotationsBulkCommand,
+  InvestigationOperationsQueuePageV1,
+  InvestigationOperationsQueueQueryInput,
+  InvestigationOperationsQueueQueryV1,
   InvestigationRuntime,
 } from "./public.js";
 import { MAX_ARTIFACT_ANNOTATION_BULK_IDS } from "./public.js";
@@ -91,5 +94,24 @@ describe("investigation runtime public surface", () => {
       idempotencyKey: "coord-public-0004",
     };
     expect([invalidSelf.action, invalidParticipant.action]).toHaveLength(2);
+  });
+
+  it("exposes the read-only queue DTO and command without transport or action authority", () => {
+    const input: InvestigationOperationsQueueQueryInput = {
+      q: "checkout",
+      coordinationScope: "mine",
+      limit: 25,
+    };
+    const parsed: InvestigationOperationsQueueQueryV1 | null = null;
+    const page: InvestigationOperationsQueuePageV1 | null = null;
+    const command: NonNullable<InvestigationRuntime["commands"]["queryOperationsQueue"]> =
+      () => undefined;
+
+    expect(input).toEqual({ q: "checkout", coordinationScope: "mine", limit: 25 });
+    expect(parsed).toBeNull();
+    expect(page).toBeNull();
+    expect(command(input)).toBeUndefined();
+    expect(publicRuntime).not.toHaveProperty("parseInvestigationOperationsQueuePage");
+    expect(publicRuntime).not.toHaveProperty("INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID");
   });
 });

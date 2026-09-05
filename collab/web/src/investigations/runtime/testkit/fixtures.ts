@@ -35,6 +35,11 @@ import {
   type EvidenceUploadSuccessV1,
   type InvestigationLifecycleV1,
 } from "@cd-collab/contracts/investigation-runtime";
+import {
+  INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+  parseInvestigationOperationsQueuePage,
+  type InvestigationOperationsQueuePageV1,
+} from "@cd-collab/contracts/investigation-operations-queue";
 
 /** Stable identities used by Runtime V1 conformance tests. */
 export const RUNTIME_FIXTURE_IDS = Object.freeze({
@@ -110,6 +115,56 @@ export function makeCaseList(): CaseListV1 {
   return parseCaseList({
     schemaId: CASE_LIST_SCHEMA_ID,
     cases: [makeSparseImportedCase(), makePopulatedCase()],
+  });
+}
+
+/** A joined, actor-scoped queue page whose counts are server-authored fixture data. */
+export function makeOperationsQueuePage(
+  overrides: Record<string, unknown> = {},
+): InvestigationOperationsQueuePageV1 {
+  const sparse = makeSparseImportedCase();
+  const populated = makePopulatedCase();
+  return parseInvestigationOperationsQueuePage({
+    schemaId: INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+    items: [
+      {
+        investigation: populated,
+        coordination: {
+          schemaId: "cd-collab.investigation_coordination.v1",
+          investigationId: populated.id,
+          coordinator: { identityId: "identity-alice", username: "alice" },
+          revision: 2,
+          updatedAt: "2026-02-03T20:00:00.000Z",
+          updatedBy: { identityId: "identity-alice", username: "alice" },
+          archived: false,
+        },
+      },
+      {
+        investigation: sparse,
+        coordination: {
+          schemaId: "cd-collab.investigation_coordination.v1",
+          investigationId: sparse.id,
+          coordinator: null,
+          revision: 0,
+          updatedAt: null,
+          updatedBy: null,
+          archived: false,
+        },
+      },
+    ],
+    nextCursor: null,
+    hiddenArchivedCount: 0,
+    facets: {
+      status: {
+        top: [{ key: "open", count: 1 }, { key: "monitoring", count: 1 }],
+        otherCount: 0,
+      },
+      entity: { top: [], otherCount: 0 },
+      impactIdentity: { top: [], otherCount: 0 },
+      contributor: { top: [], otherCount: 0 },
+    },
+    coordinationScopeCounts: { allVisible: 2, mine: 1, unassigned: 1 },
+    ...overrides,
   });
 }
 

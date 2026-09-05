@@ -45,6 +45,14 @@ import {
   type InvestigationCollectionQueryV1,
 } from "@cd-collab/contracts/investigation-collection";
 import {
+  INVESTIGATION_OPERATIONS_QUEUE_LIMITS,
+  INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+  parseInvestigationOperationsQueuePage,
+  parseInvestigationOperationsQueueQuery,
+  type InvestigationOperationsQueuePageV1,
+  type InvestigationOperationsQueueQueryV1,
+} from "@cd-collab/contracts/investigation-operations-queue";
+import {
   ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
   parseArtifactAnnotation,
   parseArtifactAnnotationBulkResult,
@@ -302,12 +310,39 @@ export interface InvestigationCollectionQueryGateway {
   ): Promise<GatewayResult<InvestigationCollectionPageV1>>;
 }
 
+/**
+ * Presentation-safe Operations Queue filters. The authenticated actor is
+ * deliberately absent: the server derives `mine` from the protected session.
+ */
+export interface InvestigationOperationsQueueQueryInput {
+  readonly q?: InvestigationOperationsQueueQueryV1["q"];
+  readonly status?: ReadonlyArray<InvestigationOperationsQueueQueryV1["status"][number]>;
+  readonly includeArchived?: InvestigationOperationsQueueQueryV1["includeArchived"];
+  readonly entityId?: InvestigationOperationsQueueQueryV1["entityId"];
+  readonly impactIdentity?: InvestigationOperationsQueueQueryV1["impactIdentity"];
+  readonly contributorId?: InvestigationOperationsQueueQueryV1["contributorId"];
+  readonly recordedFrom?: InvestigationOperationsQueueQueryV1["recordedFrom"];
+  readonly recordedTo?: InvestigationOperationsQueueQueryV1["recordedTo"];
+  readonly coordinationScope?: InvestigationOperationsQueueQueryV1["coordinationScope"];
+  readonly limit?: InvestigationOperationsQueueQueryV1["limit"];
+  readonly cursor?: InvestigationOperationsQueueQueryV1["cursor"];
+}
+
+/** Optional read-only queue transport, independent of both collection seams. */
+export interface InvestigationOperationsQueueGateway {
+  queryOperationsQueue(
+    query: InvestigationOperationsQueueQueryInput,
+    options: GatewayRequestOptions,
+  ): Promise<GatewayResult<InvestigationOperationsQueuePageV1>>;
+}
+
 export interface InvestigationGateway
   extends
     Partial<InvestigationWriteGateway>,
     Partial<InvestigationAnnotationGateway>,
     Partial<InvestigationCollectionQueryGateway>,
-    Partial<InvestigationCoordinationGateway>
+    Partial<InvestigationCoordinationGateway>,
+    Partial<InvestigationOperationsQueueGateway>
 {
   listInvestigations(
     options: GatewayRequestOptions,
@@ -800,6 +835,23 @@ function investigationCollectionPageIdentity(page: InvestigationCollectionPageV1
   return true;
 }
 
+function investigationOperationsQueuePageIdentity(
+  page: InvestigationOperationsQueuePageV1,
+): boolean {
+  const identities = new Set<string>();
+  for (const item of page.items) {
+    const investigationId = item.investigation.id;
+    if (
+      investigationId.length === 0
+      || identities.has(investigationId)
+      || item.coordination.investigationId !== investigationId
+      || item.coordination.archived !== (item.investigation.status === "archived")
+    ) return false;
+    identities.add(investigationId);
+  }
+  return true;
+}
+
 const COLLECTION_QUERY_FILTER_KEYS = [
   "q",
   "status",
@@ -930,6 +982,117 @@ export function investigationCollectionQueryKey(
     contributorId: query.contributorId,
     recordedFrom: query.recordedFrom,
     recordedTo: query.recordedTo,
+    cursor: query.cursor,
+    limit: query.limit,
+  });
+}
+
+const OPERATIONS_QUEUE_QUERY_FILTER_KEYS = [
+  ...COLLECTION_QUERY_FILTER_KEYS,
+  "coordinationScope",
+] as const;
+
+/**
+ * Snapshot only queue-contract fields. Unknown workload, ranking, actor, and
+ * assignment inputs cannot become query parameters later.
+ */
+export function snapshotInvestigationOperationsQueueQueryInput(
+  input: InvestigationOperationsQueueQueryInput,
+): InvestigationOperationsQueueQueryInput {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return Object.freeze({ q: "\u0000" });
+  }
+  const collection = snapshotInvestigationCollectionQueryInput(input);
+  const record = input as Record<string, unknown>;
+  return deepFreezeDto({
+    ...collection,
+    ...(record.coordinationScope === undefined
+      ? {}
+      : { coordinationScope: record.coordinationScope }),
+  }) as InvestigationOperationsQueueQueryInput;
+}
+
+export function parseInvestigationOperationsQueueQueryInput(
+  input: InvestigationOperationsQueueQueryInput,
+): GatewayResult<InvestigationOperationsQueueQueryV1> {
+  try {
+    const snapshot = snapshotInvestigationOperationsQueueQueryInput(input);
+    const body: Record<string, unknown> = {
+      schemaId: INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+    };
+    const record = snapshot as Record<string, unknown>;
+    for (const key of OPERATIONS_QUEUE_QUERY_FILTER_KEYS) {
+      if (record[key] !== undefined) body[key] = record[key];
+    }
+    return {
+      ok: true,
+      value: deepFreezeDto(parseInvestigationOperationsQueueQuery(body)),
+    };
+  } catch (cause) {
+    return cause instanceof ContractViolation
+      ? failed(protocolFailure("contract"))
+      : failed({ kind: "unexpected" });
+  }
+}
+
+function serializeInvestigationOperationsQueueQuery(
+  query: InvestigationOperationsQueueQueryV1,
+): string {
+  const params = new URLSearchParams();
+  params.set("schemaId", query.schemaId);
+  if (query.q !== "") params.set("q", query.q);
+  for (const status of query.status) params.append("status", status);
+  if (query.includeArchived) params.set("includeArchived", "true");
+  if (query.entityId !== null) params.set("entityId", query.entityId);
+  if (query.impactIdentity !== null) {
+    params.set("impactIdentity", JSON.stringify({
+      productName: query.impactIdentity.productName,
+      version: query.impactIdentity.version,
+      build: query.impactIdentity.build,
+      component: query.impactIdentity.component,
+      environment: query.impactIdentity.environment,
+    }));
+  }
+  if (query.contributorId !== null) params.set("contributorId", query.contributorId);
+  if (query.recordedFrom !== null) params.set("recordedFrom", query.recordedFrom);
+  if (query.recordedTo !== null) params.set("recordedTo", query.recordedTo);
+  params.set("coordinationScope", query.coordinationScope);
+  if (query.limit !== INVESTIGATION_OPERATIONS_QUEUE_LIMITS.defaultLimit) {
+    params.set("limit", String(query.limit));
+  }
+  if (query.cursor !== null) params.set("cursor", query.cursor);
+  return params.toString();
+}
+
+export function investigationOperationsQueueQueryKeyFromInput(
+  input: InvestigationOperationsQueueQueryInput | null,
+): string | null {
+  if (input === null) return null;
+  const parsed = parseInvestigationOperationsQueueQueryInput(input);
+  return parsed.ok ? investigationOperationsQueueQueryKey(parsed.value) : "invalid";
+}
+
+export function investigationOperationsQueueQueryKey(
+  query: InvestigationOperationsQueueQueryV1,
+): string {
+  return JSON.stringify({
+    q: query.q,
+    status: [...query.status].sort(),
+    includeArchived: query.includeArchived,
+    entityId: query.entityId,
+    impactIdentity: query.impactIdentity === null
+      ? null
+      : {
+          productName: query.impactIdentity.productName,
+          version: query.impactIdentity.version,
+          build: query.impactIdentity.build,
+          component: query.impactIdentity.component,
+          environment: query.impactIdentity.environment,
+        },
+    contributorId: query.contributorId,
+    recordedFrom: query.recordedFrom,
+    recordedTo: query.recordedTo,
+    coordinationScope: query.coordinationScope,
     cursor: query.cursor,
     limit: query.limit,
   });
@@ -1394,6 +1557,11 @@ const UNAVAILABLE_COORDINATION_GATEWAY: InvestigationCoordinationGateway = Objec
     Promise.resolve(failed<InvestigationCoordinationActionSuccessV1>(WRITE_SEAM_UNAVAILABLE)),
 });
 
+const UNAVAILABLE_OPERATIONS_QUEUE_GATEWAY: InvestigationOperationsQueueGateway = Object.freeze({
+  queryOperationsQueue: () =>
+    Promise.resolve(failed<InvestigationOperationsQueuePageV1>(QUERY_SEAM_UNAVAILABLE)),
+});
+
 /**
  * Resolve the write seams a gateway actually implements.
  *
@@ -1516,9 +1684,27 @@ export function investigationCoordinationGateway(
   return Object.freeze(resolved);
 }
 
+/**
+ * Resolve the queue read independently. Older transports remain valid, but a
+ * queue request can never be rewritten as either legacy collection request.
+ */
+export function investigationOperationsQueueGateway(
+  gateway: InvestigationGateway,
+): InvestigationOperationsQueueGateway {
+  const queryOperationsQueue = gateway.queryOperationsQueue;
+  if (queryOperationsQueue === undefined) return UNAVAILABLE_OPERATIONS_QUEUE_GATEWAY;
+  const resolved: InvestigationOperationsQueueGateway = {
+    queryOperationsQueue(query, options) {
+      return queryOperationsQueue.call(gateway, query, options);
+    },
+  };
+  return Object.freeze(resolved);
+}
+
 export const investigationGateway: InvestigationGatewayWithWrites
   & InvestigationCollectionQueryGateway
-  & InvestigationCoordinationGateway = {
+  & InvestigationCoordinationGateway
+  & InvestigationOperationsQueueGateway = {
   async listInvestigations({ signal }) {
     const result = await requestParsed(
       "/api/cases",
@@ -1551,6 +1737,28 @@ export const investigationGateway: InvestigationGatewayWithWrites
       signal,
       parseInvestigationCollectionPage,
       investigationCollectionPageIdentity,
+    );
+  },
+
+  async queryOperationsQueue(input, { signal }) {
+    if (signal.aborted) return aborted();
+    const parsed = parseInvestigationOperationsQueueQueryInput(input);
+    if (signal.aborted) return aborted();
+    if (!parsed.ok) return parsed;
+    let search: string;
+    try {
+      if (signal.aborted) return aborted();
+      search = serializeInvestigationOperationsQueueQuery(parsed.value);
+    } catch {
+      return signal.aborted ? aborted() : failed({ kind: "unexpected" });
+    }
+    if (signal.aborted) return aborted();
+    return requestParsed(
+      `/api/cases?${search}`,
+      {},
+      signal,
+      parseInvestigationOperationsQueuePage,
+      investigationOperationsQueuePageIdentity,
     );
   },
 

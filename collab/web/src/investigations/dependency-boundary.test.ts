@@ -711,6 +711,24 @@ describe("Investigation Runtime V1 dependency boundary", () => {
     expect(investigationImportViolations(runtimePath, runtime)).toEqual([]);
   });
 
+  it("keeps the browser-safe queue contract inside runtime and out of strategies", () => {
+    const runtimePath = resolve(INVESTIGATIONS_ROOT, "runtime/queue-example.ts");
+    const runtime = parseSourceText(
+      runtimePath,
+      'import type { InvestigationOperationsQueuePageV1 } from "@cd-collab/contracts/investigation-operations-queue";\nexport type Page = InvestigationOperationsQueuePageV1;',
+    );
+    expect(investigationImportViolations(runtimePath, runtime)).toEqual([]);
+
+    const strategyPath = resolve(INVESTIGATIONS_ROOT, "strategies/example/Queue.tsx");
+    const strategy = parseSourceText(
+      strategyPath,
+      'import type { InvestigationOperationsQueuePageV1 } from "@cd-collab/contracts/investigation-operations-queue";\nexport type Page = InvestigationOperationsQueuePageV1;',
+    );
+    expect(investigationImportViolations(strategyPath, strategy)).toEqual([
+      "collab/web/src/investigations/strategies/example/Queue.tsx:1 imports @cd-collab/contracts/investigation-operations-queue, which is not an approved strategy dependency",
+    ]);
+  });
+
   it("allows only the exact shared presentation surface and keeps the kit authority-free", () => {
     const keystonePath = resolve(
       INVESTIGATIONS_ROOT,
