@@ -429,6 +429,42 @@ describe("useInvestigationCollectionQuery", () => {
     expect(result.current.successfulSnapshotGeneration).toBe(1);
   });
 
+  it("never republishes accumulated rows after a concealed collection response", async () => {
+    const first = collectionPage({ hiddenArchivedCount: 1 });
+    const retry = createDeferred<GatewayResult<InvestigationCollectionPageV1>>();
+    const responses: Array<
+      GatewayResult<InvestigationCollectionPageV1>
+      | Promise<GatewayResult<InvestigationCollectionPageV1>>
+    > = [
+      { ok: true, value: first },
+      { ok: false, error: { kind: "not_found", status: 404 } },
+      retry.promise,
+    ];
+    const gateway = queryGatewayWith(async () => responses.shift()!);
+    const { result } = renderHook(() => useInvestigationCollectionQuery({
+      gateway,
+      enabled: true,
+      identityKey: "alice",
+      authorityKey: "interactive:viewer",
+      query: { q: "checkout" },
+    }));
+    await waitFor(() => expect(result.current.page).toEqual({ status: "ready", value: first }));
+
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.page).toEqual({
+      status: "failed",
+      error: { kind: "not_found", status: 404 },
+    }));
+
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.page).toEqual({ status: "loading" }));
+    act(() => retry.resolve({ ok: false, error: { kind: "network" } }));
+    await waitFor(() => expect(result.current.page).toEqual({
+      status: "failed",
+      error: { kind: "network" },
+    }));
+  });
+
   it("keeps a failed first page failed instead of looking empty", async () => {
     const gateway = queryGatewayWith(async () => ({
       ok: false,

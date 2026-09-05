@@ -342,6 +342,12 @@ export function useInvestigationCollectionQuery({
             generation: requestGeneration,
           });
         } else {
+          // Concealment failures must evict the private accumulated-page
+          // cache as well as the published value. A later retry must not be
+          // able to republish rows after access was lost or hidden.
+          if (result.error.kind === "not_found" || result.error.kind === "auth_lost") {
+            accumulatedPageRef.current = null;
+          }
           setResource((current) => failResourceLoad(current, scope, result.error));
         }
       })

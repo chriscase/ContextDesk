@@ -5,7 +5,10 @@ import {
   INVESTIGATION_LIFECYCLE_SCHEMA_ID,
   type CaseV1,
 } from "@cd-collab/contracts/investigation-runtime";
-import { investigationCollectionQueryGateway } from "../gateway.js";
+import {
+  investigationCollectionQueryGateway,
+  investigationOperationsQueueGateway,
+} from "../gateway.js";
 import { describe, expect, it } from "vitest";
 import {
   READ_ONLY_CAPABILITY_FIXTURE,
@@ -24,6 +27,7 @@ import {
   makeContributionList,
   makeEvidenceList,
   makeEvidenceUploadSuccess,
+  makeOperationsQueuePage,
   makePopulatedCase,
   makeRestoreAllowedLifecycle,
   makeSparseImportedCase,
@@ -63,6 +67,22 @@ describe("Runtime V1 deterministic testkit", () => {
     expect(upload.artifact).toEqual(evidence.artifacts[0]);
     expect(upload.artifact.summaryContributionId).toBe(upload.summary.id);
     expect(contributions.contributions.map(({ id }) => id)).toContain(upload.summary.id);
+  });
+
+  it("provides a frozen queue page with coherent joined rows and server counts", () => {
+    const page = makeOperationsQueuePage();
+    expect(page.items.map((item) => item.investigation.id)).toEqual([
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      RUNTIME_FIXTURE_IDS.sparseCase,
+    ]);
+    expect(page.items.map((item) => item.coordination.investigationId)).toEqual(
+      page.items.map((item) => item.investigation.id),
+    );
+    expect(page.coordinationScopeCounts).toEqual({ allVisible: 2, mine: 1, unassigned: 1 });
+    expect(Object.isFrozen(page)).toBe(true);
+    expect(Object.isFrozen(page.items)).toBe(true);
+    expect(Object.isFrozen(page.items[0]?.coordination.coordinator)).toBe(true);
+    expect(Object.isFrozen(page.coordinationScopeCounts)).toBe(true);
   });
 
   it("provides contract-normalized bulk annotation fixtures with set identities", () => {
@@ -118,6 +138,7 @@ describe("Runtime V1 deterministic testkit", () => {
     const gateway = createInvestigationGatewayDouble();
 
     expect(gateway.queryInvestigations).toBeUndefined();
+    expect(gateway.queryOperationsQueue).toBeUndefined();
     await expect(gateway.listInvestigations({ signal })).resolves.toEqual(
       gatewayOk(makeCaseList().cases),
     );
@@ -159,6 +180,17 @@ describe("Runtime V1 deterministic testkit", () => {
     await expect(gateway.listInvestigations({ signal })).resolves.toEqual(
       gatewayOk(makeCaseList().cases),
     );
+  });
+
+  it("fails the missing queue seam closed without using either collection read", async () => {
+    const { signal } = new AbortController();
+    const gateway = createInvestigationGatewayDouble();
+    const resolved = investigationOperationsQueueGateway(gateway);
+
+    await expect(resolved.queryOperationsQueue({ coordinationScope: "mine" }, { signal }))
+      .resolves.toEqual(gatewayUnavailable());
+    expect(gateway.queryInvestigations).toBeUndefined();
+    expect(gateway.listInvestigations).not.toHaveBeenCalled();
   });
 
   it("models a late transport that ignores abort without using a clock", async () => {

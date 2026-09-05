@@ -35,6 +35,7 @@ export { MAX_ARTIFACT_ANNOTATION_BULK_IDS } from "./annotation-contract.js";
 export {
   type EvidencePreviewValue,
   type InvestigationCollectionQueryInput,
+  type InvestigationOperationsQueueQueryInput,
   type PreviewEvidenceInput,
 } from "./gateway.js";
 export {
@@ -75,3 +76,10 @@ export type {
   InvestigationCollectionQueryV1,
   InvestigationCollectionStatusV1,
 } from "@cd-collab/contracts/investigation-collection";
+export type {
+  InvestigationOperationsQueueCoordinationScopeCountsV1,
+  InvestigationOperationsQueueCoordinationScopeV1,
+  InvestigationOperationsQueuePageV1,
+  InvestigationOperationsQueueQueryV1,
+  InvestigationOperationsQueueRowV1,
+} from "@cd-collab/contracts/investigation-operations-queue";

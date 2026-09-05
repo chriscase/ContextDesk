@@ -3,6 +3,7 @@ import {
   parseInvestigationCollectionPage,
   type InvestigationCollectionPageV1,
 } from "@cd-collab/contracts/investigation-collection";
+import type { InvestigationOperationsQueuePageV1 } from "@cd-collab/contracts/investigation-operations-queue";
 import {
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
@@ -18,9 +19,11 @@ import { startTransition, Suspense, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   parseInvestigationCollectionQueryInput,
+  parseInvestigationOperationsQueueQueryInput,
   type GatewayResult,
   type InvestigationCollectionQueryInput,
   type InvestigationGateway,
+  type InvestigationOperationsQueueQueryInput,
 } from "./gateway.js";
 import {
   ARTIFACT_ANNOTATION_BULK_RESULT_SCHEMA_ID,
@@ -43,6 +46,7 @@ import {
   makeContributionList,
   makeEvidenceList,
   makeEvidenceUploadSuccess,
+  makeOperationsQueuePage,
   makePopulatedCase,
   makeSparseImportedCase,
   RUNTIME_FIXTURE_IDS,
@@ -705,6 +709,8 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().resources.investigation).toEqual({ status: "idle" });
     expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
     expect(currentRuntime().resources.investigationCollectionQuery).toBeNull();
+    expect(currentRuntime().resources.operationsQueue).toEqual({ status: "idle" });
+    expect(currentRuntime().resources.operationsQueueQuery).toBeNull();
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
       uploadEvidence: null,
@@ -715,9 +721,11 @@ describe("InvestigationRuntimeProvider", () => {
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: null,
+      queryOperationsQueue: null,
     });
     expect(gateway.listInvestigations).not.toHaveBeenCalled();
     expect(gateway.queryInvestigations).toBeUndefined();
+    expect(gateway.queryOperationsQueue).toBeUndefined();
     expect(gateway.getInvestigation).not.toHaveBeenCalled();
     expect(gateway.listEvidence).not.toHaveBeenCalled();
     expect(gateway.listContributions).not.toHaveBeenCalled();
@@ -769,6 +777,7 @@ describe("InvestigationRuntimeProvider", () => {
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: expect.any(Function),
+      queryOperationsQueue: expect.any(Function),
     });
     expect(gateway.createInvestigation).not.toHaveBeenCalled();
     expect(gateway.uploadEvidence).not.toHaveBeenCalled();
@@ -1984,7 +1993,7 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().resources.lifecycle).toEqual({ status: "ready", value: changed });
   });
 
-  it("fences identity and case changes while retaining the list outside investigation routes", async () => {
+  it("fences identity and case changes and stops investigation reads outside investigation routes", async () => {
     const caseRequests: Array<{ id: string; signal: AbortSignal }> = [];
     const gateway = makeGateway({
       getInvestigation: vi.fn((id, { signal }) => {
@@ -2058,10 +2067,13 @@ describe("InvestigationRuntimeProvider", () => {
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: expect.any(Function),
+      queryOperationsQueue: expect.any(Function),
     });
-    await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+    await waitFor(() => expect(currentRuntime().resources.investigations).toEqual({ status: "idle" }));
+    expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
     // One initial read, one freshness read for the case transition, and one
-    // newly scoped read for each authority/identity transition.
+    // newly scoped read for each authority/identity transition. Leaving the
+    // investigations area does not add another collection read.
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(4);
   });
 
@@ -2219,6 +2231,7 @@ describe("InvestigationRuntimeProvider", () => {
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
         queryInvestigations: expect.any(Function),
+        queryOperationsQueue: expect.any(Function),
       });
     });
 
@@ -2395,6 +2408,7 @@ describe("InvestigationRuntimeProvider", () => {
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
         queryInvestigations: expect.any(Function),
+        queryOperationsQueue: expect.any(Function),
       });
     });
 
@@ -2572,6 +2586,149 @@ describe("InvestigationRuntimeProvider", () => {
         cursor: OPAQUE_CURSOR,
       });
       expect(requests[1]).toEqual(continued.ok ? continued.value : null);
+    });
+  });
+
+  describe("operations queue resource", () => {
+    const commonProps = {
+      identityKey: "alice",
+      authorityKey: "alice-authority-v1",
+      capabilities: ["investigation:read"] as const,
+      readOnly: true,
+      active: false,
+      focusCaseId: null,
+      isInvestigationLocation: false,
+      onOpenCreated: vi.fn(),
+    };
+
+    it("does not query on mount and fails a missing queue seam closed", async () => {
+      const listInvestigations = vi.fn(async () => succeeded(makeCaseList().cases));
+      const queryInvestigations = vi.fn(() => unexpected<InvestigationCollectionPageV1>());
+      const gateway = makeGateway({ listInvestigations, queryInvestigations });
+      render(
+        <ProviderUnderTest {...commonProps} gateway={gateway}>
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await act(async () => undefined);
+
+      expect(currentRuntime().resources.investigations).toEqual({ status: "idle" });
+      expect(currentRuntime().resources.operationsQueue).toEqual({ status: "idle" });
+      expect(currentRuntime().resources.operationsQueueQuery).toBeNull();
+      expect(currentRuntime().commands.queryOperationsQueue).toEqual(expect.any(Function));
+      expect(gateway.queryOperationsQueue).toBeUndefined();
+
+      act(() => currentRuntime().commands.queryOperationsQueue?.({ coordinationScope: "mine" }));
+      await waitFor(() => expect(currentRuntime().resources.operationsQueue).toEqual({
+        status: "failed",
+        error: { kind: "unavailable", status: 503 },
+      }));
+      expect(listInvestigations).not.toHaveBeenCalled();
+      expect(queryInvestigations).not.toHaveBeenCalled();
+      expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
+    });
+
+    it("snapshots an explicit query and publishes only a deeply frozen server page", async () => {
+      const page = makeOperationsQueuePage();
+      const queryOperationsQueue = vi.fn(async (
+        _query: InvestigationOperationsQueueQueryInput,
+        _options: { readonly signal: AbortSignal },
+      ) => succeeded(page));
+      const gateway = makeGateway({ queryOperationsQueue });
+      render(
+        <ProviderUnderTest {...commonProps} gateway={gateway}>
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      const status = ["open"] as Array<"open">;
+      const input = {
+        q: "checkout",
+        status,
+        coordinationScope: "unassigned" as const,
+        priority: "urgent",
+        actorId: "identity-mallory",
+      };
+
+      act(() => currentRuntime().commands.queryOperationsQueue?.(input));
+      status.push("open");
+      input.q = "mutated-after-command";
+      await waitFor(() => expect(currentRuntime().resources.operationsQueue.status).toBe("ready"));
+
+      const parsed = parseInvestigationOperationsQueueQueryInput({
+        q: "checkout",
+        status: ["open"],
+        coordinationScope: "unassigned",
+      });
+      expect(queryOperationsQueue.mock.calls[0]?.[0]).toEqual(parsed.ok ? parsed.value : null);
+      expect(queryOperationsQueue.mock.calls[0]?.[0]).not.toHaveProperty("priority");
+      expect(queryOperationsQueue.mock.calls[0]?.[0]).not.toHaveProperty("actorId");
+      expect(currentRuntime().resources.operationsQueueQuery).toEqual(parsed.ok ? parsed.value : null);
+      const resource = currentRuntime().resources.operationsQueue;
+      expect(resource).toEqual({ status: "ready", value: page });
+      if (resource.status !== "ready") throw new Error("expected ready queue");
+      expect(Object.isFrozen(resource.value)).toBe(true);
+      expect(Object.isFrozen(resource.value.items)).toBe(true);
+      expect(Object.isFrozen(resource.value.items[0]?.coordination.coordinator)).toBe(true);
+      expect(Object.isFrozen(resource.value.coordinationScopeCounts)).toBe(true);
+      expect(currentRuntime().mutations).toEqual(expect.objectContaining({
+        create: { status: "idle" },
+      }));
+    });
+
+    it("drops an old scope's queue input before a new identity can request it", async () => {
+      const requests: Array<{
+        signal: AbortSignal;
+        deferred: Deferred<GatewayResult<InvestigationOperationsQueuePageV1>>;
+      }> = [];
+      const gateway = makeGateway({
+        queryOperationsQueue: vi.fn((_query, { signal }) => {
+          const deferred = createDeferred<GatewayResult<InvestigationOperationsQueuePageV1>>();
+          requests.push({ signal, deferred });
+          return deferred.promise;
+        }),
+      });
+      const view = render(
+        <ProviderUnderTest {...commonProps} gateway={gateway}>
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      act(() => currentRuntime().commands.queryOperationsQueue?.({
+        coordinationScope: "mine",
+        cursor: "eyJwYWdlIjoyfQ",
+      }));
+      await waitFor(() => expect(requests).toHaveLength(1));
+
+      view.rerender(
+        <ProviderUnderTest
+          {...commonProps}
+          identityKey="bob"
+          authorityKey="bob-authority-v1"
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      await waitFor(() => expect(currentRuntime().resources.operationsQueueQuery).toBeNull());
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.signal.aborted).toBe(true);
+      await act(async () => requests[0]!.deferred.resolve({
+        ok: true,
+        value: makeOperationsQueuePage(),
+      }));
+      expect(currentRuntime().resources.operationsQueue).toEqual({ status: "idle" });
+
+      act(() => currentRuntime().commands.queryOperationsQueue?.({ coordinationScope: "mine" }));
+      await waitFor(() => expect(requests).toHaveLength(2));
+      expect(currentRuntime().resources.operationsQueueQuery?.cursor).toBeNull();
+
+      await act(async () => requests[1]!.deferred.resolve({
+        ok: false,
+        error: { kind: "auth_lost", status: 401 },
+      }));
+      expect(currentRuntime().resources.operationsQueue).toEqual({
+        status: "failed",
+        error: { kind: "auth_lost", status: 401 },
+      });
     });
   });
 });

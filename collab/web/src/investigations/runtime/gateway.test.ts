@@ -20,6 +20,10 @@ import {
   parseInvestigationCollectionPage,
   type InvestigationCollectionPageV1,
 } from "@cd-collab/contracts/investigation-collection";
+import {
+  INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+  INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+} from "@cd-collab/contracts/investigation-operations-queue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUTH_LOST_EVENT } from "../../protected-api.js";
 import {
@@ -28,8 +32,10 @@ import {
   investigationBulkAnnotationGateway,
   investigationCollectionQueryGateway,
   investigationCoordinationGateway,
+  investigationOperationsQueueGateway,
   investigationWriteGateway,
   parseInvestigationCollectionQueryInput,
+  parseInvestigationOperationsQueueQueryInput,
   type InvestigationGateway,
   type InvestigationWriteGateway,
 } from "./gateway.js";
@@ -50,6 +56,7 @@ import {
   makeContributionList,
   makeEvidenceList,
   makeEvidenceUploadSuccess,
+  makeOperationsQueuePage,
   makePopulatedCase,
 } from "./testkit/fixtures.js";
 import { createDeferred } from "./testkit/promises.js";
@@ -2792,6 +2799,170 @@ describe("collection query seam", () => {
     controller.abort();
     const fetchMock = vi.spyOn(globalThis, "fetch");
     expect(await investigationGateway.queryInvestigations({}, options(controller))).toEqual({
+      ok: false,
+      error: { kind: "aborted" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("operations queue query seam", () => {
+  it("serializes only versioned queue filters and never sends actor or workload policy", async () => {
+    const page = makeOperationsQueuePage();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(page));
+    const input = Object.assign(Object.create({ inheritedFilter: "must-not-cross" }), {
+      q: "  storefront operators  ",
+      status: ["open", "monitoring"],
+      includeArchived: true,
+      entityId: "ent-northwind",
+      impactIdentity: { ...COLLECTION_IMPACT_IDENTITY, extra: "must-not-cross" },
+      contributorId: "identity-alice",
+      recordedFrom: "2026-01-01T00:00:00.000Z",
+      recordedTo: "2026-08-26T00:00:00.000Z",
+      coordinationScope: "mine",
+      cursor: OPAQUE_COLLECTION_CURSOR,
+      limit: 25,
+      actorId: "identity-mallory",
+      coordinatorIdentityId: "identity-mallory",
+      priority: "urgent",
+      rank: 1,
+      sla: "five-minutes",
+      lease: true,
+      presence: true,
+      assignment: "claim_self",
+      autoAssign: true,
+    });
+
+    const result = await investigationGateway.queryOperationsQueue(input, options());
+
+    expect(result).toEqual({ ok: true, value: page });
+    expect(result.ok && Object.isFrozen(result.value)).toBe(true);
+    expect(result.ok && Object.isFrozen(result.value.items)).toBe(true);
+    expect(result.ok && Object.isFrozen(result.value.items[0]?.coordination)).toBe(true);
+    expect(result.ok && Object.isFrozen(result.value.coordinationScopeCounts)).toBe(true);
+    const [requested, init] = fetchMock.mock.calls[0] ?? [];
+    const url = new URL(String(requested), "http://runtime.test");
+    expect(url.pathname).toBe("/api/cases");
+    expect(init?.method).toBeUndefined();
+    expect(init?.method ?? "GET").toBe("GET");
+    expect(url.searchParams.get("schemaId")).toBe(
+      INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+    );
+    expect(url.searchParams.get("q")).toBe("storefront operators");
+    expect(url.searchParams.getAll("status")).toEqual(["open", "monitoring"]);
+    expect(url.searchParams.get("coordinationScope")).toBe("mine");
+    expect(url.searchParams.get("cursor")).toBe(OPAQUE_COLLECTION_CURSOR);
+    for (const forbidden of [
+      "actorId",
+      "coordinatorIdentityId",
+      "priority",
+      "rank",
+      "sla",
+      "lease",
+      "presence",
+      "assignment",
+      "autoAssign",
+      "inheritedFilter",
+    ]) expect(url.searchParams.get(forbidden)).toBeNull();
+  });
+
+  it("defaults only after an explicit call and stays separate from both legacy reads", async () => {
+    const page = makeOperationsQueuePage({ items: [], coordinationScopeCounts: {
+      allVisible: 0,
+      mine: 0,
+      unassigned: 0,
+    } });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(page));
+
+    expect(await investigationGateway.queryOperationsQueue({}, options())).toEqual({
+      ok: true,
+      value: page,
+    });
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]), "http://runtime.test");
+    expect(url.searchParams.get("schemaId")).toBe(
+      INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+    );
+    expect(url.searchParams.get("coordinationScope")).toBe("all_visible");
+    expect(url.searchParams.get("limit")).toBeNull();
+    expect(parseInvestigationOperationsQueueQueryInput({}).ok).toBe(true);
+  });
+
+  it.each([
+    ["legacy case-list", makeCaseList()],
+    ["Collection V1", collectionPageJson()],
+  ] as const)("rejects a real %s envelope without falling back", async (_kind, envelope) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(envelope));
+
+    expect(await investigationGateway.queryOperationsQueue({}, options())).toEqual({
+      ok: false,
+      error: { kind: "protocol", reason: "contract" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a queue page whose server-owned scope counts contradict its rows", async () => {
+    const malformed = {
+      ...makeOperationsQueuePage(),
+      schemaId: INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+      coordinationScopeCounts: { allVisible: 0, mine: 0, unassigned: 0 },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(malformed));
+
+    expect(await investigationGateway.queryOperationsQueue({}, options())).toEqual({
+      ok: false,
+      error: { kind: "protocol", reason: "contract" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([401, 403] as const)(
+    "classifies queue auth loss for %i, dispatches it, and leaves the body unread",
+    async (status) => {
+      const response = jsonResponse({ error: "concealed" }, status);
+      const json = vi.spyOn(response, "json");
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+      const listener = vi.fn();
+      window.addEventListener(AUTH_LOST_EVENT, listener);
+      try {
+        expect(await investigationGateway.queryOperationsQueue({}, options())).toEqual({
+          ok: false,
+          error: { kind: "auth_lost", status },
+        });
+        expect(json).not.toHaveBeenCalled();
+        expect(response.bodyUsed).toBe(false);
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect((listener.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({ status });
+      } finally {
+        window.removeEventListener(AUTH_LOST_EVENT, listener);
+      }
+    },
+  );
+
+  it("fails a missing seam closed, preserves its receiver, and honors pre-abort", async () => {
+    const absent = investigationOperationsQueueGateway(createInvestigationGatewayDouble());
+    await expect(absent.queryOperationsQueue({}, options())).resolves.toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503 },
+    });
+
+    const page = makeOperationsQueuePage();
+    const receivers: unknown[] = [];
+    const stateful = createInvestigationGatewayDouble({
+      queryOperationsQueue() {
+        receivers.push(this);
+        return Promise.resolve({ ok: true as const, value: page });
+      },
+    });
+    await expect(investigationOperationsQueueGateway(stateful).queryOperationsQueue(
+      { coordinationScope: "unassigned" },
+      options(),
+    )).resolves.toEqual({ ok: true, value: page });
+    expect(receivers).toEqual([stateful]);
+
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    expect(await investigationGateway.queryOperationsQueue({}, options(controller))).toEqual({
       ok: false,
       error: { kind: "aborted" },
     });
