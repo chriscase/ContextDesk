@@ -236,6 +236,22 @@ export type {
   InvestigationCollectionStatusV1,
 } from "./investigation-collection-browser.js";
 
+export {
+  INVESTIGATION_OPERATIONS_QUEUE_COORDINATION_SCOPES,
+  INVESTIGATION_OPERATIONS_QUEUE_LIMITS,
+  INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+  INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+  parseInvestigationOperationsQueuePage,
+  parseInvestigationOperationsQueueQuery,
+} from "./investigation-operations-queue-browser.js";
+export type {
+  InvestigationOperationsQueueCoordinationScopeCountsV1,
+  InvestigationOperationsQueueCoordinationScopeV1,
+  InvestigationOperationsQueuePageV1,
+  InvestigationOperationsQueueQueryV1,
+  InvestigationOperationsQueueRowV1,
+} from "./investigation-operations-queue-browser.js";
+
 export { TIMELINE_SCHEMA_ID, parseTimeline } from "./timeline.js";
 export type { TimelineEventV1, TimelineV1 } from "./timeline.js";
 
