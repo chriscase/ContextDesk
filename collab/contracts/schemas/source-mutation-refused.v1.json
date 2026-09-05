@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/source-mutation-refused.v1.json",
+  "title": "cd-collab Source Mutation Refused v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "error",
+    "action",
+    "sourceId",
+    "expectedRevision",
+    "reason",
+    "detail",
+    "current"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.source_mutation_refused.v1" },
+    "error": { "type": "string", "const": "source_catalog_refused" },
+    "action": { "type": "string", "enum": ["create", "retire", "restore"] },
+    "sourceId": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "expectedRevision": { "type": "integer", "minimum": 0 },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "source_not_found",
+        "already_retired",
+        "not_retired",
+        "permanent_unknown_protected",
+        "expected_revision_mismatch",
+        "identity_already_bound",
+        "idempotency_intent_mismatch"
+      ]
+    },
+    "detail": { "type": "string", "minLength": 1, "maxLength": 600 },
+    "current": {
+      "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/source" }]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "reason": { "const": "identity_already_bound" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": {
+          "action": { "const": "create" },
+          "sourceId": { "type": "string" },
+          "expectedRevision": { "const": 0 },
+          "current": {
+            "allOf": [
+              { "$ref": "#/$defs/source" },
+              {
+                "type": "object",
+                "properties": { "identityId": { "type": "string", "minLength": 1 } },
+                "required": ["identityId"]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "reason": { "const": "expected_revision_mismatch" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": {
+          "action": { "type": "string", "enum": ["retire", "restore"] },
+          "current": {
+            "allOf": [
+              { "$ref": "#/$defs/source" },
+              { "type": "object", "required": ["revision"] }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "id",
+        "name",
+        "kind",
+        "description",
+        "lifecycle",
+        "identityId",
+        "createdAt",
+        "createdBy"
+      ],
+      "properties": {
+        "schemaId": { "type": "string", "const": "cd-collab.source.v1" },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": {
+          "type": "string",
+          "enum": ["human", "external-tool", "internal-system", "contextdesk", "unknown"]
+        },
+        "description": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "lifecycle": { "type": "string", "enum": ["active", "retired"] },
+        "identityId": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "createdAt": { "type": "string", "format": "date-time", "minLength": 1 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

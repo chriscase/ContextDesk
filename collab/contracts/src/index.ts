@@ -596,14 +596,47 @@ export type {
 
 export {
   PERMANENT_UNKNOWN_SOURCE_ID,
+  SOURCE_CATALOG_RESPONSE_CONTEXT,
+  SOURCE_CREATE_REQUEST_SCHEMA_ID,
+  SOURCE_DESCRIPTION_MAX_LENGTH,
+  SOURCE_IDEMPOTENCY_KEY_MAX_LENGTH,
+  SOURCE_IDEMPOTENCY_KEY_MIN_LENGTH,
+  SOURCE_IDEMPOTENCY_KEY_RE,
+  SOURCE_IDENTITY_MAX_LENGTH,
   SOURCE_KINDS,
   SOURCE_LIFECYCLES,
   SOURCE_LIST_SCHEMA_ID,
+  SOURCE_MUTATION_ACTIONS,
+  SOURCE_MUTATION_REFUSED_SCHEMA_ID,
+  SOURCE_MUTATION_REFUSALS,
+  SOURCE_MUTATION_SUCCESS_SCHEMA_ID,
+  SOURCE_NAME_MAX_LENGTH,
+  SOURCE_REFUSAL_DETAIL_MAX_LENGTH,
+  SOURCE_RESTORE_REQUEST_SCHEMA_ID,
+  SOURCE_RETIRE_REQUEST_SCHEMA_ID,
   SOURCE_SCHEMA_ID,
+  SOURCE_UUID_RE,
   parseSource,
+  parseSourceCreateRequest,
   parseSourceList,
+  parseSourceMutationRefused,
+  parseSourceMutationSuccess,
+  parseSourceRestoreRequest,
+  parseSourceRetireRequest,
 } from "./source.js";
-export type { SourceKind, SourceLifecycle, SourceListV1, SourceV1 } from "./source.js";
+export type {
+  SourceCreateRequestV1,
+  SourceKind,
+  SourceLifecycle,
+  SourceListV1,
+  SourceMutationAction,
+  SourceMutationRefusedV1,
+  SourceMutationRefusal,
+  SourceMutationSuccessV1,
+  SourceRestoreRequestV1,
+  SourceRetireRequestV1,
+  SourceV1,
+} from "./source.js";
 
 export {
   COMPLETENESS,
