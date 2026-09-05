@@ -25,24 +25,7 @@ export interface OperationsQueuePresentation {
 
 interface ContinuationAttempt {
   readonly id: number;
-  readonly view: ResourceView<InvestigationOperationsQueuePageV1>;
-}
-
-function continuationViewChanged(
-  baseline: ResourceView<InvestigationOperationsQueuePageV1>,
-  current: ResourceView<InvestigationOperationsQueuePageV1>,
-): boolean {
-  if (baseline.availability !== current.availability) return true;
-  if (baseline.availability === "available" && current.availability === "available") {
-    if (baseline.value !== current.value || baseline.refresh !== current.refresh) return true;
-    return baseline.refresh === "failed"
-      && current.refresh === "failed"
-      && baseline.refreshError !== current.refreshError;
-  }
-  if (baseline.availability === "unavailable" && current.availability === "unavailable") {
-    return baseline.error !== current.error;
-  }
-  return false;
+  readonly baselineRequestGeneration: number;
 }
 
 function inputForLocation(query: OperationsQueueLocationQuery): InvestigationOperationsQueueQueryInput {
@@ -99,6 +82,7 @@ export function useOperationsQueue(
   const [continuationInFlight, setContinuationInFlight] = useState(false);
   const [continuationOutcome, setContinuationOutcome] = useState(0);
   const activeQuery = runtime.resources.operationsQueueQuery;
+  const requestGeneration = runtime.resources.operationsQueueRequestGeneration;
   const activeQueryMatches = activeQuery !== null && baseKey(activeQuery) === inputKey;
   // A location change is authoritative immediately. Never publish rows or
   // counts from the previous query while the Runtime starts the new request.
@@ -129,7 +113,7 @@ export function useOperationsQueue(
       && activeQueryMatches
       && activeQuery.cursor !== null
       && pendingContinuationAttemptRef.current !== null
-      && continuationViewChanged(pendingContinuationAttemptRef.current.view, view)
+      && requestGeneration > pendingContinuationAttemptRef.current.baselineRequestGeneration
       && (
         view.availability === "unavailable"
         || (view.availability === "available" && view.refresh !== "loading")
@@ -141,7 +125,7 @@ export function useOperationsQueue(
       setContinuationInFlight(false);
       setContinuationOutcome(settledAttempt);
     }
-  }, [activeQuery, activeQueryMatches, command, commandAvailability, inputKey, view]);
+  }, [activeQuery, activeQueryMatches, command, commandAvailability, inputKey, requestGeneration, view]);
 
   useEffect(() => {
     if (commandAvailability !== "available" || typeof command !== "function") {
@@ -198,7 +182,7 @@ export function useOperationsQueue(
             continuationPendingRef.current = true;
             pendingContinuationAttemptRef.current = {
               id: ++continuationAttemptRef.current,
-              view,
+              baselineRequestGeneration: requestGeneration,
             };
             setContinuationInFlight(true);
             runtime.refresh.operationsQueue();
@@ -207,7 +191,7 @@ export function useOperationsQueue(
           continuationPendingRef.current = true;
           pendingContinuationAttemptRef.current = {
             id: ++continuationAttemptRef.current,
-            view,
+            baselineRequestGeneration: requestGeneration,
           };
           setContinuationInFlight(true);
           command(Object.freeze({ ...input, cursor }));

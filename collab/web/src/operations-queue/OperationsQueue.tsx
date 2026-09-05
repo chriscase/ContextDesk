@@ -90,6 +90,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const [unavailableRetry, setUnavailableRetry] = useState<{
     readonly error: unknown;
     readonly observedLoading: boolean;
+    readonly queryKey: string;
     readonly scopeToken: object;
   } | null>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -140,7 +141,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
 
   useEffect(() => {
     if (unavailableRetry === null) return;
-    if (unavailableRetry.scopeToken !== queue.scopeToken) {
+    if (unavailableRetry.scopeToken !== queue.scopeToken || unavailableRetry.queryKey !== queryKey) {
       unavailableRetryInitiatorRef.current = null;
       setUnavailableRetry(null);
       return;
@@ -165,7 +166,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     if (!shouldRecoverFocus) return;
     if (queue.view.availability === "unavailable") unavailableRef.current?.focus();
     else titleRef.current?.focus();
-  }, [queue.scopeToken, queue.view, unavailableRetry]);
+  }, [queryKey, queue.scopeToken, queue.view, unavailableRetry]);
 
   const requestNextPage = (event: MouseEvent<HTMLButtonElement>) => {
     if (paginationDisabled) return;
@@ -180,6 +181,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     setUnavailableRetry({
       error: queue.view.error,
       observedLoading: false,
+      queryKey,
       scopeToken: queue.scopeToken,
     });
     queue.refresh();

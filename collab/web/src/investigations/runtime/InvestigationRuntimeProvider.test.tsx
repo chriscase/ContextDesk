@@ -2615,6 +2615,7 @@ describe("InvestigationRuntimeProvider", () => {
       expect(currentRuntime().resources.investigations).toEqual({ status: "idle" });
       expect(currentRuntime().resources.operationsQueue).toEqual({ status: "idle" });
       expect(currentRuntime().resources.operationsQueueQuery).toBeNull();
+      expect(currentRuntime().resources.operationsQueueRequestGeneration).toBe(0);
       expect(currentRuntime().commands.queryOperationsQueue).toEqual(expect.any(Function));
       expect(gateway.queryOperationsQueue).toBeUndefined();
 
@@ -2653,6 +2654,7 @@ describe("InvestigationRuntimeProvider", () => {
       status.push("open");
       input.q = "mutated-after-command";
       await waitFor(() => expect(currentRuntime().resources.operationsQueue.status).toBe("ready"));
+      expect(currentRuntime().resources.operationsQueueRequestGeneration).toBe(1);
 
       const parsed = parseInvestigationOperationsQueueQueryInput({
         q: "checkout",

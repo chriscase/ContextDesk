@@ -187,19 +187,23 @@ describe("Operations Queue public-runtime adapter", () => {
     expect(queryOperationsQueue).toHaveBeenCalledTimes(2);
   });
 
-  it("publishes distinct outcomes for a failed continuation and its successful retry", async () => {
+  it("publishes distinct outcomes when repeated continuations reuse one frozen failure", async () => {
     const first = makeOperationsQueuePage({
       items: [makeOperationsQueuePage().items[0]],
       nextCursor: "eyJwYWdlIjoyfQ",
       coordinationScopeCounts: { allVisible: 2, mine: 1, unassigned: 1 },
     });
     let continuationCalls = 0;
+    const sharedFailure = Object.freeze({
+      ok: false as const,
+      error: Object.freeze({ kind: "network" as const }),
+    });
     const queryOperationsQueue = vi.fn<NonNullable<InvestigationGateway["queryOperationsQueue"]>>(
       async (input) => {
         if (!input.cursor) return gatewayOk(first);
         continuationCalls += 1;
-        return continuationCalls === 1
-          ? { ok: false as const, error: { kind: "network" as const } }
+        return continuationCalls <= 2
+          ? sharedFailure
           : gatewayOk(makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjozfQ" }));
       },
     );
@@ -219,6 +223,11 @@ describe("Operations Queue public-runtime adapter", () => {
     act(() => presentation?.nextPage());
     await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(presentation?.continuationOutcome).toBe(2));
+    expect(presentation?.continuationFailed).toBe(true);
+
+    act(() => presentation?.nextPage());
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(presentation?.continuationOutcome).toBe(3));
     expect(presentation?.continuationFailed).toBe(false);
   });
 

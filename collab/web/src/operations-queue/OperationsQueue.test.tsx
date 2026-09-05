@@ -447,6 +447,8 @@ describe("Operations Queue presentation", () => {
       view: { availability: "available", value: page, refresh: "settled" },
     }));
     fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+    const search = screen.getByRole("searchbox", { name: "Search" });
+    search.focus();
 
     hook.current.mockReturnValue(settled({
       scopeToken: Object.freeze({}),
@@ -461,7 +463,32 @@ describe("Operations Queue presentation", () => {
     );
 
     await waitFor(() => expect(screen.queryByText("All operations are shown.")).toBeNull());
-    expect(document.activeElement).not.toBe(screen.queryByText("All operations are shown."));
+    expect(document.activeElement).toBe(search);
+  });
+
+  it("does not apply unavailable retry focus to a different location query", async () => {
+    const refresh = vi.fn();
+    const rendered = renderQueue(settled({
+      view: { availability: "unavailable", error: { kind: "network" } },
+      refresh,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    const nextQuery = { ...DEFAULT_OPERATIONS_QUEUE_QUERY, q: "different" };
+    hook.current.mockReturnValue(settled({ view: { availability: "loading" }, refresh }));
+    rendered.rerender(
+      <OperationsQueue query={nextQuery} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: makeOperationsQueuePage(), refresh: "settled" },
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={nextQuery} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Operations Queue" })).toBeTruthy());
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("does not steal focus when the user moves away during continuation", async () => {
