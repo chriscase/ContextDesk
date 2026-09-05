@@ -45,7 +45,10 @@
           "appliedRevision": { "const": 1 },
           "applied": {
             "type": "object",
-            "properties": { "lifecycle": { "const": "active" } }
+            "properties": {
+              "lifecycle": { "const": "active" },
+              "revision": { "const": 1 }
+            }
           }
         }
       }

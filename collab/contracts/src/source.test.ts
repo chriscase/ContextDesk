@@ -266,6 +266,19 @@ describe("parseSourceList", () => {
       }),
     ).toThrow(/\$\.sources\[1\]\.id.*duplicate source id/);
   });
+
+  it("rejects duplicate non-null identity bindings in a list envelope", () => {
+    const identityId = "uid=alice,ou=people,dc=example,dc=test";
+    expect(() =>
+      parseSourceList({
+        schemaId: SOURCE_LIST_SCHEMA_ID,
+        sources: [
+          source({ identityId }),
+          source({ id: HUMAN_ID, kind: "human", name: "Alice", identityId }),
+        ],
+      }),
+    ).toThrow(/\$\.sources\[1\]\.identityId.*duplicate bound identity/);
+  });
 });
 
 describe("source mutation requests", () => {
@@ -551,6 +564,14 @@ describe("source mutation refusal pairings", () => {
         refusal("create", "identity_already_bound", {
           sourceId: TOOL_ID,
           current: source({ identityId: null }),
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("create", "expected_revision_mismatch", {
+          sourceId: TOOL_ID,
+          current: source({ revision: 4 }),
         }),
       ),
     ).toBe(false);

@@ -71,6 +71,7 @@
       },
       "then": {
         "properties": {
+          "action": { "type": "string", "enum": ["retire", "restore"] },
           "current": {
             "allOf": [
               { "$ref": "#/$defs/source" },

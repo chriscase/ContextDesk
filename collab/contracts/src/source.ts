@@ -359,12 +359,22 @@ export function parseSourceList(raw: unknown): SourceListV1 {
   checkObject("$", sourceListShape, raw);
   const parsed = raw as SourceListV1;
   const seenIds = new Set<string>();
+  const seenIdentityIds = new Set<string>();
   parsed.sources.forEach((source, index) => {
     const parsedSource = parseSource(source, `$.sources[${index}]`);
     if (seenIds.has(parsedSource.id)) {
       throw new ContractViolation(`$.sources[${index}].id`, "duplicate source id");
     }
     seenIds.add(parsedSource.id);
+    if (parsedSource.identityId !== null) {
+      if (seenIdentityIds.has(parsedSource.identityId)) {
+        throw new ContractViolation(
+          `$.sources[${index}].identityId`,
+          "duplicate bound identity",
+        );
+      }
+      seenIdentityIds.add(parsedSource.identityId);
+    }
   });
   return parsed;
 }
