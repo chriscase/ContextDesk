@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 const PUBLIC_IDENTITY_KEY_FILE = "public-identity-key";
@@ -171,6 +171,24 @@ export function createEphemeralPublicIdentityCodec(): HmacPublicIdentityCodec {
   return new HmacPublicIdentityCodec(randomBytes(PUBLIC_IDENTITY_KEY_BYTES));
 }
 
+async function readPrivateKey(path: string): Promise<Buffer> {
+  const metadata = await stat(path);
+  if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
+    throw new Error("public identity key permissions must deny group and other access");
+  }
+  return readFile(path);
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const directory = await open(path, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
 /** Load the durable installation-local key used only for public user ids. */
 export async function loadPublicIdentityCodec(
   evidenceRoot: string,
@@ -180,24 +198,37 @@ export async function loadPublicIdentityCodec(
   await mkdir(evidenceRoot, { recursive: true });
   const path = join(evidenceRoot, PUBLIC_IDENTITY_KEY_FILE);
   try {
-    const metadata = await stat(path);
-    if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
-      throw new Error("public identity key permissions must deny group and other access");
-    }
-    return new HmacPublicIdentityCodec(await readFile(path));
+    return new HmacPublicIdentityCodec(await readPrivateKey(path));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  // Stage and flush the bytes before exclusive publication. A hard link becomes
+  // visible atomically, so an EEXIST observer can never read a partially written key.
   const generated = randomBytes(PUBLIC_IDENTITY_KEY_BYTES);
+  const temporaryPath = join(
+    evidenceRoot,
+    `.${PUBLIC_IDENTITY_KEY_FILE}.${process.pid}.${randomBytes(16).toString("hex")}.tmp`,
+  );
+  const temporary = await open(temporaryPath, "wx", 0o600);
+  let published = false;
   try {
-    await writeFile(path, generated, { flag: "wx", mode: 0o600 });
-    return new HmacPublicIdentityCodec(generated);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const metadata = await stat(path);
-    if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
-      throw new Error("public identity key permissions must deny group and other access");
+    try {
+      await temporary.writeFile(generated);
+      await temporary.sync();
+    } finally {
+      await temporary.close();
     }
-    return new HmacPublicIdentityCodec(await readFile(path));
+    try {
+      await link(temporaryPath, path);
+      published = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  } finally {
+    await unlink(temporaryPath);
   }
+  await syncDirectory(evidenceRoot);
+  return published
+    ? new HmacPublicIdentityCodec(generated)
+    : new HmacPublicIdentityCodec(await readPrivateKey(path));
 }
