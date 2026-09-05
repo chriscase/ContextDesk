@@ -388,6 +388,14 @@ describe("investigation operations queue page", () => {
     );
     expect(parsed.coordinationScopeCounts.unassigned).toBe(0);
     expect(parsed.items[0]?.coordination.coordinator?.identityId).toBe("identity-alice");
+    expect(() =>
+      parseInvestigationOperationsQueuePage(
+        page({
+          items: [{ investigation: caseRow(), coordination: assigned }],
+          coordinationScopeCounts: { allVisible: 1, mine: 0, unassigned: 1 },
+        }),
+      ),
+    ).toThrow(/assigned remainder must cover every returned assigned row/);
   });
 
   it("returns detached, deeply frozen normalized values", () => {

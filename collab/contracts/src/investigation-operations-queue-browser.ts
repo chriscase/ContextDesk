@@ -281,6 +281,15 @@ export function parseInvestigationOperationsQueuePage(
       "must cover every returned unassigned row",
     );
   }
+  const returnedAssignedCount = items.length - returnedUnassignedCount;
+  const visibleAssignedCount =
+    coordinationScopeCounts.allVisible - coordinationScopeCounts.unassigned;
+  if (returnedAssignedCount > visibleAssignedCount) {
+    throw new ContractViolation(
+      "$.coordinationScopeCounts.allVisible",
+      "assigned remainder must cover every returned assigned row",
+    );
+  }
 
   return deepFrozenCopy({
     schemaId: INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
