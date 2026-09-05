@@ -49,7 +49,8 @@ describe("investigation runtime public surface", () => {
       idempotencyKey: "bulk-runtime-0001",
     };
     const result: ArtifactAnnotationBulkResultV1 | null = null;
-    const runtime: Pick<InvestigationRuntime, "commands"> = {
+    const runtime: Pick<InvestigationRuntime, "presentationScopeKey" | "commands"> = {
+      presentationScopeKey: "opaque-presentation-scope",
       commands: {
         createInvestigation: null,
         uploadEvidence: null,
@@ -65,6 +66,7 @@ describe("investigation runtime public surface", () => {
     expect(MAX_ARTIFACT_ANNOTATION_BULK_IDS).toBe(64);
     expect(publicRuntime.MAX_ARTIFACT_ANNOTATION_BULK_IDS).toBe(64);
     expect(result).toBeNull();
+    expect(runtime.presentationScopeKey).toBe("opaque-presentation-scope");
     expect(runtime.commands.createArtifactAnnotations).toBeNull();
     const coordinationCommand: InvestigationCoordinationActionCommand = {
       action: "claim_self",

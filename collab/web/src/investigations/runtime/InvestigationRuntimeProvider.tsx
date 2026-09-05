@@ -182,8 +182,22 @@ const ANONYMOUS_IDENTITY: InvestigationRuntimeIdentity = Object.freeze({
   displayName: "",
 });
 
+let nextPresentationScopeId = 0;
+
+function createPresentationScopeKey(): string {
+  nextPresentationScopeId += 1;
+  return `investigation-presentation-scope-${nextPresentationScopeId.toString(36)}`;
+}
+
 /** The complete presentation-safe Runtime V1 surface. */
 export interface InvestigationRuntime {
+  /**
+   * Opaque reset/fencing key for presentation-local transient state. It
+   * changes with the shell's identity or authority epoch, but contains
+   * neither shell key and stays stable across ordinary resource updates.
+   * It grants no authority and must never be parsed or used as permission.
+   */
+  readonly presentationScopeKey: string;
   /** Descriptive only. Never consult it to decide what a strategy may do. */
   readonly identity: InvestigationRuntimeIdentity;
   readonly capabilities: InvestigationRuntimeCapabilities;
@@ -261,6 +275,23 @@ export function InvestigationRuntimeProvider({
   children,
 }: InvestigationRuntimeProviderProps) {
   const gateway = useContext(InjectedGatewayContext) ?? investigationGateway;
+  const presentationScopeRef = useRef<{
+    readonly identityKey: string;
+    readonly authorityKey: string;
+    readonly publicKey: string;
+  } | null>(null);
+  if (
+    presentationScopeRef.current === null
+    || presentationScopeRef.current.identityKey !== identityKey
+    || presentationScopeRef.current.authorityKey !== authorityKey
+  ) {
+    presentationScopeRef.current = {
+      identityKey,
+      authorityKey,
+      publicKey: createPresentationScopeKey(),
+    };
+  }
+  const presentationScopeKey = presentationScopeRef.current.publicKey;
   // Production binds the concrete POST/PATCH methods. A transport without them
   // resolves to the fail-closed seam, so a write reports `unavailable` instead
   // of appearing to succeed.
@@ -588,6 +619,7 @@ export function InvestigationRuntimeProvider({
   ]);
 
   const value = useMemo<InvestigationRuntime>(() => deepFreezeDto({
+    presentationScopeKey,
     identity,
     capabilities,
     resources: {
@@ -744,6 +776,7 @@ export function InvestigationRuntimeProvider({
     previewController.clear,
     previewController.preview,
     previewController.state,
+    presentationScopeKey,
   ]);
 
   return (

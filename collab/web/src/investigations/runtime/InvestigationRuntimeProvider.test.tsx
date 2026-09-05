@@ -157,6 +157,82 @@ function currentRuntime(): InvestigationRuntime {
 }
 
 describe("InvestigationRuntimeProvider", () => {
+  it("publishes a stable opaque presentation scope that rotates with either shell epoch", async () => {
+    const IDENTITY_KEY = "raw-identity-fence-do-not-publish";
+    const AUTHORITY_KEY = "raw-authority-fence-do-not-publish";
+    const UPDATED_IDENTITY_KEY = "raw-identity-fence-v2-do-not-publish";
+    const UPDATED_AUTHORITY_KEY = "raw-authority-fence-v2-do-not-publish";
+    const currentCase = makePopulatedCase();
+    const updatedCase = { ...currentCase, title: `${currentCase.title} (updated)` };
+    const getInvestigation = vi.fn()
+      .mockResolvedValueOnce(succeeded(currentCase))
+      .mockResolvedValue(succeeded(updatedCase));
+    const gateway = makeGateway({ getInvestigation });
+
+    function Harness() {
+      const [identityKey, setIdentityKey] = useState(IDENTITY_KEY);
+      const [authorityKey, setAuthorityKey] = useState(AUTHORITY_KEY);
+      const [label, setLabel] = useState("initial");
+      return (
+        <>
+          <button type="button" onClick={() => setLabel("ordinary rerender")}>rerender</button>
+          <button type="button" onClick={() => setIdentityKey(UPDATED_IDENTITY_KEY)}>
+            rotate identity epoch
+          </button>
+          <button type="button" onClick={() => setAuthorityKey(UPDATED_AUTHORITY_KEY)}>
+            rotate authority epoch
+          </button>
+          <ProviderUnderTest
+            identityKey={identityKey}
+            identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+            authorityKey={authorityKey}
+            capabilities={FULL_CAPABILITIES}
+            readOnly={false}
+            active
+            focusCaseId={currentCase.id}
+            isInvestigationLocation
+            onOpenCreated={vi.fn()}
+            gateway={gateway}
+          >
+            <RuntimeProbe label={label} />
+          </ProviderUnderTest>
+        </>
+      );
+    }
+
+    render(<Harness />);
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    const initialScope = currentRuntime().presentationScopeKey;
+    expect(initialScope).not.toBe("");
+    for (const rawKey of [IDENTITY_KEY, AUTHORITY_KEY]) {
+      expect(initialScope).not.toContain(rawKey);
+      expect(JSON.stringify(currentRuntime())).not.toContain(rawKey);
+    }
+
+    act(() => screen.getByRole("button", { name: "rerender" }).click());
+    expect(currentRuntime().presentationScopeKey).toBe(initialScope);
+
+    act(() => currentRuntime().refresh.investigation());
+    expect(currentRuntime().presentationScopeKey).toBe(initialScope);
+    await waitFor(() => expect(currentRuntime().resources.investigation).toMatchObject({
+      status: "ready",
+      value: { title: updatedCase.title },
+    }));
+    expect(currentRuntime().presentationScopeKey).toBe(initialScope);
+
+    act(() => screen.getByRole("button", { name: "rotate identity epoch" }).click());
+    const identityScope = currentRuntime().presentationScopeKey;
+    expect(identityScope).not.toBe(initialScope);
+    expect(identityScope).not.toContain(UPDATED_IDENTITY_KEY);
+    expect(JSON.stringify(currentRuntime())).not.toContain(UPDATED_IDENTITY_KEY);
+
+    act(() => screen.getByRole("button", { name: "rotate authority epoch" }).click());
+    const authorityScope = currentRuntime().presentationScopeKey;
+    expect(authorityScope).not.toBe(identityScope);
+    expect(authorityScope).not.toContain(UPDATED_AUTHORITY_KEY);
+    expect(JSON.stringify(currentRuntime())).not.toContain(UPDATED_AUTHORITY_KEY);
+  });
+
   it("publishes and applies the frozen coordination seam only for an authenticated ready case", async () => {
     const success = coordinationSuccess();
     const getCoordination = vi.fn(async () => succeeded(coordination()));
