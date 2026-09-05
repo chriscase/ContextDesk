@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/external-run-import-success.v1.json",
+  "title": "cd-collab External Run Import Success v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "importMode",
+    "caseId",
+    "sourceId",
+    "expectedSourceRevision",
+    "replayed",
+    "applied",
+    "contribution"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.external_run_import_success.v1" },
+    "importMode": { "type": "string", "const": "manual" },
+    "caseId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sourceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "expectedSourceRevision": { "type": "integer", "minimum": 1 },
+    "replayed": { "type": "boolean" },
+    "applied": { "$ref": "#/$defs/appliedRun" },
+    "contribution": { "$ref": "#/$defs/contribution" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "appliedRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId", "id", "caseId", "contributionId", "sourceId", "outputHash", "outputText",
+        "promptHash", "promptText", "promptCompleteness", "outputCompleteness", "workflowCompleteness",
+        "evidenceVisibility", "snapshotBinding", "visibilityNote", "importerId", "importerUsername",
+        "operatorId", "operatorUsername", "provider", "model", "version", "claimedTraces",
+        "uncertainty", "timing", "cost", "redacted", "privacyClass", "corroborationState", "createdAt",
+        "importMode", "sourceRevision", "evidenceArtifactIds"
+      ],
+      "properties": {
+        "schemaId": { "type": "string", "const": "cd-collab.external_run.v1" },
+        "id": { "$ref": "#/$defs/uuid" },
+        "caseId": { "$ref": "#/$defs/uuid" },
+        "contributionId": { "$ref": "#/$defs/uuid" },
+        "sourceId": { "$ref": "#/$defs/uuid" },
+        "outputHash": { "$ref": "#/$defs/sha256" },
+        "outputText": { "type": "string", "minLength": 1, "maxLength": 1000000 },
+        "promptHash": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "promptText": { "type": ["string", "null"], "maxLength": 1000000 },
+        "promptCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+        "outputCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+        "workflowCompleteness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+        "evidenceVisibility": { "type": "string", "enum": ["unknown", "importer_described"] },
+        "snapshotBinding": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "visibilityNote": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "importerId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "importerUsername": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "operatorId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "operatorUsername": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "provider": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+        "model": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+        "version": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+        "claimedTraces": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "uncertainty": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "timing": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+        "cost": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+        "redacted": { "type": "boolean" },
+        "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+        "corroborationState": { "type": "string", "const": "unverified" },
+        "createdAt": { "type": "string", "format": "date-time", "minLength": 1 },
+        "importMode": { "type": "string", "const": "manual" },
+        "sourceRevision": { "type": "integer", "minimum": 1 },
+        "evidenceArtifactIds": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uuid" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "promptText": { "type": "null" } },
+            "required": ["promptText"]
+          },
+          "then": {
+            "properties": {
+              "promptHash": { "type": "null" },
+              "promptCompleteness": { "enum": ["partial", "unknown"] }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "promptText": { "type": "string" } },
+            "required": ["promptText"]
+          },
+          "then": {
+            "properties": { "promptHash": { "$ref": "#/$defs/sha256" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "evidenceVisibility": { "const": "unknown" } },
+            "required": ["evidenceVisibility"]
+          },
+          "then": {
+            "properties": {
+              "evidenceArtifactIds": { "type": "array", "maxItems": 0 },
+              "snapshotBinding": { "type": "null" },
+              "visibilityNote": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "evidenceVisibility": { "const": "importer_described" } },
+            "required": ["evidenceVisibility"]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": { "evidenceArtifactIds": { "type": "array", "minItems": 1 } },
+                "required": ["evidenceArtifactIds"]
+              },
+              {
+                "properties": { "snapshotBinding": { "type": "string" } },
+                "required": ["snapshotBinding"]
+              },
+              {
+                "properties": { "visibilityNote": { "type": "string", "minLength": 1 } },
+                "required": ["visibilityNote"]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "contribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "id",
+        "caseId",
+        "kind",
+        "revision",
+        "predecessorRevision",
+        "body",
+        "contentHash",
+        "privacyClass",
+        "tombstoned",
+        "authorId",
+        "authorUsername",
+        "createdAt",
+        "hypothesisStatus",
+        "hypothesisLinks",
+        "sourceId"
+      ],
+      "properties": {
+        "schemaId": { "type": "string", "const": "cd-collab.contribution.v1" },
+        "id": { "$ref": "#/$defs/uuid" },
+        "caseId": { "$ref": "#/$defs/uuid" },
+        "kind": { "type": "string", "const": "external_run" },
+        "revision": { "type": "integer", "const": 1 },
+        "predecessorRevision": { "type": "null" },
+        "body": { "type": ["string", "null"] },
+        "contentHash": { "type": "string", "minLength": 1 },
+        "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+        "tombstoned": { "type": "boolean", "const": false },
+        "authorId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "authorUsername": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time", "minLength": 1 },
+        "hypothesisStatus": {
+          "anyOf": [
+            { "type": "string", "enum": ["proposed", "supported", "contradicted", "superseded"] },
+            { "type": "null" }
+          ]
+        },
+        "hypothesisLinks": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "id"],
+                "properties": {
+                  "kind": { "type": "string", "enum": ["artifact", "contribution"] },
+                  "id": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          ]
+        },
+        "sourceId": { "$ref": "#/$defs/uuid" }
+      }
+    }
+  }
+}

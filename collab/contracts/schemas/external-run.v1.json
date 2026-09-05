@@ -11,6 +11,11 @@
     "operatorId", "operatorUsername", "provider", "model", "version", "claimedTraces",
     "uncertainty", "timing", "cost", "redacted", "privacyClass", "corroborationState", "createdAt"
   ],
+  "dependentRequired": {
+    "importMode": ["sourceRevision", "evidenceArtifactIds"],
+    "sourceRevision": ["importMode", "evidenceArtifactIds"],
+    "evidenceArtifactIds": ["importMode", "sourceRevision"]
+  },
   "properties": {
     "schemaId": { "type": "string", "const": "cd-collab.external_run.v1" },
     "id": { "type": "string" },
@@ -41,6 +46,17 @@
     "redacted": { "type": "boolean" },
     "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
     "corroborationState": { "type": "string", "enum": ["unverified", "corroborated", "contradicted"] },
-    "createdAt": { "type": "string" }
+    "createdAt": { "type": "string" },
+    "importMode": { "type": "string", "const": "manual" },
+    "sourceRevision": { "type": "integer", "minimum": 1 },
+    "evidenceArtifactIds": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      }
+    }
   }
 }
