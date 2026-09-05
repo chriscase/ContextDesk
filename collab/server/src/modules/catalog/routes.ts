@@ -16,7 +16,7 @@ import {
   requireSessionCapability,
   type SessionAuthorizationDeps,
 } from "../authz/index.js";
-import { projectSourceForCaller } from "./project.js";
+import { projectSourceForCaller, projectSourceMutationForCaller } from "./project.js";
 import {
   CatalogCommitOutcomeUnknownError,
   CatalogMutationRefusedError,
@@ -125,9 +125,12 @@ export async function registerCatalogRoutes(
         const parsed = parseSourceCreateRequest(request.body);
         const result = await deps.catalog.applyCreate(ctx.actor, parsed, request.ip);
         void reply.code(result.replayed ? 200 : 201);
-        return result;
+        return {
+          ...result,
+          applied: projectSourceMutationForCaller(result.applied, ctx.has("admin:users")),
+        };
       } catch (err) {
-        return strictMutationError(reply, err);
+        return strictMutationError(reply, err, ctx.has("admin:users"));
       }
     }
     if (!ctx.has("run:strategies")) {
@@ -211,9 +214,12 @@ export async function registerCatalogRoutes(
         if (parsed.sourceId !== id) return invalid(reply);
         const result = await deps.catalog.applyRetire(ctx.actor, parsed, request.ip);
         void reply.code(200);
-        return result;
+        return {
+          ...result,
+          applied: projectSourceMutationForCaller(result.applied, ctx.has("admin:users")),
+        };
       } catch (err) {
-        return strictMutationError(reply, err);
+        return strictMutationError(reply, err, ctx.has("admin:users"));
       }
     }
     if (!ctx.has("run:strategies")) {
@@ -244,20 +250,33 @@ export async function registerCatalogRoutes(
       if (parsed.sourceId !== id) return invalid(reply);
       const result = await deps.catalog.applyRestore(ctx.actor, parsed, request.ip);
       void reply.code(200);
-      return result;
+      return {
+        ...result,
+        applied: projectSourceMutationForCaller(result.applied, ctx.has("admin:users")),
+      };
     } catch (err) {
-      return strictMutationError(reply, err);
+      return strictMutationError(reply, err, ctx.has("admin:users"));
     }
   });
 }
 
-function strictMutationError(reply: FastifyReply, err: unknown) {
+function strictMutationError(
+  reply: FastifyReply,
+  err: unknown,
+  canSeeDirectoryIdentities: boolean,
+) {
   if (err instanceof CatalogCommitOutcomeUnknownError) {
     return unknownCommit(reply);
   }
   if (err instanceof CatalogMutationRefusedError) {
     void reply.code(409);
-    return err.body;
+    return {
+      ...err.body,
+      current:
+        err.body.current === null
+          ? null
+          : projectSourceMutationForCaller(err.body.current, canSeeDirectoryIdentities),
+    };
   }
   if (err instanceof ContractViolation) {
     return invalid(reply);

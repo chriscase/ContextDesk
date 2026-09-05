@@ -178,17 +178,14 @@ describe.skipIf(!adminUrl())("postgres source catalog mutations", () => {
       await migrateUp(client);
       const pool = new Pool({ connectionString: url, max: 4 });
       const queries: string[] = [];
-      const originalConnect = pool.connect.bind(pool);
-      pool.connect = (async () => {
-        const connected = await originalConnect();
+      pool.on("connect", (connected) => {
         const originalQuery = connected.query.bind(connected);
         connected.query = ((...args: Parameters<typeof connected.query>) => {
           const sql = typeof args[0] === "string" ? args[0] : String(args[0]);
           queries.push(sql);
           return originalQuery(...args);
         }) as typeof connected.query;
-        return connected;
-      }) as Pool["connect"];
+      });
       const audit = new PgAuditStore(pool);
       const store = new PgCatalogStore(pool);
       const catalog = new CatalogService(store, audit);
@@ -368,17 +365,14 @@ describe.skipIf(!adminUrl())("postgres source catalog mutations", () => {
       await migrateUp(client);
       const pool = new Pool({ connectionString: url, max: 4 });
       const queries: string[] = [];
-      const originalConnect = pool.connect.bind(pool);
-      pool.connect = (async () => {
-        const connected = await originalConnect();
+      pool.on("connect", (connected) => {
         const originalQuery = connected.query.bind(connected);
         connected.query = ((...args: Parameters<typeof connected.query>) => {
           const sql = typeof args[0] === "string" ? args[0] : String(args[0]);
           queries.push(sql);
           return originalQuery(...args);
         }) as typeof connected.query;
-        return connected;
-      }) as Pool["connect"];
+      });
       const store = new PgCatalogStore(pool);
       const catalog = new CatalogService(store, new PgAuditStore(pool));
       try {

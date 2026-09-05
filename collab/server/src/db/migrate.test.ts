@@ -662,6 +662,8 @@ describe.skipIf(!adminUrl())("migrations", () => {
   it("excludes concurrent writers from both coordination tables during the rollback guard", async () => {
     await withDisposableDb(async (client, url) => {
       await migrateUp(client);
+      const catalogRollback = await migrateDown(client);
+      expect(catalogRollback.rolledBack).toBe("030_source_catalog_mutations");
       await client.query(`
         INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
         VALUES (

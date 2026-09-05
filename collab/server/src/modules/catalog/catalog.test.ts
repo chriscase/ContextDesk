@@ -720,6 +720,139 @@ describe("source catalog strict mutations", () => {
     });
   });
 
+  it("projects directory identities from strict mutation successes, replays, and refusals", async () => {
+    await withMutationApp(async ({ app, catalog, grants }) => {
+      const dave = await loginCookie(app, "dave", "fixture-dave-secret");
+      const lead = await loginCookie(app, "lead", "fixture-lead-secret");
+      const granted = await loginCookie(app, "granted", "fixture-granted-secret");
+      await grants.grant(
+        "uid=granted,ou=people,dc=example,dc=test",
+        "catalog:write",
+        "uid=dave,ou=people,dc=example,dc=test",
+      );
+
+      const leadIdentity = "uid=lead,ou=people,dc=example,dc=test";
+      const createPayload = createBody({
+        idempotencyKey: "src-projection-lead",
+        name: "lead",
+        kind: "human",
+        identityId: leadIdentity,
+      });
+      const createdResponse = await app.inject({
+        method: "POST",
+        url: "/api/catalog/sources",
+        headers: { cookie: lead },
+        payload: createPayload,
+      });
+      expect(createdResponse.statusCode).toBe(201);
+      expect(createdResponse.body).not.toContain("uid=");
+      const created = parseSourceMutationSuccess(JSON.parse(createdResponse.body));
+      expect(created.applied.identityId).toMatch(/^attr:[0-9a-f]{64}$/);
+      expect(created.applied.createdBy).toMatch(/^attr:[0-9a-f]{64}$/);
+      expect(created.applied.name).toBe(created.sourceId);
+
+      const replayResponse = await app.inject({
+        method: "POST",
+        url: "/api/catalog/sources",
+        headers: { cookie: lead },
+        payload: createPayload,
+      });
+      expect(replayResponse.statusCode).toBe(200);
+      expect(replayResponse.body).not.toContain("uid=");
+      const replay = parseSourceMutationSuccess(JSON.parse(replayResponse.body));
+      expect(replay.replayed).toBe(true);
+      expect(replay.applied).toEqual(created.applied);
+
+      const staleResponse = await app.inject({
+        method: "POST",
+        url: `/api/catalog/sources/${created.sourceId}/retire`,
+        headers: { cookie: lead },
+        payload: {
+          schemaId: SOURCE_RETIRE_REQUEST_SCHEMA_ID,
+          sourceId: created.sourceId,
+          expectedRevision: 9,
+          idempotencyKey: "src-projection-stale",
+        },
+      });
+      expect(staleResponse.statusCode).toBe(409);
+      expect(staleResponse.body).not.toContain("uid=");
+      const stale = parseSourceMutationRefused(JSON.parse(staleResponse.body));
+      expect(stale.current?.identityId).toBe(created.applied.identityId);
+
+      const collisionResponse = await app.inject({
+        method: "POST",
+        url: "/api/catalog/sources",
+        headers: { cookie: granted },
+        payload: createBody({
+          idempotencyKey: "src-projection-collision",
+          name: "Duplicate lead",
+          kind: "human",
+          identityId: leadIdentity,
+        }),
+      });
+      expect(collisionResponse.statusCode).toBe(409);
+      expect(collisionResponse.body).not.toContain("uid=");
+      const collision = parseSourceMutationRefused(JSON.parse(collisionResponse.body));
+      expect(collision.reason).toBe("identity_already_bound");
+      expect(collision.current?.identityId).toBe(created.applied.identityId);
+
+      const retiredResponse = await app.inject({
+        method: "POST",
+        url: `/api/catalog/sources/${created.sourceId}/retire`,
+        headers: { cookie: lead },
+        payload: {
+          schemaId: SOURCE_RETIRE_REQUEST_SCHEMA_ID,
+          sourceId: created.sourceId,
+          expectedRevision: 1,
+          idempotencyKey: "src-projection-retire",
+        },
+      });
+      expect(retiredResponse.statusCode).toBe(200);
+      expect(retiredResponse.body).not.toContain("uid=");
+      const retired = parseSourceMutationSuccess(JSON.parse(retiredResponse.body));
+      expect(retired.applied.identityId).toBe(created.applied.identityId);
+
+      const restoredResponse = await app.inject({
+        method: "POST",
+        url: `/api/catalog/sources/${created.sourceId}/restore`,
+        headers: { cookie: lead },
+        payload: {
+          schemaId: SOURCE_RESTORE_REQUEST_SCHEMA_ID,
+          sourceId: created.sourceId,
+          expectedRevision: 2,
+          idempotencyKey: "src-projection-restore",
+        },
+      });
+      expect(restoredResponse.statusCode).toBe(200);
+      expect(restoredResponse.body).not.toContain("uid=");
+      const restored = parseSourceMutationSuccess(JSON.parse(restoredResponse.body));
+      expect(restored.applied.identityId).toBe(created.applied.identityId);
+
+      const stored = (await catalog.list()).find((source) => source.id === created.sourceId);
+      expect(stored?.identityId).toBe(leadIdentity);
+      expect(stored?.createdBy).toBe(leadIdentity);
+      expect(stored?.name).toBe("lead");
+
+      const adminIdentity = "uid=dave,ou=people,dc=example,dc=test";
+      const adminResponse = await app.inject({
+        method: "POST",
+        url: "/api/catalog/sources",
+        headers: { cookie: dave },
+        payload: createBody({
+          idempotencyKey: "src-projection-admin",
+          name: "dave",
+          kind: "human",
+          identityId: adminIdentity,
+        }),
+      });
+      expect(adminResponse.statusCode).toBe(201);
+      const adminCreated = parseSourceMutationSuccess(JSON.parse(adminResponse.body));
+      expect(adminCreated.applied.identityId).toMatch(/^usr-[a-f0-9]{32}$/);
+      expect(adminCreated.applied.createdBy).toBe(adminCreated.applied.identityId);
+      expect(adminCreated.applied.name).toBe("dave");
+    });
+  });
+
   it("retires and restores with CAS and every contract refusal", async () => {
     await withMutationApp(async ({ app, catalog }) => {
       const dave = await loginCookie(app, "dave", "fixture-dave-secret");

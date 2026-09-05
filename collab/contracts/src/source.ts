@@ -110,7 +110,8 @@ export const SOURCE_CATALOG_RESPONSE_CONTEXT = Object.freeze({
     "legacy_unversioned_rows_are_read_only_until_the_server_emits_a_revision",
   replay:
     "replayed_success_returns_the_original_applied_result_and_revision_tuple",
-  projection: "list_projection_is_authorization_filtered_and_not_caller_authoritative",
+  projection:
+    "list_and_mutation_response_projection_is_authorization_filtered_and_not_caller_authoritative",
   auth: "mutations_require_server_authorized_catalog_write",
   audit: "successful_mutations_are_appended_to_the_audit_log",
 } as const);
