@@ -9,7 +9,9 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { ContractViolation, canonicalJson } from "@cd-collab/contracts";
 
 const CURSOR_VERSION = 1 as const;
-const CURSOR_PURPOSE = "cd-collab.investigation_collection_cursor.v1";
+const COLLECTION_CURSOR_PURPOSE = "cd-collab.investigation_collection_cursor.v1";
+const OPERATIONS_QUEUE_CURSOR_PURPOSE =
+  "cd-collab.investigation_operations_queue_cursor.v1";
 const OPAQUE_CURSOR_RE = /^[A-Za-z0-9_-]{8,4096}$/;
 const HMAC_KEY = randomBytes(32);
 
@@ -39,8 +41,8 @@ function unsignedBody(cursor: InvestigationCollectionCursor): string {
   });
 }
 
-function macOf(body: string): string {
-  return createHmac("sha256", HMAC_KEY).update(CURSOR_PURPOSE).update(body).digest("base64url");
+function macOf(body: string, purpose: string): string {
+  return createHmac("sha256", HMAC_KEY).update(purpose).update(body).digest("base64url");
 }
 
 function equalMac(actual: string, expected: string): boolean {
@@ -49,9 +51,7 @@ function equalMac(actual: string, expected: string): boolean {
   return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
 
-export function mintInvestigationCollectionCursor(
-  cursor: InvestigationCollectionCursor,
-): string {
+function mintCursor(cursor: InvestigationCollectionCursor, purpose: string): string {
   const body = unsignedBody(cursor);
   const token = Buffer.from(
     canonicalJson({
@@ -61,7 +61,7 @@ export function mintInvestigationCollectionCursor(
       q: cursor.queryFingerprint,
       t: cursor.createdAt,
       i: cursor.id,
-      m: macOf(body),
+      m: macOf(body, purpose),
     }),
     "utf8",
   ).toString("base64url");
@@ -71,7 +71,7 @@ export function mintInvestigationCollectionCursor(
   return token;
 }
 
-export function parseInvestigationCollectionCursor(raw: string): InvestigationCollectionCursor {
+function parseCursor(raw: string, purpose: string): InvestigationCollectionCursor {
   if (!OPAQUE_CURSOR_RE.test(raw)) {
     throw new CollectionCursorError("malformed_cursor");
   }
@@ -109,15 +109,37 @@ export function parseInvestigationCollectionCursor(raw: string): InvestigationCo
     createdAt: record.t,
     id: record.i,
   };
-  if (!equalMac(record.m, macOf(unsignedBody(cursor)))) {
+  if (!equalMac(record.m, macOf(unsignedBody(cursor), purpose))) {
     throw new CollectionCursorError("malformed_cursor");
   }
   try {
-    const roundTrip = mintInvestigationCollectionCursor(cursor);
+    const roundTrip = mintCursor(cursor, purpose);
     if (roundTrip !== raw) throw new ContractViolation("$", "malformed cursor");
   } catch (error) {
     if (error instanceof CollectionCursorError) throw error;
     throw new CollectionCursorError("malformed_cursor");
   }
   return cursor;
+}
+
+export function mintInvestigationCollectionCursor(
+  cursor: InvestigationCollectionCursor,
+): string {
+  return mintCursor(cursor, COLLECTION_CURSOR_PURPOSE);
+}
+
+export function parseInvestigationCollectionCursor(raw: string): InvestigationCollectionCursor {
+  return parseCursor(raw, COLLECTION_CURSOR_PURPOSE);
+}
+
+export function mintInvestigationOperationsQueueCursor(
+  cursor: InvestigationCollectionCursor,
+): string {
+  return mintCursor(cursor, OPERATIONS_QUEUE_CURSOR_PURPOSE);
+}
+
+export function parseInvestigationOperationsQueueCursor(
+  raw: string,
+): InvestigationCollectionCursor {
+  return parseCursor(raw, OPERATIONS_QUEUE_CURSOR_PURPOSE);
 }

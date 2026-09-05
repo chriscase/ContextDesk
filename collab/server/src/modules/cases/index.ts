@@ -21,6 +21,7 @@ export type {
   Actor,
   ArtifactAnnotationRow,
   ArtifactRow,
+  CaseCoordinationSnapshotRow,
   CaseStore,
   CaseTimelineRow,
   OverviewActivityRow,

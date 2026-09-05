@@ -172,6 +172,12 @@ export interface InvestigationCoordinationRow {
   updatedBy: InvestigationCoordinatorIdentityV1;
 }
 
+/** One visibility-scoped, statement-consistent case and coordination read. */
+export interface CaseCoordinationSnapshotRow {
+  caseRow: CaseRow;
+  coordination: InvestigationCoordinationRow | null;
+}
+
 /** Insert-only successful command envelope used for exact retry replay. */
 export interface InvestigationCoordinationSuccessIntent {
   caseId: string;
@@ -382,6 +388,9 @@ export interface ParticipantVisibilityScope {
 
 export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
+  listCaseCoordinationSnapshot(
+    scope: OverviewScope,
+  ): Promise<CaseCoordinationSnapshotRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
   /**
    * Lock and reload one case inside `withAtomic`.
@@ -573,6 +582,21 @@ export class MemoryCaseStore implements CaseStore {
 
   async listCases(): Promise<CaseRow[]> {
     return [...this.cases.values()].map((row) => cloneCase(row));
+  }
+
+  async listCaseCoordinationSnapshot(
+    scope: OverviewScope,
+  ): Promise<CaseCoordinationSnapshotRow[]> {
+    const snapshot: CaseCoordinationSnapshotRow[] = [];
+    for (const row of this.cases.values()) {
+      if (!isOverviewVisibleCase(row, scope)) continue;
+      const coordination = this.investigationCoordinations.get(row.id);
+      snapshot.push({
+        caseRow: cloneCase(row),
+        coordination: coordination ? cloneInvestigationCoordinationRow(coordination) : null,
+      });
+    }
+    return snapshot;
   }
 
   async getCase(id: string): Promise<CaseRow | null> {
@@ -1149,6 +1173,20 @@ export class PgCaseStore implements CaseStore {
   async listCases(): Promise<CaseRow[]> {
     const result = await this.db.query(`${CASE_SELECT} GROUP BY c.id`);
     return result.rows.map((row) => asCase(row as Record<string, unknown>));
+  }
+
+  async listCaseCoordinationSnapshot(
+    scope: OverviewScope,
+  ): Promise<CaseCoordinationSnapshotRow[]> {
+    const result = await this.db.query(
+      `${CASE_COORDINATION_SELECT}
+       WHERE ${overviewVisiblePredicate("c.id", "$1", "$2")}
+       GROUP BY c.id, ic.case_id, ic.coordinator_identity_id, ic.coordinator_username,
+                ic.revision, ic.updated_at, ic.updated_by_identity_id, ic.updated_by_username`,
+      [scope.isAdmin, scope.actorId],
+    );
+    return result.rows.map((row) =>
+      asCaseCoordinationSnapshotRow(row as Record<string, unknown>));
   }
 
   async getCase(id: string): Promise<CaseRow | null> {
@@ -1997,6 +2035,27 @@ const CASE_SELECT = `
   LEFT JOIN case_participants p ON p.case_id = c.id
 `;
 
+const CASE_COORDINATION_SELECT = `
+  SELECT c.id, c.title, c.problem_statement, c.affected_parties, c.impact, c.situation_scope,
+         c.open_questions, c.situation_version, c.investigation_context,
+         c.occurred_at, c.occurred_at_precision, c.occurred_at_zone,
+         c.severity, c.status, c.legal_hold,
+         c.retention_class,
+         c.created_at, c.created_by, c.created_by_username,
+         COALESCE(
+           json_agg(
+             json_build_object('identityId', p.identity_id, 'username', p.username)
+           ) FILTER (WHERE p.identity_id IS NOT NULL),
+           '[]'
+         ) AS participants,
+         ic.case_id AS coordination_case_id,
+         ic.coordinator_identity_id, ic.coordinator_username, ic.revision,
+         ic.updated_at, ic.updated_by_identity_id, ic.updated_by_username
+  FROM cases c
+  LEFT JOIN case_participants p ON p.case_id = c.id
+  LEFT JOIN investigation_coordination ic ON ic.case_id = c.id
+`;
+
 function cloneCase(row: CaseRow): CaseRow {
   return {
     ...row,
@@ -2058,6 +2117,18 @@ function asInvestigationCoordinationRow(row: Record<string, unknown>): Investiga
       identityId: String(row.updated_by_identity_id),
       username: String(row.updated_by_username),
     },
+  };
+}
+
+function asCaseCoordinationSnapshotRow(
+  row: Record<string, unknown>,
+): CaseCoordinationSnapshotRow {
+  const coordinationCaseId = row.coordination_case_id;
+  return {
+    caseRow: asCase(row),
+    coordination: coordinationCaseId === null || coordinationCaseId === undefined
+      ? null
+      : asInvestigationCoordinationRow({ ...row, case_id: coordinationCaseId }),
   };
 }
 
