@@ -10,8 +10,11 @@ import {
   ContractViolation,
   INVESTIGATION_COLLECTION_LIMITS,
   INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
+  INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+  INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
   canonicalJson,
   parseInvestigationCollectionPage,
+  parseInvestigationOperationsQueuePage,
   softwareImpactDisplayLabel,
   softwareImpactIdentityKey,
   type CaseStatus,
@@ -19,15 +22,20 @@ import {
   type InvestigationCollectionFacetsV1,
   type InvestigationCollectionPageV1,
   type InvestigationCollectionQueryV1,
+  type InvestigationCoordinationV1,
+  type InvestigationOperationsQueuePageV1,
+  type InvestigationOperationsQueueQueryV1,
   type SoftwareImpactIdentityV1,
 } from "@cd-collab/contracts";
 import {
   CollectionCursorError,
   mintInvestigationCollectionCursor,
+  mintInvestigationOperationsQueueCursor,
   parseInvestigationCollectionCursor,
+  parseInvestigationOperationsQueueCursor,
 } from "./collection-cursor.js";
 import type { InvestigationCollectionGraphSnapshot } from "./collection-graph.js";
-import type { Actor, CaseRow } from "./store.js";
+import type { Actor, CaseCoordinationSnapshotRow, CaseRow } from "./store.js";
 
 export class CollectionQueryError extends Error {
   constructor(readonly code: "malformed_cursor" | "stale_cursor") {
@@ -38,6 +46,7 @@ export class CollectionQueryError extends Error {
 
 const ARCHIVED_STATUS: CaseStatus = "archived";
 const FILTER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+type CollectionFilters = Omit<InvestigationCollectionQueryV1, "schemaId">;
 
 function emptyFacet(): { top: Array<{ key: string; count: number }>; otherCount: number } {
   return { top: [], otherCount: 0 };
@@ -128,6 +137,11 @@ export function requestsInvestigationCollectionPage(query: unknown): boolean {
   return Object.prototype.hasOwnProperty.call(raw, "schemaId");
 }
 
+export function requestsInvestigationOperationsQueuePage(query: unknown): boolean {
+  const raw = asHttpQuery(query);
+  return raw.schemaId === INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID;
+}
+
 export function collectionQueryFingerprint(query: InvestigationCollectionQueryV1): string {
   return createHash("sha256")
     .update(
@@ -141,6 +155,29 @@ export function collectionQueryFingerprint(query: InvestigationCollectionQueryV1
         contributorId: query.contributorId,
         recordedFrom: query.recordedFrom,
         recordedTo: query.recordedTo,
+        limit: query.limit,
+      }),
+    )
+    .digest("hex");
+}
+
+export function operationsQueueQueryFingerprint(
+  query: InvestigationOperationsQueueQueryV1,
+): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        schemaId: INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+        q: query.q,
+        status: [...query.status].sort(),
+        includeArchived: query.includeArchived,
+        entityId: query.entityId,
+        impactIdentity:
+          query.impactIdentity === null ? null : softwareImpactIdentityKey(query.impactIdentity),
+        contributorId: query.contributorId,
+        recordedFrom: query.recordedFrom,
+        recordedTo: query.recordedTo,
+        coordinationScope: query.coordinationScope,
         limit: query.limit,
       }),
     )
@@ -177,11 +214,11 @@ function matchesQuery(row: CaseRow, normalizedQuery: string, entityLabels: reado
   );
 }
 
-function admitsArchived(query: InvestigationCollectionQueryV1): boolean {
+function admitsArchived(query: CollectionFilters): boolean {
   return query.includeArchived || query.status.includes(ARCHIVED_STATUS);
 }
 
-function inRecordedRange(createdAt: string, query: InvestigationCollectionQueryV1): boolean {
+function inRecordedRange(createdAt: string, query: CollectionFilters): boolean {
   const recorded = Date.parse(createdAt);
   if (!Number.isFinite(recorded)) return false;
   if (query.recordedFrom !== null && recorded < Date.parse(query.recordedFrom)) return false;
@@ -214,7 +251,7 @@ function hasImpact(
 
 function matchesFilters(
   row: CaseRow,
-  query: InvestigationCollectionQueryV1,
+  query: CollectionFilters,
   graph: InvestigationCollectionGraphSnapshot | null,
   options: { ignoreArchivedVisibility: boolean },
 ): boolean {
@@ -407,5 +444,108 @@ export function buildInvestigationCollectionPage(input: {
     nextCursor,
     hiddenArchivedCount,
     facets: authorizedFacets(authorized, graph),
+  });
+}
+
+export function buildInvestigationOperationsQueuePage(input: {
+  authorized: readonly CaseCoordinationSnapshotRow[];
+  query: InvestigationOperationsQueueQueryV1;
+  actor: Actor;
+  isAdmin: boolean;
+  graph: InvestigationCollectionGraphSnapshot | null;
+  toCase: (row: CaseRow) => CaseV1;
+  toCoordination: (
+    row: CaseRow,
+    coordination: CaseCoordinationSnapshotRow["coordination"],
+  ) => InvestigationCoordinationV1;
+}): InvestigationOperationsQueuePageV1 {
+  const { authorized, query, actor, isAdmin, graph, toCase, toCoordination } = input;
+  const fingerprint = operationsQueueQueryFingerprint(query);
+  let cursor = null as ReturnType<typeof parseInvestigationOperationsQueueCursor> | null;
+  if (query.cursor !== null) {
+    try {
+      cursor = parseInvestigationOperationsQueueCursor(query.cursor);
+    } catch (error) {
+      if (error instanceof CollectionCursorError) {
+        throw new CollectionQueryError(error.code);
+      }
+      throw new CollectionQueryError("malformed_cursor");
+    }
+    if (
+      cursor.actorId !== actor.id
+      || cursor.isAdmin !== isAdmin
+      || cursor.queryFingerprint !== fingerprint
+    ) {
+      throw new CollectionQueryError("stale_cursor");
+    }
+  }
+
+  const commonMatching: CaseCoordinationSnapshotRow[] = [];
+  let hiddenArchivedCount = 0;
+  for (const row of authorized) {
+    const matchesExceptArchive = matchesFilters(row.caseRow, query, graph, {
+      ignoreArchivedVisibility: true,
+    });
+    if (!matchesExceptArchive) continue;
+    if (row.caseRow.status === ARCHIVED_STATUS && !admitsArchived(query)) {
+      hiddenArchivedCount += 1;
+      continue;
+    }
+    commonMatching.push(row);
+  }
+
+  const coordinationScopeCounts = {
+    allVisible: commonMatching.length,
+    mine: commonMatching.filter(
+      (row) => row.coordination?.coordinator?.identityId === actor.id,
+    ).length,
+    unassigned: commonMatching.filter(
+      (row) => row.coordination === null || row.coordination.coordinator === null,
+    ).length,
+  };
+  const scoped = commonMatching.filter((row) => {
+    switch (query.coordinationScope) {
+      case "mine":
+        return row.coordination?.coordinator?.identityId === actor.id;
+      case "unassigned":
+        return row.coordination === null || row.coordination.coordinator === null;
+      case "all_visible":
+        return true;
+    }
+  });
+  scoped.sort((left, right) => compareRecordingOrder(left.caseRow, right.caseRow));
+
+  if (cursor) {
+    const found = scoped.some(
+      (row) => row.caseRow.id === cursor.id && row.caseRow.createdAt === cursor.createdAt,
+    );
+    if (!found) throw new CollectionQueryError("stale_cursor");
+  }
+  const following = cursor
+    ? scoped.filter((row) => comesAfterCursor(row.caseRow, cursor.createdAt, cursor.id))
+    : scoped;
+  const items = following.slice(0, query.limit);
+  const last = items[items.length - 1];
+  const nextCursor =
+    last && following.length > query.limit
+      ? mintInvestigationOperationsQueueCursor({
+          actorId: actor.id,
+          isAdmin,
+          queryFingerprint: fingerprint,
+          createdAt: last.caseRow.createdAt,
+          id: last.caseRow.id,
+        })
+      : null;
+
+  return parseInvestigationOperationsQueuePage({
+    schemaId: INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+    items: items.map((row) => ({
+      investigation: toCase(row.caseRow),
+      coordination: toCoordination(row.caseRow, row.coordination),
+    })),
+    nextCursor,
+    hiddenArchivedCount,
+    facets: authorizedFacets(authorized.map((row) => row.caseRow), graph),
+    coordinationScopeCounts,
   });
 }

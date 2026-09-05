@@ -1028,6 +1028,67 @@ describe("atomic memory Situation updates", () => {
 });
 
 describe("PostgreSQL Situation SQL boundary", () => {
+  it("loads authorized cases and coordination in one joined statement", async () => {
+    const calls: Array<{ sql: string; values: unknown[] | undefined }> = [];
+    const db = {
+      query: async (sql: string, values?: unknown[]) => {
+        calls.push({ sql: sql.replace(/\s+/g, " ").trim(), values });
+        return {
+          rows: [
+            pgCaseRecord({
+              coordination_case_id: CASE_ID,
+              coordinator_identity_id: "identity-alice",
+              coordinator_username: "alice",
+              revision: 2,
+              updated_at: "2026-09-04T12:00:00.000Z",
+              updated_by_identity_id: "identity-alice",
+              updated_by_username: "alice",
+            }),
+            pgCaseRecord({
+              id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              coordination_case_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              coordinator_identity_id: null,
+              coordinator_username: null,
+              revision: 3,
+              updated_at: "2026-09-04T13:00:00.000Z",
+              updated_by_identity_id: "identity-alice",
+              updated_by_username: "alice",
+            }),
+            pgCaseRecord({
+              id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              coordination_case_id: null,
+            }),
+          ],
+          rowCount: 3,
+        };
+      },
+    };
+    const store = new PgCaseStore(db as never);
+    const snapshot = await store.listCaseCoordinationSnapshot({
+      actorId: "identity-alice",
+      isAdmin: false,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.sql).toContain("LEFT JOIN investigation_coordination");
+    expect(calls[0]?.sql).toContain("EXISTS ( SELECT 1 FROM case_participants");
+    expect(calls[0]?.values).toEqual([false, "identity-alice"]);
+    expect(snapshot[0]?.caseRow.id).toBe(CASE_ID);
+    expect(snapshot[0]?.coordination).toMatchObject({
+      caseId: CASE_ID,
+      coordinator: { identityId: "identity-alice", username: "alice" },
+      revision: 2,
+    });
+    expect(snapshot[1]?.coordination).toEqual({
+      caseId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      coordinator: null,
+      revision: 3,
+      updatedAt: "2026-09-04T13:00:00.000Z",
+      updatedBy: { identityId: "identity-alice", username: "alice" },
+    });
+    expect(snapshot[2]?.coordination).toBeNull();
+  });
+
   it("locks and version-checks the case and commits state, timeline, and audit together", async () => {
     const statements: string[] = [];
     const db = {

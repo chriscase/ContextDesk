@@ -45,6 +45,8 @@ import {
   type ContributionV1,
   type InvestigationCollectionPageV1,
   type InvestigationCollectionQueryV1,
+  type InvestigationOperationsQueuePageV1,
+  type InvestigationOperationsQueueQueryV1,
   type HypothesisStatus,
   type InvestigationContextV1,
   type InvestigationCoordinationActionRequestV1,
@@ -108,7 +110,10 @@ import {
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
 import { deriveCaseBoard, type AcceptedDecisionBoardInput } from "./board.js";
 import type { InvestigationCollectionGraph } from "./collection-graph.js";
-import { buildInvestigationCollectionPage } from "./collection-query.js";
+import {
+  buildInvestigationCollectionPage,
+  buildInvestigationOperationsQueuePage,
+} from "./collection-query.js";
 import {
   CaseStoreCommitOutcomeUnknownError,
   MemoryCaseStore,
@@ -133,7 +138,7 @@ import {
 } from "./store.js";
 
 export { CaseStoreCommitOutcomeUnknownError };
-export type { Actor, ArtifactRow, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, OverviewVisibilityBoundary, RevisionRow, TimelineRow } from "./store.js";
+export type { Actor, ArtifactRow, CaseCoordinationSnapshotRow, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, OverviewVisibilityBoundary, RevisionRow, TimelineRow } from "./store.js";
 export type { ArtifactAnnotationRow } from "./store.js";
 
 const ACTIVITY_DETAIL_KEYS = new Set([
@@ -826,6 +831,30 @@ export class CaseService {
       isAdmin,
       graph,
       toCase: (row) => this.toCase(row),
+    });
+  }
+
+  async listOperationsQueuePage(
+    actor: Actor,
+    isAdmin: boolean,
+    query: InvestigationOperationsQueueQueryV1,
+  ): Promise<InvestigationOperationsQueuePageV1> {
+    const authorized = await this.store.listCaseCoordinationSnapshot({
+      actorId: actor.id,
+      isAdmin,
+    });
+    const graph = this.collectionGraph
+      ? await this.collectionGraph.snapshot(authorized.map((row) => row.caseRow.id))
+      : null;
+    return buildInvestigationOperationsQueuePage({
+      authorized,
+      query,
+      actor,
+      isAdmin,
+      graph,
+      toCase: (row) => this.toCase(row),
+      toCoordination: (row, coordination) =>
+        this.coordinationProjection(row, coordination),
     });
   }
 

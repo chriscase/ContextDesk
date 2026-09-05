@@ -5,10 +5,15 @@ import {
   CASE_LIST_SCHEMA_ID,
   CASE_SCHEMA_ID,
   ContractViolation,
+  INVESTIGATION_COORDINATION_SCHEMA_ID,
   INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
   INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+  INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+  INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
   parseInvestigationCollectionPage,
   parseInvestigationCollectionQuery,
+  parseInvestigationOperationsQueuePage,
+  parseInvestigationOperationsQueueQuery,
   type CaseV1,
 } from "@cd-collab/contracts";
 import { describe, expect, it, vi } from "vitest";
@@ -22,9 +27,12 @@ import {
 import {
   CollectionQueryError,
   buildInvestigationCollectionPage,
+  buildInvestigationOperationsQueuePage,
   collectionQueryFromHttp,
   collectionQueryFingerprint,
+  operationsQueueQueryFingerprint,
   requestsInvestigationCollectionPage,
+  requestsInvestigationOperationsQueuePage,
 } from "./collection-query.js";
 import { CaseService } from "./service.js";
 import { MemoryCaseStore, type CaseRow } from "./store.js";
@@ -35,6 +43,7 @@ const CASE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CASE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const CASE_C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const CASE_D = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const CASE_E = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const IMPACT = {
   productName: "Fixture Desk",
   version: "4.2",
@@ -48,6 +57,15 @@ function query(
 ): ReturnType<typeof parseInvestigationCollectionQuery> {
   return parseInvestigationCollectionQuery({
     schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+    ...overrides,
+  });
+}
+
+function queueQuery(
+  overrides: Record<string, unknown> = {},
+): ReturnType<typeof parseInvestigationOperationsQueueQuery> {
+  return parseInvestigationOperationsQueueQuery({
+    schemaId: INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
     ...overrides,
   });
 }
@@ -104,9 +122,10 @@ async function withService(
     store: MemoryCaseStore;
     graph: MemoryInvestigationCollectionGraph;
   }) => Promise<void>,
+  caseStore: MemoryCaseStore = new MemoryCaseStore(),
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-collection-query-"));
-  const store = new MemoryCaseStore();
+  const store = caseStore;
   const graph = new MemoryInvestigationCollectionGraph();
   const service = new CaseService(
     new FilesystemEvidenceStore({ rootDir: root }),
@@ -192,6 +211,343 @@ describe("collection query HTTP adapter", () => {
     expect(
       requestsInvestigationCollectionPage({ schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID }),
     ).toBe(true);
+    expect(requestsInvestigationOperationsQueuePage({})).toBe(false);
+    expect(requestsInvestigationOperationsQueuePage({
+      schemaId: INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+    })).toBe(false);
+    expect(requestsInvestigationOperationsQueuePage({
+      schemaId: INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
+    })).toBe(true);
+  });
+});
+
+class CountingCoordinationSnapshotStore extends MemoryCaseStore {
+  snapshotCalls = 0;
+  listCalls = 0;
+  coordinationLookupCalls = 0;
+
+  override async listCases(): Promise<CaseRow[]> {
+    this.listCalls += 1;
+    return super.listCases();
+  }
+
+  override async listCaseCoordinationSnapshot(
+    scope: Parameters<MemoryCaseStore["listCaseCoordinationSnapshot"]>[0],
+  ): ReturnType<MemoryCaseStore["listCaseCoordinationSnapshot"]> {
+    this.snapshotCalls += 1;
+    return super.listCaseCoordinationSnapshot(scope);
+  }
+
+  override async getInvestigationCoordination(
+    caseId: string,
+  ): ReturnType<MemoryCaseStore["getInvestigationCoordination"]> {
+    this.coordinationLookupCalls += 1;
+    return super.getInvestigationCoordination(caseId);
+  }
+}
+
+async function recordCoordination(
+  store: MemoryCaseStore,
+  caseId: string,
+  coordinator: { identityId: string; username: string } | null,
+): Promise<void> {
+  await store.withAtomic(() =>
+    store.saveInvestigationCoordination({
+      caseId,
+      coordinator,
+      revision: 1,
+      updatedAt: "2026-09-04T12:00:00.000Z",
+      updatedBy: { identityId: ALICE.id, username: ALICE.username },
+    }));
+}
+
+describe("operations queue service and store", () => {
+  it("uses one authorized case-coordination snapshot and derives all three scopes", async () => {
+    const store = new CountingCoordinationSnapshotStore();
+    await withService(async ({ service }) => {
+      await store.insertCase(row({
+        id: CASE_A,
+        title: "Mine checkout",
+        createdAt: "2026-08-26T00:00:00.000Z",
+      }));
+      await store.insertCase(row({
+        id: CASE_B,
+        title: "Unassigned checkout",
+        createdAt: "2026-08-25T00:00:00.000Z",
+      }));
+      await store.insertCase(row({
+        id: CASE_C,
+        title: "Assigned to Eve",
+        createdAt: "2026-08-24T00:00:00.000Z",
+        participants: [
+          { identityId: ALICE.id, username: ALICE.username },
+          { identityId: EVE.id, username: EVE.username },
+        ],
+      }));
+      await store.insertCase(row({
+        id: CASE_D,
+        title: "Eve private",
+        createdAt: "2026-08-23T00:00:00.000Z",
+        createdBy: EVE.id,
+        createdByUsername: EVE.username,
+        participants: [{ identityId: EVE.id, username: EVE.username }],
+      }));
+      await recordCoordination(store, CASE_A, {
+        identityId: ALICE.id,
+        username: ALICE.username,
+      });
+      await recordCoordination(store, CASE_C, {
+        identityId: EVE.id,
+        username: EVE.username,
+      });
+
+      const all = parseInvestigationOperationsQueuePage(
+        await service.listOperationsQueuePage(ALICE, false, queueQuery()),
+      );
+      expect(all.schemaId).toBe(INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID);
+      expect(all.items.map((item) => item.investigation.id)).toEqual([
+        CASE_A,
+        CASE_B,
+        CASE_C,
+      ]);
+      expect(all.coordinationScopeCounts).toEqual({ allVisible: 3, mine: 1, unassigned: 1 });
+      expect(JSON.stringify(all)).not.toContain(CASE_D);
+      expect(store.snapshotCalls).toBe(1);
+      expect(store.listCalls).toBe(0);
+      expect(store.coordinationLookupCalls).toBe(0);
+
+      const mine = await service.listOperationsQueuePage(
+        ALICE,
+        false,
+        queueQuery({ coordinationScope: "mine" }),
+      );
+      expect(mine.items.map((item) => item.investigation.id)).toEqual([CASE_A]);
+      expect(mine.coordinationScopeCounts).toEqual(all.coordinationScopeCounts);
+      const unassigned = await service.listOperationsQueuePage(
+        ALICE,
+        false,
+        queueQuery({ coordinationScope: "unassigned" }),
+      );
+      expect(unassigned.items.map((item) => item.investigation.id)).toEqual([CASE_B]);
+      expect(unassigned.items[0]?.coordination).toMatchObject({
+        investigationId: CASE_B,
+        coordinator: null,
+        revision: 0,
+        archived: false,
+      });
+    }, store);
+  });
+
+  it("counts persisted null and missing coordination rows as distinct unassigned records", async () => {
+    await withService(async ({ service, store }) => {
+      await store.insertCase(row({
+        id: CASE_A,
+        title: "Persisted unassigned",
+        createdAt: "2026-08-26T00:00:00.000Z",
+      }));
+      await store.insertCase(row({
+        id: CASE_B,
+        title: "Never coordinated",
+        createdAt: "2026-08-25T00:00:00.000Z",
+      }));
+      await recordCoordination(store, CASE_A, null);
+
+      const unassigned = parseInvestigationOperationsQueuePage(
+        await service.listOperationsQueuePage(
+          ALICE,
+          false,
+          queueQuery({ coordinationScope: "unassigned" }),
+        ),
+      );
+
+      expect(unassigned.items.map((item) => item.investigation.id)).toEqual([CASE_A, CASE_B]);
+      expect(unassigned.coordinationScopeCounts).toEqual({
+        allVisible: 2,
+        mine: 0,
+        unassigned: 2,
+      });
+      expect(unassigned.items[0]?.coordination).toEqual({
+        schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
+        investigationId: CASE_A,
+        coordinator: null,
+        revision: 1,
+        archived: false,
+        updatedAt: "2026-09-04T12:00:00.000Z",
+        updatedBy: { identityId: ALICE.id, username: ALICE.username },
+      });
+      expect(unassigned.items[1]?.coordination).toMatchObject({
+        investigationId: CASE_B,
+        coordinator: null,
+        revision: 0,
+        archived: false,
+        updatedAt: null,
+        updatedBy: null,
+      });
+    });
+  });
+
+  it("counts after common filters and archive admission but before scope and paging", async () => {
+    await withService(async ({ service, store }) => {
+      await store.insertCase(row({
+        id: CASE_A,
+        title: "Live checkout",
+        createdAt: "2026-08-26T00:00:00.000Z",
+      }));
+      await store.insertCase(row({
+        id: CASE_B,
+        title: "Archived checkout",
+        status: "archived",
+        createdAt: "2026-08-25T00:00:00.000Z",
+      }));
+      await store.insertCase(row({
+        id: CASE_C,
+        title: "Unrelated mailer",
+        createdAt: "2026-08-24T00:00:00.000Z",
+      }));
+      await recordCoordination(store, CASE_A, {
+        identityId: ALICE.id,
+        username: ALICE.username,
+      });
+
+      const hidden = await service.listOperationsQueuePage(
+        ALICE,
+        false,
+        queueQuery({ q: "checkout", coordinationScope: "mine", limit: 1 }),
+      );
+      expect(hidden.items.map((item) => item.investigation.id)).toEqual([CASE_A]);
+      expect(hidden.hiddenArchivedCount).toBe(1);
+      expect(hidden.coordinationScopeCounts).toEqual({ allVisible: 1, mine: 1, unassigned: 0 });
+
+      const shown = await service.listOperationsQueuePage(
+        ALICE,
+        false,
+        queueQuery({ q: "checkout", includeArchived: true, limit: 1 }),
+      );
+      expect(shown.items).toHaveLength(1);
+      expect(shown.nextCursor).toEqual(expect.any(String));
+      expect(shown.coordinationScopeCounts).toEqual({ allVisible: 2, mine: 1, unassigned: 1 });
+      const archived = await service.listOperationsQueuePage(
+        ALICE,
+        false,
+        queueQuery({
+          q: "checkout",
+          includeArchived: true,
+          coordinationScope: "unassigned",
+        }),
+      );
+      expect(archived.items[0]?.investigation.id).toBe(CASE_B);
+      expect(archived.items[0]?.coordination.archived).toBe(true);
+      expect(archived.coordinationScopeCounts).toEqual(shown.coordinationScopeCounts);
+    });
+  });
+
+  it("binds queue cursors to purpose, actor, admin state, normalized filters, scope, and limit", async () => {
+    await withService(async ({ service, store }) => {
+      for (const [id, createdAt] of [
+        [CASE_A, "2026-08-26T00:00:00.000Z"],
+        [CASE_B, "2026-08-25T00:00:00.000Z"],
+        [CASE_C, "2026-08-24T00:00:00.000Z"],
+      ] as const) {
+        await store.insertCase(row({ id, title: id, createdAt }));
+      }
+      const first = await service.listOperationsQueuePage(
+        ALICE,
+        false,
+        queueQuery({ limit: 1 }),
+      );
+      expect(first.nextCursor).toEqual(expect.any(String));
+      const second = await service.listOperationsQueuePage(
+        ALICE,
+        false,
+        queueQuery({ limit: 1, cursor: first.nextCursor }),
+      );
+      expect(second.items[0]?.investigation.id).toBe(CASE_B);
+
+      for (const [actor, isAdmin, overrides] of [
+        [EVE, false, {}],
+        [ALICE, true, {}],
+        [ALICE, false, { q: "different" }],
+        [ALICE, false, { status: ["monitoring"] }],
+        [ALICE, false, { includeArchived: true }],
+        [ALICE, false, { entityId: "ent-different" }],
+        [ALICE, false, { impactIdentity: IMPACT }],
+        [ALICE, false, { contributorId: EVE.id }],
+        [ALICE, false, { recordedFrom: "2026-08-01T00:00:00.000Z" }],
+        [ALICE, false, { recordedTo: "2026-08-31T00:00:00.000Z" }],
+        [ALICE, false, { coordinationScope: "unassigned" }],
+        [ALICE, false, { limit: 2 }],
+      ] as const) {
+        await expect(service.listOperationsQueuePage(
+          actor,
+          isAdmin,
+          queueQuery({ limit: 1, cursor: first.nextCursor, ...overrides }),
+        )).rejects.toMatchObject({ code: "stale_cursor" });
+      }
+
+      const collection = await service.listCollectionPage(ALICE, false, query({ limit: 1 }));
+      expect(collection.nextCursor).toEqual(expect.any(String));
+      await expect(service.listOperationsQueuePage(
+        ALICE,
+        false,
+        queueQuery({ limit: 1, cursor: collection.nextCursor }),
+      )).rejects.toMatchObject({ code: "malformed_cursor" });
+      await expect(service.listCollectionPage(
+        ALICE,
+        false,
+        query({ limit: 1, cursor: first.nextCursor }),
+      )).rejects.toMatchObject({ code: "malformed_cursor" });
+    });
+  });
+
+  it("traverses equal-createdAt rows by id without duplicates or omissions", async () => {
+    await withService(async ({ service, store }) => {
+      for (const [id, createdAt] of [
+        [CASE_D, "2026-08-27T00:00:00.000Z"],
+        [CASE_C, "2026-08-26T00:00:00.000Z"],
+        [CASE_A, "2026-08-26T00:00:00.000Z"],
+        [CASE_B, "2026-08-26T00:00:00.000Z"],
+        [CASE_E, "2026-08-25T00:00:00.000Z"],
+      ] as const) {
+        await store.insertCase(row({ id, title: id, createdAt }));
+      }
+
+      const traversed: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const page = await service.listOperationsQueuePage(
+          ALICE,
+          false,
+          queueQuery({ limit: 2, cursor }),
+        );
+        traversed.push(...page.items.map((item) => item.investigation.id));
+        cursor = page.nextCursor;
+      } while (cursor !== null);
+
+      expect(traversed).toEqual([CASE_D, CASE_A, CASE_B, CASE_C, CASE_E]);
+      expect(new Set(traversed).size).toBe(traversed.length);
+    });
+  });
+
+  it("keeps queue fingerprints canonical across status order", () => {
+    expect(operationsQueueQueryFingerprint(queueQuery({ status: ["open", "monitoring"] })))
+      .toBe(operationsQueueQueryFingerprint(queueQuery({ status: ["monitoring", "open"] })));
+    expect(buildInvestigationOperationsQueuePage({
+      authorized: [],
+      query: queueQuery(),
+      actor: ALICE,
+      isAdmin: false,
+      graph: null,
+      toCase,
+      toCoordination: (caseRow) => ({
+        schemaId: "cd-collab.investigation_coordination.v1",
+        investigationId: caseRow.id,
+        coordinator: null,
+        revision: 0,
+        updatedAt: null,
+        updatedBy: null,
+        archived: caseRow.status === "archived",
+      }),
+    }).items).toEqual([]);
   });
 });
 

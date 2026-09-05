@@ -25,6 +25,7 @@ import {
   isRfc4122Uuid,
   parseInvestigationLifecycleActionRequest,
   parseInvestigationCoordinationActionRequest,
+  parseInvestigationOperationsQueueQuery,
   type ArtifactKind,
   type AuthErrorV1,
   type CaseSeverity,
@@ -64,6 +65,7 @@ import {
   CollectionQueryError,
   collectionQueryFromHttp,
   requestsInvestigationCollectionPage,
+  requestsInvestigationOperationsQueuePage,
 } from "./collection-query.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
@@ -789,6 +791,18 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const query = asRecord(request.query);
+    if (requestsInvestigationOperationsQueuePage(query)) {
+      try {
+        const parsed = parseInvestigationOperationsQueueQuery(collectionQueryFromHttp(query));
+        return await deps.domain.listOperationsQueuePage(ctx.actor, ctx.isAdmin, parsed);
+      } catch (error) {
+        if (error instanceof CollectionQueryError) {
+          void reply.code(400);
+          return { error: error.code };
+        }
+        return domainError(reply, error);
+      }
+    }
     if (requestsInvestigationCollectionPage(query)) {
       try {
         const parsed = parseInvestigationCollectionQuery(collectionQueryFromHttp(query));

@@ -4,10 +4,15 @@ import { join } from "node:path";
 import {
   AUTH_ERROR_SCHEMA_ID,
   CASE_LIST_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
   INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
   INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
+  INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
+  INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID,
   parseCaseList,
   parseInvestigationCollectionPage,
+  parseInvestigationCoordinationActionSuccess,
+  parseInvestigationOperationsQueuePage,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
@@ -83,10 +88,26 @@ const roleMap =
 
 class CountingListCaseStore extends MemoryCaseStore {
   listCalls = 0;
+  coordinationSnapshotCalls = 0;
+  coordinationLookupCalls = 0;
 
   override async listCases(): Promise<Awaited<ReturnType<MemoryCaseStore["listCases"]>>> {
     this.listCalls += 1;
     return super.listCases();
+  }
+
+  override async listCaseCoordinationSnapshot(
+    scope: Parameters<MemoryCaseStore["listCaseCoordinationSnapshot"]>[0],
+  ): ReturnType<MemoryCaseStore["listCaseCoordinationSnapshot"]> {
+    this.coordinationSnapshotCalls += 1;
+    return super.listCaseCoordinationSnapshot(scope);
+  }
+
+  override async getInvestigationCoordination(
+    caseId: string,
+  ): ReturnType<MemoryCaseStore["getInvestigationCoordination"]> {
+    this.coordinationLookupCalls += 1;
+    return super.getInvestigationCoordination(caseId);
   }
 }
 
@@ -170,12 +191,30 @@ function collectionUrl(params: Record<string, string | string[]> = {}): string {
   return `/api/cases?${search.toString()}`;
 }
 
+function operationsQueueUrl(params: Record<string, string | string[]> = {}): string {
+  const search = new URLSearchParams();
+  search.set("schemaId", INVESTIGATION_OPERATIONS_QUEUE_QUERY_SCHEMA_ID);
+  for (const [key, value] of Object.entries(params)) {
+    if (Array.isArray(value)) {
+      for (const item of value) search.append(key, item);
+    } else {
+      search.set(key, value);
+    }
+  }
+  return `/api/cases?${search.toString()}`;
+}
+
 async function createCase(
   app: Awaited<ReturnType<typeof buildApp>>,
   session: string,
   title: string,
   extra: Record<string, unknown> = {},
-): Promise<{ id: string; title: string; status: string }> {
+): Promise<{
+  id: string;
+  title: string;
+  status: string;
+  participants: Array<{ identityId: string; username: string }>;
+}> {
   const created = await app.inject({
     method: "POST",
     url: "/api/cases",
@@ -183,7 +222,12 @@ async function createCase(
     payload: { title, ...extra },
   });
   expect(created.statusCode).toBe(200);
-  return JSON.parse(created.body) as { id: string; title: string; status: string };
+  return JSON.parse(created.body) as {
+    id: string;
+    title: string;
+    status: string;
+    participants: Array<{ identityId: string; username: string }>;
+  };
 }
 
 describe("GET /api/cases collection query", () => {
@@ -192,6 +236,7 @@ describe("GET /api/cases collection query", () => {
       const alice = await login(app, "alice", ALICE);
       const created = await createCase(app, alice, "Legacy list fixture");
       await caseStore.updateCaseMeta({ id: created.id, status: "archived" });
+      const queueBefore = caseStore.coordinationSnapshotCalls;
 
       const unauthenticated = await app.inject({ method: "GET", url: "/api/cases" });
       expect(unauthenticated.statusCode).toBe(401);
@@ -199,6 +244,12 @@ describe("GET /api/cases collection query", () => {
         schemaId: AUTH_ERROR_SCHEMA_ID,
         error: "unauthenticated",
       });
+      const unauthenticatedQueue = await app.inject({
+        method: "GET",
+        url: operationsQueueUrl(),
+      });
+      expect(unauthenticatedQueue.statusCode).toBe(401);
+      expect(caseStore.coordinationSnapshotCalls).toBe(queueBefore);
 
       const listed = await app.inject({
         method: "GET",
@@ -240,6 +291,112 @@ describe("GET /api/cases collection query", () => {
       expect(page.facets.entity.top).toEqual([{ key: "ent-northwind", count: 1 }]);
       expect(page.facets.impactIdentity.top[0]?.identity).toEqual(IMPACT);
       expect(page).not.toHaveProperty("rank");
+    });
+  });
+
+  it("selects the queue schema exactly and derives member/admin scopes and counts", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const eve = await login(app, "eve", "fixture-eve-secret");
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const aliceCase = await createCase(app, alice, "Alice queue fixture");
+      const eveCase = await createCase(app, eve, "Eve private queue fixture");
+      const claim = await app.inject({
+        method: "POST",
+        url: `/api/cases/${aliceCase.id}/coordination`,
+        headers: { cookie: alice },
+        payload: {
+          schemaId: INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+          investigationId: aliceCase.id,
+          action: "claim_self",
+          expectedRevision: 0,
+          idempotencyKey: "queue-http-claim-alice",
+        },
+      });
+      expect(claim.statusCode).toBe(200);
+      const aliceIdentity = parseInvestigationCoordinationActionSuccess(
+        JSON.parse(claim.body),
+      ).applied.coordinator!;
+
+      const mineResponse = await app.inject({
+        method: "GET",
+        url: operationsQueueUrl({ coordinationScope: "mine" }),
+        headers: { cookie: alice },
+      });
+      expect(mineResponse.statusCode).toBe(200);
+      const mine = parseInvestigationOperationsQueuePage(JSON.parse(mineResponse.body));
+      expect(mine.schemaId).toBe(INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID);
+      expect(mine.items.map((item) => item.investigation.id)).toEqual([aliceCase.id]);
+      expect(mine.items[0]?.coordination.coordinator?.identityId).toBe(
+        aliceIdentity.identityId,
+      );
+      expect(mine.coordinationScopeCounts).toEqual({ allVisible: 1, mine: 1, unassigned: 0 });
+      expect(JSON.stringify(mine)).not.toContain(eveCase.id);
+
+      const unassigned = parseInvestigationOperationsQueuePage(JSON.parse((await app.inject({
+        method: "GET",
+        url: operationsQueueUrl({ coordinationScope: "unassigned" }),
+        headers: { cookie: alice },
+      })).body));
+      expect(unassigned.items).toEqual([]);
+      expect(unassigned.coordinationScopeCounts).toEqual(mine.coordinationScopeCounts);
+
+      const admin = parseInvestigationOperationsQueuePage(JSON.parse((await app.inject({
+        method: "GET",
+        url: operationsQueueUrl(),
+        headers: { cookie: dave },
+      })).body));
+      expect(admin.items.map((item) => item.investigation.id).sort()).toEqual(
+        [aliceCase.id, eveCase.id].sort(),
+      );
+      expect(admin.coordinationScopeCounts).toEqual({ allVisible: 2, mine: 0, unassigned: 1 });
+    });
+  });
+
+  it("rejects queue cursor tampering and cross-scope or cross-schema replay", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      await createCase(app, alice, "Queue cursor one");
+      await createCase(app, alice, "Queue cursor two");
+      const first = parseInvestigationOperationsQueuePage(JSON.parse((await app.inject({
+        method: "GET",
+        url: operationsQueueUrl({ limit: "1" }),
+        headers: { cookie: alice },
+      })).body));
+      expect(first.nextCursor).toEqual(expect.any(String));
+      const cursor = first.nextCursor ?? "";
+      const second = await app.inject({
+        method: "GET",
+        url: operationsQueueUrl({ limit: "1", cursor }),
+        headers: { cookie: alice },
+      });
+      expect(second.statusCode).toBe(200);
+      expect(parseInvestigationOperationsQueuePage(JSON.parse(second.body)).items).toHaveLength(1);
+
+      const tamperedCursor = `${cursor.slice(0, -1)}${cursor.endsWith("A") ? "B" : "A"}`;
+      const tampered = await app.inject({
+        method: "GET",
+        url: operationsQueueUrl({ limit: "1", cursor: tamperedCursor }),
+        headers: { cookie: alice },
+      });
+      expect(tampered.statusCode).toBe(400);
+      expect(JSON.parse(tampered.body)).toEqual({ error: "malformed_cursor" });
+
+      const wrongScope = await app.inject({
+        method: "GET",
+        url: operationsQueueUrl({ limit: "1", coordinationScope: "unassigned", cursor }),
+        headers: { cookie: alice },
+      });
+      expect(wrongScope.statusCode).toBe(400);
+      expect(JSON.parse(wrongScope.body)).toEqual({ error: "stale_cursor" });
+
+      const wrongSchema = await app.inject({
+        method: "GET",
+        url: collectionUrl({ limit: "1", cursor }),
+        headers: { cookie: alice },
+      });
+      expect(wrongSchema.statusCode).toBe(400);
+      expect(JSON.parse(wrongSchema.body)).toEqual({ error: "malformed_cursor" });
     });
   });
 
@@ -402,6 +559,20 @@ describe("GET /api/cases collection query", () => {
       });
       expect(wrongVersion.statusCode).toBe(400);
 
+      const wrongQueueVersion = await app.inject({
+        method: "GET",
+        url: "/api/cases?schemaId=cd-collab.investigation_operations_queue_query.v2",
+        headers: { cookie: alice },
+      });
+      expect(wrongQueueVersion.statusCode).toBe(400);
+      const unknownQueueKey = await app.inject({
+        method: "GET",
+        url: `${operationsQueueUrl()}&workload=1`,
+        headers: { cookie: alice },
+      });
+      expect(unknownQueueKey.statusCode).toBe(400);
+      expect(JSON.parse(unknownQueueKey.body).error).toBe("invalid");
+
       const malformedCursor = await app.inject({
         method: "GET",
         url: collectionUrl({ cursor: "not-a-cursor" }),
@@ -438,6 +609,8 @@ describe("GET /api/cases collection query", () => {
       const alice = await login(app, "alice", ALICE);
       await createCase(app, alice, "Must stay unread");
       const before = caseStore.listCalls;
+      const queueBefore = caseStore.coordinationSnapshotCalls;
+      const coordinationBefore = caseStore.coordinationLookupCalls;
 
       const unauthenticated = await app.inject({ method: "GET", url: collectionUrl() });
       expect(unauthenticated.statusCode).toBe(401);
@@ -445,6 +618,12 @@ describe("GET /api/cases collection query", () => {
         schemaId: AUTH_ERROR_SCHEMA_ID,
         error: "unauthenticated",
       });
+      const unauthenticatedQueue = await app.inject({
+        method: "GET",
+        url: operationsQueueUrl(),
+      });
+      expect(unauthenticatedQueue.statusCode).toBe(401);
+      expect(caseStore.coordinationSnapshotCalls).toBe(queueBefore);
 
       const dave = await login(app, "dave", "fixture-dave-secret");
       const revoked = await app.inject({
@@ -465,6 +644,20 @@ describe("GET /api/cases collection query", () => {
         error: "forbidden",
       });
       expect(caseStore.listCalls).toBe(before);
+
+      const deniedQueue = await app.inject({
+        method: "GET",
+        url: `${operationsQueueUrl({ coordinationScope: "not-a-scope", limit: "not-a-number" })}&workload=1`,
+        headers: { cookie: alice },
+      });
+      expect(deniedQueue.statusCode).toBe(403);
+      expect(JSON.parse(deniedQueue.body)).toEqual({
+        schemaId: AUTH_ERROR_SCHEMA_ID,
+        error: "forbidden",
+      });
+      expect(caseStore.listCalls).toBe(before);
+      expect(caseStore.coordinationSnapshotCalls).toBe(queueBefore);
+      expect(caseStore.coordinationLookupCalls).toBe(coordinationBefore);
     });
   });
 });
