@@ -12,6 +12,7 @@ import {
 } from "@cd-collab/contracts";
 import { INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID } from "@cd-collab/contracts/investigation-collection";
 import { INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID } from "@cd-collab/contracts/investigation-operations-queue";
+import { SOURCE_LIST_SCHEMA_ID } from "@cd-collab/contracts/source-catalog";
 import type { InvestigationRuntimeProviderProps } from "./investigations/runtime/public.js";
 import { parsePathname, pathFor, restoreAfterSignIn, sameLocation, type WorkLocation } from "./app-location.js";
 
@@ -147,6 +148,13 @@ function operationsQueuePageResponse(
   }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
+function sourceListResponse(): Response {
+  return new Response(JSON.stringify({
+    schemaId: SOURCE_LIST_SCHEMA_ID,
+    sources: [],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
 function stubSignedOutFetch(): FetchStub {
   const stub = vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) });
   vi.stubGlobal("fetch", stub);
@@ -215,7 +223,7 @@ function stubSignedInFetch(
       } as Response;
     }
     if (url === "/api/catalog/sources") {
-      return { ok: true, json: async () => ({ sources: [] }) };
+      return sourceListResponse();
     }
     return { ok: false, json: async () => ({}) };
   });
@@ -385,7 +393,7 @@ describe("auth boundary", () => {
     expect(screen.queryByRole("navigation")).toBeNull();
     expect(screen.queryByRole("button", { name: "Start investigation" })).toBeNull();
     expect(screen.queryByRole("tablist")).toBeNull();
-    expect(screen.queryByText(/Who and what supplied the information/)).toBeNull();
+    expect(screen.queryByText(/Attribution labels/)).toBeNull();
     const requested = stub.mock.calls.map((call) => String(call[0]));
     expect(requested).not.toContain("/api/cases");
     expect(requested).not.toContain("/api/catalog/sources");
@@ -854,7 +862,7 @@ describe("authenticated application shell", () => {
         return { ok: true, status: 200, json: async () => ({}) };
       }
       if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [] }) };
-      if (url === "/api/catalog/sources") return { ok: true, json: async () => ({ sources: [] }) };
+      if (url === "/api/catalog/sources") return sourceListResponse();
       if (url === "/api/authz/group-role-map") {
         return {
           ok: true,
@@ -973,15 +981,89 @@ describe("authenticated application shell", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Attribution" }));
     expect(
-      screen.getByRole("heading", { name: "Who and what supplied the information" }),
+      screen.getByRole("heading", { name: "Attribution labels" }),
     ).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Operating picture" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Help" }));
     expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
     expect(screen.getByLabelText("Search help")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Who and what supplied the information" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Attribution labels" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
+  });
+
+  it("mounts the Source Catalog only on its shell-owned route", async () => {
+    const fetchStub = stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(fetchStub.mock.calls.map(([input]) => String(input))).not.toContain(
+      "/api/catalog/sources",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Attribution" }));
+    expect(await screen.findByRole("heading", { name: "Attribution labels" })).toBeTruthy();
+    await waitFor(() => expect(
+      fetchStub.mock.calls.filter(([input]) => String(input) === "/api/catalog/sources"),
+    ).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Attribution labels" })).toBeNull();
+  });
+
+  it("uses investigation:read for browse and only catalog:write for catalog changes", async () => {
+    window.history.replaceState(null, "", "/sources");
+    const deniedFetch = stubSignedInFetch({
+      username: "catalog-only",
+      roles: [],
+      capabilities: ["catalog:write"],
+    });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Attribution is unavailable in this view" })).toBeTruthy();
+    expect(screen.getByText(/no catalog data was requested/)).toBeTruthy();
+    expect(deniedFetch.mock.calls.map(([input]) => String(input))).not.toContain(
+      "/api/catalog/sources",
+    );
+    expect(screen.queryByRole("heading", { name: "Add attribution label" })).toBeNull();
+    cleanup();
+
+    window.history.replaceState(null, "", "/sources");
+    stubSignedInFetch({
+      username: "strategy-runner",
+      roles: [],
+      capabilities: ["investigation:read", "run:strategies"],
+    });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Attribution labels" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Add attribution label" })).toBeNull();
+    expect(screen.getByRole("note").textContent).toMatch(/requires catalog write access/);
+    cleanup();
+
+    window.history.replaceState(null, "", "/sources");
+    stubSignedInFetch({
+      username: "catalog-writer",
+      roles: [],
+      capabilities: ["investigation:read", "catalog:write"],
+    });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Add attribution label" })).toBeTruthy();
+  });
+
+  it("keeps catalog browsing available but removes its writes in a static snapshot", async () => {
+    window.__CONTEXTDESK_STATIC_READ_ONLY__ = true;
+    window.history.replaceState(null, "", "/sources");
+    const fetchStub = stubSignedInFetch({
+      username: "owner",
+      roles: [],
+      capabilities: ["investigation:read", "catalog:write"],
+    });
+    render(<App />);
+
+    const catalogHeading = await screen.findByRole("heading", { name: "Attribution labels" });
+    expect(catalogHeading).toBeTruthy();
+    expect((await within(catalogHeading.closest("section") as HTMLElement).findByRole("note")).textContent).toMatch(/requires catalog write access/);
+    expect(screen.queryByRole("heading", { name: "Add attribution label" })).toBeNull();
+    expect(fetchStub.mock.calls.filter(([input]) => String(input) === "/api/catalog/sources")).toHaveLength(1);
+    expect(fetchStub.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 
   it("shows the honest sample-data notice in synthetic demo mode", async () => {
@@ -1558,7 +1640,7 @@ describe("pathname shell routing", () => {
     window.history.replaceState(null, "", "/sources");
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "Who and what supplied the information" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Attribution labels" })).toBeTruthy();
     expect(window.location.pathname).toBe("/sources");
     expect(
       screen.getByRole("navigation", { name: "Primary" }).querySelector('[aria-current="page"]')
@@ -1576,7 +1658,7 @@ describe("pathname shell routing", () => {
     expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
     window.history.back();
     await waitFor(() => expect(window.location.pathname).toBe("/sources"));
-    expect(screen.getByRole("heading", { name: "Who and what supplied the information" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Attribution labels" })).toBeTruthy();
     window.history.forward();
     await waitFor(() => expect(window.location.pathname).toBe("/help"));
     expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
@@ -1613,7 +1695,7 @@ describe("pathname shell routing", () => {
         return { ok: true, status: 200, json: async () => ({}) };
       }
       if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [] }) };
-      if (url === "/api/catalog/sources") return { ok: true, json: async () => ({ sources: [] }) };
+      if (url === "/api/catalog/sources") return sourceListResponse();
       return { ok: false, json: async () => ({}) };
     });
     vi.stubGlobal("fetch", stub);
@@ -1693,7 +1775,7 @@ describe("pathname shell routing", () => {
           };
         }
         if (String(input) === "/api/catalog/sources") {
-          return { ok: true, json: async () => ({ sources: [] }) };
+          return sourceListResponse();
         }
         if (String(input) === "/api/cases") {
           return { ok: true, json: async () => ({ cases: [] }) };
@@ -1705,9 +1787,9 @@ describe("pathname shell routing", () => {
     render(<App />);
     expect(screen.getByText(/Checking your session/)).toBeTruthy();
     expect(screen.queryByRole("navigation")).toBeNull();
-    expect(screen.queryByRole("heading", { name: "Who and what supplied the information" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Attribution labels" })).toBeNull();
     release(undefined);
-    expect(await screen.findByRole("heading", { name: "Who and what supplied the information" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Attribution labels" })).toBeTruthy();
     expect(window.location.pathname).toBe("/sources");
   });
 

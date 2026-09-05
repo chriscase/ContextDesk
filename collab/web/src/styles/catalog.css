@@ -494,6 +494,423 @@
   }
 }
 
+/* Source Catalog Console V1. The older `.catalog` rules above remain for
+   Entities, which intentionally shares that visual vocabulary. */
+
+.source-catalog {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+  margin-top: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel, 0.75rem);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.source-catalog :where(button, input, select, textarea) {
+  min-width: 0;
+  font: inherit;
+}
+
+.source-catalog :where(button, input, select, textarea):focus-visible,
+.source-catalog [tabindex="-1"]:focus-visible {
+  outline: 0.18rem solid var(--accent);
+  outline-offset: 0.16rem;
+}
+
+.source-catalog button {
+  min-height: 2.25rem;
+  padding: 0.42rem 0.68rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-deep);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.source-catalog button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.source-catalog button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.source-catalog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.source-catalog__header h2,
+.source-catalog__header p,
+.source-catalog__message h3,
+.source-catalog__message p,
+.source-catalog__add h3,
+.source-catalog__add p,
+.source-catalog__row p,
+.source-catalog__result-count,
+.source-catalog__refresh-status {
+  margin: 0;
+}
+
+.source-catalog__header h2 {
+  font-size: clamp(1.25rem, 2vw, 1.6rem);
+  line-height: 1.2;
+}
+
+.source-catalog__header h2 + p {
+  max-width: 52rem;
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.source-catalog__eyebrow {
+  margin-bottom: 0.22rem !important;
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.source-catalog__refresh {
+  flex: 0 0 auto;
+}
+
+.source-catalog__message,
+.source-catalog__notice,
+.source-catalog__viewer-note {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line-soft, var(--border));
+  border-radius: 0.55rem;
+  background: var(--surface-deep);
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.source-catalog__message h3 {
+  width: 100%;
+  color: var(--fg);
+  font-size: 0.95rem;
+}
+
+.source-catalog__message--error,
+.source-catalog__notice--error {
+  border-color: var(--danger, CanvasText);
+}
+
+.source-catalog__notice--warning {
+  border-color: var(--warning, CanvasText);
+}
+
+.source-catalog__notice--success {
+  border-color: var(--success, var(--accent));
+}
+
+.source-catalog__refresh-status,
+.source-catalog__result-count {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.source-catalog__facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.source-catalog__facts div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--line-soft, var(--border));
+  border-radius: 0.5rem;
+  background: var(--surface-deep);
+}
+
+.source-catalog__facts dt {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 650;
+}
+
+.source-catalog__facts dd {
+  margin: 0;
+  color: var(--fg);
+  font-size: 1rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-catalog__toolbar {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) minmax(9rem, 0.42fr) minmax(10rem, 0.48fr);
+  gap: 0.6rem;
+  align-items: end;
+}
+
+.source-catalog__toolbar label,
+.source-catalog__add label {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.source-catalog__toolbar :where(input, select),
+.source-catalog__add :where(input, select, textarea) {
+  width: 100%;
+  min-height: 2.3rem;
+  padding: 0.42rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface-input, var(--surface-deep));
+  color: var(--fg);
+}
+
+.source-catalog__list {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.source-catalog__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.7rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line-soft, var(--border));
+  border-radius: 0.5rem;
+}
+
+.source-catalog__row-main {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.source-catalog__row-title,
+.source-catalog__row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.source-catalog__row-title strong,
+.source-catalog__row p,
+.source-catalog__row small,
+.source-catalog__action-note {
+  overflow-wrap: anywhere;
+}
+
+.source-catalog__row-title strong {
+  font-size: 0.9rem;
+}
+
+.source-catalog__row p,
+.source-catalog__row small {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.source-catalog__muted {
+  font-style: italic;
+}
+
+.source-catalog__chip,
+.source-catalog__policy {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.35rem;
+  padding: 0.08rem 0.38rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.2;
+}
+
+.source-catalog__chip--active,
+.source-catalog__chip--internal-system {
+  border-color: color-mix(in srgb, var(--success) 48%, var(--border));
+}
+
+.source-catalog__chip--retired,
+.source-catalog__chip--unknown,
+.source-catalog__policy {
+  border-style: dashed;
+}
+
+.source-catalog__chip--external-tool {
+  border-color: color-mix(in srgb, var(--warning) 48%, var(--border));
+}
+
+.source-catalog__chip--contextdesk {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+}
+
+.source-catalog__row-actions {
+  justify-content: flex-end;
+  max-width: 30rem;
+}
+
+.source-catalog__action-note {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-align: right;
+}
+
+.source-catalog__danger {
+  border-color: var(--danger, CanvasText) !important;
+}
+
+.source-catalog__add {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, var(--accent-soft) 35%, transparent);
+}
+
+.source-catalog__add h3 {
+  font-size: 0.98rem;
+}
+
+.source-catalog__add > div p,
+.source-catalog__hint {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.source-catalog__add form {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.42fr) minmax(14rem, 1fr) auto;
+  gap: 0.55rem;
+  align-items: end;
+}
+
+.source-catalog__add-description,
+.source-catalog__hint {
+  grid-column: 1 / -1;
+}
+
+.source-catalog__add textarea {
+  resize: vertical;
+}
+
+.source-catalog__add em {
+  font-weight: 400;
+}
+
+.source-catalog__primary {
+  border-color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .source-catalog button,
+  .source-catalog :where(input, select, textarea) {
+    transition: border-color 120ms ease, background-color 120ms ease;
+  }
+}
+
+@media (max-width: 720px) {
+  .source-catalog__header,
+  .source-catalog__row {
+    grid-template-columns: 1fr;
+  }
+
+  .source-catalog__header {
+    display: grid;
+  }
+
+  .source-catalog__refresh,
+  .source-catalog__row-actions {
+    justify-self: start;
+  }
+
+  .source-catalog__row-actions {
+    justify-content: flex-start;
+  }
+
+  .source-catalog__action-note {
+    text-align: left;
+  }
+
+  .source-catalog__toolbar,
+  .source-catalog__add form {
+    grid-template-columns: 1fr;
+  }
+
+  .source-catalog__add-description,
+  .source-catalog__hint {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 390px) {
+  .source-catalog {
+    padding: 0.7rem;
+  }
+
+  .source-catalog__facts {
+    grid-template-columns: 1fr;
+  }
+
+  .source-catalog__row-actions button,
+  .source-catalog__notice button,
+  .source-catalog__message button {
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .source-catalog,
+  .source-catalog__message,
+  .source-catalog__notice,
+  .source-catalog__facts div,
+  .source-catalog__row,
+  .source-catalog__add,
+  .source-catalog__chip,
+  .source-catalog__policy,
+  .source-catalog button,
+  .source-catalog :where(input, select, textarea) {
+    border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+
+  .source-catalog__primary,
+  .source-catalog__danger {
+    border-width: 2px;
+  }
+}
+
 /* The classes below are consumed by ImportedRun.tsx and the triage capture
    card, which import no stylesheet of their own; keep them intact when
    reworking catalog styles. */

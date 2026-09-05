@@ -957,6 +957,8 @@ export function App() {
     !staticReadOnly &&
     (hasCapability(capabilities, "run:strategies") ||
       hasCapability(capabilities, "admin:system_config"));
+  const canWriteCatalog =
+    !staticReadOnly && hasCapability(capabilities, "catalog:write");
   const canAdminUsers = !staticReadOnly && hasCapability(capabilities, "admin:users");
   const canAdminSystem = !staticReadOnly && hasCapability(capabilities, "admin:system_config");
   const canAdmin = canAdminUsers || canAdminSystem;
@@ -1279,7 +1281,14 @@ export function App() {
               aria-label="Attribution"
               hidden={work.area !== "sources"}
             >
-              <Catalog canLead={canLeadCatalog} />
+              {work.area === "sources" ? (
+                <Catalog
+                  canRead={canReadInvestigations}
+                  canWrite={canWriteCatalog}
+                  identityKey={session.identityId}
+                  authorityKey={investigationAuthorityKey(session, staticReadOnly)}
+                />
+              ) : null}
             </section>
             <section className="app__area" aria-label="Help" hidden={work.area !== "help"}>
               <HelpCenter
