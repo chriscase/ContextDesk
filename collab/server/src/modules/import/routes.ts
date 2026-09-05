@@ -1,14 +1,23 @@
 import {
   AUTH_ERROR_SCHEMA_ID,
+  ContractViolation,
+  EXTERNAL_RUN_IMPORT_LIMITS,
+  EXTERNAL_RUN_IMPORT_REQUEST_SCHEMA_ID,
+  parseExternalRunImportRequest,
   type AuthErrorV1,
 } from "@cd-collab/contracts";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import {
   requireSessionCapability,
   type SessionAuthorizationDeps,
 } from "../authz/index.js";
-import type { ImportService } from "./service.js";
+import { CaseStoreCommitOutcomeUnknownError } from "../cases/index.js";
+import {
+  ExternalRunImportNotFoundError,
+  ExternalRunImportRefusedError,
+  type ImportService,
+} from "./service.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -22,6 +31,29 @@ function asRecord(body: unknown): Record<string, unknown> {
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+function strictInvalid(reply: FastifyReply) {
+  void reply.code(400);
+  return { error: "invalid" };
+}
+
+function strictImportError(reply: FastifyReply, error: unknown) {
+  if (error instanceof ExternalRunImportRefusedError) {
+    void reply.code(409);
+    return error.body;
+  }
+  if (error instanceof ExternalRunImportNotFoundError) {
+    void reply.code(404);
+    return { error: "not_found" };
+  }
+  if (error instanceof CaseStoreCommitOutcomeUnknownError) {
+    void reply.code(503);
+    return { error: "commit_outcome_unknown" };
+  }
+  if (error instanceof ContractViolation) return strictInvalid(reply);
+  void reply.code(500);
+  return { error: "internal" };
 }
 
 export interface ImportRouteDeps {
@@ -70,6 +102,40 @@ export async function registerImportRoutes(
     }
     const id = (request.params as { id: string }).id;
     const body = asRecord(request.body);
+    if (Object.hasOwn(body, "schemaId")) {
+      if (body.schemaId !== EXTERNAL_RUN_IMPORT_REQUEST_SCHEMA_ID) {
+        return strictInvalid(reply);
+      }
+      const rawOutput = typeof body.outputText === "string" ? body.outputText : "";
+      const rawPrompt = typeof body.promptText === "string" ? body.promptText : "";
+      if (
+        new TextEncoder().encode(rawOutput).byteLength
+          + new TextEncoder().encode(rawPrompt).byteLength
+        > EXTERNAL_RUN_IMPORT_LIMITS.combinedTextMaxBytes
+      ) {
+        void reply.code(413);
+        return { error: "payload_too_large" };
+      }
+      try {
+        const parsed = parseExternalRunImportRequest(request.body);
+        if (parsed.caseId !== id) return strictInvalid(reply);
+        const result = await deps.imports.importRunStrict(
+          id,
+          ctx.actor,
+          parsed,
+          request.ip,
+          ctx.isAdmin,
+          {
+            canReadPrivate: ctx.has("evidence:private:read"),
+            canSeeDirectoryIdentities: ctx.has("admin:users"),
+          },
+        );
+        void reply.code(result.replayed ? 200 : 201);
+        return result;
+      } catch (error) {
+        return strictImportError(reply, error);
+      }
+    }
     const outputText = str(body.outputText);
     const sourceId = str(body.sourceId);
     const suppliedOperatorId = str(body.operatorId)?.trim() || null;

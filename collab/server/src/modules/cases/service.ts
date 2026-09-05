@@ -986,6 +986,59 @@ export class CaseService {
     return this.toCase(row);
   }
 
+  /**
+   * Case-row serialization boundary for strict external-run imports. Callers
+   * must already be inside `withAtomic`; the returned projection discloses no
+   * more than the ordinary authorized case read.
+   */
+  async lockVisibleCaseForImport(
+    id: string,
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<CaseV1 | null> {
+    const row = await this.store.lockCase(id);
+    if (!row || (!isAdmin && !this.isMember(row, actor.id))) return null;
+    return this.toCase(row);
+  }
+
+  /**
+   * Validate strict-import evidence attribution against immutable case-owned
+   * rows. Missing, cross-case, or unreadable identities are deliberately
+   * indistinguishable; a visible privacy downgrade is the only typed result.
+   */
+  async validateExternalRunImportEvidence(input: {
+    caseId: string;
+    evidenceArtifactIds: readonly string[];
+    snapshotBinding: string | null;
+    privacyClass: PrivacyClass;
+    canReadPrivate: boolean;
+  }): Promise<"ok" | "not_found" | "privacy_mismatch"> {
+    const rows = await this.store.getArtifactsByIds(input.evidenceArtifactIds);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    for (const id of input.evidenceArtifactIds) {
+      const row = byId.get(id);
+      if (!row || row.caseId !== input.caseId) return "not_found";
+      if (row.privacyClass === "owner_only" && !input.canReadPrivate) return "not_found";
+      if (input.privacyClass === "share_safe" && row.privacyClass !== "share_safe") {
+        return "privacy_mismatch";
+      }
+    }
+
+    if (input.snapshotBinding === null) return "ok";
+    const snapshot = (await this.store.listSnapshotsByCase(input.caseId))
+      .find((row) => row.fingerprint === input.snapshotBinding);
+    if (!snapshot || snapshot.caseId !== input.caseId) return "not_found";
+    if (snapshot.visibility === "owner_only" && !input.canReadPrivate) return "not_found";
+    const snapshotIds = snapshot.evidence.map((item) => item.evidenceId).sort();
+    if (JSON.stringify(snapshotIds) !== JSON.stringify([...input.evidenceArtifactIds].sort())) {
+      return "not_found";
+    }
+    if (input.privacyClass === "share_safe" && snapshot.visibility !== "share_safe") {
+      return "privacy_mismatch";
+    }
+    return "ok";
+  }
+
   async getInvestigationCoordination(
     caseId: string,
     actor: Actor,
