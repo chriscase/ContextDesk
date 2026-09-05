@@ -47,8 +47,10 @@ describe("useInvestigationOperationsQueue", () => {
     );
 
     expect(result.current.page).toEqual({ status: "idle" });
+    expect(result.current.latestRequestGeneration).toBe(0);
     rerender({ enabled: false, query: { coordinationScope: "mine" } });
     expect(result.current.page).toEqual({ status: "idle" });
+    expect(result.current.latestRequestGeneration).toBe(0);
     expect(queryOperationsQueue).not.toHaveBeenCalled();
   });
 
@@ -70,6 +72,7 @@ describe("useInvestigationOperationsQueue", () => {
       status: "failed",
       error: { kind: "protocol", reason: "contract" },
     }));
+    expect(result.current.latestRequestGeneration).toBe(1);
     expect(result.current.query).toBeNull();
     expect(queryOperationsQueue).not.toHaveBeenCalled();
   });
@@ -94,9 +97,11 @@ describe("useInvestigationOperationsQueue", () => {
       { initialProps: { query: { q: "checkout", coordinationScope: "mine" } as InvestigationOperationsQueueQueryInput } },
     );
     await waitFor(() => expect(requests).toHaveLength(1));
+    expect(result.current.latestRequestGeneration).toBe(1);
 
     rerender({ query: { q: "inventory", coordinationScope: "unassigned" } });
     await waitFor(() => expect(requests).toHaveLength(2));
+    expect(result.current.latestRequestGeneration).toBe(1);
     await act(async () => first.resolve({ ok: true, value: makeOperationsQueuePage() }));
     expect(result.current.page).toEqual({ status: "loading" });
 
@@ -138,9 +143,11 @@ describe("useInvestigationOperationsQueue", () => {
       value: makeOperationsQueuePage(),
     }));
     expect(result.current.page.status).toBe("ready");
+    expect(result.current.latestRequestGeneration).toBe(1);
 
     rerender(nextScope);
     await waitFor(() => expect(requests).toHaveLength(2));
+    expect(result.current.latestRequestGeneration).toBe(1);
     expect(requests[0]!.signal.aborted).toBe(true);
     expect(result.current.page).toEqual({ status: "loading" });
   });
@@ -173,6 +180,7 @@ describe("useInvestigationOperationsQueue", () => {
       { initialProps: { query: { q: "checkout", coordinationScope: "all_visible" } as InvestigationOperationsQueueQueryInput } },
     );
     await waitFor(() => expect(result.current.page).toEqual({ status: "ready", value: firstPage }));
+    expect(result.current.latestRequestGeneration).toBe(1);
 
     rerender({ query: {
       q: "checkout",
@@ -180,6 +188,7 @@ describe("useInvestigationOperationsQueue", () => {
       cursor: OPAQUE_CURSOR,
     } });
     await waitFor(() => expect(result.current.page.status).toBe("ready"));
+    expect(result.current.latestRequestGeneration).toBe(2);
     expect(requests[1]?.cursor).toBe(OPAQUE_CURSOR);
     if (result.current.page.status !== "ready") throw new Error("expected ready queue");
     expect(result.current.page.value.items).toEqual([
@@ -211,6 +220,7 @@ describe("useInvestigationOperationsQueue", () => {
       query: { coordinationScope: "mine" },
     }));
     await waitFor(() => expect(result.current.page).toEqual({ status: "ready", value: page }));
+    expect(result.current.latestRequestGeneration).toBe(1);
 
     act(() => result.current.refresh());
     await waitFor(() => expect(result.current.page).toEqual({
@@ -218,16 +228,19 @@ describe("useInvestigationOperationsQueue", () => {
       error: { kind: "network" },
       previous: page,
     }));
+    expect(result.current.latestRequestGeneration).toBe(2);
     act(() => result.current.refresh());
     await waitFor(() => expect(result.current.page).toEqual({
       status: "failed",
       error: { kind: "auth_lost", status: 403 },
     }));
+    expect(result.current.latestRequestGeneration).toBe(3);
     act(() => result.current.refresh());
     await waitFor(() => expect(result.current.page).toEqual({
       status: "failed",
       error: { kind: "network" },
     }));
+    expect(result.current.latestRequestGeneration).toBe(4);
   });
 
   it("never republishes accumulated rows after a concealed not-found response", async () => {

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { StageId } from "./Cases.js";
 
 /** Areas the shell can genuinely navigate to from a help article. */
-export type HelpAreaTarget = "overview" | "investigations" | "entities" | "sources" | "profile";
+export type HelpAreaTarget = "overview" | "investigations" | "operations" | "entities" | "sources" | "profile";
 
 type HelpActionTarget = { area: HelpAreaTarget } | { stage: StageId };
 
@@ -132,14 +132,15 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         id: "war-room-basics",
         title: "What the War Room is",
         summary:
-          "A shared workspace where a team records investigations and moves each one through Capture, Analyze, Compare, and Decide.",
-        keywords: ["overview", "workflow", "stages", "orientation", "introduction"],
+          "A shared workspace with a recorded overview, a searchable investigation inventory, and a read-only coordination queue.",
+        keywords: ["overview", "operations", "workflow", "stages", "orientation", "introduction"],
         what:
-          "The War Room is the web workspace for ContextDesk investigations. Overview is the recorded operating picture: status counts, the latest cross-investigation activity, explicitly recorded open threads, and saved shift handoffs. It does not infer urgency, priority, or completeness. Every activity row identifies its investigation, provenance, and recorded time and opens through a fresh access check. Investigations is the searchable case inventory and creation entry point. Opening an investigation focuses it and offers five stages: Situation (the shared picture), Capture (notes and imports), Analyze (evidence and AI lanes), Compare (lanes side by side), and Decide (the human call and export).",
+          "The War Room is the web workspace for ContextDesk investigations. Overview is the recorded operating picture: status counts, the latest cross-investigation activity, explicitly recorded open threads, and saved shift handoffs. It does not infer urgency, priority, or completeness. Operations is a separate, read-only server-owned coordination queue for visible investigations. Investigations remains the searchable case inventory and creation entry point. Opening an investigation focuses it and offers five stages: Situation (the shared picture), Capture (notes and imports), Analyze (evidence and AI lanes), Compare (lanes side by side), and Decide (the human call and export).",
         when:
           "Read this first if the navigation is unfamiliar, or when you want to know which stage a task belongs to.",
         steps: [
           "Open Overview to see what changed most recently across investigations and the follow-up or handoff records collaborators explicitly saved.",
+          "Open Operations to review visible investigations by recorded coordinator, or to use the Mine and Unassigned server scopes without changing any assignment.",
           "Read Open threads to find recorded workstreams that stopped short, comparison disagreements or unknowns, and proposed or revised decisions — each entry links straight to the record.",
           "Select an investigation to focus it; the Situation stage opens first.",
           "Use the stage strip or the Situation page's work-area links to move between Capture, Analyze, Compare, and Decide.",
@@ -152,7 +153,38 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         actions: [
           { label: "Go to Overview", go: { area: "overview" } },
           { label: "Go to Investigations", go: { area: "investigations" } },
+          { label: "Go to Operations", go: { area: "operations" } },
         ],
+      },
+      {
+        id: "operations-queue",
+        title: "Review the read-only Operations Queue",
+        summary:
+          "See visible investigations in the server's recorded coordination order, including who is coordinating each one or that no coordinator is recorded.",
+        keywords: [
+          "operations queue",
+          "coordination",
+          "coordinator",
+          "mine",
+          "unassigned",
+          "read only",
+          "archived",
+        ],
+        what:
+          "Operations is a first-class area beside Investigations. It asks the server for a read-only coordination queue and shows the returned investigations in exactly that order. Each row shows only its recorded title, status, and coordinator; when there is no coordinator, it says Not recorded. Selecting a row opens that investigation on Situation.",
+        when:
+          "Use it when you need a shared coordination view across investigations without editing records or changing who coordinates them.",
+        steps: [
+          "Open Operations from the primary navigation.",
+          "Use All visible, Mine, or Unassigned. Their counts come from the server and describe the visible coordination scopes for your account.",
+          "Search or select recorded statuses to request a narrower server result. Turn on Include archived only when archived work belongs in the view.",
+          "Load more operations when the server reports another page, or open a row to continue in that investigation's Situation stage.",
+        ],
+        recorded:
+          "Operations writes nothing. It re-presents the investigation title and status plus the coordination record already held by the server. Searches, scope changes, refreshes, and pagination do not claim, release, or assign an investigation.",
+        limits:
+          "This queue has no claim, release, or assignment controls, and it does not calculate priority, rank, urgency, SLA, workload, leases, presence, or automatic assignment. Scope counts, row order, archive visibility, and continuation cursors are server-owned. A copied Operations URL keeps only search, status, archive visibility, and coordination scope; it never includes the server cursor.",
+        actions: [{ label: "Go to Operations", go: { area: "operations" } }],
       },
       {
         id: "read-situation",
