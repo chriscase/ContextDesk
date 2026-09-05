@@ -6,12 +6,14 @@ import {
   SOURCE_DESCRIPTION_MAX_LENGTH,
   SOURCE_IDENTITY_MAX_LENGTH,
   SOURCE_LIST_SCHEMA_ID,
+  SOURCE_MUTATION_REFUSED_SCHEMA_ID,
   SOURCE_MUTATION_SUCCESS_SCHEMA_ID,
   SOURCE_NAME_MAX_LENGTH,
   SOURCE_SCHEMA_ID,
   parseSource,
   parseSourceCreateRequest,
   parseSourceList,
+  parseSourceMutationRefused,
   parseSourceMutationSuccess,
   parseSourceRestoreRequest,
   parseSourceRetireRequest,
@@ -293,5 +295,40 @@ describe("applied revision identity on success", () => {
         applied: source({ revision: 1 }),
       }),
     ).toThrow(/must equal appliedRevision/);
+  });
+});
+
+describe("refusal envelope hardening", () => {
+  function identityCollision(current: unknown = source({
+    identityId: "uid=alice,ou=people,dc=example,dc=test",
+  })) {
+    return {
+      schemaId: SOURCE_MUTATION_REFUSED_SCHEMA_ID,
+      error: "source_catalog_refused",
+      action: "create",
+      sourceId: TOOL_ID,
+      expectedRevision: 0,
+      reason: "identity_already_bound",
+      detail: "That identity is already bound to a recorded source.",
+      current,
+    };
+  }
+
+  it("accepts the truthful identity collision and rejects nested envelope drift", () => {
+    expect(parseSourceMutationRefused(identityCollision()).reason).toBe(
+      "identity_already_bound",
+    );
+    expect(() =>
+      parseSourceMutationRefused(identityCollision({ ...source(), nestedLeak: true })),
+    ).toThrow(/unknown key/);
+  });
+
+  it("rejects dangerous refusal detail text", () => {
+    expect(() =>
+      parseSourceMutationRefused({
+        ...identityCollision(),
+        detail: "Bound\u202eidentity",
+      }),
+    ).toThrow(/control characters|bidi|multi-line/);
   });
 });

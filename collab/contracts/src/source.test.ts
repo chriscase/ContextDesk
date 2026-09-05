@@ -185,6 +185,12 @@ describe("source catalog constants", () => {
       immutableKind: "source_kind_is_immutable_after_create",
       historicalRefs: "retired_sources_remain_resolvable_for_historical_references",
       identityUniqueness: "non_null_identityId_is_unique_across_the_catalog",
+      identityCollision:
+        "identity_already_bound_current_identity_matches_create_request_identity",
+      revisionAvailability:
+        "legacy_unversioned_rows_are_read_only_until_the_server_emits_a_revision",
+      replay:
+        "replayed_success_returns_the_original_applied_result_and_revision_tuple",
       projection: "list_projection_is_authorization_filtered_and_not_caller_authoritative",
       auth: "mutations_require_server_authorized_catalog_write",
       audit: "successful_mutations_are_appended_to_the_audit_log",
@@ -250,6 +256,15 @@ describe("parseSourceList", () => {
         sources: [source(), { ...permanentUnknown(), kind: "human" }],
       }),
     ).toThrow(/\$\.sources\[1\]\.kind/);
+  });
+
+  it("rejects duplicate source identities in a list envelope", () => {
+    expect(() =>
+      parseSourceList({
+        schemaId: SOURCE_LIST_SCHEMA_ID,
+        sources: [source(), source({ name: "Duplicate label" })],
+      }),
+    ).toThrow(/\$\.sources\[1\]\.id.*duplicate source id/);
   });
 });
 
@@ -336,7 +351,14 @@ describe("source mutation success", () => {
     ).toThrow(/active source/);
   });
 
-  it("enforces non-replayed retire/restore revision arithmetic", () => {
+  it("enforces create, retire, and restore revision arithmetic", () => {
+    expect(() =>
+      parseSourceMutationSuccess(
+        success("create", source({ revision: 2 }), {
+          appliedRevision: 2,
+        }),
+      ),
+    ).toThrow(/create appliedRevision must be 1/);
     expect(() =>
       parseSourceMutationSuccess(
         success("retire", source({ lifecycle: "retired", revision: 4 }), {
@@ -355,27 +377,27 @@ describe("source mutation success", () => {
     ).toThrow(/must equal previousRevision/);
   });
 
-  it("relaxes revision arithmetic on replay but never the applied action outcome", () => {
+  it("requires a replay to return the original applied revision tuple and outcome", () => {
     const replayedRetire = parseSourceMutationSuccess(
-      success("retire", source({ lifecycle: "retired", revision: 9 }), {
+      success("retire", source({ lifecycle: "retired", revision: 2 }), {
         replayed: true,
         previousRevision: 1,
         expectedRevision: 1,
-        appliedRevision: 9,
+        appliedRevision: 2,
       }),
     );
-    expect(replayedRetire.appliedRevision).not.toBe(replayedRetire.previousRevision + 1);
+    expect(replayedRetire.appliedRevision).toBe(replayedRetire.previousRevision + 1);
     expect(replayedRetire.applied.lifecycle).toBe("retired");
     expect(() =>
       parseSourceMutationSuccess(
-        success("retire", source({ lifecycle: "active", revision: 9 }), {
+        success("retire", source({ lifecycle: "retired", revision: 9 }), {
           replayed: true,
           previousRevision: 1,
           expectedRevision: 1,
           appliedRevision: 9,
         }),
       ),
-    ).toThrow(/retired source/);
+    ).toThrow(/previousRevision \+ 1/);
     expect(() =>
       parseSourceMutationSuccess(
         success("create", source({ lifecycle: "retired", revision: 1 }), { replayed: true }),
@@ -392,15 +414,18 @@ describe("source mutation success", () => {
     ).toThrow(/active source/);
   });
 
-  it("protects the permanent unknown source from retire and restore success", () => {
+  it("protects the permanent unknown source from every mutation success", () => {
+    expect(() =>
+      parseSourceMutationSuccess(success("create", permanentUnknown({ revision: 1 }))),
+    ).toThrow(/cannot be created, retired, or restored/);
     expect(() =>
       parseSourceMutationSuccess(
         success("retire", permanentUnknown({ lifecycle: "retired", revision: 2 })),
       ),
-    ).toThrow(/cannot be retired or restored|must remain active/);
+    ).toThrow(/cannot be created, retired, or restored|must remain active/);
     expect(() =>
       parseSourceMutationSuccess(success("restore", permanentUnknown({ revision: 2 }))),
-    ).toThrow(/cannot be retired or restored/);
+    ).toThrow(/cannot be created, retired, or restored/);
   });
 });
 
@@ -411,6 +436,7 @@ describe("source mutation refusal pairings", () => {
     not_retired: ["restore"],
     permanent_unknown_protected: ["retire", "restore"],
     expected_revision_mismatch: ["retire", "restore"],
+    identity_already_bound: ["create"],
     idempotency_intent_mismatch: SOURCE_MUTATION_ACTIONS,
   };
 
@@ -441,6 +467,13 @@ describe("source mutation refusal pairings", () => {
     }
     if (reason === "expected_revision_mismatch") {
       return { sourceId: TOOL_ID, current: source({ revision: 4 }), expectedRevision };
+    }
+    if (reason === "identity_already_bound") {
+      return {
+        sourceId: TOOL_ID,
+        current: source({ identityId: "uid=alice,ou=people,dc=example,dc=test" }),
+        expectedRevision,
+      };
     }
     if (action === "create") {
       return { sourceId: null, current: null, expectedRevision };
@@ -490,6 +523,37 @@ describe("source mutation refusal pairings", () => {
         }),
       ),
     ).toThrow(/differ/);
+    expect(() =>
+      parseSourceMutationRefused(
+        refusal("retire", "expected_revision_mismatch", {
+          current: legacySource(),
+        }),
+      ),
+    ).toThrow(/versioned current source/);
+    expect(() =>
+      parseSourceMutationRefused(
+        refusal("create", "identity_already_bound", {
+          sourceId: TOOL_ID,
+          current: source({ identityId: null }),
+        }),
+      ),
+    ).toThrow(/current source with a bound identity/);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("create", "identity_already_bound", {
+          sourceId: TOOL_ID,
+          current: source({ identityId: "uid=alice,ou=people,dc=example,dc=test" }),
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      validator("source-mutation-refused.v1.json")(
+        refusal("create", "identity_already_bound", {
+          sourceId: TOOL_ID,
+          current: source({ identityId: null }),
+        }),
+      ),
+    ).toBe(false);
     expect(() =>
       parseSourceMutationRefused(
         refusal("retire", "permanent_unknown_protected", {

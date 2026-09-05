@@ -29,11 +29,20 @@
   },
   "allOf": [
     {
+      "not": {
+        "properties": {
+          "sourceId": { "const": "00000000-0000-0000-0000-000000000001" }
+        },
+        "required": ["sourceId"]
+      }
+    },
+    {
       "if": { "properties": { "action": { "const": "create" } }, "required": ["action"] },
       "then": {
         "properties": {
           "expectedRevision": { "const": 0 },
           "previousRevision": { "const": 0 },
+          "appliedRevision": { "const": 1 },
           "applied": {
             "type": "object",
             "properties": { "lifecycle": { "const": "active" } }

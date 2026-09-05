@@ -33,6 +33,7 @@ export const SOURCE_MUTATION_REFUSALS = [
   "not_retired",
   "permanent_unknown_protected",
   "expected_revision_mismatch",
+  "identity_already_bound",
   "idempotency_intent_mismatch",
 ] as const;
 export type SourceMutationRefusal = (typeof SOURCE_MUTATION_REFUSALS)[number];
@@ -60,6 +61,12 @@ export const SOURCE_CATALOG_RESPONSE_CONTEXT = Object.freeze({
   immutableKind: "source_kind_is_immutable_after_create",
   historicalRefs: "retired_sources_remain_resolvable_for_historical_references",
   identityUniqueness: "non_null_identityId_is_unique_across_the_catalog",
+  identityCollision:
+    "identity_already_bound_current_identity_matches_create_request_identity",
+  revisionAvailability:
+    "legacy_unversioned_rows_are_read_only_until_the_server_emits_a_revision",
+  replay:
+    "replayed_success_returns_the_original_applied_result_and_revision_tuple",
   projection: "list_projection_is_authorization_filtered_and_not_caller_authoritative",
   auth: "mutations_require_server_authorized_catalog_write",
   audit: "successful_mutations_are_appended_to_the_audit_log",
@@ -202,6 +209,7 @@ const REFUSAL_ACTIONS: Readonly<
   not_retired: ["restore"],
   permanent_unknown_protected: ["retire", "restore"],
   expected_revision_mismatch: ["retire", "restore"],
+  identity_already_bound: ["create"],
   idempotency_intent_mismatch: SOURCE_MUTATION_ACTIONS,
 };
 
@@ -350,7 +358,14 @@ export function parseSource(raw: unknown, path = "$"): SourceV1 {
 export function parseSourceList(raw: unknown): SourceListV1 {
   checkObject("$", sourceListShape, raw);
   const parsed = raw as SourceListV1;
-  parsed.sources.forEach((source, index) => parseSource(source, `$.sources[${index}]`));
+  const seenIds = new Set<string>();
+  parsed.sources.forEach((source, index) => {
+    const parsedSource = parseSource(source, `$.sources[${index}]`);
+    if (seenIds.has(parsedSource.id)) {
+      throw new ContractViolation(`$.sources[${index}].id`, "duplicate source id");
+    }
+    seenIds.add(parsedSource.id);
+  });
   return parsed;
 }
 
@@ -408,11 +423,11 @@ function parseAppliedSource(raw: unknown, path: string): SourceV1 & { revision: 
   return applied as SourceV1 & { revision: number };
 }
 
-function assertNotPermanentUnknownMutation(action: SourceMutationAction, sourceId: string): void {
-  if (action !== "create" && sourceId === PERMANENT_UNKNOWN_SOURCE_ID) {
+function assertNotPermanentUnknownMutation(sourceId: string): void {
+  if (sourceId === PERMANENT_UNKNOWN_SOURCE_ID) {
     throw new ContractViolation(
       "$.sourceId",
-      "permanent unknown source cannot be retired or restored",
+      "permanent unknown source cannot be created, retired, or restored",
     );
   }
 }
@@ -428,7 +443,7 @@ export function parseSourceMutationSuccess(raw: unknown): SourceMutationSuccessV
   const replayed = record.replayed === true;
   const applied = parseAppliedSource(record.applied, "$.applied");
 
-  assertNotPermanentUnknownMutation(action, sourceId);
+  assertNotPermanentUnknownMutation(sourceId);
   if (applied.id !== sourceId) {
     throw new ContractViolation("$.applied.id", "must match sourceId");
   }
@@ -442,6 +457,9 @@ export function parseSourceMutationSuccess(raw: unknown): SourceMutationSuccessV
     }
     if (previousRevision !== 0) {
       throw new ContractViolation("$.previousRevision", "create previousRevision must be 0");
+    }
+    if (appliedRevision !== 1) {
+      throw new ContractViolation("$.appliedRevision", "create appliedRevision must be 1");
     }
     if (applied.lifecycle !== "active") {
       throw new ContractViolation("$.applied.lifecycle", "create must apply an active source");
@@ -459,11 +477,11 @@ export function parseSourceMutationSuccess(raw: unknown): SourceMutationSuccessV
     throw new ContractViolation("$.applied.lifecycle", "restore must apply an active source");
   }
 
-  if (!replayed && action !== "create") {
+  if (action !== "create") {
     if (expectedRevision !== previousRevision) {
       throw new ContractViolation(
         "$.expectedRevision",
-        "must equal previousRevision for a non-replayed apply",
+        "must equal previousRevision for the original applied result",
       );
     }
     if (appliedRevision !== previousRevision + 1 || !Number.isSafeInteger(previousRevision + 1)) {
@@ -578,10 +596,25 @@ export function parseSourceMutationRefused(raw: unknown): SourceMutationRefusedV
     if (current === null) {
       throw new ContractViolation("$.current", "expected_revision_mismatch requires current");
     }
+    if (current.revision === undefined) {
+      throw new ContractViolation(
+        "$.current.revision",
+        "expected_revision_mismatch requires a versioned current source",
+      );
+    }
     if (current.revision === expectedRevision) {
       throw new ContractViolation(
         "$.current.revision",
         "expected_revision_mismatch requires current.revision to differ",
+      );
+    }
+  }
+
+  if (reason === "identity_already_bound") {
+    if (current === null || current.identityId === null) {
+      throw new ContractViolation(
+        "$.current.identityId",
+        "identity_already_bound requires a current source with a bound identity",
       );
     }
   }

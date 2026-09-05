@@ -31,6 +31,7 @@
         "not_retired",
         "permanent_unknown_protected",
         "expected_revision_mismatch",
+        "identity_already_bound",
         "idempotency_intent_mismatch"
       ]
     },
@@ -39,6 +40,47 @@
       "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/source" }]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "reason": { "const": "identity_already_bound" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": {
+          "action": { "const": "create" },
+          "sourceId": { "type": "string" },
+          "expectedRevision": { "const": 0 },
+          "current": {
+            "allOf": [
+              { "$ref": "#/$defs/source" },
+              {
+                "type": "object",
+                "properties": { "identityId": { "type": "string", "minLength": 1 } },
+                "required": ["identityId"]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "reason": { "const": "expected_revision_mismatch" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": {
+          "current": {
+            "allOf": [
+              { "$ref": "#/$defs/source" },
+              { "type": "object", "required": ["revision"] }
+            ]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "source": {
       "type": "object",
