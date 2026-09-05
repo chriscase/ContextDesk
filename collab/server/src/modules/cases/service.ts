@@ -9,13 +9,22 @@ import {
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_SCHEMA_ID,
   OVERVIEW_ACTIVITY_CAP,
   OVERVIEW_OPEN_CASE_CAP,
   describeDeleteRequest,
+  evaluateInvestigationCoordination,
   isRfc4122Uuid,
   isContributionIdempotencyKey,
   parseArtifactAnnotationBulkResult,
   parseArtifactAnnotationBulkRequest,
+  parseInvestigationCoordination,
+  parseInvestigationCoordinationActionRefused,
+  parseInvestigationCoordinationActionSuccess,
+  parseInvestigationCoordinationChanged,
   normalizeInvestigationContext,
   snapshotFairness,
   snapshotFingerprint,
@@ -38,6 +47,12 @@ import {
   type InvestigationCollectionQueryV1,
   type HypothesisStatus,
   type InvestigationContextV1,
+  type InvestigationCoordinationActionRequestV1,
+  type InvestigationCoordinationActionRefusedV1,
+  type InvestigationCoordinationActionSuccessV1,
+  type InvestigationCoordinationChangedV1,
+  type InvestigationCoordinationRefusal,
+  type InvestigationCoordinationV1,
   type InvestigationLifecycleActionRequestV1,
   type InvestigationLifecycleActionSuccessV1,
   type InvestigationLifecycleChangedV1,
@@ -101,7 +116,9 @@ import {
   type ArtifactAnnotationRow,
   type ArtifactRow,
   type CaseStore,
+  type CaseRow,
   type CaseTimelineRow,
+  type InvestigationCoordinationRow,
   type OverviewActivityRow,
   type OverviewCounts,
   type OverviewOpenCaseRow,
@@ -245,6 +262,20 @@ export class ArtifactAnnotationConflictError extends Error {
   constructor() {
     super("artifact annotation conflict");
     this.name = "ArtifactAnnotationConflictError";
+  }
+}
+
+export class InvestigationCoordinationChangedError extends Error {
+  constructor(readonly conflict: InvestigationCoordinationChangedV1) {
+    super("investigation coordination changed");
+    this.name = "InvestigationCoordinationChangedError";
+  }
+}
+
+export class InvestigationCoordinationRefusedError extends Error {
+  constructor(readonly refusal: InvestigationCoordinationActionRefusedV1) {
+    super("investigation coordination refused");
+    this.name = "InvestigationCoordinationRefusedError";
   }
 }
 
@@ -924,6 +955,182 @@ export class CaseService {
     if (!row) return null;
     if (!isAdmin && !this.isMember(row, actor.id)) return null;
     return this.toCase(row);
+  }
+
+  async getInvestigationCoordination(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<InvestigationCoordinationV1 | null> {
+    const row = await this.store.getCase(caseId);
+    if (!row || (!isAdmin && !this.isMember(row, actor.id))) return null;
+    return this.coordinationProjection(
+      row,
+      await this.store.getInvestigationCoordination(caseId),
+    );
+  }
+
+  /**
+   * Apply one action under the case row lock. The returned JSON is the exact
+   * string persisted for successful replay, so transport can send identical
+   * bytes on every accepted retry.
+   */
+  async coordinateInvestigation(
+    routeCaseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    input: InvestigationCoordinationActionRequestV1,
+    origin: string,
+  ): Promise<string> {
+    return this.store.withAtomic(async () => {
+      const row = await this.store.lockCase(routeCaseId);
+      if (!row || (!isAdmin && !this.isMember(row, actor.id))) {
+        throw new Error("case not found");
+      }
+      const targetIdentityId = input.targetIdentityId ?? null;
+      const priorIntent = await this.store.getInvestigationCoordinationSuccessIntent(
+        routeCaseId,
+        actor.id,
+        input.idempotencyKey,
+      );
+      if (priorIntent) {
+        if (
+          priorIntent.action !== input.action
+          || priorIntent.targetIdentityId !== targetIdentityId
+        ) {
+          const current = this.coordinationProjection(
+            row,
+            await this.store.getInvestigationCoordination(routeCaseId),
+          );
+          throw this.coordinationRefused(
+            input,
+            current,
+            "idempotency_intent_mismatch",
+          );
+        }
+        this.assertCoordinationReplayContext(priorIntent.successJson, input, actor);
+        return priorIntent.successJson;
+      }
+
+      const stored = await this.store.getInvestigationCoordination(routeCaseId);
+      const current = this.coordinationProjection(row, stored);
+
+      const actorParticipant = row.participants.find(
+        (participant) => participant.identityId === actor.id,
+      );
+      const targetParticipant = targetIdentityId === null
+        ? null
+        : row.participants.find((participant) => participant.identityId === targetIdentityId) ?? null;
+      // Privileged cleanup remains possible after the holder ceased to be an
+      // eligible participant: the recorded coordinator supplies identity,
+      // while eligibility still comes only from the locked participant set.
+      const targetIdentity = targetIdentityId === null
+        ? null
+        : targetParticipant ?? (
+            current.coordinator?.identityId === targetIdentityId
+              ? current.coordinator
+              : null
+          );
+      const evaluation = evaluateInvestigationCoordination({
+        action: input.action,
+        expectedRevision: input.expectedRevision,
+        subject: {
+          investigationId: routeCaseId,
+          archived: current.archived,
+          revision: current.revision,
+          coordinator: current.coordinator,
+          actor: {
+            identityId: actor.id,
+            eligibleParticipant: actorParticipant !== undefined,
+          },
+          target: targetIdentity === null
+            ? null
+            : {
+                identityId: targetIdentity.identityId,
+                eligibleParticipant: targetParticipant !== null,
+              },
+        },
+      });
+      if (!evaluation.allowed) {
+        if (evaluation.kind === "changed") {
+          const changed = parseInvestigationCoordinationChanged({
+            schemaId: INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+            error: "coordination_changed",
+            investigationId: routeCaseId,
+            action: input.action,
+            targetIdentityId,
+            current,
+          });
+          throw new InvestigationCoordinationChangedError(changed);
+        }
+        throw this.coordinationRefused(input, current, evaluation.reason);
+      }
+
+      const updatedAt = new Date().toISOString();
+      const updatedBy = { identityId: actor.id, username: actor.username };
+      const coordinator = evaluation.nextCoordinatorIdentityId === null
+        ? null
+        : evaluation.nextCoordinatorIdentityId === actor.id
+          ? { identityId: actor.id, username: actorParticipant?.username ?? actor.username }
+          : targetParticipant === null
+            ? null
+            : { ...targetParticipant };
+      if (evaluation.nextCoordinatorIdentityId !== null && coordinator === null) {
+        throw new Error("eligible coordination target disappeared while case lock was held");
+      }
+      const projectionRow: InvestigationCoordinationRow = {
+        caseId: routeCaseId,
+        coordinator,
+        revision: evaluation.previousRevision + 1,
+        updatedAt,
+        updatedBy,
+      };
+      const applied = this.coordinationProjection(row, projectionRow);
+      const success = parseInvestigationCoordinationActionSuccess({
+        schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+        investigationId: routeCaseId,
+        action: input.action,
+        targetIdentityId,
+        previousRevision: evaluation.previousRevision,
+        previousCoordinator: current.coordinator,
+        applied,
+      });
+      this.assertCoordinationSuccessContext(success, input, actor);
+      const successJson = JSON.stringify(success);
+
+      await this.store.saveInvestigationCoordination(projectionRow);
+      await this.store.appendTimeline(routeCaseId, {
+        kind: "investigation_coordination_changed",
+        actor,
+        targetId: routeCaseId,
+        clientTime: canonicalClientTime(input.clientTime),
+        payload: {
+          action: input.action,
+          targetIdentityId,
+          previousRevision: evaluation.previousRevision,
+          revision: applied.revision,
+          previousCoordinator: current.coordinator,
+          current: applied,
+        },
+      });
+      await this.audit.append({
+        identity: actor.id,
+        action: "investigation_coordination_changed",
+        target: `${routeCaseId}:${input.action}:${targetIdentityId ?? actor.id}`,
+        origin,
+        outcome: "success",
+      });
+      await this.store.insertInvestigationCoordinationSuccessIntent({
+        caseId: routeCaseId,
+        actorId: actor.id,
+        idempotencyKey: input.idempotencyKey,
+        action: input.action,
+        targetIdentityId,
+        successJson,
+        createdAt: updatedAt,
+      });
+      return successJson;
+    }, this.audit);
   }
 
   async createCase(
@@ -2907,6 +3114,106 @@ export class CaseService {
     const row = await this.store.getCase(id);
     if (!row) throw new Error("case not found");
     return row;
+  }
+
+  private coordinationProjection(
+    caseRow: Pick<CaseRow, "id" | "status">,
+    stored: InvestigationCoordinationRow | null,
+  ): InvestigationCoordinationV1 {
+    return parseInvestigationCoordination(stored === null
+      ? {
+          schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
+          investigationId: caseRow.id,
+          coordinator: null,
+          revision: 0,
+          updatedAt: null,
+          updatedBy: null,
+          archived: caseRow.status === ARCHIVED_STATUS,
+        }
+      : {
+          schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
+          investigationId: caseRow.id,
+          coordinator: stored.coordinator,
+          revision: stored.revision,
+          updatedAt: stored.updatedAt,
+          updatedBy: stored.updatedBy,
+          archived: caseRow.status === ARCHIVED_STATUS,
+        });
+  }
+
+  private coordinationRefused(
+    input: InvestigationCoordinationActionRequestV1,
+    current: InvestigationCoordinationV1,
+    reason: InvestigationCoordinationRefusal,
+  ): InvestigationCoordinationRefusedError {
+    const details: Record<InvestigationCoordinationRefusal, string> = {
+      investigation_archived: "The investigation is archived.",
+      occupied: "Another participant is currently coordinating this investigation.",
+      already_coordinator: "The selected participant is already coordinating this investigation.",
+      not_coordinator: "Only the current coordinator can release their own coordination.",
+      target_not_coordinator: "The selected participant is not the current coordinator.",
+      target_not_eligible: "The selected identity is not an eligible current participant.",
+      actor_not_eligible: "The current actor is not an eligible current participant.",
+      idempotency_intent_mismatch: "This idempotency key was already used for a different coordination intent.",
+    };
+    return new InvestigationCoordinationRefusedError(
+      parseInvestigationCoordinationActionRefused({
+        schemaId: INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+        error: "coordination_refused",
+        investigationId: input.investigationId,
+        action: input.action,
+        targetIdentityId: input.targetIdentityId ?? null,
+        reason,
+        detail: details[reason],
+        current,
+      }),
+    );
+  }
+
+  private assertCoordinationReplayContext(
+    successJson: string,
+    input: InvestigationCoordinationActionRequestV1,
+    actor: Actor,
+  ): void {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(successJson);
+    } catch {
+      throw new Error("invalid persisted investigation coordination success JSON");
+    }
+    this.assertCoordinationSuccessContext(
+      parseInvestigationCoordinationActionSuccess(raw),
+      input,
+      actor,
+    );
+  }
+
+  private assertCoordinationSuccessContext(
+    success: InvestigationCoordinationActionSuccessV1,
+    input: InvestigationCoordinationActionRequestV1,
+    actor: Actor,
+  ): void {
+    const targetIdentityId = input.targetIdentityId ?? null;
+    if (
+      success.investigationId !== input.investigationId
+      || success.action !== input.action
+      || success.targetIdentityId !== targetIdentityId
+      || success.applied.updatedBy?.identityId !== actor.id
+    ) {
+      throw new Error("investigation coordination success context mismatch");
+    }
+    if (
+      input.action === "claim_self"
+      && success.applied.coordinator?.identityId !== actor.id
+    ) {
+      throw new Error("investigation coordination self-claim actor mismatch");
+    }
+    if (
+      input.action === "release_self"
+      && success.previousCoordinator?.identityId !== actor.id
+    ) {
+      throw new Error("investigation coordination self-release actor mismatch");
+    }
   }
 
   private async requireLatest(caseId: string, contributionId: string): Promise<RevisionRow> {

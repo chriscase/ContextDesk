@@ -9,6 +9,8 @@ export {
   LifecycleActionRequiredError,
   LifecycleChangedError,
   LifecycleRefusedError,
+  InvestigationCoordinationChangedError,
+  InvestigationCoordinationRefusedError,
   LegalHoldError,
   MemoryCaseStore,
   PgCaseStore,
@@ -35,6 +37,8 @@ export type {
   CaseProbeKind,
   CaseRow,
   ParticipantIdentityRow,
+  InvestigationCoordinationRow,
+  InvestigationCoordinationSuccessIntent,
 } from "./store.js";
 export { CASE_PROBE_KINDS } from "./store.js";
 export { activityComesAfter, compareActivityDesc, overviewVisiblePredicate, isOverviewVisibleCase, activeCaseQueryable, runWithCaseQueryable } from "./store.js";

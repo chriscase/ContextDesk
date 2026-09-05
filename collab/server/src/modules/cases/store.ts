@@ -12,6 +12,7 @@ import {
   type CaseStatus,
   type ContributionKind,
   type HypothesisStatus,
+  type InvestigationCoordinatorIdentityV1,
   type OverviewOpenStatus,
   type OverviewSeverityCountsV1,
   type OverviewStatusCountsV1,
@@ -159,6 +160,26 @@ export interface ArtifactAnnotationBulkWriteIntent {
   idempotencyKey: string;
   requestDigest: string;
   resultJson: string;
+  createdAt: string;
+}
+
+/** Materialized answer to who currently coordinates one investigation. */
+export interface InvestigationCoordinationRow {
+  caseId: string;
+  coordinator: InvestigationCoordinatorIdentityV1 | null;
+  revision: number;
+  updatedAt: string;
+  updatedBy: InvestigationCoordinatorIdentityV1;
+}
+
+/** Insert-only successful command envelope used for exact retry replay. */
+export interface InvestigationCoordinationSuccessIntent {
+  caseId: string;
+  actorId: string;
+  idempotencyKey: string;
+  action: "claim_self" | "release_self" | "assign_participant" | "release_participant";
+  targetIdentityId: string | null;
+  successJson: string;
   createdAt: string;
 }
 
@@ -421,6 +442,16 @@ export interface CaseStore {
     key: string,
   ): Promise<ArtifactAnnotationBulkWriteIntent | null>;
   insertArtifactAnnotationBulkIdempotency(row: ArtifactAnnotationBulkWriteIntent): Promise<void>;
+  getInvestigationCoordination(caseId: string): Promise<InvestigationCoordinationRow | null>;
+  saveInvestigationCoordination(row: InvestigationCoordinationRow): Promise<void>;
+  getInvestigationCoordinationSuccessIntent(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<InvestigationCoordinationSuccessIntent | null>;
+  insertInvestigationCoordinationSuccessIntent(
+    row: InvestigationCoordinationSuccessIntent,
+  ): Promise<void>;
   withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T>;
   lockIntakeIdempotency(caseId: string, key: string): Promise<void>;
   lockEvidenceDigest(digest: string): Promise<void>;
@@ -468,6 +499,8 @@ export class MemoryCaseStore implements CaseStore {
   private readonly artifactAnnotations = new Map<string, ArtifactAnnotationRow>();
   private readonly artifactAnnotationIntents = new Map<string, ArtifactAnnotationWriteIntent>();
   private readonly artifactAnnotationBulkIntents = new Map<string, ArtifactAnnotationBulkWriteIntent>();
+  private readonly investigationCoordinations = new Map<string, InvestigationCoordinationRow>();
+  private readonly investigationCoordinationSuccessIntents = new Map<string, InvestigationCoordinationSuccessIntent>();
   private readonly snapshots = new Map<string, SnapshotRow>();
   private readonly intakeBatches = new Map<string, IntakeBatchRow>();
   private readonly contributionIntents = new Map<string, ContributionWriteIntent>();
@@ -487,6 +520,8 @@ export class MemoryCaseStore implements CaseStore {
       artifactAnnotations: [...this.artifactAnnotations.entries()],
       artifactAnnotationIntents: [...this.artifactAnnotationIntents.entries()],
       artifactAnnotationBulkIntents: [...this.artifactAnnotationBulkIntents.entries()],
+      investigationCoordinations: [...this.investigationCoordinations.entries()],
+      investigationCoordinationSuccessIntents: [...this.investigationCoordinationSuccessIntents.entries()],
       snapshots: [...this.snapshots.entries()],
       intakeBatches: [...this.intakeBatches.entries()],
       contributionIntents: [...this.contributionIntents.entries()],
@@ -502,6 +537,8 @@ export class MemoryCaseStore implements CaseStore {
       artifactAnnotations?: [string, ArtifactAnnotationRow][];
       artifactAnnotationIntents?: [string, ArtifactAnnotationWriteIntent][];
       artifactAnnotationBulkIntents?: [string, ArtifactAnnotationBulkWriteIntent][];
+      investigationCoordinations?: [string, InvestigationCoordinationRow][];
+      investigationCoordinationSuccessIntents?: [string, InvestigationCoordinationSuccessIntent][];
       snapshots: [string, SnapshotRow][];
       intakeBatches: [string, IntakeBatchRow][];
       contributionIntents?: [string, ContributionWriteIntent][];
@@ -513,6 +550,8 @@ export class MemoryCaseStore implements CaseStore {
     this.artifactAnnotations.clear();
     this.artifactAnnotationIntents.clear();
     this.artifactAnnotationBulkIntents.clear();
+    this.investigationCoordinations.clear();
+    this.investigationCoordinationSuccessIntents.clear();
     this.snapshots.clear();
     this.intakeBatches.clear();
     this.contributionIntents.clear();
@@ -523,6 +562,10 @@ export class MemoryCaseStore implements CaseStore {
     for (const [id, value] of row.artifactAnnotations ?? []) this.artifactAnnotations.set(id, value);
     for (const [id, value] of row.artifactAnnotationIntents ?? []) this.artifactAnnotationIntents.set(id, value);
     for (const [id, value] of row.artifactAnnotationBulkIntents ?? []) this.artifactAnnotationBulkIntents.set(id, value);
+    for (const [id, value] of row.investigationCoordinations ?? []) this.investigationCoordinations.set(id, value);
+    for (const [id, value] of row.investigationCoordinationSuccessIntents ?? []) {
+      this.investigationCoordinationSuccessIntents.set(id, value);
+    }
     for (const [id, value] of row.snapshots) this.snapshots.set(id, value);
     for (const [id, value] of row.intakeBatches) this.intakeBatches.set(id, value);
     for (const [id, value] of row.contributionIntents ?? []) this.contributionIntents.set(id, value);
@@ -888,6 +931,42 @@ export class MemoryCaseStore implements CaseStore {
       throw new Error("artifact annotation bulk idempotency key already exists");
     }
     this.artifactAnnotationBulkIntents.set(key, { ...row });
+  }
+
+  async getInvestigationCoordination(caseId: string): Promise<InvestigationCoordinationRow | null> {
+    const row = this.investigationCoordinations.get(caseId);
+    return row ? cloneInvestigationCoordinationRow(row) : null;
+  }
+
+  async saveInvestigationCoordination(row: InvestigationCoordinationRow): Promise<void> {
+    if (!this.atomicContext.getStore()) {
+      throw new Error("coordination write requires an atomic boundary");
+    }
+    this.investigationCoordinations.set(row.caseId, cloneInvestigationCoordinationRow(row));
+  }
+
+  async getInvestigationCoordinationSuccessIntent(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<InvestigationCoordinationSuccessIntent | null> {
+    const row = this.investigationCoordinationSuccessIntents.get(
+      investigationCoordinationIntentKey(caseId, actorId, key),
+    );
+    return row ? { ...row } : null;
+  }
+
+  async insertInvestigationCoordinationSuccessIntent(
+    row: InvestigationCoordinationSuccessIntent,
+  ): Promise<void> {
+    if (!this.atomicContext.getStore()) {
+      throw new Error("coordination success intent requires an atomic boundary");
+    }
+    const key = investigationCoordinationIntentKey(row.caseId, row.actorId, row.idempotencyKey);
+    if (this.investigationCoordinationSuccessIntents.has(key)) {
+      throw new Error("investigation coordination idempotency key already exists");
+    }
+    this.investigationCoordinationSuccessIntents.set(key, { ...row });
   }
 
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
@@ -1631,6 +1710,84 @@ export class PgCaseStore implements CaseStore {
     );
   }
 
+  async getInvestigationCoordination(caseId: string): Promise<InvestigationCoordinationRow | null> {
+    const result = await this.db.query(
+      `SELECT case_id, coordinator_identity_id, coordinator_username, revision,
+              updated_at, updated_by_identity_id, updated_by_username
+       FROM investigation_coordination WHERE case_id = $1`,
+      [caseId],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asInvestigationCoordinationRow(row) : null;
+  }
+
+  async saveInvestigationCoordination(row: InvestigationCoordinationRow): Promise<void> {
+    if (!pgCaseTx.getStore()) {
+      throw new Error("coordination write requires an atomic boundary");
+    }
+    await this.db.query(
+      `INSERT INTO investigation_coordination (
+         case_id, coordinator_identity_id, coordinator_username, revision,
+         updated_at, updated_by_identity_id, updated_by_username
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (case_id) DO UPDATE SET
+         coordinator_identity_id = EXCLUDED.coordinator_identity_id,
+         coordinator_username = EXCLUDED.coordinator_username,
+         revision = EXCLUDED.revision,
+         updated_at = EXCLUDED.updated_at,
+         updated_by_identity_id = EXCLUDED.updated_by_identity_id,
+         updated_by_username = EXCLUDED.updated_by_username`,
+      [
+        row.caseId,
+        row.coordinator?.identityId ?? null,
+        row.coordinator?.username ?? null,
+        row.revision,
+        row.updatedAt,
+        row.updatedBy.identityId,
+        row.updatedBy.username,
+      ],
+    );
+  }
+
+  async getInvestigationCoordinationSuccessIntent(
+    caseId: string,
+    actorId: string,
+    key: string,
+  ): Promise<InvestigationCoordinationSuccessIntent | null> {
+    const result = await this.db.query(
+      `SELECT case_id, actor_id, idempotency_key, action, target_identity_id,
+              success_json, created_at
+       FROM investigation_coordination_success_intents
+       WHERE case_id = $1 AND actor_id = $2 AND idempotency_key = $3`,
+      [caseId, actorId, key],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asInvestigationCoordinationSuccessIntent(row) : null;
+  }
+
+  async insertInvestigationCoordinationSuccessIntent(
+    row: InvestigationCoordinationSuccessIntent,
+  ): Promise<void> {
+    if (!pgCaseTx.getStore()) {
+      throw new Error("coordination success intent requires an atomic boundary");
+    }
+    await this.db.query(
+      `INSERT INTO investigation_coordination_success_intents (
+         case_id, actor_id, idempotency_key, action, target_identity_id,
+         success_json, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        row.caseId,
+        row.actorId,
+        row.idempotencyKey,
+        row.action,
+        row.targetIdentityId,
+        row.successJson,
+        row.createdAt,
+      ],
+    );
+  }
+
   async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
     if (audit && (!(audit instanceof PgAuditStore) || !audit.isBoundTo(this.pool))) {
       throw new Error("PostgreSQL case and audit stores must share one connection source");
@@ -1871,6 +2028,53 @@ function contributionIntentKey(caseId: string, actorId: string, key: string): st
 
 function artifactAnnotationIntentKey(caseId: string, actorId: string, key: string): string {
   return `${caseId}\0${actorId}\0${key}`;
+}
+
+function investigationCoordinationIntentKey(caseId: string, actorId: string, key: string): string {
+  return `${caseId}\0${actorId}\0${key}`;
+}
+
+function cloneInvestigationCoordinationRow(
+  row: InvestigationCoordinationRow,
+): InvestigationCoordinationRow {
+  return {
+    ...row,
+    coordinator: row.coordinator ? { ...row.coordinator } : null,
+    updatedBy: { ...row.updatedBy },
+  };
+}
+
+function asInvestigationCoordinationRow(row: Record<string, unknown>): InvestigationCoordinationRow {
+  const coordinatorId = row.coordinator_identity_id;
+  const coordinatorUsername = row.coordinator_username;
+  return {
+    caseId: String(row.case_id),
+    coordinator: coordinatorId === null || coordinatorId === undefined
+      ? null
+      : { identityId: String(coordinatorId), username: String(coordinatorUsername) },
+    revision: Number(row.revision),
+    updatedAt: asIso(row.updated_at),
+    updatedBy: {
+      identityId: String(row.updated_by_identity_id),
+      username: String(row.updated_by_username),
+    },
+  };
+}
+
+function asInvestigationCoordinationSuccessIntent(
+  row: Record<string, unknown>,
+): InvestigationCoordinationSuccessIntent {
+  return {
+    caseId: String(row.case_id),
+    actorId: String(row.actor_id),
+    idempotencyKey: String(row.idempotency_key),
+    action: row.action as InvestigationCoordinationSuccessIntent["action"],
+    targetIdentityId: row.target_identity_id === null || row.target_identity_id === undefined
+      ? null
+      : String(row.target_identity_id),
+    successJson: String(row.success_json),
+    createdAt: asIso(row.created_at),
+  };
 }
 
 function asContributionWriteIntent(row: Record<string, unknown>): ContributionWriteIntent {

@@ -93,9 +93,16 @@ export async function migrateDown(
   if (opts.dryRun) {
     return { rolledBack: latest.version, sql };
   }
-  await client.query(sql);
-  await client.query(`DELETE FROM schema_migrations WHERE version = $1`, [
-    latest.version,
-  ]);
+  await client.query("BEGIN");
+  try {
+    await client.query(sql);
+    await client.query(`DELETE FROM schema_migrations WHERE version = $1`, [
+      latest.version,
+    ]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
   return { rolledBack: latest.version, sql };
 }

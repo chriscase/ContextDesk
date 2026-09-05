@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ARTIFACT_ANNOTATION_BULK_REQUEST_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
   AUTH_ERROR_SCHEMA_ID,
   parseArtifactAnnotation,
   parseArtifactAnnotationBulkResult,
@@ -15,6 +16,10 @@ import {
   parseContribution,
   parseEvidenceList,
   parseEvidenceUploadSuccess,
+  parseInvestigationCoordination,
+  parseInvestigationCoordinationActionRefused,
+  parseInvestigationCoordinationActionSuccess,
+  parseInvestigationCoordinationChanged,
   parseProvenance,
   parseSourceList,
   parseTimeline,
@@ -26,7 +31,7 @@ import { FilesystemEvidenceStore, sha256Hex } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
 import { MapAuthAdapter } from "../auth/index.js";
 import { createAuthLog, createRateLimiter, MemorySessionStore, defaultSessionPolicy } from "../auth/index.js";
-import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
+import { MemoryGroupRoleStore, MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { MemoryLocalGrantStore } from "../people/index.js";
 import {
@@ -107,11 +112,13 @@ const roleMap =
 
 class UnknownOnceAfterCommitCaseStore extends MemoryCaseStore {
   failAfterNextCommit = false;
+  atomicCalls = 0;
 
   override async withAtomic<T>(
     operation: () => Promise<T>,
     audit?: Parameters<MemoryCaseStore["withAtomic"]>[1],
   ): Promise<T> {
+    this.atomicCalls += 1;
     const result = await super.withAtomic(operation, audit);
     if (this.failAfterNextCommit) {
       this.failAfterNextCommit = false;
@@ -131,6 +138,7 @@ async function withApp(
     caseStore: MemoryCaseStore;
     grants: MemoryLocalGrantStore;
     roles: MutableGroupRoleMap;
+    roleStore: MemoryGroupRoleStore;
   }) => Promise<void>,
   caseStore: MemoryCaseStore = new MemoryCaseStore(),
 ) {
@@ -141,6 +149,7 @@ async function withApp(
   const grants = new MemoryLocalGrantStore();
   const domain = new CaseService(store, audit, caseStore, catalog);
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(roleMap));
+  const roleStore = new MemoryGroupRoleStore(roles);
   const app = await buildApp({
     config: testConfig({ evidenceRoot: root }),
     pool: null,
@@ -160,11 +169,12 @@ async function withApp(
         cookieSecure: false,
       },
       roles,
+      roleStore,
       audit,
     },
   });
   try {
-    await fn({ app, audit, domain, catalog, store, caseStore, grants, roles });
+    await fn({ app, audit, domain, catalog, store, caseStore, grants, roles, roleStore });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -1957,5 +1967,520 @@ describe("cases timeline evidence provenance", () => {
       expect(stale.statusCode).toBe(409);
       expect(JSON.parse(stale.body)).toEqual({ error: "contribution_conflict", currentRevision: 2 });
     });
+  });
+});
+
+describe("investigation coordination HTTP", () => {
+  const request = (
+    investigationId: string,
+    action: "claim_self" | "release_self" | "assign_participant" | "release_participant",
+    idempotencyKey: string,
+    expectedRevision: number,
+    targetIdentityId?: string,
+  ) => ({
+    schemaId: INVESTIGATION_COORDINATION_ACTION_REQUEST_SCHEMA_ID,
+    investigationId,
+    action,
+    ...(targetIdentityId ? { targetIdentityId } : {}),
+    expectedRevision,
+    idempotencyKey,
+  });
+
+  it("conceals access, orders action authority, evaluates state, and replays exact successes", async () => {
+    await withApp(async ({ app, domain, caseStore, audit }) => {
+      const alice = await login(app, "alice", ALICE);
+      const carol = await login(app, "carol", "fixture-carol-secret");
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Synthetic coordination" },
+      })).body));
+
+      const initial = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+      });
+      expect(initial.statusCode).toBe(200);
+      expect(parseInvestigationCoordination(JSON.parse(initial.body))).toMatchObject({
+        investigationId: created.id,
+        coordinator: null,
+        revision: 0,
+        archived: false,
+      });
+
+      const getCaseBeforeAuthority = vi.spyOn(caseStore, "getCase");
+      const getCoordinationBeforeAuthority = vi.spyOn(
+        caseStore,
+        "getInvestigationCoordination",
+      );
+      const lockCaseBeforeAuthority = vi.spyOn(caseStore, "lockCase");
+      const atomicBeforeAuthority = vi.spyOn(caseStore, "withAtomic");
+      const expectNoCaseStoreAccess = () => {
+        expect(getCaseBeforeAuthority).not.toHaveBeenCalled();
+        expect(getCoordinationBeforeAuthority).not.toHaveBeenCalled();
+        expect(lockCaseBeforeAuthority).not.toHaveBeenCalled();
+        expect(atomicBeforeAuthority).not.toHaveBeenCalled();
+      };
+      const concealed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: carol },
+        payload: {
+          ...request(created.id, "claim_self", "coord-carol-01", 0),
+          surprise: true,
+        },
+      });
+      expect(concealed.statusCode).toBe(403);
+      expectNoCaseStoreAccess();
+
+      // A recognized privileged action reaches its capability gate before
+      // missing/extra request fields are disclosed by the strict parser.
+      const privilegedBeforeStrictParse = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: {
+          action: "assign_participant",
+          investigationId: created.id,
+          surprise: true,
+        },
+      });
+      expect(privilegedBeforeStrictParse.statusCode).toBe(403);
+      expectNoCaseStoreAccess();
+      const unknownAction = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: { action: "take_over" },
+      });
+      expect(unknownAction.statusCode).toBe(400);
+      expectNoCaseStoreAccess();
+      getCaseBeforeAuthority.mockRestore();
+      getCoordinationBeforeAuthority.mockRestore();
+      lockCaseBeforeAuthority.mockRestore();
+      atomicBeforeAuthority.mockRestore();
+      const wrongPathIdentity = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: request(MISSING_CASE_ID, "claim_self", "coord-wrong-path", 0),
+      });
+      expect(wrongPathIdentity.statusCode).toBe(400);
+      const strictExtra = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: { ...request(created.id, "claim_self", "coord-strict-01", 0), surprise: true },
+      });
+      expect(strictExtra.statusCode).toBe(400);
+
+      const claimPayload = request(created.id, "claim_self", "coord-alice-01", 0);
+      const claimed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: claimPayload,
+      });
+      expect(claimed.statusCode).toBe(200);
+      const claimedBody = parseInvestigationCoordinationActionSuccess(JSON.parse(claimed.body));
+      expect(claimedBody.action).toBe("claim_self");
+      expect(claimedBody.applied.revision).toBe(1);
+
+      const replay = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: {
+          ...claimPayload,
+          expectedRevision: 999,
+          clientTime: "2026-09-04T10:00:00-04:00",
+        },
+      });
+      expect(replay.statusCode).toBe(200);
+      expect(replay.body).toBe(claimed.body);
+
+      const mismatch = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: request(created.id, "release_self", "coord-alice-01", 1),
+      });
+      expect(mismatch.statusCode).toBe(409);
+      expect(parseInvestigationCoordinationActionRefused(JSON.parse(mismatch.body)).reason)
+        .toBe("idempotency_intent_mismatch");
+
+      const occupied = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: request(created.id, "claim_self", "coord-alice-02", 999),
+      });
+      expect(parseInvestigationCoordinationActionRefused(JSON.parse(occupied.body)).reason)
+        .toBe("already_coordinator");
+
+      await domain.addParticipant(
+        created.id,
+        users().get("dave")!.identity,
+        {
+          identityId: users().get("eve")!.identity.id,
+          username: users().get("eve")!.identity.username,
+        },
+        "test",
+      );
+      const ineligible = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: dave },
+        payload: request(
+          created.id,
+          "assign_participant",
+          "coord-dave-001",
+          1,
+          "uid=missing,ou=people,dc=example,dc=test",
+        ),
+      });
+      expect(parseInvestigationCoordinationActionRefused(JSON.parse(ineligible.body)).reason)
+        .toBe("target_not_eligible");
+      expect(await caseStore.getInvestigationCoordinationSuccessIntent(
+        created.id,
+        users().get("dave")!.identity.id,
+        "coord-dave-001",
+      )).toBeNull();
+
+      const assigned = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: dave },
+        payload: request(
+          created.id,
+          "assign_participant",
+          "coord-alice-01",
+          1,
+          users().get("eve")!.identity.id,
+        ),
+      });
+      expect(parseInvestigationCoordinationActionSuccess(JSON.parse(assigned.body)).applied.revision)
+        .toBe(2);
+
+      const changed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: dave },
+        payload: request(
+          created.id,
+          "release_participant",
+          "coord-dave-003",
+          1,
+          users().get("eve")!.identity.id,
+        ),
+      });
+      expect(changed.statusCode).toBe(409);
+      expect(parseInvestigationCoordinationChanged(JSON.parse(changed.body)).current.revision).toBe(2);
+
+      const captured = caseStore.capture() as {
+        cases: [string, { participants: { identityId: string; username: string }[] }][];
+      };
+      const capturedCase = captured.cases.find(([id]) => id === created.id)?.[1];
+      expect(capturedCase).toBeDefined();
+      capturedCase!.participants = capturedCase!.participants.filter(
+        (participant) => participant.identityId !== users().get("eve")!.identity.id,
+      );
+      caseStore.restore(captured);
+      const cleanup = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: dave },
+        payload: request(
+          created.id,
+          "release_participant",
+          "coord-dave-cleanup",
+          2,
+          users().get("eve")!.identity.id,
+        ),
+      });
+      expect(parseInvestigationCoordinationActionSuccess(JSON.parse(cleanup.body)).applied)
+        .toMatchObject({ coordinator: null, revision: 3 });
+
+      await caseStore.updateCaseMeta({ id: created.id, status: "archived" });
+      const archived = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: dave },
+        payload: request(
+          created.id,
+          "release_participant",
+          "coord-dave-004",
+          3,
+          users().get("eve")!.identity.id,
+        ),
+      });
+      expect(parseInvestigationCoordinationActionRefused(JSON.parse(archived.body)).reason)
+        .toBe("investigation_archived");
+
+      // A saved success bypasses fresh archive/CAS checks only after the
+      // current request has passed session, capability, and case access.
+      const archivedReplay = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: { ...claimPayload, expectedRevision: 44 },
+      });
+      expect(archivedReplay.body).toBe(claimed.body);
+
+      const timeline = await caseStore.listTimeline(created.id);
+      expect(timeline.filter((event) => event.kind === "investigation_coordination_changed"))
+        .toHaveLength(3);
+      expect((await audit.list()).filter(
+        (event) => event.action === "investigation_coordination_changed"
+          && event.outcome === "success",
+      )).toHaveLength(3);
+    });
+  });
+
+  it("denies a member viewer at the action gate before case access", async () => {
+    await withApp(async ({ app, domain, caseStore }) => {
+      const alice = await login(app, "alice", ALICE);
+      const carol = await login(app, "carol", "fixture-carol-secret");
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Member viewer coordination" },
+      })).body));
+      await domain.addParticipant(
+        created.id,
+        users().get("alice")!.identity,
+        users().get("carol")!.identity,
+        "test",
+      );
+      const getCase = vi.spyOn(caseStore, "getCase");
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: carol },
+        payload: request(created.id, "claim_self", "coord-carol-member", 0),
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(getCase).not.toHaveBeenCalled();
+    });
+  });
+
+  it("re-authorizes exact replay after capability and membership changes", async () => {
+    await withApp(async ({ app, caseStore, roleStore }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Replay authorization" },
+      })).body));
+      const payload = request(created.id, "claim_self", "coord-replay-auth", 0);
+      const success = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(success.statusCode).toBe(200);
+
+      const captured = caseStore.capture() as {
+        cases: [string, { participants: { identityId: string; username: string }[] }][];
+      };
+      const capturedCase = captured.cases.find(([id]) => id === created.id)?.[1];
+      expect(capturedCase).toBeDefined();
+      capturedCase!.participants = [];
+      caseStore.restore(captured);
+
+      const afterMembershipLoss = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: { ...payload, expectedRevision: 99 },
+      });
+      expect(afterMembershipLoss.statusCode).toBe(404);
+
+      await roleStore.delete("cn=contributors,ou=groups,dc=example,dc=test");
+      const getCase = vi.spyOn(caseStore, "getCase");
+      const afterCapabilityLoss = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: { ...payload, expectedRevision: 100 },
+      });
+      expect(afterCapabilityLoss.statusCode).toBe(403);
+      expect(getCase).not.toHaveBeenCalled();
+    });
+  });
+
+  it("performs no case-store read when the live session lacks investigation read", async () => {
+    await withApp(async ({ app, caseStore, grants, roleStore }) => {
+      const alice = await login(app, "alice", ALICE);
+      await roleStore.delete("cn=contributors,ou=groups,dc=example,dc=test");
+      await grants.grant(
+        users().get("alice")!.identity.id,
+        "investigation:write",
+        users().get("dave")!.identity.id,
+      );
+      const getCase = vi.spyOn(caseStore, "getCase");
+      const getCoordination = vi.spyOn(caseStore, "getInvestigationCoordination");
+      const lockCase = vi.spyOn(caseStore, "lockCase");
+      const withAtomic = vi.spyOn(caseStore, "withAtomic");
+      const read = await app.inject({
+        method: "GET",
+        url: `/api/cases/${MISSING_CASE_ID}/coordination`,
+        headers: { cookie: alice },
+      });
+      const write = await app.inject({
+        method: "POST",
+        url: `/api/cases/${MISSING_CASE_ID}/coordination`,
+        headers: { cookie: alice },
+        payload: request(MISSING_CASE_ID, "claim_self", "coord-alice-denied", 0),
+      });
+      expect(read.statusCode).toBe(403);
+      expect(write.statusCode).toBe(403);
+      expect(getCase).not.toHaveBeenCalled();
+      expect(getCoordination).not.toHaveBeenCalled();
+      expect(lockCase).not.toHaveBeenCalled();
+      expect(withAtomic).not.toHaveBeenCalled();
+    });
+  });
+
+  it("serializes concurrent claims through the case row boundary", async () => {
+    await withApp(async ({ app, domain, caseStore }) => {
+      const alice = await login(app, "alice", ALICE);
+      const eve = await login(app, "eve", "fixture-eve-secret");
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Concurrent coordination" },
+      })).body));
+      await domain.addParticipant(
+        created.id,
+        users().get("alice")!.identity,
+        {
+          identityId: users().get("eve")!.identity.id,
+          username: users().get("eve")!.identity.username,
+        },
+        "test",
+      );
+      const responses = await Promise.all([
+        app.inject({
+          method: "POST",
+          url: `/api/cases/${created.id}/coordination`,
+          headers: { cookie: alice },
+          payload: request(created.id, "claim_self", "coord-race-alice", 0),
+        }),
+        app.inject({
+          method: "POST",
+          url: `/api/cases/${created.id}/coordination`,
+          headers: { cookie: eve },
+          payload: request(created.id, "claim_self", "coord-race-eve", 0),
+        }),
+      ]);
+      expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+      const refused = responses.find((response) => response.statusCode === 409)!;
+      expect(parseInvestigationCoordinationActionRefused(JSON.parse(refused.body)).reason)
+        .toBe("occupied");
+      const winnerIndex = responses.findIndex((response) => response.statusCode === 200);
+      const winnerCookie = winnerIndex === 0 ? alice : eve;
+      const loserCookie = winnerIndex === 0 ? eve : alice;
+      const loserRelease = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: loserCookie },
+        payload: request(created.id, "release_self", "coord-race-loser", 1),
+      });
+      expect(parseInvestigationCoordinationActionRefused(JSON.parse(loserRelease.body)).reason)
+        .toBe("not_coordinator");
+      const winnerRelease = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: winnerCookie },
+        payload: request(created.id, "release_self", "coord-race-winner", 1),
+      });
+      expect(parseInvestigationCoordinationActionSuccess(JSON.parse(winnerRelease.body)).applied)
+        .toMatchObject({ coordinator: null, revision: 2 });
+      expect((await caseStore.listTimeline(created.id)).filter(
+        (event) => event.kind === "investigation_coordination_changed",
+      )).toHaveLength(2);
+    });
+  });
+
+  it("rolls projection, timeline, audit, and replay intent back together", async () => {
+    const caseStore = new MemoryCaseStore();
+    await withApp(async ({ app, audit }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Coordination rollback" },
+      })).body));
+      const originalAppend = audit.append.bind(audit);
+      audit.append = vi.fn(async (event) => {
+        if (event.action === "investigation_coordination_changed") throw new Error("synthetic audit failure");
+        return originalAppend(event);
+      });
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload: request(created.id, "claim_self", "coord-rollback", 0),
+      });
+      expect(response.statusCode).toBe(400);
+      expect(await caseStore.getInvestigationCoordination(created.id)).toBeNull();
+      expect(await caseStore.getInvestigationCoordinationSuccessIntent(
+        created.id,
+        users().get("alice")!.identity.id,
+        "coord-rollback",
+      )).toBeNull();
+      expect((await caseStore.listTimeline(created.id)).filter(
+        (event) => event.kind === "investigation_coordination_changed",
+      )).toHaveLength(0);
+    }, caseStore);
+  });
+
+  it("maps an unknown coordination commit outcome to 503 without retrying", async () => {
+    const caseStore = new UnknownOnceAfterCommitCaseStore();
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Unknown coordination outcome" },
+      })).body));
+      caseStore.failAfterNextCommit = true;
+      const callsBefore = caseStore.atomicCalls;
+      const payload = request(created.id, "claim_self", "coord-unknown-01", 0);
+      const unknown = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(unknown.statusCode).toBe(503);
+      expect(JSON.parse(unknown.body)).toEqual({ error: "commit_outcome_unknown" });
+      expect(caseStore.atomicCalls - callsBefore).toBe(1);
+
+      const retry = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/coordination`,
+        headers: { cookie: alice },
+        payload,
+      });
+      expect(retry.statusCode).toBe(200);
+      expect(parseInvestigationCoordinationActionSuccess(JSON.parse(retry.body)).applied.revision)
+        .toBe(1);
+      expect((await caseStore.listTimeline(created.id)).filter(
+        (event) => event.kind === "investigation_coordination_changed",
+      )).toHaveLength(1);
+    }, caseStore);
   });
 });

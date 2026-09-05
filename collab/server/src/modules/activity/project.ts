@@ -137,6 +137,28 @@ function mapEvent(caseId: string, event: CaseTimelineRow, payload: Record<string
         revision: null,
         workstreamId: null,
       };
+    case "investigation_coordination_changed": {
+      const action = str(payload, "action");
+      const summary = action === "claim_self"
+        ? "claimed investigation coordination"
+        : action === "release_self"
+          ? "released their investigation coordination"
+          : action === "assign_participant"
+            ? "assigned investigation coordination"
+            : action === "release_participant"
+              ? "released investigation coordination"
+              : "changed investigation coordination";
+      return {
+        activityKind: "investigation_updated",
+        resourceKind: "investigation",
+        resourceId: caseId,
+        provenance: "human",
+        summary,
+        humanFinding: false,
+        revision,
+        workstreamId: null,
+      };
+    }
     case "evidence_registered":
       return { activityKind: "evidence_added", resourceKind: "evidence_item", resourceId: target, provenance: "human", summary: "added evidence", humanFinding: false, revision: null, workstreamId: null };
     case "evidence_privacy_classified":
