@@ -21,6 +21,7 @@ function settled(overrides: Partial<OperationsQueuePresentation> = {}): Operatio
     commandAvailability: "available",
     view: { availability: "available", value: makeOperationsQueuePage(), refresh: "settled" },
     continuationFailed: false,
+    continuationInFlight: false,
     refresh: vi.fn(),
     nextPage: vi.fn(),
     ...overrides,
@@ -64,6 +65,22 @@ describe("Operations Queue presentation", () => {
     expect(screen.getByRole("link", { name: /All visible 17/u })).toBeTruthy();
     expect(screen.getByRole("link", { name: /Mine 6/u })).toBeTruthy();
     expect(screen.getByRole("link", { name: /Unassigned 3/u })).toBeTruthy();
+  });
+
+  it("gives sparse imported rows a useful title", () => {
+    const page = makeOperationsQueuePage();
+    renderQueue(settled({
+      view: {
+        availability: "available",
+        value: { ...page, items: page.items.map((row, index) => ({
+          ...row,
+          investigation: { ...row.investigation, title: index === 0 ? "" : "   " },
+        })) },
+        refresh: "settled",
+      },
+    }));
+
+    expect(screen.getAllByRole("link", { name: /Untitled investigation/u })).toHaveLength(2);
   });
 
   it("keeps scope and row links native while intercepting only normal shell navigation", () => {
@@ -166,7 +183,24 @@ describe("Operations Queue presentation", () => {
     refreshFailure.unmount();
 
     const nextPage = vi.fn();
-    const failed = settled({
+    const continuation = renderQueue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      nextPage,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+    hook.current.mockReturnValue(settled({
+      continuationInFlight: true,
+      view: { availability: "available", value: page, refresh: "loading" },
+      nextPage,
+    }));
+    continuation.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    hook.current.mockReturnValue(settled({
       view: {
         availability: "available",
         value: page,
@@ -175,9 +209,7 @@ describe("Operations Queue presentation", () => {
       },
       continuationFailed: true,
       nextPage,
-    });
-    const continuation = renderQueue(failed);
-    fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+    }));
     continuation.rerender(
       <OperationsQueue
         query={DEFAULT_OPERATIONS_QUEUE_QUERY}
@@ -207,6 +239,22 @@ describe("Operations Queue presentation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
 
     hook.current.mockReturnValue(settled({
+      continuationInFlight: true,
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ", hiddenArchivedCount: 4 }),
+        refresh: "loading",
+      },
+    }));
+    rendered.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+
+    hook.current.mockReturnValue(settled({
       view: {
         availability: "available",
         value: makeOperationsQueuePage({ nextCursor: null, hiddenArchivedCount: 4 }),
@@ -222,6 +270,89 @@ describe("Operations Queue presentation", () => {
     );
     const completion = screen.getByText("All operations are shown.");
     await waitFor(() => expect(document.activeElement).toBe(completion));
+
+    const search = screen.getByRole("searchbox", { name: "Search" });
+    search.focus();
+    fireEvent.change(search, { target: { value: "checkout" } });
+    expect(document.activeElement).toBe(search);
+
+    hook.current.mockReturnValue(settled({
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({ nextCursor: null, hiddenArchivedCount: 4 }),
+        refresh: "loading",
+      },
+    }));
+    rendered.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Refreshing…" })).toBeTruthy();
+    expect(screen.queryByText("Loading more operations…")).toBeNull();
+    expect(document.activeElement).toBe(search);
+  });
+
+  it("restores focus to Load more after a nonterminal continuation retry", async () => {
+    const cursor = "eyJwYWdlIjoyfQ";
+    const page = makeOperationsQueuePage({ nextCursor: cursor });
+    const nextPage = vi.fn();
+    const rendered = renderQueue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      nextPage,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more operations" }));
+
+    hook.current.mockReturnValue(settled({
+      continuationInFlight: true,
+      view: { availability: "available", value: page, refresh: "loading" },
+      nextPage,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+
+    hook.current.mockReturnValue(settled({
+      continuationFailed: true,
+      view: {
+        availability: "available",
+        value: page,
+        refresh: "failed",
+        refreshError: { kind: "network" },
+      },
+      nextPage,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("alert")));
+    fireEvent.click(screen.getByRole("button", { name: "Try loading more" }));
+
+    hook.current.mockReturnValue(settled({
+      continuationInFlight: true,
+      view: { availability: "available", value: page, refresh: "loading" },
+      nextPage,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    hook.current.mockReturnValue(settled({
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjozfQ" }),
+        refresh: "settled",
+      },
+      nextPage,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Load more operations" }),
+    ));
+    expect(screen.queryByText("All operations are shown.")).toBeNull();
   });
 
   it("uses distinct true-empty, filtered-empty, and scope-empty copy", () => {

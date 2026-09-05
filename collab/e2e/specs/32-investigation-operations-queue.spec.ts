@@ -108,6 +108,7 @@ test.describe("Investigation Operations Queue", () => {
     const token = `operations-page-${Date.now()}`;
     await createInvestigation(page, `${token} first`);
     await createInvestigation(page, `${token} second`);
+    await createInvestigation(page, `${token} third`);
     let source: QueuePage | null = null;
     let continuationAttempts = 0;
     const queueRequests: URL[] = [];
@@ -131,8 +132,10 @@ test.describe("Investigation Operations Queue", () => {
           contentType: "application/json",
           body: JSON.stringify({
             ...source!,
-            items: source!.items.slice(1, 2),
-            nextCursor: null,
+            items: continuationAttempts === 2
+              ? source!.items.slice(1, 2)
+              : source!.items.slice(2, 3),
+            nextCursor: continuationAttempts === 2 ? "eyJwYWdlIjozfQ" : null,
           }),
         });
         return;
@@ -153,8 +156,8 @@ test.describe("Investigation Operations Queue", () => {
       await page.goto(`/operations?q=${encodeURIComponent(token)}&coordinationScope=unassigned`);
       const rows = page.getByRole("list", { name: "Operations queue investigations" }).getByRole("listitem");
       await expect(rows).toHaveCount(1);
-      await expect.poll(() => source?.items.length ?? 0).toBeGreaterThanOrEqual(2);
-      const expected = source!.items.slice(0, 2).map((row) => row.investigation.title);
+      await expect.poll(() => source?.items.length ?? 0).toBeGreaterThanOrEqual(3);
+      const expected = source!.items.slice(0, 3).map((row) => row.investigation.title);
       await expect(rows.nth(0)).toContainText(expected[0]!);
 
       const loadMore = page.getByRole("button", { name: "Load more operations" });
@@ -170,11 +173,78 @@ test.describe("Investigation Operations Queue", () => {
       await expect(rows).toHaveCount(2);
       await expect(rows.nth(0)).toContainText(expected[0]!);
       await expect(rows.nth(1)).toContainText(expected[1]!);
+      await expect(loadMore).toBeFocused();
+      await loadMore.press("Enter");
+      await expect(rows).toHaveCount(3);
+      await expect(rows.nth(2)).toContainText(expected[2]!);
       const completion = page.getByText("All operations are shown.");
       await expect(completion).toBeFocused();
-      expect(queueRequests.filter((url) => url.searchParams.has("cursor"))).toHaveLength(2);
+      const search = page.getByRole("searchbox", { name: "Search" });
+      await search.focus();
+      await search.pressSequentially("x");
+      await expect(search).toBeFocused();
+      expect(queueRequests.filter((url) => url.searchParams.has("cursor"))).toHaveLength(3);
       expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
     } finally {
+      await page.unroute("**/api/cases?**");
+    }
+  });
+
+  test("keeps denied and failed first loads truthful without legacy case reads", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.carol);
+    await page.waitForLoadState("networkidle");
+    const authenticated = await page.request.get("/api/auth/me");
+    expect(authenticated.ok(), await authenticated.text()).toBeTruthy();
+    const session = await authenticated.json() as Record<string, unknown>;
+    await page.route("**/api/auth/me", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...session, capabilities: [] }),
+      });
+    });
+    const deniedReads: URL[] = [];
+    const recordDeniedReads = (request: import("@playwright/test").Request) => {
+      const url = new URL(request.url());
+      if (request.method() === "GET" && (url.pathname === "/api/cases" || url.pathname.startsWith("/api/cases/"))) {
+        deniedReads.push(url);
+      }
+    };
+    page.on("request", recordDeniedReads);
+    await page.goto("/operations");
+    await expect(page.getByText(/no queue data was requested/u)).toBeVisible();
+    await expect(page.getByRole("button", { name: /Try again/u })).toHaveCount(0);
+    expect(deniedReads).toEqual([]);
+    page.off("request", recordDeniedReads);
+    await page.unroute("**/api/auth/me");
+
+    await loginAs(page, FIXTURE_USERS.dave);
+    await page.waitForLoadState("networkidle");
+    const failedReads: URL[] = [];
+    const recordFailedReads = (request: import("@playwright/test").Request) => {
+      const url = new URL(request.url());
+      if (request.method() === "GET" && url.pathname === "/api/cases") failedReads.push(url);
+    };
+    page.on("request", recordFailedReads);
+    await page.route("**/api/cases?**", async (route) => {
+      const url = new URL(route.request().url());
+      if (isQueueRequest(url)) {
+        await route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
+      } else {
+        await route.continue();
+      }
+    });
+    try {
+      await page.goto("/operations");
+      await expect(page.getByText("Operations Queue service is unavailable")).toBeVisible();
+      await expect(page.getByText(/No legacy investigation list was substituted/u)).toBeVisible();
+      expect(failedReads).toHaveLength(1);
+      expect(isQueueRequest(failedReads[0]!)).toBe(true);
+      await page.getByRole("button", { name: "Try again" }).click();
+      await expect.poll(() => failedReads.length).toBe(2);
+      expect(failedReads.every(isQueueRequest)).toBe(true);
+    } finally {
+      page.off("request", recordFailedReads);
       await page.unroute("**/api/cases?**");
     }
   });
@@ -183,28 +253,69 @@ test.describe("Investigation Operations Queue", () => {
     await loginAs(page, FIXTURE_USERS.dave);
     const title = uniqueTitle("Operations responsive row");
     await createInvestigation(page, title);
+    const longCoordinator = "coordinator".repeat(12).slice(0, 128);
+    await page.route("**/api/cases?**", async (route) => {
+      const url = new URL(route.request().url());
+      if (!isQueueRequest(url)) {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      const body = await response.json() as QueuePage;
+      await route.fulfill({
+        response,
+        json: {
+          ...body,
+          coordinationScopeCounts: {
+            ...body.coordinationScopeCounts,
+            mine: 0,
+            unassigned: 0,
+          },
+          items: body.items.map((row, index) => index === 0
+            ? {
+                ...row,
+                coordination: {
+                  ...row.coordination,
+                  coordinator: { identityId: "identity-long-coordinator", username: longCoordinator },
+                  revision: 1,
+                  updatedAt: "2026-09-04T08:30:00-05:00",
+                  updatedBy: { identityId: "identity-long-coordinator", username: longCoordinator },
+                },
+              }
+            : row),
+        },
+      });
+    });
     await page.setViewportSize({ width: 320, height: 720 });
-    await page.goto(`/operations?q=${encodeURIComponent(title)}&coordinationScope=unassigned`);
-    await expect(page.getByRole("heading", { name: "Operations Queue" })).toBeVisible();
-    const dimensions = await page.evaluate(() => ({
-      documentWidth: document.documentElement.scrollWidth,
-      viewportWidth: document.documentElement.clientWidth,
-    }));
-    expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
+    try {
+      await page.goto(`/operations?q=${encodeURIComponent(title)}`);
+      await expect(page.getByRole("heading", { name: "Operations Queue" })).toBeVisible();
+      await expect(page.getByText(`Coordinator: ${longCoordinator}`)).toBeVisible();
+      const dimensions = await page.evaluate(() => ({
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+      }));
+      expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
 
-    const scope = page.getByRole("link", { name: /Unassigned/u });
-    await scope.focus();
-    await expect(scope).toBeFocused();
-    expect(await scope.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
+      const scope = page.getByRole("link", { name: /All visible/u });
+      await scope.focus();
+      await expect(scope).toBeFocused();
+      expect(await scope.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
 
-    await page.emulateMedia({ forcedColors: "active" });
-    expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
-    await scope.focus();
-    expect(await scope.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
+      await page.emulateMedia({ forcedColors: "active" });
+      expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+      await scope.focus();
+      expect(await scope.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
+      const inactiveScope = page.getByRole("link", { name: /Unassigned/u });
+      expect(await scope.evaluate((element) => getComputedStyle(element).backgroundColor))
+        .not.toBe(await inactiveScope.evaluate((element) => getComputedStyle(element).backgroundColor));
 
-    await page.emulateMedia({ forcedColors: "none", reducedMotion: "reduce" });
-    expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
-    const transitionDuration = await scope.evaluate((element) => getComputedStyle(element).transitionDuration);
-    expect(transitionDuration.split(",").every((value) => value.trim() === "0s")).toBe(true);
+      await page.emulateMedia({ forcedColors: "none", reducedMotion: "reduce" });
+      expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
+      const transitionDuration = await scope.evaluate((element) => getComputedStyle(element).transitionDuration);
+      expect(transitionDuration.split(",").every((value) => value.trim() === "0s")).toBe(true);
+    } finally {
+      await page.unroute("**/api/cases?**");
+    }
   });
 });

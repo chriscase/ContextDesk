@@ -251,10 +251,16 @@
   gap: 0.45rem 0.7rem;
   color: var(--muted);
   font-size: 0.84rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.operations-queue__status,
-.operations-queue__archived {
+.operations-queue__row-facts > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operations-queue__status {
   display: inline-flex;
   align-items: center;
   min-height: 1.65rem;
@@ -269,8 +275,7 @@
 .operations-queue__status--open { border-color: var(--success); }
 .operations-queue__status--monitoring { border-color: var(--accent); }
 .operations-queue__status--resolved { border-color: var(--muted); }
-.operations-queue__status--archived,
-.operations-queue__archived { border-color: var(--warning); }
+.operations-queue__status--archived { border-color: var(--warning); }
 
 .operations-queue__pagination {
   display: flex;
@@ -332,7 +337,6 @@
   .operations-queue__archive-note,
   .operations-queue__row-link,
   .operations-queue__status,
-  .operations-queue__archived,
   .operations-queue button,
   .operations-queue input {
     border-color: CanvasText;
@@ -341,5 +345,11 @@
 
   .operations-queue :where(button, input, a, [tabindex]):focus-visible {
     outline-color: Highlight;
+  }
+
+  .operations-queue__scopes a[aria-current="page"] {
+    border-color: Highlight;
+    color: HighlightText;
+    background: Highlight;
   }
 }

@@ -53,14 +53,13 @@ function investigationHref(id: string): string {
 
 function QueueRow({
   row,
-  includeArchived,
   onOpen,
 }: {
   readonly row: InvestigationOperationsQueueRowV1;
-  readonly includeArchived: boolean;
   readonly onOpen: (id: string) => void;
 }) {
   const coordinator = row.coordination.coordinator?.username ?? null;
+  const title = row.investigation.title.trim() || "Untitled investigation";
   return (
     <li className="operations-queue__row">
       <a
@@ -72,15 +71,12 @@ function QueueRow({
           onOpen(row.investigation.id);
         }}
       >
-        <span className="operations-queue__row-title">{row.investigation.title}</span>
+        <span className="operations-queue__row-title">{title}</span>
         <span className="operations-queue__row-facts">
           <span className={`operations-queue__status operations-queue__status--${row.investigation.status}`}>
             {row.investigation.status}
           </span>
           <span>Coordinator: {coordinator ?? "Not recorded"}</span>
-          {includeArchived && row.investigation.status === "archived" ? (
-            <span className="operations-queue__archived">Archived</span>
-          ) : null}
         </span>
       </a>
     </li>
@@ -90,31 +86,53 @@ function QueueRow({
 export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: OperationsQueueProps) {
   const queue = useOperationsQueue(query);
   const [searchDraft, setSearchDraft] = useState(query.q);
-  const [continuationAttempted, setContinuationAttempted] = useState(false);
+  const [continuationAttempt, setContinuationAttempt] = useState(0);
   const completionRef = useRef<HTMLParagraphElement>(null);
   const continuationFailureRef = useRef<HTMLDivElement>(null);
+  const loadMoreRef = useRef<HTMLButtonElement>(null);
+  const observedInFlightAttemptRef = useRef(0);
+  const focusedOutcomeAttemptRef = useRef(0);
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
 
   useEffect(() => setSearchDraft(query.q), [query.q]);
-  useEffect(() => setContinuationAttempted(false), [queryKey]);
+  useEffect(() => {
+    setContinuationAttempt(0);
+    observedInFlightAttemptRef.current = 0;
+    focusedOutcomeAttemptRef.current = 0;
+  }, [queryKey]);
 
   const available = queue.view.availability === "available";
+  const refreshState = available ? queue.view.refresh : null;
   const hasNextPage = available && queue.view.value.nextCursor !== null;
-  const continuationLoading = continuationAttempted
-    && available
-    && queue.view.refresh === "loading";
+  const continuationLoading = queue.continuationInFlight;
 
   useEffect(() => {
-    if (continuationAttempted && available && queue.view.refresh === "settled" && !hasNextPage) {
-      completionRef.current?.focus();
+    if (continuationAttempt === 0) return;
+    if (continuationLoading) {
+      observedInFlightAttemptRef.current = continuationAttempt;
+      return;
     }
-  }, [available, continuationAttempted, hasNextPage, queue.view]);
-
-  useEffect(() => {
-    if (continuationAttempted && queue.continuationFailed) {
+    if (
+      observedInFlightAttemptRef.current !== continuationAttempt
+      || focusedOutcomeAttemptRef.current === continuationAttempt
+    ) return;
+    if (queue.continuationFailed) {
+      focusedOutcomeAttemptRef.current = continuationAttempt;
       continuationFailureRef.current?.focus();
+      return;
     }
-  }, [continuationAttempted, queue.continuationFailed]);
+    if (available && refreshState === "settled") {
+      focusedOutcomeAttemptRef.current = continuationAttempt;
+      if (hasNextPage) loadMoreRef.current?.focus();
+      else completionRef.current?.focus();
+    }
+  }, [available, continuationAttempt, continuationLoading, hasNextPage, queue.continuationFailed, refreshState]);
+
+  const requestNextPage = () => {
+    if (continuationLoading) return;
+    setContinuationAttempt((current) => current + 1);
+    queue.nextPage();
+  };
 
   const update = (next: Partial<OperationsQueueLocationQuery>) => {
     onQueryChange({ ...query, ...next });
@@ -139,7 +157,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
             onClick={queue.refresh}
             aria-disabled={queue.view.refresh === "loading"}
           >
-            {queue.view.refresh === "loading" && !continuationAttempted ? "Refreshing…" : "Refresh"}
+            {queue.view.refresh === "loading" && !continuationLoading ? "Refreshing…" : "Refresh"}
           </button>
         ) : null}
       </header>
@@ -278,7 +296,6 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
                 <QueueRow
                   key={row.investigation.id}
                   row={row}
-                  includeArchived={query.includeArchived}
                   onOpen={onOpenInvestigation}
                 />
               ))}
@@ -293,7 +310,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
               ref={continuationFailureRef}
             >
               <p>More operations could not be loaded. Previously loaded rows remain in server order.</p>
-              <button type="button" onClick={queue.nextPage}>Try loading more</button>
+              <button type="button" onClick={requestNextPage}>Try loading more</button>
             </div>
           ) : null}
           {available && hasNextPage ? (
@@ -301,11 +318,8 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
               <button
                 type="button"
                 aria-disabled={continuationLoading}
-                onClick={() => {
-                  if (continuationLoading) return;
-                  setContinuationAttempted(true);
-                  queue.nextPage();
-                }}
+                ref={loadMoreRef}
+                onClick={requestNextPage}
               >
                 {continuationLoading ? "Loading more operations…" : "Load more operations"}
               </button>
@@ -316,10 +330,15 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
               </span>
             </nav>
           ) : null}
-          {available && continuationAttempted && !hasNextPage && queue.view.refresh === "settled" ? (
+          {available && continuationAttempt > 0 && !hasNextPage && queue.view.refresh === "settled" ? (
             <p className="operations-queue__completion" role="status" tabIndex={-1} ref={completionRef}>
               All operations are shown.
             </p>
+          ) : null}
+          {available && queue.view.refresh === "settled" ? (
+            <span className="sr-only" role="status" aria-live="polite">
+              {items.length} {items.length === 1 ? "operation" : "operations"} shown.
+            </span>
           ) : null}
         </>
       ) : null}

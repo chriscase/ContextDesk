@@ -599,13 +599,16 @@ describe("authenticated application shell", () => {
 
     expect(await screen.findByText(/no queue data was requested/u)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
-    expect(fetchStub.mock.calls.some(([input]) =>
-      String(input).includes("investigation_operations_queue_query"))).toBe(false);
+    const caseReads = fetchStub.mock.calls
+      .filter(([, init]) => (init?.method ?? "GET") === "GET")
+      .map(([input]) => String(input))
+      .filter((url) => url === "/api/cases" || url.startsWith("/api/cases?") || url.startsWith("/api/cases/"));
+    expect(caseReads).toEqual([]);
   });
 
   it("reports a queue 503 without substituting the investigation list", async () => {
     window.history.replaceState(null, "", "/operations");
-    stubSignedInFetch({
+    const fetchStub = stubSignedInFetch({
       username: "alice",
       roles: ["viewer"],
       capabilities: ["investigation:read"],
@@ -620,6 +623,12 @@ describe("authenticated application shell", () => {
     expect(await screen.findByText("Operations Queue service is unavailable")).toBeTruthy();
     expect(screen.getByText(/No legacy investigation list was substituted/u)).toBeTruthy();
     expect(screen.queryByRole("list", { name: "Operations queue investigations" })).toBeNull();
+    const caseReads = fetchStub.mock.calls
+      .filter(([, init]) => (init?.method ?? "GET") === "GET")
+      .map(([input]) => String(input))
+      .filter((url) => url === "/api/cases" || url.startsWith("/api/cases?") || url.startsWith("/api/cases/"));
+    expect(caseReads).toHaveLength(1);
+    expect(caseReads[0]).toContain("investigation_operations_queue_query");
   });
 
   it("separates user administration from system policy and fetches neither without authority", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { OperationsQueueLocationQuery } from "../app-location.js";
 import {
   selectResourceView,
@@ -14,6 +14,7 @@ export interface OperationsQueuePresentation {
   readonly commandAvailability: OperationsQueueCommandAvailability;
   readonly view: ResourceView<InvestigationOperationsQueuePageV1>;
   readonly continuationFailed: boolean;
+  readonly continuationInFlight: boolean;
   readonly refresh: () => void;
   readonly nextPage: () => void;
 }
@@ -58,15 +59,23 @@ export function useOperationsQueue(
     locationQuery.status,
   ]);
   const inputKey = useMemo(() => baseKey(input), [input]);
-  const view = commandAvailability === "available"
+  const rawView = commandAvailability === "available"
     ? selectResourceView(runtime.resources.operationsQueue)
     : { availability: "idle" } as const;
   const activeQueryRef = useRef(runtime.resources.operationsQueueQuery);
   activeQueryRef.current = runtime.resources.operationsQueueQuery;
   const requestedKeyRef = useRef<string | null>(null);
   const continuationPendingRef = useRef(false);
+  const [continuationInFlight, setContinuationInFlight] = useState(false);
   const activeQuery = runtime.resources.operationsQueueQuery;
   const activeQueryMatches = activeQuery !== null && baseKey(activeQuery) === inputKey;
+  // A location change is authoritative immediately. Never publish rows or
+  // counts from the previous query while the Runtime starts the new request.
+  const view: ResourceView<InvestigationOperationsQueuePageV1> = commandAvailability === "available"
+    ? activeQueryMatches
+      ? rawView
+      : { availability: "loading" }
+    : { availability: "idle" };
   const continuationFailed = view.availability === "available"
     && view.refresh === "failed"
     && activeQueryMatches
@@ -75,6 +84,7 @@ export function useOperationsQueue(
   useEffect(() => {
     if (requestedKeyRef.current !== inputKey || commandAvailability !== "available") {
       continuationPendingRef.current = false;
+      setContinuationInFlight(false);
       return;
     }
     if (
@@ -85,6 +95,7 @@ export function useOperationsQueue(
       && view.refresh !== "loading"
     ) {
       continuationPendingRef.current = false;
+      setContinuationInFlight(false);
     }
   }, [activeQuery, activeQueryMatches, commandAvailability, inputKey, view]);
 
@@ -92,6 +103,7 @@ export function useOperationsQueue(
     if (commandAvailability !== "available" || typeof command !== "function") {
       requestedKeyRef.current = null;
       continuationPendingRef.current = false;
+      setContinuationInFlight(false);
       return;
     }
     if (requestedKeyRef.current === inputKey) return;
@@ -108,6 +120,7 @@ export function useOperationsQueue(
     commandAvailability,
     view,
     continuationFailed,
+    continuationInFlight,
     refresh: commandAvailability === "available" && typeof command === "function"
       ? () => {
           if (continuationPendingRef.current) return;
@@ -133,10 +146,12 @@ export function useOperationsQueue(
             && baseKey(current) === inputKey
           ) {
             continuationPendingRef.current = true;
+            setContinuationInFlight(true);
             runtime.refresh.operationsQueue();
             return;
           }
           continuationPendingRef.current = true;
+          setContinuationInFlight(true);
           command(Object.freeze({ ...input, cursor }));
         }
       : () => undefined,

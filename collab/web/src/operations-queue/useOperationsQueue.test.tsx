@@ -34,7 +34,15 @@ function renderProbe(
   query: OperationsQueueLocationQuery = DEFAULT_OPERATIONS_QUEUE_QUERY,
   capabilities: readonly string[] = ["investigation:read"],
 ) {
-  return render(
+  return render(probeTree(gateway, query, capabilities));
+}
+
+function probeTree(
+  gateway: InvestigationGateway,
+  query: OperationsQueueLocationQuery,
+  capabilities: readonly string[] = ["investigation:read"],
+) {
+  return (
     <InvestigationRuntimeGatewayHarness gateway={gateway}>
       <InvestigationRuntimeProvider
         identityKey="identity-alice"
@@ -49,7 +57,7 @@ function renderProbe(
       >
         <Probe query={query} />
       </InvestigationRuntimeProvider>
-    </InvestigationRuntimeGatewayHarness>,
+    </InvestigationRuntimeGatewayHarness>
   );
 }
 
@@ -93,6 +101,32 @@ describe("Operations Queue public-runtime adapter", () => {
     expect(presentation?.view.availability === "available"
       ? presentation.view.value.items.map((row) => row.investigation.title)
       : []).toEqual(page.items.map((row) => row.investigation.title));
+  });
+
+  it("withholds the previous query page as soon as location filters change", async () => {
+    let resolveSecond: ((value: ReturnType<typeof gatewayOk<InvestigationOperationsQueuePageV1>>) => void) | null = null;
+    const first = makeOperationsQueuePage();
+    const second = makeOperationsQueuePage({ items: [first.items[1]!] });
+    const queryOperationsQueue = vi.fn<NonNullable<InvestigationGateway["queryOperationsQueue"]>>(
+      (input) => input.q === "second"
+        ? new Promise((resolve) => { resolveSecond = resolve; })
+        : Promise.resolve(gatewayOk(first)),
+    );
+    const gateway = createInvestigationGatewayDouble({ queryOperationsQueue });
+    const initial = { ...DEFAULT_OPERATIONS_QUEUE_QUERY, q: "first" };
+    const next = { ...DEFAULT_OPERATIONS_QUEUE_QUERY, q: "second" };
+    const rendered = renderProbe(gateway, initial);
+    await waitFor(() => expect(screen.getByTestId("queue-state").textContent)
+      .toBe("available:available:settled:2"));
+
+    rendered.rerender(probeTree(gateway, next));
+    expect(screen.getByTestId("queue-state").textContent).toBe("available:loading");
+    expect(presentation?.view.availability).toBe("loading");
+    await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(2));
+
+    act(() => resolveSecond?.(gatewayOk(second)));
+    await waitFor(() => expect(screen.getByTestId("queue-state").textContent)
+      .toBe("available:available:settled:1"));
   });
 
   it("passes only the server cursor for continuation and preserves previous rows on failure", async () => {
