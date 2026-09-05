@@ -52,6 +52,10 @@
       "types": "./dist/investigation-collection-browser.d.ts",
       "import": "./dist/investigation-collection-browser.js"
     },
+    "./investigation-operations-queue": {
+      "types": "./dist/investigation-operations-queue-browser.d.ts",
+      "import": "./dist/investigation-operations-queue-browser.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [
