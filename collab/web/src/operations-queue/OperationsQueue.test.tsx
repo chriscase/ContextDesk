@@ -577,8 +577,18 @@ describe("Operations Queue presentation", () => {
     const authorityRetry = screen.getByRole("button", { name: "Try again" });
     authorityRetry.focus();
     fireEvent.click(authorityRetry);
+    const nextAuthorityScope = Object.freeze({});
     hook.current.mockReturnValue(settled({
-      scopeToken: Object.freeze({}),
+      scopeToken: nextAuthorityScope,
+      view: { availability: "available", value: page, refresh: "loading" },
+      requestGeneration: 1,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    hook.current.mockReturnValue(settled({
+      scopeToken: nextAuthorityScope,
       view: { availability: "available", value: page, refresh: "settled" },
       requestGeneration: 1,
       refresh,
@@ -586,9 +596,7 @@ describe("Operations Queue presentation", () => {
     rendered.rerender(
       <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
     );
-    await waitFor(() => expect(document.activeElement).not.toBe(
-      screen.getByRole("heading", { name: "Operations Queue" }),
-    ));
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("does not apply retained-refresh retry focus to a different location query", async () => {
