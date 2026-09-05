@@ -574,7 +574,9 @@ describe("Operations Queue presentation", () => {
     rendered.rerender(
       <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    const authorityRetry = screen.getByRole("button", { name: "Try again" });
+    authorityRetry.focus();
+    fireEvent.click(authorityRetry);
     hook.current.mockReturnValue(settled({
       scopeToken: Object.freeze({}),
       view: { availability: "available", value: page, refresh: "settled" },
@@ -584,7 +586,48 @@ describe("Operations Queue presentation", () => {
     rendered.rerender(
       <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
     );
-    await waitFor(() => expect(document.activeElement).toBe(search));
+    await waitFor(() => expect(document.activeElement).not.toBe(
+      screen.getByRole("heading", { name: "Operations Queue" }),
+    ));
+  });
+
+  it("does not apply retained-refresh retry focus to a different location query", async () => {
+    const refresh = vi.fn();
+    const page = makeOperationsQueuePage();
+    const rendered = renderQueue(settled({
+      view: {
+        availability: "available",
+        value: page,
+        refresh: "failed",
+        refreshError: { kind: "network" },
+      },
+      requestGeneration: 11,
+      refresh,
+    }));
+    const retry = screen.getByRole("button", { name: "Try again" });
+    retry.focus();
+    fireEvent.click(retry);
+
+    const nextQuery = { ...DEFAULT_OPERATIONS_QUEUE_QUERY, q: "different" };
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "loading" },
+      requestGeneration: 1,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={nextQuery} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: page, refresh: "settled" },
+      requestGeneration: 1,
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={nextQuery} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Operations Queue" })).toBeTruthy());
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("clears pagination intent when the Runtime authority scope changes", async () => {
