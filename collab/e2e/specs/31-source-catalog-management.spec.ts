@@ -290,9 +290,14 @@ test.describe("Source Catalog Console", () => {
         sourceId: created.sourceId,
         expectedRevision: 1,
       });
-      const alert = page.getByRole("alert").filter({ hasText: "latest confirmed record is shown" });
+      const alert = page.getByRole("alert").filter({
+        hasText: "The catalog was reconciled to the latest confirmed record; it may be hidden by the current filters.",
+      });
       await expect(alert).toBeFocused();
       await expect(alert).toContainText("already retired");
+      await expect(alert).toContainText(
+        "The catalog was reconciled to the latest confirmed record; it may be hidden by the current filters.",
+      );
       const reconciled = catalogRow(page, name);
       await expect(reconciled).toContainText("Retired");
       await expect(reconciled.getByRole("button", { name: `Restore ${name}` })).toBeVisible();
