@@ -17,6 +17,7 @@ import {
 import {
   ADMINISTRATION,
   DEFAULT_COLLECTION_QUERY,
+  DEFAULT_OPERATIONS_QUEUE_QUERY,
   EVIDENCE_STORAGE_ADMIN,
   HOME,
   LDAP_ADMIN,
@@ -81,6 +82,7 @@ import {
 import { useUiStrategyGovernance } from "./useUiStrategyGovernance.js";
 import { ActivityCenter } from "./overview/ActivityCenter.js";
 import { useWarRoomCollectionQuery } from "./investigations/war-room/useWarRoomCollectionQuery.js";
+import { OperationsQueue } from "./operations-queue/index.js";
 
 interface SessionView {
   identityId: string;
@@ -258,6 +260,7 @@ declare global {
 const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
   { area: "overview", label: "Overview" },
   { area: "investigations", label: "Investigations" },
+  { area: "operations", label: "Operations" },
   { area: "entities", label: "Entities" },
   { area: "sources", label: "Attribution" },
   { area: "administration", label: "Administration" },
@@ -677,8 +680,12 @@ export function App() {
   const navigate = useCallback((
     next: ShellLocation,
     mode: "push" | "replace" = "push",
-    historyStrategyId: UiStrategyId | undefined = transientUiStrategyId ?? undefined,
+    historyStrategyId: UiStrategyId | null | undefined = transientUiStrategyId ?? undefined,
   ) => {
+    const investigationStrategyId = isWorkLocation(next) && next.area === "investigations"
+      ? historyStrategyId ?? undefined
+      : undefined;
+    if (investigationStrategyId === undefined) setTransientUiStrategyId(null);
     setLocation((current) => {
       if (sameLocation(current, next)) {
         return current;
@@ -686,7 +693,7 @@ export function App() {
       return next;
     });
     setNavOpen(false);
-    writeHistory(next, mode, historyStrategyId);
+    writeHistory(next, mode, investigationStrategyId);
   }, [transientUiStrategyId]);
 
   const openCreatedInvestigation = useCallback((investigationId: string) => {
@@ -774,7 +781,9 @@ export function App() {
         return;
       }
       const historyStrategyId = historyUiStrategyId(event.state);
-      setTransientUiStrategyId(historyStrategyId);
+      setTransientUiStrategyId(
+        isWorkLocation(next) && next.area === "investigations" ? historyStrategyId : null,
+      );
       setLocation(next);
       setNavOpen(false);
     };
@@ -953,6 +962,7 @@ export function App() {
   const canAdmin = canAdminUsers || canAdminSystem;
   const work: WorkLocation = isWorkLocation(location) ? location : HOME;
   const inInvestigationsArea = work.area === "investigations";
+  const inOperationsArea = work.area === "operations";
   const unknown = isUnknownLocation(location);
   const currentArea = unknown ? null : work.area;
   const warRoomBindings: WarRoomStrategyBindings = {
@@ -1139,6 +1149,40 @@ export function App() {
                     }
                   }}
                 />
+              ) : null}
+            </section>
+            <section className="app__area" aria-label="Operations" hidden={!inOperationsArea}>
+              {inOperationsArea ? (
+                <InvestigationRuntimeProvider
+                  identityKey={session.identityId}
+                  identity={{
+                    id: session.identityId,
+                    username: session.username,
+                    displayName: session.displayName,
+                  }}
+                  authorityKey={investigationAuthorityKey(session, staticReadOnly)}
+                  capabilities={capabilities}
+                  readOnly={staticReadOnly}
+                  active={false}
+                  focusCaseId={null}
+                  isInvestigationLocation={false}
+                  onOpenCreated={openCreatedInvestigation}
+                >
+                  <OperationsQueue
+                    query={work.operationsQueueQuery ?? DEFAULT_OPERATIONS_QUEUE_QUERY}
+                    onQueryChange={(operationsQueueQuery) => navigate({
+                      area: "operations",
+                      caseId: null,
+                      stage: "situation",
+                      operationsQueueQuery,
+                    }, "replace")}
+                    onOpenInvestigation={(caseId) => navigate({
+                      area: "investigations",
+                      caseId,
+                      stage: "situation",
+                    }, "push", null)}
+                  />
+                </InvestigationRuntimeProvider>
               ) : null}
             </section>
             <section className="app__area" aria-label="Investigations" hidden={!inInvestigationsArea}>
