@@ -15,6 +15,8 @@ describe("investigation runtime capability projection", () => {
       canContribute: true,
       canEditSituation: true,
       canManageLifecycle: true,
+      canCoordinateSelf: true,
+      canCoordinateParticipants: false,
     });
   });
 
@@ -32,6 +34,8 @@ describe("investigation runtime capability projection", () => {
       canContribute: true,
       canEditSituation: true,
       canManageLifecycle: false,
+      canCoordinateSelf: true,
+      canCoordinateParticipants: false,
     });
     expect(projectInvestigationCapabilities(["run:strategies"], false)).toEqual({
       canRead: false,
@@ -41,6 +45,8 @@ describe("investigation runtime capability projection", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: true,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
   });
 
@@ -57,6 +63,8 @@ describe("investigation runtime capability projection", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: false,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
   });
 
@@ -74,6 +82,8 @@ describe("investigation runtime capability projection", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: false,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
   });
 
@@ -86,6 +96,8 @@ describe("investigation runtime capability projection", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: false,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
     expect(projectInvestigationCapabilities([
       "investigation:read",
@@ -98,6 +110,26 @@ describe("investigation runtime capability projection", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: true,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
+    });
+  });
+
+  it("keeps self and participant coordination as exact independent gates", () => {
+    expect(projectInvestigationCapabilities(["investigation:write"], false)).toMatchObject({
+      canCoordinateSelf: true,
+      canCoordinateParticipants: false,
+    });
+    expect(projectInvestigationCapabilities(["investigation:coordinate"], false)).toMatchObject({
+      canCoordinateSelf: false,
+      canCoordinateParticipants: true,
+    });
+    expect(projectInvestigationCapabilities([
+      "investigation:write",
+      "investigation:coordinate",
+    ], true)).toMatchObject({
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
   });
 
@@ -108,6 +140,8 @@ describe("investigation runtime capability projection", () => {
     ], false);
     expect(Object.keys(projected).sort()).toEqual([
       "canContribute",
+      "canCoordinateParticipants",
+      "canCoordinateSelf",
       "canCreate",
       "canEditSituation",
       "canManageLifecycle",
@@ -137,6 +171,8 @@ describe("investigation runtime capability projection", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: false,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
   });
 
@@ -154,6 +190,8 @@ describe("investigation runtime capability projection", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: false,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
   });
 });

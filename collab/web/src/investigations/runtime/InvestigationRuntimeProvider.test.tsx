@@ -5,12 +5,16 @@ import {
 } from "@cd-collab/contracts/investigation-collection";
 import {
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_SCHEMA_ID,
   type CaseV1,
   type ContributionV1,
   type InvestigationLifecycleActionSuccessV1,
+  type InvestigationCoordinationActionSuccessV1,
+  type InvestigationCoordinationV1,
 } from "@cd-collab/contracts/investigation-runtime";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { startTransition, Suspense, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   parseInvestigationCollectionQueryInput,
@@ -79,6 +83,31 @@ function artifactAnnotation(
   };
 }
 
+function coordination(revision = 2): InvestigationCoordinationV1 {
+  return {
+    schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
+    investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
+    coordinator: null,
+    revision,
+    updatedAt: "2026-02-03T20:00:00.000Z",
+    updatedBy: { identityId: "identity-lead", username: "lead" },
+    archived: false,
+  };
+}
+
+function coordinationSuccess(): InvestigationCoordinationActionSuccessV1 {
+  const identity = { identityId: "identity-lead", username: "lead" } as const;
+  return {
+    schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+    investigationId: RUNTIME_FIXTURE_IDS.populatedCase,
+    action: "claim_self",
+    targetIdentityId: null,
+    previousRevision: 2,
+    previousCoordinator: null,
+    applied: { ...coordination(3), coordinator: identity, updatedBy: identity },
+  };
+}
+
 function makeGateway(overrides: Partial<InvestigationGateway> = {}): InvestigationGateway {
   return {
     listInvestigations: vi.fn(async () => succeeded(makeCaseList().cases)),
@@ -128,6 +157,353 @@ function currentRuntime(): InvestigationRuntime {
 }
 
 describe("InvestigationRuntimeProvider", () => {
+  it("publishes a stable opaque presentation scope that rotates with either shell epoch", async () => {
+    const IDENTITY_KEY = "raw-identity-fence-do-not-publish";
+    const AUTHORITY_KEY = "raw-authority-fence-do-not-publish";
+    const UPDATED_IDENTITY_KEY = "raw-identity-fence-v2-do-not-publish";
+    const UPDATED_AUTHORITY_KEY = "raw-authority-fence-v2-do-not-publish";
+    const currentCase = makePopulatedCase();
+    const updatedCase = { ...currentCase, title: `${currentCase.title} (updated)` };
+    const getInvestigation = vi.fn()
+      .mockResolvedValueOnce(succeeded(currentCase))
+      .mockResolvedValue(succeeded(updatedCase));
+    const gateway = makeGateway({ getInvestigation });
+
+    function Harness() {
+      const [identityKey, setIdentityKey] = useState(IDENTITY_KEY);
+      const [authorityKey, setAuthorityKey] = useState(AUTHORITY_KEY);
+      const [label, setLabel] = useState("initial");
+      return (
+        <>
+          <button type="button" onClick={() => setLabel("ordinary rerender")}>rerender</button>
+          <button type="button" onClick={() => setIdentityKey(UPDATED_IDENTITY_KEY)}>
+            rotate identity epoch
+          </button>
+          <button type="button" onClick={() => setAuthorityKey(UPDATED_AUTHORITY_KEY)}>
+            rotate authority epoch
+          </button>
+          <ProviderUnderTest
+            identityKey={identityKey}
+            identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+            authorityKey={authorityKey}
+            capabilities={FULL_CAPABILITIES}
+            readOnly={false}
+            active
+            focusCaseId={currentCase.id}
+            isInvestigationLocation
+            onOpenCreated={vi.fn()}
+            gateway={gateway}
+          >
+            <RuntimeProbe label={label} />
+          </ProviderUnderTest>
+        </>
+      );
+    }
+
+    render(<Harness />);
+    await waitFor(() => expect(currentRuntime().resources.investigation.status).toBe("ready"));
+    const initialScope = currentRuntime().presentationScopeKey;
+    expect(initialScope).not.toBe("");
+    for (const rawKey of [IDENTITY_KEY, AUTHORITY_KEY]) {
+      expect(initialScope).not.toContain(rawKey);
+      expect(JSON.stringify(currentRuntime())).not.toContain(rawKey);
+    }
+
+    act(() => screen.getByRole("button", { name: "rerender" }).click());
+    expect(currentRuntime().presentationScopeKey).toBe(initialScope);
+
+    act(() => currentRuntime().refresh.investigation());
+    expect(currentRuntime().presentationScopeKey).toBe(initialScope);
+    await waitFor(() => expect(currentRuntime().resources.investigation).toMatchObject({
+      status: "ready",
+      value: { title: updatedCase.title },
+    }));
+    expect(currentRuntime().presentationScopeKey).toBe(initialScope);
+
+    act(() => screen.getByRole("button", { name: "rotate identity epoch" }).click());
+    const identityScope = currentRuntime().presentationScopeKey;
+    expect(identityScope).not.toBe(initialScope);
+    expect(identityScope).not.toContain(UPDATED_IDENTITY_KEY);
+    expect(JSON.stringify(currentRuntime())).not.toContain(UPDATED_IDENTITY_KEY);
+
+    act(() => screen.getByRole("button", { name: "rotate authority epoch" }).click());
+    const authorityScope = currentRuntime().presentationScopeKey;
+    expect(authorityScope).not.toBe(identityScope);
+    expect(authorityScope).not.toContain(UPDATED_AUTHORITY_KEY);
+    expect(JSON.stringify(currentRuntime())).not.toContain(UPDATED_AUTHORITY_KEY);
+  });
+
+  it("does not rotate the committed presentation scope for an abandoned concurrent epoch", async () => {
+    const AUTHORITY_KEY = "committed-authority-epoch";
+    const neverSettles = new Promise<never>(() => undefined);
+    let suspendedRenders = 0;
+
+    function ScopeKeyProbe() {
+      const runtime = useInvestigationRuntime();
+      return <output data-testid="presentation-scope">{runtime.presentationScopeKey}</output>;
+    }
+
+    function SuspendChangedEpoch({ suspended }: { readonly suspended: boolean }) {
+      if (suspended) {
+        suspendedRenders += 1;
+        throw neverSettles;
+      }
+      return null;
+    }
+
+    function tree(authorityKey: string, suspended: boolean) {
+      return (
+        <Suspense fallback={<p>Suspended epoch fallback</p>}>
+          <ProviderUnderTest
+            identityKey="stable-identity-epoch"
+            identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+            authorityKey={authorityKey}
+            capabilities={FULL_CAPABILITIES}
+            readOnly={false}
+            active
+            focusCaseId={null}
+            isInvestigationLocation
+            onOpenCreated={vi.fn()}
+            gateway={makeGateway()}
+          >
+            <ScopeKeyProbe />
+            <SuspendChangedEpoch suspended={suspended} />
+          </ProviderUnderTest>
+        </Suspense>
+      );
+    }
+
+    const view = render(tree(AUTHORITY_KEY, false));
+    const initialScope = screen.getByTestId("presentation-scope").textContent;
+    expect(initialScope).not.toBe("");
+
+    act(() => {
+      startTransition(() => view.rerender(tree("abandoned-authority-epoch", true)));
+    });
+    await waitFor(() => expect(suspendedRenders).toBeGreaterThan(0));
+    expect(screen.queryByText("Suspended epoch fallback")).toBeNull();
+    expect(screen.getByTestId("presentation-scope").textContent).toBe(initialScope);
+
+    view.rerender(tree(AUTHORITY_KEY, false));
+    expect(screen.getByTestId("presentation-scope").textContent).toBe(initialScope);
+  });
+
+  it("publishes and applies the frozen coordination seam only for an authenticated ready case", async () => {
+    const success = coordinationSuccess();
+    const getCoordination = vi.fn(async () => succeeded(coordination()));
+    const applyCoordinationAction = vi.fn(async () => succeeded(success));
+    const gateway = makeGateway({ getCoordination, applyCoordinationAction });
+    render(
+      <ProviderUnderTest
+        identityKey="lead-session"
+        identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+        authorityKey="lead-authority-v1"
+        capabilities={[
+          "investigation:read",
+          "investigation:write",
+          "investigation:coordinate",
+        ]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => {
+      expect(currentRuntime().resources.investigation.status).toBe("ready");
+      expect(currentRuntime().resources.coordination.status).toBe("ready");
+    });
+    expect(currentRuntime().capabilities).toMatchObject({
+      canCoordinateSelf: true,
+      canCoordinateParticipants: true,
+    });
+    expect(currentRuntime().commands.applyCoordinationAction).not.toBeNull();
+    expect(Object.isFrozen(currentRuntime().resources.coordination)).toBe(true);
+    expect(Object.isFrozen(currentRuntime().commands.applyCoordinationAction)).toBe(true);
+
+    act(() => currentRuntime().refresh.activeInvestigation());
+    await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      await expect(currentRuntime().commands.applyCoordinationAction!({
+        action: "claim_self",
+        idempotencyKey: "coord-provider-0001",
+      })).resolves.toEqual({ status: "succeeded", value: success });
+    });
+    expect(applyCoordinationAction).toHaveBeenCalledOnce();
+    expect(currentRuntime().mutations.coordination).toEqual({
+      status: "succeeded",
+      value: success,
+    });
+    expect(currentRuntime().resources.coordination).toEqual({
+      status: "ready",
+      value: success.applied,
+    });
+  });
+
+  it("keeps legacy gateways valid through a frozen unavailable coordination adapter", async () => {
+    const gateway = makeGateway();
+    render(
+      <ProviderUnderTest
+        identityKey="lead-session"
+        identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+        authorityKey="lead-authority-v1"
+        capabilities={["investigation:read", "investigation:write"]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.coordination).toEqual({
+      status: "failed",
+      error: { kind: "unavailable", status: 503 },
+    }));
+    expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it("reads coordination but exposes no action without a nonempty authenticated identity", async () => {
+    const getCoordination = vi.fn(async () => succeeded(coordination()));
+    const gateway = makeGateway({
+      getCoordination,
+      applyCoordinationAction: vi.fn(async () => succeeded(coordinationSuccess())),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="opaque-session-key"
+        authorityKey="lead-authority-v1"
+        capabilities={[
+          "investigation:read",
+          "investigation:write",
+          "investigation:coordinate",
+        ]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.coordination.status).toBe("ready"));
+    expect(getCoordination).toHaveBeenCalledWith(
+      RUNTIME_FIXTURE_IDS.populatedCase,
+      { actorIdentityId: "", signal: expect.any(AbortSignal) },
+    );
+    expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it("does not read coordination without case-read authority", async () => {
+    const getCoordination = vi.fn(async () => succeeded(coordination()));
+    const gateway = makeGateway({
+      getCoordination,
+      applyCoordinationAction: vi.fn(async () => succeeded(coordinationSuccess())),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="viewer-session"
+        identity={{ id: "identity-viewer", username: "viewer", displayName: "Viewer" }}
+        authorityKey="viewer-authority-v1"
+        capabilities={[]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.coordination).toEqual({
+      status: "idle",
+    }));
+    expect(getCoordination).not.toHaveBeenCalled();
+    expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it("keeps coordination readable in static read-only mode without exposing its command", async () => {
+    const getCoordination = vi.fn(async () => succeeded(coordination()));
+    const gateway = makeGateway({
+      getCoordination,
+      applyCoordinationAction: vi.fn(async () => succeeded(coordinationSuccess())),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead-session"
+        identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+        authorityKey="lead-authority-read-only"
+        capabilities={[
+          "investigation:read",
+          "investigation:write",
+          "investigation:coordinate",
+        ]}
+        readOnly
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().resources.coordination.status).toBe("ready"));
+    expect(getCoordination).toHaveBeenCalledOnce();
+    expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
+  it.each([
+    ["401", { kind: "auth_lost" as const, status: 401 as const }],
+    ["403", { kind: "auth_lost" as const, status: 403 as const }],
+    ["404", { kind: "not_found" as const, status: 404 as const }],
+  ])("denies the active parent scope after coordination apply %s", async (_status, error) => {
+    const gateway = makeGateway({
+      getCoordination: vi.fn(async () => succeeded(coordination())),
+      applyCoordinationAction: vi.fn(async () => ({ ok: false as const, error })),
+    });
+    render(
+      <ProviderUnderTest
+        identityKey="lead-session"
+        identity={{ id: "identity-lead", username: "lead", displayName: "Lead" }}
+        authorityKey="lead-authority-v1"
+        capabilities={["investigation:read", "investigation:write"]}
+        readOnly={false}
+        active
+        focusCaseId={RUNTIME_FIXTURE_IDS.populatedCase}
+        isInvestigationLocation
+        onOpenCreated={vi.fn()}
+        gateway={gateway}
+      >
+        <RuntimeProbe />
+      </ProviderUnderTest>,
+    );
+    await waitFor(() => expect(currentRuntime().commands.applyCoordinationAction).not.toBeNull());
+    await act(async () => {
+      await currentRuntime().commands.applyCoordinationAction!({
+        action: "claim_self",
+        idempotencyKey: `coord-provider-terminal-${_status}`,
+      });
+    });
+    await waitFor(() => expect(currentRuntime().resources.investigation).toEqual({
+      status: "failed",
+      error,
+    }));
+    expect(currentRuntime().resources.evidence).toEqual({ status: "failed", error });
+    expect(currentRuntime().resources.contributions).toEqual({ status: "failed", error });
+    expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+  });
+
   it("fails loudly when a strategy consumes the runtime outside its provider", () => {
     expect(() => render(<RuntimeProbe />)).toThrow(
       "useInvestigationRuntime must be used within InvestigationRuntimeProvider",
@@ -335,6 +711,7 @@ describe("InvestigationRuntimeProvider", () => {
       createContribution: null,
       updateSituation: null,
       applyLifecycle: null,
+      applyCoordinationAction: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: null,
@@ -379,6 +756,8 @@ describe("InvestigationRuntimeProvider", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: false,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
     expect(currentRuntime().commands).toEqual({
       createInvestigation: null,
@@ -386,6 +765,7 @@ describe("InvestigationRuntimeProvider", () => {
       createContribution: null,
       updateSituation: null,
       applyLifecycle: null,
+      applyCoordinationAction: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: expect.any(Function),
@@ -426,6 +806,8 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().capabilities.canReadPrivate).toBe(true);
     expect(Object.keys(currentRuntime().capabilities).sort()).toEqual([
       "canContribute",
+      "canCoordinateParticipants",
+      "canCoordinateSelf",
       "canCreate",
       "canEditSituation",
       "canManageLifecycle",
@@ -478,6 +860,8 @@ describe("InvestigationRuntimeProvider", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: false,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
     expect(currentRuntime().commands.uploadEvidence).toBeNull();
   });
@@ -1380,6 +1764,8 @@ describe("InvestigationRuntimeProvider", () => {
       canContribute: false,
       canEditSituation: false,
       canManageLifecycle: true,
+      canCoordinateSelf: false,
+      canCoordinateParticipants: false,
     });
     expect(currentRuntime().commands.createContribution).toBeNull();
     expect(currentRuntime().commands.updateSituation).toBeNull();
@@ -1668,6 +2054,7 @@ describe("InvestigationRuntimeProvider", () => {
       createContribution: null,
       updateSituation: null,
       applyLifecycle: null,
+      applyCoordinationAction: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: expect.any(Function),
@@ -1819,6 +2206,8 @@ describe("InvestigationRuntimeProvider", () => {
         canContribute: false,
         canEditSituation: false,
         canManageLifecycle: false,
+        canCoordinateSelf: false,
+        canCoordinateParticipants: false,
       });
       expect(runtime.commands).toEqual({
         createInvestigation: null,
@@ -1826,6 +2215,7 @@ describe("InvestigationRuntimeProvider", () => {
         createContribution: null,
         updateSituation: null,
         applyLifecycle: null,
+        applyCoordinationAction: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
         queryInvestigations: expect.any(Function),
@@ -1992,6 +2382,8 @@ describe("InvestigationRuntimeProvider", () => {
         canContribute: false,
         canEditSituation: false,
         canManageLifecycle: false,
+        canCoordinateSelf: false,
+        canCoordinateParticipants: false,
       });
       expect(runtime.commands).toEqual({
         createInvestigation: null,
@@ -1999,6 +2391,7 @@ describe("InvestigationRuntimeProvider", () => {
         createContribution: null,
         updateSituation: null,
         applyLifecycle: null,
+        applyCoordinationAction: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
         queryInvestigations: expect.any(Function),

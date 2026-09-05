@@ -7,6 +7,10 @@ import {
   INVESTIGATION_LIFECYCLE_ACTION_REFUSED_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_CHANGED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_SCHEMA_ID,
   type CaseV1,
   type ContributionV1,
 } from "@cd-collab/contracts/investigation-runtime";
@@ -23,6 +27,7 @@ import {
   investigationAnnotationGateway,
   investigationBulkAnnotationGateway,
   investigationCollectionQueryGateway,
+  investigationCoordinationGateway,
   investigationWriteGateway,
   parseInvestigationCollectionQueryInput,
   type InvestigationGateway,
@@ -59,6 +64,432 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
+
+describe("investigation coordination transport", () => {
+  const investigationId = RUNTIME_FIXTURE_IDS.populatedCase;
+  const actor = { identityId: "identity-alice", username: "alice" } as const;
+  const other = { identityId: "identity-bob", username: "bob" } as const;
+  const coordination = (revision = 0, coordinator: typeof actor | typeof other | null = null) => ({
+    schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
+    investigationId,
+    coordinator,
+    revision,
+    updatedAt: revision === 0 ? null : "2026-02-03T20:00:00.000Z",
+    updatedBy: revision === 0 ? null : other,
+    archived: false,
+  });
+  const coordinationOptions = () => ({
+    actorIdentityId: actor.identityId,
+    signal: new AbortController().signal,
+  });
+
+  it("resolves both optional methods together and leaves legacy gateways unavailable", async () => {
+    const legacy = createInvestigationGatewayDouble();
+    const resolved = investigationCoordinationGateway(legacy);
+    expect(Object.isFrozen(resolved)).toBe(true);
+    await expect(resolved.getCoordination(investigationId, coordinationOptions())).resolves.toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503 },
+    });
+
+    const half = {
+      ...legacy,
+      getCoordination: vi.fn(async () => ({ ok: true, value: coordination() } as const)),
+    };
+    const allOrNothing = investigationCoordinationGateway(half);
+    expect(allOrNothing).toBe(resolved);
+    expect(half.getCoordination).not.toHaveBeenCalled();
+
+    const reverseHalf = {
+      ...legacy,
+      applyCoordinationAction: vi.fn(async () => ({
+        ok: false,
+        error: { kind: "unexpected" },
+      } as const)),
+    };
+    expect(investigationCoordinationGateway(reverseHalf)).toBe(resolved);
+    expect(reverseHalf.applyCoordinationAction).not.toHaveBeenCalled();
+  });
+
+  it("GETs a route-bound deeply frozen coordination projection", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(coordination()));
+    const result = await investigationGateway.getCoordination(
+      investigationId,
+      coordinationOptions(),
+    );
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `/api/cases/${encodeURIComponent(investigationId)}/coordination`,
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(Object.isFrozen(result.value)).toBe(true);
+  });
+
+  it("POSTs only the strict request and binds route, intent, and actor on success", async () => {
+    const success = {
+      schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId,
+      action: "claim_self",
+      targetIdentityId: null,
+      previousRevision: 0,
+      previousCoordinator: null,
+      applied: {
+        ...coordination(1, actor),
+        updatedBy: actor,
+      },
+    } as const;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(success));
+    const input = Object.assign(Object.create({ inherited: "blocked" }), {
+      action: "claim_self" as const,
+      expectedRevision: 0,
+      idempotencyKey: "coord-action-0001",
+      clientTime: "2026-02-03T20:00:00.000Z",
+      actorIdentityId: "must-not-cross",
+      extra: "must-not-cross",
+    });
+    const result = await investigationGateway.applyCoordinationAction(
+      investigationId,
+      input,
+      coordinationOptions(),
+    );
+    expect(result.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({
+      "content-type": "application/json",
+      [COLLAB_CSRF_HEADER]: COLLAB_CSRF_HEADER_VALUE,
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      schemaId: "cd-collab.investigation_coordination_action_request.v1",
+      investigationId,
+      action: "claim_self",
+      expectedRevision: 0,
+      idempotencyKey: "coord-action-0001",
+      clientTime: "2026-02-03T20:00:00.000Z",
+    });
+    if (result.ok) {
+      expect(Object.isFrozen(result.value)).toBe(true);
+      expect(Object.isFrozen(result.value.applied.coordinator)).toBe(true);
+    }
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...success,
+      applied: { ...success.applied, coordinator: other, updatedBy: other },
+    }));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      input,
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId,
+      action: "release_self",
+      targetIdentityId: null,
+      previousRevision: 1,
+      previousCoordinator: actor,
+      applied: { ...coordination(2), updatedBy: actor },
+    }));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "release_self",
+        expectedRevision: 1,
+        idempotencyKey: "coord-action-release-0001",
+      },
+      coordinationOptions(),
+    )).resolves.toMatchObject({ ok: true });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId,
+      action: "assign_participant",
+      targetIdentityId: other.identityId,
+      previousRevision: 1,
+      previousCoordinator: actor,
+      applied: { ...coordination(2, other), updatedBy: actor },
+    }));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "assign_participant",
+        targetIdentityId: other.identityId,
+        expectedRevision: 1,
+        idempotencyKey: "coord-action-assign-0001",
+      },
+      coordinationOptions(),
+    )).resolves.toMatchObject({ ok: true });
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({
+      targetIdentityId: other.identityId,
+    });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId,
+      action: "release_participant",
+      targetIdentityId: other.identityId,
+      previousRevision: 1,
+      previousCoordinator: other,
+      applied: { ...coordination(2), updatedBy: actor },
+    }));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "release_participant",
+        targetIdentityId: other.identityId,
+        expectedRevision: 1,
+        idempotencyKey: "coord-action-release-participant-0001",
+      },
+      coordinationOptions(),
+    )).resolves.toMatchObject({ ok: true });
+  });
+
+  it("strict-parses and context-binds recognized changed/refused conflicts", async () => {
+    const changed = {
+      schemaId: INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+      error: "coordination_changed",
+      investigationId,
+      action: "claim_self",
+      targetIdentityId: null,
+      current: coordination(2),
+    } as const;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(changed, 409));
+    const result = await investigationGateway.applyCoordinationAction(
+      investigationId,
+      { action: "claim_self", expectedRevision: 0, idempotencyKey: "coord-action-0002" },
+      coordinationOptions(),
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: "coordination_changed",
+        status: 409,
+        investigationId,
+        action: "claim_self",
+        targetIdentityId: null,
+        current: changed.current,
+      },
+    });
+    if (!result.ok) expect(Object.isFrozen(result.error)).toBe(true);
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+      error: "coordination_refused",
+      investigationId,
+      action: "claim_self",
+      targetIdentityId: null,
+      reason: "occupied",
+      detail: "Another participant is coordinating this investigation.",
+      current: coordination(2, other),
+    }, 409));
+    const refused = await investigationGateway.applyCoordinationAction(
+      investigationId,
+      { action: "claim_self", expectedRevision: 2, idempotencyKey: "coord-action-0003" },
+      coordinationOptions(),
+    );
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.kind).toBe("coordination_refused");
+  });
+
+  it("rejects actor-aware changed/refused contradictions after strict parsing", async () => {
+    const input = {
+      action: "claim_self" as const,
+      expectedRevision: 2,
+      idempotencyKey: "coord-action-actor-0001",
+    };
+    const changedAtExpectedRevision = {
+      schemaId: INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+      error: "coordination_changed",
+      investigationId,
+      action: "claim_self",
+      targetIdentityId: null,
+      current: coordination(2),
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(changedAtExpectedRevision, 409),
+    );
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      input,
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+
+    const contradictions = [
+      {
+        schemaId: INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+        error: "coordination_refused",
+        investigationId,
+        action: "claim_self",
+        targetIdentityId: null,
+        reason: "already_coordinator",
+        detail: "Already coordinated.",
+        current: coordination(2, other),
+      },
+      {
+        schemaId: INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+        error: "coordination_refused",
+        investigationId,
+        action: "claim_self",
+        targetIdentityId: null,
+        reason: "occupied",
+        detail: "Occupied.",
+        current: coordination(2, actor),
+      },
+    ] as const;
+    for (const contradiction of contradictions) {
+      fetchMock.mockResolvedValueOnce(jsonResponse(contradiction, 409));
+      await expect(investigationGateway.applyCoordinationAction(
+        investigationId,
+        input,
+        coordinationOptions(),
+      )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+    }
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_REFUSED_SCHEMA_ID,
+      error: "coordination_refused",
+      investigationId,
+      action: "release_self",
+      targetIdentityId: null,
+      reason: "not_coordinator",
+      detail: "Not coordinator.",
+      current: coordination(2, actor),
+    }, 409));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "release_self",
+        expectedRevision: 2,
+        idempotencyKey: "coord-action-actor-0002",
+      },
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+      error: "coordination_changed",
+      investigationId,
+      action: "release_self",
+      targetIdentityId: null,
+      current: coordination(3, other),
+    }, 409));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "release_self",
+        expectedRevision: 2,
+        idempotencyKey: "coord-action-actor-0003",
+      },
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId,
+      action: "release_self",
+      targetIdentityId: null,
+      previousRevision: 2,
+      previousCoordinator: other,
+      applied: { ...coordination(3), updatedBy: other },
+    }));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "release_self",
+        expectedRevision: 2,
+        idempotencyKey: "coord-action-actor-0004",
+      },
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "protocol", reason: "identity" } });
+  });
+
+  it("gives 401/403 precedence and keeps unknown conflicts and 503 bodies bounded", async () => {
+    const misleading = {
+      schemaId: INVESTIGATION_COORDINATION_CHANGED_SCHEMA_ID,
+      error: "coordination_changed",
+      investigationId,
+      action: "claim_self",
+      targetIdentityId: null,
+      current: coordination(2),
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const input = {
+      action: "claim_self" as const,
+      expectedRevision: 0,
+      idempotencyKey: "coord-action-0004",
+    };
+    for (const status of [401, 403] as const) {
+      fetchMock.mockResolvedValueOnce(jsonResponse(misleading, status));
+      await expect(investigationGateway.applyCoordinationAction(
+        investigationId,
+        input,
+        coordinationOptions(),
+      )).resolves.toEqual({ ok: false, error: { kind: "auth_lost", status } });
+    }
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "something_private", raw: "secret" }, 409));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      input,
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "conflict", status: 409 } });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      error: "commit_outcome_unknown",
+      raw: "must-not-escape",
+    }, 503));
+    const unknown = await investigationGateway.applyCoordinationAction(
+      investigationId,
+      input,
+      coordinationOptions(),
+    );
+    expect(unknown).toEqual({
+      ok: false,
+      error: { kind: "unavailable", status: 503, reason: "commit_outcome_unknown" },
+    });
+    expect(JSON.stringify(unknown)).not.toContain("must-not-escape");
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...misleading,
+      raw: "x".repeat(9_000),
+    }, 409));
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      input,
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error: { kind: "conflict", status: 409 } });
+  });
+
+  it.each([
+    [401, { kind: "auth_lost" as const, status: 401 as const }],
+    [403, { kind: "auth_lost" as const, status: 403 as const }],
+    [404, { kind: "not_found" as const, status: 404 as const }],
+  ] as const)("classifies coordination POST %i without reading its response body", async (
+    status,
+    error,
+  ) => {
+    const response = jsonResponse({
+      error: "commit_outcome_unknown",
+      private: "must-not-be-read",
+    }, status);
+    const json = vi.spyOn(response, "json");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    await expect(investigationGateway.applyCoordinationAction(
+      investigationId,
+      {
+        action: "claim_self",
+        expectedRevision: 0,
+        idempotencyKey: `coord-status-no-read-${status}`,
+      },
+      coordinationOptions(),
+    )).resolves.toEqual({ ok: false, error });
+    expect(json).not.toHaveBeenCalled();
+    expect(response.bodyUsed).toBe(false);
+  });
+});
 
 function options(controller = new AbortController()) {
   return { signal: controller.signal };

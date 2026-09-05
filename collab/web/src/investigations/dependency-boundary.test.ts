@@ -18,6 +18,8 @@ type CoveredRuntimeOperation =
   | "POST evidence"
   | "GET lifecycle"
   | "POST lifecycle"
+  | "GET coordination"
+  | "POST coordination"
   | "PATCH situation";
 
 /**
@@ -165,6 +167,9 @@ function coveredOperation(
   }
   if (/^\/api\/cases\/\$\{\}\/lifecycle$/.test(route)) {
     if (method === "GET" || method === "POST") return `${method} lifecycle`;
+  }
+  if (/^\/api\/cases\/\$\{\}\/coordination$/.test(route)) {
+    if (method === "GET" || method === "POST") return `${method} coordination`;
   }
   return null;
 }

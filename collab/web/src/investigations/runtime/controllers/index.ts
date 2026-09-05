@@ -33,6 +33,12 @@ export {
   type UseCreateInvestigationOptions,
 } from "./use-create-investigation.js";
 export {
+  useInvestigationCoordination,
+  type InvestigationCoordinationCommand,
+  type InvestigationCoordinationController,
+  type UseInvestigationCoordinationOptions,
+} from "./use-investigation-coordination.js";
+export {
   useInvestigationList,
   type InvestigationListController,
   type UseInvestigationListOptions,

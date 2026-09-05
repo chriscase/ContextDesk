@@ -6,6 +6,8 @@ export interface InvestigationRuntimeCapabilities {
   canContribute: boolean;
   canEditSituation: boolean;
   canManageLifecycle: boolean;
+  canCoordinateSelf: boolean;
+  canCoordinateParticipants: boolean;
 }
 
 /**
@@ -36,5 +38,8 @@ export function projectInvestigationCapabilities(
     canContribute: canMutate && effective.has("investigation:write"),
     canEditSituation: canMutate && effective.has("investigation:write"),
     canManageLifecycle: canMutate && effective.has("run:strategies"),
+    canCoordinateSelf: canMutate && effective.has("investigation:write"),
+    canCoordinateParticipants:
+      canMutate && effective.has("investigation:coordinate"),
   };
 }

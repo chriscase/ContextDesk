@@ -9,6 +9,8 @@ import type {
   EvidenceUploadSuccessV1,
   InvestigationLifecycleActionSuccessV1,
   InvestigationLifecycleV1,
+  InvestigationCoordinationActionSuccessV1,
+  InvestigationCoordinationV1,
   LifecycleAction,
 } from "@cd-collab/contracts/investigation-runtime";
 import {
@@ -16,6 +18,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -34,6 +37,7 @@ import {
   useCreateArtifactAnnotation,
   useCreateArtifactAnnotationsBulk,
   useInvestigationList,
+  useInvestigationCoordination,
   useLifecycleAction,
   useUpdateSituation,
   useUploadEvidence,
@@ -41,6 +45,7 @@ import {
   type CreateArtifactAnnotationCommand,
   type CreateArtifactAnnotationsBulkCommand,
   type PreviewEvidenceCommand,
+  type InvestigationCoordinationCommand,
   type UpdateSituationCommand,
   type UploadEvidenceCommand,
 } from "./controllers/index.js";
@@ -50,6 +55,7 @@ import {
   investigationAnnotationGateway,
   investigationBulkAnnotationGateway,
   investigationCollectionQueryGateway,
+  investigationCoordinationGateway,
   investigationWriteGateway,
   snapshotInvestigationCollectionQueryInput,
   type CreateInvestigationInput,
@@ -75,6 +81,7 @@ export type InvestigationContributionCommand = CreateContributionCommand;
 export type InvestigationArtifactAnnotationCommand = CreateArtifactAnnotationCommand;
 export type InvestigationArtifactAnnotationsBulkCommand = CreateArtifactAnnotationsBulkCommand;
 export type InvestigationSituationCommand = UpdateSituationCommand;
+export type InvestigationCoordinationActionCommand = InvestigationCoordinationCommand;
 
 export interface InvestigationRuntimeResources {
   readonly investigations: ResourceState<readonly CaseV1[]>;
@@ -84,6 +91,7 @@ export interface InvestigationRuntimeResources {
   readonly evidence: ResourceState<readonly ArtifactV1[]>;
   readonly contributions: ResourceState<readonly ContributionV1[]>;
   readonly lifecycle: ResourceState<InvestigationLifecycleV1>;
+  readonly coordination: ResourceState<InvestigationCoordinationV1>;
   readonly artifactAnnotations: ResourceState<readonly ArtifactAnnotationV1[]>;
 }
 
@@ -93,6 +101,7 @@ export interface InvestigationRuntimeMutations {
   readonly createContribution: MutationState<ContributionV1>;
   readonly updateSituation: MutationState<CaseV1>;
   readonly lifecycle: MutationState<InvestigationLifecycleActionSuccessV1>;
+  readonly coordination: MutationState<InvestigationCoordinationActionSuccessV1>;
   readonly createArtifactAnnotation: MutationState<ArtifactAnnotationV1>;
   readonly createArtifactAnnotations: MutationState<ArtifactAnnotationBulkResultV1>;
 }
@@ -104,6 +113,7 @@ export interface InvestigationRuntimeRefresh {
   readonly evidence: () => void;
   readonly contributions: () => void;
   readonly lifecycle: () => void;
+  readonly coordination: () => void;
   readonly artifactAnnotations: () => Promise<void>;
   readonly activeInvestigation: () => void;
 }
@@ -124,6 +134,9 @@ export interface InvestigationRuntimeCommands {
   readonly applyLifecycle: ((
     action: LifecycleAction,
   ) => Promise<CommandOutcome<InvestigationLifecycleActionSuccessV1>>) | null;
+  readonly applyCoordinationAction: ((
+    command: InvestigationCoordinationActionCommand,
+  ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>) | null;
   readonly createArtifactAnnotation: ((
     command: InvestigationArtifactAnnotationCommand,
   ) => Promise<CommandOutcome<ArtifactAnnotationV1>>) | null;
@@ -170,8 +183,22 @@ const ANONYMOUS_IDENTITY: InvestigationRuntimeIdentity = Object.freeze({
   displayName: "",
 });
 
+let nextPresentationScopeId = 0;
+
+function createPresentationScopeKey(): string {
+  nextPresentationScopeId += 1;
+  return `investigation-presentation-scope-${nextPresentationScopeId.toString(36)}`;
+}
+
 /** The complete presentation-safe Runtime V1 surface. */
 export interface InvestigationRuntime {
+  /**
+   * Opaque reset/fencing key for presentation-local transient state. It
+   * changes with the shell's identity or authority epoch, but contains
+   * neither shell key and stays stable across ordinary resource updates.
+   * It grants no authority and must never be parsed or used as permission.
+   */
+  readonly presentationScopeKey: string;
   /** Descriptive only. Never consult it to decide what a strategy may do. */
   readonly identity: InvestigationRuntimeIdentity;
   readonly capabilities: InvestigationRuntimeCapabilities;
@@ -249,6 +276,33 @@ export function InvestigationRuntimeProvider({
   children,
 }: InvestigationRuntimeProviderProps) {
   const gateway = useContext(InjectedGatewayContext) ?? investigationGateway;
+  const [committedPresentationScope, setCommittedPresentationScope] = useState<{
+    readonly identityKey: string;
+    readonly authorityKey: string;
+    readonly publicKey: string;
+  }>(() => ({
+    identityKey,
+    authorityKey,
+    publicKey: createPresentationScopeKey(),
+  }));
+  const presentationScopeChanged =
+    committedPresentationScope.identityKey !== identityKey
+    || committedPresentationScope.authorityKey !== authorityKey;
+  // A committed epoch-change render must reset presentation state before any
+  // effects can use it, while an abandoned concurrent render must not mutate
+  // the last committed scope. The transitional key contains only the existing
+  // opaque key; the new opaque epoch is committed in the layout phase.
+  const presentationScopeKey = presentationScopeChanged
+    ? `${committedPresentationScope.publicKey}:transition`
+    : committedPresentationScope.publicKey;
+  useLayoutEffect(() => {
+    if (!presentationScopeChanged) return;
+    setCommittedPresentationScope({
+      identityKey,
+      authorityKey,
+      publicKey: createPresentationScopeKey(),
+    });
+  }, [authorityKey, identityKey, presentationScopeChanged]);
   // Production binds the concrete POST/PATCH methods. A transport without them
   // resolves to the fail-closed seam, so a write reports `unavailable` instead
   // of appearing to succeed.
@@ -260,6 +314,10 @@ export function InvestigationRuntimeProvider({
   );
   const collectionQueryGateway = useMemo(
     () => investigationCollectionQueryGateway(gateway),
+    [gateway],
+  );
+  const coordinationGateway = useMemo(
+    () => investigationCoordinationGateway(gateway),
     [gateway],
   );
   const [collectionQueryInput, setCollectionQueryInput] =
@@ -276,8 +334,12 @@ export function InvestigationRuntimeProvider({
     canContribute: projected.canContribute,
     canEditSituation: projected.canEditSituation,
     canManageLifecycle: projected.canManageLifecycle,
+    canCoordinateSelf: projected.canCoordinateSelf,
+    canCoordinateParticipants: projected.canCoordinateParticipants,
   }), [
     projected.canContribute,
+    projected.canCoordinateParticipants,
+    projected.canCoordinateSelf,
     projected.canCreate,
     projected.canEditSituation,
     projected.canManageLifecycle,
@@ -299,6 +361,9 @@ export function InvestigationRuntimeProvider({
   const canContribute = capabilities.canRead && capabilities.canContribute;
   const canEditSituation = capabilities.canRead && capabilities.canEditSituation;
   const canManageLifecycle = capabilities.canRead && capabilities.canManageLifecycle;
+  const canCoordinateSelf = capabilities.canRead && capabilities.canCoordinateSelf;
+  const canCoordinateParticipants =
+    capabilities.canRead && capabilities.canCoordinateParticipants;
   const activeCaseId = active && capabilities.canRead ? focusCaseId : null;
 
   const investigationList = useInvestigationList({
@@ -462,11 +527,6 @@ export function InvestigationRuntimeProvider({
     onRefresh: refreshArtifactAnnotationsFor,
     onScopeDenied: activeInvestigation.denyScope,
   });
-  const refreshAll = useCallback(() => {
-    activeInvestigation.refreshAll();
-    artifactAnnotationsController.refresh();
-  }, [activeInvestigation.refreshAll, artifactAnnotationsController.refresh]);
-
   const createController = useCreateInvestigation({
     gateway,
     identityKey,
@@ -546,8 +606,31 @@ export function InvestigationRuntimeProvider({
     onRefreshLifecycle: refreshLifecycleFor,
     onScopeDenied: activeInvestigation.denyScope,
   });
+  const coordinationController = useInvestigationCoordination({
+    gateway: coordinationGateway,
+    identityKey,
+    authorityKey,
+    actorIdentityId: identity.id,
+    investigationId: activeScopeUnavailable ? null : activeCaseId,
+    active: active && capabilities.canRead,
+    canRead: capabilities.canRead && !activeScopeUnavailable,
+    canCoordinateSelf: canCoordinateSelf && !activeScopeUnavailable,
+    canCoordinateParticipants: canCoordinateParticipants && !activeScopeUnavailable,
+    readOnly,
+    onScopeDenied: activeInvestigation.denyScope,
+  });
+  const refreshAll = useCallback(() => {
+    activeInvestigation.refreshAll();
+    coordinationController.refresh();
+    artifactAnnotationsController.refresh();
+  }, [
+    activeInvestigation.refreshAll,
+    artifactAnnotationsController.refresh,
+    coordinationController.refresh,
+  ]);
 
   const value = useMemo<InvestigationRuntime>(() => deepFreezeDto({
+    presentationScopeKey,
     identity,
     capabilities,
     resources: {
@@ -566,6 +649,9 @@ export function InvestigationRuntimeProvider({
       lifecycle: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : activeInvestigation.lifecycle,
+      coordination: activeMissingFromAuthoritativeList
+        ? { status: "failed", error: { kind: "not_found", status: 404 } }
+        : coordinationController.coordination,
       artifactAnnotations: activeMissingFromAuthoritativeList
         ? { status: "failed", error: { kind: "not_found", status: 404 } }
         : artifactAnnotationsController.annotations,
@@ -576,6 +662,7 @@ export function InvestigationRuntimeProvider({
       createContribution: contributionController.state,
       updateSituation: situationController.state,
       lifecycle: lifecycleController.state,
+      coordination: coordinationController.state,
       createArtifactAnnotation: artifactAnnotationController.state,
       createArtifactAnnotations: artifactAnnotationsBulkController.state,
     },
@@ -591,6 +678,7 @@ export function InvestigationRuntimeProvider({
       evidence: activeInvestigation.refreshEvidence,
       contributions: activeInvestigation.refreshContributions,
       lifecycle: activeInvestigation.refreshLifecycle,
+      coordination: coordinationController.refresh,
       artifactAnnotations: artifactAnnotationsController.refresh,
       activeInvestigation: refreshAll,
     },
@@ -621,6 +709,13 @@ export function InvestigationRuntimeProvider({
         && lifecycleValue !== null
         && !activeScopeUnavailable
         ? lifecycleController.apply
+        : null,
+      applyCoordinationAction: (canCoordinateSelf || canCoordinateParticipants)
+        && activeReadyCaseId !== null
+        && identity.id.length > 0
+        && coordinationController.coordination.status === "ready"
+        && !activeScopeUnavailable
+        ? coordinationController.apply
         : null,
       createArtifactAnnotation: canContribute
         && activeReadyCaseId !== null
@@ -653,6 +748,8 @@ export function InvestigationRuntimeProvider({
     active,
     activeCaseId,
     canContribute,
+    canCoordinateParticipants,
+    canCoordinateSelf,
     canCreate,
     canEditSituation,
     canManageLifecycle,
@@ -676,6 +773,10 @@ export function InvestigationRuntimeProvider({
     isInvestigationLocation,
     lifecycleController.apply,
     lifecycleController.state,
+    coordinationController.apply,
+    coordinationController.coordination,
+    coordinationController.refresh,
+    coordinationController.state,
     situationCase,
     situationController.state,
     situationController.update,
@@ -686,6 +787,7 @@ export function InvestigationRuntimeProvider({
     previewController.clear,
     previewController.preview,
     previewController.state,
+    presentationScopeKey,
   ]);
 
   return (
