@@ -1,6 +1,10 @@
 import { SOURCE_SCHEMA_ID, type SourceV1 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
-import { directoryAttribution, projectSourceForCaller } from "./project.js";
+import {
+  directoryAttribution,
+  projectSourceForCaller,
+  projectSourceMutationForCaller,
+} from "./project.js";
 
 const aliceDn = "uid=alice,ou=people,dc=example,dc=test";
 
@@ -48,5 +52,16 @@ describe("catalog source projection", () => {
     expect(projected.name).toBe("Web assistant");
     expect(projected.identityId).toBeNull();
     expect(projected.createdBy).toBe(directoryAttribution(aliceDn));
+  });
+
+  it("keeps mutation response identities non-null but opaque for non-admin callers", () => {
+    const raw = source({ revision: 3 });
+    const projected = projectSourceMutationForCaller(raw, false);
+    expect(projected.identityId).toBe(directoryAttribution(aliceDn));
+    expect(projected.createdBy).toBe(directoryAttribution(aliceDn));
+    expect(projected.name).toBe(projected.id);
+    expect(projected.revision).toBe(3);
+    expect(JSON.stringify(projected)).not.toContain("uid=");
+    expect(projectSourceMutationForCaller(raw, true)).toEqual(raw);
   });
 });

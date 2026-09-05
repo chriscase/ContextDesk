@@ -237,6 +237,11 @@ company directory works with ContextDesk.
   completeness `unknown`.
 - Catalog administration is case-lead/admin and audited. Retiring a source
   keeps historical attributions.
+- Strict create/retire/restore is a compare-and-swap envelope authorized only
+  by `catalog:write`. Replay happens before source lookup; mixed
+  unversioned/versioned rows stay readable; legacy update/retire may mutate
+  only unversioned rows and never the permanent Unknown source. Uncertain
+  COMMIT is a sanitized 503 with no rollback or retry.
 
 ### Investigation record graph
 

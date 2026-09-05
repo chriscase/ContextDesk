@@ -16,6 +16,7 @@ import {
   parseAdminPeopleStatusRequest,
 } from "./admin-people.js";
 import { DEFAULT_DIRECTORY_ATTRIBUTE_MAP } from "./directory-mapping.js";
+import { CAPABILITIES } from "./capability.js";
 import { ContractViolation } from "./parse.js";
 import { USER_PROFILE_SCHEMA_ID, type UserProfileV1 } from "./user-profile.js";
 
@@ -133,7 +134,7 @@ describe("buildEffectiveCapabilityRows", () => {
 
   it("includes every capability, held or not, so an admin UI can render a full toggle list", () => {
     const rows = buildEffectiveCapabilityRows(["viewer"], []);
-    expect(rows).toHaveLength(11);
+    expect(rows).toHaveLength(CAPABILITIES.length);
   });
 });
 

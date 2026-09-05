@@ -781,7 +781,7 @@ describe("durable idempotency and session parity", () => {
     ).toThrow(/expected one of/);
   });
 
-  it("keeps the closed JSON session schema aligned with capability v2", () => {
+  it("keeps the closed JSON session schema aligned with capability v3", () => {
     const schema = JSON.parse(
       readFileSync(join(here, "..", "schemas", "session.v1.json"), "utf8"),
     ) as object;

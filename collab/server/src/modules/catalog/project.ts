@@ -42,3 +42,22 @@ export function projectSourceForCaller(
     name: nameIsDirectory ? source.id : source.name,
   };
 }
+
+/**
+ * Mutation refusals such as identity_already_bound require a non-null identityId.
+ * Preserve that contract without exposing a directory identity to non-admin callers.
+ */
+export function projectSourceMutationForCaller<T extends SourceV1>(
+  source: T,
+  canSeeDirectoryIdentities: boolean,
+): T {
+  if (canSeeDirectoryIdentities) return source;
+  const projected = projectSourceForCaller(source, false);
+  return {
+    ...projected,
+    identityId:
+      source.identityId && isDirectoryIdentity(source.identityId)
+        ? directoryAttribution(source.identityId)
+        : source.identityId,
+  } as T;
+}

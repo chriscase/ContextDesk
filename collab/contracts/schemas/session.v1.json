@@ -37,6 +37,7 @@
           "decision:accept",
           "export:create",
           "portable:restore",
+          "catalog:write",
           "admin:users",
           "admin:system_config",
           "audit:view"
