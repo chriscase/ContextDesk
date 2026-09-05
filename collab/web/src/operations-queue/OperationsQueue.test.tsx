@@ -522,7 +522,7 @@ describe("Operations Queue presentation", () => {
   });
 
   it("marks pagination unavailable during a header refresh", () => {
-    renderQueue(settled({
+    const rendered = renderQueue(settled({
       view: {
         availability: "available",
         value: makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" }),
@@ -530,6 +530,25 @@ describe("Operations Queue presentation", () => {
       },
     }));
     expect(screen.getByRole("button", { name: "Load more operations" }).getAttribute("aria-disabled"))
+      .toBe("true");
+    expect(screen.getByRole("button", { name: "Refreshing…" })).toBeTruthy();
+
+    hook.current.mockReturnValue(settled({
+      continuationInFlight: true,
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" }),
+        refresh: "loading",
+      },
+    }));
+    rendered.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Refresh after load" }).getAttribute("aria-disabled"))
       .toBe("true");
   });
 
@@ -559,5 +578,34 @@ describe("Operations Queue presentation", () => {
       />,
     );
     expect(screen.getByText("No visible investigations are unassigned.")).toBeTruthy();
+
+    rendered.rerender(
+      <OperationsQueue
+        query={{ ...DEFAULT_OPERATIONS_QUEUE_QUERY, coordinationScope: "mine" }}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("No visible investigations are coordinated by you.")).toBeTruthy();
+
+    hook.current.mockReturnValue(settled({
+      view: {
+        availability: "available",
+        value: makeOperationsQueuePage({
+          items: [],
+          hiddenArchivedCount: 2,
+          coordinationScopeCounts: { allVisible: 0, mine: 0, unassigned: 0 },
+        }),
+        refresh: "settled",
+      },
+    }));
+    rendered.rerender(
+      <OperationsQueue
+        query={DEFAULT_OPERATIONS_QUEUE_QUERY}
+        onQueryChange={vi.fn()}
+        onOpenInvestigation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("No non-archived investigations are visible in Operations.")).toBeTruthy();
   });
 });

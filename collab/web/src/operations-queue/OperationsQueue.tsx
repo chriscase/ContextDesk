@@ -210,7 +210,11 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
             onClick={queue.refresh}
             aria-disabled={queue.view.refresh === "loading"}
           >
-            {queue.view.refresh === "loading" && !continuationLoading ? "Refreshing…" : "Refresh"}
+            {queue.view.refresh === "loading"
+              ? continuationLoading
+                ? "Refresh after load"
+                : "Refreshing…"
+              : "Refresh"}
           </button>
         ) : null}
       </header>
