@@ -239,6 +239,7 @@ test.describe("Investigation Operations Queue", () => {
       await expect(page.getByRole("button", { name: "Try loading more" })).toHaveCount(0);
       await unavailable.getByRole("button", { name: "Try again" }).press("Enter");
       await expect(page.getByRole("button", { name: "Load more operations" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Operations Queue", exact: true })).toBeFocused();
       expect(cursorRequests).toBe(1);
       expect(baseRequests).toBe(2);
     } finally {

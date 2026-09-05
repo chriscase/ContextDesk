@@ -87,9 +87,14 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
   const queue = useOperationsQueue(query);
   const [searchDraft, setSearchDraft] = useState(query.q);
   const [continuationAttempt, setContinuationAttempt] = useState(0);
+  const [unavailableRetry, setUnavailableRetry] = useState<{
+    readonly error: unknown;
+  } | null>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const completionRef = useRef<HTMLParagraphElement>(null);
   const continuationFailureRef = useRef<HTMLDivElement>(null);
   const unavailableRef = useRef<HTMLDivElement>(null);
+  const unavailableRetryInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const loadMoreRef = useRef<HTMLButtonElement>(null);
   const continuationInitiatorRef = useRef<HTMLButtonElement | null>(null);
   const focusedOutcomeRef = useRef(0);
@@ -100,6 +105,8 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     setContinuationAttempt(0);
     focusedOutcomeRef.current = 0;
     continuationInitiatorRef.current = null;
+    unavailableRetryInitiatorRef.current = null;
+    setUnavailableRetry(null);
   }, [queryKey]);
 
   const available = queue.view.availability === "available";
@@ -129,11 +136,33 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
     }
   }, [available, hasNextPage, queue.continuationFailed, queue.continuationOutcome, queue.view.availability, refreshState]);
 
+  useEffect(() => {
+    if (unavailableRetry === null || queue.view.availability === "idle" || queue.view.availability === "loading") return;
+    if (queue.view.availability === "unavailable" && queue.view.error === unavailableRetry.error) return;
+    const activeElement = document.activeElement;
+    const shouldRecoverFocus = activeElement === document.body
+      || activeElement === unavailableRetryInitiatorRef.current;
+    unavailableRetryInitiatorRef.current = null;
+    setUnavailableRetry(null);
+    if (!shouldRecoverFocus) return;
+    if (queue.view.availability === "unavailable") unavailableRef.current?.focus();
+    else titleRef.current?.focus();
+  }, [queue.view, unavailableRetry]);
+
   const requestNextPage = (event: MouseEvent<HTMLButtonElement>) => {
     if (paginationDisabled) return;
     continuationInitiatorRef.current = event.currentTarget;
     setContinuationAttempt((current) => current + 1);
     queue.nextPage();
+  };
+
+  const retryUnavailable = (event: MouseEvent<HTMLButtonElement>) => {
+    if (queue.view.availability !== "unavailable") return;
+    unavailableRetryInitiatorRef.current = event.currentTarget;
+    setUnavailableRetry({
+      error: queue.view.error,
+    });
+    queue.refresh();
   };
 
   const update = (next: Partial<OperationsQueueLocationQuery>) => {
@@ -149,7 +178,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
       <header className="operations-queue__header">
         <div>
           <p className="operations-queue__eyebrow">Coordination</p>
-          <h2 id="operations-queue-title">Operations Queue</h2>
+          <h2 id="operations-queue-title" tabIndex={-1} ref={titleRef}>Operations Queue</h2>
           <p>Review the server-recorded coordination view. Open an investigation to make changes there.</p>
         </div>
         {available ? (
@@ -262,7 +291,7 @@ export function OperationsQueue({ query, onQueryChange, onOpenInvestigation }: O
                 ? "Operations Queue service is unavailable"
                 : "Operations Queue could not be loaded"}</h3>
               <p>No legacy investigation list was substituted for this queue response.</p>
-              <button type="button" onClick={queue.refresh}>Try again</button>
+              <button type="button" onClick={retryUnavailable}>Try again</button>
             </div>
           ) : null}
 

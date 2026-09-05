@@ -382,6 +382,35 @@ describe("Operations Queue presentation", () => {
     expect(screen.queryByRole("button", { name: "Try loading more" })).toBeNull();
   });
 
+  it("returns focus to queue context after an unavailable first-page retry succeeds", async () => {
+    const refresh = vi.fn();
+    const rendered = renderQueue(settled({
+      view: { availability: "unavailable", error: { kind: "network" } },
+      refresh,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    hook.current.mockReturnValue(settled({
+      view: { availability: "loading" },
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+    hook.current.mockReturnValue(settled({
+      view: { availability: "available", value: makeOperationsQueuePage(), refresh: "settled" },
+      refresh,
+    }));
+    rendered.rerender(
+      <OperationsQueue query={DEFAULT_OPERATIONS_QUEUE_QUERY} onQueryChange={vi.fn()} onOpenInvestigation={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "Operations Queue" }),
+    ));
+  });
+
   it("does not steal focus when the user moves away during continuation", async () => {
     const page = makeOperationsQueuePage({ nextCursor: "eyJwYWdlIjoyfQ" });
     const rendered = renderQueue(settled({
