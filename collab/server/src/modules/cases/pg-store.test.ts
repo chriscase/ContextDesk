@@ -1046,10 +1046,20 @@ describe("PostgreSQL Situation SQL boundary", () => {
             }),
             pgCaseRecord({
               id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              coordination_case_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              coordinator_identity_id: null,
+              coordinator_username: null,
+              revision: 3,
+              updated_at: "2026-09-04T13:00:00.000Z",
+              updated_by_identity_id: "identity-alice",
+              updated_by_username: "alice",
+            }),
+            pgCaseRecord({
+              id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
               coordination_case_id: null,
             }),
           ],
-          rowCount: 2,
+          rowCount: 3,
         };
       },
     };
@@ -1069,7 +1079,14 @@ describe("PostgreSQL Situation SQL boundary", () => {
       coordinator: { identityId: "identity-alice", username: "alice" },
       revision: 2,
     });
-    expect(snapshot[1]?.coordination).toBeNull();
+    expect(snapshot[1]?.coordination).toEqual({
+      caseId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      coordinator: null,
+      revision: 3,
+      updatedAt: "2026-09-04T13:00:00.000Z",
+      updatedBy: { identityId: "identity-alice", username: "alice" },
+    });
+    expect(snapshot[2]?.coordination).toBeNull();
   });
 
   it("locks and version-checks the case and commits state, timeline, and audit together", async () => {

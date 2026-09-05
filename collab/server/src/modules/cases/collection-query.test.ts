@@ -5,6 +5,7 @@ import {
   CASE_LIST_SCHEMA_ID,
   CASE_SCHEMA_ID,
   ContractViolation,
+  INVESTIGATION_COORDINATION_SCHEMA_ID,
   INVESTIGATION_COLLECTION_PAGE_SCHEMA_ID,
   INVESTIGATION_COLLECTION_QUERY_SCHEMA_ID,
   INVESTIGATION_OPERATIONS_QUEUE_PAGE_SCHEMA_ID,
@@ -42,6 +43,7 @@ const CASE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CASE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const CASE_C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const CASE_D = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const CASE_E = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const IMPACT = {
   productName: "Fixture Desk",
   version: "4.2",
@@ -336,6 +338,54 @@ describe("operations queue service and store", () => {
     }, store);
   });
 
+  it("counts persisted null and missing coordination rows as distinct unassigned records", async () => {
+    await withService(async ({ service, store }) => {
+      await store.insertCase(row({
+        id: CASE_A,
+        title: "Persisted unassigned",
+        createdAt: "2026-08-26T00:00:00.000Z",
+      }));
+      await store.insertCase(row({
+        id: CASE_B,
+        title: "Never coordinated",
+        createdAt: "2026-08-25T00:00:00.000Z",
+      }));
+      await recordCoordination(store, CASE_A, null);
+
+      const unassigned = parseInvestigationOperationsQueuePage(
+        await service.listOperationsQueuePage(
+          ALICE,
+          false,
+          queueQuery({ coordinationScope: "unassigned" }),
+        ),
+      );
+
+      expect(unassigned.items.map((item) => item.investigation.id)).toEqual([CASE_A, CASE_B]);
+      expect(unassigned.coordinationScopeCounts).toEqual({
+        allVisible: 2,
+        mine: 0,
+        unassigned: 2,
+      });
+      expect(unassigned.items[0]?.coordination).toEqual({
+        schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
+        investigationId: CASE_A,
+        coordinator: null,
+        revision: 1,
+        archived: false,
+        updatedAt: "2026-09-04T12:00:00.000Z",
+        updatedBy: { identityId: ALICE.id, username: ALICE.username },
+      });
+      expect(unassigned.items[1]?.coordination).toMatchObject({
+        investigationId: CASE_B,
+        coordinator: null,
+        revision: 0,
+        archived: false,
+        updatedAt: null,
+        updatedBy: null,
+      });
+    });
+  });
+
   it("counts after common filters and archive admission but before scope and paging", async () => {
     await withService(async ({ service, store }) => {
       await store.insertCase(row({
@@ -446,6 +496,35 @@ describe("operations queue service and store", () => {
         false,
         query({ limit: 1, cursor: first.nextCursor }),
       )).rejects.toMatchObject({ code: "malformed_cursor" });
+    });
+  });
+
+  it("traverses equal-createdAt rows by id without duplicates or omissions", async () => {
+    await withService(async ({ service, store }) => {
+      for (const [id, createdAt] of [
+        [CASE_D, "2026-08-27T00:00:00.000Z"],
+        [CASE_C, "2026-08-26T00:00:00.000Z"],
+        [CASE_A, "2026-08-26T00:00:00.000Z"],
+        [CASE_B, "2026-08-26T00:00:00.000Z"],
+        [CASE_E, "2026-08-25T00:00:00.000Z"],
+      ] as const) {
+        await store.insertCase(row({ id, title: id, createdAt }));
+      }
+
+      const traversed: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const page = await service.listOperationsQueuePage(
+          ALICE,
+          false,
+          queueQuery({ limit: 2, cursor }),
+        );
+        traversed.push(...page.items.map((item) => item.investigation.id));
+        cursor = page.nextCursor;
+      } while (cursor !== null);
+
+      expect(traversed).toEqual([CASE_D, CASE_A, CASE_B, CASE_C, CASE_E]);
+      expect(new Set(traversed).size).toBe(traversed.length);
     });
   });
 

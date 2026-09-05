@@ -647,7 +647,7 @@ describe("GET /api/cases collection query", () => {
 
       const deniedQueue = await app.inject({
         method: "GET",
-        url: operationsQueueUrl(),
+        url: `${operationsQueueUrl({ coordinationScope: "not-a-scope", limit: "not-a-number" })}&workload=1`,
         headers: { cookie: alice },
       });
       expect(deniedQueue.statusCode).toBe(403);
@@ -655,6 +655,7 @@ describe("GET /api/cases collection query", () => {
         schemaId: AUTH_ERROR_SCHEMA_ID,
         error: "forbidden",
       });
+      expect(caseStore.listCalls).toBe(before);
       expect(caseStore.coordinationSnapshotCalls).toBe(queueBefore);
       expect(caseStore.coordinationLookupCalls).toBe(coordinationBefore);
     });
