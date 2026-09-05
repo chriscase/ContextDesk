@@ -2675,7 +2675,7 @@ describe("InvestigationRuntimeProvider", () => {
       }));
     });
 
-    it("aborts and fences the queue across identity changes, then clears auth-lost data", async () => {
+    it("drops an old scope's queue input before a new identity can request it", async () => {
       const requests: Array<{
         signal: AbortSignal;
         deferred: Deferred<GatewayResult<InvestigationOperationsQueuePageV1>>;
@@ -2692,7 +2692,10 @@ describe("InvestigationRuntimeProvider", () => {
           <RuntimeProbe />
         </ProviderUnderTest>,
       );
-      act(() => currentRuntime().commands.queryOperationsQueue?.({ coordinationScope: "mine" }));
+      act(() => currentRuntime().commands.queryOperationsQueue?.({
+        coordinationScope: "mine",
+        cursor: "eyJwYWdlIjoyfQ",
+      }));
       await waitFor(() => expect(requests).toHaveLength(1));
 
       view.rerender(
@@ -2705,13 +2708,18 @@ describe("InvestigationRuntimeProvider", () => {
           <RuntimeProbe />
         </ProviderUnderTest>,
       );
-      await waitFor(() => expect(requests).toHaveLength(2));
+      await waitFor(() => expect(currentRuntime().resources.operationsQueueQuery).toBeNull());
+      expect(requests).toHaveLength(1);
       expect(requests[0]!.signal.aborted).toBe(true);
       await act(async () => requests[0]!.deferred.resolve({
         ok: true,
         value: makeOperationsQueuePage(),
       }));
-      expect(currentRuntime().resources.operationsQueue).toEqual({ status: "loading" });
+      expect(currentRuntime().resources.operationsQueue).toEqual({ status: "idle" });
+
+      act(() => currentRuntime().commands.queryOperationsQueue?.({ coordinationScope: "mine" }));
+      await waitFor(() => expect(requests).toHaveLength(2));
+      expect(currentRuntime().resources.operationsQueueQuery?.cursor).toBeNull();
 
       await act(async () => requests[1]!.deferred.resolve({
         ok: false,

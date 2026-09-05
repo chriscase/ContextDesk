@@ -344,11 +344,23 @@ export function InvestigationRuntimeProvider({
   const requestInvestigationCollection = useCallback((input: InvestigationCollectionQueryInput) => {
     setCollectionQueryInput(snapshotInvestigationCollectionQueryInput(input));
   }, []);
-  const [operationsQueueInput, setOperationsQueueInput] =
-    useState<InvestigationOperationsQueueQueryInput | null>(null);
+  const [operationsQueueRequest, setOperationsQueueRequest] = useState<{
+    readonly identityKey: string;
+    readonly authorityKey: string;
+    readonly input: InvestigationOperationsQueueQueryInput;
+  } | null>(null);
   const requestOperationsQueue = useCallback((input: InvestigationOperationsQueueQueryInput) => {
-    setOperationsQueueInput(snapshotInvestigationOperationsQueueQueryInput(input));
-  }, []);
+    setOperationsQueueRequest(Object.freeze({
+      identityKey,
+      authorityKey,
+      input: snapshotInvestigationOperationsQueueQueryInput(input),
+    }));
+  }, [authorityKey, identityKey]);
+  const operationsQueueInput = operationsQueueRequest !== null
+    && operationsQueueRequest.identityKey === identityKey
+    && operationsQueueRequest.authorityKey === authorityKey
+    ? operationsQueueRequest.input
+    : null;
   const projected = projectInvestigationCapabilities(rawCapabilities, readOnly);
   const capabilities = useMemo<InvestigationRuntimeCapabilities>(() => Object.freeze({
     canRead: projected.canRead,
