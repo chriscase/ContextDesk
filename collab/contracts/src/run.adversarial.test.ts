@@ -582,6 +582,29 @@ describe("bound and completeness pressure", () => {
     ).toThrow(/predecessor must be null/);
   });
 
+  it("rejects marked durable rows with valid-looking wrong hashes and non-null hypothesis fields", () => {
+    expect(() => parseExternalRun(applied({ outputHash: "a".repeat(64) }))).toThrow(
+      /exact outputText/,
+    );
+    expect(() => parseExternalRun(applied({ createdAt: "not-an-instant" }))).toThrow(
+      /ISO-8601 instant/,
+    );
+    expect(() =>
+      parseExternalRunImportSuccess(
+        success({ contribution: contribution({ hypothesisStatus: "supported" }) }),
+      ),
+    ).toThrow(/hypothesisStatus must be null/);
+    expect(() =>
+      parseExternalRunImportSuccess(
+        success({
+          contribution: contribution({
+            hypothesisLinks: [{ kind: "contribution", id: CONTRIBUTION_ID }],
+          }),
+        }),
+      ),
+    ).toThrow(/hypothesisLinks must be null/);
+  });
+
   it.each([
     ["null", null],
     ["an array", []],

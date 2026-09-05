@@ -332,7 +332,8 @@ describe("external-run import constants", () => {
     expect(Object.isFrozen(EXTERNAL_RUN_IMPORT_RESPONSE_CONTEXT)).toBe(true);
     expect(EXTERNAL_RUN_IMPORT_RESPONSE_CONTEXT).toEqual({
       actor: "authenticated_actor_is_server_bound_and_never_accepted_from_the_wire",
-      operator: "request_operator_is_descriptive_only_and_never_authority",
+      operator:
+        "request_operator_null_maps_to_authenticated_importer_for_required_stored_operator_identity_fields_and_any_supplied_operator_is_descriptive_only_and_never_authority",
       hashes: "output_and_prompt_hashes_derive_from_exact_request_bytes",
       contributionActor: "contribution_and_importer_actor_binding_is_server_owned",
       parserCannotCompare:
@@ -378,6 +379,13 @@ describe("external-run import constants", () => {
     expect(EXTERNAL_RUN_IMPORT_IDEMPOTENCY.persist).toBe("manual_attributed_writes_only");
     expect(EXTERNAL_RUN_IMPORT_IDEMPOTENCY.uncertainOutcome).toContain("freeze_exact");
   });
+
+  it("freezes request operator null mapping to the authenticated importer as never-authority", () => {
+    expect(Object.isFrozen(EXTERNAL_RUN_IMPORT_RESPONSE_CONTEXT)).toBe(true);
+    expect(EXTERNAL_RUN_IMPORT_RESPONSE_CONTEXT.operator).toBe(
+      "request_operator_null_maps_to_authenticated_importer_for_required_stored_operator_identity_fields_and_any_supplied_operator_is_descriptive_only_and_never_authority",
+    );
+  });
 });
 
 describe("parseExternalRun legacy compatibility", () => {
@@ -391,34 +399,8 @@ describe("parseExternalRun legacy compatibility", () => {
     expect(validator("external-run.v1.json")(legacyRun())).toBe(true);
   });
 
-  it("accepts optional new fields when present and sorts evidence ids", () => {
-    const parsed = parseExternalRun(
-      legacyRun({
-        importMode: "manual",
-        sourceRevision: 4,
-        evidenceArtifactIds: [ARTIFACT_B, ARTIFACT_A],
-      }),
-    );
-    expect(parsed.importMode).toBe("manual");
-    expect(parsed.sourceRevision).toBe(4);
-    expect(parsed.evidenceArtifactIds).toEqual([ARTIFACT_A, ARTIFACT_B]);
-    expect(
-      validator("external-run.v1.json")(
-        legacyRun({
-          importMode: "manual",
-          sourceRevision: 4,
-          evidenceArtifactIds: [ARTIFACT_A, ARTIFACT_B],
-        }),
-      ),
-    ).toBe(true);
-  });
-
   it("rejects revision 0 and unknown import modes on the optional fields", () => {
-    expect(() =>
-      parseExternalRun(
-        legacyRun({ importMode: "manual", sourceRevision: 0, evidenceArtifactIds: [] }),
-      ),
-    ).toThrow(/>= 1/);
+    expect(() => parseExternalRun(applied({ sourceRevision: 0 }))).toThrow(/>= 1/);
     expect(() =>
       parseExternalRun(
         legacyRun({ importMode: "automatic", sourceRevision: 1, evidenceArtifactIds: [] }),
@@ -439,6 +421,93 @@ describe("parseExternalRun legacy compatibility", () => {
       expect(() => parseExternalRun(candidate)).toThrow(/must appear together/);
       expect(validator("external-run.v1.json")(candidate)).toBe(false);
     }
+  });
+});
+
+describe("parseExternalRun marked durable manual import", () => {
+  it("accepts a truly valid marked row and the JSON Schema", () => {
+    const parsed = parseExternalRun(
+      applied({
+        sourceRevision: 4,
+        evidenceArtifactIds: [ARTIFACT_A, ARTIFACT_B],
+        evidenceVisibility: "importer_described",
+      }),
+    );
+    expect(parsed.importMode).toBe("manual");
+    expect(parsed.sourceRevision).toBe(4);
+    expect(parsed.evidenceArtifactIds).toEqual([ARTIFACT_A, ARTIFACT_B]);
+    expect(parsed.outputHash).toBe(OUTPUT_HASH);
+    expect(parsed.createdAt).toBe("2026-09-05T12:00:00.000Z");
+    expect(parsed.corroborationState).toBe("unverified");
+    expect(
+      validator("external-run.v1.json")(
+        applied({
+          sourceRevision: 4,
+          evidenceArtifactIds: [ARTIFACT_A, ARTIFACT_B],
+          evidenceVisibility: "importer_described",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects marked rows with valid-looking wrong hashes, non-SHA hashes, and invalid timestamps", () => {
+    const wrongHash = applied({ outputHash: "a".repeat(64) });
+    expect(() => parseExternalRun(wrongHash)).toThrow(/exact outputText/);
+    expect(validator("external-run.v1.json")(wrongHash)).toBe(true);
+
+    const nonSha = applied({ outputHash: "not-a-sha" });
+    expect(() => parseExternalRun(nonSha)).toThrow(/SHA-256/);
+    expect(validator("external-run.v1.json")(nonSha)).toBe(false);
+
+    const wrongPrompt = applied({ promptHash: "b".repeat(64) });
+    expect(() => parseExternalRun(wrongPrompt)).toThrow(/exact promptText/);
+    expect(validator("external-run.v1.json")(wrongPrompt)).toBe(true);
+
+    const invalidTimestamp = applied({ createdAt: "yesterday" });
+    expect(() => parseExternalRun(invalidTimestamp)).toThrow(/ISO-8601 instant/);
+    expect(validator("external-run.v1.json")(invalidTimestamp)).toBe(false);
+  });
+
+  it("rejects marked rows with invalid prompt pairing, corroboration, or privacy/evidence relationships", () => {
+    const unpairedPrompt = applied({
+      promptText: null,
+      promptHash: PROMPT_HASH,
+      promptCompleteness: "unknown",
+    });
+    expect(() => parseExternalRun(unpairedPrompt)).toThrow(/if and only if/);
+    expect(validator("external-run.v1.json")(unpairedPrompt)).toBe(false);
+
+    const missingPromptHash = applied({ promptHash: null });
+    expect(() => parseExternalRun(missingPromptHash)).toThrow(/if and only if/);
+    expect(validator("external-run.v1.json")(missingPromptHash)).toBe(false);
+
+    const corroborated = applied({ corroborationState: "corroborated" });
+    expect(() => parseExternalRun(corroborated)).toThrow(/unverified/);
+    expect(validator("external-run.v1.json")(corroborated)).toBe(false);
+
+    const unknownWithArtifacts = applied({
+      evidenceVisibility: "unknown",
+      evidenceArtifactIds: [ARTIFACT_A],
+    });
+    expect(() => parseExternalRun(unknownWithArtifacts)).toThrow(/zero artifact ids/);
+    expect(validator("external-run.v1.json")(unknownWithArtifacts)).toBe(false);
+
+    const describedWithoutEvidence = applied({ evidenceVisibility: "importer_described" });
+    expect(() => parseExternalRun(describedWithoutEvidence)).toThrow(
+      /importer_described requires at least one/,
+    );
+    expect(validator("external-run.v1.json")(describedWithoutEvidence)).toBe(false);
+  });
+
+  it("requires marked evidence ids unique and already sorted", () => {
+    expect(() =>
+      parseExternalRun(
+        applied({
+          evidenceVisibility: "importer_described",
+          evidenceArtifactIds: [ARTIFACT_B, ARTIFACT_A],
+        }),
+      ),
+    ).toThrow(/canonical lexical order/);
   });
 });
 
@@ -790,6 +859,26 @@ describe("parseExternalRunImportSuccess", () => {
     ).toThrow(/must match applied.importerUsername/);
   });
 
+  it("requires companion external_run contribution hypothesisStatus and hypothesisLinks to be null", () => {
+    const statusPayload = success({
+      contribution: contribution({ hypothesisStatus: "proposed" }),
+    });
+    expect(() => parseExternalRunImportSuccess(statusPayload)).toThrow(
+      /hypothesisStatus must be null/,
+    );
+    expect(validator("external-run-import-success.v1.json")(statusPayload)).toBe(false);
+
+    const linksPayload = success({
+      contribution: contribution({
+        hypothesisLinks: [{ kind: "artifact", id: ARTIFACT_A }],
+      }),
+    });
+    expect(() => parseExternalRunImportSuccess(linksPayload)).toThrow(
+      /hypothesisLinks must be null/,
+    );
+    expect(validator("external-run-import-success.v1.json")(linksPayload)).toBe(false);
+  });
+
   it("requires SHA hashes, prompt-hash iff, and unverified corroboration", () => {
     expect(() =>
       parseExternalRunImportSuccess(
@@ -1055,6 +1144,14 @@ describe("JSON Schema additionalProperties and parser/schema parity", () => {
     expect(
       validator("external-run-import-success.v1.json")(
         success({ applied: applied({ corroborationState: "corroborated" }) }),
+      ),
+    ).toBe(false);
+    expect(
+      validator("external-run.v1.json")(applied({ corroborationState: "contradicted" })),
+    ).toBe(false);
+    expect(
+      validator("external-run-import-success.v1.json")(
+        success({ contribution: contribution({ hypothesisStatus: "contradicted" }) }),
       ),
     ).toBe(false);
     expect(

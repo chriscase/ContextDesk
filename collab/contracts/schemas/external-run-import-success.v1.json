@@ -200,29 +200,8 @@
         "authorId": { "type": "string", "minLength": 1, "maxLength": 512 },
         "authorUsername": { "type": "string", "minLength": 1, "maxLength": 200 },
         "createdAt": { "type": "string", "format": "date-time", "minLength": 1 },
-        "hypothesisStatus": {
-          "anyOf": [
-            { "type": "string", "enum": ["proposed", "supported", "contradicted", "superseded"] },
-            { "type": "null" }
-          ]
-        },
-        "hypothesisLinks": {
-          "anyOf": [
-            { "type": "null" },
-            {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["kind", "id"],
-                "properties": {
-                  "kind": { "type": "string", "enum": ["artifact", "contribution"] },
-                  "id": { "type": "string", "minLength": 1 }
-                }
-              }
-            }
-          ]
-        },
+        "hypothesisStatus": { "type": "null" },
+        "hypothesisLinks": { "type": "null" },
         "sourceId": { "$ref": "#/$defs/uuid" }
       }
     }

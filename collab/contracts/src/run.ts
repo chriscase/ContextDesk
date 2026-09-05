@@ -78,13 +78,16 @@ export const EXTERNAL_RUN_IMPORT_LIMITS = {
 
 /**
  * Server-only invariants the standalone parsers cannot prove from a wire body.
- * Request operator identity is descriptive only. Authenticated actor identity
- * is never accepted from the client. Artifact/snapshot existence and privacy
+ * Request operator null maps to the authenticated importer for the required
+ * stored operator identity fields. Any supplied request operator remains
+ * descriptive only and is never authority. Authenticated actor identity is
+ * never accepted from the client. Artifact/snapshot existence and privacy
  * verification are not claimed by the request parser.
  */
 export const EXTERNAL_RUN_IMPORT_RESPONSE_CONTEXT = Object.freeze({
   actor: "authenticated_actor_is_server_bound_and_never_accepted_from_the_wire",
-  operator: "request_operator_is_descriptive_only_and_never_authority",
+  operator:
+    "request_operator_null_maps_to_authenticated_importer_for_required_stored_operator_identity_fields_and_any_supplied_operator_is_descriptive_only_and_never_authority",
   hashes: "output_and_prompt_hashes_derive_from_exact_request_bytes",
   contributionActor: "contribution_and_importer_actor_binding_is_server_owned",
   parserCannotCompare:
@@ -806,21 +809,11 @@ export function parseExternalRun(raw: unknown, path = "$"): ExternalRunV1 {
       "manual import fields importMode, sourceRevision, and evidenceArtifactIds must appear together",
     );
   }
-  const parsed = raw as ExternalRunV1;
-  if (record.sourceRevision !== undefined) {
-    parsed.sourceRevision = requireRevisionAtLeastOne(
-      record.sourceRevision,
-      `${path}.sourceRevision`,
-    );
+  // Marked durable manual-import rows reuse AppliedImportedExternalRunV1 invariants.
+  if (importFieldPresence.every(Boolean)) {
+    return parseAppliedImportedRun(raw, path);
   }
-  if (record.evidenceArtifactIds !== undefined) {
-    parsed.evidenceArtifactIds = parseEvidenceArtifactIds(
-      record.evidenceArtifactIds,
-      `${path}.evidenceArtifactIds`,
-      "sort",
-    );
-  }
-  return parsed;
+  return raw as ExternalRunV1;
 }
 
 export function parseExternalRunImportRequest(raw: unknown): ExternalRunImportRequestV1 {
@@ -1116,6 +1109,18 @@ function parseImportContribution(raw: unknown, path: string): ContributionV1 {
   }
   if (parsed.contentHash.length < 1) {
     throw new ContractViolation(`${path}.contentHash`, "expected non-empty text");
+  }
+  if (parsed.hypothesisStatus !== null) {
+    throw new ContractViolation(
+      `${path}.hypothesisStatus`,
+      "successful import contribution hypothesisStatus must be null",
+    );
+  }
+  if (parsed.hypothesisLinks !== null) {
+    throw new ContractViolation(
+      `${path}.hypothesisLinks`,
+      "successful import contribution hypothesisLinks must be null",
+    );
   }
   return parsed;
 }
