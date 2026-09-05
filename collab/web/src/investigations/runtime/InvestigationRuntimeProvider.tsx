@@ -390,15 +390,18 @@ export function InvestigationRuntimeProvider({
     capabilities.canRead && capabilities.canCoordinateParticipants;
   const activeCaseId = active && capabilities.canRead ? focusCaseId : null;
 
+  // Collection reads belong only to the canonical investigations surface.
+  // Other shell areas may mount this provider for a different public Runtime
+  // resource and must not inherit the legacy list or collection transport.
   const investigationList = useInvestigationList({
     gateway,
-    enabled: capabilities.canRead,
+    enabled: active && capabilities.canRead,
     identityKey,
     authorityKey,
   });
   const investigationCollection = useInvestigationCollectionQuery({
     gateway: collectionQueryGateway,
-    enabled: capabilities.canRead && collectionQueryInput !== null,
+    enabled: active && capabilities.canRead && collectionQueryInput !== null,
     identityKey,
     authorityKey,
     query: collectionQueryInput,

@@ -1993,7 +1993,7 @@ describe("InvestigationRuntimeProvider", () => {
     expect(currentRuntime().resources.lifecycle).toEqual({ status: "ready", value: changed });
   });
 
-  it("fences identity and case changes while retaining the list outside investigation routes", async () => {
+  it("fences identity and case changes and stops investigation reads outside investigation routes", async () => {
     const caseRequests: Array<{ id: string; signal: AbortSignal }> = [];
     const gateway = makeGateway({
       getInvestigation: vi.fn((id, { signal }) => {
@@ -2069,9 +2069,11 @@ describe("InvestigationRuntimeProvider", () => {
       queryInvestigations: expect.any(Function),
       queryOperationsQueue: expect.any(Function),
     });
-    await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+    await waitFor(() => expect(currentRuntime().resources.investigations).toEqual({ status: "idle" }));
+    expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
     // One initial read, one freshness read for the case transition, and one
-    // newly scoped read for each authority/identity transition.
+    // newly scoped read for each authority/identity transition. Leaving the
+    // investigations area does not add another collection read.
     expect(gateway.listInvestigations).toHaveBeenCalledTimes(4);
   });
 
@@ -2593,22 +2595,24 @@ describe("InvestigationRuntimeProvider", () => {
       authorityKey: "alice-authority-v1",
       capabilities: ["investigation:read"] as const,
       readOnly: true,
-      active: true,
+      active: false,
       focusCaseId: null,
-      isInvestigationLocation: true,
+      isInvestigationLocation: false,
       onOpenCreated: vi.fn(),
     };
 
     it("does not query on mount and fails a missing queue seam closed", async () => {
       const listInvestigations = vi.fn(async () => succeeded(makeCaseList().cases));
-      const gateway = makeGateway({ listInvestigations });
+      const queryInvestigations = vi.fn(() => unexpected<InvestigationCollectionPageV1>());
+      const gateway = makeGateway({ listInvestigations, queryInvestigations });
       render(
         <ProviderUnderTest {...commonProps} gateway={gateway}>
           <RuntimeProbe />
         </ProviderUnderTest>,
       );
-      await waitFor(() => expect(currentRuntime().resources.investigations.status).toBe("ready"));
+      await act(async () => undefined);
 
+      expect(currentRuntime().resources.investigations).toEqual({ status: "idle" });
       expect(currentRuntime().resources.operationsQueue).toEqual({ status: "idle" });
       expect(currentRuntime().resources.operationsQueueQuery).toBeNull();
       expect(currentRuntime().commands.queryOperationsQueue).toEqual(expect.any(Function));
@@ -2619,8 +2623,8 @@ describe("InvestigationRuntimeProvider", () => {
         status: "failed",
         error: { kind: "unavailable", status: 503 },
       }));
-      expect(listInvestigations).toHaveBeenCalledTimes(1);
-      expect(gateway.queryInvestigations).toBeUndefined();
+      expect(listInvestigations).not.toHaveBeenCalled();
+      expect(queryInvestigations).not.toHaveBeenCalled();
       expect(currentRuntime().resources.investigationCollection).toEqual({ status: "idle" });
     });
 
