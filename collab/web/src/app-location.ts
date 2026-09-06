@@ -9,6 +9,11 @@ import {
   parseInvestigationOperationsQueueQuery,
   type InvestigationOperationsQueueCoordinationScopeV1,
 } from "@cd-collab/contracts/investigation-operations-queue";
+import {
+  INVESTIGATION_ACTIVITY_KINDS,
+  INVESTIGATION_STAGES,
+  type InvestigationActivityFilterV1,
+} from "@cd-collab/contracts/investigation-activity";
 
 export const AREA_IDS = [
   "overview",
@@ -106,6 +111,21 @@ export const DEFAULT_OPERATIONS_QUEUE_QUERY: OperationsQueueLocationQuery = Obje
   coordinationScope: "all_visible",
 });
 
+/** The shareable, non-transport portion of the Overview Activity Center view. */
+export type OverviewActivityLocationQuery = Readonly<{
+  activityKind: InvestigationActivityFilterV1["activityKind"] | null;
+  stage: InvestigationActivityFilterV1["stage"] | null;
+  from: InvestigationActivityFilterV1["from"] | null;
+  to: InvestigationActivityFilterV1["to"] | null;
+}>;
+
+export const DEFAULT_OVERVIEW_ACTIVITY_QUERY: OverviewActivityLocationQuery = Object.freeze({
+  activityKind: null,
+  stage: null,
+  from: null,
+  to: null,
+});
+
 export type WorkLocation = {
   area: AreaId;
   caseId: string | null;
@@ -113,6 +133,7 @@ export type WorkLocation = {
   focus?: WorkFocus;
   collectionQuery?: CollectionQueryLocation;
   operationsQueueQuery?: OperationsQueueLocationQuery;
+  overviewActivityQuery?: OverviewActivityLocationQuery;
 };
 
 export type SignInLocation = { kind: "sign-in" };
@@ -374,6 +395,23 @@ export function isWorkLocation(value: unknown): value is WorkLocation {
       return false;
     }
   }
+  if (candidate.overviewActivityQuery !== undefined) {
+    if (candidate.area !== "overview" || candidate.caseId !== null) return false;
+    const query = candidate.overviewActivityQuery;
+    if (!query || typeof query !== "object" || Array.isArray(query)) return false;
+    const record = query as Record<string, unknown>;
+    for (const key of ["activityKind", "stage", "from", "to"] as const) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) return false;
+    }
+    if (record.activityKind !== null && record.activityKind !== undefined
+      && !INVESTIGATION_ACTIVITY_KINDS.includes(record.activityKind as typeof INVESTIGATION_ACTIVITY_KINDS[number])) return false;
+    if (record.stage !== null && record.stage !== undefined
+      && !INVESTIGATION_STAGES.includes(record.stage as typeof INVESTIGATION_STAGES[number])) return false;
+    for (const key of ["from", "to"] as const) {
+      const value = record[key];
+      if (value !== null && value !== undefined && !isActivityTimestamp(value)) return false;
+    }
+  }
   return isStageId(String(candidate.stage ?? ""));
 }
 
@@ -419,7 +457,8 @@ export function sameLocation(a: ShellLocation, b: ShellLocation): boolean {
     (a.focus?.experiment ?? null) === (b.focus?.experiment ?? null) &&
     (a.focus?.navigation ?? null) === (b.focus?.navigation ?? null) &&
     queryLocationEqual(a.collectionQuery, b.collectionQuery) &&
-    operationsQueryLocationEqual(a.operationsQueueQuery, b.operationsQueueQuery);
+    operationsQueryLocationEqual(a.operationsQueueQuery, b.operationsQueueQuery) &&
+    overviewActivityQueryEqual(a.overviewActivityQuery, b.overviewActivityQuery);
 }
 
 export function normalizePathname(pathname: string): string {
@@ -576,6 +615,76 @@ const OPERATIONS_QUERY_PARAMS = new Set([
   "coordinationScope",
 ]);
 
+const OVERVIEW_ACTIVITY_QUERY_PARAMS = new Set(["activityKind", "stage", "from", "to"]);
+const RFC3339_ACTIVITY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function isActivityTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64 && RFC3339_ACTIVITY_TIMESTAMP.test(value)
+    && !Number.isNaN(Date.parse(value));
+}
+
+export function overviewActivityFilterFromLocation(
+  query: OverviewActivityLocationQuery | undefined,
+): InvestigationActivityFilterV1 {
+  const value = query ?? DEFAULT_OVERVIEW_ACTIVITY_QUERY;
+  return {
+    ...(value.activityKind ? { activityKind: value.activityKind } : {}),
+    ...(value.stage ? { stage: value.stage } : {}),
+    ...(value.from ? { from: value.from } : {}),
+    ...(value.to ? { to: value.to } : {}),
+  };
+}
+
+export function overviewActivityQueryFromFilter(
+  filter: InvestigationActivityFilterV1,
+): OverviewActivityLocationQuery {
+  return Object.freeze({
+    activityKind: filter.activityKind ?? null,
+    stage: filter.stage ?? null,
+    from: filter.from ?? null,
+    to: filter.to ?? null,
+  });
+}
+
+function overviewActivityQueryEqual(
+  left: OverviewActivityLocationQuery | undefined,
+  right: OverviewActivityLocationQuery | undefined,
+): boolean {
+  const a = left ?? DEFAULT_OVERVIEW_ACTIVITY_QUERY;
+  const b = right ?? DEFAULT_OVERVIEW_ACTIVITY_QUERY;
+  return a.activityKind === b.activityKind && a.stage === b.stage && a.from === b.from && a.to === b.to;
+}
+
+function parseOverviewActivityQuery(search: string): OverviewActivityLocationQuery | undefined {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  if (![...params.keys()].some((key) => OVERVIEW_ACTIVITY_QUERY_PARAMS.has(key))) return undefined;
+  const activityKind = params.get("activityKind");
+  const stage = params.get("stage");
+  const from = params.get("from");
+  const to = params.get("to");
+  const query = Object.freeze({
+    activityKind: activityKind && INVESTIGATION_ACTIVITY_KINDS.includes(activityKind as typeof INVESTIGATION_ACTIVITY_KINDS[number])
+      ? activityKind as InvestigationActivityFilterV1["activityKind"] : null,
+    stage: stage && INVESTIGATION_STAGES.includes(stage as typeof INVESTIGATION_STAGES[number])
+      ? stage as InvestigationActivityFilterV1["stage"] : null,
+    from: from && isActivityTimestamp(from) ? from : null,
+    to: to && isActivityTimestamp(to) ? to : null,
+  });
+  return overviewActivityQueryEqual(query, undefined) ? undefined : query;
+}
+
+function overviewActivityQueryPath(query: OverviewActivityLocationQuery | undefined): string {
+  if (overviewActivityQueryEqual(query, undefined)) return "";
+  const value = query ?? DEFAULT_OVERVIEW_ACTIVITY_QUERY;
+  const params = new URLSearchParams();
+  if (value.activityKind) params.set("activityKind", value.activityKind);
+  if (value.stage) params.set("stage", value.stage);
+  if (value.from) params.set("from", value.from);
+  if (value.to) params.set("to", value.to);
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
 function parseOperationsField(
   field: "q" | "status" | "includeArchived" | "coordinationScope",
   value: unknown,
@@ -657,7 +766,11 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
     return unknownAt(pathname);
   }
   if (path === "/" || path === "") {
-    return { ...HOME };
+    const overviewActivityQuery = parseOverviewActivityQuery(search);
+    return {
+      ...HOME,
+      ...(overviewActivityQuery ? { overviewActivityQuery } : {}),
+    };
   }
   if (path === "/signin" || path === "/sign-in" || path === "/login") {
     return SIGN_IN;
@@ -733,7 +846,8 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
 
 export function areaPathFor(location: WorkLocation): string {
   if (location.area === "overview") {
-    return "/";
+    const query = overviewActivityQueryPath(location.overviewActivityQuery);
+    return query ? `/${query}` : "/";
   }
   if (location.area === "entities") {
     return "/entities";

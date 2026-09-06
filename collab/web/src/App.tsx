@@ -18,6 +18,8 @@ import {
   ADMINISTRATION,
   DEFAULT_COLLECTION_QUERY,
   DEFAULT_OPERATIONS_QUEUE_QUERY,
+  overviewActivityFilterFromLocation,
+  overviewActivityQueryFromFilter,
   EVIDENCE_STORAGE_ADMIN,
   HOME,
   LDAP_ADMIN,
@@ -1141,6 +1143,13 @@ export function App() {
                   canRead={canReadInvestigations}
                   identityKey={session.identityId}
                   authorityKey={investigationAuthorityKey(session, staticReadOnly)}
+                  filter={overviewActivityFilterFromLocation(work.overviewActivityQuery)}
+                  onFilterChange={(filter) => navigate({
+                    area: "overview",
+                    caseId: null,
+                    stage: "situation",
+                    overviewActivityQuery: overviewActivityQueryFromFilter(filter),
+                  })}
                   onOpenInvestigations={() =>
                     navigate({ area: "investigations", caseId: null, stage: "situation" })}
                   onOpenRoute={(pathname) => {
