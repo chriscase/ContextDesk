@@ -5,7 +5,8 @@ const STORAGE_PREFIX = "cd-operations-views:";
 const MAX_SAVED_VIEWS = 8;
 const MAX_VIEW_NAME = 64;
 const MAX_QUERY = 256;
-const VALID_STATUSES = new Set(["open", "monitoring", "resolved", "archived"]);
+const VALID_STATUSES = ["open", "monitoring", "resolved", "archived"] as const;
+const VALID_STATUS_SET = new Set<string>(VALID_STATUSES);
 const VALID_SCOPES = new Set(["all_visible", "mine", "unassigned"]);
 
 export interface OperationsQueueSavedView {
@@ -22,14 +23,14 @@ function identityStorageKey(identity: InvestigationRuntimeIdentity): string | nu
 function normalizeQuery(raw: unknown): OperationsQueueLocationQuery | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
-  const q = typeof record.q === "string" ? record.q : null;
+  const q = typeof record.q === "string" ? record.q.trim() : null;
   const status = Array.isArray(record.status) ? record.status : null;
   const coordinationScope = record.coordinationScope;
   if (
     q === null
     || q.length > MAX_QUERY
     || status === null
-    || status.some((item) => typeof item !== "string" || !VALID_STATUSES.has(item))
+    || status.some((item) => typeof item !== "string" || !VALID_STATUS_SET.has(item))
     || new Set(status).size !== status.length
     || typeof record.includeArchived !== "boolean"
     || typeof coordinationScope !== "string"
@@ -37,7 +38,9 @@ function normalizeQuery(raw: unknown): OperationsQueueLocationQuery | null {
   ) return null;
   return Object.freeze({
     q,
-    status: Object.freeze([...status]) as OperationsQueueLocationQuery["status"],
+    status: Object.freeze(
+      VALID_STATUSES.filter((item) => status.includes(item)),
+    ) as OperationsQueueLocationQuery["status"],
     includeArchived: record.includeArchived,
     coordinationScope: coordinationScope as OperationsQueueLocationQuery["coordinationScope"],
   });
@@ -53,6 +56,19 @@ function normalizeView(raw: unknown): OperationsQueueSavedView | null {
   return Object.freeze({ id, name, query });
 }
 
+function persistableViews(views: readonly unknown[]): OperationsQueueSavedView[] {
+  const seen = new Set<string>();
+  const next: OperationsQueueSavedView[] = [];
+  for (const view of views) {
+    const normalized = normalizeView(view);
+    if (normalized === null || seen.has(normalized.id)) continue;
+    seen.add(normalized.id);
+    next.push(normalized);
+    if (next.length >= MAX_SAVED_VIEWS) break;
+  }
+  return next;
+}
+
 function storageFor(identity: InvestigationRuntimeIdentity): Storage | null {
   if (typeof window === "undefined" || identityStorageKey(identity) === null) return null;
   try {
@@ -66,6 +82,17 @@ export function operationsQueueSavedViewsKey(identity: InvestigationRuntimeIdent
   return identityStorageKey(identity);
 }
 
+export function operationsQueueSavedViewQuery(
+  query: OperationsQueueLocationQuery,
+): OperationsQueueLocationQuery | null {
+  return normalizeQuery({
+    q: query.q,
+    status: query.status,
+    includeArchived: query.includeArchived,
+    coordinationScope: query.coordinationScope,
+  });
+}
+
 export function loadOperationsQueueSavedViews(
   identity: InvestigationRuntimeIdentity,
 ): OperationsQueueSavedView[] {
@@ -77,16 +104,7 @@ export function loadOperationsQueueSavedViews(
     if (raw === null) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    const seen = new Set<string>();
-    return parsed
-      .map(normalizeView)
-      .filter((view): view is OperationsQueueSavedView => view !== null)
-      .filter((view) => {
-        if (seen.has(view.id)) return false;
-        seen.add(view.id);
-        return true;
-      })
-      .slice(0, MAX_SAVED_VIEWS);
+    return persistableViews(parsed);
   } catch {
     return [];
   }
@@ -99,8 +117,10 @@ export function writeOperationsQueueSavedViews(
   const storage = storageFor(identity);
   const key = identityStorageKey(identity);
   if (storage === null || key === null) return false;
+  const normalized = persistableViews(views);
+  if (views.length > 0 && normalized.length === 0) return false;
   try {
-    storage.setItem(key, JSON.stringify(views.slice(0, MAX_SAVED_VIEWS)));
+    storage.setItem(key, JSON.stringify(normalized));
     return true;
   } catch {
     return false;
@@ -109,4 +129,8 @@ export function writeOperationsQueueSavedViews(
 
 export function operationsQueueSavedViewNameLimit(): number {
   return MAX_VIEW_NAME;
+}
+
+export function operationsQueueSavedViewLimit(): number {
+  return MAX_SAVED_VIEWS;
 }
