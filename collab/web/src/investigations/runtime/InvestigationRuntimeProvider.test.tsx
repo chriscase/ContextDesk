@@ -720,6 +720,7 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycle: null,
       applyCoordinationAction: null,
       applyNamedCoordinationSelf: null,
+      applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: null,
@@ -777,6 +778,7 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycle: null,
       applyCoordinationAction: null,
       applyNamedCoordinationSelf: null,
+      applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: expect.any(Function),
@@ -2068,6 +2070,7 @@ describe("InvestigationRuntimeProvider", () => {
       applyLifecycle: null,
       applyCoordinationAction: null,
       applyNamedCoordinationSelf: null,
+      applyNamedCoordinationParticipant: null,
       createArtifactAnnotation: null,
       createArtifactAnnotations: null,
       queryInvestigations: expect.any(Function),
@@ -2233,6 +2236,7 @@ describe("InvestigationRuntimeProvider", () => {
         applyLifecycle: null,
         applyCoordinationAction: null,
         applyNamedCoordinationSelf: null,
+        applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
         queryInvestigations: expect.any(Function),
@@ -2411,6 +2415,7 @@ describe("InvestigationRuntimeProvider", () => {
         applyLifecycle: null,
         applyCoordinationAction: null,
         applyNamedCoordinationSelf: null,
+        applyNamedCoordinationParticipant: null,
         createArtifactAnnotation: null,
         createArtifactAnnotations: null,
         queryInvestigations: expect.any(Function),
@@ -2727,6 +2732,102 @@ describe("InvestigationRuntimeProvider", () => {
         expect.objectContaining({ expectedRevision: page.items[0]!.coordination.revision }),
         expect.objectContaining({ actorIdentityId: "identity-alice" }),
       );
+    });
+
+    it("publishes named-row participant coordination independently of focus and self-capability", async () => {
+      const page = makeOperationsQueuePage();
+      const queryOperationsQueue = vi.fn(async () => succeeded(page));
+      const getCoordination = vi.fn(async () => succeeded(page.items[0]!.coordination));
+      const getInvestigation = vi.fn(async () => succeeded(makePopulatedCase()));
+      const applyCoordinationAction = vi.fn(async () => succeeded<InvestigationCoordinationActionSuccessV1>({
+        schemaId: "cd-collab.investigation_coordination_action_success.v1",
+        investigationId: page.items[0]!.investigation.id,
+        action: "assign_participant",
+        targetIdentityId: "identity-ravi",
+        previousRevision: page.items[0]!.coordination.revision,
+        previousCoordinator: page.items[0]!.coordination.coordinator,
+        applied: page.items[0]!.coordination,
+      }));
+      const gateway = makeGateway({
+        queryOperationsQueue,
+        getCoordination,
+        getInvestigation,
+        applyCoordinationAction,
+      });
+      render(
+        <ProviderUnderTest
+          {...commonProps}
+          capabilities={["investigation:read", "investigation:coordinate"]}
+          readOnly={false}
+          identity={{ id: "identity-alice", username: "alice", displayName: "Alice" }}
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      act(() => currentRuntime().commands.queryOperationsQueue?.({ coordinationScope: "mine" }));
+      await waitFor(() => expect(currentRuntime().resources.operationsQueue.status).toBe("ready"));
+      expect(currentRuntime().capabilities).toMatchObject({
+        canCoordinateSelf: false,
+        canCoordinateParticipants: true,
+      });
+      expect(currentRuntime().commands.applyNamedCoordinationSelf).toBeNull();
+      expect(currentRuntime().commands.applyNamedCoordinationParticipant).toEqual(expect.any(Function));
+      expect(currentRuntime().commands.applyCoordinationAction).toBeNull();
+      expect(currentRuntime().resources.investigation).toEqual({ status: "idle" });
+      expect(currentRuntime().mutations.namedCoordinationParticipant).toEqual({ status: "idle" });
+
+      await act(async () => {
+        const outcome = await currentRuntime().commands.applyNamedCoordinationParticipant?.({
+          investigationId: page.items[0]!.investigation.id,
+          action: "assign_participant",
+          targetIdentityId: "identity-ravi",
+          idempotencyKey: "provider-named-assign-1",
+        });
+        expect(outcome?.status).toBe("succeeded");
+      });
+      expect(getCoordination).not.toHaveBeenCalled();
+      expect(getInvestigation).not.toHaveBeenCalled();
+      expect(applyCoordinationAction).toHaveBeenCalledWith(
+        page.items[0]!.investigation.id,
+        expect.objectContaining({
+          action: "assign_participant",
+          targetIdentityId: "identity-ravi",
+          expectedRevision: page.items[0]!.coordination.revision,
+        }),
+        expect.objectContaining({ actorIdentityId: "identity-alice" }),
+      );
+      expect(currentRuntime().resources.investigation).toEqual({ status: "idle" });
+      await waitFor(() => expect(queryOperationsQueue).toHaveBeenCalledTimes(2));
+    });
+
+    it("does not publish named-row participant coordination from self-only write capability", async () => {
+      const page = makeOperationsQueuePage();
+      const queryOperationsQueue = vi.fn(async () => succeeded(page));
+      const getCoordination = vi.fn();
+      const applyCoordinationAction = vi.fn();
+      const gateway = makeGateway({ queryOperationsQueue, getCoordination, applyCoordinationAction });
+      render(
+        <ProviderUnderTest
+          {...commonProps}
+          capabilities={["investigation:read", "investigation:write"]}
+          readOnly={false}
+          identity={{ id: "identity-alice", username: "alice", displayName: "Alice" }}
+          gateway={gateway}
+        >
+          <RuntimeProbe />
+        </ProviderUnderTest>,
+      );
+      act(() => currentRuntime().commands.queryOperationsQueue?.({ coordinationScope: "mine" }));
+      await waitFor(() => expect(currentRuntime().resources.operationsQueue.status).toBe("ready"));
+      expect(currentRuntime().capabilities).toMatchObject({
+        canCoordinateSelf: true,
+        canCoordinateParticipants: false,
+      });
+      expect(currentRuntime().commands.applyNamedCoordinationSelf).toEqual(expect.any(Function));
+      expect(currentRuntime().commands.applyNamedCoordinationParticipant).toBeNull();
+      expect(getCoordination).not.toHaveBeenCalled();
+      expect(applyCoordinationAction).not.toHaveBeenCalled();
     });
 
     it("drops an old scope's queue input before a new identity can request it", async () => {

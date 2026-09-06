@@ -9,6 +9,7 @@ export {
   type InvestigationContributionCommand,
   type InvestigationCoordinationActionCommand,
   type InvestigationNamedCoordinationSelfCommand,
+  type InvestigationNamedCoordinationParticipantCommand,
   type InvestigationArtifactAnnotationCommand,
   type InvestigationArtifactAnnotationsBulkCommand,
   type InvestigationCreateInput,
