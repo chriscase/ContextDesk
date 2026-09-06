@@ -4,7 +4,8 @@ import { FIXTURE_USERS } from "../src/users.js";
 
 const INVESTIGATION_ID = "11111111-1111-4111-8111-111111111111";
 const INSTALLATION_ID = "inst-activityfixture";
-const NOTICE = "Activity is a projection of recorded investigation events, not a second source of truth.";
+const NOTICE =
+  "Activity is a projection of recorded investigation events, not a second source of truth.";
 const ACTIVITY_SCHEMA = "cd-collab.investigation_activity_item.v1";
 const PAGE_SCHEMA = "cd-collab.investigation_activity_page.v1";
 const ERROR_SCHEMA = "cd-collab.investigation_activity_error.v1";
@@ -25,7 +26,12 @@ function cursor(activityId: string, occurredAt: string, seq: number): string {
   return Buffer.from(payload, "utf8").toString("base64url");
 }
 
-function item(activityId: string, occurredAt: string, summary: string, orderTieBreak: number) {
+function item(
+  activityId: string,
+  occurredAt: string,
+  summary: string,
+  orderTieBreak: number,
+) {
   return {
     schemaId: ACTIVITY_SCHEMA,
     activityId,
@@ -69,57 +75,175 @@ function page(items: readonly unknown[], nextCursor: string | null) {
   };
 }
 
+function assertPageEnvelope(value: ReturnType<typeof page>): void {
+  expect(value.schemaId).toBe(PAGE_SCHEMA);
+  expect(value.notices).toContain(NOTICE);
+  expect(
+    value.items.every(
+      (entry) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        "schemaId" in entry &&
+        entry.schemaId === ACTIVITY_SCHEMA,
+    ),
+  ).toBe(true);
+}
+
 test.describe("Overview Activity Center cursor continuation", () => {
-  test("loads an opaque next page, deduplicates rows, and keeps transport state out of the URL", async ({ page: browserPage }) => {
+  test("loads an opaque next page, deduplicates rows, and keeps transport state out of the URL", async ({
+    page: browserPage,
+  }) => {
     const firstCursor = cursor(ACTIVITY_A, "2026-01-01T00:00:00.000Z", 1);
     const requests: URL[] = [];
+    const responses: unknown[] = [];
+    browserPage.on("response", async (response) => {
+      if (!response.url().includes("/api/investigation-activity")) return;
+      try {
+        responses.push(await response.json());
+      } catch {
+        // The browser may observe an aborted response while the fixture is closing.
+      }
+    });
     await browserPage.route("**/api/investigation-activity*", async (route) => {
       const url = new URL(route.request().url());
       requests.push(url);
       if (url.searchParams.get("cursor") === firstCursor) {
+        const responseBody = page(
+          [
+            item(
+              ACTIVITY_A,
+              "2026-01-01T00:00:00.000Z",
+              "opened the investigation",
+              1,
+            ),
+            item(
+              ACTIVITY_B,
+              "2025-12-31T23:00:00.000Z",
+              "recorded a later page event",
+              2,
+            ),
+          ],
+          null,
+        );
+        assertPageEnvelope(responseBody);
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify(page([
-            item(ACTIVITY_A, "2026-01-01T00:00:00.000Z", "opened the investigation", 1),
-            item(ACTIVITY_B, "2025-12-31T23:00:00.000Z", "recorded a later page event", 2),
-          ], null)),
+          body: JSON.stringify(responseBody),
         });
         return;
       }
+      if (
+        url.searchParams.get("activityKind") !== null &&
+        url.searchParams.get("activityKind") !== "investigation_created"
+      ) {
+        await route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({
+            schemaId: ERROR_SCHEMA,
+            error: "invalid_filter",
+          }),
+        });
+        return;
+      }
+      const responseBody = page(
+        [
+          item(
+            ACTIVITY_A,
+            "2026-01-01T00:00:00.000Z",
+            "opened the investigation",
+            1,
+          ),
+        ],
+        firstCursor,
+      );
+      assertPageEnvelope(responseBody);
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(page([
-          item(ACTIVITY_A, "2026-01-01T00:00:00.000Z", "opened the investigation", 1),
-        ], firstCursor)),
+        body: JSON.stringify(responseBody),
       });
     });
 
     await loginAs(browserPage, FIXTURE_USERS.dave);
     await browserPage.goto("/?activityKind=investigation_created");
-    await expect(browserPage.getByRole("heading", { name: "Operating picture" })).toBeVisible();
-    await expect(browserPage.getByRole("link", { name: /opened the investigation/ })).toHaveCount(1);
-    await expect(browserPage.getByRole("button", { name: "Load more activity" })).toBeVisible();
+    await expect(
+      browserPage.getByRole("heading", { name: "Operating picture" }),
+    ).toBeVisible();
+    await expect(
+      browserPage.getByRole("link", { name: /opened the investigation/ }),
+    ).toHaveCount(1);
+    await expect(
+      browserPage.getByRole("button", { name: "Load more activity" }),
+    ).toBeVisible();
 
-    await browserPage.getByRole("button", { name: "Load more activity" }).click();
-    await expect(browserPage.getByRole("link", { name: /recorded a later page event/ })).toHaveCount(1);
-    await expect(browserPage.getByRole("link", { name: /opened the investigation/ })).toHaveCount(1);
-    await expect(browserPage.getByRole("button", { name: "Load more activity" })).toHaveCount(0);
+    await browserPage
+      .getByRole("button", { name: "Load more activity" })
+      .click();
+    await expect(
+      browserPage.getByRole("link", { name: /recorded a later page event/ }),
+    ).toHaveCount(1);
+    await expect(
+      browserPage.getByRole("link", { name: /opened the investigation/ }),
+    ).toHaveCount(1);
+    await expect(
+      browserPage.getByRole("button", { name: "Load more activity" }),
+    ).toHaveCount(0);
     await expect(browserPage).toHaveURL(/activityKind=investigation_created/u);
-    expect(new URL(browserPage.url()).searchParams.has("cursor")).toBe(false);
+    const location = new URL(browserPage.url());
+    expect(location.pathname).toBe("/");
+    expect(location.hash).toBe("");
+    expect(location.searchParams.get("activityKind")).toBe(
+      "investigation_created",
+    );
+    expect(location.searchParams.has("cursor")).toBe(false);
     const filteredRequests = requests.filter(
-      (request) => request.searchParams.get("activityKind") === "investigation_created",
+      (request) =>
+        request.searchParams.get("activityKind") === "investigation_created",
     );
     expect(filteredRequests.length).toBeGreaterThan(0);
-    expect(filteredRequests.some((request) => request.searchParams.get("cursor") === firstCursor)).toBe(true);
+    expect(
+      filteredRequests.every(
+        (request) =>
+          request.searchParams.get("activityKind") === "investigation_created",
+      ),
+    ).toBe(true);
+    expect(filteredRequests[0]?.searchParams.has("cursor")).toBe(false);
+    expect(
+      filteredRequests.some(
+        (request) => request.searchParams.get("cursor") === firstCursor,
+      ),
+    ).toBe(true);
+    await expect
+      .poll(() =>
+        responses.some(
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            "schemaId" in value &&
+            value.schemaId === PAGE_SCHEMA,
+        ),
+      )
+      .toBe(true);
   });
 
-  test("recovers a stale cursor by restarting the filtered window without mixing pages", async ({ page: browserPage }) => {
+  test("recovers a stale cursor by restarting the filtered window without mixing pages", async ({
+    page: browserPage,
+  }) => {
     const firstCursor = cursor(ACTIVITY_A, "2026-01-01T00:00:00.000Z", 1);
     const requests: URL[] = [];
+    const responses: unknown[] = [];
     let stale = true;
     let restarted = false;
+    browserPage.on("response", async (response) => {
+      if (!response.url().includes("/api/investigation-activity")) return;
+      try {
+        responses.push(await response.json());
+      } catch {
+        // The browser may observe an aborted response while the fixture is closing.
+      }
+    });
     await browserPage.route("**/api/investigation-activity*", async (route) => {
       const url = new URL(route.request().url());
       requests.push(url);
@@ -129,46 +253,119 @@ test.describe("Overview Activity Center cursor continuation", () => {
         await route.fulfill({
           status: 400,
           contentType: "application/json",
-          body: JSON.stringify({ schemaId: ERROR_SCHEMA, error: "stale_cursor" }),
+          body: JSON.stringify({
+            schemaId: ERROR_SCHEMA,
+            error: "stale_cursor",
+          }),
         });
         return;
       }
+      if (
+        url.searchParams.get("activityKind") !== null &&
+        url.searchParams.get("activityKind") !== "investigation_created"
+      ) {
+        await route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({
+            schemaId: ERROR_SCHEMA,
+            error: "invalid_filter",
+          }),
+        });
+        return;
+      }
+      const responseBody = page(
+        [
+          item(
+            restarted ? ACTIVITY_B : ACTIVITY_A,
+            restarted ? "2026-01-02T00:00:00.000Z" : "2026-01-01T00:00:00.000Z",
+            restarted
+              ? "restarted filtered activity window"
+              : "opened the investigation",
+            restarted ? 2 : 1,
+          ),
+        ],
+        url.searchParams.has("cursor") ? null : firstCursor,
+      );
+      assertPageEnvelope(responseBody);
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(page(
-          [item(
-            restarted ? ACTIVITY_B : ACTIVITY_A,
-            restarted ? "2026-01-02T00:00:00.000Z" : "2026-01-01T00:00:00.000Z",
-            restarted ? "restarted filtered activity window" : "opened the investigation",
-            restarted ? 2 : 1,
-          )],
-          url.searchParams.has("cursor") ? null : firstCursor,
-        )),
+        body: JSON.stringify(responseBody),
       });
     });
 
     await loginAs(browserPage, FIXTURE_USERS.dave);
-    await browserPage.goto("/?activityKind=investigation_created&stage=situation");
-    await expect(browserPage.getByRole("button", { name: "Load more activity" })).toBeVisible();
-    await browserPage.getByRole("button", { name: "Load more activity" }).click();
+    await browserPage.goto(
+      "/?activityKind=investigation_created&stage=situation",
+    );
+    await expect(
+      browserPage.getByRole("button", { name: "Load more activity" }),
+    ).toBeVisible();
+    await browserPage
+      .getByRole("button", { name: "Load more activity" })
+      .click();
 
-    await expect(browserPage.getByRole("link", { name: /restarted filtered activity window/ })).toHaveCount(1);
-    await expect(browserPage.getByRole("link", { name: /opened the investigation/ })).toHaveCount(0);
-    await expect(browserPage.getByRole("button", { name: "Load more activity" })).toBeVisible();
-    await expect(browserPage).toHaveURL(/activityKind=investigation_created&stage=situation/u);
-    expect(new URL(browserPage.url()).searchParams.has("cursor")).toBe(false);
+    await expect(
+      browserPage.getByRole("link", {
+        name: /restarted filtered activity window/,
+      }),
+    ).toHaveCount(1);
+    await expect(
+      browserPage.getByRole("link", { name: /opened the investigation/ }),
+    ).toHaveCount(0);
+    await expect(
+      browserPage.getByRole("button", { name: "Load more activity" }),
+    ).toBeVisible();
+    await expect(browserPage).toHaveURL(
+      /activityKind=investigation_created&stage=situation/u,
+    );
+    const location = new URL(browserPage.url());
+    expect(location.pathname).toBe("/");
+    expect(location.hash).toBe("");
+    expect(location.searchParams.get("activityKind")).toBe(
+      "investigation_created",
+    );
+    expect(location.searchParams.get("stage")).toBe("situation");
+    expect(location.searchParams.has("cursor")).toBe(false);
     const filteredRequests = requests.filter(
-      (request) => request.searchParams.get("activityKind") === "investigation_created",
+      (request) =>
+        request.searchParams.get("activityKind") === "investigation_created",
     );
     expect(filteredRequests.length).toBeGreaterThan(0);
-    expect(filteredRequests.every((request) => request.searchParams.get("stage") === "situation")).toBe(true);
+    expect(
+      filteredRequests.every(
+        (request) => request.searchParams.get("stage") === "situation",
+      ),
+    ).toBe(true);
     const staleCursorIndex = filteredRequests.findIndex(
       (request) => request.searchParams.get("cursor") === firstCursor,
     );
     expect(staleCursorIndex).toBeGreaterThanOrEqual(0);
     expect(
-      filteredRequests.slice(staleCursorIndex + 1).some((request) => !request.searchParams.has("cursor")),
-    ).toBe(true);
+      filteredRequests[staleCursorIndex + 1]?.searchParams.has("cursor"),
+    ).toBe(false);
+    await expect
+      .poll(() =>
+        responses.some(
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            "schemaId" in value &&
+            value.schemaId === ERROR_SCHEMA,
+        ),
+      )
+      .toBe(true);
+    await expect
+      .poll(() =>
+        responses.some(
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            "schemaId" in value &&
+            value.schemaId === PAGE_SCHEMA,
+        ),
+      )
+      .toBe(true);
   });
 });
