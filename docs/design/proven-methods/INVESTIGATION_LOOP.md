@@ -20,7 +20,9 @@ collaboration database with privacy filtering and replay-safe write intents.
 The browser receives only versioned, server-confirmed metadata and never gains
 storage, authorization, or audit authority.
 
-### Operations Queue coordination foundation (local integration)
+<a id="operations-queue-coordination-foundation-partial-existing-server-integration"></a>
+
+### Operations Queue coordination foundation (partial; existing server integration)
 
 This is local integration of the existing collaboration server, not a
 separate local server.
@@ -98,7 +100,7 @@ record or issue coordination actions. Priority, SLA, due dates, ranking,
 leases, presence locks, automatic assignment/membership, and automatic
 status changes remain explicit non-goals.
 
-<a id="named-row-self-action-seam-local-integration"></a>
+<a id="named-row-self-action-seam-partial-merged-on-main-qualification-pending"></a>
 
 #### Named-row self-action seam (partial; merged on main, qualification pending)
 
