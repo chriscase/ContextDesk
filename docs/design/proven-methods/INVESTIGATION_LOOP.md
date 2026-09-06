@@ -130,7 +130,8 @@ that active case.
 
 #### Named-row privileged participant assign and release seam (accepted design)
 
-The next bounded packet lets a caller who holds
+The next bounded implementation packet after this docs freeze lets a
+caller who holds
 `investigation:coordinate` `assign_participant` or `release_participant`
 from a named Operations row through the existing
 `POST /api/cases/:id/coordination` route and the existing
@@ -138,11 +139,12 @@ from a named Operations row through the existing
 Privileged actions still require `targetIdentityId`. They do not use
 `investigation:write` as the action gate.
 
-This chapter does not authorize that write. It is a future
-design/implementation packet, not permission to add Runtime, server, UI,
-or test code. Operations rows have no privileged assign/release control
-until a later Runtime named-row command/controller and Operations UI/e2e
-land. There is still no queue-side writer, operations write endpoint,
+This chapter ships no privileged queue controls and does not authorize
+that write. It is a future design/implementation packet, not permission
+to add Runtime, server, UI, or test code until these docs are merged
+and a separate bounded implementation packet is issued. Operations rows
+have no privileged assign/release control until that later Runtime
+named-row command/controller and Operations UI/e2e land. There is still no queue-side writer, operations write endpoint,
 GET-per-row coordination fetch, people-search API, or automatic
 membership change.
 
@@ -171,9 +173,10 @@ Prerequisites, inspected rather than invented:
   ready coordination GET. `InvestigationRuntimeCommands.queryOperationsQueue`
   remains the read-only queue query. There is no public named-row
   `assign_participant` / `release_participant` command on
-  `InvestigationRuntimeCommands`. This freeze is a prerequisite for a
-  later additive Runtime command; this chapter does not invent that
-  command name.
+  `InvestigationRuntimeCommands`. This freeze is a docs prerequisite for
+  a later additive Runtime command after these docs merge and a separate
+  bounded implementation packet is issued; this chapter does not invent
+  that command name.
 - **Server handlers.** `registerCaseRoutes` in
   [`routes.ts`](../../../collab/server/src/modules/cases/routes.ts)
   registers anonymous GET and POST handlers on
@@ -196,6 +199,9 @@ Exact packet order:
 3. Runtime named-row privileged command/controller (later packet; the
    public command name is not invented here);
 4. Operations UI/e2e.
+
+Steps 2-4 wait until these docs are merged and a separate bounded
+implementation packet is issued.
 
 When that later Runtime seam exists, the client must reuse the current
 coordination rules: `investigation:coordinate`; server-time membership
@@ -252,7 +258,7 @@ view state.
 | Model/detector proposal review queue (findings + report sections) | **Partial** | [`proposed.rs`](../../../crates/cd-core/src/investigations/proposed.rs) and [`report.rs`](../../../crates/cd-core/src/investigations/report.rs)                                       | Ranking, walkthrough, and deeper-analysis requests remain #646 |
 | Operations Queue shell area | **Partial** | `/operations`, `operations-queue/`, the public Runtime V1 read-only queue command/resource, server-owned scope counts/order/cursor, canonical Operations-only URL query, query-only saved views, and bundled Help article; named-row `claim_self`/`release_self` is a separate write seam through `applyNamedCoordinationSelf` (merged Operations Queue self-coordination slice on `main`) | PR #1152 is a qualification-only e2e lane; hosted acceptance is not claimed until that lane is accepted or closed. No queue-side writer, operations endpoint, GET-per-row coordination, active-case retargeting, or privileged assignment/release |
 | Named-row Operations self-action (`claim_self` / `release_self`) | **Partial** | Merged Operations Queue self-coordination slice on `main`: public Runtime command `applyNamedCoordinationSelf`, `useNamedCoordinationSelf`, Operations Queue row Claim/Release controls, existing case coordination envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:write` for self actions), durable idempotency, and `POST /api/cases/:id/coordination`. Separate from the read-only queue query. | Hosted e2e acceptance is not claimed until PR #1152 is accepted or closed. Privileged `assign_participant`/`release_participant` stay off Operations rows |
-| Named-row Operations privileged assign/release (`assign_participant` / `release_participant`) | **Accepted design** | Existing case coordination action request/success/changed/refused envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:coordinate` for privileged actions), `CaseV1.participants` on the joined queue row, `CaseService.coordinateInvestigation`, and `POST /api/cases/:id/coordination` | No public named-row privileged Runtime command exists; this freeze is a prerequisite rather than inventing that command name. No Operations privileged write UI, queue-side writer, operations write endpoint, GET-per-row coordination, active-case retargeting, people-search API, or automatic membership. This row is not an authorization to code |
+| Named-row Operations privileged assign/release (`assign_participant` / `release_participant`) | **Accepted design** | Existing case coordination action request/success/changed/refused envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:coordinate` for privileged actions), `CaseV1.participants` on the joined queue row, `CaseService.coordinateInvestigation`, and `POST /api/cases/:id/coordination` | No public named-row privileged Runtime command exists; this freeze is a docs prerequisite rather than inventing that command name. No Operations privileged write UI, queue-side writer, operations write endpoint, GET-per-row coordination, active-case retargeting, people-search API, or automatic membership. This docs change ships no privileged queue controls and does not authorize code until these docs are merged and a separate bounded implementation packet is issued |
 | Accepted-state report projection + Markdown export   | **Partial** | [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) `assemble_investigation_report`                                                                                  | Fuller #532 vocabulary, patches/undo, claim detection, HTML/PDF, evidence appendix |
 | War Room Log workbench saved views, bookmarks, and share-safe locators | **Local integration** | Contract `investigation-workbench.ts` (`cd-collab.log_workbench_view.v1`, `cd-collab.log_workbench_bookmark.v1`, `cd-collab.log_workbench_share_safe_locator.v1`), server `collab/server/src/modules/workbench/`, Analyze UI `LogWorkbench.tsx`. Saved views are records, not authorization tokens, and applying one restores filters, time window, sort, grouping, and display. Locators reauthorize on resolve; unauthorized and missing tokens are indistinguishable and disclose no path. Stale bookmarks explain rather than silently retarget. Chronology pins are insert-only (`pinned` vs recorded `human_ground_truth`). Resource kinds `log_workbench_view`, `log_workbench_bookmark`, and `log_workbench_line` route to Analyze `triage-log-workbench`. | Desktop Explorer saved-view recipes remain a separate path. Heuristic text similarity is labeled and cannot be recorded as ground truth. |
 | War Room investigation-scoped file/ZIP/directory intake | **Local integration** | Collab contract `investigation-corpus-intake.ts`, module `collab/server/src/modules/corpus-intake/`, Capture UI `CorpusIntakePanel.tsx`. Concurrent distinct-key commits sharing a digest reclassify `duplicateDigest` after the per-digest lock from live artifacts. ZIP names consult language bit `0x0800`: valid UTF-8 with the bit is accepted, unmarked non-ASCII and invalid UTF-8 are rejected as `invalid_encoding`, local/central encoding-bit disagreement is malformed, and Info-ZIP Unicode Path extra `0x7075` is the canonical name when present (CRC-checked, fatal UTF-8; traversal or local/central extra disagreement fail closed). | Parallel portable-investigation restore lane is out of scope here. PostgreSQL `withAtomic` now binds store queries to the transaction via async-local storage. In-process post-promote timeline/audit failure rolls back staged blobs. A process crash after promote and before COMMIT leaves a durable pending-write journal; recovery reclaims those hashes when no artifact, snapshot, or imported-run row references them, and keeps them when a later retry or successful COMMIT does. |
@@ -720,7 +726,7 @@ responsive rails are not fully represented by DOM tests.
 | Multi-corpus investigation     | **Planned/non-goal for current slice**             | Document schema permits bounded links                                 | Complete multi-corpus UI/semantics                                 |
 | War Room archive / restore     | **Shipped**                                        | Archiving is a confirmed, explained act separate from the ordinary status control; `POST /api/cases/:id/lifecycle` locks and reloads the case, status history, and legal hold, compares the caller's parsed preview state, re-evaluates the action, and writes only the server-derived target in the same case/timeline/audit transaction. Changed preview state returns the versioned `lifecycle_changed` 409 with the current parsed lifecycle and no action writes; action refusal is also a bounded, versioned 409 carrying investigation identity and action; the generic status route rejects archive and restore with a bounded 400 command pointer. Legal hold refuses archive fail-closed and never refuses restore; restore returns to the most recent recorded working status, falling back to `open` and never to `resolved`. Archived investigations leave the working list with the withheld count reported beside the control that reveals them | No delete path of any kind, and none implied — deletion is answered, not offered. No retention-policy expiry, no bulk archive, no scheduled archival, and no archive-driven storage reclamation. `retentionClass` remains recorded and unused |
 | Operations Queue named-row self-action | **Partial** | Merged Operations Queue self-coordination slice on `main`: `claim_self` / `release_self` reuse `POST /api/cases/:id/coordination` and `investigation:write` through `applyNamedCoordinationSelf` as a separate write seam from the read-only queue query; Investigation First active-case coordination stays on that same route | Hosted e2e acceptance is not claimed until PR #1152 is accepted or closed. No queue-side writer or operations write endpoint, no GET-per-row coordination, no active-case retargeting, no privileged participant assignment/release from queue rows |
-| Operations Queue named-row privileged assign/release | **Accepted design** | `assign_participant` / `release_participant` reuse `POST /api/cases/:id/coordination` and `investigation:coordinate`; membership is `CaseV1.participants` on the joined queue row, with server-time eligibility in `CaseService.coordinateInvestigation` | No public named-row privileged Runtime command exists; this freeze is a prerequisite rather than inventing that command name. No Operations privileged write UI, queue-side writer, operations write endpoint, GET-per-row coordination, active-case retargeting, people-search API, or automatic membership. This row is not an authorization to code |
+| Operations Queue named-row privileged assign/release | **Accepted design** | `assign_participant` / `release_participant` reuse `POST /api/cases/:id/coordination` and `investigation:coordinate`; membership is `CaseV1.participants` on the joined queue row, with server-time eligibility in `CaseService.coordinateInvestigation` | No public named-row privileged Runtime command exists; this freeze is a docs prerequisite rather than inventing that command name. No Operations privileged write UI, queue-side writer, operations write endpoint, GET-per-row coordination, active-case retargeting, people-search API, or automatic membership. This docs change ships no privileged queue controls and does not authorize code until these docs are merged and a separate bounded implementation packet is issued |
 
 ## 15. Reimplementation notes
 

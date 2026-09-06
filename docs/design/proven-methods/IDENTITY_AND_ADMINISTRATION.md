@@ -34,7 +34,7 @@ password verification does use fixed-length timing-safe comparison.
 | Capability | Status | Evidence | Residual |
 | --- | --- | --- | --- |
 | Canonical profile contract (mutable display profile split from immutable attribution identity) | Shipped | [`user-profile.ts`](../../../collab/contracts/src/user-profile.ts), [`user-profile.test.ts`](../../../collab/contracts/src/user-profile.test.ts) | Real Unicode confusable-skeleton/homoglyph detection is not attempted — only C0/DEL/zero-width/bidi-control/BOM code points are blocked |
-| Capability model v2/v3 (12 fine-grained capabilities, role-default matrix, additive local grants) | **Partial**: contract and server route enforcement accepted; read-only queue query and `/operations` UI are integrated in this product, not a separate local server; named-row `claim_self`/`release_self` through `applyNamedCoordinationSelf` is a separate write seam (merged Operations Queue self-coordination slice on `main`); **local integration** enforces `catalog:write` on strict source-catalog CAS routes before parse/store access | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`routes.ts`](../../../collab/server/src/modules/catalog/routes.ts), [`OperationsQueue.tsx`](../../../collab/web/src/operations-queue/OperationsQueue.tsx) | `investigation:coordinate` is enforced for privileged coordination actions. Named-row `claim_self`/`release_self` from a queue row is a separate write seam on the existing case coordination route (`investigation:write`), not a queue capability, not a queue-query write, and not a `investigation:coordinate` grant. PR #1152 is a qualification-only e2e lane; hosted acceptance is not claimed until that lane is accepted or closed. Named-row `assign_participant`/`release_participant` from a queue row is accepted design on that same case route (`investigation:coordinate`), not a queue capability, not a people-search API, and not an authorization to code. Strict catalog mutations are `catalog:write` only; `run:strategies` and `admin:users` are not catalog mutation authority. |
+| Capability model v2/v3 (12 fine-grained capabilities, role-default matrix, additive local grants) | **Partial**: contract and server route enforcement accepted; read-only queue query and `/operations` UI are integrated in this product, not a separate local server; named-row `claim_self`/`release_self` through `applyNamedCoordinationSelf` is a separate write seam (merged Operations Queue self-coordination slice on `main`); **local integration** enforces `catalog:write` on strict source-catalog CAS routes before parse/store access | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`routes.ts`](../../../collab/server/src/modules/catalog/routes.ts), [`OperationsQueue.tsx`](../../../collab/web/src/operations-queue/OperationsQueue.tsx) | `investigation:coordinate` is enforced for privileged coordination actions. Named-row `claim_self`/`release_self` from a queue row is a separate write seam on the existing case coordination route (`investigation:write`), not a queue capability, not a queue-query write, and not a `investigation:coordinate` grant. PR #1152 is a qualification-only e2e lane; hosted acceptance is not claimed until that lane is accepted or closed. Named-row `assign_participant`/`release_participant` from a queue row is accepted design on that same case route (`investigation:coordinate`) for the next implementation packet after this docs freeze, not a queue capability, not a people-search API, not a privileged queue control in this freeze, and not an authorization to code until these docs are merged and a separate bounded implementation packet is issued. Strict catalog mutations are `catalog:write` only; `run:strategies` and `admin:users` are not catalog mutation authority. |
 | Memory + PostgreSQL profile/grant stores with CAS, login-time sync, fail-closed identity collision | Shipped | [`store.ts`](../../../collab/server/src/modules/people/store.ts), [`store.contract-tests.ts`](../../../collab/server/src/modules/people/store.contract-tests.ts) run against both backends by [`store.test.ts`](../../../collab/server/src/modules/people/store.test.ts) and [`pg-store.test.ts`](../../../collab/server/src/modules/people/pg-store.test.ts) | None known |
 | Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | Directory-removal auto-disable remains a named residual in §16; browser mutation CSRF is now system-wide (see §10) |
 | Domain-wide session authorization and suspension fail-closed | Shipped | [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`authorization.adversarial.test.ts`](../../../collab/server/src/modules/authz/authorization.adversarial.test.ts), War Room domain/admin `routes.ts` files | None known |
@@ -281,7 +281,8 @@ privileged participant actions; Investigation First already applies
 those actions on the mounted case.
 
 The next named-row privileged participant assign/release seam is
-**accepted design** on that same singular route. A later packet may let
+**accepted design** on that same singular route for the next
+implementation packet after this docs freeze. A later packet may let
 a caller who holds `investigation:coordinate` post existing
 `assign_participant` / `release_participant` envelopes from a named
 Operations row. Server-time membership eligibility stays
@@ -297,8 +298,10 @@ self-only; `applyCoordinationAction` is active-case only).
 `/api/cases/:id/coordination` that call
 `CaseService.getInvestigationCoordination` and
 `CaseService.coordinateInvestigation`; those handlers have no exported
-names, and this freeze does not invent them. This paragraph is a future
-design/implementation packet, not an authorization to code.
+names, and this freeze does not invent them. This paragraph ships no
+privileged queue controls. It is a future design/implementation packet,
+not an authorization to code until these docs are merged and a separate
+bounded implementation packet is issued.
 
 Capability model v2 and the closed capability enum carried by `session.v1`
 are one coupled deployment unit. Mixed old/new contract and server deployments
@@ -586,9 +589,11 @@ commissioned to satisfy:
    e2e lane; hosted acceptance is not claimed until that lane is
    accepted or closed. Named-row `assign_participant` / `release_participant` from an
    Operations row is accepted design on that same case route
-   (`investigation:coordinate`); this chapter does not authorize that
-   later packet and does not invent a Runtime command name or
-   people-search API. `catalog:write` has a local integration on the
+   (`investigation:coordinate`) for the next implementation packet after
+   this docs freeze; this chapter ships no privileged queue controls and
+   does not authorize code until these docs are merged and a separate
+   bounded implementation packet is issued, and does not invent a Runtime
+   command name or people-search API. `catalog:write` has a local integration on the
    existing collaboration server protecting strict source catalog
    mutations before request parsing or store access. §4, §5, §6.2, §6.3.
 4. **Admin operations.** Shipped - list/search, effective roles/
