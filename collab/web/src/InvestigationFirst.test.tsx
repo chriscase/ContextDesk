@@ -226,7 +226,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     claim.focus();
     fireEvent.click(claim);
     expect(applyCoordinationAction).not.toHaveBeenCalled();
-    const confirmClaim = screen.getByRole("button", { name: "Confirm claim coordination" });
+    const confirmClaim = await screen.findByRole("button", { name: "Confirm claim coordination" });
     confirmClaim.focus();
     fireEvent.click(confirmClaim);
     await waitFor(() => expect(applyCoordinationAction).toHaveBeenCalledTimes(1));
