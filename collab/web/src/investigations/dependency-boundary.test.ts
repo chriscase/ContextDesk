@@ -376,6 +376,7 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
   const sharedRoot = resolve(strategiesRoot, "shared");
   const sharedIndexModule = resolve(sharedRoot, "index");
   const runtimeHandoffModule = resolve(strategiesRoot, "runtime-handoff");
+  const runtimeCoordinationModule = resolve(strategiesRoot, "runtime-coordination");
   const collectionQueryAdapterModule = resolve(strategiesRoot, "collection-query");
 
   const relativeInvestigationPath = relative(INVESTIGATIONS_ROOT, path).split(sep).join("/");
@@ -384,11 +385,31 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
   const layer: InvestigationLayer = inStrategies ? "strategy" : "runtime";
   const strategyMatch = /^strategies\/([^/]+)\//.exec(relativeInvestigationPath);
   const strategyId = strategyMatch?.[1] ?? null;
+  const isRuntimeCoordinationAdapter = sameModule(path, runtimeCoordinationModule);
 
   for (const imported of importsOf(source)) {
     const resolvedModule = modulePath(path, imported.module);
     const location = `${repositoryPath(path)}:${imported.line}`;
     const importsProtectedApi = /(?:^|\/)protected-api(?:\.js)?$/.test(imported.module);
+
+    // This adapter lives directly under strategies/, so it has no strategyId
+    // and cannot inherit the directory-scoped strategy import rule below. Keep
+    // its complete dependency surface explicit and fail closed as it evolves.
+    if (
+      isRuntimeCoordinationAdapter
+      && imported.module !== "react"
+      && !(
+        resolvedModule
+        && (
+          sameModule(resolvedModule, publicModule)
+          || sameModule(resolvedModule, sharedIndexModule)
+        )
+      )
+    ) {
+      violations.push(
+        `${location} imports ${imported.module}, which is not an approved root runtime-coordination adapter dependency`,
+      );
+    }
 
     if (importsProtectedApi && !sameModule(path, gatewayModule)) {
       violations.push(`${location} imports protected-api outside runtime/gateway.ts`);
@@ -436,6 +457,7 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
       const isStrategyContract = sameModule(resolvedModule, contractModule);
       const isSharedIndex = sameModule(resolvedModule, sharedIndexModule);
       const isRuntimeHandoffAdapter = sameModule(resolvedModule, runtimeHandoffModule);
+      const isRuntimeCoordinationAdapter = sameModule(resolvedModule, runtimeCoordinationModule);
       const isCollectionQueryAdapter = sameModule(resolvedModule, collectionQueryAdapterModule);
 
       if (
@@ -454,10 +476,11 @@ function investigationImportViolations(path: string, source: ts.SourceFile): str
         && !isStrategyContract
         && !isSharedIndex
         && !isRuntimeHandoffAdapter
+        && !isRuntimeCoordinationAdapter
         && !isCollectionQueryAdapter
       ) {
         violations.push(
-          `${location} imports investigation behavior outside runtime/public.ts, strategies/contract.ts, the exact shared/index.ts presentation surface, or the reviewed runtime-handoff adapter`,
+          `${location} imports investigation behavior outside runtime/public.ts, strategies/contract.ts, the exact shared/index.ts presentation surface, or the reviewed runtime adapters`,
         );
       }
     }
@@ -820,8 +843,9 @@ describe("Investigation Runtime V1 dependency boundary", () => {
         'import type { InvestigationStrategyShellProps } from "../contract.js";',
         'import { StrategyPanel } from "../shared/index.js";',
         'import { RuntimeHandoffPanel } from "../runtime-handoff.js";',
+        'import { RuntimeCoordinationControl } from "../runtime-coordination.js";',
         'import { localModel } from "./model.js";',
-        "export const used = [useInvestigationRuntime, StrategyPanel, RuntimeHandoffPanel, localModel];",
+        "export const used = [useInvestigationRuntime, StrategyPanel, RuntimeHandoffPanel, RuntimeCoordinationControl, localModel];",
         "export type Props = InvestigationStrategyShellProps;",
       ].join("\n"),
     );
@@ -832,7 +856,7 @@ describe("Investigation Runtime V1 dependency boundary", () => {
       'import { StrategyPanel } from "../shared/presentation.js";\nexport { StrategyPanel };',
     );
     expect(investigationImportViolations(keystonePath, privateSharedImport)).toEqual([
-      "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.tsx:1 imports investigation behavior outside runtime/public.ts, strategies/contract.ts, the exact shared/index.ts presentation surface, or the reviewed runtime-handoff adapter",
+      "collab/web/src/investigations/strategies/keystone/KeystoneStrategy.tsx:1 imports investigation behavior outside runtime/public.ts, strategies/contract.ts, the exact shared/index.ts presentation surface, or the reviewed runtime adapters",
     ]);
 
     const sharedPath = resolve(
@@ -854,6 +878,40 @@ describe("Investigation Runtime V1 dependency boundary", () => {
       "collab/web/src/investigations/strategies/shared/presentation.tsx:2 imports authority or strategy behavior into the presentation-only shared kit",
       "collab/web/src/investigations/strategies/shared/presentation.tsx:3 imports authority or strategy behavior into the presentation-only shared kit",
     ]);
+  });
+
+  it("keeps the root runtime-coordination adapter on its exact public dependency seam", () => {
+    const adapterPath = resolve(
+      INVESTIGATIONS_ROOT,
+      "strategies/runtime-coordination.tsx",
+    );
+    const adapterSourceText = readFileSync(adapterPath, "utf8");
+
+    expect(
+      investigationImportViolations(adapterPath, parseSourceText(adapterPath, adapterSourceText)),
+      "the adapter's present imports must remain inside its exact allowlist",
+    ).toEqual([]);
+
+    const forbiddenImports = [
+      "../runtime/controllers/index.js",
+      "../runtime/gateway.js",
+      "../../../../server/src/index.js",
+      "../../protected-api.js",
+      "./keystone/KeystoneStrategy.js",
+    ] as const;
+    for (const specifier of forbiddenImports) {
+      const mutatedSource = parseSourceText(
+        adapterPath,
+        `${adapterSourceText}\nimport ${JSON.stringify(specifier)};`,
+      );
+      const adapterViolations = investigationImportViolations(adapterPath, mutatedSource)
+        .filter((violation) => violation.includes(
+          "not an approved root runtime-coordination adapter dependency",
+        ));
+
+      expect(adapterViolations, `${specifier} escaped the root adapter allowlist`).toHaveLength(1);
+      expect(adapterViolations[0]).toContain(`imports ${specifier},`);
+    }
   });
 
   it("rejects a production import of either testkit and allows test-only use", () => {

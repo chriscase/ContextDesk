@@ -5,6 +5,85 @@
   color: var(--fg);
 }
 
+/* Shared, transport-free coordination presentation. */
+.strategy-kit__coordination {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface-deep);
+}
+
+.strategy-kit__coordination-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
+.strategy-kit__coordination-heading h3,
+.strategy-kit__coordination-heading p,
+.strategy-kit__coordination-facts p,
+.strategy-kit__coordination-status,
+.strategy-kit__coordination-notice p,
+.strategy-kit__coordination-confirm p,
+.strategy-kit__coordination-actions details > p { margin: 0; }
+.strategy-kit__coordination-heading p,
+.strategy-kit__coordination-heading > span,
+.strategy-kit__coordination-status,
+.strategy-kit__coordination-person > span,
+.strategy-kit__coordination-actions details > p { color: var(--muted); font-size: 0.82rem; line-height: 1.45; }
+.strategy-kit__coordination-heading > span { flex: 0 0 auto; }
+.strategy-kit__coordination-facts { display: grid; gap: 0.65rem; }
+.strategy-kit__coordination-empty { font-weight: 650; }
+.strategy-kit__coordination-person { display: flex; flex-wrap: wrap; gap: 0.35rem 0.65rem; align-items: baseline; min-width: 0; }
+.strategy-kit__coordination-person strong,
+.strategy-kit__coordination-person code { overflow-wrap: anywhere; }
+.strategy-kit__coordination-person > span { flex-basis: 100%; }
+.strategy-kit__coordination-facts dl { display: flex; flex-wrap: wrap; gap: 0.55rem 1.2rem; margin: 0; }
+.strategy-kit__coordination-facts dl div { min-width: 0; }
+.strategy-kit__coordination-facts dt { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.strategy-kit__coordination-facts dd { margin: 0.12rem 0 0; overflow-wrap: anywhere; }
+.strategy-kit__coordination-actions,
+.strategy-kit__coordination-privileged-actions,
+.strategy-kit__coordination-confirm,
+.strategy-kit__coordination-retry { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: center; }
+.strategy-kit__coordination-actions details { flex-basis: 100%; padding-top: 0.25rem; border-top: 1px solid var(--line-soft); }
+.strategy-kit__coordination-actions summary { width: fit-content; color: var(--accent); cursor: pointer; font-weight: 650; }
+.strategy-kit__coordination-actions details > p { margin: 0.55rem 0; max-width: 54rem; }
+.strategy-kit__coordination-actions label { display: grid; gap: 0.25rem; max-width: 34rem; color: var(--muted); font-size: 0.78rem; }
+.strategy-kit__coordination-actions select { min-width: min(22rem, 100%); max-width: 100%; }
+.strategy-kit__coordination-privileged-actions { margin-top: 0.6rem; }
+.strategy-kit__coordination-confirm { padding: 0.75rem; border: 1px solid var(--line-soft); border-inline-start: 3px solid var(--warning); border-radius: 0.45rem; }
+.strategy-kit__coordination-confirm p { flex-basis: 100%; line-height: 1.45; }
+.strategy-kit__coordination-notice { padding: 0.65rem 0.75rem; border: 1px solid color-mix(in srgb, var(--danger) 48%, var(--border)); border-radius: 0.45rem; color: var(--danger); }
+.strategy-kit__coordination-retry { margin-top: 0.6rem; }
+.strategy-kit__coordination-success { margin: 0; color: var(--success); }
+.strategy-kit__coordination :where(button, select) { max-width: 100%; border: 1px solid var(--border); border-radius: 0.4rem; padding: 0.48rem 0.7rem; background: transparent; color: var(--fg); font: inherit; overflow-wrap: anywhere; }
+.strategy-kit__coordination button:disabled { opacity: 0.55; cursor: not-allowed; }
+.strategy-kit__coordination :where(button, select, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 390px) {
+  .strategy-kit__coordination-heading,
+  .strategy-kit__coordination-actions,
+  .strategy-kit__coordination-privileged-actions,
+  .strategy-kit__coordination-confirm,
+  .strategy-kit__coordination-retry { display: grid; align-items: stretch; }
+  .strategy-kit__coordination-heading > span { justify-self: start; }
+  .strategy-kit__coordination :where(button, select) { width: 100%; }
+}
+
+@media (forced-colors: active) {
+  .strategy-kit__coordination,
+  .strategy-kit__coordination-confirm,
+  .strategy-kit__coordination-notice,
+  .strategy-kit__coordination :where(button, select) { border-color: CanvasText; }
+  .strategy-kit__coordination :where(button, select, summary):focus-visible,
+  .strategy-kit__coordination :where(button, select, summary):focus { outline: 3px solid Highlight; outline-offset: 2px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .strategy-kit__coordination,
+  .strategy-kit__coordination * { animation: none !important; transition: none !important; }
+}
+
 .strategy-kit__hero,
 .strategy-kit__panel-heading,
 .strategy-kit__notice,

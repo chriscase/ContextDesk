@@ -30,6 +30,27 @@ export type {
 export { HandoffPanel } from "./HandoffPanel.js";
 export type { HandoffPanelProps } from "./HandoffPanel.js";
 
+export {
+  createCoordinationIdempotencyKey,
+  selectCoordinationResourceView,
+} from "./coordination.js";
+export type {
+  CoordinationAction,
+  CoordinationActionCommand,
+  CoordinationActionInput,
+  CoordinationActionResult,
+  CoordinationFailureKind,
+  CoordinationIdentityRecord,
+  CoordinationMutationState,
+  CoordinationParticipantHint,
+  CoordinationReadError,
+  CoordinationRecord,
+  CoordinationResourceState,
+  CoordinationResourceView,
+} from "./coordination.js";
+export { CoordinationControl } from "./CoordinationControl.js";
+export type { CoordinationControlProps } from "./CoordinationControl.js";
+
 export { EvidenceAnnotationWorkspace } from "./EvidenceAnnotationWorkspace.js";
 export type { EvidenceAnnotationWorkspaceProps } from "./EvidenceAnnotationWorkspace.js";
 

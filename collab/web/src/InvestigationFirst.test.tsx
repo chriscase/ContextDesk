@@ -1,8 +1,11 @@
 import {
+  INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+  INVESTIGATION_COORDINATION_SCHEMA_ID,
   INVESTIGATION_LIFECYCLE_ACTION_SUCCESS_SCHEMA_ID,
   type ArtifactV1,
   type CaseV1,
   type ContributionV1,
+  type InvestigationCoordinationV1,
   type InvestigationLifecycleActionSuccessV1,
   type InvestigationLifecycleV1,
 } from "@cd-collab/contracts";
@@ -46,6 +49,27 @@ const CONTRIBUTOR_CAPABILITIES = [
   "investigation:write",
 ] as const;
 
+const COORDINATOR_CAPABILITIES = [
+  "investigation:read",
+  "investigation:coordinate",
+] as const;
+
+function makeCoordination(
+  investigation: CaseV1 = makePopulatedCase(),
+  coordinator: InvestigationCoordinationV1["coordinator"] = null,
+  revision = coordinator === null ? 0 : 3,
+): InvestigationCoordinationV1 {
+  return {
+    schemaId: INVESTIGATION_COORDINATION_SCHEMA_ID,
+    investigationId: investigation.id,
+    coordinator,
+    revision,
+    updatedAt: coordinator === null ? null : "2026-09-04T18:30:00.000Z",
+    updatedBy: coordinator,
+    archived: investigation.status === "archived",
+  };
+}
+
 function makeLifecycle(investigation: CaseV1): InvestigationLifecycleV1 {
   const template = investigation.status === "archived" ? makeRestoreAllowedLifecycle() : makeArchiveAllowedLifecycle();
   return { ...template, investigationId: investigation.id, status: investigation.status };
@@ -87,6 +111,16 @@ function renderStrategy(options: {
   shell?: Partial<InvestigationStrategyShellProps>;
 } = {}) {
   const gateway = options.gateway ?? createInvestigationGatewayDouble();
+  Object.assign(gateway, {
+    getCoordination: gateway.getCoordination ?? vi.fn(async (investigationId: string) => gatewayOk({
+      ...makeCoordination(),
+      investigationId,
+    })),
+    applyCoordinationAction: gateway.applyCoordinationAction ?? vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "unexpected" as const },
+    })),
+  });
   const shell = { ...shellDefaults, ...options.shell };
   let runtimeProps = {
     identityKey: options.identityKey ?? "alice",
@@ -130,6 +164,262 @@ function renderStrategy(options: {
 afterEach(() => cleanup());
 
 describe("Investigation First Runtime V1 presentation", () => {
+  it("mounts one coordination control between the detail header and missing-details strip", async () => {
+    const gateway = createInvestigationGatewayDouble();
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    const detailHeading = await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    const coordinationHeading = await screen.findByRole("heading", { name: "Coordination" });
+    const missingDetails = screen.getByText("Core context is recorded");
+    expect(detailHeading.compareDocumentPosition(coordinationHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(coordinationHeading.compareDocumentPosition(missingDetails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getAllByRole("heading", { name: "Coordination" })).toHaveLength(1);
+    expect(screen.getByText("No coordinator is recorded.")).toBeTruthy();
+    expect(gateway.getCoordination).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let an evidence mutation make coordination busy or failed", async () => {
+    const upload = createDeferred<GatewayResult<ReturnType<typeof makeEvidenceUploadSuccess>>>();
+    const gateway = createInvestigationGatewayDouble({
+      uploadEvidence: vi.fn(() => upload.promise),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: RUNTIME_FIXTURE_IDS.populatedCase } });
+    const claim = await screen.findByRole("button", { name: "Claim coordination" });
+    fireEvent.change(screen.getByLabelText("File"), {
+      target: { files: [new File(["evidence"], "evidence.txt", { type: "text/plain" })] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to evidence inventory" }));
+    await screen.findByRole("button", { name: "Adding…" });
+    const coordination = screen.getByRole("heading", { name: "Coordination" }).closest("section");
+    expect(coordination?.getAttribute("aria-busy")).toBe("false");
+    expect((claim as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => upload.resolve(gatewayUnavailable()));
+    await screen.findByRole("button", { name: "Add to evidence inventory" });
+    expect(coordination?.querySelector('[role="alert"]')).toBeNull();
+    expect((claim as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("claims through the runtime adapter only after confirmation and reports success", async () => {
+    const current = makePopulatedCase();
+    const applyCoordinationAction = vi.fn(async (
+      investigationId: string,
+      input: Parameters<NonNullable<InvestigationGateway["applyCoordinationAction"]>>[1],
+      options: Parameters<NonNullable<InvestigationGateway["applyCoordinationAction"]>>[2],
+    ) => gatewayOk({
+      schemaId: INVESTIGATION_COORDINATION_ACTION_SUCCESS_SCHEMA_ID,
+      investigationId,
+      action: "claim_self" as const,
+      targetIdentityId: null,
+      previousRevision: input.expectedRevision,
+      previousCoordinator: null,
+      applied: {
+        ...makeCoordination(current, { identityId: options.actorIdentityId, username: "alice" }, input.expectedRevision + 1),
+        updatedBy: { identityId: options.actorIdentityId, username: "alice" },
+      },
+    }));
+    const gateway = createInvestigationGatewayDouble({
+      getCoordination: vi.fn(async () => gatewayOk(makeCoordination(current))),
+      applyCoordinationAction,
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: current.id } });
+    const claim = await screen.findByRole("button", { name: "Claim coordination" });
+    claim.focus();
+    fireEvent.click(claim);
+    expect(applyCoordinationAction).not.toHaveBeenCalled();
+    const confirmClaim = await screen.findByRole("button", { name: "Confirm claim coordination" });
+    confirmClaim.focus();
+    fireEvent.click(confirmClaim);
+    await waitFor(() => expect(applyCoordinationAction).toHaveBeenCalledTimes(1));
+    const input = applyCoordinationAction.mock.calls[0]?.[1];
+    expect(input).toMatchObject({ action: "claim_self", expectedRevision: 0 });
+    expect(input).not.toHaveProperty("targetIdentityId");
+    expect(input?.idempotencyKey).toMatch(/^coordination-/u);
+    expect(await screen.findByText("Coordination was updated.")).toBeTruthy();
+    const coordination = screen.getByRole("heading", { name: "Coordination" }).closest("section");
+    expect(within(coordination!).getByText("alice", { selector: "code" })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Coordination" }));
+  });
+
+  it("keeps participant authority separate and can release an unlisted recorded holder", async () => {
+    const current = makePopulatedCase();
+    const former = { identityId: "identity-former", username: "former-user" };
+    const applyCoordinationAction = vi.fn<NonNullable<InvestigationGateway["applyCoordinationAction"]>>(async () => ({
+      ok: false as const,
+      error: { kind: "unexpected" as const },
+    }));
+    const gateway = createInvestigationGatewayDouble({
+      getCoordination: vi.fn(async () => gatewayOk(makeCoordination(current, former))),
+      applyCoordinationAction,
+    });
+    renderStrategy({
+      gateway,
+      capabilities: COORDINATOR_CAPABILITIES,
+      shell: { focusCaseId: current.id },
+    });
+    expect(await screen.findByText("former-user")).toBeTruthy();
+    expect(screen.getByText("Not listed among this investigation’s recorded participants.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Release my coordination" })).toBeNull();
+    fireEvent.click(screen.getByText("Participant coordination"));
+    fireEvent.click(screen.getByRole("button", { name: "Release recorded coordinator" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm release recorded coordinator" }));
+    await waitFor(() => expect(applyCoordinationAction).toHaveBeenCalledTimes(1));
+    expect(applyCoordinationAction.mock.calls[0]?.[1]).toMatchObject({
+      action: "release_participant",
+      targetIdentityId: former.identityId,
+      expectedRevision: 3,
+    });
+  });
+
+  it("retains an explicit unknown outcome through refresh and replays its exact runtime request", async () => {
+    const current = makePopulatedCase();
+    const refresh = createDeferred<GatewayResult<InvestigationCoordinationV1>>();
+    const applyCoordinationAction = vi.fn<NonNullable<InvestigationGateway["applyCoordinationAction"]>>(async () => ({
+      ok: false as const,
+      error: { kind: "unavailable" as const, status: 503 as const, reason: "commit_outcome_unknown" as const },
+    }));
+    const getCoordination = vi.fn()
+      .mockResolvedValueOnce(gatewayOk(makeCoordination(current)))
+      .mockImplementationOnce(() => refresh.promise);
+    const gateway = createInvestigationGatewayDouble({
+      getCoordination,
+      applyCoordinationAction,
+    });
+    renderStrategy({
+      gateway,
+      capabilities: COORDINATOR_CAPABILITIES,
+      shell: { focusCaseId: current.id },
+    });
+    await screen.findByText("No coordinator is recorded.");
+    fireEvent.click(screen.getByText("Participant coordination"));
+    fireEvent.click(screen.getByRole("button", { name: "Review participant assignment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm participant assignment" }));
+    await screen.findByRole("button", { name: "Retry exact action" });
+    const first = applyCoordinationAction.mock.calls[0]?.[1];
+    const unknownCopy = /may have been recorded/iu;
+    expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh coordination" }));
+    await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
+    expect((screen.getByRole("button", { name: "Retry exact action" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+
+    await act(async () => refresh.resolve(gatewayOk(makeCoordination(current))));
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Retry exact action" }) as HTMLButtonElement).disabled).toBe(false);
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
+    expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry exact action" }));
+    await waitFor(() => expect(applyCoordinationAction).toHaveBeenCalledTimes(2));
+    expect(applyCoordinationAction.mock.calls[1]?.[1]).toEqual(first);
+    expect(screen.getByRole("alert").textContent).toMatch(unknownCopy);
+  });
+
+  it.each([
+    ["identity", { identityKey: "alice-session-v2" }],
+    ["authority", { authorityKey: "alice-authority-v2" }],
+  ] as const)(
+    "drops an unknown coordination retry when only the %s epoch changes",
+    async (_epoch, runtimeUpdate) => {
+      const current = makePopulatedCase();
+      const getCoordination = vi.fn(async () => gatewayOk(makeCoordination(current)));
+      const applyCoordinationAction = vi.fn<NonNullable<InvestigationGateway["applyCoordinationAction"]>>(async () => ({
+        ok: false as const,
+        error: {
+          kind: "unavailable" as const,
+          status: 503 as const,
+          reason: "commit_outcome_unknown" as const,
+        },
+      }));
+      const view = renderStrategy({
+        gateway: createInvestigationGatewayDouble({
+          getCoordination,
+          applyCoordinationAction,
+        }),
+        shell: { focusCaseId: current.id },
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Claim coordination" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm claim coordination" }));
+      expect(await screen.findByText(/may have been recorded/iu)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Retry exact action" })).toBeTruthy();
+      expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+
+      view.rerender({}, runtimeUpdate);
+      expect(screen.queryByText(/may have been recorded/iu)).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry exact action" })).toBeNull();
+      expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(getCoordination).toHaveBeenCalledTimes(2));
+      await screen.findByRole("button", { name: "Claim coordination" });
+      expect(screen.queryByText(/may have been recorded/iu)).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry exact action" })).toBeNull();
+      expect(applyCoordinationAction).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["coordination_changed", "coordination_refused"] as const)(
+    "maps %s into current-record review copy without leaking refusal detail",
+    async (kind) => {
+      const current = makePopulatedCase();
+      const latest = makeCoordination(current, { identityId: "identity-ravi", username: "ravi" }, 6);
+      const gateway = createInvestigationGatewayDouble({
+        getCoordination: vi.fn(async () => gatewayOk(makeCoordination(current))),
+        applyCoordinationAction: vi.fn(async () => ({
+          ok: false as const,
+          error: kind === "coordination_changed"
+            ? {
+                kind,
+                status: 409 as const,
+                investigationId: current.id,
+                action: "claim_self" as const,
+                targetIdentityId: null,
+                current: latest,
+              }
+            : {
+                kind,
+                status: 409 as const,
+                investigationId: current.id,
+                action: "claim_self" as const,
+                targetIdentityId: null,
+                reason: "occupied" as const,
+                detail: "server-owned bounded detail must not become presentation copy",
+                current: latest,
+              },
+        })),
+      });
+      renderStrategy({ gateway, shell: { focusCaseId: current.id } });
+      fireEvent.click(await screen.findByRole("button", { name: "Claim coordination" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm claim coordination" }));
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toMatch(/current recorded facts/iu);
+      if (kind === "coordination_refused") {
+        expect(alert.textContent).not.toContain("server-owned bounded detail");
+      }
+      expect(screen.getByText("ravi", { selector: "strong" })).toBeTruthy();
+      expect(screen.getByText("Revision 6")).toBeTruthy();
+    },
+  );
+
+  it.each([401, 403, 404] as const)("fails the parent detail closed after coordination POST %i", async (status) => {
+    const current = makePopulatedCase();
+    const gateway = createInvestigationGatewayDouble({
+      getCoordination: vi.fn(async () => gatewayOk(makeCoordination(current))),
+      applyCoordinationAction: vi.fn(async () => ({
+        ok: false as const,
+        error: status === 404
+          ? { kind: "not_found" as const, status }
+          : { kind: "auth_lost" as const, status },
+      })),
+    });
+    renderStrategy({ gateway, shell: { focusCaseId: current.id } });
+    fireEvent.click(await screen.findByRole("button", { name: "Claim coordination" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm claim coordination" }));
+    expect(await screen.findByRole("heading", { name: "Investigation unavailable" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Coordination" })).toBeNull();
+  });
+
   it("keeps fast capture above browse and distinguishes existing from new combo values", async () => {
     renderStrategy();
     const create = await screen.findByRole("heading", { name: "Create an investigation" });
@@ -851,6 +1141,9 @@ describe("Investigation First Runtime V1 presentation", () => {
     await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
     expect(screen.queryByRole("heading", { name: "Add evidence" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Archive investigation" })).toBeNull();
+    expect(screen.getByText("No coordinator is recorded.")).toBeTruthy();
+    expect(screen.getByText(/coordination.*current access/iu)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /claim coordination|participant assignment|release.*coordination/iu })).toBeNull();
     cleanup();
     const archived = { ...makePopulatedCase(), status: "archived" as const };
     renderStrategy({
@@ -861,6 +1154,13 @@ describe("Investigation First Runtime V1 presentation", () => {
     await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
     expect(screen.queryByRole("heading", { name: "Add evidence" })).toBeNull();
     expect(screen.getByText("Archiving and restoring are unavailable in this view.")).toBeTruthy();
+    expect(screen.getByText("Coordination cannot change while this investigation is archived.")).toBeTruthy();
+    cleanup();
+    const readOnlyCase = makePopulatedCase();
+    renderStrategy({ readOnly: true, shell: { focusCaseId: readOnlyCase.id } });
+    await screen.findByRole("heading", { name: "Checkout latency after 4.8.0 rollout" });
+    expect(screen.getByText("No coordinator is recorded.")).toBeTruthy();
+    expect(screen.getByText(/coordination.*current access/iu)).toBeTruthy();
   });
 
   it("offers a viewer browsing the list no create heading and no submit control", async () => {
@@ -950,6 +1250,7 @@ describe("Investigation First Runtime V1 presentation", () => {
     expect(gateway.listEvidence).not.toHaveBeenCalled();
     expect(gateway.listContributions).not.toHaveBeenCalled();
     expect(gateway.getLifecycle).not.toHaveBeenCalled();
+    expect(gateway.getCoordination).not.toHaveBeenCalled();
 
     // A terminal arrival still lands the reader on the heading exactly once.
     await waitFor(() => expect(document.activeElement).toBe(heading));
