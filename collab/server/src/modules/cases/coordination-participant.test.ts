@@ -141,16 +141,34 @@ function participantIds(row: { participants: { identityId: string }[] }): string
   return row.participants.map((participant) => participant.identityId).sort();
 }
 
+type CaseCoordinationSnapshot = {
+  status: string;
+  legalHold: boolean;
+  participants: string[];
+  coordination: unknown;
+  timeline: number;
+};
+
+async function snapshotCase(
+  caseStore: MemoryCaseStore,
+  caseId: string,
+): Promise<CaseCoordinationSnapshot> {
+  const row = await caseStore.getCase(caseId);
+  return {
+    status: row!.status,
+    legalHold: row!.legalHold,
+    participants: participantIds(row!),
+    coordination: await caseStore.getInvestigationCoordination(caseId),
+    timeline: (await caseStore.listTimeline(caseId)).filter(
+      (event) => event.kind === "investigation_coordination_changed",
+    ).length,
+  };
+}
+
 async function expectUnchangedCase(
   caseStore: MemoryCaseStore,
   caseId: string,
-  before: {
-    status: string;
-    legalHold: boolean;
-    participants: string[];
-    coordination: unknown;
-    timeline: number;
-  },
+  before: CaseCoordinationSnapshot,
 ) {
   const row = await caseStore.getCase(caseId);
   expect(row).toMatchObject({ status: before.status, legalHold: before.legalHold });
@@ -159,6 +177,31 @@ async function expectUnchangedCase(
   expect((await caseStore.listTimeline(caseId)).filter(
     (event) => event.kind === "investigation_coordination_changed",
   )).toHaveLength(before.timeline);
+}
+
+function coordinationSuccessIntentCount(caseStore: MemoryCaseStore, caseId: string): number {
+  const captured = caseStore.capture() as {
+    investigationCoordinationSuccessIntents?: [string, { caseId: string }][];
+  };
+  return (captured.investigationCoordinationSuccessIntents ?? []).filter(
+    ([, row]) => row.caseId === caseId,
+  ).length;
+}
+
+function dropRecordedParticipant(
+  caseStore: MemoryCaseStore,
+  caseId: string,
+  identityId: string,
+) {
+  const captured = caseStore.capture() as {
+    cases: [string, { participants: { identityId: string; username: string }[] }][];
+  };
+  const capturedCase = captured.cases.find(([id]) => id === caseId)?.[1];
+  expect(capturedCase).toBeDefined();
+  capturedCase!.participants = capturedCase!.participants.filter(
+    (participant) => participant.identityId !== identityId,
+  );
+  caseStore.restore(captured);
 }
 
 class UnknownOnceAfterCommitCaseStore extends MemoryCaseStore {
@@ -453,15 +496,7 @@ describe("privileged participant coordination service", () => {
         request(created.id, "assign_participant", "coord-assign-03", 0, eveActor.id),
         "test",
       );
-      const before = {
-        status: (await caseStore.getCase(created.id))!.status,
-        legalHold: (await caseStore.getCase(created.id))!.legalHold,
-        participants: participantIds((await caseStore.getCase(created.id))!),
-        coordination: await caseStore.getInvestigationCoordination(created.id),
-        timeline: (await caseStore.listTimeline(created.id)).filter(
-          (event) => event.kind === "investigation_coordination_changed",
-        ).length,
-      };
+      const before = await snapshotCase(caseStore, created.id);
       await expect(domain.coordinateInvestigation(
         created.id,
         erinActor,
@@ -484,15 +519,7 @@ describe("privileged participant coordination service", () => {
   it("refuses a target that is not a recorded participant", async () => {
     await withService(async ({ domain, caseStore }) => {
       const created = await seedMembers(domain);
-      const before = {
-        status: (await caseStore.getCase(created.id))!.status,
-        legalHold: (await caseStore.getCase(created.id))!.legalHold,
-        participants: participantIds((await caseStore.getCase(created.id))!),
-        coordination: await caseStore.getInvestigationCoordination(created.id),
-        timeline: (await caseStore.listTimeline(created.id)).filter(
-          (event) => event.kind === "investigation_coordination_changed",
-        ).length,
-      };
+      const before = await snapshotCase(caseStore, created.id);
       await expect(domain.coordinateInvestigation(
         created.id,
         erinActor,
@@ -504,6 +531,39 @@ describe("privileged participant coordination service", () => {
         refusal: expect.objectContaining({ reason: "target_not_eligible" }),
       });
       await expectUnchangedCase(caseStore, created.id, before);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(0);
+    });
+  });
+
+  it("refuses assign_participant of a nonparticipant before a stale CAS check", async () => {
+    await withService(async ({ domain, caseStore }) => {
+      const created = await seedMembers(domain);
+      await domain.coordinateInvestigation(
+        created.id,
+        erinActor,
+        false,
+        request(created.id, "assign_participant", "coord-assign-stale-eligible", 0, eveActor.id),
+        "test",
+      );
+      const before = await snapshotCase(caseStore, created.id);
+      expect(before.coordination).toMatchObject({ revision: 1, coordinator: { identityId: eveActor.id } });
+      await expect(domain.coordinateInvestigation(
+        created.id,
+        erinActor,
+        false,
+        request(created.id, "assign_participant", "coord-missing-stale", 0, MISSING_IDENTITY_ID),
+        "test",
+      )).rejects.toMatchObject({
+        name: "InvestigationCoordinationRefusedError",
+        refusal: expect.objectContaining({ reason: "target_not_eligible" }),
+      });
+      await expectUnchangedCase(caseStore, created.id, before);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
+      expect(await caseStore.getInvestigationCoordinationSuccessIntent(
+        created.id,
+        erinActor.id,
+        "coord-missing-stale",
+      )).toBeNull();
     });
   });
 
@@ -519,6 +579,7 @@ describe("privileged participant coordination service", () => {
       );
 
       await caseStore.updateCaseMeta({ id: created.id, status: "archived" });
+      const archived = await snapshotCase(caseStore, created.id);
       await expect(domain.coordinateInvestigation(
         created.id,
         erinActor,
@@ -529,18 +590,13 @@ describe("privileged participant coordination service", () => {
         name: "InvestigationCoordinationRefusedError",
         refusal: expect.objectContaining({ reason: "investigation_archived" }),
       });
+      await expectUnchangedCase(caseStore, created.id, archived);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
       await caseStore.updateCaseMeta({ id: created.id, status: "open" });
 
-      const captured = caseStore.capture() as {
-        cases: [string, { participants: { identityId: string; username: string }[] }][];
-      };
-      const capturedCase = captured.cases.find(([id]) => id === created.id)?.[1];
-      expect(capturedCase).toBeDefined();
-      capturedCase!.participants = capturedCase!.participants.filter(
-        (participant) => participant.identityId !== eveActor.id,
-      );
-      caseStore.restore(captured);
-
+      dropRecordedParticipant(caseStore, created.id, eveActor.id);
+      const holder = await snapshotCase(caseStore, created.id);
+      expect(holder.participants).not.toContain(eveActor.id);
       await expect(domain.coordinateInvestigation(
         created.id,
         erinActor,
@@ -561,7 +617,9 @@ describe("privileged participant coordination service", () => {
         name: "InvestigationCoordinationRefusedError",
         refusal: expect.objectContaining({ reason: "target_not_coordinator" }),
       });
+      await expectUnchangedCase(caseStore, created.id, holder);
 
+      const stale = await snapshotCase(caseStore, created.id);
       await expect(domain.coordinateInvestigation(
         created.id,
         erinActor,
@@ -569,6 +627,8 @@ describe("privileged participant coordination service", () => {
         request(created.id, "release_participant", "coord-stale", 0, eveActor.id),
         "test",
       )).rejects.toBeInstanceOf(InvestigationCoordinationChangedError);
+      await expectUnchangedCase(caseStore, created.id, stale);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
     });
   });
 
@@ -606,7 +666,7 @@ describe("privileged participant coordination service", () => {
   });
 
   it("replays an exact success and refuses an intent mismatch", async () => {
-    await withService(async ({ domain }) => {
+    await withService(async ({ domain, caseStore }) => {
       const created = await seedMembers(domain);
       const payload = request(
         created.id,
@@ -622,6 +682,10 @@ describe("privileged participant coordination service", () => {
         payload,
         "test",
       );
+      const afterSuccess = await snapshotCase(caseStore, created.id);
+      expect(afterSuccess.timeline).toBe(1);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
+
       const replay = await domain.coordinateInvestigation(
         created.id,
         erinActor,
@@ -630,6 +694,9 @@ describe("privileged participant coordination service", () => {
         "test",
       );
       expect(replay).toBe(first);
+      await expectUnchangedCase(caseStore, created.id, afterSuccess);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
+
       await expect(domain.coordinateInvestigation(
         created.id,
         erinActor,
@@ -649,6 +716,17 @@ describe("privileged participant coordination service", () => {
       )).rejects.toMatchObject({
         name: "InvestigationCoordinationRefusedError",
         refusal: expect.objectContaining({ reason: "idempotency_intent_mismatch" }),
+      });
+      await expectUnchangedCase(caseStore, created.id, afterSuccess);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
+      expect(await caseStore.getInvestigationCoordinationSuccessIntent(
+        created.id,
+        erinActor.id,
+        "coord-idempotent",
+      )).toMatchObject({
+        action: "assign_participant",
+        targetIdentityId: eveActor.id,
+        successJson: first,
       });
     });
   });
@@ -692,22 +770,41 @@ describe("privileged participant coordination service", () => {
     }, caseStore);
   });
 
-  it("locks, re-reads, evaluates, derives the target, then writes", async () => {
+  it("locks, re-reads, evaluates, derives a fallback release, then writes", async () => {
     const caseStore = new OrderRecordingCaseStore();
     await withService(async ({ domain }) => {
       const created = await seedMembers(domain);
+      await domain.coordinateInvestigation(
+        created.id,
+        erinActor,
+        false,
+        request(created.id, "assign_participant", "coord-order-assign", 0, eveActor.id),
+        "test",
+      );
+      dropRecordedParticipant(caseStore, created.id, eveActor.id);
+      const before = await snapshotCase(caseStore, created.id);
+      expect(before.participants).not.toContain(eveActor.id);
+      expect(before.coordination).toMatchObject({
+        coordinator: { identityId: eveActor.id, username: "eve" },
+        revision: 1,
+      });
+
       caseStore.order.length = 0;
       const success = parseSuccess(await domain.coordinateInvestigation(
         created.id,
         erinActor,
         false,
-        request(created.id, "assign_participant", "coord-order", 0, eveActor.id),
+        request(created.id, "release_participant", "coord-order", 1, eveActor.id),
         "test",
       ));
-      expect(success.applied.coordinator).toEqual({
-        identityId: eveActor.id,
-        username: "eve",
+      expect(success).toMatchObject({
+        action: "release_participant",
+        targetIdentityId: eveActor.id,
+        previousCoordinator: { identityId: eveActor.id, username: "eve" },
+        applied: { coordinator: null, revision: 2, archived: false },
       });
+      expect(participantIds((await caseStore.getCase(created.id))!)).toEqual(before.participants);
+      expect((await caseStore.getCase(created.id))?.status).toBe(before.status);
       expect(caseStore.order).toEqual([
         "withAtomic",
         "lockCase",
@@ -796,6 +893,88 @@ describe("privileged participant coordination HTTP", () => {
     });
   });
 
+  it("keeps self claim/release on write and gates privileged assign/release on coordinate", async () => {
+    await withApp(async ({ app, domain, caseStore }) => {
+      const { alice, erin, created } = await seedHttpCase(app, domain);
+      const lockCase = vi.spyOn(caseStore, "lockCase");
+
+      const privilegedAsMember = await postCoordination(
+        app,
+        alice,
+        created.id,
+        request(created.id, "assign_participant", "http-alice-privileged-assign", 0, eveActor.id),
+      );
+      expect(privilegedAsMember.statusCode).toBe(403);
+      expect(JSON.parse(privilegedAsMember.body)).toEqual({
+        schemaId: AUTH_ERROR_SCHEMA_ID,
+        error: "forbidden",
+      });
+      expect(lockCase).not.toHaveBeenCalled();
+      expect(await caseStore.getInvestigationCoordination(created.id)).toBeNull();
+
+      const claimed = await postCoordination(
+        app,
+        alice,
+        created.id,
+        request(created.id, "claim_self", "http-alice-claim", 0),
+      );
+      expect(claimed.statusCode).toBe(200);
+      expect(parseInvestigationCoordinationActionSuccess(JSON.parse(claimed.body))).toMatchObject({
+        action: "claim_self",
+        applied: {
+          coordinator: { identityId: expect.stringMatching(/^usr-[a-f0-9]{32}$/), username: "alice" },
+          revision: 1,
+        },
+      });
+      expect(lockCase).toHaveBeenCalled();
+      lockCase.mockClear();
+
+      const privilegedReleaseAsHolder = await postCoordination(
+        app,
+        alice,
+        created.id,
+        request(created.id, "release_participant", "http-alice-privileged-release", 1, aliceActor.id),
+      );
+      expect(privilegedReleaseAsHolder.statusCode).toBe(403);
+      expect(JSON.parse(privilegedReleaseAsHolder.body)).toEqual({
+        schemaId: AUTH_ERROR_SCHEMA_ID,
+        error: "forbidden",
+      });
+      expect(lockCase).not.toHaveBeenCalled();
+      expect(await caseStore.getInvestigationCoordination(created.id)).toMatchObject({
+        coordinator: { username: "alice" },
+        revision: 1,
+      });
+
+      const released = await postCoordination(
+        app,
+        alice,
+        created.id,
+        request(created.id, "release_self", "http-alice-release", 1),
+      );
+      expect(released.statusCode).toBe(200);
+      expect(parseInvestigationCoordinationActionSuccess(JSON.parse(released.body)).applied)
+        .toMatchObject({ coordinator: null, revision: 2 });
+
+      const assigned = await postCoordination(
+        app,
+        erin,
+        created.id,
+        request(created.id, "assign_participant", "http-erin-assign", 2, eveActor.id),
+      );
+      expect(assigned.statusCode).toBe(200);
+      const privilegedRelease = await postCoordination(
+        app,
+        erin,
+        created.id,
+        request(created.id, "release_participant", "http-erin-release", 3, eveActor.id),
+      );
+      expect(privilegedRelease.statusCode).toBe(200);
+      expect(parseInvestigationCoordinationActionSuccess(JSON.parse(privilegedRelease.body)).applied)
+        .toMatchObject({ coordinator: null, revision: 4 });
+    });
+  });
+
   it("refuses a second active assignment of the current holder", async () => {
     await withApp(async ({ app, domain, caseStore }) => {
       const { erin, created } = await seedHttpCase(app, domain);
@@ -856,6 +1035,7 @@ describe("privileged participant coordination HTTP", () => {
       );
 
       await caseStore.updateCaseMeta({ id: created.id, status: "archived" });
+      const archivedBefore = await snapshotCase(caseStore, created.id);
       const archived = await postCoordination(
         app,
         erin,
@@ -865,8 +1045,10 @@ describe("privileged participant coordination HTTP", () => {
       expect(archived.statusCode).toBe(409);
       expect(parseInvestigationCoordinationActionRefused(JSON.parse(archived.body)).reason)
         .toBe("investigation_archived");
+      await expectUnchangedCase(caseStore, created.id, archivedBefore);
       await caseStore.updateCaseMeta({ id: created.id, status: "open" });
 
+      const holderBefore = await snapshotCase(caseStore, created.id);
       const holder = await postCoordination(
         app,
         erin,
@@ -883,11 +1065,13 @@ describe("privileged participant coordination HTTP", () => {
       );
       expect(parseInvestigationCoordinationActionRefused(JSON.parse(wrongHolder.body)).reason)
         .toBe("target_not_coordinator");
+      await expectUnchangedCase(caseStore, created.id, holderBefore);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
     });
   });
 
   it("returns 409 coordination_changed for a stale expectedRevision", async () => {
-    await withApp(async ({ app, domain }) => {
+    await withApp(async ({ app, domain, caseStore }) => {
       const { erin, created } = await seedHttpCase(app, domain);
       await postCoordination(
         app,
@@ -895,6 +1079,7 @@ describe("privileged participant coordination HTTP", () => {
         created.id,
         request(created.id, "assign_participant", "http-assign-05", 0, eveActor.id),
       );
+      const before = await snapshotCase(caseStore, created.id);
       const changed = await postCoordination(
         app,
         erin,
@@ -907,11 +1092,13 @@ describe("privileged participant coordination HTTP", () => {
         action: "release_participant",
         current: { revision: 1 },
       });
+      await expectUnchangedCase(caseStore, created.id, before);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
     });
   });
 
   it("replays the exact success body and refuses an intent mismatch", async () => {
-    await withApp(async ({ app, domain }) => {
+    await withApp(async ({ app, domain, caseStore }) => {
       const { erin, created } = await seedHttpCase(app, domain);
       const payload = request(
         created.id,
@@ -922,6 +1109,19 @@ describe("privileged participant coordination HTTP", () => {
       );
       const first = await postCoordination(app, erin, created.id, payload);
       expect(first.statusCode).toBe(200);
+      const afterSuccess = await snapshotCase(caseStore, created.id);
+      const storedIntent = await caseStore.getInvestigationCoordinationSuccessIntent(
+        created.id,
+        erinActor.id,
+        "http-idempotent",
+      );
+      expect(afterSuccess.timeline).toBe(1);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
+      expect(storedIntent).toMatchObject({
+        action: "assign_participant",
+        targetIdentityId: eveActor.id,
+      });
+
       const replay = await postCoordination(
         app,
         erin,
@@ -930,6 +1130,9 @@ describe("privileged participant coordination HTTP", () => {
       );
       expect(replay.statusCode).toBe(200);
       expect(replay.body).toBe(first.body);
+      await expectUnchangedCase(caseStore, created.id, afterSuccess);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
+
       const mismatch = await postCoordination(
         app,
         erin,
@@ -939,6 +1142,22 @@ describe("privileged participant coordination HTTP", () => {
       expect(mismatch.statusCode).toBe(409);
       expect(parseInvestigationCoordinationActionRefused(JSON.parse(mismatch.body)).reason)
         .toBe("idempotency_intent_mismatch");
+      const targetMismatch = await postCoordination(
+        app,
+        erin,
+        created.id,
+        request(created.id, "assign_participant", "http-idempotent", 1, aliceActor.id),
+      );
+      expect(targetMismatch.statusCode).toBe(409);
+      expect(parseInvestigationCoordinationActionRefused(JSON.parse(targetMismatch.body)).reason)
+        .toBe("idempotency_intent_mismatch");
+      await expectUnchangedCase(caseStore, created.id, afterSuccess);
+      expect(coordinationSuccessIntentCount(caseStore, created.id)).toBe(1);
+      expect(await caseStore.getInvestigationCoordinationSuccessIntent(
+        created.id,
+        erinActor.id,
+        "http-idempotent",
+      )).toEqual(storedIntent);
     });
   });
 
@@ -1093,15 +1312,7 @@ describe("privileged participant coordination HTTP", () => {
       const success = await postCoordination(app, erin, created.id, payload);
       expect(success.statusCode).toBe(200);
 
-      const captured = caseStore.capture() as {
-        cases: [string, { participants: { identityId: string; username: string }[] }][];
-      };
-      const capturedCase = captured.cases.find(([id]) => id === created.id)?.[1];
-      expect(capturedCase).toBeDefined();
-      capturedCase!.participants = capturedCase!.participants.filter(
-        (participant) => participant.identityId !== erinActor.id,
-      );
-      caseStore.restore(captured);
+      dropRecordedParticipant(caseStore, created.id, erinActor.id);
 
       const afterMembershipLoss = await postCoordination(
         app,
