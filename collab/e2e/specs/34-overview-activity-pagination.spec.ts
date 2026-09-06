@@ -95,11 +95,14 @@ test.describe("Overview Activity Center cursor continuation", () => {
   }) => {
     const firstCursor = cursor(ACTIVITY_A, "2026-01-01T00:00:00.000Z", 1);
     const requests: URL[] = [];
-    const responses: unknown[] = [];
+    const responses: Array<{ status: number; body: unknown }> = [];
     browserPage.on("response", async (response) => {
       if (!response.url().includes("/api/investigation-activity")) return;
       try {
-        responses.push(await response.json());
+        responses.push({
+          status: response.status(),
+          body: await response.json(),
+        });
       } catch {
         // The browser may observe an aborted response while the fixture is closing.
       }
@@ -190,7 +193,6 @@ test.describe("Overview Activity Center cursor continuation", () => {
     await expect(
       browserPage.getByRole("button", { name: "Load more activity" }),
     ).toHaveCount(0);
-    await expect(browserPage).toHaveURL(/activityKind=investigation_created/u);
     const location = new URL(browserPage.url());
     expect(location.pathname).toBe("/");
     expect(location.hash).toBe("");
@@ -198,11 +200,12 @@ test.describe("Overview Activity Center cursor continuation", () => {
       "investigation_created",
     );
     expect(location.searchParams.has("cursor")).toBe(false);
-    const filteredRequests = requests.filter(
+    const firstFilteredRequestIndex = requests.findIndex(
       (request) =>
         request.searchParams.get("activityKind") === "investigation_created",
     );
-    expect(filteredRequests.length).toBeGreaterThan(0);
+    expect(firstFilteredRequestIndex).toBeGreaterThanOrEqual(0);
+    const filteredRequests = requests.slice(firstFilteredRequestIndex);
     expect(
       filteredRequests.every(
         (request) =>
@@ -218,11 +221,11 @@ test.describe("Overview Activity Center cursor continuation", () => {
     await expect
       .poll(() =>
         responses.some(
-          (value) =>
-            typeof value === "object" &&
-            value !== null &&
-            "schemaId" in value &&
-            value.schemaId === PAGE_SCHEMA,
+          ({ body }) =>
+            typeof body === "object" &&
+            body !== null &&
+            "schemaId" in body &&
+            body.schemaId === PAGE_SCHEMA,
         ),
       )
       .toBe(true);
@@ -233,13 +236,16 @@ test.describe("Overview Activity Center cursor continuation", () => {
   }) => {
     const firstCursor = cursor(ACTIVITY_A, "2026-01-01T00:00:00.000Z", 1);
     const requests: URL[] = [];
-    const responses: unknown[] = [];
+    const responses: Array<{ status: number; body: unknown }> = [];
     let stale = true;
     let restarted = false;
     browserPage.on("response", async (response) => {
       if (!response.url().includes("/api/investigation-activity")) return;
       try {
-        responses.push(await response.json());
+        responses.push({
+          status: response.status(),
+          body: await response.json(),
+        });
       } catch {
         // The browser may observe an aborted response while the fixture is closing.
       }
@@ -300,6 +306,9 @@ test.describe("Overview Activity Center cursor continuation", () => {
       "/?activityKind=investigation_created&stage=situation",
     );
     await expect(
+      browserPage.getByRole("link", { name: /opened the investigation/ }),
+    ).toHaveCount(1);
+    await expect(
       browserPage.getByRole("button", { name: "Load more activity" }),
     ).toBeVisible();
     await browserPage
@@ -317,9 +326,6 @@ test.describe("Overview Activity Center cursor continuation", () => {
     await expect(
       browserPage.getByRole("button", { name: "Load more activity" }),
     ).toBeVisible();
-    await expect(browserPage).toHaveURL(
-      /activityKind=investigation_created&stage=situation/u,
-    );
     const location = new URL(browserPage.url());
     expect(location.pathname).toBe("/");
     expect(location.hash).toBe("");
@@ -328,11 +334,12 @@ test.describe("Overview Activity Center cursor continuation", () => {
     );
     expect(location.searchParams.get("stage")).toBe("situation");
     expect(location.searchParams.has("cursor")).toBe(false);
-    const filteredRequests = requests.filter(
+    const firstFilteredRequestIndex = requests.findIndex(
       (request) =>
         request.searchParams.get("activityKind") === "investigation_created",
     );
-    expect(filteredRequests.length).toBeGreaterThan(0);
+    expect(firstFilteredRequestIndex).toBeGreaterThanOrEqual(0);
+    const filteredRequests = requests.slice(firstFilteredRequestIndex);
     expect(
       filteredRequests.every(
         (request) => request.searchParams.get("stage") === "situation",
@@ -342,28 +349,35 @@ test.describe("Overview Activity Center cursor continuation", () => {
       (request) => request.searchParams.get("cursor") === firstCursor,
     );
     expect(staleCursorIndex).toBeGreaterThanOrEqual(0);
+    expect(staleCursorIndex).toBeGreaterThan(0);
+    expect(
+      filteredRequests[staleCursorIndex - 1]?.searchParams.has("cursor"),
+    ).toBe(false);
     expect(
       filteredRequests[staleCursorIndex + 1]?.searchParams.has("cursor"),
     ).toBe(false);
     await expect
       .poll(() =>
         responses.some(
-          (value) =>
-            typeof value === "object" &&
-            value !== null &&
-            "schemaId" in value &&
-            value.schemaId === ERROR_SCHEMA,
+          ({ status, body }) =>
+            status === 400 &&
+            typeof body === "object" &&
+            body !== null &&
+            "schemaId" in body &&
+            body.schemaId === ERROR_SCHEMA &&
+            "error" in body &&
+            body.error === "stale_cursor",
         ),
       )
       .toBe(true);
     await expect
       .poll(() =>
         responses.some(
-          (value) =>
-            typeof value === "object" &&
-            value !== null &&
-            "schemaId" in value &&
-            value.schemaId === PAGE_SCHEMA,
+          ({ body }) =>
+            typeof body === "object" &&
+            body !== null &&
+            "schemaId" in body &&
+            body.schemaId === PAGE_SCHEMA,
         ),
       )
       .toBe(true);
