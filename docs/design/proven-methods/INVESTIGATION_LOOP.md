@@ -86,57 +86,124 @@ permits only React, shell location, the public runtime surface, and its own
 modules/CSS; contracts, private runtime controllers/gateway/provider,
 protected transport, and raw API routes are rejected.
 
-Operations is read-only. UI strategies remain investigation presentations and
-do not own this shell area. Saved views are query-only bookmarks of that
-shareable queue query; they do not record or issue coordination actions.
-Priority, SLA, due dates, ranking, leases, presence locks, automatic
-assignment/membership, and automatic status changes remain explicit non-goals.
+Operations is no longer read-only for named-row self-actions. UI
+strategies remain investigation presentations and do not own this shell
+area. Saved views are query-only bookmarks of that shareable queue
+query; they do not record or issue coordination actions. Priority, SLA,
+due dates, ranking, leases, presence locks, automatic
+assignment/membership, and automatic status changes remain explicit
+non-goals.
 
-#### Named-row self-action seam (accepted design)
+#### Named-row self-action seam (local integration)
 
-The next bounded packet lets an eligible participant `claim_self` or
-`release_self` from a named Operations row through the existing
-`POST /api/cases/:id/coordination` route and the existing
-`cd-collab.investigation_coordination_action_request.v1` envelope. Self
-actions still omit `targetIdentityId` and still require
-`investigation:write`. They do not use `investigation:coordinate`.
-
-This chapter does not claim that write exists. Operations rows remain
-read-only until a later Runtime named-row command/controller and
-Operations UI/e2e land. There is no queue-side writer or operations write
-endpoint, no GET-per-row coordination fetch, and no privileged
+Named-row `claim_self` / `release_self` controls are now integrated in
+Operations Queue. An eligible participant posts the existing
+`cd-collab.investigation_coordination_action_request.v1` envelope to
+`POST /api/cases/:id/coordination` through the public Runtime command
+`applyNamedCoordinationSelf`. Self actions still omit `targetIdentityId`
+and still require `investigation:write`. They do not use
+`investigation:coordinate`. There is no queue-side writer or operations
+write endpoint, no GET-per-row coordination fetch, and no privileged
 `assign_participant` / `release_participant` control on queue rows.
+
+PR [#1152](https://github.com/chriscase/ContextDesk/pull/1152) is a
+qualification-only e2e lane for that already-merged self-action. Hosted
+acceptance is not claimed while that lane is not green.
 
 Investigation First's existing active-case coordination command is
 unchanged: it continues to `GET` and `POST` `/api/cases/:id/coordination`
 for the mounted investigation, including privileged participant
 assignment and release for callers who hold `investigation:coordinate`.
-A named-row self-action must not retarget, select, refresh, or reopen
+A named-row self-action does not retarget, select, refresh, or reopen
 that active case.
+
+#### Named-row privileged participant assign and release seam (accepted design)
+
+The next bounded packet lets a caller who holds
+`investigation:coordinate` `assign_participant` or `release_participant`
+from a named Operations row through the existing
+`POST /api/cases/:id/coordination` route and the existing
+`cd-collab.investigation_coordination_action_request.v1` envelope.
+Privileged actions still require `targetIdentityId`. They do not use
+`investigation:write` as the action gate.
+
+This chapter does not authorize that write. It is a future
+design/implementation packet, not permission to add Runtime, server, UI,
+or test code. Operations rows have no privileged assign/release control
+until a later Runtime named-row command/controller and Operations UI/e2e
+land. There is still no queue-side writer, operations write endpoint,
+GET-per-row coordination fetch, people-search API, or automatic
+membership change.
+
+Prerequisites, inspected rather than invented:
+
+- **Membership source.** `InvestigationOperationsQueueRowV1.investigation`
+  is `CaseV1`. `CaseV1.participants` is `CaseParticipantV1[]` with
+  `{ identityId, username }` from
+  [`case.ts`](../../../collab/contracts/src/case.ts).
+  `buildInvestigationOperationsQueuePage` maps each joined case row
+  through `CaseService.toCase`, so recorded membership is already on the
+  queue row. Server-time eligibility is
+  `CaseService.coordinateInvestigation` after `lockCase`:
+  `row.participants.find` for actor and target, with
+  `eligibleParticipant` true only when that locked participant row
+  exists. `CaseService.isMember` is the same participant-id check. Queue
+  `CaseV1.participants` is recorded membership at query time, not live
+  eligibility. No people-search or membership-search API exists; none is
+  added.
+- **Runtime public command seams.**
+  `InvestigationRuntimeCommands.applyNamedCoordinationSelf`
+  (`InvestigationNamedCoordinationSelfCommand`: `investigationId`,
+  `claim_self` \| `release_self`, `idempotencyKey`) is the named-row
+  self-action command. `InvestigationRuntimeCommands.applyCoordinationAction`
+  is the active-case command for all four actions and requires a mounted
+  ready coordination GET. `InvestigationRuntimeCommands.queryOperationsQueue`
+  remains the read-only queue query. There is no public named-row
+  `assign_participant` / `release_participant` command on
+  `InvestigationRuntimeCommands`. This freeze is a prerequisite for a
+  later additive Runtime command; this chapter does not invent that
+  command name.
+- **Server handlers.** `registerCaseRoutes` in
+  [`routes.ts`](../../../collab/server/src/modules/cases/routes.ts)
+  registers anonymous GET and POST handlers on
+  `/api/cases/:id/coordination`. Those handlers have no exported
+  function names; this freeze does not invent them. GET calls
+  `CaseService.getInvestigationCoordination`. POST calls
+  `CaseService.coordinateInvestigation` after
+  `recognizedCoordinationAction`,
+  `INVESTIGATION_COORDINATION_ACTION_AUTHORITY[action]`, and
+  `requireCaseAccess`. The existing POST already authorizes, conceals,
+  evaluates, and records `assign_participant` / `release_participant`
+  without a new writer.
 
 Exact packet order:
 
 1. contracts/docs (this foundation);
 2. server proof that the existing concealed case coordination route
    already authorizes, conceals, evaluates, and records named-row
-   `claim_self` / `release_self` without a new writer;
-3. Runtime named-row command/controller;
+   `assign_participant` / `release_participant` without a new writer;
+3. Runtime named-row privileged command/controller (later packet; the
+   public command name is not invented here);
 4. Operations UI/e2e.
 
-When that Runtime seam exists, the client must reuse the current
-coordination rules: optimistic `expectedRevision` CAS from the joined
-row's `coordination.revision` projection; durable idempotency lookup `(investigationId,
-actorIdentityId, idempotencyKey)` with intent `action` plus
-`targetIdentityId`; a 503 `commit_outcome_unknown` freezes the exact
-payload and key for an explicit retry; `401`/`403` emit the global
-authentication-loss event and invalidate the protected tree; `404`
-conceals missing and inaccessible investigations without invalidating
-the session; archive and eligibility stay bounded
-`coordination_refused` reasons re-evaluated from current state; a
-successful parsed action refreshes the server-ordered queue rather than
-rewriting the local row. Privileged participant assignment/release,
-priority, SLA, due dates, ranking, leases, presence, automatic
-membership, and automatic status changes remain out of this seam.
+When that later Runtime seam exists, the client must reuse the current
+coordination rules: `investigation:coordinate`; server-time membership
+eligibility from the locked case-row participant set, not from the queue
+projection as authority; optimistic `expectedRevision` CAS from the
+joined row's `coordination.revision` projection; durable idempotency
+lookup `(investigationId, actorIdentityId, idempotencyKey)` with intent
+`action` plus `targetIdentityId`; a 503 `commit_outcome_unknown` freezes
+the exact payload and key for an explicit retry and is never retried
+automatically; `401`/`403` emit the global authentication-loss event and
+invalidate the protected tree; `404` conceals missing and inaccessible
+investigations without invalidating the session; archive and eligibility
+stay bounded `coordination_refused` reasons re-evaluated from current
+state; a successful parsed action refreshes the server-ordered queue
+rather than rewriting the local row; investigation focus, `focusCaseId`,
+the inactive Operations mount, and the canonical Operations URL query
+stay unchanged. Priority, SLA, due dates, ranking, leases, presence,
+automatic membership, automatic status changes, and a new search API
+remain out of this seam.
 
 ## 1. Problem
 
@@ -172,8 +239,9 @@ view state.
 | Explicit Apply and Restore prior view                | **Partial** | [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx) contains the core/UI path                                                                           | Native responsive/restart matrix remains                 |
 | Linked-chat `log_nav` proposal                       | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs), [`logNav.ts`](../../../desktop/src/lib/logExplorer/logNav.ts)                                         | It is navigation intent, not a durable finding proposal  |
 | Model/detector proposal review queue (findings + report sections) | **Partial** | [`proposed.rs`](../../../crates/cd-core/src/investigations/proposed.rs) and [`report.rs`](../../../crates/cd-core/src/investigations/report.rs)                                       | Ranking, walkthrough, and deeper-analysis requests remain #646 |
-| Read-only Operations Queue shell area | **Local integration** | `/operations`, `operations-queue/`, the public Runtime V1 queue command/resource, server-owned scope counts/order/cursor, canonical Operations-only URL query, query-only saved views, and bundled Help article | Named-row `claim_self`/`release_self` from a queue row is accepted design only; Operations remains read-only until the later Runtime command and UI packets. No queue-side writer, operations endpoint, GET-per-row coordination, active-case retargeting, or privileged assignment/release |
-| Named-row Operations self-action (`claim_self` / `release_self`) | **Accepted design** | Existing case coordination action request/success/changed/refused envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:write` for self actions), durable idempotency, and `POST /api/cases/:id/coordination` | Runtime named-row command/controller and Operations UI/e2e are later packets; this chapter does not claim those writes exist. Privileged `assign_participant`/`release_participant` stay off Operations rows |
+| Operations Queue shell area | **Local integration** | `/operations`, `operations-queue/`, the public Runtime V1 queue command/resource, server-owned scope counts/order/cursor, canonical Operations-only URL query, query-only saved views, bundled Help article, and named-row `claim_self`/`release_self` through `applyNamedCoordinationSelf` | PR #1152 is a qualification-only e2e lane; hosted acceptance is not claimed while that lane is not green. No queue-side writer, operations endpoint, GET-per-row coordination, active-case retargeting, or privileged assignment/release |
+| Named-row Operations self-action (`claim_self` / `release_self`) | **Local integration** | Public Runtime command `applyNamedCoordinationSelf`, `useNamedCoordinationSelf`, Operations Queue row Claim/Release controls, existing case coordination envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:write` for self actions), durable idempotency, and `POST /api/cases/:id/coordination` | Hosted e2e acceptance is not claimed while PR #1152 is not green. Privileged `assign_participant`/`release_participant` stay off Operations rows |
+| Named-row Operations privileged assign/release (`assign_participant` / `release_participant`) | **Accepted design** | Existing case coordination action request/success/changed/refused envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:coordinate` for privileged actions), `CaseV1.participants` on the joined queue row, `CaseService.coordinateInvestigation`, and `POST /api/cases/:id/coordination` | No public named-row privileged Runtime command exists; this freeze is a prerequisite rather than inventing that command name. No Operations privileged write UI, queue-side writer, operations write endpoint, GET-per-row coordination, active-case retargeting, people-search API, or automatic membership. This row is not an authorization to code |
 | Accepted-state report projection + Markdown export   | **Partial** | [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) `assemble_investigation_report`                                                                                  | Fuller #532 vocabulary, patches/undo, claim detection, HTML/PDF, evidence appendix |
 | War Room Log workbench saved views, bookmarks, and share-safe locators | **Local integration** | Contract `investigation-workbench.ts` (`cd-collab.log_workbench_view.v1`, `cd-collab.log_workbench_bookmark.v1`, `cd-collab.log_workbench_share_safe_locator.v1`), server `collab/server/src/modules/workbench/`, Analyze UI `LogWorkbench.tsx`. Saved views are records, not authorization tokens, and applying one restores filters, time window, sort, grouping, and display. Locators reauthorize on resolve; unauthorized and missing tokens are indistinguishable and disclose no path. Stale bookmarks explain rather than silently retarget. Chronology pins are insert-only (`pinned` vs recorded `human_ground_truth`). Resource kinds `log_workbench_view`, `log_workbench_bookmark`, and `log_workbench_line` route to Analyze `triage-log-workbench`. | Desktop Explorer saved-view recipes remain a separate path. Heuristic text similarity is labeled and cannot be recorded as ground truth. |
 | War Room investigation-scoped file/ZIP/directory intake | **Local integration** | Collab contract `investigation-corpus-intake.ts`, module `collab/server/src/modules/corpus-intake/`, Capture UI `CorpusIntakePanel.tsx`. Concurrent distinct-key commits sharing a digest reclassify `duplicateDigest` after the per-digest lock from live artifacts. ZIP names consult language bit `0x0800`: valid UTF-8 with the bit is accepted, unmarked non-ASCII and invalid UTF-8 are rejected as `invalid_encoding`, local/central encoding-bit disagreement is malformed, and Info-ZIP Unicode Path extra `0x7075` is the canonical name when present (CRC-checked, fatal UTF-8; traversal or local/central extra disagreement fail closed). | Parallel portable-investigation restore lane is out of scope here. PostgreSQL `withAtomic` now binds store queries to the transaction via async-local storage. In-process post-promote timeline/audit failure rolls back staged blobs. A process crash after promote and before COMMIT leaves a durable pending-write journal; recovery reclaims those hashes when no artifact, snapshot, or imported-run row references them, and keeps them when a later retry or successful COMMIT does. |
@@ -640,7 +708,8 @@ responsive rails are not fully represented by DOM tests.
 | Report assembly/export         | **Partial**                                        | Versioned accepted-state projection, deterministic Markdown, confirmation-gated bounded export | Fuller #532 vocabulary, report patches/undo, unsupported-claim detection, HTML/PDF, evidence appendix |
 | Multi-corpus investigation     | **Planned/non-goal for current slice**             | Document schema permits bounded links                                 | Complete multi-corpus UI/semantics                                 |
 | War Room archive / restore     | **Shipped**                                        | Archiving is a confirmed, explained act separate from the ordinary status control; `POST /api/cases/:id/lifecycle` locks and reloads the case, status history, and legal hold, compares the caller's parsed preview state, re-evaluates the action, and writes only the server-derived target in the same case/timeline/audit transaction. Changed preview state returns the versioned `lifecycle_changed` 409 with the current parsed lifecycle and no action writes; action refusal is also a bounded, versioned 409 carrying investigation identity and action; the generic status route rejects archive and restore with a bounded 400 command pointer. Legal hold refuses archive fail-closed and never refuses restore; restore returns to the most recent recorded working status, falling back to `open` and never to `resolved`. Archived investigations leave the working list with the withheld count reported beside the control that reveals them | No delete path of any kind, and none implied — deletion is answered, not offered. No retention-policy expiry, no bulk archive, no scheduled archival, and no archive-driven storage reclamation. `retentionClass` remains recorded and unused |
-| Operations Queue named-row self-action | **Accepted design** | `claim_self` / `release_self` reuse `POST /api/cases/:id/coordination` and `investigation:write`; Investigation First active-case coordination stays on that same route | No Runtime named-row command, no Operations write UI, no queue-side writer or operations write endpoint, no GET-per-row coordination, no active-case retargeting, no privileged participant assignment/release from queue rows |
+| Operations Queue named-row self-action | **Local integration** | `claim_self` / `release_self` reuse `POST /api/cases/:id/coordination` and `investigation:write` through `applyNamedCoordinationSelf`; Investigation First active-case coordination stays on that same route | Hosted e2e acceptance is not claimed while PR #1152 is not green. No queue-side writer or operations write endpoint, no GET-per-row coordination, no active-case retargeting, no privileged participant assignment/release from queue rows |
+| Operations Queue named-row privileged assign/release | **Accepted design** | `assign_participant` / `release_participant` reuse `POST /api/cases/:id/coordination` and `investigation:coordinate`; membership is `CaseV1.participants` on the joined queue row, with server-time eligibility in `CaseService.coordinateInvestigation` | No public named-row privileged Runtime command exists; this freeze is a prerequisite rather than inventing that command name. No Operations privileged write UI, queue-side writer, operations write endpoint, GET-per-row coordination, active-case retargeting, people-search API, or automatic membership. This row is not an authorization to code |
 
 ## 15. Reimplementation notes
 
