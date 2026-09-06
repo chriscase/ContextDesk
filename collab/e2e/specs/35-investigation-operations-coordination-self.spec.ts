@@ -1,5 +1,5 @@
 import { expect, test, type Request } from "@playwright/test";
-import { loginAs, uniqueTitle } from "../src/helpers.js";
+import { BROWSER_MUTATION_HEADERS, loginAs, uniqueTitle } from "../src/helpers.js";
 import { FIXTURE_USERS } from "../src/users.js";
 import {
   captureCoordinationRequests,
@@ -8,6 +8,7 @@ import {
   expectOnlyPublicCoordinationWrites,
   expectQueueUrlUnchanged,
   expectSelfBody,
+  QUEUE_QUERY_SCHEMA_ID,
 } from "../src/operations-queue-coordination-harness.js";
 
 test.describe.configure({ mode: "serial" });
@@ -110,20 +111,39 @@ test.describe("Operations Queue self-coordination browser qualification", () => 
 
   test("keeps a viewer read-only without emitting coordination writes", async ({ page }) => {
     test.setTimeout(120_000);
+    await loginAs(page, FIXTURE_USERS.dave);
+    const title = uniqueTitle("Operations viewer qualification");
+    const caseId = await createQualificationInvestigation(page, title);
+    const added = await page.request.post(`/api/cases/${caseId}/participants`, {
+      headers: BROWSER_MUTATION_HEADERS,
+      data: {
+        identityId: FIXTURE_USERS.carol.identityId,
+        username: FIXTURE_USERS.carol.username,
+      },
+    });
+    expect(added.ok(), await added.text()).toBeTruthy();
     await loginAs(page, FIXTURE_USERS.carol);
-    const requests: string[] = [];
+    const requests: Request[] = [];
     const listener = (request: Request) => {
-      const url = new URL(request.url());
-      if (url.pathname === "/api/cases" || url.pathname.endsWith("/coordination")) {
-        requests.push(`${request.method()} ${url.pathname}`);
-      }
+      requests.push(request);
     };
     page.on("request", listener);
     try {
-      await page.goto("/operations");
+      await page.goto(`/operations?q=${encodeURIComponent(title)}`);
       await expect(page.getByRole("heading", { name: "Operations Queue", exact: true })).toBeVisible();
+      await expect(page.getByRole("link", { name: title })).toBeVisible();
+      expect(requests.some((request) => {
+        const url = new URL(request.url());
+        return request.method() === "GET"
+          && url.pathname === "/api/cases"
+          && url.searchParams.get("schemaId") === QUEUE_QUERY_SCHEMA_ID;
+      })).toBe(true);
       await expect(page.getByRole("button", { name: /Claim for me|Release me/u })).toHaveCount(0);
-      expect(requests.filter((entry) => entry.startsWith("POST "))).toEqual([]);
+      expect(requests.filter((request) => {
+        const url = new URL(request.url());
+        return request.method() === "POST"
+          && (url.pathname === "/api/cases" || /\/api\/cases\/[^/]+\/coordination$/u.test(url.pathname));
+      })).toEqual([]);
     } finally {
       page.off("request", listener);
     }

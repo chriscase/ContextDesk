@@ -4,6 +4,9 @@ import { BROWSER_MUTATION_HEADERS } from "./helpers.js";
 export const COORDINATION_SCHEMA_ID =
   "cd-collab.investigation_coordination_action_request.v1";
 
+export const QUEUE_QUERY_SCHEMA_ID =
+  "cd-collab.investigation_operations_queue_query.v1";
+
 export interface CoordinationRequestBody {
   readonly schemaId: string;
   readonly investigationId: string;
