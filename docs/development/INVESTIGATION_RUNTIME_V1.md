@@ -23,16 +23,18 @@ integrity, authorization, and audit history on the server; the preview is an
 optional read seam so older strategy/test doubles remain valid.
 
 The Operations Queue UI is a **local integration** on the additive queue
-runtime seam. `/operations` mounts the same public provider used by
-Investigations with `active=false`, `focusCaseId=null`, and
-`isInvestigationLocation=false`. It issues an explicit read-only queue command
-and consumes the runtime resource; it adds no gateway, controller, contract, or
-strategy registration. Saved views stay query-only bookmarks of the shareable
-queue query.
+runtime seam of this product, not a separate local server. `/operations`
+mounts the same public provider used by Investigations with
+`active=false`, `focusCaseId=null`, and `isInvestigationLocation=false`.
+It issues an explicit read-only queue command and consumes the runtime
+resource; that queue query is not a write path. It adds no gateway,
+controller, contract, or strategy registration. Saved views stay
+query-only bookmarks of the shareable queue query.
 
-Named-row `claim_self`/`release_self` is a **local integration** on that
-same public provider. The public command `applyNamedCoordinationSelf`
-posts the existing `cd-collab.investigation_coordination_action_request.v1`
+Named-row `claim_self`/`release_self` is a separate write seam on that
+same public provider: the merged Operations Queue self-coordination
+slice on `main`. The public command `applyNamedCoordinationSelf` posts
+the existing `cd-collab.investigation_coordination_action_request.v1`
 envelope to `POST /api/cases/:id/coordination` from a visible queue row.
 It does not retarget the active case, does not GET coordination per row,
 and does not add an operations write endpoint or queue-side writer. PR

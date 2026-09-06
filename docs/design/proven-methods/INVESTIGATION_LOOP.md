@@ -20,7 +20,10 @@ collaboration database with privacy filtering and replay-safe write intents.
 The browser receives only versioned, server-confirmed metadata and never gains
 storage, authorization, or audit authority.
 
-### Operations Queue coordination foundation (local server integration)
+### Operations Queue coordination foundation (local integration)
+
+This is local integration of the existing collaboration server, not a
+separate local server.
 
 The `InvestigationCoordinationV1` contract and server integration record zero or one
 coordinator for an investigation, a monotonic coordination revision, and
@@ -66,38 +69,41 @@ self-claim by the current holder (`already_coordinator`) from another holder
 absent holder. The standalone wire parser enforces only the subset knowable
 without trusting actor or request context.
 
-The coordination writer foundation is a **local server integration**. `GET` and action-specific `POST` on
+The coordination writer foundation is a **local integration** of the existing collaboration server, not a separate server. `GET` and action-specific `POST` on
 `/api/cases/:id/coordination` use live session capabilities, concealed case
 access, a case-row lock, a materialized projection, insert-only successful
 idempotency envelopes, and atomic timeline/audit writes. Generic activity maps
 the event to a factual investigation update.
 
 The subsequent **local Operations Queue integration** adds a joined,
-server-ordered read query and a first-class `/operations` shell area. It uses
-the existing public Investigation Runtime provider with investigation activity
-disabled, and it keeps only `q`, recorded status, archive inclusion, and the
-coordination scope in the canonical URL. `all_visible` is the omitted default;
-page size, schema identity, actor, entity, impact, contributor, dates, and the
-opaque continuation cursor remain runtime/server details. All visible, Mine,
-and Unassigned counts come directly from the server. Rows retain server order
+server-ordered read query and a first-class `/operations` shell area. That
+queue query remains read-only. It uses the existing public Investigation
+Runtime provider with investigation activity disabled, and it keeps only
+`q`, recorded status, archive inclusion, and the coordination scope in the
+canonical URL. `all_visible` is the omitted default; page size, schema
+identity, actor, entity, impact, contributor, dates, and the opaque
+continuation cursor remain runtime/server details. All visible, Mine, and
+Unassigned counts come directly from the server. Rows retain server order
 through refresh and continuation failure and link natively to the canonical
 Situation address. The Operations module has a static dependency boundary that
 permits only React, shell location, the public runtime surface, and its own
 modules/CSS; contracts, private runtime controllers/gateway/provider,
 protected transport, and raw API routes are rejected.
 
-Operations is no longer read-only for named-row self-actions. UI
-strategies remain investigation presentations and do not own this shell
-area. Saved views are query-only bookmarks of that shareable queue
-query; they do not record or issue coordination actions. Priority, SLA,
-due dates, ranking, leases, presence locks, automatic
-assignment/membership, and automatic status changes remain explicit
-non-goals.
+Named-row coordination actions are a separate write seam on the existing
+case coordination route, not a queue-side writer. UI strategies remain
+investigation presentations and do not own this shell area. Saved views
+are query-only bookmarks of that shareable queue query; they do not
+record or issue coordination actions. Priority, SLA, due dates, ranking,
+leases, presence locks, automatic assignment/membership, and automatic
+status changes remain explicit non-goals.
 
 #### Named-row self-action seam (local integration)
 
 Named-row `claim_self` / `release_self` controls are now integrated in
-Operations Queue. An eligible participant posts the existing
+Operations Queue as a separate write seam from the read-only queue
+query. This is the merged Operations Queue self-coordination slice on
+`main`. An eligible participant posts the existing
 `cd-collab.investigation_coordination_action_request.v1` envelope to
 `POST /api/cases/:id/coordination` through the public Runtime command
 `applyNamedCoordinationSelf`. Self actions still omit `targetIdentityId`
@@ -107,8 +113,9 @@ write endpoint, no GET-per-row coordination fetch, and no privileged
 `assign_participant` / `release_participant` control on queue rows.
 
 PR [#1152](https://github.com/chriscase/ContextDesk/pull/1152) is a
-qualification-only e2e lane for that already-merged self-action. Hosted
-acceptance is not claimed while that lane is not green.
+qualification-only e2e lane for that already-merged Operations Queue
+self-coordination slice on `main`. Hosted acceptance is not claimed
+while that lane is not green.
 
 Investigation First's existing active-case coordination command is
 unchanged: it continues to `GET` and `POST` `/api/cases/:id/coordination`
@@ -239,8 +246,8 @@ view state.
 | Explicit Apply and Restore prior view                | **Partial** | [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx) contains the core/UI path                                                                           | Native responsive/restart matrix remains                 |
 | Linked-chat `log_nav` proposal                       | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs), [`logNav.ts`](../../../desktop/src/lib/logExplorer/logNav.ts)                                         | It is navigation intent, not a durable finding proposal  |
 | Model/detector proposal review queue (findings + report sections) | **Partial** | [`proposed.rs`](../../../crates/cd-core/src/investigations/proposed.rs) and [`report.rs`](../../../crates/cd-core/src/investigations/report.rs)                                       | Ranking, walkthrough, and deeper-analysis requests remain #646 |
-| Operations Queue shell area | **Local integration** | `/operations`, `operations-queue/`, the public Runtime V1 queue command/resource, server-owned scope counts/order/cursor, canonical Operations-only URL query, query-only saved views, bundled Help article, and named-row `claim_self`/`release_self` through `applyNamedCoordinationSelf` | PR #1152 is a qualification-only e2e lane; hosted acceptance is not claimed while that lane is not green. No queue-side writer, operations endpoint, GET-per-row coordination, active-case retargeting, or privileged assignment/release |
-| Named-row Operations self-action (`claim_self` / `release_self`) | **Local integration** | Public Runtime command `applyNamedCoordinationSelf`, `useNamedCoordinationSelf`, Operations Queue row Claim/Release controls, existing case coordination envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:write` for self actions), durable idempotency, and `POST /api/cases/:id/coordination` | Hosted e2e acceptance is not claimed while PR #1152 is not green. Privileged `assign_participant`/`release_participant` stay off Operations rows |
+| Operations Queue shell area | **Local integration** | `/operations`, `operations-queue/`, the public Runtime V1 read-only queue command/resource, server-owned scope counts/order/cursor, canonical Operations-only URL query, query-only saved views, and bundled Help article; named-row `claim_self`/`release_self` is a separate write seam through `applyNamedCoordinationSelf` (merged Operations Queue self-coordination slice on `main`) | PR #1152 is a qualification-only e2e lane; hosted acceptance is not claimed while that lane is not green. No queue-side writer, operations endpoint, GET-per-row coordination, active-case retargeting, or privileged assignment/release |
+| Named-row Operations self-action (`claim_self` / `release_self`) | **Local integration** | Merged Operations Queue self-coordination slice on `main`: public Runtime command `applyNamedCoordinationSelf`, `useNamedCoordinationSelf`, Operations Queue row Claim/Release controls, existing case coordination envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:write` for self actions), durable idempotency, and `POST /api/cases/:id/coordination`. Separate from the read-only queue query. | Hosted e2e acceptance is not claimed while PR #1152 is not green. Privileged `assign_participant`/`release_participant` stay off Operations rows |
 | Named-row Operations privileged assign/release (`assign_participant` / `release_participant`) | **Accepted design** | Existing case coordination action request/success/changed/refused envelopes, `INVESTIGATION_COORDINATION_ACTION_AUTHORITY` (`investigation:coordinate` for privileged actions), `CaseV1.participants` on the joined queue row, `CaseService.coordinateInvestigation`, and `POST /api/cases/:id/coordination` | No public named-row privileged Runtime command exists; this freeze is a prerequisite rather than inventing that command name. No Operations privileged write UI, queue-side writer, operations write endpoint, GET-per-row coordination, active-case retargeting, people-search API, or automatic membership. This row is not an authorization to code |
 | Accepted-state report projection + Markdown export   | **Partial** | [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) `assemble_investigation_report`                                                                                  | Fuller #532 vocabulary, patches/undo, claim detection, HTML/PDF, evidence appendix |
 | War Room Log workbench saved views, bookmarks, and share-safe locators | **Local integration** | Contract `investigation-workbench.ts` (`cd-collab.log_workbench_view.v1`, `cd-collab.log_workbench_bookmark.v1`, `cd-collab.log_workbench_share_safe_locator.v1`), server `collab/server/src/modules/workbench/`, Analyze UI `LogWorkbench.tsx`. Saved views are records, not authorization tokens, and applying one restores filters, time window, sort, grouping, and display. Locators reauthorize on resolve; unauthorized and missing tokens are indistinguishable and disclose no path. Stale bookmarks explain rather than silently retarget. Chronology pins are insert-only (`pinned` vs recorded `human_ground_truth`). Resource kinds `log_workbench_view`, `log_workbench_bookmark`, and `log_workbench_line` route to Analyze `triage-log-workbench`. | Desktop Explorer saved-view recipes remain a separate path. Heuristic text similarity is labeled and cannot be recorded as ground truth. |
@@ -708,7 +715,7 @@ responsive rails are not fully represented by DOM tests.
 | Report assembly/export         | **Partial**                                        | Versioned accepted-state projection, deterministic Markdown, confirmation-gated bounded export | Fuller #532 vocabulary, report patches/undo, unsupported-claim detection, HTML/PDF, evidence appendix |
 | Multi-corpus investigation     | **Planned/non-goal for current slice**             | Document schema permits bounded links                                 | Complete multi-corpus UI/semantics                                 |
 | War Room archive / restore     | **Shipped**                                        | Archiving is a confirmed, explained act separate from the ordinary status control; `POST /api/cases/:id/lifecycle` locks and reloads the case, status history, and legal hold, compares the caller's parsed preview state, re-evaluates the action, and writes only the server-derived target in the same case/timeline/audit transaction. Changed preview state returns the versioned `lifecycle_changed` 409 with the current parsed lifecycle and no action writes; action refusal is also a bounded, versioned 409 carrying investigation identity and action; the generic status route rejects archive and restore with a bounded 400 command pointer. Legal hold refuses archive fail-closed and never refuses restore; restore returns to the most recent recorded working status, falling back to `open` and never to `resolved`. Archived investigations leave the working list with the withheld count reported beside the control that reveals them | No delete path of any kind, and none implied — deletion is answered, not offered. No retention-policy expiry, no bulk archive, no scheduled archival, and no archive-driven storage reclamation. `retentionClass` remains recorded and unused |
-| Operations Queue named-row self-action | **Local integration** | `claim_self` / `release_self` reuse `POST /api/cases/:id/coordination` and `investigation:write` through `applyNamedCoordinationSelf`; Investigation First active-case coordination stays on that same route | Hosted e2e acceptance is not claimed while PR #1152 is not green. No queue-side writer or operations write endpoint, no GET-per-row coordination, no active-case retargeting, no privileged participant assignment/release from queue rows |
+| Operations Queue named-row self-action | **Local integration** | Merged Operations Queue self-coordination slice on `main`: `claim_self` / `release_self` reuse `POST /api/cases/:id/coordination` and `investigation:write` through `applyNamedCoordinationSelf` as a separate write seam from the read-only queue query; Investigation First active-case coordination stays on that same route | Hosted e2e acceptance is not claimed while PR #1152 is not green. No queue-side writer or operations write endpoint, no GET-per-row coordination, no active-case retargeting, no privileged participant assignment/release from queue rows |
 | Operations Queue named-row privileged assign/release | **Accepted design** | `assign_participant` / `release_participant` reuse `POST /api/cases/:id/coordination` and `investigation:coordinate`; membership is `CaseV1.participants` on the joined queue row, with server-time eligibility in `CaseService.coordinateInvestigation` | No public named-row privileged Runtime command exists; this freeze is a prerequisite rather than inventing that command name. No Operations privileged write UI, queue-side writer, operations write endpoint, GET-per-row coordination, active-case retargeting, people-search API, or automatic membership. This row is not an authorization to code |
 
 ## 15. Reimplementation notes
