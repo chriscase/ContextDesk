@@ -1,537 +1,508 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { protectedApiFetch } from "./protected-api.js";
-
-interface SourceRow {
-  id: string;
-  name: string;
-  kind: string;
-  lifecycle: string;
-  description?: string | null;
-  createdAt?: string;
-}
+import {
+  PERMANENT_UNKNOWN_SOURCE_ID,
+  SOURCE_DESCRIPTION_MAX_LENGTH,
+  SOURCE_KINDS,
+  SOURCE_NAME_MAX_LENGTH,
+  type SourceKind,
+  type SourceMutationAction,
+  type SourceMutationRefusal,
+  type SourceV1,
+} from "@cd-collab/contracts/source-catalog";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type RefObject,
+} from "react";
+import type { SourceCatalogGateway } from "./source-catalog/gateway.js";
+import {
+  useSourceCatalog,
+  type SourceCatalogMutationState,
+  type SourceCatalogResource,
+} from "./source-catalog/use-source-catalog.js";
 
 interface KindMeta {
-  label: string;
-  meaning: string;
-  registerHint: string;
-  namePlaceholder: string;
+  readonly label: string;
+  readonly hint: string;
+  readonly placeholder: string;
 }
 
-const KIND_ORDER = [
-  "human",
-  "external-tool",
-  "internal-system",
-  "contextdesk",
-  "unknown",
-] as const;
-
-type KnownKind = (typeof KIND_ORDER)[number];
-
-const KIND_META: Record<KnownKind, KindMeta> = {
+const KIND_META: Readonly<Record<SourceKind, KindMeta>> = Object.freeze({
   human: {
     label: "Person",
-    meaning:
-      "A named person — a colleague or an outside expert. What people write is credited to their own entry.",
-    registerHint:
-      "Use the person's everyday name. People who sign in usually receive an entry automatically the first time they contribute.",
-    namePlaceholder: "e.g. Priya Sharma (network vendor)",
+    hint: "Use the person’s everyday name. This creates an attribution label, not an account.",
+    placeholder: "e.g. Priya Sharma (network vendor)",
   },
   "external-tool": {
     label: "External tool",
-    meaning:
-      "A product or AI assistant used outside ContextDesk — a chat assistant, a vendor analyzer. Registering one lets people credit it when pasting its output into a case; ContextDesk never connects to the tool itself.",
-    registerHint:
-      "This adds the tool to the attribution picker when someone pastes analysis into an investigation. No credentials are stored and no automatic connection is created.",
-    namePlaceholder: "e.g. Claude chat assistant",
+    hint: "Credit output pasted from a product or assistant. No credentials or connection are created.",
+    placeholder: "e.g. Vendor support assistant",
   },
   "internal-system": {
     label: "Internal system",
-    meaning:
-      "One of your own systems — monitoring, ticketing, a runbook store. A person carries its material into a case; the system itself never writes here.",
-    registerHint:
-      "Name the system rather than the person operating it, so attribution survives team changes.",
-    namePlaceholder: "e.g. Grafana alerts",
+    hint: "Name the system rather than the operator so its attribution survives team changes.",
+    placeholder: "e.g. Grafana alerts",
   },
   contextdesk: {
     label: "ContextDesk",
-    meaning:
-      "ContextDesk's own output, when a person carries it back in as case material. Model lanes launched inside a case label themselves; this kind is for output brought back by hand.",
-    registerHint:
-      "Only needed when ContextDesk output re-enters by hand — lanes run inside a case are labeled on their own.",
-    namePlaceholder: "e.g. Brief carried over from the checkout case",
+    hint: "Use this only for ContextDesk output carried into an investigation by hand.",
+    placeholder: "e.g. Brief carried from the checkout case",
   },
   unknown: {
     label: "Unknown origin",
-    meaning:
-      "Where material came from is honestly not known. Unknown is a permanent, valid answer — never an error, and never upgraded to a guess.",
-    registerHint:
-      "An honest label for material whose origin can't be established. Recording unknown is better than inventing a source.",
-    namePlaceholder: "e.g. Unattributed paste from the old ticket",
+    hint: "An honest unknown is permanent and preferable to an invented source.",
+    placeholder: "e.g. Unattributed paste from the old ticket",
   },
-};
+});
 
-const DEFAULT_REGISTER_KIND = "external-tool";
+const DEFAULT_KIND: SourceKind = "external-tool";
 
-function metaFor(kind: string): KindMeta | undefined {
-  return (KIND_ORDER as readonly string[]).includes(kind)
-    ? KIND_META[kind as KnownKind]
-    : undefined;
+export interface CatalogProps {
+  readonly canRead: boolean;
+  readonly canWrite: boolean;
+  readonly identityKey: string;
+  readonly authorityKey: string;
+  readonly gateway?: SourceCatalogGateway;
+  readonly keyFactory?: () => string;
 }
 
-function kindLabel(kind: string): string {
-  return metaFor(kind)?.label ?? kind;
+function sourceRows(resource: SourceCatalogResource): readonly SourceV1[] {
+  if (resource.status === "ready") return resource.value;
+  if ((resource.status === "loading" || resource.status === "failed") && resource.previous) {
+    return resource.previous;
+  }
+  return [];
 }
 
-function kindChipClass(kind: string): string {
-  return metaFor(kind) ? `catalog-chip catalog-chip--${kind}` : "catalog-chip";
+function kindLabel(kind: SourceKind): string {
+  return KIND_META[kind].label;
 }
 
-function matchesQuery(source: SourceRow, query: string): boolean {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return true;
-  return [source.name, source.description ?? "", source.kind, kindLabel(source.kind)]
-    .join("\n")
-    .toLowerCase()
-    .includes(needle);
+function actionVerb(action: SourceMutationAction): string {
+  if (action === "create") return "Adding";
+  if (action === "retire") return "Retiring";
+  return "Restoring";
 }
 
-function SourceCard(props: {
-  source: SourceRow;
-  canLead: boolean;
-  confirming: boolean;
-  onAskRetire: () => void;
-  onConfirmRetire: () => void;
-  onKeepActive: () => void;
+function refusalCopy(reason: SourceMutationRefusal): string {
+  switch (reason) {
+    case "expected_revision_mismatch":
+      return "This label changed before the action was applied. The catalog was reconciled to the latest confirmed record; it may be hidden by the current filters. Review it before trying a new action.";
+    case "source_revision_unavailable":
+      return "This legacy label has no managed revision and remains read-only.";
+    case "already_retired":
+      return "This label is already retired. The catalog was reconciled to the latest confirmed record; it may be hidden by the current filters.";
+    case "not_retired":
+      return "This label is already active. The catalog was reconciled to the latest confirmed record; it may be hidden by the current filters.";
+    case "permanent_unknown_protected":
+      return "Unknown origin is a permanent safety label and cannot be retired or restored.";
+    case "source_not_found":
+      return "That label is no longer in the visible catalog. The catalog has been refreshed.";
+    case "identity_already_bound":
+      return "That identity already has an attribution label. Use the existing label instead.";
+    case "idempotency_intent_mismatch":
+      return "That saved request key belongs to a different action. Review the current catalog before trying again.";
+  }
+}
+
+function failureCopy(mutation: Extract<SourceCatalogMutationState, { status: "failed" }>): string {
+  switch (mutation.error.kind) {
+    case "invalid_request":
+    case "invalid":
+      return "Check the label fields and try a new action.";
+    case "protocol":
+      return "The server response could not be validated. No catalog change was assumed.";
+    case "internal":
+      return "The catalog service could not complete the action. No catalog change was assumed.";
+    default:
+      return "The action could not be completed. No catalog change was assumed.";
+  }
+}
+
+function resourceFailureCopy(resource: Extract<SourceCatalogResource, { status: "failed" }>): string {
+  const prefix = resource.previous !== undefined
+    ? "The latest refresh could not be validated. Previously confirmed labels remain shown."
+    : "Attribution labels could not be loaded or validated.";
+  return `${prefix} Try loading the catalog again.`;
+}
+
+function mutationToken(mutation: SourceCatalogMutationState): string | null {
+  if (mutation.status === "idle" || mutation.status === "running") return null;
+  if (mutation.status === "succeeded") {
+    return `${mutation.status}:${mutation.action}:${mutation.value.appliedRevision}`;
+  }
+  if (mutation.status === "refused") {
+    return `${mutation.status}:${mutation.action}:${mutation.refusal.reason}:${mutation.refusal.expectedRevision}`;
+  }
+  return `${mutation.status}:${mutation.action}`;
+}
+
+function MutationNotice(props: {
+  readonly mutation: SourceCatalogMutationState;
+  readonly onRetryUnknown: () => void;
+  readonly onDismiss: () => void;
+  readonly noticeRef: RefObject<HTMLDivElement | null>;
 }) {
-  const { source } = props;
-  const active = source.lifecycle === "active";
-  return (
-    <li className={`catalog__card${active ? "" : " catalog__card--retired"}`}>
-      <div className="catalog__card-head">
-        <span className="catalog__name">{source.name}</span>
-        <span className={kindChipClass(source.kind)}>{kindLabel(source.kind)}</span>
-        <span
-          className={`catalog__status${active ? "" : " catalog__status--retired"}`}
-        >
-          {source.lifecycle}
-        </span>
+  const { mutation } = props;
+  if (mutation.status === "idle") return null;
+  if (mutation.status === "running") {
+    return (
+      <div className="source-catalog__notice" role="status" aria-live="polite">
+        {actionVerb(mutation.action)} the label…
       </div>
-      {source.description ? (
-        <p className="catalog__desc">{source.description}</p>
-      ) : (
-        <p className="catalog__desc catalog__desc--none">No description recorded.</p>
-      )}
-      <p className="catalog__meta">
-        {source.createdAt ? `Added ${source.createdAt.slice(0, 10)}` : "Date added not recorded"}
-      </p>
-      {props.canLead && active ? (
-        <div className="catalog__actions">
-          <button
-            type="button"
-            className={`catalog__button${props.confirming ? " catalog__button--confirm" : ""}`}
-            aria-label={
-              props.confirming
-                ? `Confirm retire ${source.name}`
-                : `Retire ${source.name}`
-            }
-            {...(props.confirming
-              ? { "aria-describedby": `catalog-retire-note-${source.id}` }
-              : {})}
-            onClick={props.confirming ? props.onConfirmRetire : props.onAskRetire}
-          >
-            {props.confirming ? "Confirm retire" : "Retire…"}
-          </button>
-          {props.confirming ? (
-            <>
-              <button
-                type="button"
-                className="catalog__button"
-                onClick={props.onKeepActive}
-              >
-                Keep active
-              </button>
-              <span
-                id={`catalog-retire-note-${source.id}`}
-                className="catalog__retire-note"
-              >
-                Retiring hides this source from new intake; every past attribution
-                keeps it.
-              </span>
-            </>
-          ) : null}
-        </div>
-      ) : null}
-    </li>
+    );
+  }
+  if (mutation.status === "outcome_unknown") {
+    return (
+      <div
+        className="source-catalog__notice source-catalog__notice--warning"
+        role="alert"
+        tabIndex={-1}
+        ref={props.noticeRef}
+      >
+        <strong>The server may have completed this action.</strong>
+        <span>Do not start another catalog change. Retry sends the exact same saved request and key.</span>
+        <button type="button" onClick={props.onRetryUnknown}>Retry the same request</button>
+      </div>
+    );
+  }
+
+  const success = mutation.status === "succeeded";
+  const message = success
+    ? `${mutation.action === "create" ? "Added" : mutation.action === "retire" ? "Retired" : "Restored"} ${mutation.value.applied.name}.`
+    : mutation.status === "refused"
+      ? refusalCopy(mutation.refusal.reason)
+      : failureCopy(mutation);
+  return (
+    <div
+      className={`source-catalog__notice${success ? " source-catalog__notice--success" : " source-catalog__notice--error"}`}
+      role={success ? "status" : "alert"}
+      aria-live={success ? "polite" : undefined}
+      tabIndex={-1}
+      ref={props.noticeRef}
+    >
+      <span>{message}</span>
+      <button type="button" onClick={props.onDismiss}>Dismiss</button>
+    </div>
   );
 }
 
-export function Catalog(props: { canLead: boolean }) {
-  const [sources, setSources] = useState<SourceRow[]>([]);
-  const [loadState, setLoadState] = useState<"loading" | "error" | "ready">("loading");
-  const [createError, setCreateError] = useState<string | null>(null);
-  const [retireError, setRetireError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [confirmRetireId, setConfirmRetireId] = useState<string | null>(null);
-  const [registerKind, setRegisterKind] = useState<string>(DEFAULT_REGISTER_KIND);
+export function Catalog(props: CatalogProps) {
+  const controller = useSourceCatalog({
+    enabled: props.canRead,
+    canWrite: props.canWrite,
+    identityKey: props.identityKey,
+    authorityKey: props.authorityKey,
+    ...(props.gateway ? { gateway: props.gateway } : {}),
+    ...(props.keyFactory ? { keyFactory: props.keyFactory } : {}),
+  });
   const [query, setQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState<"all" | SourceKind>("all");
+  const [lifecycleFilter, setLifecycleFilter] = useState<"all" | "active" | "retired">("all");
+  const [confirmRetireId, setConfirmRetireId] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [kind, setKind] = useState<SourceKind>(DEFAULT_KIND);
+  const mutationNoticeRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const keepActiveRef = useRef<HTMLButtonElement>(null);
+  const rowActionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const retireReturnFocusIdRef = useRef<string | null>(null);
+  const lastMutationOriginRef = useRef<
+    { readonly kind: "create" } | { readonly kind: "source"; readonly sourceId: string } | null
+  >(null);
+  const dismissReturnFocusRef = useRef<
+    { readonly kind: "create" } | { readonly kind: "source"; readonly sourceId: string } | null
+  >(null);
+  const lastFocusedMutationRef = useRef<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    try {
-      const res = await protectedApiFetch("/api/catalog/sources");
-      if (!res.ok) {
-        setLoadState((prev) => (prev === "ready" ? "ready" : "error"));
-        return;
-      }
-      const body = (await res.json()) as { sources?: SourceRow[] };
-      setSources(body.sources ?? []);
-      setLoadState("ready");
-    } catch {
-      setLoadState((prev) => (prev === "ready" ? "ready" : "error"));
-    }
-  }, []);
+  const rows = sourceRows(controller.resource);
+  const counts = useMemo(() => ({
+    active: rows.filter((source) => source.lifecycle === "active").length,
+    retired: rows.filter((source) => source.lifecycle === "retired").length,
+    legacy: rows.filter((source) => source.revision === undefined).length,
+  }), [rows]);
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return rows.filter((source) => {
+      if (kindFilter !== "all" && source.kind !== kindFilter) return false;
+      if (lifecycleFilter !== "all" && source.lifecycle !== lifecycleFilter) return false;
+      if (!needle) return true;
+      return [source.name, source.description ?? "", kindLabel(source.kind), source.lifecycle]
+        .join("\n")
+        .toLocaleLowerCase()
+        .includes(needle);
+    });
+  }, [kindFilter, lifecycleFilter, query, rows]);
 
+  const mutationTokenValue = mutationToken(controller.mutation);
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (mutationTokenValue === null) {
+      lastFocusedMutationRef.current = null;
+      return;
+    }
+    if (mutationTokenValue === lastFocusedMutationRef.current) return;
+    lastFocusedMutationRef.current = mutationTokenValue;
+    mutationNoticeRef.current?.focus();
+  }, [mutationTokenValue]);
+  useEffect(() => {
+    if (confirmRetireId !== null) {
+      keepActiveRef.current?.focus();
+      return;
+    }
+    const sourceId = retireReturnFocusIdRef.current;
+    if (sourceId === null) return;
+    retireReturnFocusIdRef.current = null;
+    rowActionRefs.current.get(sourceId)?.focus();
+  }, [confirmRetireId]);
+  useEffect(() => {
+    if (confirmRetireId !== null && !filtered.some(({ id }) => id === confirmRetireId)) {
+      setConfirmRetireId(null);
+    }
+  }, [confirmRetireId, filtered]);
+  useEffect(() => {
+    if (controller.mutation.status !== "idle") return;
+    const target = dismissReturnFocusRef.current;
+    if (target === null) return;
+    dismissReturnFocusRef.current = null;
+    if (target.kind === "create") {
+      nameInputRef.current?.focus();
+      return;
+    }
+    (rowActionRefs.current.get(target.sourceId) ?? titleRef.current)?.focus();
+  }, [controller.mutation.status]);
+  useEffect(() => {
+    if (!props.canWrite) {
+      retireReturnFocusIdRef.current = null;
+      setConfirmRetireId(null);
+    }
+  }, [props.canWrite]);
+
+  const writeLocked = controller.mutation.status === "running"
+    || controller.mutation.status === "outcome_unknown";
+  const hasConfirmedRows = controller.resource.status === "ready"
+    || ((controller.resource.status === "loading" || controller.resource.status === "failed")
+      && controller.resource.previous !== undefined);
 
   async function createSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setCreateError(null);
-    const form = event.currentTarget;
-    const data = new FormData(form);
-    setSaving(true);
-    try {
-      const response = await protectedApiFetch("/api/catalog/sources", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          name: String(data.get("name") ?? ""),
-          kind: String(data.get("kind") ?? "unknown"),
-          description: String(data.get("description") ?? ""),
-        }),
-      });
-      if (!response.ok) {
-        setCreateError(
-          "Source could not be added. You may not have permission to manage the catalog.",
-        );
-        return;
-      }
-      form.reset();
-      setRegisterKind(DEFAULT_REGISTER_KIND);
-      await refresh();
-      window.dispatchEvent(new Event("contextdesk:source-catalog-changed"));
-    } catch {
-      setCreateError(
-        "Source could not be added. You may not have permission to manage the catalog.",
-      );
-    } finally {
-      setSaving(false);
+    lastMutationOriginRef.current = { kind: "create" };
+    const outcome = await controller.actions.create({ name, kind, description });
+    if (outcome.status === "succeeded") {
+      setName("");
+      setDescription("");
+      setKind(DEFAULT_KIND);
     }
   }
 
-  async function retire(id: string) {
-    setRetireError(null);
+  function cancelRetire(sourceId: string) {
+    retireReturnFocusIdRef.current = sourceId;
     setConfirmRetireId(null);
-    try {
-      const response = await protectedApiFetch(`/api/catalog/sources/${id}/retire`, {
-        method: "POST",
-      });
-      if (!response.ok) {
-        setRetireError(
-          "Source could not be retired. You may not have permission to manage the catalog.",
-        );
-        return;
-      }
-      await refresh();
-      window.dispatchEvent(new Event("contextdesk:source-catalog-changed"));
-    } catch {
-      setRetireError(
-        "Source could not be retired. You may not have permission to manage the catalog.",
-      );
-    }
   }
 
-  const active = sources.filter((s) => s.lifecycle === "active");
-  const retired = sources.filter((s) => s.lifecycle !== "active");
-  const intakeReady = active.filter((s) => s.kind === "external-tool").length;
-  const shownActive = active.filter((s) => matchesQuery(s, query));
-  const shownRetired = retired.filter((s) => matchesQuery(s, query));
-  const shownTotal = shownActive.length + shownRetired.length;
-  const filtering = query.trim().length > 0;
-
-  function groupCount(shown: number, total: number): string {
-    return filtering ? `${shown} of ${total}` : `${total}`;
+  function retireSource(sourceId: string) {
+    lastMutationOriginRef.current = { kind: "source", sourceId };
+    setConfirmRetireId(null);
+    void controller.actions.retire(sourceId);
   }
 
-  const registerMeta = metaFor(registerKind) ?? KIND_META.unknown;
+  function restoreSource(sourceId: string) {
+    lastMutationOriginRef.current = { kind: "source", sourceId };
+    void controller.actions.restore(sourceId);
+  }
+
+  function dismissMutation() {
+    dismissReturnFocusRef.current = lastMutationOriginRef.current;
+    controller.actions.dismissMutation();
+  }
+
+  const denied = !props.canRead;
+  const initiallyBusy = props.canRead
+    && (controller.resource.status === "idle"
+      || (controller.resource.status === "loading" && controller.resource.previous === undefined));
 
   return (
-    <section
-      className="catalog"
-      aria-labelledby="catalog-title"
-      aria-busy={loadState === "loading"}
-    >
-      <header>
-        <p className="case-memory__eyebrow">Attribution</p>
-        <h2 id="catalog-title" className="catalog__title">
-          Who and what supplied the information
-        </h2>
-        <p className="catalog__copy">
-          Reusable labels identify the people and tools behind notes, files, and imported
-          answers. The actual logs, email, chat, and other evidence stay inside each
-          investigation. Add or review that material from the investigation’s Capture stage.
-          These labels are not user accounts and do not connect to the named tools.
-        </p>
+    <section className="source-catalog" aria-labelledby="source-catalog-title" aria-busy={initiallyBusy}>
+      <header className="source-catalog__header">
+        <div>
+          <p className="source-catalog__eyebrow">Attribution</p>
+          <h2 id="source-catalog-title" ref={titleRef} tabIndex={-1}>Attribution labels</h2>
+          <p>
+            Reusable labels record who or what supplied notes, files, and imported answers.
+            Evidence stays in its investigation; labels create no account, credential, or connection.
+          </p>
+        </div>
+        {props.canRead ? (
+          <button type="button" className="source-catalog__refresh" disabled={initiallyBusy || writeLocked} onClick={controller.actions.refresh}>
+            Refresh
+          </button>
+        ) : null}
       </header>
 
-      {loadState === "loading" ? (
-        <p className="catalog__loading" role="status">
-          Loading attribution labels…
-        </p>
-      ) : null}
-
-      {loadState === "error" ? (
-        <div className="catalog__load-error">
-          <p role="alert">Attribution labels could not be loaded. Try again.</p>
-          <button
-            type="button"
-            className="catalog__button"
-            onClick={() => {
-              setLoadState("loading");
-              void refresh();
-            }}
-          >
-            Retry loading attribution
-          </button>
+      {denied ? (
+        <div className="source-catalog__message" role="status">
+          <h3>Attribution is unavailable in this view</h3>
+          <p>Your current account cannot read investigations, so no catalog data was requested.</p>
         </div>
       ) : null}
+      {initiallyBusy ? <p className="source-catalog__message" role="status">Loading attribution labels…</p> : null}
+      {controller.resource.status === "loading" && controller.resource.previous !== undefined ? (
+        <p className="source-catalog__refresh-status" role="status">Refreshing labels. Previously confirmed rows remain shown.</p>
+      ) : null}
+      {controller.resource.status === "failed" ? (
+        <div className="source-catalog__message source-catalog__message--error" role="alert">
+          <p>{resourceFailureCopy(controller.resource)}</p>
+          <button type="button" onClick={controller.actions.refresh}>Try loading the catalog again</button>
+        </div>
+      ) : null}
+      {!denied ? (
+        <MutationNotice
+          mutation={controller.mutation}
+          noticeRef={mutationNoticeRef}
+          onRetryUnknown={() => void controller.actions.retryUnknown()}
+          onDismiss={dismissMutation}
+        />
+      ) : null}
 
-      {loadState === "ready" ? (
+      {hasConfirmedRows ? (
         <>
-          <dl className="catalog__facts">
-            <div className="catalog__fact">
-              <dt>Available labels</dt>
-              <dd>
-                <strong>{active.length}</strong>
-                <span>selectable when new material is recorded</span>
-              </dd>
-            </div>
-            <div className="catalog__fact">
-              <dt>Retired labels</dt>
-              <dd>
-                <strong>{retired.length}</strong>
-                <span>hidden from new intake; past attributions keep them</span>
-              </dd>
-            </div>
-            <div className="catalog__fact">
-              <dt>Tools available for pasted output</dt>
-              <dd>
-                <strong>{intakeReady}</strong>
-                <span>
-                  active external tools people can credit when pasting output into a
-                  case
-                </span>
-              </dd>
-            </div>
+          <dl className="source-catalog__facts" aria-label="Catalog counts">
+            <div><dt>Active</dt><dd>{counts.active}</dd></div>
+            <div><dt>Retired</dt><dd>{counts.retired}</dd></div>
+            <div><dt>Legacy read-only</dt><dd>{counts.legacy}</dd></div>
           </dl>
+          <div className="source-catalog__toolbar" role="search">
+            <label><span>Search</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name, kind, or description" /></label>
+            <label>
+              <span>Kind</span>
+              <select value={kindFilter} onChange={(event) => setKindFilter(event.target.value as "all" | SourceKind)}>
+                <option value="all">All kinds</option>
+                {SOURCE_KINDS.map((value) => <option key={value} value={value}>{kindLabel(value)}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Lifecycle</span>
+              <select value={lifecycleFilter} onChange={(event) => setLifecycleFilter(event.target.value as "all" | "active" | "retired")}>
+                <option value="all">Active and retired</option>
+                <option value="active">Active</option>
+                <option value="retired">Retired</option>
+              </select>
+            </label>
+          </div>
+          <p className="source-catalog__result-count" aria-live="polite">
+            {filtered.length} of {rows.length} {rows.length === 1 ? "label" : "labels"} shown.
+          </p>
 
-          <section className="catalog__kinds" aria-labelledby="catalog-kinds-title">
-            <h3 id="catalog-kinds-title">What can supply information</h3>
-            <ul className="catalog__kind-cards">
-              {KIND_ORDER.map((kind) => {
-                const meta = KIND_META[kind];
-                const count = active.filter((s) => s.kind === kind).length;
+          {rows.length === 0 ? (
+            <div className="source-catalog__message">
+              <h3>No attribution labels are registered yet</h3>
+              <p>{props.canWrite ? "Add the first reusable label below." : "A catalog writer can add the first reusable label."}</p>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="source-catalog__message">
+              <h3>No labels match these filters</h3>
+              <p>Change the search, kind, or lifecycle filter to see other confirmed labels.</p>
+            </div>
+          ) : (
+            <ul className="source-catalog__list" aria-label="Attribution labels">
+              {filtered.map((source) => {
+                const permanent = source.id === PERMANENT_UNKNOWN_SOURCE_ID;
+                const legacy = source.revision === undefined;
+                const canChange = props.canWrite && !permanent && !legacy;
+                const confirming = confirmRetireId === source.id;
                 return (
-                  <li key={kind} className="catalog__kind-card">
-                    <div className="catalog__kind-card-head">
-                      <span className={kindChipClass(kind)}>{meta.label}</span>
+                  <li key={source.id} className="source-catalog__row">
+                    <div className="source-catalog__row-main">
+                      <div className="source-catalog__row-title">
+                        <strong>{source.name}</strong>
+                        <span className={`source-catalog__chip source-catalog__chip--${source.kind}`}>{kindLabel(source.kind)}</span>
+                        <span className={`source-catalog__chip source-catalog__chip--${source.lifecycle}`}>{source.lifecycle === "active" ? "Active" : "Retired"}</span>
+                        {legacy ? <span className="source-catalog__policy">Legacy record · read-only</span> : null}
+                        {permanent ? <span className="source-catalog__policy">Permanent · protected</span> : null}
+                      </div>
+                      <p className={source.description ? undefined : "source-catalog__muted"}>{source.description || "No description recorded."}</p>
+                      <small><time dateTime={source.createdAt}>Added {source.createdAt.slice(0, 10)}</time></small>
                     </div>
-                    <p>{meta.meaning}</p>
-                    <span className="catalog__kind-count">
-                      {count === 0
-                        ? "none active yet"
-                        : `${count} active ${count === 1 ? "source" : "sources"}`}
-                    </span>
+                    {canChange ? (
+                      <div className="source-catalog__row-actions">
+                        {source.lifecycle === "active" ? (
+                          confirming ? (
+                            <>
+                              <button
+                                type="button"
+                                className="source-catalog__danger"
+                                disabled={writeLocked}
+                                aria-describedby={`retire-note-${source.id}`}
+                                onClick={() => retireSource(source.id)}
+                              >
+                                Confirm retire {source.name}
+                              </button>
+                              <button ref={keepActiveRef} type="button" disabled={writeLocked} onClick={() => cancelRetire(source.id)}>Keep active</button>
+                              <span id={`retire-note-${source.id}`} className="source-catalog__action-note">
+                                Retirement hides this label from new intake. Past attribution is preserved.
+                              </span>
+                            </>
+                          ) : (
+                            <button
+                              ref={(node) => {
+                                if (node) rowActionRefs.current.set(source.id, node);
+                                else rowActionRefs.current.delete(source.id);
+                              }}
+                              type="button"
+                              disabled={writeLocked}
+                              onClick={() => setConfirmRetireId(source.id)}
+                            >
+                              Retire {source.name}…
+                            </button>
+                          )
+                        ) : (
+                          <button
+                            ref={(node) => {
+                              if (node) rowActionRefs.current.set(source.id, node);
+                              else rowActionRefs.current.delete(source.id);
+                            }}
+                            type="button"
+                            disabled={writeLocked}
+                            onClick={() => restoreSource(source.id)}
+                          >
+                            Restore {source.name}
+                          </button>
+                        )}
+                      </div>
+                    ) : null}
                   </li>
                 );
               })}
             </ul>
-          </section>
-
-          {sources.length === 0 ? (
-            <div className="catalog__empty">
-              <p className="catalog__empty-title">No sources are registered yet.</p>
-              <p>
-                {props.canLead
-                  ? "Register the first one below. Teams usually start with the external tools whose output they paste into cases."
-                  : "A case lead can register the first one; browsing stays open to everyone."}
-              </p>
-            </div>
-          ) : (
-            <>
-              <div className="catalog__toolbar" role="search">
-                <label className="catalog__filter">
-                  <span>Filter</span>
-                  <input
-                    type="search"
-                    className="login__input"
-                    aria-label="Filter sources"
-                    placeholder="Name, kind, or description"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                  />
-                </label>
-                <p className="catalog__filter-result" aria-live="polite">
-                  {filtering
-                    ? `${shownTotal} of ${sources.length} ${sources.length === 1 ? "source matches" : "sources match"}.`
-                    : ""}
-                </p>
-              </div>
-
-              {retireError ? (
-                <p className="case-memory__error" role="alert">
-                  {retireError}
-                </p>
-              ) : null}
-
-              <section
-                className="catalog__group"
-                aria-labelledby="catalog-active-title"
-              >
-                <h3 id="catalog-active-title">
-                  Available attribution labels ({groupCount(shownActive.length, active.length)})
-                </h3>
-                <p className="catalog__group-copy">
-                  These can be credited when new material is recorded on a case.
-                </p>
-                {active.length === 0 ? (
-                  <p className="case-memory__empty">
-                    No labels are available for new material. Retired labels below keep their history.
-                  </p>
-                ) : shownActive.length === 0 ? (
-                  <p className="case-memory__empty">
-                    No available labels match the filter.
-                  </p>
-                ) : (
-                  <ul className="catalog__cards">
-                    {shownActive.map((s) => (
-                      <SourceCard
-                        key={s.id}
-                        source={s}
-                        canLead={props.canLead}
-                        confirming={confirmRetireId === s.id}
-                        onAskRetire={() => setConfirmRetireId(s.id)}
-                        onConfirmRetire={() => void retire(s.id)}
-                        onKeepActive={() => setConfirmRetireId(null)}
-                      />
-                    ))}
-                  </ul>
-                )}
-              </section>
-
-              {retired.length > 0 ? (
-                <section
-                  className="catalog__group"
-                  aria-labelledby="catalog-retired-title"
-                >
-                  <h3 id="catalog-retired-title">
-                    Retired attribution labels ({groupCount(shownRetired.length, retired.length)})
-                  </h3>
-                  <p className="catalog__group-copy">
-                    Retired labels no longer appear for new intake. Every past
-                    contribution keeps its attribution — retirement hides, it never
-                    rewrites.
-                  </p>
-                  {shownRetired.length === 0 ? (
-                    <p className="case-memory__empty">
-                      No retired labels match the filter.
-                    </p>
-                  ) : (
-                    <ul className="catalog__cards">
-                      {shownRetired.map((s) => (
-                        <SourceCard
-                          key={s.id}
-                          source={s}
-                          canLead={props.canLead}
-                          confirming={false}
-                          onAskRetire={() => undefined}
-                          onConfirmRetire={() => undefined}
-                          onKeepActive={() => undefined}
-                        />
-                      ))}
-                    </ul>
-                  )}
-                </section>
-              ) : null}
-            </>
           )}
 
-          {props.canLead ? (
-            <section
-              className="catalog__register"
-              aria-labelledby="catalog-register-title"
-            >
-              <h3 id="catalog-register-title">Add an attribution label</h3>
-              <p className="catalog__group-copy">
-                Registering creates an attribution label for people to pick when
-                recording where material came from. It stores a name and a
-                description — no credentials, no connection, and no access.
-              </p>
-              {createError ? (
-                <p className="case-memory__error" role="alert">
-                  {createError}
-                </p>
-              ) : null}
-              <form className="catalog__form" onSubmit={(e) => void createSource(e)}>
-                <fieldset className="catalog__kind-picker">
-                  <legend>Who or what supplied the information?</legend>
-                  {KIND_ORDER.map((kind) => (
-                    <label key={kind} className="catalog__kind-option">
-                      <input
-                        type="radio"
-                        name="kind"
-                        value={kind}
-                        defaultChecked={kind === DEFAULT_REGISTER_KIND}
-                        onChange={() => setRegisterKind(kind)}
-                      />
-                      <span>
-                        <strong>{KIND_META[kind].label}</strong>
-                      </span>
-                    </label>
-                  ))}
-                </fieldset>
-                <p className="catalog__register-hint">{registerMeta.registerHint}</p>
-                <label className="catalog__field">
-                  Name
-                  <input
-                    className="login__input"
-                    name="name"
-                    aria-label="Source name"
-                    placeholder={registerMeta.namePlaceholder}
-                    required
-                  />
+          {props.canWrite ? (
+            <section className="source-catalog__add" aria-labelledby="source-catalog-add-title">
+              <div><h3 id="source-catalog-add-title">Add attribution label</h3><p>Name a source people can select when recording where material came from.</p></div>
+              <form onSubmit={(event) => void createSource(event)}>
+                <label>
+                  <span>Kind</span>
+                  <select aria-label="Source kind" value={kind} disabled={writeLocked} onChange={(event) => setKind(event.target.value as SourceKind)}>
+                    {SOURCE_KINDS.map((value) => <option key={value} value={value}>{kindLabel(value)}</option>)}
+                  </select>
                 </label>
-                <label className="catalog__field">
-                  Description (optional)
-                  <textarea
-                    className="login__input"
-                    name="description"
-                    aria-label="Source description"
-                    rows={2}
-                    placeholder="Which team runs it, which version, or where it lives"
-                  />
+                <label className="source-catalog__add-name">
+                  <span>Name</span>
+                  <input ref={nameInputRef} value={name} onChange={(event) => setName(event.target.value)} maxLength={SOURCE_NAME_MAX_LENGTH} placeholder={KIND_META[kind].placeholder} disabled={writeLocked} required />
                 </label>
-                <button className="login__submit" type="submit" disabled={saving}>
-                  Add label
-                </button>
+                <label className="source-catalog__add-description">
+                  <span>Description <em>(optional)</em></span>
+                  <textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={SOURCE_DESCRIPTION_MAX_LENGTH} rows={2} disabled={writeLocked} placeholder="Team, purpose, or where people encounter it" />
+                </label>
+                <p className="source-catalog__hint">{KIND_META[kind].hint}</p>
+                <button type="submit" className="source-catalog__primary" disabled={writeLocked || name.trim().length === 0}>Add label</button>
               </form>
             </section>
           ) : (
-            <p className="catalog__viewer-note" role="note">
-              You&rsquo;re browsing with read access. Registering and retiring
-              sources is reserved for case leads; everything recorded here stays
-              visible to you.
-            </p>
+            <p className="source-catalog__viewer-note" role="note">You can browse attribution labels. Adding, retiring, and restoring labels requires catalog write access.</p>
           )}
         </>
       ) : null}

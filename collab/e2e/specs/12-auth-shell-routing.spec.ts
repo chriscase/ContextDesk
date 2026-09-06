@@ -29,10 +29,10 @@ test.describe("auth shell pathname routing", () => {
 
     await page.getByRole("button", { name: "Attribution" }).click();
     await expect(page).toHaveURL(/\/sources$/);
-    await expect(page.getByRole("heading", { name: "Who and what supplied the information" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Attribution labels" })).toBeVisible();
 
     await page.reload();
-    await expect(page.getByRole("heading", { name: "Who and what supplied the information" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Attribution labels" })).toBeVisible();
     await expect(page).toHaveURL(/\/sources$/);
 
     await page.getByRole("button", { name: "Help" }).click();
@@ -41,7 +41,7 @@ test.describe("auth shell pathname routing", () => {
 
     await page.goBack();
     await expect(page).toHaveURL(/\/sources$/);
-    await expect(page.getByRole("heading", { name: "Who and what supplied the information" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Attribution labels" })).toBeVisible();
 
     await page.goForward();
     await expect(page).toHaveURL(/\/help$/);
