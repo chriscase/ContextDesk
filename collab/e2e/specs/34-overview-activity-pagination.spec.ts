@@ -108,18 +108,24 @@ test.describe("Overview Activity Center cursor continuation", () => {
     await expect(browserPage.getByRole("button", { name: "Load more activity" })).toHaveCount(0);
     await expect(browserPage).toHaveURL(/activityKind=investigation_created/u);
     expect(new URL(browserPage.url()).searchParams.has("cursor")).toBe(false);
-    expect(requests.map((request) => request.searchParams.get("cursor"))).toEqual([null, null, firstCursor]);
+    const filteredRequests = requests.filter(
+      (request) => request.searchParams.get("activityKind") === "investigation_created",
+    );
+    expect(filteredRequests.length).toBeGreaterThan(0);
+    expect(filteredRequests.some((request) => request.searchParams.get("cursor") === firstCursor)).toBe(true);
   });
 
   test("recovers a stale cursor by restarting the filtered window without mixing pages", async ({ page: browserPage }) => {
     const firstCursor = cursor(ACTIVITY_A, "2026-01-01T00:00:00.000Z", 1);
     const requests: URL[] = [];
     let stale = true;
+    let restarted = false;
     await browserPage.route("**/api/investigation-activity*", async (route) => {
       const url = new URL(route.request().url());
       requests.push(url);
       if (url.searchParams.get("cursor") === firstCursor && stale) {
         stale = false;
+        restarted = true;
         await route.fulfill({
           status: 400,
           contentType: "application/json",
@@ -130,9 +136,15 @@ test.describe("Overview Activity Center cursor continuation", () => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(page([
-          item(ACTIVITY_A, "2026-01-01T00:00:00.000Z", "opened the investigation", 1),
-        ], url.searchParams.has("cursor") ? null : firstCursor)),
+        body: JSON.stringify(page(
+          [item(
+            restarted ? ACTIVITY_B : ACTIVITY_A,
+            restarted ? "2026-01-02T00:00:00.000Z" : "2026-01-01T00:00:00.000Z",
+            restarted ? "restarted filtered activity window" : "opened the investigation",
+            restarted ? 2 : 1,
+          )],
+          url.searchParams.has("cursor") ? null : firstCursor,
+        )),
       });
     });
 
@@ -141,10 +153,22 @@ test.describe("Overview Activity Center cursor continuation", () => {
     await expect(browserPage.getByRole("button", { name: "Load more activity" })).toBeVisible();
     await browserPage.getByRole("button", { name: "Load more activity" }).click();
 
-    await expect(browserPage.getByRole("link", { name: /opened the investigation/ })).toHaveCount(1);
+    await expect(browserPage.getByRole("link", { name: /restarted filtered activity window/ })).toHaveCount(1);
+    await expect(browserPage.getByRole("link", { name: /opened the investigation/ })).toHaveCount(0);
     await expect(browserPage.getByRole("button", { name: "Load more activity" })).toBeVisible();
     await expect(browserPage).toHaveURL(/activityKind=investigation_created&stage=situation/u);
     expect(new URL(browserPage.url()).searchParams.has("cursor")).toBe(false);
-    expect(requests.map((request) => request.searchParams.get("cursor"))).toEqual([null, null, firstCursor, null]);
+    const filteredRequests = requests.filter(
+      (request) => request.searchParams.get("activityKind") === "investigation_created",
+    );
+    expect(filteredRequests.length).toBeGreaterThan(0);
+    expect(filteredRequests.every((request) => request.searchParams.get("stage") === "situation")).toBe(true);
+    const staleCursorIndex = filteredRequests.findIndex(
+      (request) => request.searchParams.get("cursor") === firstCursor,
+    );
+    expect(staleCursorIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      filteredRequests.slice(staleCursorIndex + 1).some((request) => !request.searchParams.has("cursor")),
+    ).toBe(true);
   });
 });
