@@ -21,6 +21,8 @@ export interface ActivityCenterProps {
   readonly canRead: boolean;
   readonly identityKey: string;
   readonly authorityKey: string;
+  readonly filter: InvestigationActivityFilterV1;
+  readonly onFilterChange: (filter: InvestigationActivityFilterV1) => void;
   readonly onOpenRoute: (pathname: string) => void;
   readonly onOpenInvestigations: () => void;
   readonly gateway?: OverviewGateway;
@@ -33,6 +35,12 @@ function titleCase(value: string): string {
 function timeLabel(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? "Recorded time unavailable" : date.toLocaleString();
+}
+
+function dateDraft(value: string | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "" : date.toISOString().slice(0, 10);
 }
 
 function provenance(item: InvestigationActivityItemV1): string {
@@ -63,13 +71,12 @@ function failureCopy(kind: string): string {
 }
 
 export function ActivityCenter({
-  canRead, identityKey, authorityKey, onOpenRoute, onOpenInvestigations, gateway,
+  canRead, identityKey, authorityKey, filter, onFilterChange, onOpenRoute, onOpenInvestigations, gateway,
 }: ActivityCenterProps) {
-  const [draftKind, setDraftKind] = useState("");
-  const [draftStage, setDraftStage] = useState("");
-  const [draftFrom, setDraftFrom] = useState("");
-  const [draftTo, setDraftTo] = useState("");
-  const [filter, setFilter] = useState<InvestigationActivityFilterV1>({});
+  const [draftKind, setDraftKind] = useState(filter.activityKind ?? "");
+  const [draftStage, setDraftStage] = useState(filter.stage ?? "");
+  const [draftFrom, setDraftFrom] = useState(() => dateDraft(filter.from));
+  const [draftTo, setDraftTo] = useState(() => dateDraft(filter.to));
   const [openingId, setOpeningId] = useState<string | null>(null);
   const controller = useActivityCenter({ enabled: canRead, identityKey, authorityKey, filter, ...(gateway ? { gateway } : {}) });
   const items = displayItems(controller.activity);
@@ -82,6 +89,13 @@ export function ActivityCenter({
   const hasLoadedActivityWindow = controller.activity.status === "ready" || items.length > 0;
 
   useEffect(() => {
+    setDraftKind(filter.activityKind ?? "");
+    setDraftStage(filter.stage ?? "");
+    setDraftFrom(dateDraft(filter.from));
+    setDraftTo(dateDraft(filter.to));
+  }, [filter.activityKind, filter.from, filter.stage, filter.to]);
+
+  useEffect(() => {
     const refreshRecordedActivity = () => controller.refresh();
     window.addEventListener("contextdesk:triage-run-changed", refreshRecordedActivity);
     return () => window.removeEventListener("contextdesk:triage-run-changed", refreshRecordedActivity);
@@ -89,7 +103,7 @@ export function ActivityCenter({
 
   function applyFilters(event: FormEvent) {
     event.preventDefault();
-    setFilter({
+    onFilterChange({
       ...(draftKind ? { activityKind: draftKind as NonNullable<InvestigationActivityFilterV1["activityKind"]> } : {}),
       ...(draftStage ? { stage: draftStage as NonNullable<InvestigationActivityFilterV1["stage"]> } : {}),
       ...(draftFrom ? { from: `${draftFrom}T00:00:00.000Z` } : {}),
@@ -102,7 +116,7 @@ export function ActivityCenter({
     setDraftStage("");
     setDraftFrom("");
     setDraftTo("");
-    setFilter({});
+    onFilterChange({});
   }
 
   async function openItem(event: MouseEvent<HTMLAnchorElement>, item: InvestigationActivityItemV1) {

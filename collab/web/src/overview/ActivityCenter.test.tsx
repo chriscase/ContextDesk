@@ -52,6 +52,7 @@ function gatewayWith(overrides: Partial<OverviewGateway> = {}): OverviewGateway 
 
 const baseProps = {
   canRead: true, identityKey: "alice", authorityKey: "interactive:viewer",
+  filter: {}, onFilterChange: vi.fn(),
   onOpenRoute: vi.fn(), onOpenInvestigations: vi.fn(),
 };
 
@@ -96,11 +97,14 @@ describe("ActivityCenter", () => {
 
   it("applies server-owned filters without silently selecting assigned-to-me", async () => {
     const gateway = gatewayWith();
-    render(<ActivityCenter {...baseProps} gateway={gateway} />);
+    const onFilterChange = vi.fn();
+    const { rerender } = render(<ActivityCenter {...baseProps} onFilterChange={onFilterChange} gateway={gateway} />);
     await screen.findAllByText("recorded a shift handoff");
     fireEvent.change(screen.getByLabelText("Activity"), { target: { value: "handoff_recorded" } });
     fireEvent.change(screen.getByLabelText("Stage"), { target: { value: "situation" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    expect(onFilterChange).toHaveBeenCalledWith({ activityKind: "handoff_recorded", stage: "situation" });
+    rerender(<ActivityCenter {...baseProps} onFilterChange={onFilterChange} filter={{ activityKind: "handoff_recorded", stage: "situation" }} gateway={gateway} />);
     await waitFor(() => expect(gateway.listActivity).toHaveBeenLastCalledWith(
       { filter: { activityKind: "handoff_recorded", stage: "situation" } }, expect.any(AbortSignal),
     ));
