@@ -3,6 +3,9 @@ import type { OperationsQueueLocationQuery } from "../app-location.js";
 import {
   selectResourceView,
   useInvestigationRuntime,
+  type CommandOutcome,
+  type InvestigationCoordinationActionSuccessV1,
+  type InvestigationNamedCoordinationSelfCommand,
   type InvestigationRuntimeIdentity,
   type InvestigationOperationsQueuePageV1,
   type InvestigationOperationsQueueQueryInput,
@@ -25,6 +28,19 @@ export interface OperationsQueuePresentation {
   readonly requestGeneration: number;
   readonly refresh: () => void;
   readonly nextPage: () => void;
+  readonly selfCoordination: OperationsQueueSelfCoordinationPresentation;
+}
+
+export interface OperationsQueueSelfCoordinationPresentation {
+  readonly available: boolean;
+  readonly targetInvestigationId: string | null;
+  readonly action: InvestigationNamedCoordinationSelfCommand["action"] | null;
+  readonly state: ReturnType<typeof useInvestigationRuntime>["mutations"]["namedCoordinationSelf"];
+  readonly apply: (
+    investigationId: string,
+    action: InvestigationNamedCoordinationSelfCommand["action"],
+  ) => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>;
+  readonly retry: () => Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>>;
 }
 
 interface ContinuationAttempt {
@@ -60,6 +76,7 @@ export function useOperationsQueue(
 ): OperationsQueuePresentation {
   const runtime = useInvestigationRuntime();
   const command = runtime.commands.queryOperationsQueue;
+  const selfCommand = runtime.commands.applyNamedCoordinationSelf;
   const commandAvailability: OperationsQueueCommandAvailability = command === undefined
     ? "absent"
     : command === null
@@ -85,6 +102,15 @@ export function useOperationsQueue(
   const pendingContinuationAttemptRef = useRef<ContinuationAttempt | null>(null);
   const [continuationInFlight, setContinuationInFlight] = useState(false);
   const [continuationOutcome, setContinuationOutcome] = useState(0);
+  const selfIntentRef = useRef<{
+    readonly investigationId: string;
+    readonly action: InvestigationNamedCoordinationSelfCommand["action"];
+    readonly idempotencyKey: string;
+  } | null>(null);
+  const [selfTarget, setSelfTarget] = useState<{
+    readonly investigationId: string;
+    readonly action: InvestigationNamedCoordinationSelfCommand["action"];
+  } | null>(null);
   const activeQuery = runtime.resources.operationsQueueQuery;
   const requestGeneration = runtime.resources.operationsQueueRequestGeneration;
   const activeQueryMatches = activeQuery !== null && baseKey(activeQuery) === inputKey;
@@ -130,6 +156,50 @@ export function useOperationsQueue(
       setContinuationOutcome(settledAttempt);
     }
   }, [activeQuery, activeQueryMatches, command, commandAvailability, inputKey, requestGeneration, view]);
+
+  useEffect(() => {
+    selfIntentRef.current = null;
+    setSelfTarget(null);
+  }, [inputKey, scopeToken]);
+
+  const applySelf = useMemo(() => async (
+    investigationId: string,
+    action: InvestigationNamedCoordinationSelfCommand["action"],
+  ): Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>> => {
+    if (selfCommand === null) return { status: "ignored", reason: "not_ready" };
+    if (runtime.mutations.namedCoordinationSelf.status === "running") {
+      return { status: "ignored", reason: "busy" };
+    }
+    const previous = selfIntentRef.current;
+    const intent = previous?.investigationId === investigationId && previous.action === action
+      ? previous
+      : {
+          investigationId,
+          action,
+          idempotencyKey: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+        };
+    selfIntentRef.current = intent;
+    setSelfTarget({ investigationId, action });
+    const outcome = await selfCommand({
+      investigationId,
+      action,
+      idempotencyKey: intent.idempotencyKey,
+    });
+    if (outcome.status === "succeeded"
+      || (outcome.status === "failed"
+        && !(outcome.error.kind === "unavailable" && outcome.error.reason === "commit_outcome_unknown"))) {
+      selfIntentRef.current = null;
+    }
+    return outcome;
+  }, [runtime.mutations.namedCoordinationSelf.status, selfCommand]);
+
+  const retrySelf = useMemo(() => async (): Promise<CommandOutcome<InvestigationCoordinationActionSuccessV1>> => {
+    const intent = selfIntentRef.current;
+    if (intent === null) return { status: "ignored", reason: "not_ready" };
+    return applySelf(intent.investigationId, intent.action);
+  }, [applySelf]);
 
   useEffect(() => {
     if (commandAvailability !== "available" || typeof command !== "function") {
@@ -203,5 +273,13 @@ export function useOperationsQueue(
           command(Object.freeze({ ...input, cursor }));
         }
       : () => undefined,
+    selfCoordination: {
+      available: selfCommand !== null,
+      targetInvestigationId: selfTarget?.investigationId ?? null,
+      action: selfTarget?.action ?? null,
+      state: runtime.mutations.namedCoordinationSelf,
+      apply: applySelf,
+      retry: retrySelf,
+    },
   };
 }
