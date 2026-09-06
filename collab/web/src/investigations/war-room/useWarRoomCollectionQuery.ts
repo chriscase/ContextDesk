@@ -119,15 +119,17 @@ export function useWarRoomCollectionQuery(
       return () => undefined;
     }
     return () => {
-      if (continuationPendingRef.current || view.availability !== "available" || view.value.nextCursor === null || view.refresh === "loading") return;
-      continuationPendingRef.current = true;
       const activeQuery = activeQueryRef.current;
-      if (
-        view.refresh === "failed"
+      const retryAvailable =
+        view.availability === "available"
+        && view.refresh === "failed"
         && activeQuery !== null
         && activeQuery.cursor === view.value.nextCursor
-        && canonicalCollectionBaseKey(activeQuery) === inputKey
-      ) {
+        && canonicalCollectionBaseKey(activeQuery) === inputKey;
+      if (continuationPendingRef.current && !retryAvailable) return;
+      if (view.availability !== "available" || view.value.nextCursor === null || view.refresh === "loading") return;
+      continuationPendingRef.current = true;
+      if (retryAvailable) {
         runtime.refresh.investigationCollection();
         return;
       }
