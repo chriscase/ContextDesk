@@ -34,7 +34,7 @@ password verification does use fixed-length timing-safe comparison.
 | Capability | Status | Evidence | Residual |
 | --- | --- | --- | --- |
 | Canonical profile contract (mutable display profile split from immutable attribution identity) | Shipped | [`user-profile.ts`](../../../collab/contracts/src/user-profile.ts), [`user-profile.test.ts`](../../../collab/contracts/src/user-profile.test.ts) | Real Unicode confusable-skeleton/homoglyph detection is not attempted — only C0/DEL/zero-width/bidi-control/BOM code points are blocked |
-| Capability model v2/v3 (12 fine-grained capabilities, role-default matrix, additive local grants) | **Partial**: contract and server route enforcement accepted; read-only queue query and `/operations` UI are a local integration; **local integration** enforces `catalog:write` on strict source-catalog CAS routes before parse/store access | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`routes.ts`](../../../collab/server/src/modules/catalog/routes.ts), [`OperationsQueue.tsx`](../../../collab/web/src/operations-queue/OperationsQueue.tsx) | `investigation:coordinate` is enforced for privileged coordination actions. Operations intentionally uses `investigation:read` only and exposes no coordination write control. Strict catalog mutations are `catalog:write` only; `run:strategies` and `admin:users` are not catalog mutation authority. |
+| Capability model v2/v3 (12 fine-grained capabilities, role-default matrix, additive local grants) | **Partial**: contract and server route enforcement accepted; read-only queue query and `/operations` UI are a local integration; **local integration** enforces `catalog:write` on strict source-catalog CAS routes before parse/store access | [`capability.ts`](../../../collab/contracts/src/capability.ts), [`capabilities.ts`](../../../collab/server/src/modules/people/capabilities.ts), [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`routes.ts`](../../../collab/server/src/modules/catalog/routes.ts), [`OperationsQueue.tsx`](../../../collab/web/src/operations-queue/OperationsQueue.tsx) | `investigation:coordinate` is enforced for privileged coordination actions. Operations intentionally uses `investigation:read` only and exposes no coordination write control. Named-row `claim_self`/`release_self` from a queue row is accepted design on the existing case coordination route (`investigation:write`), not a queue capability and not a `investigation:coordinate` grant. Strict catalog mutations are `catalog:write` only; `run:strategies` and `admin:users` are not catalog mutation authority. |
 | Memory + PostgreSQL profile/grant stores with CAS, login-time sync, fail-closed identity collision | Shipped | [`store.ts`](../../../collab/server/src/modules/people/store.ts), [`store.contract-tests.ts`](../../../collab/server/src/modules/people/store.contract-tests.ts) run against both backends by [`store.test.ts`](../../../collab/server/src/modules/people/store.test.ts) and [`pg-store.test.ts`](../../../collab/server/src/modules/people/pg-store.test.ts) | None known |
 | Admin operations (search, effective roles/capabilities+source, activate/suspend, grant/revoke, directory-mapping preview) | Shipped | [`admin-routes.ts`](../../../collab/server/src/modules/people/admin-routes.ts), [`admin-routes.test.ts`](../../../collab/server/src/modules/people/admin-routes.test.ts) | Directory-removal auto-disable remains a named residual in §16; browser mutation CSRF is now system-wide (see §10) |
 | Domain-wide session authorization and suspension fail-closed | Shipped | [`session-authorization.ts`](../../../collab/server/src/modules/authz/session-authorization.ts), [`authorization.adversarial.test.ts`](../../../collab/server/src/modules/authz/authorization.adversarial.test.ts), War Room domain/admin `routes.ts` files | None known |
@@ -252,7 +252,10 @@ This is an **accepted contract with a local integration**. The
 coordination route and store use the permission for action-specific
 authorization. The read-only queue query and `/operations` UI do not use
 `investigation:coordinate`: visible queue reads require `investigation:read`,
-and the UI exposes no claim, release, or assign request. Every coordination write must
+and that shell area exposes no claim, release, or assign request.
+Investigation First already applies the four actions on the mounted
+active case through `POST /api/cases/:id/coordination`; that active-case
+command is unchanged. Every coordination write must
 re-authorize the session and investigation membership for every request; a
 visible button or UI strategy may never stand in for that check.
 `claim_self` uses the existing `investigation:write` gate and requires
@@ -262,6 +265,19 @@ longer authorize, privileged release is the cleanup path. The
 `assign_participant` and `release_participant` actions require case access plus
 `investigation:coordinate`. A single shared gate for all four actions is not
 permitted.
+
+The next named-row self-action seam remains on that same singular
+route. `claim_self` and `release_self` from an Operations row still
+require `investigation:write` and current-participant eligibility (with
+the existing holder-release exception). They do not become Operations
+writes, do not use a new capability, and do not expose
+`assign_participant` / `release_participant` on queue rows.
+`investigation:coordinate` remains reserved for privileged participant
+actions; Investigation First already applies those actions, and they remain
+off Operations rows. Until a later Runtime named-row command exists, the `/operations`
+surface exposes investigation-read queue data and no coordination mutation
+command; capability projections may still carry the session's broader
+coordination capabilities for future Runtime consumers.
 
 Capability model v2 and the closed capability enum carried by `session.v1`
 are one coupled deployment unit. Mixed old/new contract and server deployments
@@ -540,6 +556,9 @@ commissioned to satisfy:
    privileged actions on the singular coordination route. The read-only queue
    query and `/operations` UI are a local integration using
    `investigation:read`; they do not expose those privileged actions.
+   Named-row `claim_self`/`release_self` from an Operations row is accepted
+   design on the existing case coordination route (`investigation:write`),
+   not a queue write and not a `investigation:coordinate` grant.
    `catalog:write` has a local server integration protecting strict source
    catalog mutations before request parsing or store access. §4, §5, §6.2,
    §6.3.
