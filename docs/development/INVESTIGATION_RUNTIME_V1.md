@@ -22,25 +22,45 @@ read-only text preview. These additions keep provider credentials, byte
 integrity, authorization, and audit history on the server; the preview is an
 optional read seam so older strategy/test doubles remain valid.
 
-The Operations Queue UI is a **local integration** on the additive queue
-runtime seam. `/operations` mounts the same public provider used by
-Investigations with `active=false`, `focusCaseId=null`, and
-`isInvestigationLocation=false`. It issues an explicit read-only queue command
-and consumes the runtime resource; it adds no gateway, controller, contract, or
-strategy registration. Saved views stay query-only bookmarks of the shareable
-queue query.
+The Operations Queue UI is **partial** on the additive queue runtime seam
+of this product, not a separate local server. `/operations`
+mounts the same public provider used by Investigations with
+`active=false`, `focusCaseId=null`, and `isInvestigationLocation=false`.
+It issues an explicit read-only queue command and consumes the runtime
+resource; that queue query is not a write path. It adds no gateway,
+controller, contract, or strategy registration. Saved views stay
+query-only bookmarks of the shareable queue query.
 
-The next named-row self-action seam is **accepted design**, not a Runtime
-operation on this surface. Operations rows remain read-only. A later additive
-Runtime packet may add a named-row `claim_self`/`release_self` command that
-posts the existing `cd-collab.investigation_coordination_action_request.v1`
-envelope to `POST /api/cases/:id/coordination`. That packet must not retarget
-the active case, must not GET coordination per row, must not add an operations
-write endpoint or queue-side writer, and must not expose privileged
-`assign_participant`/`release_participant` from queue rows. Packet order is
-contracts/docs → server proof → Runtime named-row command/controller →
-Operations UI/e2e. This document does not claim that Runtime or Queue write
-seam exists.
+Named-row `claim_self`/`release_self` is a separate write seam on that
+same public provider: the merged Operations Queue self-coordination
+slice on `main`. The public command `applyNamedCoordinationSelf` posts
+the existing `cd-collab.investigation_coordination_action_request.v1`
+envelope to `POST /api/cases/:id/coordination` from a visible queue row.
+It does not retarget the active case, does not GET coordination per row,
+and does not add an operations write endpoint or queue-side writer. PR
+[#1152](https://github.com/chriscase/ContextDesk/pull/1152) is a
+qualification-only e2e lane; hosted acceptance is not claimed until that
+lane is accepted or closed.
+
+The next named-row privileged participant assign/release seam is
+**accepted design**, not a Runtime operation on this surface. A later
+additive Runtime packet may post existing `assign_participant` /
+`release_participant` envelopes to that same case route from a named
+queue row (`investigation:coordinate`). There is currently no public
+named-row privileged command on `InvestigationRuntimeCommands`:
+`applyNamedCoordinationSelf` is self-only, and `applyCoordinationAction`
+is scoped to the mounted active case. This freeze is a prerequisite for
+that later command rather than inventing a name. Server handlers already
+exist as anonymous GET/POST registrations in `registerCaseRoutes` that
+call `CaseService.getInvestigationCoordination` and
+`CaseService.coordinateInvestigation`; those handlers have no exported
+names. Membership is `CaseV1.participants` on
+`InvestigationOperationsQueueRowV1.investigation`, with server-time
+eligibility from the locked case-row participant set. Packet order is
+contracts/docs → server proof → Runtime named-row privileged
+command/controller → Operations UI/e2e. This document does not authorize
+that later packet and does not add a people-search API, priority, SLA,
+ranking, presence, or automatic membership.
 
 Runtime V1 is the shared browser-side boundary that lets ContextDesk ship more
 than one investigation presentation without creating competing authorities for
@@ -67,9 +87,12 @@ The runtime owns browser-side orchestration only:
 - requesting and preserving a server-ordered Operations Queue projection,
   including server scope counts and opaque-cursor continuation;
 - invoking investigation create, evidence upload, contribution create,
-  Situation update, archive, restore, and active-case coordination commands;
-- a later additive named-row `claim_self`/`release_self` command is accepted
-  design only and is not owned by this surface yet;
+  Situation update, archive, restore, active-case coordination, and
+  named-row `claim_self`/`release_self` (`applyNamedCoordinationSelf`)
+  commands;
+- a later additive named-row `assign_participant`/`release_participant`
+  command is accepted design only and is not owned by this surface yet;
+  this freeze does not invent that command name;
 - requesting a bounded, text-only evidence preview with range and ETag
   validation, while keeping binary and metadata-only references out of the
   browser preview surface;
@@ -165,8 +188,10 @@ canonical URL state is separate from investigation collection query state.
 Only search, status, archive inclusion, and coordination scope are shareable;
 the default `all_visible` scope is omitted and the server cursor never enters
 history. Saved views bookmark that same query; they do not store or issue
-coordination actions. A later named-row self-action must not change
-investigation focus, `focusCaseId`, or the inactive Operations mount.
+coordination actions. Named-row `claim_self`/`release_self` must not change
+investigation focus, `focusCaseId`, or the inactive Operations mount. A
+later named-row privileged assign/release must keep those same
+focus/URL/query invariants.
 
 Changing strategy must:
 
@@ -188,10 +213,11 @@ Mutation completion is fenced independently. A late upload, contribution,
 Situation edit, lifecycle action, coordination action, or refresh for case A
 cannot publish into, select, refresh, or reopen A after navigation to case B.
 Every write controller fences identity, authority, case, capability, read-only
-state, and unmount, and aborts the superseded request. A later named-row
-coordination write must use the same fence: success refreshes the
+state, and unmount, and aborts the superseded request. Named-row
+`claim_self`/`release_self` already uses that fence: success refreshes the
 server-ordered queue and must not select, refresh, or reopen the active
-investigation. Create navigation uses only the identifier
+investigation. A later named-row privileged assign/release must use the
+same fence. Create navigation uses only the identifier
 returned by the successful, parsed server response. A retained create callback
 rechecks the latest identity, authority, read-only state, capability, and
 canonical location before it may issue a request, and it runs only at the
@@ -214,10 +240,11 @@ Consequently, strategies do not promise a durable in-page case-level denied
 surface after those responses. An inaccessible or missing case is expressed by
 the server's `404` response without invalidating the session. A failed
 collection or evidence request is never represented as an empty collection.
-Active-case coordination already follows those auth-loss and concealment
-rules; a later named-row self-action must do the same. A 503
-`commit_outcome_unknown` freezes the exact payload and idempotency key for an
-explicit retry and is never retried automatically.
+Active-case coordination and named-row `claim_self`/`release_self` already
+follow those auth-loss and concealment rules; a later named-row privileged
+assign/release must do the same. A 503 `commit_outcome_unknown` freezes
+the exact payload and idempotency key for an explicit retry and is never
+retried automatically.
 
 ## Capabilities and read-only behavior
 
@@ -230,9 +257,11 @@ affordances are projected separately even while both rely on
 projection rather than strategy code. Active-case `claim_self`/`release_self`
 use `canCoordinateSelf` (`investigation:write`); privileged
 `assign_participant`/`release_participant` use `canCoordinateParticipants`
-(`investigation:coordinate`). Operations currently projects no coordination
-mutation command. A later named-row self-action uses `canCoordinateSelf` only
-and does not grant privileged participant actions on queue rows.
+(`investigation:coordinate`). Operations projects named-row
+`applyNamedCoordinationSelf` with `canCoordinateSelf` only and does not
+grant privileged participant actions on queue rows. A later named-row
+privileged assign/release uses `canCoordinateParticipants` only; that
+command is not present on this surface.
 
 Lifecycle authority is shared across presentations. A strategy cannot use a
 broader or narrower capability formula than another strategy for the same
@@ -251,10 +280,18 @@ behavior:
 - inspect and invoke the already-landed active-case `claim_self`, `release_self`,
   `assign_participant`, and `release_participant` through the existing
   protected `POST /api/cases/:id/coordination` route (Investigation First).
-  This command is scoped to the mounted active investigation. Named-row
-  Operations `claim_self`/`release_self` are a later additive command and are
-  not present; they must reuse that same route and request envelope, refresh
-  the server-ordered queue after a parsed success, and must not GET
+  This command (`applyCoordinationAction`) is scoped to the mounted active
+  investigation. Named-row Operations `claim_self`/`release_self` are
+  present as `applyNamedCoordinationSelf`; they reuse that same route and
+  request envelope, refresh the server-ordered queue after a parsed success,
+  and must not GET coordination per row or retarget the active case.
+  Named-row `assign_participant`/`release_participant` are a later additive
+  command and are not present; this freeze is a prerequisite rather than
+  inventing that command name. A later packet must reuse that same route
+  and request envelope, take `expectedRevision` from the joined queue
+  `coordination.revision`, freeze a 503 `commit_outcome_unknown` body/key
+  with no auto-retry, treat `401`/`403` as auth-loss and `404` as
+  concealment, keep focus/URL/query unchanged, and must not GET
   coordination per row or retarget the active case;
 - load one investigation;
 - create an investigation and return its authoritative identifier;
@@ -307,9 +344,10 @@ response. The delivered contracts layer provides:
   envelopes and parsers for `POST /api/cases/:id/lifecycle`; and
 - versioned investigation-coordination projection and action
   request/success/changed/refused envelopes and parsers for `GET` and
-  `POST /api/cases/:id/coordination`. A later named-row self-action must reuse
-  those same parsers; it does not add a queue write schema or operations
-  endpoint.
+  `POST /api/cases/:id/coordination`. Named-row `claim_self`/`release_self`
+  already reuse those same parsers. A later named-row privileged
+  assign/release must reuse them too; it does not add a queue write schema,
+  operations endpoint, or people-search API.
 
 The case service emits those versioned envelopes, and Runtime V1 accepts only
 their parsed values.
