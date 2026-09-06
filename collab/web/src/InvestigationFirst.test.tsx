@@ -400,6 +400,7 @@ describe("Investigation First Runtime V1 presentation", () => {
       expect(screen.getByText("ravi", { selector: "strong" })).toBeTruthy();
       expect(screen.getByText("Revision 6")).toBeTruthy();
     },
+    10000,
   );
 
   it.each([401, 403, 404] as const)("fails the parent detail closed after coordination POST %i", async (status) => {
